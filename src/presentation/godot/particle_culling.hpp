@@ -15,9 +15,9 @@ namespace eawr::presentation::godot_backend::particle_culling {
 // standalone renderer probes can use the same renderer without a particle sink.
 inline thread_local std::map<std::uint64_t, particles::CullingFrame> cameras;
 
-inline void set_camera(const godot::RID& scenario, const FixedCamera& camera) {
+[[nodiscard]] inline particles::CullingFrame snapshot(const FixedCamera& camera) {
     particles::CullingFrame result;
-    if (camera.width == 0 || camera.height == 0) { cameras[scenario.get_id()] = result; return; }
+    if (camera.width == 0 || camera.height == 0) return result;
     godot::Transform3D transform;
     transform.origin = godot::Vector3(camera.eye[0], camera.eye[1], camera.eye[2]);
     transform = transform.looking_at(godot::Vector3(camera.target[0], camera.target[1], camera.target[2]),
@@ -25,7 +25,7 @@ inline void set_camera(const godot::RID& scenario, const FixedCamera& camera) {
     const auto projection = godot::Projection::create_perspective(camera.vertical_fov_degrees,
         static_cast<float>(camera.width) / camera.height, camera.near_plane, camera.far_plane);
     const auto planes = projection.get_projection_planes(transform);
-    if (planes.size() != 6) { cameras[scenario.get_id()] = result; return; }
+    if (planes.size() != 6) return result;
     for (int64_t index = 0; index < 6; ++index) {
         const godot::Plane plane = planes[index];
         result.planes[static_cast<std::size_t>(index)] = {static_cast<float>(plane.normal.x),
@@ -33,7 +33,11 @@ inline void set_camera(const godot::RID& scenario, const FixedCamera& camera) {
     }
     result.valid = true;
     result.enabled = true;
-    cameras[scenario.get_id()] = result;
+    return result;
+}
+
+inline void set_camera(const godot::RID& scenario, const FixedCamera& camera) {
+    cameras[scenario.get_id()] = snapshot(camera);
 }
 
 [[nodiscard]] inline particles::CullingFrame frame(const godot::RID& scenario) {

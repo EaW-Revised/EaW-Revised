@@ -223,7 +223,8 @@ std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const Sp
             if (clone.ship != ship) continue;
             // frame()'s clock: whole ticks since the clone appeared, one tick before its death tick.
             const double elapsed = tick - (static_cast<double>(active.death_tick) - 1.0);
-            if (elapsed < -1.0e-9) return std::nullopt;
+            if (elapsed < -1.0e-9 || (active.hidden_since && elapsed + 1.0e-9 >= static_cast<double>(*active.hidden_since)))
+                return std::nullopt;
             const animation::Player* player = population.live_clip(ship);
             const auto death = clone_death_frame(clone, player,
                                                  static_cast<std::uint64_t>(std::floor(elapsed + 1.0e-9)));
@@ -236,11 +237,27 @@ std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const Sp
     return std::nullopt;
 }
 
-void LiveSessionView::retire_clones(SpacePopulation& population, GodotRenderer& renderer) {
+void LiveSessionView::retire_clones(SpacePopulation& population, GodotRenderer& renderer,
+    const std::function<bool(std::size_t)>& terminal_ready) {
     for (const ActiveClone& retiring : retiring_clones_) {
-        population.retire_live_ship(renderer, death_clones_.at(retiring.unit).ship);
+        const auto ship = death_clones_.at(retiring.unit).ship;
+        const bool reusable = std::any_of(launch_clones_.begin(), launch_clones_.end(),
+            [&](const DeathClone& clone) { return clone.ship == ship; });
+        if (retiring.hidden_since && reusable) terminal_source_leases_.insert(retiring.unit);
+        population.retire_live_ship(renderer, ship, reusable);
     }
     retiring_clones_.clear();
+    // This callback is supplied only AFTER the emitter phase has consumed all
+    // reached samples. Commit requests in active-clone order on the main thread;
+    // next frame excludes their geometry before its instance list is assembled.
+    if (!terminal_ready) return;
+    for (auto& active : active_clones_) {
+        const auto ship = death_clones_.at(active.unit).ship;
+        if (!active.hidden_since && population.live_clip_terminal_hidden(ship) && terminal_ready(ship)) {
+            const double elapsed = presented_tick_ - (static_cast<double>(active.death_tick) - 1.0);
+            active.hidden_since = static_cast<std::uint64_t>(std::max(0.0, std::floor(elapsed + 1.0e-9)));
+        }
+    }
 }
 
 } // namespace eawr::presentation::godot_backend

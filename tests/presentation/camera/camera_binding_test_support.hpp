@@ -6,23 +6,16 @@
 
 #include "camera_input.hpp"
 
-#include <cmath>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
-#include <iterator>
-#include <limits>
-#include <numbers>
+#include <cstdint>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace eawr_camera_binding_test {
 
 namespace camera = eawr::presentation::camera;
 namespace input = eawr::viewer::camera_input;
 
-extern int failures;
+extern int& failures;
 
 void expect(const bool condition, const std::string_view message);
 void expect_close(const float actual, const float expected, const std::string_view message,

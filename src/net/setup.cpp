@@ -1,4 +1,5 @@
 #include "eawr/net/setup.hpp"
+#include "eawr/net/galactic_setup.hpp"
 #include "eawr/net/lan_directory.hpp"
 #include "eawr/core/sha256.hpp"
 
@@ -65,7 +66,8 @@ bool hash_text(std::string_view value) {
     });
 }
 core::Result<void> validate_offer(const SetupOffer& offer) {
-    if (offer.domain != tactical_setup_domain || offer.setup.empty() || offer.setup.size() > max_setup_bytes
+    const bool galactic = offer.domain == galactic_setup_domain;
+    if ((offer.domain != tactical_setup_domain && !galactic) || offer.setup.empty() || offer.setup.size() > max_setup_bytes
         || offer.input_delay == 0 || offer.input_delay > max_input_delay || offer.seats.size() < 2
         || offer.final_tick_count == 0 || offer.final_tick_count > max_session_ticks
         || offer.seats.size() > max_match_seats || offer.identity.build.empty() || offer.identity.build.size() > 256
@@ -80,6 +82,7 @@ core::Result<void> validate_offer(const SetupOffer& offer) {
         return error<void>(SetupReason::options, "invalid recovery policy limits");
     if (auto valid = sim::validate_match_identity(offer.identity.content); !valid)
         return error<void>(SetupReason::options, valid.error().message);
+    if (galactic) return validate_galactic_offer(offer);
     auto setup = decode_skirmish_setup(offer.setup);
     if (!setup) return core::Result<void>::failure(setup.error());
     if (setup.value().seed != offer.seed || !setup.value().match_identity

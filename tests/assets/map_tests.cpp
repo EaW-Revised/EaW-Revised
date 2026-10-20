@@ -1,3 +1,5 @@
+#include <utility>
+#include "../support/check.hpp"
 #include "map_test_support.hpp"
 
 #include "eawr/assets/map.hpp"
@@ -20,8 +22,11 @@
 #include <vector>
 
 namespace eawr::tests::map_contracts {
-int failures{};
-void expect(const bool condition, const char* message) { if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(const bool condition, const char* message) {
+    local_checker.check(condition, message, std::cerr);
+}
 void u8(std::vector<std::byte>& out, const std::uint8_t value) { out.push_back(static_cast<std::byte>(value)); }
 void u16(std::vector<std::byte>& out, const std::uint16_t value) { u8(out, value & 255U); u8(out, (value >> 8U) & 255U); }
 void u32(std::vector<std::byte>& out, const std::uint32_t value) { for (unsigned shift = 0; shift < 32; shift += 8) u8(out, (value >> shift) & 255U); }

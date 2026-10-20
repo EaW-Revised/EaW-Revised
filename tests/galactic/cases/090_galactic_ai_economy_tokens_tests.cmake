@@ -1,4 +1,6 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_ai_execution
+
     NAME galactic_ai_economy_tokens_tests
     SOURCES ai_economy_tokens_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/script/foc"
@@ -7,5 +9,5 @@ eawr_add_test_case(
 )
 
 set_tests_properties(galactic_ai_economy_tokens_contracts PROPERTIES ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
-eawr_add_game_data_test(NAME galactic_ai_economy_tokens_stock COMMAND galactic_ai_economy_tokens_tests --installed)
+eawr_add_game_data_test(NAME galactic_ai_economy_tokens_stock COMMAND galactic_area_ai_execution galactic_ai_economy_tokens_tests --installed)
 set_tests_properties(galactic_ai_economy_tokens_stock PROPERTIES LABELS game-data ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")

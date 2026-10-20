@@ -1,0 +1,70 @@
+[
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#print_rows",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#print_rows"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#mass_driver_type",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#mass_driver_type"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#hero_company_tables",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#hero_company_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#nested_special_tables",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#nested_special_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#projectile_defence_tables",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#projectile_defence_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#concentrate_fire_tables",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#concentrate_fire_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#rocket_variant_inputs",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#rocket_variant_inputs"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#manual_weapon_loading",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#manual_weapon_loading"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#special_weapon_classification",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#special_weapon_classification"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#cluster_bomb_inputs",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#cluster_bomb_inputs"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#barrage_inputs",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#barrage_inputs"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#object_script_inheritance",
+    "new": "tests/units/unit_tables_synthetic_weapons_tests.cpp#object_script_inheritance"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#synthetic_tables",
+    "new": "tests/units/unit_tables_synthetic_loader_tests.cpp#synthetic_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#priority_rules",
+    "new": "tests/units/unit_tables_synthetic_identity_tests.cpp#priority_rules"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#content_identity",
+    "new": "tests/units/unit_tables_synthetic_identity_tests.cpp#content_identity"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#hunt_tables",
+    "new": "tests/units/unit_tables_synthetic_identity_tests.cpp#hunt_tables"
+  },
+  {
+    "old": "tests/units/unit_tables_synthetic_tests.cpp#bind_frame_errors",
+    "new": "tests/units/unit_tables_synthetic_identity_tests.cpp#bind_frame_errors"
+  }
+]

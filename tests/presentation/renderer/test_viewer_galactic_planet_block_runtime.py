@@ -5,6 +5,7 @@ import tempfile
 import unittest
 
 from tests.presentation.renderer import test_viewer_galactic_command_bar_runtime as support
+from tests.presentation.renderer import test_viewer_planet_hud_runtime as planet_support
 ROOT, RUNTIME, GAME_ROOT = support.ROOT, support.RUNTIME, support.GAME_ROOT
 
 LEFT, CENTER, RIGHT = 0, 1, 2  # Godot HorizontalAlignment
@@ -25,6 +26,19 @@ class GalacticPlanetBlockRuntime(unittest.TestCase):
         self.assertEqual(rows["Text_Day_Counter"]["align"], LEFT)
         for name in ("Text_Credits", "Text_Day_Credits", "Text_Planetary_Income", "Text_Pop_Cap"):
             self.assertEqual(rows[name]["align"], RIGHT, name)
+
+    def test_fiscal_row_uses_cycle_without_numeric_structure_counter(self):
+        # WGUI-34/94: structures occupy the focused icon row. The number beside
+        # the ten progress pips is the fiscal cycle, not a structure-slot count.
+        data, _ = planet_support.PlanetHudRuntime.capture(self, "synthetic",
+            "--eawr-galactic-seat", "3", "--eawr-galactic-hud-fixture", "production")
+        bar = data["command_bar"]
+        rows = {row["name"]: row for row in bar["planet_block"]}
+        self.assertNotIn("Text_Planetary_Pop", rows)
+        self.assertEqual(rows["Text_Day_Counter"]["text"], "DAY 1")
+        self.assertEqual(bar["cycle"], "Day 1")
+        self.assertEqual(bar["pips"], 10)
+        self.assertEqual(bar["current_pip"], 0)
 
     def test_title_row_has_the_emblem_and_the_value_shares_the_tint(self):
         rows = self.block()

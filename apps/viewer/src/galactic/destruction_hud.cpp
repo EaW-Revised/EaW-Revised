@@ -1,16 +1,25 @@
 #include "galactic_mode_internal.hpp"
-#include "destruction_hud_fixture.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include <ostream>
 using namespace godot;
 namespace eawr::presentation::godot_backend {
+namespace {
+// The authored slot captions (the text table's ability-slot group); destruction keeps its tooltip caption.
+const char* ability_slot_text(sim::galactic::AbilityKind kind) {
+    using sim::galactic::AbilityKind;
+    switch (kind) {
+    case AbilityKind::technology_theft: return "TEXT_ABILITY_SLOT_SLICE";
+    case AbilityKind::structure_sabotage: return "TEXT_ABILITY_SLOT_SABOTAGE";
+    case AbilityKind::hero_neutralization: return "TEXT_ABILITY_SLOT_NEUTRALIZE_HERO";
+    default: return "TEXT_TOOLTIP_ABILITY_DESTROY_PLANET_NAME";
+    }
+}
+}
 bool GalacticMode::State::build_destruction_hud() {
     const auto* style = command_catalog.find("g_special_ability");
     if (!style || !hud || !hud_fonts) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture.starts_with("destruction-")
-        && !options.hud_fixture.starts_with("destruction-live"))
-        destruction_hud.fixture = galactic_view::destruction_fixture(galaxy->local.player, options.hud_fixture);
+    if (options.hud_provider && !options.hud_provider->destruction(*this)) return false;
     auto& state = destruction_hud;
     state.slot = memnew(EawrHudButton); hud->add_child(state.slot);
     state.slot->set_name("galaxy_destruction_first_slot");
@@ -66,11 +75,27 @@ void GalacticMode::State::update_destruction_hud() {
         && !gates.action_menu && !gates.selection_locked && !tactical && !loading
         && !retreat_dialog_open && (!battle_dialog || !battle_dialog->visible())
         && displayed_snapshot->clock().pause_depth == 0;
-    state.slot->set_visible(state.projected && state.enabled && state.facts && destruction_source(dragged_fleet));
+    // The prepared destruction slot (copied or host fact) wins; otherwise the dragged hero fleet's authored action.
+    const bool prepared_slot = state.facts && destruction_source(dragged_fleet);
+    const auto key = static_cast<const void*>(displayed_snapshot.get());
+    if (dragged_fleet != state.drop_fleet || key != state.drop_publication) {
+        state.drop_fleet = dragged_fleet; state.drop_publication = key; state.drop.reset();
+        if (dragged_fleet && galaxy_setup.ability_host && !state.fixture)
+            state.drop = galactic_view::ability_drop_candidate(*displayed_snapshot, galaxy->local.player,
+                dragged_fleet, *galaxy_setup.ability_host);
+    }
+    const auto label = !prepared_slot && state.drop ? std::optional(state.drop->kind) : std::nullopt;
+    if (label != state.drop_label) {
+        state.drop_label = label;
+        state.text->set_text(String::utf8(battle_text(ability_slot_text(
+            label.value_or(sim::galactic::AbilityKind::planet_destruction))).c_str()));
+    }
+    state.slot->set_visible(state.projected && state.enabled && (prepared_slot || state.drop));
 }
 void GalacticMode::State::position_destruction_hud(galactic_view::ObjectId planet, Vector2 anchor, float scale, float alpha) {
     auto& state = destruction_hud;
-    if (!state.slot || !state.facts || planet != state.facts->planet) return;
+    const auto slot_planet = state.facts ? state.facts->planet : state.drop ? state.drop->planet : 0;
+    if (!state.slot || !slot_planet || planet != slot_planet) return;
     state.projected = alpha > 0;
     // WGCH-DB-U01: existing authored HUD offset convention; exact special-slot
     // Offset/Text_Offset/right-justify mapping awaits retail pixel qualification.
@@ -120,6 +145,26 @@ bool GalacticMode::State::drop_destruction(galactic_view::ObjectId source, bool 
     }
     return true;
 }
+bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool submit) {
+    auto& state = destruction_hud;
+    if (!state.enabled || source != dragged_fleet || !game || state.fixture || !galaxy_setup.ability_host) return false;
+    const auto drop = galactic_view::ability_drop_candidate(*displayed_snapshot, galaxy->local.player, source,
+        *galaxy_setup.ability_host);
+    if (!drop) return false;
+    galactic_view::DropIntent intent;
+    intent.kind = galactic_view::DropKind::ability;
+    intent.source = drop->actor; intent.planet = drop->planet;
+    intent.ability = galactic_view::ability_drop_order(*drop);
+    const auto command = map_input.command(intent, input_planets());
+    if (!command) return false;
+    if (submit) {
+        // WGCH-154: no confirmation. The prepared publication opens the hero action menu (hero_action_modal);
+        // a destruction release queues its execution and the host reports the result.
+        game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
+        ++submitted_orders; ++state.prepares;
+    }
+    return true;
+}
 void GalacticMode::State::write_destruction_report(std::ostream& output) const {
     const auto& state = destruction_hud;
     const auto* facts = state.facts ? &*state.facts : nullptr;
@@ -136,7 +181,9 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"source_id\": " << (facts ? facts->source : 0)
         << ", \"planet\": " << (facts ? facts->planet : 0) << ", \"refusal\": " << (facts ? static_cast<int>(facts->refusal) : 0)
         << ", \"outcome\": " << (result == results.end() ? 0 : static_cast<int>(result->outcome))
-        << ", \"rebuilds\": " << state.rebuilds << ", \"accepts\": " << state.accepts
+        << ", \"rebuilds\": " << state.rebuilds << ", \"accepts\": " << state.accepts << ", \"hero_drops\": " << state.prepares << ", \"enabled\": " << (state.enabled ? "true" : "false")
+        << ", \"projected\": " << (state.projected ? "true" : "false") << ", \"drop_actor\": " << (state.drop ? state.drop->actor : 0)
+        << ", \"drop_kind\": " << (state.drop ? static_cast<int>(state.drop->kind) : 0) << ", \"drop_fleet\": " << state.drop_fleet
         << ", \"accepted_source\": " << state.accepted_source << ", \"accepted_planet\": " << state.accepted_planet
         << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
 }

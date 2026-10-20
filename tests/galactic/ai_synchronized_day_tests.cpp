@@ -1,3 +1,16 @@
+#include <algorithm>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <memory>
+#include <ostream>
+#include <set>
+#include <tuple>
+#include <vector>
+#include <string_view>
+#include <string>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // WGA-485: bounded stock observation, sharing the campaign gate's real providers.
 #include "galactic_support.hpp"
 #include "eawr/campaign/live_setup.hpp"
@@ -9,27 +22,21 @@
 #include "eawr/campaign/setup.hpp"
 #include "eawr/data/retail_values.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::must;
 
 namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using namespace galactic_test;
-template<class T> T must(eawr::core::Result<T> value) { if (!value) throw std::runtime_error(value.error().message); return std::move(value).value(); }
-void must(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+
 std::filesystem::path game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    std::filesystem::path root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
+    return std::filesystem::path(std::move(*root));
 }
 int run() {
     std::cout << "CTEST_FULL_OUTPUT\n";
@@ -138,4 +145,4 @@ int run() {
     return galactic_test::failures == 0 ? 0 : 1;
 }
 }
-int main() { try { return run(); } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; } }
+int case_galactic_ai_synchronized_day_tests() { try { return run(); } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; } }

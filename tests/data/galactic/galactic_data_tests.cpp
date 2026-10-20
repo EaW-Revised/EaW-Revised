@@ -1,6 +1,9 @@
 // Galactic conquest data loaders (docs/galactic-data.md): a synthetic tree with no game data, and
 // the stock FoC campaigns when EAWR_EAW_GAME_ROOT names an install.
 
+#include "../../support/temp_dir.hpp"
+#include "../../support/env.hpp"
+#include "../../support/check.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
@@ -9,9 +12,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -27,13 +32,11 @@ namespace galactic = eawr::data::galactic;
 using galactic::Fixed;
 using galactic::IssueKind;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 std::int64_t raw(const std::int64_t whole) { return whole * Fixed::scale; }
@@ -41,17 +44,7 @@ std::int64_t raw(const std::int64_t whole) { return whole * Fixed::scale; }
 Fixed decimal(const std::string_view text) { return Fixed::from_decimal(text).value(); }
 
 std::optional<std::string> environment(const char* name) {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-    return result.empty() ? std::nullopt : std::optional<std::string>(result);
-#else
-    const char* value = std::getenv(name);
-    return value == nullptr || *value == '\0' ? std::nullopt : std::optional<std::string>(value);
-#endif
+    return eawr::testing::environment(name);
 }
 
 struct TempTree final {
@@ -59,8 +52,7 @@ struct TempTree final {
         ("eawr-galactic-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     TempTree() { std::filesystem::create_directories(root); }
     ~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
     TempTree(const TempTree&) = delete;
     TempTree& operator=(const TempTree&) = delete;

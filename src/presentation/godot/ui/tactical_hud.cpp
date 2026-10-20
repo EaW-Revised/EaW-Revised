@@ -48,7 +48,6 @@ void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
         button->set_order_selected(targeting);
     }
 }
-bool TacticalHud::movie_mode() const { return state_->movie; }
 void TacticalHud::set_movie_mode(const bool on) {
     auto& state = *state_;
     state.movie = on && state.movie_height.has_value();

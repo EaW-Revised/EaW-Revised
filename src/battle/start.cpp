@@ -1,9 +1,9 @@
 #include "eawr/battle/start.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/assets/map.hpp"
 #include "eawr/sim/math/trig.hpp"
 
-#include <algorithm>
 #include <utility>
 
 namespace eawr::battle {
@@ -11,9 +11,7 @@ namespace eawr::battle {
 namespace detail {
 
 bool iequals(const std::string_view left, const std::string_view right) noexcept {
-    const auto fold = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(), [&](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 
 } // namespace detail

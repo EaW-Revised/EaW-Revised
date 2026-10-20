@@ -1,8 +1,8 @@
 #include "eawr/assets/map.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
-#include "eawr/core/ascii.hpp"
 #include <string>
 #include <utility>
 
@@ -21,13 +21,7 @@ namespace tactical = sim::tactical;
 }
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (core::ascii_upper(static_cast<unsigned char>(left[index])) != core::ascii_upper(static_cast<unsigned char>(right[index]))) {
-            return false;
-        }
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 // AB-04: seconds to whole frames, truncated.

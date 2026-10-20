@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "loading_screen.hpp"
 #include "loading_planet.hpp"
 
@@ -66,13 +68,7 @@ constexpr const char* begin_gadget = "IDC_BEGIN_BUTTON";
 }
 
 [[nodiscard]] std::string json(const std::string& value) {
-    std::string output = "\"";
-    for (const char character : value) {
-        if (character == '"' || character == '\\') output += '\\';
-        if (static_cast<unsigned char>(character) < 0x20U) continue;
-        output += character;
-    }
-    return output + "\"";
+    return eawr::core::json_quote_drop_controls(value);
 }
 
 [[nodiscard]] bool starts_with(const std::string& value, const std::string_view prefix) {
@@ -80,9 +76,8 @@ constexpr const char* begin_gadget = "IDC_BEGIN_BUTTON";
 }
 
 [[nodiscard]] std::string_view loading_owner_text_key(const std::string_view raw) {
-    const auto first = raw.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    return raw.substr(first, raw.find_last_not_of(" \t\r\n") - first + 1);
+    const auto trimmed = core::trim_view(raw, core::xml_whitespace);
+    return trimmed.empty() ? std::string_view{} : trimmed;
 }
 
 [[nodiscard]] std::filesystem::path default_font_cache(const std::filesystem::path& given) {

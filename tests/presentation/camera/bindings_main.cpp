@@ -5,20 +5,16 @@
 // fixture values (tests/assets/fixtures/camera_fixture.py), never retail data,
 // and every binding below is project-authored test data.
 
+#include "../../support/check.hpp"
 #include "camera_input.hpp"
+#include "camera_binding_test_support.hpp"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
-#include <fstream>
 #include <iostream>
-#include <iterator>
-#include <limits>
-#include <numbers>
 #include <string>
 #include <string_view>
-#include <vector>
-
-#include "camera_binding_test_support.hpp"
 
 #ifndef EAWR_CAMERA_BINDINGS_PATH
 #error "EAWR_CAMERA_BINDINGS_PATH must name apps/viewer/project/config/camera-bindings.json"
@@ -26,13 +22,11 @@
 
 namespace eawr_camera_binding_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 void expect_close(const float actual, const float expected, const std::string_view message,

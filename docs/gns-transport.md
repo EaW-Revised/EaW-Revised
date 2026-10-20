@@ -408,8 +408,7 @@ and repair is N5. Before Lock, losing the host pair ends a member's join (EAWR-N
 take part, with the code; for a refused newcomer the failing pair's reason (1762 when the pair never connected) and the
 unreachable seat, or the host-pair code such as 1503). `seat_refused` and `left_room` carry the reported relay flag.
 `pair(p)` is the pair's phase and cause (`signalling`, `handshaking`, `open`, `failed`, `lost`) with whether a relay
-candidate was offered and, while open, that pair's own route (`GnsRoute`), never an address. `GnsTransport::observed_route()`
-follows the two-peer adapters only; pair links do not write the process-wide cell. `signal_counts(p)` accumulates over every
+candidate was offered and, while open, that pair's own route (`GnsRoute`), never an address. `signal_counts(p)` accumulates over every
 link the slot's current occupant has had, so a regrant adds to the totals; a different occupant of the slot starts again.
 One pair whose control queue overflows ends alone (1770, the normal pair-failure path); the room goes on. `connected_seats()` and `mesh_complete()` summarise it.
 
@@ -485,3 +484,5 @@ does not include the host is unreachable; the pair hello still compares the buil
 "build mismatch on a non-host pair" process case, which cannot be staged without breaking the host-pair check). The
 in-battle rows of the design (a seam that closes one pair, repair, the agreed departure) need the session and repair
 slices (N4, N5) and are not covered here.
+
+The private implementation is split by concern under `src/net/`: `gns_transport.cpp` holds the public adapter and factories, `gns_transport_impl.cpp` the pair connection and process runtime, `gns_transport_mesh.cpp` the room link lifecycle and repair, `gns_transport_formation.cpp` the formation grants and room signalling, and `gns_transport_signalling.cpp` the shared signalling, validation and logging helpers. The private headers follow those consumers: `gns_transport_signalling.hpp` holds shared helper and signalling declarations, `gns_transport_impl.hpp` pair state, and `gns_transport_mesh.hpp` mesh state; `gns_room_signal.hpp` remains the room signal codec.

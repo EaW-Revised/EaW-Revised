@@ -1,6 +1,11 @@
+// #561: the Y-wing squadron's ION_CANNON_SHOT (docs/behaviour/space-abilities.md AB-60 to AB-69):
+// a targeted team ability whose craft each fire one ion bolt at the target, holding every other
+// shot meanwhile, then recharge; autofire for a player the engine plays; the targeted command's
+// replay round trip; identical hashes at 1, 2, 4 and 8 workers.
+
+#include "../support/check.hpp"
 #include "tactical_ai_internal.hpp"
 #include "tactical_ai_world.hpp"
-
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -17,25 +22,20 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
-// #561: the Y-wing squadron's ION_CANNON_SHOT (docs/behaviour/space-abilities.md AB-60 to AB-69):
-// a targeted team ability whose craft each fire one ion bolt at the target, holding every other
-// shot meanwhile, then recharge; autofire for a player the engine plays; the targeted command's
-// replay round trip; identical hashes at 1, 2, 4 and 8 workers.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

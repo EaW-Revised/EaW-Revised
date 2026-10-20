@@ -1,7 +1,8 @@
 #include "minimap_view.hpp"
 #include "eawr/assets/assets.hpp"
-#include "eawr/data/xml.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/data/xml.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 
 #include <godot_cpp/classes/image.hpp>
@@ -56,9 +57,7 @@ EawrMinimap::~EawrMinimap() {
 void EawrMinimap::prepare_orders(const vfs::Vfs& filesystem) {
     const auto text = [](const data::XmlNode& node) {
         data::tag_trace::used(node);
-        const auto first = node.raw_text.find_first_not_of(" \t\r\n");
-        return first == std::string::npos ? std::string{}
-            : node.raw_text.substr(first, node.raw_text.find_last_not_of(" \t\r\n") - first + 1);
+        return core::trim(node.raw_text, core::xml_whitespace);
     };
     const auto number = [&text](const data::XmlNode& node) {
         const auto value = text(node);

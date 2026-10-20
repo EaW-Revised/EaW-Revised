@@ -5,6 +5,9 @@
 // special-weapon permission and each planetary source's readiness every 300 ticks (#1933).
 // MAP is a logical TED path; DIFFICULTY is Normal_Default or Hard_Default.
 // Outputs are private observations, never regenerated replay fixtures.
+
+#include "../support/result.hpp"
+#include "../support/env.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -19,18 +22,25 @@
 #include <array>
 #include <cctype>
 #include <charconv>
-#include <cstdlib>
+#include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <ios>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <tuple>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -43,13 +53,8 @@ constexpr std::size_t class_count = 8;
 constexpr std::array<const char*, class_count> classes{
     "fighter", "bomber", "corvette", "frigate", "capital", "hero", "structure", "other"};
 
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
-void check(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-}
+using eawr::testing::result_diagnostic::take;
+void check(eawr::core::Result<void> result) { eawr::testing::result_diagnostic::must(std::move(result)); }
 std::uint64_t number(const char* text) {
     const std::string value(text);
     std::uint64_t result{};
@@ -65,17 +70,7 @@ std::string quoted(const std::string& value) {
     return out + '"';
 }
 std::string environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return {};
-    std::string result(value);
-    std::free(value);
-    return result;
-#else
-    const char* value = std::getenv(name);
-    return value != nullptr ? value : "";
-#endif
+    return eawr::testing::environment(name).value_or("");
 }
 struct Type {
     std::string name;

@@ -1,5 +1,10 @@
 #include "map_camera_test_support.hpp"
 
+#include <optional>
+#include <string>
+#include <string_view>
+#include <tuple>
+
 namespace eawr_map_camera_test {
 
 constexpr std::string_view land_overrides =

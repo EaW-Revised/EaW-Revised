@@ -123,6 +123,7 @@ public:
         std::size_t bone_count{};
         std::vector<std::uint8_t> skin_used_bones;
         bool skinned{};
+        bool hidden_geometry_collapses{};
         std::vector<std::uint32_t> billboard_modes;
         std::vector<std::int32_t> bone_parents;
         std::vector<Transform3D> bind_models;
@@ -285,6 +286,7 @@ public:
     void set_unit_opacity(sim::EntityId entity_id, float alpha);
     void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
     void forget_instance_pose(sim::EntityId entity_id);
+    [[nodiscard]] std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId asset_id) const;
     void apply_unit_opacity(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
 
     [[nodiscard]] std::vector<GodotRenderer::SkinBindingEvidence> skin_bindings() const;

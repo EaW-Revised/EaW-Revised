@@ -87,41 +87,9 @@ namespace tactical = sim::tactical;
     return footprint;
 }
 
-} // namespace
-
-core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
-    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data) {
-    std::optional<core::Diagnostic> error;
-    const auto footprint = footprint_of(id, {}, scale_factor, data, error);
-    if (error) return core::Result<tactical::Footprint>::failure(*error);
-    return core::Result<tactical::Footprint>::success(*footprint);
-}
-
-core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy) {
-    using Result = core::Result<tactical::MotionTable>;
-    const bool campaign = spawn_policy.mode == SpawnPolicy::Mode::campaign;
-    const bool single_ships = spawn_policy.mode != SpawnPolicy::Mode::skirmish;
-    for (const auto& owner : spawn_policy.owners)
-        if (owner.tech >= Spawner{}.campaign_starting.size())
-            return Result::failure(failure("garrison owner tech outside 0..5"));
-    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
-        for (const auto& constant : tables.constants.scalars) {
-            if (constant.tag == tag) return constant.value;
-        }
-        return std::nullopt;
-    };
-    const auto multiplier = scalar("Object_Max_Speed_Multiplier_Space");
-    const auto rotations = scalar("MaxRotationsSpace");
-    const auto expansion = scalar("XYExpansionDistanceSpace");
-    const auto corvette = scalar("TurnInPlaceSlowdownCorvette");
-    const auto frigate = scalar("TurnInPlaceSlowdownFrigate");
-    const auto capital = scalar("TurnInPlaceSlowdownCapital");
-    if (!multiplier || !rotations || !expansion || !corvette || !frigate || !capital) {
-        return Result::failure(failure("motion needs Object_Max_Speed_Multiplier_Space, MaxRotationsSpace, "
-                                       "XYExpansionDistanceSpace and TurnInPlaceSlowdownCorvette, -Frigate and "
-                                       "-Capital"));
-    }
-    std::optional<core::Diagnostic> error;
+void append_unit_motion_profiles(const UnitTables& tables, tactical::MotionTable& table,
+    const std::optional<Fixed>& multiplier, std::optional<core::Diagnostic>& error, const std::optional<Fixed>& corvette,
+    const std::optional<Fixed>& frigate, const std::optional<Fixed>& capital) {
     const auto scaled = [&](const Fixed value, const std::string& what) {
         auto product = sim::math::multiply(value, *multiplier);
         if (!product) {
@@ -130,32 +98,6 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
         }
         return product.value();
     };
-
-    tactical::MotionTable table;
-    auto arc = sim::math::divide(Fixed::from_raw(360 * Fixed::scale), *rotations);
-    if (!arc) return Result::failure(failure("MaxRotationsSpace: " + arc.error().message));
-    table.rules.arc_degrees = arc.value();
-    table.rules.expansion_distance = *expansion;
-    // OR-06, OR-14: the approach re-check interval and the guard range (required constants of the
-    // loader). A table built by hand keeps the MotionRules defaults (10 frames, 750 units); an
-    // authored value that is no whole number of frames or is negative is refused.
-    if (const auto interval = scalar("MovementReevaluationFrameCount")) {
-        if (interval->raw() <= 0 || interval->raw() % Fixed::scale != 0 || interval->raw() / Fixed::scale > (1 << 16)) {
-            return Result::failure(failure("MovementReevaluationFrameCount must be a whole number of frames, 1 to 65536"));
-        }
-        table.rules.reevaluation_frames = static_cast<std::uint32_t>(interval->raw() / Fixed::scale);
-    }
-    if (const auto max_waypoints = scalar("MaxWaypointsPerPath")) {
-        if (max_waypoints->raw() < 0 || max_waypoints->raw() % Fixed::scale != 0
-            || max_waypoints->raw() / Fixed::scale > (1 << 16)) {
-            return Result::failure(failure("MaxWaypointsPerPath must be a whole number, 0 to 65536"));
-        }
-        table.rules.max_waypoints = static_cast<std::uint32_t>(max_waypoints->raw() / Fixed::scale);
-    }
-    if (const auto guard = scalar("Space_Guard_Range")) {
-        if (guard->raw() < 0) return Result::failure(failure("Space_Guard_Range must not be negative"));
-        table.rules.guard_range = *guard;
-    }
     for (const auto& unit : tables.units) {
         if (unit.kind != UnitKind::ship || !unit.movement.max_speed || !unit.movement.max_rate_of_turn) continue;
         const auto& movement = unit.movement;
@@ -184,6 +126,16 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
         }
         table.profiles.push_back(profile);
     }
+}
+
+std::optional<core::Diagnostic> append_avoidance_footprints(const UnitTables& tables, tactical::MotionTable& table,
+    const std::optional<Fixed>& rotations, std::optional<core::Diagnostic>& error) {
+    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
+        for (const auto& constant : tables.constants.scalars) {
+            if (constant.tag == tag) return constant.value;
+        }
+        return std::nullopt;
+    };
     // #71: the path finder's constants and the footprints, when the constants are loaded.
     const auto count = [&](const std::string_view tag) -> std::optional<std::uint32_t> {
         const auto value = scalar(tag);
@@ -230,30 +182,25 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
             [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
         for (std::size_t index = 1; index < table.footprints.size(); ++index) {
             if (table.footprints[index].type_id == table.footprints[index - 1].type_id) {
-                return Result::failure(failure("two footprints share type ID "
-                    + std::to_string(table.footprints[index].type_id)));
+                return failure("two footprints share type ID "
+                    + std::to_string(table.footprints[index].type_id));
             }
         }
     }
-    // #75: craft flight, squadron types and hangars (docs/behaviour/space-fighters.md FL, FM).
-    table.nebula_disable_seconds = scalar("Nebula_Ability_Disable_Time").value_or(Fixed{});
-    for (const auto& unit : tables.units) {
-        if (unit.footprint.hazard.nebula_service) table.nebula_service_types.push_back(assets::object_type_crc(unit.id));
-    }
-    std::sort(table.nebula_service_types.begin(), table.nebula_service_types.end());
-    auto& squadrons = table.squadrons;
-    // FO-11 (#599): a squadron's lane steer on a group move; without the constants it is off.
-    squadrons.side_error_min = scalar("FormationMinimumSideError").value_or(Fixed{});
-    squadrons.side_error_max = scalar("FormationMaximumSideError").value_or(Fixed{});
-    const Fixed one = Fixed::from_raw(Fixed::scale);
-    const auto times = [&](const Fixed value, const Fixed factor, const std::string& what) {
-        auto product = sim::math::multiply(value, factor);
+    return std::nullopt;
+}
+
+void append_craft_motion_profiles(const UnitTables& tables, tactical::MotionTable& table,
+    const std::optional<Fixed>& multiplier, std::optional<core::Diagnostic>& error) {
+    const auto scaled = [&](const Fixed value, const std::string& what) {
+        auto product = sim::math::multiply(value, *multiplier);
         if (!product) {
             if (!error) error = failure(what + ": " + product.error().message);
             return Fixed{};
         }
         return product.value();
     };
+    auto& squadrons = table.squadrons;
     for (const auto& unit : tables.units) {
         const auto& movement = unit.movement;
         if (unit.kind == UnitKind::craft && movement.max_speed && movement.max_rate_of_turn) {
@@ -280,6 +227,19 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
             squadrons.craft.push_back(craft);
         }
     }
+}
+
+void append_squadron_motion_profiles(const UnitTables& tables, tactical::MotionTable& table,
+    const std::optional<Fixed>& multiplier, std::optional<core::Diagnostic>& error) {
+    const auto scaled = [&](const Fixed value, const std::string& what) {
+        auto product = sim::math::multiply(value, *multiplier);
+        if (!product) {
+            if (!error) error = failure(what + ": " + product.error().message);
+            return Fixed{};
+        }
+        return product.value();
+    };
+    auto& squadrons = table.squadrons;
     const auto is_craft = [&squadrons](const tactical::TypeId id) {
         return std::any_of(squadrons.craft.begin(), squadrons.craft.end(),
             [id](const tactical::CraftProfile& craft) { return craft.type_id == id; });
@@ -322,6 +282,20 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     std::sort(squadrons.squadrons.begin(), squadrons.squadrons.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
+}
+
+void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTable& table,
+    const SpawnPolicy& spawn_policy, const bool& campaign, const bool& single_ships,
+    const Fixed& one, std::optional<core::Diagnostic>& error) {
+    auto& squadrons = table.squadrons;
+    const auto times = [&](const Fixed value, const Fixed factor, const std::string& what) {
+        auto product = sim::math::multiply(value, factor);
+        if (!product) {
+            if (!error) error = failure(what + ": " + product.error().message);
+            return Fixed{};
+        }
+        return product.value();
+    };
     const auto has_squadron = [&squadrons](const tactical::TypeId id) {
         return std::any_of(squadrons.squadrons.begin(), squadrons.squadrons.end(),
             [id](const tactical::SquadronProfile& squadron) { return squadron.type_id == id; });
@@ -407,6 +381,86 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
     }
     std::sort(squadrons.spawners.begin(), squadrons.spawners.end(),
               [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
+}
+
+} // namespace
+
+core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
+    const std::optional<Fixed>& scale_factor, const SpaceFootprint& data) {
+    std::optional<core::Diagnostic> error;
+    const auto footprint = footprint_of(id, {}, scale_factor, data, error);
+    if (error) return core::Result<tactical::Footprint>::failure(*error);
+    return core::Result<tactical::Footprint>::success(*footprint);
+}
+
+core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy) {
+    using Result = core::Result<tactical::MotionTable>;
+    const bool campaign = spawn_policy.mode == SpawnPolicy::Mode::campaign;
+    const bool single_ships = spawn_policy.mode != SpawnPolicy::Mode::skirmish;
+    for (const auto& owner : spawn_policy.owners)
+        if (owner.tech >= Spawner{}.campaign_starting.size())
+            return Result::failure(failure("garrison owner tech outside 0..5"));
+    const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
+        for (const auto& constant : tables.constants.scalars) {
+            if (constant.tag == tag) return constant.value;
+        }
+        return std::nullopt;
+    };
+    const auto multiplier = scalar("Object_Max_Speed_Multiplier_Space");
+    const auto rotations = scalar("MaxRotationsSpace");
+    const auto expansion = scalar("XYExpansionDistanceSpace");
+    const auto corvette = scalar("TurnInPlaceSlowdownCorvette");
+    const auto frigate = scalar("TurnInPlaceSlowdownFrigate");
+    const auto capital = scalar("TurnInPlaceSlowdownCapital");
+    if (!multiplier || !rotations || !expansion || !corvette || !frigate || !capital) {
+        return Result::failure(failure("motion needs Object_Max_Speed_Multiplier_Space, MaxRotationsSpace, "
+                                       "XYExpansionDistanceSpace and TurnInPlaceSlowdownCorvette, -Frigate and "
+                                       "-Capital"));
+    }
+    std::optional<core::Diagnostic> error;
+
+    tactical::MotionTable table;
+    auto arc = sim::math::divide(Fixed::from_raw(360 * Fixed::scale), *rotations);
+    if (!arc) return Result::failure(failure("MaxRotationsSpace: " + arc.error().message));
+    table.rules.arc_degrees = arc.value();
+    table.rules.expansion_distance = *expansion;
+    // OR-06, OR-14: the approach re-check interval and the guard range (required constants of the
+    // loader). A table built by hand keeps the MotionRules defaults (10 frames, 750 units); an
+    // authored value that is no whole number of frames or is negative is refused.
+    if (const auto interval = scalar("MovementReevaluationFrameCount")) {
+        if (interval->raw() <= 0 || interval->raw() % Fixed::scale != 0 || interval->raw() / Fixed::scale > (1 << 16)) {
+            return Result::failure(failure("MovementReevaluationFrameCount must be a whole number of frames, 1 to 65536"));
+        }
+        table.rules.reevaluation_frames = static_cast<std::uint32_t>(interval->raw() / Fixed::scale);
+    }
+    if (const auto max_waypoints = scalar("MaxWaypointsPerPath")) {
+        if (max_waypoints->raw() < 0 || max_waypoints->raw() % Fixed::scale != 0
+            || max_waypoints->raw() / Fixed::scale > (1 << 16)) {
+            return Result::failure(failure("MaxWaypointsPerPath must be a whole number, 0 to 65536"));
+        }
+        table.rules.max_waypoints = static_cast<std::uint32_t>(max_waypoints->raw() / Fixed::scale);
+    }
+    if (const auto guard = scalar("Space_Guard_Range")) {
+        if (guard->raw() < 0) return Result::failure(failure("Space_Guard_Range must not be negative"));
+        table.rules.guard_range = *guard;
+    }
+    append_unit_motion_profiles(tables, table, multiplier, error, corvette, frigate, capital);
+    if (auto footprint_error = append_avoidance_footprints(tables, table, rotations, error))
+        return Result::failure(std::move(*footprint_error));
+    // #75: craft flight, squadron types and hangars (docs/behaviour/space-fighters.md FL, FM).
+    table.nebula_disable_seconds = scalar("Nebula_Ability_Disable_Time").value_or(Fixed{});
+    for (const auto& unit : tables.units) {
+        if (unit.footprint.hazard.nebula_service) table.nebula_service_types.push_back(assets::object_type_crc(unit.id));
+    }
+    std::sort(table.nebula_service_types.begin(), table.nebula_service_types.end());
+    auto& squadrons = table.squadrons;
+    // FO-11 (#599): a squadron's lane steer on a group move; without the constants it is off.
+    squadrons.side_error_min = scalar("FormationMinimumSideError").value_or(Fixed{});
+    squadrons.side_error_max = scalar("FormationMaximumSideError").value_or(Fixed{});
+    const Fixed one = Fixed::from_raw(Fixed::scale);
+    append_craft_motion_profiles(tables, table, multiplier, error);
+    append_squadron_motion_profiles(tables, table, multiplier, error);
+    append_spawner_motion_profiles(tables, table, spawn_policy, campaign, single_ships, one, error);
 
     if (error) return Result::failure(*error);
     std::sort(table.profiles.begin(), table.profiles.end(),

@@ -1,6 +1,27 @@
 #include "foc_plan_support.hpp"
 #include "../../src/script/foc/ai_data.hpp"
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace foc_plan_test_support {
 

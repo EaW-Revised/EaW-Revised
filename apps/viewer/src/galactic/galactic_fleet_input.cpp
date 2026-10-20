@@ -191,8 +191,9 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     // ordinary fleet movement. A rejection cannot fall through into the world.
     if (destruction_hud.slot && destruction_hud.slot->is_visible_in_tree()
         && destruction_hud.slot->get_global_rect().has_point(point))
-        return source->orbit == (destruction_hud.facts ? destruction_hud.facts->planet : 0)
-            && drop_destruction(id, submit);
+        return destruction_hud.facts
+            ? source->orbit == destruction_hud.facts->planet && drop_destruction(id, submit)
+            : drop_hero_ability(id, submit);
     if (fleet_organize && fleet_organize->is_visible_in_tree()) {
         for (const auto& [name, button] : ground_hud.buttons) {
             if (!button->is_visible_in_tree() || !button->get_global_rect().has_point(point)) continue;

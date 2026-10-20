@@ -1,3 +1,4 @@
+#include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "eawr/presentation/ui/pads.hpp"
@@ -44,7 +45,7 @@ using namespace live_session_detail;
 
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::player_colour(const tactical::PlayerId player) const {
     if (!start_) return std::nullopt;
-    for (const skirmish::StartPlayer& entry : start_->players) {
+    for (const battle::StartPlayer& entry : start_->players) {
         if (entry.player.player_id == player && entry.colour) return entry.colour->rgb;
     }
     return std::nullopt;
@@ -72,7 +73,7 @@ std::optional<std::array<std::uint8_t, 3>> LiveSessionView::model_colour_of_type
     // WBP-52: a pad's capture progress feeds the model's colourisation constant, so it takes the model's colour.
     if (tables_) {
         for (const auto& unit : tables_->units) {
-            if (skirmish::type_id(unit.id) == type_id) return model_colour(player, unit.id);
+            if (battle::type_id(unit.id) == type_id) return model_colour(player, unit.id);
         }
     }
     return model_colour(player, std::string{});
@@ -604,7 +605,7 @@ void LiveSessionView::placement_preview(const std::optional<tactical::TypeId> ty
 
 std::string LiveSessionView::player_faction(const tactical::PlayerId player) const {
     if (start_) {
-        for (const skirmish::StartPlayer& candidate : start_->players) {
+        for (const battle::StartPlayer& candidate : start_->players) {
             if (candidate.player.player_id == player) return candidate.faction;
         }
         return {};
@@ -614,7 +615,7 @@ std::string LiveSessionView::player_faction(const tactical::PlayerId player) con
     for (const auto& candidate : setup_->players) {
         if (candidate.player_id != player) continue;
         for (const std::string_view name : {"Empire", "Rebel", "Underworld"}) {
-            if (skirmish::faction_id(name) == candidate.faction_id) return std::string(name);
+            if (battle::faction_id(name) == candidate.faction_id) return std::string(name);
         }
     }
     return {};

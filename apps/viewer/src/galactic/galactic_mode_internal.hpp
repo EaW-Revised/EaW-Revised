@@ -1,9 +1,13 @@
 #pragma once
+#include <iosfwd>
+#include <unordered_map>
 #include "eawr/platform/campaign_battle_view.hpp"
 #include "eawr/sim/galactic/types.hpp"
 
 // Private to the galactic mode's translation units (galactic_*.cpp).
 #include "galactic_mode.hpp"
+#include <chrono>
+#include "galactic_hud_fixture.hpp"
 #include "campaign_capture_metrics.hpp"
 #include "galaxy_snapshot_stub.hpp"
 #include "galaxy_view.hpp"
@@ -11,21 +15,19 @@
 #include "scene_content.hpp"
 #include "route_lines.hpp"
 #include "planet_hud.hpp"
-#include "fleet_hud_fixture.hpp"
+#include "hud_retained.hpp"
 #include "fleet_stacks.hpp"
 #include "fleet_panels.hpp"
 #include "fleet_traits.hpp"
 #include "fleet_drag.hpp"
 #include "ground_hud.hpp"
 #include "orbit_hud.hpp"
-#include "ground_hud_fixture.hpp"
 #include "radar_hud.hpp"
 #include "corruption_hud.hpp"
 #include "hero_action_hud.hpp"
 #include "destruction_hud.hpp"
 #include "weapon_action_hud.hpp"
 #include "black_market_hud.hpp"
-#include "black_market_hud_fixture.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "eawr/presentation/ui/fleet_cells.hpp"
 #include "clock_input.hpp"
@@ -74,11 +76,16 @@
 #include <optional>
 #include <random>
 #include <set>
+#include <unordered_map>
 #include <unordered_set>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace pugi { class xml_document; }
+namespace eawr::data::ui { struct TextDatabase; }
+namespace eawr::sim::galactic { struct GalacticClock; }
 
 namespace eawr::presentation::godot_backend {
 // `--eawr-perf-overlay on|off` (map_mode_hud.cpp, #558): an error message, or empty with `requested` set.
@@ -184,6 +191,9 @@ struct GalacticMode::State final {
     explicit State(Options value) : options(std::move(value)) {}
     ~State();
 
+    [[nodiscard]] bool fixture_enabled(GalacticHudFixture::Feature feature) const {
+        return options.hud_provider && options.hud_provider->enabled(feature);
+    }
     Options options;
     std::string status{"running"};
     std::string failure;
@@ -206,7 +216,6 @@ struct GalacticMode::State final {
     std::unique_ptr<galactic_detail::RouteGeometry> corruption_paths;
     std::vector<galactic_detail::RouteGeometry::Quad> corruption_quads, corruption_uploaded_quads;
     std::size_t corruption_path_quads{};
-    double corruption_fixture_seconds{};
     [[nodiscard]] bool service_corruption(double elapsed);
     galactic_view::GalaxySnapshotStub metadata;
     sim::galactic::GalacticSetup galaxy_setup;
@@ -259,6 +268,17 @@ struct GalacticMode::State final {
     std::uint32_t income_labels_height{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> hud_facts_snapshot;
     std::uint64_t hud_updates{}, hud_update_nanoseconds{}, hud_fact_rebuilds{}, hud_label_updates{}, hud_command_updates{};
+    std::uint64_t hud_label_content_updates{}, hud_text_style_updates{};
+    std::uint64_t hud_offer_rows_visited{}, hud_offer_max_rows{};
+    struct HudTextStyleKey final {
+        godot::String text;
+        const data::ui::CommandBarComponent* component{};
+        const data::ui::ShellAnchor* anchor{};
+        std::uint32_t height{};
+        double scale{};
+        friend bool operator==(const HudTextStyleKey&, const HudTextStyleKey&) = default;
+    };
+    std::map<const EawrHudText*, HudTextStyleKey> hud_text_styles;
     // Keep dependency keys beside their consumers. Immutable publications are
     // retained so their addresses cannot be recycled underneath a cached HUD.
     struct HudCommandKey final {
@@ -284,6 +304,40 @@ struct GalacticMode::State final {
         friend bool operator==(const HudLabelKey&, const HudLabelKey&) = default;
     };
     std::optional<HudLabelKey> hud_label_key;
+    // #4315: what each planet's name, income, level, status and fleet-badge controls were last placed from. A pass
+    // that finds the same key leaves them alone; a key that differs only by the planet's screen point and puts
+    // every control off screen is skipped too, once the controls already sit off screen.
+    struct PlanetLabelKey final {
+        std::array<float, 2> anchor{};
+        float scale{}, alpha{};
+        std::uint64_t generation{}, facts{}, badges{};
+        friend bool operator==(const PlanetLabelKey&, const PlanetLabelKey&) = default;
+        [[nodiscard]] bool same_but_anchor(const PlanetLabelKey& other) const noexcept {
+            return scale == other.scale && alpha == other.alpha && generation == other.generation
+                && facts == other.facts && badges == other.badges;
+        }
+    };
+    struct PlanetLabelRecord final {
+        PlanetLabelKey key;
+        galactic_view::HudBounds reach; // the controls' rectangle relative to key.anchor, once measured
+        bool placed{}, overlays{}, culled{}, name_visible{};
+        std::uint64_t pass{};
+    };
+    // Everything a placement reads that is neither the planet's own facts nor its screen point.
+    struct PlanetLabelEnvironment final {
+        std::uint32_t width{}, height{};
+        bool levels{}, income{}, hud_enabled{}, tutorial_locked{};
+        friend bool operator==(const PlanetLabelEnvironment&, const PlanetLabelEnvironment&) = default;
+    };
+    std::unordered_map<galactic_view::ObjectId, PlanetLabelRecord> planet_label_records;
+    std::optional<PlanetLabelEnvironment> planet_label_environment;
+    std::uint64_t planet_label_generation{}, planet_label_pass{};
+    std::uint64_t hud_label_placed{}, hud_label_retained{}, hud_label_culled{};
+    void update_planet_labels();
+    [[nodiscard]] std::uint64_t planet_badge_digest(galactic_view::ObjectId planet) const;
+    [[nodiscard]] galactic_view::HudBounds planet_control_bounds(galactic_view::ObjectId planet, godot::Vector2 anchor) const;
+    void hide_planet_overlays(galactic_view::ObjectId planet);
+    void reset_label_placement();
     std::vector<std::size_t> hud_planet_indices;
     std::vector<galactic_view::ObjectId> visible_planet_labels;
     std::map<galactic_view::ObjectId, std::pair<std::uint64_t, std::uint32_t>> hud_label_content_versions;
@@ -335,6 +389,7 @@ struct GalacticMode::State final {
     void position_destruction_hud(galactic_view::ObjectId, godot::Vector2, float, float);
     [[nodiscard]] bool destruction_source(galactic_view::ObjectId) const;
     bool drop_destruction(galactic_view::ObjectId, bool);
+    bool drop_hero_ability(galactic_view::ObjectId, bool);
     void write_destruction_report(std::ostream&) const;
     WeaponActionHudState weapon_menu;
     BlackMarketHudState market_menu;
@@ -373,10 +428,38 @@ struct GalacticMode::State final {
     std::size_t choice_page{};
     galactic_view::ObjectId choice_planet{};
     [[nodiscard]] godot::Ref<godot::Texture2D> command_texture(std::string_view name);
+    void configure_command_bar_text(const presentation::ui::ShellPlacement& placement, EawrHudText& label,
+        const data::ui::CommandBarComponent& component, const data::ui::ShellAnchor& anchor);
+    bool configure_command_bar_constants(const pugi::xml_document& document);
+    bool configure_command_bar_encyclopedia();
+    void build_command_bar_tooltip();
+    void build_command_bar_advisor(const data::ui::TextDatabase* text);
+    bool build_command_bar_shell();
+    void build_command_bar_labels(const data::ui::TextDatabase* text);
+    void build_command_bar_controls(const data::ui::TextDatabase* text);
+    void build_command_bar_choices(const pugi::xml_document& document);
+    void build_command_bar_queues();
+    void finish_command_bar_controls();
+    void update_command_bar_economy(const sim::galactic::GalacticClock& clock, bool fiscal_available);
+    void update_command_bar_labels(const presentation::ui::ShellPlacement& placement,
+        const std::map<galactic_view::ObjectId, galactic_view::PlanetHudFacts>::iterator selected);
+    void update_command_bar_allegiance(const presentation::ui::ShellPlacement& placement,
+        const std::map<galactic_view::ObjectId, galactic_view::PlanetHudFacts>::iterator selected);
+    void update_command_bar_pads();
+    void update_command_bar_buttons(const presentation::ui::ShellPlacement& placement, const sim::galactic::GalacticClock& clock);
+    void update_command_bar_choices(const presentation::ui::ShellPlacement& placement);
+    void update_command_bar_queues(const presentation::ui::ShellPlacement& placement);
+    void update_command_bar_pips(const presentation::ui::ShellPlacement& placement,
+        const sim::galactic::GalacticClock& clock, bool fiscal_available);
     [[nodiscard]] bool build_command_bar();
     void update_command_bar();
     [[nodiscard]] bool build_fleet_hud();
     void update_fleet_hud();
+    void rebuild_fleet_projection(const bool publication_changed);
+    void update_fleet_panel_cards();
+    void rebuild_fleet_cell_layouts(const presentation::ui::ShellPlacement& placement);
+    void update_fleet_controls(const presentation::ui::ShellPlacement& placement, const bool changed);
+    void update_fleet_captions(const presentation::ui::ShellPlacement& placement);
     void update_fleet_diorama();
     void update_fleet_badges(galactic_view::ObjectId planet, godot::Vector2 anchor, float scale, float alpha);
     [[nodiscard]] godot::Ref<godot::Texture2D> fleet_faction_texture(galactic_view::PlayerId owner, bool overview, bool hover = false);
@@ -394,6 +477,8 @@ struct GalacticMode::State final {
     void ground_pointer(int kind, godot::Vector2 point, bool control, bool twice);
     bool request_ground_land(bool submit, galactic_view::ObjectId fleet = 0);
     const galactic_view::GroundRoster* command_roster(galactic_view::ObjectId planet) const;
+    // #4316: the focused planet's roster, built when first asked for; the end of ground_hud.rosters when absent.
+    std::map<galactic_view::ObjectId, galactic_view::GroundRoster>::const_iterator ground_roster_find(galactic_view::ObjectId planet) const;
     bool ground_launch_drop(godot::Vector2 point);
     bool ground_pad_drop(godot::Vector2 point);
     void write_ground_report(std::ostream&) const;
@@ -430,10 +515,19 @@ struct GalacticMode::State final {
         std::optional<sim::galactic::FleetId> fleet;
         std::size_t texture{};
         bool shown{};
+        bool hidden{};            // hide() was last applied by the projection
+        std::uint32_t revision{}; // bumped whenever the projection hides the badge (a label placement must follow)
+        // What the controls were last given (#4316).
+        galactic_view::Retained<std::size_t> shown_stack;
+        galactic_view::Retained<std::optional<sim::galactic::TypeId>> shown_ship;
+        galactic_view::Retained<galactic_view::PlayerId> shown_owner;
         std::vector<viewer::galactic::FleetStackEntry> contents;
         std::optional<sim::galactic::TypeId> best;
     };
     std::map<std::pair<galactic_view::ObjectId, std::uint8_t>, FleetStackBadge> fleet_badges;
+    // #4316: max health by type. Never cleared: production_names and production_art are assigned only while the view
+    // is built (GalacticMode::State::build_view), before the first fleet projection, and not again for this State.
+    std::unordered_map<sim::galactic::TypeId, std::optional<float>> fleet_health_cache;
     // WGUI-166: the hovered stack icon's delayed fleet encyclopedia (shared popup).
     EawrUnitCards* fleet_popup{};
     std::uint64_t fleet_popup_key{};
@@ -523,6 +617,7 @@ struct GalacticMode::State final {
     void update_radar_hud();
     [[nodiscard]] bool request_hud_zoom(bool inward, bool toggle = false);
     [[nodiscard]] bool request_radar_position(galactic_view::PointerPoint point, float width, float height);
+    void update_radar_blips(std::size_t index, godot::Vector2 size, double placement_scale);
     void write_radar_report(std::ostream& output) const;
     EawrTacticalHud* advanced_map_shell{};
     godot::TextureRect* planet_bonus_icon{};
@@ -532,6 +627,17 @@ struct GalacticMode::State final {
     std::array<godot::Ref<godot::Texture2D>, 2> radar_zoom_icons;
     std::optional<std::size_t> radar_zoom_variant;
     std::array<std::map<galactic_view::ObjectId, godot::Control*>, 2> radar_blips;
+    struct RadarBlipKey final {
+        bool discovered{}, selected{}, visible{};
+        float r{}, g{}, b{}, x{}, y{};
+        bool operator==(const RadarBlipKey&) const = default;
+    };
+    struct RadarBlipCache final {
+        godot::Vector2 size;
+        double scale{};
+        std::map<galactic_view::ObjectId, RadarBlipKey> keys;
+    };
+    std::array<RadarBlipCache, 2> radar_blip_cache;
     std::array<godot::TextureRect*, 2> radar_view_icons{};
     std::shared_ptr<const sim::galactic::GalacticSnapshot> radar_publication;
     galactic_view::ObjectId radar_selection{};
@@ -560,6 +666,32 @@ struct GalacticMode::State final {
     double animation_time{};
     bool paused{};
     std::uint64_t animation_updates{};
+    // Opt-in main-thread attribution. The main/animation/camera totals include
+    // their nested phases; these are CPU enqueue times, not GPU completion.
+    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, count };
+    struct FramePhaseCost final { double milliseconds{}, worst_call_ms{}; std::uint64_t calls{}; };
+    std::array<FramePhaseCost, static_cast<std::size_t>(FramePhase::count)> frame_phase_costs{};
+    struct FramePhaseMeasure final {
+        using Clock = std::chrono::steady_clock;
+        FramePhaseCost* cost{};
+        Clock::time_point started{};
+        explicit FramePhaseMeasure(FramePhaseCost* value) : cost(value) {
+            if (cost) { ++cost->calls; started = Clock::now(); }
+        }
+        FramePhaseMeasure(const FramePhaseMeasure&) = delete;
+        FramePhaseMeasure& operator=(const FramePhaseMeasure&) = delete;
+        ~FramePhaseMeasure() { finish(); }
+        void finish() {
+            if (!cost) return;
+            const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+            cost->milliseconds += elapsed;
+            if (elapsed > cost->worst_call_ms) cost->worst_call_ms = elapsed;
+            cost = nullptr;
+        }
+    };
+    [[nodiscard]] FramePhaseMeasure measure_frame(const FramePhase phase) {
+        return FramePhaseMeasure(perf_requested ? &frame_phase_costs[static_cast<std::size_t>(phase)] : nullptr);
+    }
     // Per seat (ADR-020): the camera belongs to the seat, never to the faction.
     std::map<galactic_view::SeatId, galactic_view::OrbitCamera> cameras;
     std::map<galactic_view::SeatId, galactic_view::PlanetCamera> flights;
@@ -670,7 +802,6 @@ struct GalacticMode::State final {
     [[nodiscard]] bool build_retreat_controls();
     void service_retreat_controls();
     void request_retreat(sim::tactical::RetreatAction action);
-    galactic_view::BattleDialogView battle_dialog_fixture;
     std::function<bool(std::uint64_t, galactic_view::BattleChoice)> battle_choice_sink;
     std::function<std::string(std::string_view)> battle_text;
     std::map<std::string, galactic_view::CampaignResultType> battle_result_types;
@@ -692,12 +823,11 @@ struct GalacticMode::State final {
     bool leave_requested{};
     std::string score_failure;
     bool score_consumed{};
-    bool score_ledger_script{}; // -ledger score fixture: script a build and ownership history
-    [[nodiscard]] bool run_score_ledger();
+
     [[nodiscard]] bool build_campaign_score();
     void service_campaign_score();
     [[nodiscard]] bool score_dialog_open() const;
-    [[nodiscard]] bool configure_score_fixture(platform::LiveGameSession::Options& live);
+
     std::uint64_t audio_event_cursor{};
     std::uint64_t audio_event_gaps{};
     std::deque<godot::String> approach_text;
@@ -809,11 +939,31 @@ struct GalacticMode::State final {
     [[nodiscard]] bool update_routes();
     // WGUI-99/100: a trade line shows once both endpoints are discovered and
     // takes its type from the endpoints' apparent owners, never the actual ones.
+    // The local player's observation row per planet (first match), for a lookup that would otherwise scan the rows.
+    using LocalObservationIndex = std::unordered_map<galactic_view::ObjectId, const sim::galactic::ObservedPlanet*>;
+    [[nodiscard]] LocalObservationIndex local_observation_index() const;
+    // `observed` answers the endpoint rows from an index of displayed_snapshot; null scans the rows.
     [[nodiscard]] galactic_view::RouteOwners route_owners(const galactic_view::PlanetView& a,
-        const galactic_view::PlanetView& b) const;
+        const galactic_view::PlanetView& b, const LocalObservationIndex* observed = nullptr) const;
     [[nodiscard]] bool route_discovered(const galactic_view::PlanetView& a, const galactic_view::PlanetView& b) const;
     void submit();
     void apply_camera();
+    void write_report_identity(std::ostringstream& output) const;
+    void write_report_session(std::ostringstream& output) const;
+    void write_report_ai(std::ostringstream& output) const;
+    void write_report_controls(std::ostringstream& output) const;
+    void write_report_phases(std::ostringstream& output) const;
+    void write_report_corruption(std::ostringstream& output) const;
+    void write_report_production(std::ostringstream& output) const;
+    void write_report_command_bar(std::ostringstream& output) const;
+    void write_report_panels(std::ostringstream& output) const;
+    void write_report_scene(std::ostringstream& output) const;
+    void write_report_galaxy(std::ostringstream& output) const;
+    void write_report_planet_hud(std::ostringstream& output) const;
+    void write_report_battle_proof(std::ostringstream& output) const;
+    void write_report_handoff(std::ostringstream& output) const;
+    void write_report_zoom_samples(std::ostringstream& output) const;
+    void write_report_models(std::ostringstream& output) const;
     [[nodiscard]] bool write_report() const;
     // #4031: the F3 performance overlay (docs/ui/perf-overlay.md) over the galactic view. Tick costs come
     // from the live game session; the clock row shows the speed factor the displayed snapshot is under.

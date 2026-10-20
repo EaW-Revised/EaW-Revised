@@ -186,14 +186,17 @@ def plan_tsv(checks: list[dict[str, Any]]) -> str:
 def read_results(path: Path) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     baseline: dict[str, Any] = {}
     results: dict[str, dict[str, Any]] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        value = json.loads(line)
-        if "baseline" in value:
-            baseline = value["baseline"]
-        else:
-            results[value["id"]] = value
+    # Stock GC rows repeat complete campaign snapshots. Keep only one input
+    # line beside the parsed results, rather than another copy of the whole file.
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if "baseline" in value:
+                baseline = value["baseline"]
+            else:
+                results[value["id"]] = value
     return baseline, results
 
 
@@ -448,7 +451,11 @@ def run_command(args: argparse.Namespace) -> int:
 def report_from(out: Path, checks: list[dict[str, Any]], meta: dict[str, Any]) -> int:
     baseline, results = read_results(out / "results.jsonl")
     report = build_report(checks, baseline, results, meta)
-    (out / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    # Keep every fact, but avoid expanding millions of snapshot scalars into
+    # indented lines. The Markdown artifact provides the human-readable view.
+    with (out / "report.json").open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(json.dumps(report, separators=(",", ":")))
+        stream.write("\n")
     (out / "report.md").write_text(render_report(report), encoding="utf-8", newline="\n")
     if baseline.get("scene") == "galactic":
         (out / "findings.md").write_text(render_report(report).split("## Every check")[0], encoding="utf-8")

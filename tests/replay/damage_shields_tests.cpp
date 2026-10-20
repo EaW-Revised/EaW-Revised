@@ -1,5 +1,13 @@
 #include "damage_support.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace damage_test_support {
 
 void test_curve() {

@@ -1,3 +1,19 @@
+#include <array>
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <map>
+#include <memory>
+#include <span>
+#include <system_error>
+#include <vector>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 // WGA-58..60/66/246..253: installed Normal plan selection and paid Lua consumer.
 #include "galactic_ai_selection_content.hpp"
 #include "galactic_ai.hpp"
@@ -16,7 +32,6 @@
 
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,6 +39,8 @@
 #include <iterator>
 #include <set>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::must;
 
 namespace ai = eawr::script::foc::ai;
 namespace foc = eawr::script::foc;
@@ -32,12 +49,10 @@ namespace gc = eawr::sim::galactic;
 namespace cp = eawr::campaign;
 namespace auth = eawr::script::authoritative;
 namespace {
-template<class T> T must(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().message);
-    return std::move(value).value();
+
+void expect(bool value, std::string_view message) {
+    if (!value) eawr::testing::require(value, message);
 }
-void must(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
-void expect(bool value, std::string_view message) { if (!value) throw std::runtime_error(std::string(message)); }
 struct DiskCheckpoint {
     std::filesystem::path path = std::filesystem::temp_directory_path()
         / ("eawr-selector-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".checkpoint");
@@ -49,15 +64,9 @@ std::string read(const eawr::vfs::Vfs& fs, std::string_view path) {
     return value;
 }
 std::string game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed selector requires game root");
-    std::string root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed selector requires game root");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed selector requires game root");
+    return std::move(*root);
 }
 struct Owner {
     std::shared_ptr<foc::detail::Host> host = std::make_shared<foc::detail::Host>();

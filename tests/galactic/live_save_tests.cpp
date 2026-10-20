@@ -1,7 +1,20 @@
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <iostream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/checkpoint/game.hpp"
+#include "eawr/sim/galactic/observer.hpp"
 #include "../../apps/viewer/src/galactic/save_input.hpp"
 #include "../../apps/viewer/src/galactic/save_dialog_model.hpp"
 #include "../../src/platform/galactic/live_save_transport.hpp"
@@ -65,10 +78,7 @@ void save_input_contract() {
         "ordinary newest first and equal-time rows have no filename key");
 
 }
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 galactic::GalacticSetup setup() {
     galactic::SyntheticGalaxyOptions spec; spec.planets = 8; spec.players = 2;
     spec.fleets_per_player = 1; spec.members_per_fleet = 2; spec.debug_commands = true;
@@ -84,18 +94,21 @@ platform::LiveGameSession::Options options(std::size_t workers, const std::strin
 void retained_invasion_input() {
     const auto initial = setup();
     platform::save_detail::Input input;
-    input.orders = {{{1}, galactic::PauseGalaxy{}, 5, 90}, {{1}, galactic::ResumeGalaxy{}, 6, {}}};
+    // GCMP-04: a deferred invasion acceptance is an ordinary typed order; no side metadata carries it.
+    input.orders = {{{1}, galactic::InvasionAccept{90}, 5}, {{1}, galactic::ResumeGalaxy{}, 6}};
     auto section = take(platform::save_detail::encode_input(initial, 4, input));
+    expect(section.version == 3, "the live-input section is version 3 (invasion intent metadata retired)");
     eawr::checkpoint::Checkpoint saved;
     saved.header.identities = eawr::checkpoint::game_identities(initial);
     saved.header.seed = initial.seed; saved.header.completed_tick = 4;
     saved.sections.push_back(section);
     const auto restored = take(platform::save_detail::decode_input(saved));
-    expect(restored.orders.size() == 2 && restored.orders[0].accept_invasion == 90
-        && restored.orders[0].tick == 5 && !restored.orders[1].accept_invasion,
-        "saved deferred invasion intent retains conflict identity and does not replace adjacent ordinary input");
+    expect(restored.orders.size() == 2 && restored.orders[0].tick == 5
+        && restored.orders[0].payload == galactic::CommandPayload{galactic::InvasionAccept{90}}
+        && restored.orders[1].payload == galactic::CommandPayload{galactic::ResumeGalaxy{}},
+        "saved deferred invasion acceptance round-trips as its typed command beside ordinary input");
     saved.sections.front().bytes.pop_back();
-    expect(!platform::save_detail::decode_input(saved), "truncated invasion intent metadata refuses the save");
+    expect(!platform::save_detail::decode_input(saved), "a truncated deferred-order blob refuses the save");
 }
 std::uint64_t save(platform::LiveGameSession& live, std::string name, bool quick = false,
     bool wait_before_poll = false) {
@@ -163,9 +176,74 @@ void galaxy_roundtrip(std::size_t workers, const std::string& directory) {
     expect(!live->delete_save("../galaxy") && !live->prepare_load("../galaxy"), "repository forbids paths as slot names");
     expect(bool(live->delete_save("corrupt")), "delete removes only the selected slot");
 }
+void discovery_roundtrip(std::size_t workers, const std::string& directory) {
+    for (const bool paused : {false, true}) {
+        auto initial = setup();
+        auto& observer = initial.observer.emplace(); observer.local_player = 1;
+        observer.reveal_delay_seconds = take(Fixed::from_decimal("0.5"));
+        for (const auto& player : initial.players) {
+            galactic::ObserverPlayer row; row.player = player.player_id; row.ai = row.player != 1;
+            row.allies = {row.player}; row.default_intelligence = galactic::bit(galactic::Intelligence::ownership);
+            observer.players.push_back(row);
+        }
+        for (const auto& planet : initial.planets) {
+            galactic::ObserverPlanet row; row.planet = planet.id;
+            row.allegiance = row.target_owner = row.current_owner = row.current_controller = planet.owner;
+            observer.planets.push_back(row);
+        }
+        for (const auto& fleet : initial.fleets) for (const auto& member : fleet.members)
+            if (std::none_of(observer.types.begin(), observer.types.end(), [&](const auto& row) { return row.type == member.type; }))
+                observer.types.push_back({member.type, false, false, false});
+        std::sort(observer.types.begin(), observer.types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+        const auto initialized = galactic::initialize_campaign_observer(initial, initial.planets.front().id);
+        if (!initialized) throw std::runtime_error(eawr::core::format_diagnostic(initialized.error()));
+        auto live = take(platform::LiveGameSession::start(initial, options(workers, directory)));
+        if (paused) live->submit(platform::LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+        live->advance_to(1); expect(live->wait_for(1, 5s), "initial discovery publication settles before save");
+        const auto before = live->frame().latest;
+        const auto discovered = [](const auto& snapshot) {
+            std::vector<galactic::PlanetId> result;
+            for (const auto& row : snapshot.observations()) if (row.player == 1 && row.discovered) result.push_back(row.planet);
+            return result;
+        };
+        const auto expected = discovered(*before);
+        expect(expected.size() > 1 && expected.size() < initial.planets.size(),
+            "save fixture includes newly discovered own planets and hidden foreign controls");
+        const auto name = paused ? "discovery-paused" : "discovery-live";
+        (void)save(*live, name);
+        const auto saved = live->frame().latest;
+        expect(discovered(*saved) == expected, "paused and unpaused disk capture preserve the settled discovery set");
+        for (const bool player_load : {false, true}) {
+            auto prepared = take(live->prepare_load(name, player_load));
+            auto restored = take(platform::LiveGameSession::start(std::move(prepared), options(workers, directory)));
+            const auto first = restored->frame().latest;
+            expect(discovered(*first) == expected,
+                "first exact/player load publication preserves discovery before any new tick");
+            if (!player_load) {
+                expect(std::ranges::equal(first->observations(), saved->observations()),
+                    "exact restore preserves every observer fact");
+                expect(first->sha256() == saved->sha256(), "exact restore retains the full state hash");
+            } else {
+                // WGUI-102: player load refreshes local intelligence at the active
+                // mode clock. That may change owner knowledge, never discovery.
+                std::size_t local_rows{};
+                for (const auto& row : first->observations()) if (row.player == 1) {
+                    ++local_rows;
+                    const auto planet = std::find_if(initial.planets.begin(), initial.planets.end(),
+                        [&](const auto& value) { return value.id == row.planet; });
+                    expect(planet != initial.planets.end() && row.known_owner == planet->owner,
+                        "player-load refresh publishes the fixture's actual owner even at undiscovered planets");
+                }
+                expect(local_rows == initial.planets.size(), "player-load ownership check covers every local observer row");
+            }
+            restored->stop();
+        }
+        live->stop();
+    }
+}
 std::vector<std::vector<std::uint8_t>> saved_bytes(const std::string& directory) {
     std::vector<std::vector<std::uint8_t>> result;
-    for (const auto* name : {"galaxy", "paused", "pending", "Quick Save", "child", "returned", "identity", "identity-again"}) {
+    for (const auto* name : {"galaxy", "paused", "pending", "Quick Save", "child", "returned", "identity", "identity-again", "discovery-paused", "discovery-live"}) {
         std::ifstream file(std::filesystem::path(directory) / (std::string(name) + ".eawrsave"), std::ios::binary);
         expect(bool(file), "cross-worker save fixture exists");
         result.emplace_back(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
@@ -297,19 +375,103 @@ void pending_roundtrip(std::size_t workers, const std::string& directory) {
         "first restored frame retains pending choice and its conflict pause");
     for (auto* owner : {live.get(), restored.get(), player.get()}) {
         owner->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
-        owner->advance_to(frontier + 1); expect(owner->wait_for(frontier + 1, 5s), "restored pending choice selects its recorded child");
+        // WGS-99/142: the choice waits one tick behind the reserved prebattle autosave.
+        owner->advance_to(frontier + 2); expect(owner->wait_for(frontier + 2, 5s), "restored pending choice selects its recorded child");
         expect(owner->frame().battle && !owner->frame().pending_conflict, "pending load does not recreate campaign startup");
         const auto child = owner->battle_feed(fixture.conflict.id, {1});
         expect(bool(child), "selected child exposes its local presentation feed");
         if (child) child->set_paused(false);
         owner->battle_ready(fixture.conflict.id);
-        owner->advance_to(frontier + 2); expect(owner->wait_for(frontier + 2, 5s), "selected child continues once");
+        owner->advance_to(frontier + 3); expect(owner->wait_for(frontier + 3, 5s), "selected child continues once");
         expect(owner->frame().battle && owner->frame().conflict->id == fixture.conflict.id
             && !owner->frame().pending_conflict, "consumed prompt does not return on the next publication");
         owner->stop();
     }
     expect(live->tick_hashes().back() == restored->tick_hashes().back(), "pending continuation preserves canonical selection");
     expect(live->tick_hashes().back() == player->tick_hashes().back(), "pending player-load prologue preserves the same child selection");
+}
+// WGS-99/142/143/145/165: Begin on the pending space battle writes the reserved "Auto Save" first.
+void prebattle_autosave(std::size_t workers, const std::string& directory) {
+    const auto fixture = child_options(workers, directory).entries.front();
+    auto content = [fixture](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(fixture.content); };
+    campaign::GameSession::ConflictService admission = [](const auto&, const auto&, auto) {
+        return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+    };
+    const auto pending_options = [&](const std::string& root) {
+        auto configured = options(workers, root);
+        auto services = std::make_shared<platform::CampaignServiceConfiguration>();
+        services->configure = [fixture, content, admission](auto& game) {
+            game.set_conflict_service(admission, content, {}, eawr::campaign::ScriptRequirement::none);
+            return game.queue_conflict(fixture.conflict, {campaign::ConflictRoute::pending_tactical, false, false});
+        };
+        services->restore.content = content; services->restore.conflict_service = admission;
+        services->restore.script_requirement = eawr::campaign::ScriptRequirement::none;
+        configured.services = services; return configured;
+    };
+    const auto autosaves = [](platform::LiveGameSession& live) {
+        std::size_t count{};
+        for (const auto& row : live.save_outcomes()) if (row.name == "Auto Save") ++count;
+        return count;
+    };
+    std::filesystem::remove_all(directory);
+    auto live = take(platform::LiveGameSession::start(setup(), pending_options(directory)));
+    live->advance_to(2); expect(live->wait_for(2, 5s) && live->frame().pending_conflict, "prebattle fixture waits at the prompt");
+    expect(autosaves(*live) == 0, "arrival at the prompt does not invoke the producer");
+    const auto frontier = live->completed_tick();
+    live->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
+    live->advance_to(frontier + 1); expect(live->wait_for(frontier + 1, 5s), "the autosave tick runs");
+    expect(live->frame().pending_conflict && !live->frame().battle, "the choice has not entered the child during the autosave tick");
+    const auto saved_hash = live->frame().latest->sha256();
+    std::uint64_t token{};
+    for (const auto& row : live->save_outcomes()) if (row.name == "Auto Save") token = row.token;
+    expect(token != 0 && autosaves(*live) == 1 && live->wait_save(token, 5s), "exactly one autosave is requested and reaches disk");
+    const auto outcome = live->terminal_save_outcome(token);
+    expect(outcome && outcome->phase == platform::LiveSavePhase::completed, "the prebattle autosave is a completed publication");
+    live->advance_to(frontier + 2); expect(live->wait_for(frontier + 2, 5s), "the choice follows the autosave");
+    expect(live->frame().battle && !live->frame().pending_conflict && autosaves(*live) == 1, "Begin enters the child with no second autosave");
+    const auto slots = take(live->save_slots());
+    const auto at = std::find_if(slots.begin(), slots.end(), [](const auto& slot) { return slot.name == "Auto Save"; });
+    expect(at != slots.end() && at->description == "[AutoSave]", "the Load list shows the reserved autosave label");
+    auto runtime = take(platform::LiveGameSession::start(take(live->prepare_load("Auto Save", false)), options(workers, directory)));
+    expect(runtime->frame().latest->sha256() == saved_hash && runtime->frame().pending_conflict,
+        "restoring the autosave reaches the hash of the pre-battle state");
+    runtime->stop();
+    auto restored = take(platform::LiveGameSession::start(take(live->prepare_load("Auto Save", true)), options(workers, directory)));
+    expect(static_cast<bool>(restored->frame().pending_conflict), "the autosave restores at the pending prompt");
+    // WGS-142: the first Begin after loading the autosave itself is not a second producer.
+    const auto restored_tick = restored->completed_tick();
+    restored->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
+    restored->advance_to(restored_tick + 1); expect(restored->wait_for(restored_tick + 1, 5s), "restored Begin runs");
+    expect(restored->frame().battle && autosaves(*restored) == 0, "loading an autosave suppresses the next prebattle producer");
+    restored->stop();
+    live->stop();
+    // WGS-165: the quit producer is the same reserved slot through an ordinary autosave request,
+    // issued from the paused galaxy (the Escape menu's pause) and finished before the host leaves.
+    auto quitter = take(platform::LiveGameSession::start(setup(), pending_options(directory + "-quit")));
+    quitter->advance_to(2); expect(quitter->wait_for(2, 5s), "quit fixture runs");
+    platform::LiveSaveRequest quit; quit.seat = {1}; quit.name = "Auto Save"; quit.overwrite = true; quit.autosave = true;
+    const auto quit_token = quitter->request_save(std::move(quit)); quitter->advance_to(3);
+    expect(quitter->wait_for(3, 5s) && quitter->wait_save(quit_token, 5s), "the quit autosave request terminates");
+    const auto quit_outcome = quitter->terminal_save_outcome(quit_token);
+    expect(quit_outcome && quit_outcome->phase == platform::LiveSavePhase::completed, "the quit autosave reaches disk");
+    const auto quit_slots = take(quitter->save_slots());
+    expect(std::any_of(quit_slots.begin(), quit_slots.end(), [](const auto& slot) { return slot.name == "Auto Save" && slot.description == "[AutoSave]"; }),
+        "the quit autosave is listed with the reserved label");
+    quitter->stop();
+    // WGS-143: multiplayer sessions produce no autosave.
+    auto coop = setup(); coop.seats[1].kind = galactic::SeatKind::human; coop.seats[1].human_side_id = 2;
+    auto multi = take(platform::LiveGameSession::start(coop, pending_options(directory + "-multi")));
+    multi->advance_to(2); expect(multi->wait_for(2, 5s), "multiplayer fixture runs");
+    multi->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
+    multi->advance_to(3); expect(multi->wait_for(3, 5s) && autosaves(*multi) == 0, "multiplayer never writes the prebattle autosave");
+    multi->stop();
+    // GCMP-24/WGS-33: the saved multiplayer flag decides, so a multiplayer game down to one human still writes none.
+    auto flagged = setup(); galactic_test::mark_multiplayer(flagged);
+    auto lone = take(platform::LiveGameSession::start(flagged, pending_options(directory + "-flag")));
+    lone->advance_to(2); expect(lone->wait_for(2, 5s), "flagged fixture runs");
+    lone->submit(platform::LiveGameOrder{{1}, galactic::BattleChoice{fixture.conflict.id, true}, {}});
+    lone->advance_to(3); expect(lone->wait_for(3, 5s) && autosaves(*lone) == 0, "the multiplayer flag alone suppresses the prebattle autosave");
+    lone->stop();
 }
 // #3035: the authored identity rides with the save (unhashed section 0x8002), lists without a
 // restore and survives a restore; a fresh owner of the same campaign restores the same state.
@@ -385,7 +547,7 @@ void disk_failure(std::size_t workers, const std::string& directory) {
     live->stop();
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_live_save_tests(int argc, char** argv) {
     try {
         save_input_contract();
         retained_invasion_input();
@@ -393,8 +555,8 @@ int main(int argc, char** argv) {
         std::vector<std::vector<std::uint8_t>> reference_bytes;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             const auto root = (std::filesystem::path(directory) / std::to_string(workers)).string();
-            galaxy_roundtrip(workers, root); player_load(workers, root); pending_roundtrip(workers, root); child_roundtrip(workers, root);
-            disk_failure(workers, root); campaign_identity(workers, root);
+            galaxy_roundtrip(workers, root); player_load(workers, root); pending_roundtrip(workers, root); prebattle_autosave(workers, root + "-prebattle"); child_roundtrip(workers, root);
+            disk_failure(workers, root); campaign_identity(workers, root); discovery_roundtrip(workers, root);
             const auto bytes = saved_bytes(root);
             if (reference_bytes.empty()) reference_bytes = bytes;
             else expect(reference_bytes == bytes, "all live save boundaries have identical bytes on 1/2/4/8 workers");

@@ -1,5 +1,18 @@
 #include "fighter_support.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 namespace fighter_test_support {
 
 struct Launch {

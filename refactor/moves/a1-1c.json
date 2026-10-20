@@ -1,0 +1,106 @@
+[
+  {
+    "old": "tests/galactic/ai_campaign_gate.hpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_economic_replay_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_goal_state_stock_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_perception_shards_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_plan_loading_stock_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_plans_stock_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_player_state_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_selector_stock_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_selector_test_support.hpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_stream_ids_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_strength_tests.cpp#~TemporaryXml",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  },
+  {
+    "old": "tests/galactic/campaign_score_tests.cpp#~Tree",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  },
+  {
+    "old": "tests/galactic/campaign_scoring_tests.cpp#~Tree",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  },
+  {
+    "old": "tests/galactic/checkpoint/checkpoint_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/galactic/corruption_actions_tests.cpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/corruption_model_tests.cpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/corruption_views_tests.cpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/hero_action_views_tests.cpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/hero_actions_tests.cpp#check",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/lockstep_loopback_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/galactic/reference_pages_tests.cpp#require",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/reference_pages_tests.cpp#~CatalogFixture",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  },
+  {
+    "old": "tests/galactic/shared_control_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/galactic/story_adapters_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/story_goals_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/tactical_return_tests.cpp#~XmlTree",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  }
+]

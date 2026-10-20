@@ -1,3 +1,11 @@
+// P2-07 (#70): single-ship moves, turns and stops (docs/behaviour/space-movement.md). The rule
+// cases use the FoC corvette and Acclamator motion profiles (units::motion_table on the FoC
+// data). The `tactical-motion` fixture pins a single-move session and `tactical-motion-blocked`
+// a blocked-path session: every worker count and storage order reproduces their golden hashes,
+// and a live session records the fixture replay. `--regenerate` rewrites the goldens. #351 adds
+// banking in turns (BK-01 to BK-05); its FoC roll values re-pinned the `tactical-motion` hashes.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/math/math.hpp"
 #include "eawr/sim/replay.hpp"
@@ -11,22 +19,17 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <optional>
-#include <sstream>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
 
-// P2-07 (#70): single-ship moves, turns and stops (docs/behaviour/space-movement.md). The rule
-// cases use the FoC corvette and Acclamator motion profiles (units::motion_table on the FoC
-// data). The `tactical-motion` fixture pins a single-move session and `tactical-motion-blocked`
-// a blocked-path session: every worker count and storage order reproduces their golden hashes,
-// and a live session records the fixture replay. `--regenerate` rewrites the goldens. #351 adds
-// banking in turns (BK-01 to BK-05); its FoC roll values re-pinned the `tactical-motion` hashes.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -34,13 +37,11 @@ namespace math = eawr::sim::math;
 using math::Fixed;
 using math::Vec3;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

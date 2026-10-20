@@ -665,6 +665,407 @@ std::vector<EntityId> session_detail::Tick::redirect_recipients(const EntityId t
     return live;
 }
 
+
+core::Result<void> session_detail::Tick::deliver_redirected_impact(const EntityId& id, Hit& hit,
+        const PlayerId& killer, const EntityId& attacker, UnitStage& staged,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, math::Fixed>& craft_defense,
+        const DamageRules* const& damage_rules, std::vector<Event>& events, std::vector<UnitState>& killed) {
+
+    if (damage_blocked()) return core::Result<void>::success();
+    const auto recipient = staged.find(id);
+    if (recipient == staged.end() || !recipient->second.durability) return core::Result<void>::success();
+    const auto arriving = arrivals.find(id);
+    if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) return core::Result<void>::success();
+    auto& unit = recipient->second;
+    const auto defense = craft_defense.find(id);
+    hit.defense = math::Fixed::from_raw((defense == craft_defense.end() ? 0 : defense->second.raw())
+        + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
+        + impl_->concentrate_defense(unit, staged, staging_->ledgers.value()).raw());
+    hit.take_damage_multiplier = unit.take_damage_mode;
+    const auto hull = unit.durability->hull, shields = unit.durability->shields;
+    auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
+    if (!taken) return core::Result<void>::failure(taken.error());
+    impl_->track_damage(unit, hull, shields);
+    if (!taken.value().cancelled) notify_retaliation(unit, attacker, hit.amount);
+    impl_->end_depleted_defend(unit, tick, taken.value().storm_shield_branch);
+    if (taken.value().damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
+        EventKind::hardpoint_destroyed, unit.state, *taken.value().damage.destroyed_hardpoint));
+    if (taken.value().damage.unit_destroyed) {
+        events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state, 0, killer));
+        killed.push_back(unit.state); impl_->adjust_owned(unit.state, false); staged.erase(recipient);
+    }
+    return core::Result<void>::success();
+    }
+
+
+core::Result<void> session_detail::Tick::deliver_area_impact(const Projectile& projectile,
+        const detail::BlastRecipient& recipient, UnitStage& staged,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, math::Fixed>& craft_defense,
+        const DamageRules* const& damage_rules, auto& deliver_redirected, std::vector<Event>& events,
+        std::vector<UnitState>& killed) {
+
+    if (damage_blocked()) return core::Result<void>::success();
+    const auto target = staged.find(recipient.id);
+    if (target == staged.end() || !target->second.durability) return core::Result<void>::success();
+    const auto arriving = arrivals.find(recipient.id);
+    if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) return core::Result<void>::success();
+    const auto* profile = impl_->health_profile(target->second);
+    const auto defense = craft_defense.find(recipient.id);
+    const auto modifier = math::Fixed::from_raw((defense == craft_defense.end() ? 0 : defense->second.raw())
+        + (target->second.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
+        + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
+    // WPR-51/WCC-44, EUS-16: immediate delivery resolves the retained shooter now.
+    const auto source = staged.find(projectile.shooter);
+    const auto factor = math::Fixed::from_raw(math::Fixed::scale
+        + (source == staged.end() ? 0 : source->second.upgrade_bonuses[1].raw()));
+    auto hit = detail::area_hit(projectile, recipient, modifier, factor);
+    if (!hit) return core::Result<void>::failure(hit.error());
+    hit.value().take_damage_multiplier = target->second.take_damage_mode;
+    // WHE-51: modes are current at delivery; a removed shooter contributes identity. WTA-46: the
+    // difficulty damage scale follows the projectile's owner, so it survives its shooter.
+    const auto caused = impl_->caused_damage(
+        source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
+    if (!caused) return core::Result<void>::failure(caused.error());
+    hit.value().cause_damage_multiplier = caused.value();
+    auto redirected = redirect_damage(recipient.id, hit.value(), [&](const EntityId id, Hit share) {
+        return deliver_redirected(id, share, projectile.owner, projectile.shooter);
+    });
+    if (!redirected) return core::Result<void>::failure(redirected.error());
+    if (redirected.value()) return core::Result<void>::success();
+    const auto hull = target->second.durability->hull;
+    const auto shields = target->second.durability->shields;
+    auto taken = apply_hit(*profile, *damage_rules, *target->second.durability, hit.value(), tick);
+    if (!taken) return core::Result<void>::failure(taken.error());
+    impl_->track_damage(target->second, hull, shields);
+    if (!taken.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.value().amount);
+    impl_->end_depleted_defend(target->second, tick, taken.value().storm_shield_branch);
+    const auto& damage = taken.value().damage;
+    if (damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
+        EventKind::hardpoint_destroyed, target->second.state, *damage.destroyed_hardpoint));
+    if (damage.unit_destroyed) {
+        events.push_back(destruction_event(tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
+        killed.push_back(target->second.state);
+        impl_->adjust_owned(target->second.state, false);
+        staged.erase(target);
+    }
+    return core::Result<void>::success();
+    }
+
+
+void session_detail::Tick::queue_delayed_impact(const Projectile& source, const detail::BlastRecipient& recipient,
+        UnitStage& staged, std::vector<Impl::PendingBlastDamage>& pending_blast_damage) {
+
+    if (recipient.amount.raw() == 0) return;
+    const auto frames = detail::delayed_damage_frames(recipient.delay);
+    std::string contacted_mesh;
+    const auto target = staged.find(recipient.id);
+    const auto* profile = target == staged.end() ? nullptr : impl_->combat.find(target->second.state.type_id);
+    if (profile && recipient.hardpoint < profile->hardpoint_meshes.size())
+        contacted_mesh = profile->hardpoint_meshes[recipient.hardpoint];
+    pending_blast_damage.push_back({tick + frames, source.owner, source.damage_type,
+        source.internal_damage_misc, recipient.id, recipient.amount, std::move(contacted_mesh)});
+    }
+
+
+core::Result<void> session_detail::Tick::deliver_blast_impact(const std::size_t& index,
+        const std::vector<std::optional<detail::BlastStep>>& blasts,
+        std::vector<std::optional<detail::BlastStep>>& blasts_without_source, UnitStage& staged,
+        std::vector<std::optional<detail::ProjectileStep>>& flights, auto& deliver_area, auto& queue_damage) {
+
+    if (index >= blasts.size() || !blasts[index]) return core::Result<void>::success();
+    const auto player_count = std::max(blasts[index]->players.size(), blasts_without_source[index]
+        ? blasts_without_source[index]->players.size() : std::size_t{});
+    for (std::size_t player = 0; player < player_count; ++player) {
+        // WAD-10: source lookup belongs to each player query, including after this blast
+        // kills its own shooter in an earlier immunity-enabled player group.
+        const auto& prepared = blasts_without_source[index] && staged.find(flights[index]->projectile.shooter) == staged.end()
+            ? *blasts_without_source[index] : *blasts[index];
+        if (player >= prepared.players.size()) continue;
+        const auto& group = prepared.players[player];
+        for (const auto& recipient : group.recipients) {
+            if (recipient.delay.raw() <= 0) {
+                auto delivered = deliver_area(flights[index]->projectile, recipient);
+                if (!delivered) return delivered;
+            } else {
+                queue_damage(flights[index]->projectile, recipient);
+            }
+        }
+        if (group.capped) return core::Result<void>::success();
+    }
+    return core::Result<void>::success();
+    }
+
+
+core::Result<void> session_detail::Tick::apply_direct_impact(const UnitStage::iterator& target,
+        const DamageRules* const& damage_rules, const DurabilityProfile& profile, const Projectile& projectile,
+        Hit& hit, std::uint32_t& hardpoint, std::optional<detail::ProjectileStep>& flight,
+        std::vector<CombatEvent>& combat_events, std::vector<Event>& events, std::vector<UnitState>& killed,
+        UnitStage& staged, auto& deliver_blast, std::size_t& flight_index) {
+    const auto hull_before = target->second.durability->hull;
+    const auto shields_before = target->second.durability->shields;
+    auto outcome = apply_hit(profile, *damage_rules, *target->second.durability, hit, tick);
+    if (!outcome) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+            "tick " + std::to_string(tick) + " projectile " + std::to_string(projectile.id) + ": "
+                + outcome.error().message));
+    }
+    impl_->track_damage(target->second, hull_before, shields_before);
+    if (!outcome.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.amount);
+    impl_->end_depleted_defend(target->second, tick, outcome.value().storm_shield_branch);
+    // EN-08: only a positive energy drain disables engines; no locomotor means no effect.
+    if (projectile.disable_engines_frames && outcome.value().drained.raw() > 0
+        && profile.max_speed && !outcome.value().damage.unit_destroyed) {
+        const bool was_online = engines_online(profile, *target->second.durability);
+        disable_engines(*target->second.durability, *projectile.disable_engines_frames, tick);
+        // EN-09: discard a pending group/search speed cap, retaining its destination.
+        // FD-64/UFS-33: a failed search has no path to replan; keep its strict cooldown.
+        const bool waited = target->second.formation && !target->second.formation->failure_frame;
+        if (waited && target->second.motion) {
+            target->second.motion->target = target->second.formation->destination;
+            target->second.motion->kind = MotionKind::path;
+            target->second.formation.reset();
+        }
+        if ((was_online || waited) && target->second.motion && target->second.motion->kind == MotionKind::path) {
+            tracked_.value().replans.value().push_back(target->first);
+        }
+    }
+    // IS-01, IS-02: an ion shot stuns a unit whose type has the ion-stun behaviour.
+    if (projectile.ion_stun && profile.ion_stun_effect && !outcome.value().damage.unit_destroyed) {
+        impl_->ion_stun_unit(target->second, *projectile.ion_stun, tick);
+    }
+    // How the hit was taken, for the impact effect only (#80, docs/behaviour/battle-presentation.md).
+    std::uint32_t taken = 0;
+    if (outcome.value().storm_shield_branch) taken |= hit_outcome_storm_shield;
+    if (outcome.value().shield_absorbed) {
+        taken |= hit_outcome_shield_absorbed;
+    } else if (outcome.value().armor_multiplier <= armor_reduced_limit) {
+        taken |= hit_outcome_armor_reduced;
+    }
+    combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+        projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint, flight->from,
+        flight->contact, taken, projectile.target});
+    const auto& result = outcome.value().damage;
+    if (result.destroyed_hardpoint) {
+        events.push_back(destruction_event(
+            tick, EventKind::hardpoint_destroyed, target->second.state, *result.destroyed_hardpoint));
+    }
+    if (result.unit_destroyed) {
+        events.push_back(destruction_event(tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
+        killed.push_back(target->second.state);
+        impl_->adjust_owned(target->second.state, false);
+        staged.erase(target);
+    }
+    // WAD-03: ordinary direct routing and its single impact event precede secondary damage.
+    // Absorption does not suppress the blast; the take-damage owner supplies cancellation.
+    if (detail::blast_after_hit(projectile, outcome.value())) {
+        auto delivered = deliver_blast(flight_index);
+        if (!delivered) return core::Result<void>::failure(delivered.error());
+    }
+    return core::Result<void>::success();
+}
+
+
+core::Result<bool> session_detail::Tick::redirect_projectile_impact(const UnitStage::iterator& source,
+        UnitStage& staged, const UnitStage::iterator& target, const Projectile& projectile,
+        std::optional<detail::ProjectileStep>& flight, std::vector<Projectile>& launched,
+        std::vector<CombatEvent>& combat_events, std::uint32_t& hardpoint, auto& deliver_blast,
+        std::size_t& flight_index) {
+    if (source != staged.end() && !impl_->abilities.profiles.empty()) {
+        const auto handlers = impl_->redirect_blaster_handlers(target->second, source->second, staging_->ledgers.value());
+        bool deflected = false;
+        CombatRandom random(impl_->setup.seed, tick, projectile.id, redirect_blaster_slot);
+        CombatRandom direction_random(impl_->setup.seed, tick, projectile.id, redirect_blaster_direction_slot);
+        for (const auto* handler : handlers) {
+            const auto* shooter_profile = impl_->combat.find(source->second.state.type_id);
+            if (!projectile.profile_key) continue;
+            const auto& key = *projectile.profile_key;
+            const auto* launch_profile = impl_->combat.find(key.type);
+            if (!launch_profile) continue;
+            const ShotProfile* shot = nullptr;
+            if (key.kind == ProjectileProfileKind::death) {
+                const auto index = key.weapon & ~death_projectile_slot_flag;
+                if (index < launch_profile->death_projectiles.size()) shot = &launch_profile->death_projectiles[index];
+            } else {
+                const auto weapon = std::find_if(launch_profile->weapons.begin(), launch_profile->weapons.end(),
+                    [&](const WeaponProfile& entry) { return entry.hardpoint == key.weapon; });
+                if (weapon == launch_profile->weapons.end()) continue;
+                const auto& selected = key.kind == ProjectileProfileKind::ability ? weapon->ability_shot
+                    : key.kind == ProjectileProfileKind::barrage ? weapon->barrage_shot
+                    : key.kind == ProjectileProfileKind::charged_blast && weapon->charged_shot ? weapon->charged_shot : weapon->shot;
+                if (selected) shot = &*selected;
+            }
+            if (!shot) continue;
+            const auto defender_transform = math::to_matrix(target->second.state.rotation, target->second.state.position);
+            const auto attacker_transform = math::to_matrix(source->second.state.rotation, source->second.state.position);
+            if (!defender_transform || !attacker_transform) return core::Result<bool>::failure(
+                !defender_transform ? defender_transform.error() : attacker_transform.error());
+            detail::CombatUnit defender;
+            defender.id = target->second.state.entity_id; defender.type_id = target->second.state.type_id;
+            defender.owner = target->second.state.owner; defender.position = target->second.state.position;
+            defender.previous_position = defender.position; defender.transform = defender_transform.value();
+            defender.profile = impl_->combat.find(defender.type_id);
+            detail::CombatUnit attacker;
+            attacker.id = source->second.state.entity_id; attacker.type_id = source->second.state.type_id;
+            attacker.owner = source->second.state.owner; attacker.position = source->second.state.position;
+            attacker.previous_position = attacker.position; attacker.transform = attacker_transform.value();
+            attacker.profile = shooter_profile;
+            auto at_contact = projectile;
+            at_contact.position = flight->contact;
+            const bool defender_moving = target->second.motion && target->second.motion->kind == MotionKind::path;
+            auto reaction = detail::redirect_blaster_reaction(at_contact, *shot, *handler, defender, attacker,
+                flights_.value().next_projectile.value(), random, direction_random, defender_moving);
+            if (!reaction) return core::Result<bool>::failure(reaction.error());
+            if (reaction.value().created) {
+                ++flights_.value().next_projectile.value();
+                launched.push_back(std::move(*reaction.value().created));
+            }
+            if (!reaction.value().blocked) continue;
+            deflected = true;
+            break;
+        }
+        if (deflected) {
+            combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+                projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
+                flight->from, flight->contact, hit_outcome_redirected, projectile.target});
+            auto delivered = deliver_blast(flight_index);
+            if (!delivered) return core::Result<bool>::failure(delivered.error());
+            return core::Result<bool>::success(true);
+        }
+    }
+    return core::Result<bool>::success(false);
+}
+
+
+core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& flight_index,
+        std::vector<std::optional<detail::ProjectileStep>>& flights, UnitStage& staged,
+        std::vector<Projectile>& projectiles, std::vector<CombatEvent>& combat_events, auto& deliver_blast,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, math::Fixed>& craft_defense,
+        const DamageRules* const& damage_rules, std::vector<Projectile>& launched, auto& deliver_redirected,
+        auto& queue_damage, std::vector<Event>& events, std::vector<UnitState>& killed) {
+
+    auto& flight = flights[flight_index];
+    const auto moving_spawn = std::lower_bound(impl_->ability_spawns.begin(), impl_->ability_spawns.end(), flight->projectile.id,
+        [](const auto& entry, const std::uint64_t id) { return entry.id < id; });
+    if (moving_spawn != impl_->ability_spawns.end() && moving_spawn->id == flight->projectile.id)
+        moving_spawn->position = flight->projectile.position;
+    bool ability_spawn = false;
+    if (flight->expired || flight->hit) {
+        const auto spawn = std::lower_bound(impl_->ability_spawns.begin(), impl_->ability_spawns.end(), flight->projectile.id,
+            [](const auto& entry, const std::uint64_t id) { return entry.id < id; });
+        if (spawn != impl_->ability_spawns.end() && spawn->id == flight->projectile.id) {
+            ability_spawn = spawn->kind != AbilityKind::cluster_bomb && spawn->kind != AbilityKind::fow_reveal_ping;
+            spawn->detonated = true;
+            spawn->position = flight->projectile.position;
+            const auto* profile = impl_->spawn_profile(spawn->type);
+            if (profile && profile->weaken.on_detonation) for (const auto id : flights_->weaken_recipients[flight_index]) {
+                if (const auto recipient = staged.find(id); recipient != staged.end() && recipient->second.combat)
+                    spawn->recipients.push_back({id, tick + profile->weaken.duration_frames});
+            }
+        }
+    }
+    if (!flight->hit) {
+        if (!flight->expired) {
+            projectiles.push_back(flight->projectile);
+        }
+        if (flight->expired) {
+            const auto& projectile = flight->projectile;
+            // WAD-04/07: a miss expires once at its terminal pose, independently of
+            // blast damage and particle availability. Generic removal emits nothing.
+            // WHE-62: stationary ability spawns already publish their countdown
+            // detonation metadata; do not present that terminal twice.
+            if (!ability_spawn) combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_expired,
+                projectile.shooter, projectile.weapon, projectile.id, no_hardpoint,
+                flight->from, projectile.position, static_cast<std::uint32_t>(flight->expiry_reason),
+                projectile.target});
+            auto delivered = deliver_blast(flight_index);
+            if (!delivered) return core::Result<void>::failure(delivered.error());
+        }
+        return core::Result<void>::success();
+    }
+    // WCC-40: a pending result spends the projectile without delivering a hit.
+    if (damage_blocked()) return core::Result<void>::success();
+    const auto target = staged.find(*flight->hit);
+    if (target == staged.end() || !target->second.durability) {
+        auto delivered = deliver_blast(flight_index);
+        if (!delivered) return core::Result<void>::failure(delivered.error());
+        return core::Result<void>::success();
+    }
+    // #530 PU-37: a hidden arriving unit takes no damage; the projectile is spent. PU-38: a
+    // visible one takes the elevated vulnerability for the rules' duration.
+    const auto arriving = arrivals.find(*flight->hit);
+    if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) {
+        return core::Result<void>::success();
+    }
+    const auto arrival_defense = target->second.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
+    const auto& projectile = flight->projectile;
+    const auto& profile = *impl_->health_profile(target->second);
+    // DG-11: with meshes, the hardpoint whose collision mesh the projectile met takes it (#536),
+    // or for a shot aimed at a hardpoint of the unit it reached, the hardpoint its aim names (DG-39);
+    // with the box alone, the hardpoint the shot aimed at when it reached that unit.
+    auto hardpoint = hull_target;
+    if (flight->meshed) {
+        if (flight->mesh_hardpoint != no_hardpoint && damage_target_valid(profile, flight->mesh_hardpoint)) {
+            hardpoint = flight->mesh_hardpoint;
+        }
+    } else if (*flight->hit == projectile.target && projectile.target_hardpoint != no_hardpoint
+        && damage_target_valid(profile, projectile.target_hardpoint)) {
+        hardpoint = projectile.target_hardpoint;
+    }
+    const auto defense = craft_defense.find(*flight->hit);
+    auto modifier = defense != craft_defense.end() ? defense->second : math::Fixed{};
+    // #530 PU-38: an arriving unit's elevated vulnerability adds to its defense modifier.
+    modifier = math::Fixed::from_raw(modifier.raw() + arrival_defense.raw()
+        + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
+    auto primary_amount = detail::primary_damage(projectile);
+    if (projectile.damage_delay.raw() > 0) {
+        CombatRandom random(impl_->setup.seed, tick, projectile.id, projectile_damage_delay_slot);
+        const auto delay = detail::projectile_delivery_delay(projectile, {}, random);
+        if (!delay) return core::Result<void>::failure(delay.error());
+        queue_damage(projectile, {*flight->hit, primary_amount, delay.value(), hardpoint});
+        combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+            projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
+            flight->from, flight->contact, 0, projectile.target});
+        auto delivered = deliver_blast(flight_index);
+        if (!delivered) return core::Result<void>::failure(delivered.error());
+        return core::Result<void>::success();
+    }
+    const auto source = staged.find(projectile.shooter);
+    if (source != staged.end() && source->second.upgrade_bonuses[1].raw() != 0) {
+        // EUS-16: instance damage stays unmodified in flight, including explicit launches.
+        auto caused = math::multiply(primary_amount, math::Fixed::from_raw(math::Fixed::scale
+            + source->second.upgrade_bonuses[1].raw()));
+        if (!caused) return core::Result<void>::failure(caused.error());
+        primary_amount = caused.value();
+    }
+    Hit hit{primary_amount, projectile.damage_type, true, projectile.shield_damage,
+        projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
+        projectile.internal_damage_misc, modifier, projectile.energy_damage};
+    hit.take_damage_multiplier = target->second.take_damage_mode;
+    const auto caused = impl_->caused_damage(
+        source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
+    if (!caused) return core::Result<void>::failure(caused.error());
+    hit.cause_damage_multiplier = caused.value();
+    // WRB-06..WRB-10: after the combat damage modifier and before shields and hull, a Redirect_Blaster handler
+    // of the target may deflect the shot: no direct damage, and a fresh projectile of the target's owner.
+    auto deflected = redirect_projectile_impact(source, staged, target, projectile, flight, launched, combat_events, hardpoint, deliver_blast, flight_index);
+    if (!deflected) return core::Result<void>::failure(deflected.error());
+    if (deflected.value()) return core::Result<void>::success();
+    auto redirected = redirect_damage(*flight->hit, hit, [&](const EntityId id, Hit share) {
+        return deliver_redirected(id, share, projectile.owner, projectile.shooter);
+    });
+    if (!redirected) return core::Result<void>::failure(redirected.error());
+    if (redirected.value()) {
+        combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+            projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
+            flight->from, flight->contact, 0, projectile.target});
+        auto delivered = deliver_blast(flight_index);
+        if (!delivered) return core::Result<void>::failure(delivered.error());
+        return core::Result<void>::success();
+    }
+    if (auto result = apply_direct_impact(target, damage_rules, profile, projectile, hit, hardpoint, flight, combat_events, events, killed, staged, deliver_blast, flight_index); !result) return result;
+    return core::Result<void>::success();
+}
+
 core::Result<void> session_detail::Tick::impacts() {
     impl_->impact_bonus_bases.clear();
     impl_->impact_bonus_containers.clear();
@@ -700,79 +1101,12 @@ core::Result<void> session_detail::Tick::impacts() {
     auto& killed = impacts_.value().killed.emplace();
     auto& pending_blast_damage = impacts_.value().pending_blast_damage.emplace(impl_->pending_blast_damage);
     const auto deliver_redirected = [&](const EntityId id, Hit hit, const PlayerId killer, const EntityId attacker) -> core::Result<void> {
-        if (damage_blocked()) return core::Result<void>::success();
-        const auto recipient = staged.find(id);
-        if (recipient == staged.end() || !recipient->second.durability) return core::Result<void>::success();
-        const auto arriving = arrivals.find(id);
-        if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) return core::Result<void>::success();
-        auto& unit = recipient->second;
-        const auto defense = craft_defense.find(id);
-        hit.defense = math::Fixed::from_raw((defense == craft_defense.end() ? 0 : defense->second.raw())
-            + (unit.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
-            + impl_->concentrate_defense(unit, staged, staging_->ledgers.value()).raw());
-        hit.take_damage_multiplier = unit.take_damage_mode;
-        const auto hull = unit.durability->hull, shields = unit.durability->shields;
-        auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
-        if (!taken) return core::Result<void>::failure(taken.error());
-        impl_->track_damage(unit, hull, shields);
-        if (!taken.value().cancelled) notify_retaliation(unit, attacker, hit.amount);
-        impl_->end_depleted_defend(unit, tick, taken.value().storm_shield_branch);
-        if (taken.value().damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
-            EventKind::hardpoint_destroyed, unit.state, *taken.value().damage.destroyed_hardpoint));
-        if (taken.value().damage.unit_destroyed) {
-            events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state, 0, killer));
-            killed.push_back(unit.state); impl_->adjust_owned(unit.state, false); staged.erase(recipient);
-        }
-        return core::Result<void>::success();
+        return deliver_redirected_impact(id, hit, killer, attacker, staged, arrivals, craft_defense, damage_rules, events, killed);
     };
     // WAD-21/25: each prepared share enters ordinary damage in authored order, so state
     // changes (shield-generator loss, last-hit frame) are visible to later deliveries.
     const auto deliver_area = [&](const Projectile& projectile, const detail::BlastRecipient& recipient) -> core::Result<void> {
-        if (damage_blocked()) return core::Result<void>::success();
-        const auto target = staged.find(recipient.id);
-        if (target == staged.end() || !target->second.durability) return core::Result<void>::success();
-        const auto arriving = arrivals.find(recipient.id);
-        if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) return core::Result<void>::success();
-        const auto* profile = impl_->health_profile(target->second);
-        const auto defense = craft_defense.find(recipient.id);
-        const auto modifier = math::Fixed::from_raw((defense == craft_defense.end() ? 0 : defense->second.raw())
-            + (target->second.arrival_vulnerable_until ? impl_->economy.vulnerability.raw() : 0)
-            + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
-        // WPR-51/WCC-44, EUS-16: immediate delivery resolves the retained shooter now.
-        const auto source = staged.find(projectile.shooter);
-        const auto factor = math::Fixed::from_raw(math::Fixed::scale
-            + (source == staged.end() ? 0 : source->second.upgrade_bonuses[1].raw()));
-        auto hit = detail::area_hit(projectile, recipient, modifier, factor);
-        if (!hit) return core::Result<void>::failure(hit.error());
-        hit.value().take_damage_multiplier = target->second.take_damage_mode;
-        // WHE-51: modes are current at delivery; a removed shooter contributes identity. WTA-46: the
-        // difficulty damage scale follows the projectile's owner, so it survives its shooter.
-        const auto caused = impl_->caused_damage(
-            source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
-        if (!caused) return core::Result<void>::failure(caused.error());
-        hit.value().cause_damage_multiplier = caused.value();
-        auto redirected = redirect_damage(recipient.id, hit.value(), [&](const EntityId id, Hit share) {
-            return deliver_redirected(id, share, projectile.owner, projectile.shooter);
-        });
-        if (!redirected) return core::Result<void>::failure(redirected.error());
-        if (redirected.value()) return core::Result<void>::success();
-        const auto hull = target->second.durability->hull;
-        const auto shields = target->second.durability->shields;
-        auto taken = apply_hit(*profile, *damage_rules, *target->second.durability, hit.value(), tick);
-        if (!taken) return core::Result<void>::failure(taken.error());
-        impl_->track_damage(target->second, hull, shields);
-        if (!taken.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.value().amount);
-        impl_->end_depleted_defend(target->second, tick, taken.value().storm_shield_branch);
-        const auto& damage = taken.value().damage;
-        if (damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
-            EventKind::hardpoint_destroyed, target->second.state, *damage.destroyed_hardpoint));
-        if (damage.unit_destroyed) {
-            events.push_back(destruction_event(tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
-            killed.push_back(target->second.state);
-            impl_->adjust_owned(target->second.state, false);
-            staged.erase(target);
-        }
-        return core::Result<void>::success();
+        return deliver_area_impact(projectile, recipient, staged, arrivals, craft_defense, damage_rules, deliver_redirected, events, killed);
     };
     // WAD-26/WFO-14: deliver stored metadata independently of projectile/shooter lifetime.
     // The phase service retains the project ordering in due-frame/creation order.
@@ -796,280 +1130,15 @@ core::Result<void> session_detail::Tick::impacts() {
     }
     pending_blast_damage.erase(pending_blast_damage.begin(), blast_due_end);
     const auto queue_damage = [&](const Projectile& source, const detail::BlastRecipient& recipient) {
-        if (recipient.amount.raw() == 0) return;
-        const auto frames = detail::delayed_damage_frames(recipient.delay);
-        std::string contacted_mesh;
-        const auto target = staged.find(recipient.id);
-        const auto* profile = target == staged.end() ? nullptr : impl_->combat.find(target->second.state.type_id);
-        if (profile && recipient.hardpoint < profile->hardpoint_meshes.size())
-            contacted_mesh = profile->hardpoint_meshes[recipient.hardpoint];
-        pending_blast_damage.push_back({tick + frames, source.owner, source.damage_type,
-            source.internal_damage_misc, recipient.id, recipient.amount, std::move(contacted_mesh)});
+        queue_delayed_impact(source, recipient, staged, pending_blast_damage);
     };
     const auto deliver_blast = [&](const std::size_t index) -> core::Result<void> {
-        if (index >= blasts.size() || !blasts[index]) return core::Result<void>::success();
-        const auto player_count = std::max(blasts[index]->players.size(), blasts_without_source[index]
-            ? blasts_without_source[index]->players.size() : std::size_t{});
-        for (std::size_t player = 0; player < player_count; ++player) {
-            // WAD-10: source lookup belongs to each player query, including after this blast
-            // kills its own shooter in an earlier immunity-enabled player group.
-            const auto& prepared = blasts_without_source[index] && staged.find(flights[index]->projectile.shooter) == staged.end()
-                ? *blasts_without_source[index] : *blasts[index];
-            if (player >= prepared.players.size()) continue;
-            const auto& group = prepared.players[player];
-            for (const auto& recipient : group.recipients) {
-                if (recipient.delay.raw() <= 0) {
-                    auto delivered = deliver_area(flights[index]->projectile, recipient);
-                    if (!delivered) return delivered;
-                } else {
-                    queue_damage(flights[index]->projectile, recipient);
-                }
-            }
-            if (group.capped) return core::Result<void>::success();
-        }
-        return core::Result<void>::success();
+        return deliver_blast_impact(index, blasts, blasts_without_source, staged, flights, deliver_area, queue_damage);
     };
     auto& projectiles = impacts_.value().projectiles.emplace();
     projectiles.reserve(flights.size() + launched.size());
     for (std::size_t flight_index = 0; flight_index < flights.size(); ++flight_index) {
-        auto& flight = flights[flight_index];
-        const auto moving_spawn = std::lower_bound(impl_->ability_spawns.begin(), impl_->ability_spawns.end(), flight->projectile.id,
-            [](const auto& entry, const std::uint64_t id) { return entry.id < id; });
-        if (moving_spawn != impl_->ability_spawns.end() && moving_spawn->id == flight->projectile.id)
-            moving_spawn->position = flight->projectile.position;
-        bool ability_spawn = false;
-        if (flight->expired || flight->hit) {
-            const auto spawn = std::lower_bound(impl_->ability_spawns.begin(), impl_->ability_spawns.end(), flight->projectile.id,
-                [](const auto& entry, const std::uint64_t id) { return entry.id < id; });
-            if (spawn != impl_->ability_spawns.end() && spawn->id == flight->projectile.id) {
-                ability_spawn = spawn->kind != AbilityKind::cluster_bomb && spawn->kind != AbilityKind::fow_reveal_ping;
-                spawn->detonated = true;
-                spawn->position = flight->projectile.position;
-                const auto* profile = impl_->spawn_profile(spawn->type);
-                if (profile && profile->weaken.on_detonation) for (const auto id : flights_->weaken_recipients[flight_index]) {
-                    if (const auto recipient = staged.find(id); recipient != staged.end() && recipient->second.combat)
-                        spawn->recipients.push_back({id, tick + profile->weaken.duration_frames});
-                }
-            }
-        }
-        if (!flight->hit) {
-            if (!flight->expired) {
-                projectiles.push_back(flight->projectile);
-            }
-            if (flight->expired) {
-                const auto& projectile = flight->projectile;
-                // WAD-04/07: a miss expires once at its terminal pose, independently of
-                // blast damage and particle availability. Generic removal emits nothing.
-                // WHE-62: stationary ability spawns already publish their countdown
-                // detonation metadata; do not present that terminal twice.
-                if (!ability_spawn) combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_expired,
-                    projectile.shooter, projectile.weapon, projectile.id, no_hardpoint,
-                    flight->from, projectile.position, static_cast<std::uint32_t>(flight->expiry_reason),
-                    projectile.target});
-                auto delivered = deliver_blast(flight_index);
-                if (!delivered) return core::Result<void>::failure(delivered.error());
-            }
-            continue;
-        }
-        // WCC-40: a pending result spends the projectile without delivering a hit.
-        if (damage_blocked()) continue;
-        const auto target = staged.find(*flight->hit);
-        if (target == staged.end() || !target->second.durability) {
-            auto delivered = deliver_blast(flight_index);
-            if (!delivered) return core::Result<void>::failure(delivered.error());
-            continue;
-        }
-        // #530 PU-37: a hidden arriving unit takes no damage; the projectile is spent. PU-38: a
-        // visible one takes the elevated vulnerability for the rules' duration.
-        const auto arriving = arrivals.find(*flight->hit);
-        if (arriving != arrivals.end() && arriving->second.frame < arrival_visible_frame) {
-            continue;
-        }
-        const auto arrival_defense = target->second.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
-        const auto& projectile = flight->projectile;
-        const auto& profile = *impl_->health_profile(target->second);
-        // DG-11: with meshes, the hardpoint whose collision mesh the projectile met takes it (#536),
-        // or for a shot aimed at a hardpoint of the unit it reached, the hardpoint its aim names (DG-39);
-        // with the box alone, the hardpoint the shot aimed at when it reached that unit.
-        auto hardpoint = hull_target;
-        if (flight->meshed) {
-            if (flight->mesh_hardpoint != no_hardpoint && damage_target_valid(profile, flight->mesh_hardpoint)) {
-                hardpoint = flight->mesh_hardpoint;
-            }
-        } else if (*flight->hit == projectile.target && projectile.target_hardpoint != no_hardpoint
-            && damage_target_valid(profile, projectile.target_hardpoint)) {
-            hardpoint = projectile.target_hardpoint;
-        }
-        const auto defense = craft_defense.find(*flight->hit);
-        auto modifier = defense != craft_defense.end() ? defense->second : math::Fixed{};
-        // #530 PU-38: an arriving unit's elevated vulnerability adds to its defense modifier.
-        modifier = math::Fixed::from_raw(modifier.raw() + arrival_defense.raw()
-            + impl_->concentrate_defense(target->second, staged, staging_->ledgers.value()).raw());
-        auto primary_amount = detail::primary_damage(projectile);
-        if (projectile.damage_delay.raw() > 0) {
-            CombatRandom random(impl_->setup.seed, tick, projectile.id, projectile_damage_delay_slot);
-            const auto delay = detail::projectile_delivery_delay(projectile, {}, random);
-            if (!delay) return core::Result<void>::failure(delay.error());
-            queue_damage(projectile, {*flight->hit, primary_amount, delay.value(), hardpoint});
-            combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
-                projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
-                flight->from, flight->contact, 0, projectile.target});
-            auto delivered = deliver_blast(flight_index);
-            if (!delivered) return core::Result<void>::failure(delivered.error());
-            continue;
-        }
-        const auto source = staged.find(projectile.shooter);
-        if (source != staged.end() && source->second.upgrade_bonuses[1].raw() != 0) {
-            // EUS-16: instance damage stays unmodified in flight, including explicit launches.
-            auto caused = math::multiply(primary_amount, math::Fixed::from_raw(math::Fixed::scale
-                + source->second.upgrade_bonuses[1].raw()));
-            if (!caused) return core::Result<void>::failure(caused.error());
-            primary_amount = caused.value();
-        }
-        Hit hit{primary_amount, projectile.damage_type, true, projectile.shield_damage,
-            projectile.hitpoint_damage, hardpoint, projectile.allow_diminishing_firepower,
-            projectile.internal_damage_misc, modifier, projectile.energy_damage};
-        hit.take_damage_multiplier = target->second.take_damage_mode;
-        const auto caused = impl_->caused_damage(
-            source != staged.end() ? source->second.cause_damage_mode : math::Fixed::from_raw(math::Fixed::scale), projectile.owner);
-        if (!caused) return core::Result<void>::failure(caused.error());
-        hit.cause_damage_multiplier = caused.value();
-        // WRB-06..WRB-10: after the combat damage modifier and before shields and hull, a Redirect_Blaster handler
-        // of the target may deflect the shot: no direct damage, and a fresh projectile of the target's owner.
-        if (source != staged.end() && !impl_->abilities.profiles.empty()) {
-            const auto handlers = impl_->redirect_blaster_handlers(target->second, source->second, staging_->ledgers.value());
-            bool deflected = false;
-            CombatRandom random(impl_->setup.seed, tick, projectile.id, redirect_blaster_slot);
-            CombatRandom direction_random(impl_->setup.seed, tick, projectile.id, redirect_blaster_direction_slot);
-            for (const auto* handler : handlers) {
-                const auto* shooter_profile = impl_->combat.find(source->second.state.type_id);
-                if (!projectile.profile_key) continue;
-                const auto& key = *projectile.profile_key;
-                const auto* launch_profile = impl_->combat.find(key.type);
-                if (!launch_profile) continue;
-                const ShotProfile* shot = nullptr;
-                if (key.kind == ProjectileProfileKind::death) {
-                    const auto index = key.weapon & ~death_projectile_slot_flag;
-                    if (index < launch_profile->death_projectiles.size()) shot = &launch_profile->death_projectiles[index];
-                } else {
-                    const auto weapon = std::find_if(launch_profile->weapons.begin(), launch_profile->weapons.end(),
-                        [&](const WeaponProfile& entry) { return entry.hardpoint == key.weapon; });
-                    if (weapon == launch_profile->weapons.end()) continue;
-                    const auto& selected = key.kind == ProjectileProfileKind::ability ? weapon->ability_shot
-                        : key.kind == ProjectileProfileKind::barrage ? weapon->barrage_shot
-                        : key.kind == ProjectileProfileKind::charged_blast && weapon->charged_shot ? weapon->charged_shot : weapon->shot;
-                    if (selected) shot = &*selected;
-                }
-                if (!shot) continue;
-                const auto defender_transform = math::to_matrix(target->second.state.rotation, target->second.state.position);
-                const auto attacker_transform = math::to_matrix(source->second.state.rotation, source->second.state.position);
-                if (!defender_transform || !attacker_transform) return core::Result<void>::failure(
-                    !defender_transform ? defender_transform.error() : attacker_transform.error());
-                detail::CombatUnit defender;
-                defender.id = target->second.state.entity_id; defender.type_id = target->second.state.type_id;
-                defender.owner = target->second.state.owner; defender.position = target->second.state.position;
-                defender.previous_position = defender.position; defender.transform = defender_transform.value();
-                defender.profile = impl_->combat.find(defender.type_id);
-                detail::CombatUnit attacker;
-                attacker.id = source->second.state.entity_id; attacker.type_id = source->second.state.type_id;
-                attacker.owner = source->second.state.owner; attacker.position = source->second.state.position;
-                attacker.previous_position = attacker.position; attacker.transform = attacker_transform.value();
-                attacker.profile = shooter_profile;
-                auto at_contact = projectile;
-                at_contact.position = flight->contact;
-                const bool defender_moving = target->second.motion && target->second.motion->kind == MotionKind::path;
-                auto reaction = detail::redirect_blaster_reaction(at_contact, *shot, *handler, defender, attacker,
-                    flights_.value().next_projectile.value(), random, direction_random, defender_moving);
-                if (!reaction) return core::Result<void>::failure(reaction.error());
-                if (reaction.value().created) {
-                    ++flights_.value().next_projectile.value();
-                    launched.push_back(std::move(*reaction.value().created));
-                }
-                if (!reaction.value().blocked) continue;
-                deflected = true;
-                break;
-            }
-            if (deflected) {
-                combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
-                    projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
-                    flight->from, flight->contact, hit_outcome_redirected, projectile.target});
-                auto delivered = deliver_blast(flight_index);
-                if (!delivered) return core::Result<void>::failure(delivered.error());
-                continue;
-            }
-        }
-        auto redirected = redirect_damage(*flight->hit, hit, [&](const EntityId id, Hit share) {
-            return deliver_redirected(id, share, projectile.owner, projectile.shooter);
-        });
-        if (!redirected) return core::Result<void>::failure(redirected.error());
-        if (redirected.value()) {
-            combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
-                projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint,
-                flight->from, flight->contact, 0, projectile.target});
-            auto delivered = deliver_blast(flight_index);
-            if (!delivered) return core::Result<void>::failure(delivered.error());
-            continue;
-        }
-        const auto hull_before = target->second.durability->hull;
-        const auto shields_before = target->second.durability->shields;
-        auto outcome = apply_hit(profile, *damage_rules, *target->second.durability, hit, tick);
-        if (!outcome) {
-            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
-                "tick " + std::to_string(tick) + " projectile " + std::to_string(projectile.id) + ": "
-                    + outcome.error().message));
-        }
-        impl_->track_damage(target->second, hull_before, shields_before);
-        if (!outcome.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.amount);
-        impl_->end_depleted_defend(target->second, tick, outcome.value().storm_shield_branch);
-        // EN-08: only a positive energy drain disables engines; no locomotor means no effect.
-        if (projectile.disable_engines_frames && outcome.value().drained.raw() > 0
-            && profile.max_speed && !outcome.value().damage.unit_destroyed) {
-            const bool was_online = engines_online(profile, *target->second.durability);
-            disable_engines(*target->second.durability, *projectile.disable_engines_frames, tick);
-            // EN-09: discard a pending group/search speed cap, retaining its destination.
-            // FD-64/UFS-33: a failed search has no path to replan; keep its strict cooldown.
-            const bool waited = target->second.formation && !target->second.formation->failure_frame;
-            if (waited && target->second.motion) {
-                target->second.motion->target = target->second.formation->destination;
-                target->second.motion->kind = MotionKind::path;
-                target->second.formation.reset();
-            }
-            if ((was_online || waited) && target->second.motion && target->second.motion->kind == MotionKind::path) {
-                tracked_.value().replans.value().push_back(target->first);
-            }
-        }
-        // IS-01, IS-02: an ion shot stuns a unit whose type has the ion-stun behaviour.
-        if (projectile.ion_stun && profile.ion_stun_effect && !outcome.value().damage.unit_destroyed) {
-            impl_->ion_stun_unit(target->second, *projectile.ion_stun, tick);
-        }
-        // How the hit was taken, for the impact effect only (#80, docs/behaviour/battle-presentation.md).
-        std::uint32_t taken = 0;
-        if (outcome.value().storm_shield_branch) taken |= hit_outcome_storm_shield;
-        if (outcome.value().shield_absorbed) {
-            taken |= hit_outcome_shield_absorbed;
-        } else if (outcome.value().armor_multiplier <= armor_reduced_limit) {
-            taken |= hit_outcome_armor_reduced;
-        }
-        combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
-            projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint, flight->from,
-            flight->contact, taken, projectile.target});
-        const auto& result = outcome.value().damage;
-        if (result.destroyed_hardpoint) {
-            events.push_back(destruction_event(
-                tick, EventKind::hardpoint_destroyed, target->second.state, *result.destroyed_hardpoint));
-        }
-        if (result.unit_destroyed) {
-            events.push_back(destruction_event(tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
-            killed.push_back(target->second.state);
-            impl_->adjust_owned(target->second.state, false);
-            staged.erase(target);
-        }
-        // WAD-03: ordinary direct routing and its single impact event precede secondary damage.
-        // Absorption does not suppress the blast; the take-damage owner supplies cancellation.
-        if (detail::blast_after_hit(projectile, outcome.value())) {
-            auto delivered = deliver_blast(flight_index);
-            if (!delivered) return core::Result<void>::failure(delivered.error());
-        }
+        if (auto result = commit_projectile_flight(flight_index, flights, staged, projectiles, combat_events, deliver_blast, arrivals, craft_defense, damage_rules, launched, deliver_redirected, queue_damage, events, killed); !result) return result;
     }
     projectiles.insert(projectiles.end(), launched.begin(), launched.end());
     return core::Result<void>::success();

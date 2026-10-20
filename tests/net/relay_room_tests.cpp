@@ -1,6 +1,9 @@
 // Contracts of the N-peer room scope (slice N3, docs/net-online-npeer.md section 2 and 4).
 // Part A drives RoomService and the real Directory with a fake sink and a fake clock (no sockets, no wall time).
 // Part B runs the same service behind the TLS RelayServer on loopback with NetworkOnlineLobby and NetworkGnsRoom.
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/network_introduction.hpp"
 #include "eawr/net/relay_server.hpp"
 #include "relay_directory.hpp"
@@ -10,26 +13,36 @@
 #include "relay_tls.hpp"
 #include "relay_turn_refresh.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <iostream>
-#include <mutex>
+#include <map>
+#include <memory>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace eawr::net::relay;
 using namespace std::chrono_literals;
 using Time = RoomService::Time;
-void expect(bool condition, const char* reason) { if (!condition) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool condition, const char* reason) {
+    if (!condition) eawr::testing::require(condition, reason);
 }
+using eawr::testing::result_code_colon::require;
 template<class F> void until(F predicate, const char* reason, std::chrono::milliseconds limit = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (!predicate()) {
@@ -923,6 +936,54 @@ void credential_revocation() {
     }
 }
 
+void repair_credential_lifetimes() {
+    RoomOptions options; options.session_lifetime = 20s; options.max_session_lifetime = 60s; options.renewal_window = 8s;
+    {
+        World w(options); auto& h = w.host(3); auto a = w.member(h, "Guest1", "peer-1");
+        w.send(h.conn, h.prefix, message(Kind::room_lock));
+        std::set<std::string> issued{a.attached.turn.username};
+        w.tick(12s); w.rooms->renew(h.conn, w.now); w.settle();
+        issued.insert(renewed_in(got(w.sink.take(a.conn, Kind::renewed)))->turn.username);
+        const auto back = w.add(a.prefix);
+        w.send(back, a.prefix, attach_request(Kind::room_reattach, h.room, a.attached.capability, "peer-1"));
+        w.settle_all();
+        issued.insert(attached_of(got(w.sink.take(back, Kind::room_attached))).turn.username);
+        expect(issued.size() == 3, "Attach, renewal and repair issue distinct credentials");
+        for (const auto& name : issued)
+            expect(std::find(w.sink.revoked.begin(), w.sink.revoked.end(), name) == w.sink.revoked.end(),
+                "Repair preserves every credential that may still serve a live pair");
+        w.send(h.conn, h.prefix, slot_request(Kind::room_kick, a.slot));
+        const std::set<std::string> revoked(w.sink.revoked.begin(), w.sink.revoked.end());
+        expect(revoked == issued, "Ending the repaired seat revokes its original, renewed and repair credentials");
+    }
+    {
+        // A provider result waiting for other members' renewals has never been sent to any client. Reattach must clean it
+        // up, while keeping the issued credential that the member's existing pair links still use.
+        World w(options); auto& h = w.host(3); auto a = w.member(h, "Guest1", "peer-1");
+        w.send(h.conn, h.prefix, message(Kind::room_lock));
+        w.tick(12s); w.sink.manual = true; w.rooms->renew(h.conn, w.now);
+        const auto pending = w.sink.pending;
+        const auto member_key = std::find_if(pending.begin(), pending.end(), [](const auto& key) {
+            return key.find(":1:r:") != std::string::npos;
+        });
+        expect(member_key != pending.end(), "The member has a pending renewal request");
+        std::erase(w.sink.pending, *member_key);
+        w.rooms->turn_done(*member_key, GnsTurnCredentials{"turn:203.0.113.5:3478", "unissued-renewal", "pw", 60s}, {}, w.now);
+        expect(!w.sink.take(a.conn, Kind::renewed), "An incomplete room renewal sends no credential to the member");
+        const auto back = w.add(a.prefix);
+        w.send(back, a.prefix, attach_request(Kind::room_reattach, h.room, a.attached.capability, "peer-1"));
+        expect(w.sink.revoked == std::vector<std::string>{"unissued-renewal"},
+            "Repair revokes only the unused pending credential, preserving the live allocation credential");
+        w.sink.manual = false; w.settle_all();
+        const auto repaired = attached_of(got(w.sink.take(back, Kind::room_attached)));
+        expect(repaired.turn.username != a.attached.turn.username, "Repair obtains fresh credentials");
+        w.send(h.conn, h.prefix, slot_request(Kind::room_kick, a.slot));
+        const std::set<std::string> revoked(w.sink.revoked.begin(), w.sink.revoked.end());
+        expect(revoked == std::set<std::string>{"unissued-renewal", a.attached.turn.username, repaired.turn.username},
+            "Seat teardown eventually revokes every issued credential as well as the abandoned pending result");
+    }
+}
+
 // ---- Part B: the same service behind the TLS server ------------------------------------------------------------------------
 std::atomic<std::int64_t> millis{};
 RelayServer::Clock::time_point now_fake() { return RelayServer::Clock::time_point{} + std::chrono::milliseconds(millis.load()); }
@@ -1169,6 +1230,7 @@ int main(int argc, char** argv) {
         run("max_rooms", bounds_at_max_rooms);
         run("benign_races", benign_races_keep_connections); run("denylist_bound", denylist_bound);
         run("seat_and_slot", seat_and_slot); run("credential_revocation", credential_revocation);
+        run("repair_credential_lifetimes", repair_credential_lifetimes);
         const auto directory = std::filesystem::path(argv[1]) / require(random_code());
         std::filesystem::create_directories(directory);
         const auto cert = (directory / "certificate.pem").string(), key = (directory / "key.pem").string();

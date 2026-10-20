@@ -266,6 +266,50 @@ void queued_ability_drop_is_scoped_to_preparation_and_owner() {
     owner.reset();
     assert(!pending.matches(restored_lifetime, capability));
 }
+// WGCH-151..155: the parked hero fleet's authored action at a hostile planet starts through the typed inbox.
+void hero_fleet_drop_offers_authored_ability() {
+    namespace gc = eawr::sim::galactic;
+    // Fleet 10 (local, planet 2 owned by the enemy) carries a saboteur 30 and a plain ship 31; fleet 11 sits at home.
+    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
+        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}, {2, {}, 2}},
+        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 2, {{30, 8}, {31, 9}}}, {11, 1, 1, {{32, 8}}}},
+        std::vector<gc::GalacticEvent>{});
+    std::vector<gc::CensusObject> actors{{30, 8, 1, 2, 10, false, false, 8}, {31, 9, 1, 2, 10, false, false, 9},
+        {32, 8, 1, 1, 11, false, false, 8}};
+    const auto snapshot = [&] {
+        gc::NativeSnapshotChanges changes;
+        changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+        return gc::GalacticSnapshot::native_view(base, std::move(changes));
+    };
+    gc::GalacticAbilitySetup host;
+    gc::GalacticAbilityProfile saboteur; saboteur.type = 8; saboteur.sabotage = gc::SabotageAbilityProfile{"S", true, {}};
+    host.profiles = {saboteur};
+    const auto drop = ability_drop_candidate(*snapshot(), 1, 10, host);
+    assert(drop && drop->actor == 30 && drop->planet == 2 && drop->kind == gc::AbilityKind::structure_sabotage);
+    const auto order = ability_drop_order(*drop);
+    assert(std::get<gc::PrepareGalacticAbility>(order) == (gc::PrepareGalacticAbility{30, 2, gc::AbilityKind::structure_sabotage}));
+    MapInput input;
+    DropIntent intent; intent.kind = DropKind::ability; intent.source = 30; intent.planet = 2; intent.ability = order;
+    const std::vector<InputPlanet> visible{{1, {}, 1, true}, {2, {}, 2, true}};
+    assert(input.command(intent, visible));
+    assert(!ability_drop_candidate(*snapshot(), 1, 11, host)); // Own planet: no hostile target.
+    assert(!ability_drop_candidate(*snapshot(), 2, 10, host)); // Not the local player's fleet.
+    assert(!ability_drop_candidate(*snapshot(), 1, 99, host)); // Stale fleet.
+    host.profiles[0].lifecycle_only = true;
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Lifecycle-only profiles activate nothing.
+    host.profiles[0].lifecycle_only = false; actors[0].dead = true;
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Dead actor.
+    actors[0].dead = false; actors[0].owner = 2;
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Foreign actor.
+    actors[0].owner = 1;
+    host.profiles[0].sabotage.reset(); host.profiles[0].theft.emplace();
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host)->kind == gc::AbilityKind::technology_theft);
+    host.profiles[0].neutralize.emplace(); host.profiles[0].destruction.emplace();
+    const auto first = ability_drop_candidate(*snapshot(), 1, 10, host); // Destruction precedes the rest (WGCH-152).
+    assert(first && first->kind == gc::AbilityKind::planet_destruction);
+    const auto queued = std::get<gc::ExecutePreparedAbility>(ability_drop_order(*first)).prepared;
+    assert(queued.actor == 30 && queued.planet == 2 && !queued.preparation && queued.price == eawr::sim::math::Fixed{});
+}
 void typed_ability_intents_preserve_capabilities() {
     namespace gc = eawr::sim::galactic;
     MapInput input;
@@ -331,6 +375,25 @@ void fleet_destination_uses_live_routes() {
     visible[2].discovered = false;
     assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible));
     visible[2].discovered = true;
+    {
+        // WGM-18/GCMP-24: the saved multiplayer flag omits the reveal gate, so a hidden hop no longer stops the route.
+        auto multiplayer = setup; multiplayer.victory.emplace(); multiplayer.victory->context.multiplayer = true;
+        for (const auto& player : setup.players) {
+            gc::VictoryPlayer row; row.player = player.player_id; row.faction = "Faction"; row.playable = true;
+            multiplayer.victory->context.players.push_back(row);
+        }
+        for (const auto& planet : setup.planets) {
+            gc::VictoryPlanet row; row.planet = planet.id; row.type = planet.id; row.current = row.target = row.owner = planet.owner;
+            multiplayer.victory->context.planets.push_back(row);
+        }
+        const auto mp_created = gc::GalacticSession::create(multiplayer); assert(mp_created);
+        const auto mp_snapshot = mp_created.value().snapshot();
+        visible[1].discovered = false;
+        assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible)); // solo: hidden hop stops the route
+        const auto through = fleet_destination_intent(*mp_snapshot, 1, 10, 3, visible);
+        assert(through && (through->path == std::vector<ObjectId>{1, 2, 3}));
+        visible[1].discovered = true;
+    }
     setup.movement->access[1].potential_conflict = true;
     created = gc::GalacticSession::create(setup); assert(created); snapshot = created.value().snapshot();
     assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible)); // Hostile intermediate stops route.
@@ -597,6 +660,7 @@ int main() {
     live_hero_containment_and_home();
     queued_ability_drop_is_scoped_to_preparation_and_owner();
     typed_ability_intents_preserve_capabilities();
+    hero_fleet_drop_offers_authored_ability();
     fleet_destination_uses_live_routes();
     dragged_card_moves_as_one_stack();
 }

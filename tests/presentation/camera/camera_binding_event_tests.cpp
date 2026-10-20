@@ -1,5 +1,14 @@
 #include "camera_binding_test_support.hpp"
 
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <numbers>
+#include <string>
+#include <string_view>
+#include <utility>
+
 namespace eawr_camera_binding_test {
 
 void test_ambiguous_chords() {

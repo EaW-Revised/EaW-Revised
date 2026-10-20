@@ -302,8 +302,19 @@ public:
         const sim::tactical::EconomyRules& economy = sim::tactical::EconomyRules{},
         const sim::tactical::MapBox& map_box = sim::tactical::MapBox{});
     // The same with the content as one value (TacticalSession::create).
+    // This live adapter binds the tables above; content.retreat is not configured.
     [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
         const sim::tactical::TacticalSetup& setup, const sim::tactical::TacticalContent& content, Options options);
+    // Playback uses the same validated initializer as headless replay, including
+    // in-tick object-script ability uses. Recorded player commands are supplied
+    // at their ticks before command_source and held live orders, so interactive
+    // input can precede future recorded commands. No live scripts/step driver.
+    // The caller validates content against replay.setup.content_identity and must
+    // not also supply the recorded commands through command_source.
+    // Supplied keys are preserved; exact-key collisions are ordinary refusals.
+    // As in the setup overload, content.retreat is not configured by this adapter.
+    [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start(
+        const sim::tactical::TacticalReplay& replay, const sim::tactical::TacticalContent& content, Options options);
 
     ~LiveSession();
     LiveSession(const LiveSession&) = delete;
@@ -366,6 +377,9 @@ public:
     [[nodiscard]] sim::tactical::TacticalReplay failure_record() const;
 
 private:
+    [[nodiscard]] static core::Result<std::unique_ptr<LiveSession>> start_impl(
+        const sim::tactical::TacticalSetup& setup, const sim::tactical::TacticalContent& content,
+        Options options, const sim::tactical::TacticalReplay* replay);
     class Impl;
     explicit LiveSession(std::unique_ptr<Impl> impl) noexcept;
     std::unique_ptr<Impl> impl_;

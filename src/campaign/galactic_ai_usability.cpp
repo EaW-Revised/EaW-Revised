@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <stdexcept>
+#include <utility>
 
 namespace eawr::campaign {
 namespace gc = sim::galactic;
@@ -39,19 +40,42 @@ Real separation(const sim::math::Vec3& a, const sim::math::Vec3& b, bool squared
     const auto value = single(single(single(x * x) + single(y * y)) + single(z * z));
     return squared ? value : single(ai::square_root(value));
 }
-std::optional<Real> token(const GalacticAiUsabilityProvider::World& world,
-    const GalacticAiUsabilityProvider::Engine& engine, gc::PlayerId owner, gc::PlanetId planet,
-    std::vector<std::string> tokens, const ai::DerivedExecutionRestore* reconstruction = nullptr) {
-    ai::Equation equation; equation.name = "B_OWNING_INPUT";
-    equation.lookups.push_back({std::move(tokens), {}});
-    ai::Node node; node.kind = ai::Node::Kind::lookup; equation.program.push_back(node);
-    ai::Target target; target.object = planet; target.name = "OBJECT_" + std::to_string(planet);
-    ai::PlayerAi selected; selected.player = owner;
-    auto context = world.goal_context(selected, &target);
-    ai::AiRandom random;
-    return reconstruction ? world.reconstruction_perception(*reconstruction, engine, equation, context, random)
-        : world.perception(engine, equation, context, random);
-}
+// One owner's per-planet perception queries. The equation of each token path, the owner record and the goal context
+// depend only on the path and the owner, so a reader builds them once and each query only retargets the planet.
+class TokenReader {
+public:
+    enum class Kind : std::size_t { target_player, space_presence, space_total, ground_total };
+    TokenReader(const GalacticAiUsabilityProvider::World& world, const GalacticAiUsabilityProvider::Engine& engine,
+        gc::PlayerId owner, const ai::DerivedExecutionRestore* reconstruction = nullptr)
+        : world_(world), engine_(engine), reconstruction_(reconstruction) {
+        const std::array<std::vector<std::string>, 4> paths{{{"VARIABLE_TARGET", "TARGETPLAYERID"},
+            {"VARIABLE_TARGET", "ENEMYFORCE", "HASSPACEFORCE"}, {"VARIABLE_TARGET", "ENEMYFORCE", "SPACETOTALUNNORMALIZED"},
+            {"VARIABLE_TARGET", "ENEMYFORCE", "GROUNDTOTALUNNORMALIZED"}}};
+        for (std::size_t at = 0; at < paths.size(); ++at) {
+            auto& equation = equations_[at]; equation.name = "B_OWNING_INPUT";
+            equation.lookups.push_back({paths[at], {}, ai::compile_perception_token(paths[at])});
+            ai::Node node; node.kind = ai::Node::Kind::lookup; equation.program.push_back(node);
+        }
+        ai::PlayerAi selected; selected.player = owner;
+        context_ = world.goal_context(selected, &target_);
+    }
+    TokenReader(const TokenReader&) = delete;
+    TokenReader& operator=(const TokenReader&) = delete;
+    [[nodiscard]] std::optional<Real> operator()(gc::PlanetId planet, Kind kind) {
+        target_.object = planet; target_.name = "OBJECT_" + std::to_string(planet);
+        ai::AiRandom random;
+        const auto& equation = equations_[static_cast<std::size_t>(kind)];
+        return reconstruction_ ? world_.reconstruction_perception(*reconstruction_, engine_, equation, context_, random)
+            : world_.perception(engine_, equation, context_, random);
+    }
+private:
+    const GalacticAiUsabilityProvider::World& world_;
+    const GalacticAiUsabilityProvider::Engine& engine_;
+    const ai::DerivedExecutionRestore* reconstruction_;
+    std::array<ai::Equation, 4> equations_;
+    ai::Target target_;   // the context points at it; every query rewrites it before use
+    ai::Context context_;
+};
 bool defense(const gc::PathPlanet& row, const gc::PathOptions& options) {
     if (row.starbase_relation) return *row.starbase_relation != gc::PathRelation::allied;
     return options.ai_player ? row.ai_enemy_space_force.value_or(true)
@@ -95,22 +119,26 @@ std::vector<gc::PlanetId> production_sites(const gc::PlanetGraph& graph, gc::Pla
     // WGA-259: root inclusion is a separate test, not expansion admission.
     const bool root = end.relation == gc::PathRelation::allied
         && (options.allow_defended || bypass(end, options) || !defense(end, options));
-    std::set<gc::PlanetId> visited;
+    // Marks by node slot: the graph nodes are one contiguous vector, so a node's address gives its dense index.
+    const auto base = graph.nodes().data();
+    std::vector<std::uint8_t> visited(graph.nodes().size());
+    const auto mark = [&](gc::PlanetId id) { auto& flag = visited[static_cast<std::size_t>(graph.node(id) - base)]; return !std::exchange(flag, std::uint8_t{1}); };
+    const auto seen = [&](gc::PlanetId id) { return visited[static_cast<std::size_t>(graph.node(id) - base)] != 0; };
     const auto flood = [&](gc::PlanetId start) {
-        std::vector<gc::PlanetId> queue{start}, result; visited.insert(start);
+        std::vector<gc::PlanetId> queue{start}, result; mark(start);
         for (std::size_t at = 0; at < queue.size(); ++at) {
             const auto id = queue[at];
             if (row(id).relation == gc::PathRelation::allied) result.push_back(id);
             for (const auto& edge : graph.node(id)->edges)
-                if (visited.insert(edge.to).second && expands(row(edge.to), options)) queue.push_back(edge.to);
+                if (mark(edge.to) && expands(row(edge.to), options)) queue.push_back(edge.to);
         }
         return result;
     };
     if (root) return flood(target);
     std::vector<gc::PlanetId> best;
     for (const auto& edge : graph.node(target)->edges) {
-        if (visited.contains(edge.to)) continue;
-        if (!expands(row(edge.to), options)) { visited.insert(edge.to); continue; }
+        if (seen(edge.to)) continue;
+        if (!expands(row(edge.to), options)) { mark(edge.to); continue; }
         auto sites = flood(edge.to);
         if (policy == 4) best.insert(best.end(), sites.begin(), sites.end());
         else if (best.size() < sites.size()) best = std::move(sites);
@@ -215,6 +243,26 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     // Reconstruction reads archived values and refreshes nothing.
     std::optional<World::PartitionedReads> reads;
     if (!reconstruction) reads.emplace(world.partitioned_reads());
+    // The access rows below are a pure function of the snapshot, whose observer generation advances with every
+    // observer, orbit/membership and live-content commit, and of the access generation. When both are equal and only
+    // the perception deadline or revision moved, replay the previous rows; the perception tokens still re-query below.
+    const bool replay_rows = !reconstruction && !force && old != caches_.end() && !old->second.source_changed
+        && old->second.observer_generation == generation && old->second.access_generation == access_generation
+        && old->second.movement.access.size() == snapshot.planets().size()
+        && old->second.movement.ai_player == next.movement.ai_player
+        && old->second.movement.multiplayer == next.movement.multiplayer
+        && old->second.movement.benefits_from_corruption == next.movement.benefits_from_corruption;
+    if (replay_rows) {
+        const gc::PathPlanet defaults{};
+        for (std::size_t index = 0; index < next.movement.access.size(); ++index) {
+            auto& row = next.movement.access[index] = old->second.movement.access[index];
+            // Token-derived fields are rewritten by the serial pass below; start from the fresh-row defaults.
+            row.ai_classification_succeeded = defaults.ai_classification_succeeded;
+            row.ai_relation = defaults.ai_relation; row.ai_enemy_space_force = defaults.ai_enemy_space_force;
+        }
+        ++work_.access_reuses;
+    }
+    if (!replay_rows) {
     auto prepared = executor.execute_phase("galactic-ai-usability", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, snapshot.planets().size());
         for (auto index = range.begin; index < range.end; ++index) {
@@ -242,21 +290,24 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     });
     if (!prepared) return core::Result<const Cache*>::failure(prepared.error());
     for (const auto& error : errors) if (error) return core::Result<const Cache*>::failure(*error);
+    }
     // Perception mutates remembered bindings and upstream lazy engine caches.
     // Keep the bulk access preparation parallel; query tokens on the owner in
     // canonical planet order before publishing the completed movement input.
     const auto serial_reads = world.sequential_reads();
+    std::optional<TokenReader> tokens;
+    if (selected->ai) tokens.emplace(world, engine, owner, reconstruction);
     if (selected->ai) for (std::size_t index = 0; index < snapshot.planets().size(); ++index) {
         const auto id = snapshot.planets()[index].id;
         auto& row = next.movement.access[index];
-        const auto classified = token(world, engine, owner, id, {"VARIABLE_TARGET", "TARGETPLAYERID"}, reconstruction);
+        const auto classified = (*tokens)(id, TokenReader::Kind::target_player);
         row.ai_classification_succeeded = classified.has_value();
         if (classified) {
             const auto* player = find(content_->players, static_cast<gc::PlayerId>(*classified), [](const auto& at) { return at.player; });
             row.ai_relation = !player || player->neutral ? gc::PathRelation::neutral : gc::PathRelation::hostile;
         }
         if (!row.starbase_relation) {
-            const auto perceived_force = token(world, engine, owner, id, {"VARIABLE_TARGET", "ENEMYFORCE", "HASSPACEFORCE"}, reconstruction);
+            const auto perceived_force = (*tokens)(id, TokenReader::Kind::space_presence);
             if (perceived_force) row.ai_enemy_space_force = *perceived_force != Real{};
         }
     }
@@ -283,6 +334,12 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
             next.movement.access.begin(), next.movement.access.end(), same_access)) {
         next.site_graph = old->second.site_graph;
         next.site_memos = std::move(old->second.site_memos);
+    }
+    if (old != caches_.end() && !reconstruction) {
+        // Derived outputs carried to the replacement cache: the keyed connecting-path pass and the previously
+        // published goal-reach rows, which the rebuild below keeps whenever a row is unchanged. Past the last refusal.
+        next.island_memo = old->second.island_memo;
+        next.goal_reach = std::move(old->second.goal_reach);
     }
     next.site_memos.resize(snapshot.planets().size());
     next.perception_revision = world.movement_input_revision();
@@ -371,7 +428,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 }
             }
             cache.connectivity_ready = (prepared_through_.at(player.player).pending_changes & 2U) == 0;
-            output.goal_reach.insert(output.goal_reach.end(), cache.goal_reach.begin(), cache.goal_reach.end());
+            output.goal_reach.append(cache.goal_reach.begin(), cache.goal_reach.end());
             output.island_paths.insert(output.island_paths.end(), cache.islands.begin(), cache.islands.end());
         output.island_sizes.push_back({player.player, cache.island_sizes[0], cache.island_sizes[1]});
         }
@@ -422,16 +479,16 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             // GFS-A14's retained refresh cadence, including unread native rows.
             // Partitions own distinct target slots; representatives read after
             // the join and reuse the identical immutable result.
-            const auto site_list = [&](std::size_t index, std::size_t policy) -> const std::vector<gc::PlanetId>& {
+            const auto site_list = [&](std::size_t index, std::size_t policy) {
                 auto& memo = cache.site_memos[index][policy];
                 if (!memo) {
                     memo = std::make_shared<const std::vector<gc::PlanetId>>(
                         production_sites(*graph, snapshot->planets()[index].id, movement, policy));
                     searched[index][policy] = true;
                 }
-                return *memo;
+                return ai::SharedPlanetList(memo);
             };
-            std::vector<std::array<std::vector<gc::PlanetId>, 6>> sites(snapshot->planets().size());
+            std::vector<std::array<ai::SharedPlanetList, 6>> sites(snapshot->planets().size());
             std::vector<std::array<bool, 6>> updated(snapshot->planets().size());
             auto phase = executor.execute_phase("galactic-ai-production-sites", sim::tick_partition_count, [&](std::size_t part) {
                 const auto range = sim::partition_range(part, snapshot->planets().size());
@@ -489,9 +546,10 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             // Connecting paths use selected manager cached raw space+ground totals,
             // ordinary world edges, and their own single-precision hop policy.
             if (representatives.size() > 1) {
+                TokenReader island_tokens(world, engine, player.player);
                 for (const auto& row : snapshot->planets()) if (access(row.id).relation != gc::PathRelation::allied) {
-                    auto space = token(world, engine, player.player, row.id, {"VARIABLE_TARGET", "ENEMYFORCE", "SPACETOTALUNNORMALIZED"});
-                    auto ground = token(world, engine, player.player, row.id, {"VARIABLE_TARGET", "ENEMYFORCE", "GROUNDTOTALUNNORMALIZED"});
+                    auto space = island_tokens(row.id, TokenReader::Kind::space_total);
+                    auto ground = island_tokens(row.id, TokenReader::Kind::ground_total);
                     if (!space || !ground) return refuse<ConnectivityPublication>("WGA-261: qualified island force perception is unavailable for player "
                         + std::to_string(player.player) + " planet " + std::to_string(row.id)
                         + (space ? " (ground; WGA-184/273 qualified authored force inputs)" : " (space; WGA-181..190 force owner)"));
@@ -560,7 +618,33 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                     }
                     return core::Result<void>::success();
                 };
+                // The three searches are a pure function of: the representatives, each planet's relation and AI
+                // usability, the force terms just queried, each representative's goal list and component size, the
+                // graph and its route factors. Replay the stored connector sets only on an exact match of all of them;
+                // the perception queries above always run.
+                GalacticAiIslandMemo inputs;
+                for (const auto& planet : snapshot->planets()) {
+                    const auto& at = access(planet.id);
+                    inputs.planets.push_back(planet.id);
+                    inputs.access.push_back(static_cast<std::uint8_t>(static_cast<unsigned>(at.relation) | (at.ai_usable ? 4U : 0U)));
+                }
+                inputs.representatives = representatives;
+                for (const auto& [planet, terms] : cache.force)
+                    inputs.force.push_back({planet, terms.first.repr, terms.second.repr});
+                for (const auto representative : representatives) {
+                    inputs.goals.push_back(sites[index_of(representative)][0]);
+                    inputs.sizes.push_back(sites[index_of(representative)][1].size());
+                }
+                const auto& memo = cache.island_memo;
+                const bool replay = memo && memo->planets == inputs.planets && memo->representatives == inputs.representatives
+                    && memo->access == inputs.access && memo->force == inputs.force && memo->goals == inputs.goals
+                    && memo->sizes == inputs.sizes && memo->largest_factor == graph->largest_route_factor()
+                    && std::equal(memo->nodes.begin(), memo->nodes.end(), graph->nodes().begin(), graph->nodes().end())
+                    && std::equal(memo->routes.begin(), memo->routes.end(), snapshot->routes().begin(), snapshot->routes().end());
                 std::set<gc::PlanetId> shortest, least, largest;
+                if (replay) {
+                    shortest = memo->shortest; least = memo->least; largest = memo->largest; ++work_.island_reuses;
+                } else {
                 for (std::size_t i = 0; i < representatives.size(); ++i) {
                     auto result = connect(representatives, i, true, shortest);
                     if (!result) return core::Result<ConnectivityPublication>::failure(result.error());
@@ -573,15 +657,30 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 std::stable_sort(ordered.begin(), ordered.end(), [&](auto a, auto b) { return sites[index_of(a)][1].size() > sites[index_of(b)][1].size(); });
                 ordered.resize(2); auto result = connect(ordered, 0, true, largest);
                 if (!result) return core::Result<ConnectivityPublication>::failure(result.error());
+                inputs.nodes.assign(graph->nodes().begin(), graph->nodes().end()); inputs.largest_factor = graph->largest_route_factor();
+                inputs.routes.assign(snapshot->routes().begin(), snapshot->routes().end());
+                inputs.shortest = shortest; inputs.least = least; inputs.largest = largest;
+                cache.island_memo = std::make_shared<const GalacticAiIslandMemo>(std::move(inputs));
+                }
                 for (const auto id : shortest) staged.at({player.player, id}).shortest = true;
                 for (const auto id : least) staged.at({player.player, id}).least_force = true;
                 for (const auto id : largest) staged.at({player.player, id}).largest = true;
             }
-            cache.goal_reach.clear(); cache.islands.clear(); cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
+            // A row of the previous generation that is unchanged (same player, planet, policy and site list) is kept in
+            // place instead of being copied again; the rows and their order are exactly those of a clean rebuild.
+            const bool keep_rows = cache.goal_reach.size() == snapshot->planets().size() * policies.size();
+            if (!keep_rows) cache.goal_reach.clear();
+            cache.islands.clear(); cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
+            std::size_t reach_at = 0;
             for (const auto& row : snapshot->planets()) {
                 const auto& saved = staged.at({player.player, row.id});
                 for (std::size_t policy = 0; policy < policies.size(); ++policy) {
-                    cache.goal_reach.push_back({player.player, row.id, policies[policy], saved.sites[policy]});
+                    if (keep_rows) {
+                        auto& kept = cache.goal_reach[reach_at++];
+                        if (kept.player != player.player || kept.source != row.id || kept.policy != policies[policy]
+                            || kept.production_sites != saved.sites[policy])
+                            kept = {player.player, row.id, policies[policy], saved.sites[policy]};
+                    } else cache.goal_reach.push_back({player.player, row.id, policies[policy], saved.sites[policy]});
                     cache.connectivity_through = std::min(cache.connectivity_through, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
                 }
                 cache.islands.push_back({player.player, row.id, saved.least_force, saved.largest});
@@ -592,7 +691,7 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 prepared_through_[player.player].through = cache.valid_through; mark_state_changed();
             }
         }
-        output.goal_reach.insert(output.goal_reach.end(), cache.goal_reach.begin(), cache.goal_reach.end());
+        output.goal_reach.append(cache.goal_reach.begin(), cache.goal_reach.end());
         output.island_paths.insert(output.island_paths.end(), cache.islands.begin(), cache.islands.end());
         output.island_sizes.push_back({player.player, cache.island_sizes[0], cache.island_sizes[1]});
     }
@@ -611,7 +710,11 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
         static_cast<void>(player);
         if (prepared.pending_changes) { prepared.pending_changes = 0; mark_state_changed(); }
     }
-    output.revision = publication_revision_; published_ = std::make_shared<const ai::GalacticConnectivity>(std::move(output));
+    output.revision = publication_revision_;
+    // Rows equal to the published ones share its storage, so the runtime's route publication copies a pointer and
+    // the world's rebind finds the same rows without walking them.
+    if (published_->goal_reach == output.goal_reach) output.goal_reach = published_->goal_reach;
+    published_ = std::make_shared<const ai::GalacticConnectivity>(std::move(output));
     transaction.committed = true;
     return core::Result<ConnectivityPublication>::success(published_);
 }
@@ -767,12 +870,13 @@ core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& s
             if (policy == 4) continue;
             const auto sites = get(4);
             if (sites > planets.size() || sites > bytes.size() / 8 || (!row.frames[policy] && sites)) { bad = true; break; }
-            std::set<gc::PlanetId> unique;
+            std::set<gc::PlanetId> unique; std::vector<gc::PlanetId> ids;
             for (std::uint64_t j = 0; j < sites; ++j) {
                 const auto id = get(8);
                 if (!planets.contains(id) || !unique.insert(id).second) bad = true;
-                row.sites[policy].push_back(id);
+                ids.push_back(id);
             }
+            row.sites[policy] = ai::SharedPlanetList(std::move(ids));
         }
         staged.emplace(key, std::move(row));
     }

@@ -5,18 +5,9 @@
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
+
 #include <cstdint>
-#include <initializer_list>
-#include <iostream>
-#include <limits>
-#include <map>
-#include <optional>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace fighter_test_support {
@@ -25,7 +16,7 @@ namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-extern int failures;
+extern int& failures;
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
 constexpr std::uint64_t seed = 12345;

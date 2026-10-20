@@ -1,3 +1,19 @@
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <variant>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_ai.hpp"
 #include "galactic_ai_funding.hpp"
 #include "galactic_ai_goal_state.hpp"
@@ -9,11 +25,11 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <utility>
 
 namespace eawr::script::foc::ai {
 struct EngineContractAccess {
@@ -31,10 +47,12 @@ using namespace eawr;
 namespace a = script::foc::galactic_ai;
 namespace ai = script::foc::ai;
 namespace auth = script::authoritative;
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
-template<class T> T must(core::Result<T> result) { if (!result) throw std::runtime_error(result.error().code + " " + result.error().message); return std::move(result).value(); }
-void must(core::Result<void> result) { if (!result) throw std::runtime_error(result.error().code + " " + result.error().message); }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
+}
+using eawr::testing::result_code_space::must;
 
 a::LifecycleSetup fixture() {
     a::LifecycleSetup setup;
@@ -534,13 +552,7 @@ void bounded_diagnostics(std::size_t workers) {
 }
 
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) return {};
-    const std::string root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT"); return value ? std::optional<std::string>{value} : std::nullopt;
-#endif
+    return eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
 }
 void installed_loading() {
     const auto root = game_root();

@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 // scene_scan: builds the P1-11 static scene for one map or for every map of a
 // profile's effective view, read-only, and reports resolution in JSON. The
 // report names logical VFS paths, content hashes and counts only; the host
@@ -87,23 +88,7 @@ std::optional<std::vector<std::pair<std::string, std::filesystem::path>>> profil
 }
 
 std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        default:
-            if (character < 0x20U || character >= 0x7fU) {
-                output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
-            } else {
-                output << static_cast<char>(character);
-            }
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote_ascii(value);
 }
 
 std::string sha256_text(const std::string& text) {

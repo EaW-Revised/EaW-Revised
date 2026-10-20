@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <exception>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "ai_learning.hpp"
 #include "galactic_ai_battle_listener.hpp"
 #include "galactic_ai_parent_context_runtime.hpp"
@@ -5,15 +9,22 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
+#include <cstdint>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+
+using eawr::testing::must;
 
 namespace {
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
-void must(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+
 struct MovementFixture {
     struct Movement { std::uint32_t player{}; std::uint64_t actor{}, conflict_location{}; bool finished{}; std::uint64_t freestore_actor{}; };
     std::map<std::uint64_t, Movement> rows;
@@ -121,7 +132,7 @@ void battle_contracts() {
     namespace gc = eawr::sim::galactic;
     namespace auth = eawr::script::authoritative;
     namespace ga = eawr::script::foc::galactic_ai;
-    const auto require = [](bool ok, const char* message) { if (!ok) throw std::runtime_error(message); };
+    using eawr::testing::require;
     gc::GalacticSetup setup; setup.players = {{1, 1, 0}, {2, 2, 0}}; setup.planets = {{10, {}, 1}};
     auto galaxy = must(gc::GalacticSession::create(setup));
     const auto snapshot = galaxy.snapshot();
@@ -196,7 +207,7 @@ void battle_contracts() {
 int galactic_learning_contracts() {
     namespace ai = eawr::script::foc::ai;
     namespace learning = ai::learning;
-    const auto require = [](bool ok, const char* message) { if (!ok) throw std::runtime_error(message); };
+    using eawr::testing::require;
     try {
         ai::GoalType type; type.tracking_duration = ai::real(2); type.activation_tracking_duration = ai::real(1);
         ai::PlayerAi player; player.functions.push_back({&type, "GOAL", nullptr, {}});

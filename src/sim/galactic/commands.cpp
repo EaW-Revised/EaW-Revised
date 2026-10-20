@@ -25,6 +25,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
     return std::visit(Overloaded{
                           [](const PauseGalaxy&) { return CommandLayer::session; },
                           [](const ResumeGalaxy&) { return CommandLayer::session; },
+                          [](const BattleSummaryAcknowledge&) { return CommandLayer::session; },
                           [](const SeatLeave&) { return CommandLayer::session; },
                           [](const SeatRejoin&) { return CommandLayer::session; },
                           [](const AssignBattleTeamRole&) { return CommandLayer::session; },
@@ -44,6 +45,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const LandFleet&) { return CommandLayer::galactic; },
                           [](const BattleChoice&) { return CommandLayer::session; },
                           [](const AutoResolveWithdraw&) { return CommandLayer::session; },
+                          [](const InvasionAccept&) { return CommandLayer::session; },
                           [](const ProductionCommand&) { return CommandLayer::galactic; },
                           [](const SellObject&) { return CommandLayer::galactic; },
                           [](const ObserverCommand&) { return CommandLayer::galactic; },
@@ -64,6 +66,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
     return std::visit(Overloaded{
                           [](const PauseGalaxy&) { return session_opcodes::pause; },
                           [](const ResumeGalaxy&) { return session_opcodes::resume; },
+                          [](const BattleSummaryAcknowledge&) { return session_opcodes::dialog_acknowledge; },
                           [](const SeatLeave&) { return session_opcodes::seat_leave; },
                           [](const SeatRejoin&) { return session_opcodes::seat_rejoin; },
                           [](const AssignBattleTeamRole&) { return session_opcodes::battle_team_role; },
@@ -85,6 +88,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const LandFleet&) { return galactic_opcodes::land_transports; },
                           [](const BattleChoice&) { return session_opcodes::battle_choice; },
                           [](const AutoResolveWithdraw&) { return session_opcodes::auto_resolve_withdraw; },
+                          [](const InvasionAccept&) { return session_opcodes::invasion_accept; },
                           [](const ProductionCommand&) { return galactic_opcodes::production; },
                           [](const SellObject&) { return galactic_opcodes::sell_object; },
                           [](const ObserverCommand&) { return galactic_opcodes::observer_intelligence; },
@@ -124,8 +128,10 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const ExecutePreparedAbility& c) { detail::encode_prepared_ability(bytes, c.prepared); },
                    [&](const CancelGalacticAbility& c) { detail::put_u64(bytes, c.actor); detail::put_u64(bytes, c.preparation); },
                    [](const ResumeGalaxy&) {},
+                   [&](const BattleSummaryAcknowledge& command) { detail::put_u64(bytes, command.conflict); },
                    [&](const BattleChoice& command) { detail::put_u64(bytes, command.conflict); detail::put_u8(bytes, command.tactical ? 1 : 0); },
                    [&](const AutoResolveWithdraw& command) { detail::put_u64(bytes, command.conflict); },
+                   [&](const InvasionAccept& command) { detail::put_u64(bytes, command.conflict); },
                    [](const SeatLeave&) {},
                    [](const SeatRejoin&) {},
                    [&](const AssignBattleTeamRole& command) {
@@ -206,8 +212,18 @@ std::optional<CommandPayload> decode_payload(
     sim::detail::Reader reader(std::span<const std::uint8_t>(bytes.data(), bytes.size()));
     switch (layer) {
     case CommandLayer::session:
+        if (opcode == session_opcodes::dialog_acknowledge) {
+            BattleSummaryAcknowledge command;
+            if (!reader.read_u64(command.conflict) || !command.conflict || reader.remaining()) return std::nullopt;
+            return CommandPayload{command};
+        }
         if (opcode == session_opcodes::auto_resolve_withdraw) {
             AutoResolveWithdraw command;
+            if (!reader.read_u64(command.conflict) || !command.conflict || reader.remaining()) return std::nullopt;
+            return CommandPayload{command};
+        }
+        if (opcode == session_opcodes::invasion_accept) {
+            InvasionAccept command;
             if (!reader.read_u64(command.conflict) || !command.conflict || reader.remaining()) return std::nullopt;
             return CommandPayload{command};
         }
@@ -284,7 +300,7 @@ std::optional<CommandPayload> decode_payload(
         if (opcode == galactic_opcodes::special_prepare) {
             PrepareGalacticAbility c; std::uint8_t kind{};
             if (!reader.read_u64(c.actor) || !c.actor || !reader.read_u64(c.planet) || !c.planet
-                || !reader.read_u8(kind) || kind < 1 || kind > 5 || reader.remaining()) return {};
+                || !reader.read_u8(kind) || kind < 1 || kind > 7 || reader.remaining()) return {};
             c.kind = static_cast<AbilityKind>(kind); return c;
         }
         if (opcode == galactic_opcodes::special_execute) {

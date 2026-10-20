@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/battle_messages.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
 
 #include <array>
@@ -12,13 +13,7 @@ namespace {
 constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
 
 [[nodiscard]] std::string_view trim(std::string_view text) noexcept {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' || text.front() == '\n')) {
-        text.remove_prefix(1);
-    }
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' || text.back() == '\n')) {
-        text.remove_suffix(1);
-    }
-    return text;
+    return core::trim_view(text, core::xml_whitespace);
 }
 
 // The last child of that name wins, as later GameConstants entries do.

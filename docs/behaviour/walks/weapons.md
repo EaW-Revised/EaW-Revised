@@ -195,7 +195,7 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   (about 0.133 seconds), then 240 frames from the second shot to the next volley.
   The debug-build fire and service paths were rechecked for the bomber volley timing
   investigation; there is no torpedo-specific simultaneous-pulse branch. The installed-data
-  headless regression in `tests/units/unit_tables_foc_tests.cpp` checks both bombers,
+  headless regression in `tests/units/unit_tables_foc_weapons_tests.cpp` checks both bombers,
   both volleys and equal hashes on 1/2/4/8 workers. This timing check does not settle
   visual overlap or spacing between different squadron members.
 - **WWP-34** (debug build, EWW-03) The hardpoint remembers the frame it fired and the object it

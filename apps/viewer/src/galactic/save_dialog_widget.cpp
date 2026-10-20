@@ -311,7 +311,7 @@ void GalacticSaveControls::show_modal(Modal modal, std::string text) {
 void GalacticSaveControls::dismiss_modal(bool yes) {
     if (modal_ == Modal::progress_save || modal_ == Modal::progress_load) return;
     const auto previous = modal_; modal_ = Modal::none; modal_root_->hide();
-    if (previous == Modal::quit && yes) { state_.leave_requested = true; return; }
+    if (previous == Modal::quit && yes) { begin_quit(); return; }
     if (previous == Modal::overwrite && yes) { begin_progress(true, pending_name_, true); return; }
     if (previous == Modal::erase && yes) {
         auto removed = state_.game->delete_save(pending_name_);
@@ -320,6 +320,18 @@ void GalacticSaveControls::dismiss_modal(bool yes) {
         list(); return;
     }
     if (previous == Modal::acknowledgement && quick_route_) { quick_route_ = false; close(); }
+}
+// WGS-165: Yes on a single-player galactic game writes the reserved autosave, then leaves; the tactical
+// branch and multiplayer (WGS-143) leave without one. The leave waits for the publication so the file is
+// complete when the host tears the session down; the autosave result never holds the quit back (WGS-145).
+void GalacticSaveControls::begin_quit() {
+    const bool tactical = state_.game && state_.game->save_menu_facts().tactical;
+    if (!state_.game || tactical || state_.options.coop_preview || token_ || loading_.valid()) {
+        state_.leave_requested = true; return;
+    }
+    pending_name_ = "Auto Save"; pending_overwrite_ = true; pending_quick_ = false; pending_autosave_quit_ = true;
+    publish_save();
+    if (!token_) { pending_autosave_quit_ = false; state_.leave_requested = true; }
 }
 void GalacticSaveControls::begin_progress(bool saving, std::string name, bool overwrite, bool quick) {
     pending_name_ = std::move(name); pending_overwrite_ = overwrite; pending_quick_ = quick;

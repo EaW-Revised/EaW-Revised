@@ -191,6 +191,9 @@ public:
     // No engine/scene calls here; update_emitter commits the prepared data in caller order.
     virtual void prepare_emitter(std::uint64_t, const VertexStream&) {}
     virtual void update_emitter(std::uint64_t resource, const VertexStream& stream) = 0;
+    // Empty render submission, independent of camera admission. A terminal CPU
+    // lifecycle needs no dwell; resumable emitters may retain a short warm hold.
+    virtual void empty_emitter(std::uint64_t resource, bool) { update_emitter(resource, VertexStream{}); }
     virtual void destroy_emitter(std::uint64_t resource) = 0;
     // Why the most recent create_emitter returned zero, for the per-emitter cause.
     [[nodiscard]] virtual std::string failure_cause() const { return {}; }
@@ -381,6 +384,8 @@ public:
     [[nodiscard]] std::size_t reserved_particles(EffectHandle handle) const;
     [[nodiscard]] std::size_t live_effects() const noexcept;
     [[nodiscard]] std::size_t live_backend_resources() const noexcept;
+    // False for an unknown handle. Read-only: never detaches or consumes time/RNG.
+    [[nodiscard]] bool exhausted(EffectHandle handle) const noexcept;
     [[nodiscard]] std::span<const core::Diagnostic> diagnostics() const noexcept;
 
 private:

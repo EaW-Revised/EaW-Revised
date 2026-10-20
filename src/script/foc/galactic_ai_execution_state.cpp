@@ -195,7 +195,7 @@ core::Result<void> LiveExecutionStateContributor::restore(const NativeState& inp
         ordered.planets = std::move(planets); ordered.maximum_distance = row.maximum_distance;
         auto built = build_execution_routes(ordered, executor_);
         if (!built) return core::Result<void>::failure(built.error());
-        routes.available = true; routes.paths = built.value().paths; routes.rows = std::move(built).value().rows;
+        routes.available = true; routes.paths = built.value().paths; routes.memo = built.value().memo; routes.rows = std::move(built).value().rows;
         std::sort(routes.rows.begin(), routes.rows.end(), [](const auto& a, const auto& b) {
             return std::tie(a.player, a.source, a.candidate) < std::tie(b.player, b.source, b.candidate);
         });

@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "battle_audio.hpp"
 #include "audio_output.hpp"
@@ -34,18 +35,7 @@ using namespace battle_audio_detail;
 namespace {
 
 [[nodiscard]] std::string json(const std::string_view text) {
-    std::string result{"\""};
-    for (const char character : text) {
-        if (character == '"' || character == '\\') {
-            result += '\\';
-            result += character;
-        } else if (static_cast<unsigned char>(character) < 0x20U) {
-            result += ' ';
-        } else {
-            result += character;
-        }
-    }
-    return result + "\"";
+    return eawr::core::json_quote_space_controls(text);
 }
 } // namespace
 

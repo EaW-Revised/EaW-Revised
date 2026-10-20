@@ -1,0 +1,158 @@
+[
+  {
+    "old": "tests/galactic/production_tests.cpp#f",
+    "new": "tests/galactic/production_queue.cpp#f"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#setup",
+    "new": "tests/galactic/production_queue.cpp#setup"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#buy",
+    "new": "tests/galactic/production_queue.cpp#buy"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#cancel",
+    "new": "tests/galactic/production_queue.cpp#cancel"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#submit",
+    "new": "tests/galactic/production_queue.cpp#submit"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#admission",
+    "new": "tests/galactic/production_queue.cpp#admission"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#offer_projection",
+    "new": "tests/galactic/production_queue.cpp#offer_projection"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#orbit_completion_shares_slot_card",
+    "new": "tests/galactic/production_queue.cpp#orbit_completion_shares_slot_card"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#technology_price_production",
+    "new": "tests/galactic/production_queue.cpp#technology_price_production"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#cancel_identity",
+    "new": "tests/galactic/production_queue.cpp#cancel_identity"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#timing_and_cancel",
+    "new": "tests/galactic/production_queue.cpp#timing_and_cancel"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#inactive_work_budget",
+    "new": "tests/galactic/production_queue.cpp#inactive_work_budget"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#refund_recipient",
+    "new": "tests/galactic/production_queue.cpp#refund_recipient"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#finish_task_behind_front",
+    "new": "tests/galactic/production_queue.cpp#finish_task_behind_front"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#queue_policies",
+    "new": "tests/galactic/production_queue.cpp#queue_policies"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#base_and_tech_completion",
+    "new": "tests/galactic/production_queue.cpp#base_and_tech_completion"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#blocker_setup",
+    "new": "tests/galactic/production_queue.cpp#blocker_setup"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#live_starbase_blockers",
+    "new": "tests/galactic/production_queue.cpp#live_starbase_blockers"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#ground_structure_sale",
+    "new": "tests/galactic/production_state.cpp#ground_structure_sale"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#content_and_placement",
+    "new": "tests/galactic/production_state.cpp#content_and_placement"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#shared_technology_writer",
+    "new": "tests/galactic/production_state.cpp#shared_technology_writer"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#production_corpus_bytes",
+    "new": "tests/galactic/production_state.cpp#production_corpus_bytes"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#blocker_parity_checkpoint",
+    "new": "tests/galactic/production_state.cpp#blocker_parity_checkpoint"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#corpus",
+    "new": "tests/galactic/production_state.cpp#corpus"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_setup",
+    "new": "tests/galactic/production_state.cpp#census_setup"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#native_action_production_barrier",
+    "new": "tests/galactic/production_state.cpp#native_action_production_barrier"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#unit_sale",
+    "new": "tests/galactic/production_state.cpp#unit_sale"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_admission",
+    "new": "tests/galactic/production_state.cpp#census_admission"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_campaign_retained_counts",
+    "new": "tests/galactic/production_state.cpp#census_campaign_retained_counts"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#company_original_binding",
+    "new": "tests/galactic/production_state.cpp#company_original_binding"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_container_and_capacity",
+    "new": "tests/galactic/production_state.cpp#census_container_and_capacity"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_rounding_and_data",
+    "new": "tests/galactic/production_state.cpp#census_rounding_and_data"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_stock_composite_boundary",
+    "new": "tests/galactic/production_state.cpp#census_stock_composite_boundary"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_composite_counts",
+    "new": "tests/galactic/production_state.cpp#census_composite_counts"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#census_corpus_checkpoint",
+    "new": "tests/galactic/production_state.cpp#census_corpus_checkpoint"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#parity_checkpoint_case",
+    "new": "tests/galactic/production_state.cpp#parity_checkpoint_case"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#parity_checkpoint",
+    "new": "tests/galactic/production_state.cpp#parity_checkpoint"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#write_corpus",
+    "new": "tests/galactic/production_state.cpp#write_corpus"
+  },
+  {
+    "old": "tests/galactic/production_tests.cpp#fixture_root",
+    "new": "tests/galactic/production_state.cpp#fixture_root"
+  }
+]

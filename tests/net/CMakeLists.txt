@@ -2,7 +2,10 @@ add_executable(net_transport_tests transport_tests.cpp)
 target_link_libraries(net_transport_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_transport_tests)
 add_test(NAME net_transport_contracts COMMAND net_transport_tests)
-add_executable(net_lockstep_tests lockstep_session_tests.cpp)
+add_executable(net_lockstep_tests
+    lockstep_session_tests.cpp
+    lockstep_session_agreement_tests.cpp
+    lockstep_session_departure_tests.cpp)
 target_link_libraries(net_lockstep_tests PRIVATE eawr::net eawr::platform eawr::ui_model)
 eawr_target_project_warnings(net_lockstep_tests)
 add_test(NAME net_lockstep_contracts COMMAND net_lockstep_tests)
@@ -34,13 +37,18 @@ add_executable(net_setup_tcp_tests setup_tcp_tests.cpp)
 target_link_libraries(net_setup_tcp_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_setup_tcp_tests)
 add_test(NAME net_setup_tcp_contracts COMMAND net_setup_tcp_tests "${PROJECT_BINARY_DIR}/setup-tcp-artifacts")
-add_executable(net_viewer_lan_tests viewer_lan_tests.cpp
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/online_match.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/skirmish_prepare.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match_fake.cpp")
+# #3768: the galactic-campaign-v1 setup offer (roster codec, two-peer and eight-seat agreement, every refusal before a shared step).
+add_executable(net_galactic_setup_tests galactic_setup_tests.cpp)
+target_link_libraries(net_galactic_setup_tests PRIVATE eawr::net eawr::platform eawr::campaign)
+eawr_target_project_warnings(net_galactic_setup_tests)
+add_test(NAME net_galactic_setup_contracts COMMAND net_galactic_setup_tests)
+add_executable(net_viewer_lan_tests
+    viewer_lan_tests.cpp
+    viewer_lan_mesh_tests.cpp
+    viewer_lan_staging_tests.cpp
+    viewer_lan_recovery_tests.cpp)
 target_include_directories(net_viewer_lan_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
-target_link_libraries(net_viewer_lan_tests PRIVATE eawr::net eawr::platform eawr::skirmish eawr::ui_model eawr::scene)
+target_link_libraries(net_viewer_lan_tests PRIVATE eawr::platform_net eawr::net eawr::platform eawr::skirmish eawr::ui_model eawr::scene)
 eawr_target_project_warnings(net_viewer_lan_tests)
 add_test(NAME net_viewer_lan_contracts COMMAND net_viewer_lan_tests)
 add_test(NAME net_pending_input_contracts COMMAND net_viewer_lan_tests --pending-inputs)
@@ -98,6 +106,9 @@ eawr_target_project_warnings(net_gns_mesh_tests)
 add_test(NAME net_gns_mesh_paths COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>")
 set_tests_properties(net_gns_mesh_paths PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 900)
+add_test(NAME net_gns_lobby_retry COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" lobby_retry)
+set_tests_properties(net_gns_lobby_retry PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 300)
 add_test(NAME net_gns_mesh_nine COMMAND "${Python3_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/gns_mesh_processes.py" "$<TARGET_FILE:net_gns_mesh_tests>" nine)
 set_tests_properties(net_gns_mesh_nine PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600)
@@ -128,6 +139,8 @@ target_link_libraries(net_gns_transport_tests PRIVATE eawr::net)
 eawr_target_project_warnings(net_gns_transport_tests)
 add_test(NAME net_gns_transport_contracts COMMAND net_gns_transport_tests)
 set_tests_properties(net_gns_transport_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+add_test(NAME net_gns_turn_refusal_contracts COMMAND net_gns_transport_tests --turn-refusals)
+set_tests_properties(net_gns_turn_refusal_contracts PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
 # Reuse the same assertions and fixtures over real GNS loopback UDP.
 foreach(case setup lockstep desync)
@@ -170,6 +183,8 @@ add_executable(net_mesh_cascade_tests mesh_cascade_tests.cpp)
 target_link_libraries(net_mesh_cascade_tests PRIVATE eawr::net Threads::Threads)
 eawr_target_project_warnings(net_mesh_cascade_tests)
 add_test(NAME net_mesh_cascade_contracts COMMAND net_mesh_cascade_tests)
+add_test(NAME net_mesh_silent_seat_contracts COMMAND net_mesh_cascade_tests silent-seat)
+set_tests_properties(net_mesh_silent_seat_contracts PROPERTIES TIMEOUT 600)
 set_tests_properties(net_mesh_cascade_contracts PROPERTIES TIMEOUT 600)
 add_executable(net_mesh_session_tests mesh_session_tests.cpp)
 target_link_libraries(net_mesh_session_tests PRIVATE eawr::net eawr::platform Threads::Threads)
@@ -200,13 +215,9 @@ target_link_libraries(net_relay_disabled_tests PRIVATE eawr::relay)
 eawr_target_project_warnings(net_relay_disabled_tests)
 add_test(NAME net_relay_disabled_contracts COMMAND net_relay_disabled_tests)
 if(EAWR_ENABLE_RELAY)
-    add_executable(net_viewer_online_tests viewer_online_tests.cpp
-        "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match.cpp"
-        "${PROJECT_SOURCE_DIR}/apps/viewer/src/online_match.cpp"
-        "${PROJECT_SOURCE_DIR}/apps/viewer/src/skirmish_prepare.cpp"
-        "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match_fake.cpp")
+    add_executable(net_viewer_online_tests viewer_online_tests.cpp)
     target_include_directories(net_viewer_online_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
-    target_link_libraries(net_viewer_online_tests PRIVATE eawr::net eawr::platform eawr::skirmish eawr::ui_model)
+    target_link_libraries(net_viewer_online_tests PRIVATE eawr::platform_net eawr::net eawr::platform eawr::skirmish eawr::ui_model)
     eawr_target_project_warnings(net_viewer_online_tests)
     # The process harness must launch the relay built from this same checkout,
     # including when an offload job selects only this test target.
@@ -250,5 +261,17 @@ add_executable(net_lobby_session_tests lobby_session_tests.cpp)
 target_link_libraries(net_lobby_session_tests PRIVATE eawr::net eawr::platform)
 eawr_target_project_warnings(net_lobby_session_tests)
 add_test(NAME net_lobby_session_contracts COMMAND net_lobby_session_tests)
+
+add_executable(net_galactic_adapter_tests galactic_adapter_tests.cpp)
+target_link_libraries(net_galactic_adapter_tests PRIVATE eawr::net_galactic eawr::platform)
+eawr_target_project_warnings(net_galactic_adapter_tests)
+add_test(NAME net_galactic_adapter_contracts COMMAND net_galactic_adapter_tests)
+set_tests_properties(net_galactic_adapter_contracts PROPERTIES TIMEOUT 600)
+
+add_executable(net_galactic_live_driver_tests galactic_live_driver_tests.cpp)
+target_link_libraries(net_galactic_live_driver_tests PRIVATE eawr::platform_net_galactic eawr::net_galactic eawr::platform)
+eawr_target_project_warnings(net_galactic_live_driver_tests)
+add_test(NAME net_galactic_live_driver_contracts COMMAND net_galactic_live_driver_tests)
+set_tests_properties(net_galactic_live_driver_contracts PROPERTIES TIMEOUT 600)
 
 eawr_label_tests()

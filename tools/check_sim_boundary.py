@@ -398,7 +398,8 @@ def main() -> int:
             checker = Path(__file__).resolve()
             identity = {"checker": "sim_boundary", "root": os.path.normcase(str(root)),
                         "sources": [hashlib.sha256(source.read_bytes()).hexdigest()
-                                    for source in (checker, checker.with_name("boundary_cache.py"))],
+                                    for source in (checker, checker.with_name("boundary_cache.py"),
+                                               checker.parent / "common/eawr_python_helpers.py")],
                         **BoundaryCache.clang_identity(args.clang)}
             cache = BoundaryCache(args.cache_dir, root, identity,
                                   include_dirs=(root / "include", root / "third_party/pugixml/src", generated),

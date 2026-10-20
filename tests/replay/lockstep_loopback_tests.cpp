@@ -3,8 +3,8 @@
 // a divergence and check the gate names the right tick and peer. Arguments: the directories that
 // hold the committed *.eawr-replay files.
 
+#include "../support/check.hpp"
 #include "../support/lockstep_loopback.hpp"
-
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -17,9 +17,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -34,14 +36,12 @@ namespace tactical = eawr::sim::tactical;
 using Peer = lockstep::Peer<lockstep::TacticalAdapter>;
 using Executors = std::vector<const eawr::sim::PartitionExecutor*>;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 std::filesystem::path report_directory = "out/lockstep-loopback";
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 struct CorpusReplay {

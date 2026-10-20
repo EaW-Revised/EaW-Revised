@@ -1,3 +1,7 @@
+// Insert before the anonymous namespace; this is fixture setup only.
+
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_execution.hpp"
 #include "galactic_ai_execution_state.hpp"
@@ -5,17 +9,31 @@
 #include "galactic_ai_state.hpp"
 #include "tactical_ai_internal.hpp"
 #include "galactic_ai_world.hpp"
+#include "galactic_ai_selection_content.hpp"
+#include "galactic_ai_execution_work.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
+#include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
-// Insert before the anonymous namespace; this is fixture setup only.
 namespace eawr::script::foc::ai {
 struct EngineContractAccess {
     static void magic_fixture(Engine& engine, tactical::PlayerId player, std::uint64_t instance,
@@ -31,6 +49,25 @@ struct EngineContractAccess {
         engine.rebuild_runtime_index();
     }
     static void complete_native(Engine& engine) { engine.service_execution(engine.players_.front()); }
+    static PlayerAi& execution_fixture(Engine& engine, std::size_t tasks) {
+        PlayerAi owner; owner.player = 1; owner.galactic = true;
+        owner.functions.push_back({&engine.data_.goals.at("GOAL"), "GOAL", nullptr, {}});
+        Goal goal; goal.id = goal.plan = 7; goal.target = 1; goal.active = true; owner.active.push_back(goal);
+        Plan plan; plan.id = plan.goal = 7; plan.player = 1; plan.definition = 0; plan.taskforces = {1};
+        owner.running.emplace(plan.id, plan);
+        TaskForce force; force.id = 1; force.plan = 7; force.name = "Main";
+        owner.taskforces.emplace(force.id, force);
+        Block block; block.id = 1; block.taskforce = 1; block.kind = Block::Kind::produce;
+        owner.blocks.emplace(block.id, block);
+        BuildTask task; task.taskforce = task.block = 1; task.type = 100; task.source = 0;
+        owner.tasks.assign(tasks, task);
+        engine.players_.clear(); engine.players_.push_back(std::move(owner));
+        Target target; target.id = 1; target.object = 20; engine.targets_[1] = target;
+        engine.rebuild_runtime_index();
+        return engine.players_.front();
+    }
+    static void execution(Engine& engine) { engine.service_galactic_execution(engine.players_.front()); }
+    static void reindex(Engine& engine) { engine.rebuild_runtime_index(); }
 };
 }
 
@@ -46,9 +83,150 @@ using galactic_test::expect;
 using ga::Number;
 using eawr::sim::math::Fixed;
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
+using eawr::testing::result_diagnostic::take;
+
+void execution_work_contracts() {
+    ai::AiData data; ai::GoalType goal; goal.name = "GOAL"; goal.reachability = "ANY";
+    data.goals.emplace(goal.name, goal);
+    ai::PlanDef plan; plan.name = "FIXTURE"; plan.allow_free_store = true;
+    plan.taskforces.resize(2);
+    {
+        gc::SyntheticGalaxyOptions options; options.players = 1; options.planets = 2;
+        options.fleets_per_player = options.members_per_fleet = 1;
+        auto session = take(gc::GalacticSession::create(gc::synthetic_galaxy(options)));
+        auto host = std::make_shared<foc::detail::Host>();
+        host->galactic_execution = std::make_shared<ga::NativeActions>(session, std::make_shared<ai::GalacticFunding>(),
+            ga::NativeActions::Placement{}, std::map<gc::PlayerId, Fixed>{});
+        ai::Engine engine(host, data, {plan});
+        auto& player = ai::EngineContractAccess::execution_fixture(engine, 0);
+        player.blocks.clear();
+        // Interleave two tasks per block in reverse block order. Reduction must
+        // visit each indexed row once, including retained finished tasks.
+        for (unsigned pass = 0; pass != 2; ++pass) for (std::uint64_t id = 64; id != 0; --id) {
+            ai::Block block; block.id = id; player.blocks.emplace(id, block);
+            ai::BuildTask task; task.block = id; task.finished = true;
+            task.failed = pass == 1 && id % 2 == 0;
+            if (task.failed) task.galactic_assembly = ai::BuildTask::GalacticAssembly::failed;
+            player.tasks.push_back(task);
+        }
+        ai::EngineContractAccess::reindex(engine); ai::EngineContractAccess::execution(engine);
+        auto work = ai::galactic_execution_work();
+        expect(work.indexed_tasks == 128 && work.reduced_tasks == 128 && work.failure_tasks == 64,
+            "execution block reduction is linear in retained tasks and stops at the first failed assembly row");
+        for (const auto& [id, block] : player.blocks)
+            expect(block.finished && block.result == (id % 2 != 0), "interleaved tasks retain each block's success/failure result");
+        ai::EngineContractAccess::execution(engine); work = ai::galactic_execution_work();
+        expect(work.reduced_tasks == 128 && work.failure_tasks == 0, "finished failures never emit another failure callback");
+    }
+    std::string baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        gc::GalacticSetup configured; configured.players = {{1, 1, 0}};
+        configured.planets = {{10, {}, 1}, {20, {whole(3), whole(4), {}}, 1}};
+        configured.player_economy = gc::PlayerEconomySetup{{{1, whole(200), whole(1000), 2, 5}}};
+        configured.fiscal = gc::FiscalSetup{whole(2500), {{1, true, whole(1)}}, {{10, {}}, {20, {}}}};
+        configured.rules.fiscal_cycle_frames = 10000;
+        configured.rules.maximum_fleet_movement_distance = Fixed{};
+        configured.fleets = {{30, 1, 10, {{31, 100}, {32, 100}}}};
+        configured.fleet_control = gc::FleetControlSetup{{}, {{100, false, true, false}}, {}};
+        configured.production = gc::ProductionSetup{5, {{1, false, true, true, whole(50), {}, {}, {}, {}}}, {}};
+        gc::PlanetProduction producer; producer.planet = 10; producer.target_owner = producer.starbase_owner = producer.ground_occupier = 1;
+        producer.enabled = producer.surface_accessible = true; producer.ground_slots = producer.space_slots = 3;
+        producer.maximum_ground_forces = 10;
+        gc::ProductionOffer offer; offer.type = 100; offer.price = whole(100); offer.seconds = whole(1);
+        offer.tech = 2; offer.affiliated = offer.direct_build_allowed = true; producer.offers = {offer};
+        gc::PlanetProduction destination; destination.planet = 20;
+        configured.production->planets = {producer, destination};
+        auto session = take(gc::GalacticSession::create(configured));
+        ai::GalacticPerceptionSetup perception; perception.seed = 42;
+        perception.players = {{1, 1, "Empire", "Normal", false, true, false, 10}};
+        perception.planets = {{10, "ALPHA", 1000, {}, {}, {}, {}, {}}, {20, "BETA", 1000, {}, {}, {}, {}, {}}};
+        foc::AiType type; type.type_id = 100; type.name = "UNIT"; type.tech_level = 2; perception.types = {type};
+        auto world = std::make_shared<ai::GalacticWorld>(perception);
+        ai::GalacticConnectivity paths; paths.revision = 1; paths.execution_available = true;
+        paths.execution_routes = {{1, 10, 20, false, ai::real(7), {}, {}}};
+        paths.goal_reach = {{1, 20, "ANY", {10}}};
+        take(world->bind(session.snapshot(), paths, executor, 0, session.next_entity_id()));
+        auto host = std::make_shared<foc::detail::Host>(); host->ai_world = world; host->view = world->view();
+        auto engine = std::make_shared<ai::Engine>(host, data, std::vector{plan});
+        auto& player = ai::EngineContractAccess::execution_fixture(*engine, 3);
+        auto funding = std::make_shared<ai::GalacticFunding>();
+        auto actions = std::make_shared<ga::NativeActions>(session, funding, ga::NativeActions::Placement{},
+            std::map<gc::PlayerId, Fixed>{{1, whole(1)}}, ga::NativeActions::GoalResolver{}, &executor);
+        host->galactic_execution = actions;
+        for (const auto id : {31ULL, 32ULL}) {
+            ga::FreestoreFacts actor; actor.object = {id, 100, 1, 10, ga::FreestoreKind::unit, false, false, false, {}};
+            actor.current_type = 100; actor.parent = 30; actor.ai_usable = actor.qualified = true;
+            take(actions->qualified_freestore().update(actor));
+        }
+        auto catalog = std::make_shared<ai::galactic_goals::MaterializedPlanCatalog>();
+        catalog->constraints["FIXTURE"].forces = {{}, {false, false, true, false, {}}};
+        engine->set_galactic_stage_catalog(catalog);
+        bool usable = true, garrison = true, skip = false;
+        std::uint64_t garrison_reads{}, usability_reads{};
+        engine->set_galactic_stage_garrison([&](auto, const auto&, auto) { ++garrison_reads; return eawr::core::Result<bool>::success(garrison); });
+        engine->set_galactic_stage_combat_skip([&](auto, const auto&, auto) { return eawr::core::Result<bool>::success(skip); });
+        engine->set_galactic_stage_usability([&](auto, const auto&, auto) { ++usability_reads; return eawr::core::Result<bool>::success(usable); });
+        std::size_t calls{};
+        const auto read = [&] { return take(engine->galactic_freestore_selection_facts(1, 20, 31, engine->plans().front())); };
+        const auto uncached = read();
+        expect(uncached.first == ai::real(37) && uncached.second, "execution fixture has the real two-force stage cost");
+        engine->set_galactic_selection([&](auto, auto, const auto&, const auto&) {
+            ++calls;
+            expect(read() == uncached && read() == uncached, "memoized immutable stages preserve the original soft-float result");
+            usable = false; garrison = false;
+            const auto refused = read();
+            expect(refused.first == ai::galactic_goals::rejected_estimate() && !refused.second,
+                "stage reuse still reads live actor usability and garrison predicates");
+            skip = true; expect(read().first == ai::Real{}, "live combat-skip predicate precedes stage reuse");
+            skip = false; usable = garrison = true;
+            if (calls == 2) {
+                paths.revision = 2; paths.goal_reach.front().production_sites.clear();
+                const auto old_input = world->copy_input();
+                take(world->bind(session.snapshot(), paths, executor, 1, session.next_entity_id()));
+                host->view = world->view();
+                expect(world->copy_input() != old_input && read().first == ai::real(74),
+                    "changed immutable world input invalidates stages within the same execution turn");
+                paths.revision = 3; paths.goal_reach.front().production_sites = {10};
+                take(world->bind(session.snapshot(), paths, executor, 2, session.next_entity_id())); host->view = world->view();
+            }
+            if (calls == 3) {
+                const auto old_snapshot = session.snapshot();
+                take(session.add_credits(1, whole(1), whole(1)));
+                expect(session.snapshot() != old_snapshot && read() == uncached,
+                    "changed completed snapshot invalidates stages without changing immutable geometry");
+            }
+            auto input = std::make_shared<ai::GalacticSelectionInput>(); input->complete = true;
+            input->freestore = {{31, ai::real(37), false, 100, false}, {32, ai::real(37), false, 100, false}};
+            return eawr::core::Result<std::shared_ptr<const ai::GalacticSelectionInput>>::success(input);
+        });
+        ai::EngineContractAccess::execution(*engine);
+        const auto work = ai::galactic_execution_work();
+        expect(calls == 3 && player.tasks[0].object == 31 && player.tasks[1].object == 32 && player.tasks[2].failed,
+            "selection inputs retain serial first-available assignment and live assigned membership");
+        expect(work.stage_preparations == 4 && work.stage_reuses == 7 && work.production_sites == 8,
+            "stage preparation scales with distinct immutable publications, not actor reads");
+        expect(garrison_reads == 15 && usability_reads == 12, "cached stage rows never suppress live actor predicates");
+        {
+            // One batch over several actors answers exactly what an independent read of each actor answers,
+            // also while the live per-actor predicates differ between the actors and between the reads.
+            engine->set_galactic_stage_garrison([&](auto, const auto&, auto actor) { return eawr::core::Result<bool>::success(actor == 31 ? garrison : !garrison); });
+            engine->set_galactic_stage_combat_skip([&](auto, const auto&, auto actor) { return eawr::core::Result<bool>::success(actor == 32 && skip); });
+            engine->set_galactic_stage_usability([&](auto, const auto&, auto) { return eawr::core::Result<bool>::success(usable); });
+            for (const bool flip : {false, true}) {
+                garrison = true; skip = flip; usable = !flip;
+                const auto batch = engine->galactic_freestore_selection_batch(1, 20, engine->plans().front());
+                for (const auto actor : {31ULL, 32ULL, 31ULL}) {
+                    const auto alone = engine->galactic_freestore_selection_facts(1, 20, actor, engine->plans().front());
+                    const auto batched = batch(actor);
+                    expect(alone && batched && alone.value() == batched.value(), "batch reader equals the independent single-actor read over a multi-actor fixture");
+                }
+            }
+            garrison = true; skip = false; usable = true;
+        }
+        const auto trace = session.state_sha256() + std::to_string(work.stage_preparations) + std::to_string(work.stage_reuses);
+        if (baseline.empty()) baseline = trace; else expect(trace == baseline, "execution work and ordered assignment agree on 1/2/4/8 workers");
+    }
 }
 
 void immediate_cash_contracts() {
@@ -630,13 +808,7 @@ function ReadCounts() Count = FreeStore.Get_Object_Count() end
     expect(scripts.service(executor, pacing).value().diagnostics.empty() && trace() == before, "load attachment retains restored thread and avoids fresh definitions");
 }
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text); return result.empty() ? std::nullopt : std::optional{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT"); return text && *text ? std::optional{std::string(text)} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 std::string read(const eawr::vfs::Vfs& filesystem, std::string_view path) {
     const auto bytes = filesystem.open(path).value();
@@ -984,10 +1156,10 @@ void installed() {
     }
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_execution_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
+        else { execution_work_contracts(); immediate_cash_contracts(); native_execution_state(); live_execution_restore(); paid_contracts(); routes(); packed_routes(); admission(); safety(); lua_callbacks(); }
     } catch (const std::exception& exception) { std::cerr << exception.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

@@ -82,7 +82,7 @@ void order_independence() {
 }
 } // namespace
 
-int main() {
+int case_galactic_ai_partition_order_tests() {
     try {
         order_independence();
     } catch (const std::exception& error) {

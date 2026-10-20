@@ -1,0 +1,18 @@
+[
+  {
+    "old": "apps/viewer/src/space_populate_compose.cpp#SpacePopulation::compose",
+    "new": "apps/viewer/src/space_populate_arrivals.cpp#SpacePopulation::compose_range"
+  },
+  {
+    "old": "apps/viewer/src/space_populate_compose.cpp#drawable_projectile_effects",
+    "new": "apps/viewer/src/space_populate_arrivals.cpp#drawable_projectile_effects"
+  },
+  {
+    "old": "apps/viewer/src/space_populate_compose.cpp#ViewTest",
+    "new": "apps/viewer/src/space_populate_arrivals.cpp#ViewTest"
+  },
+  {
+    "old": "apps/viewer/src/space_populate_compose.cpp#classify_composed_unit",
+    "new": "apps/viewer/src/space_populate_internal.hpp#classify_composed_unit"
+  }
+]

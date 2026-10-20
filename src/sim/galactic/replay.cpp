@@ -32,12 +32,13 @@ inline constexpr std::uint16_t observer_tag = 12; // coordinator-reserved
 inline constexpr std::uint16_t economy_corruption_tag = 15; // coordinator-reserved
 inline constexpr std::uint16_t native_effects_tag = 16; // coordinator-reserved
 inline constexpr std::uint16_t ability_host_tag = 17; // coordinator-reserved
+inline constexpr std::uint16_t interactive_seat_tag = 18; // solo summary modal policy
 inline constexpr std::uint16_t income_tag = 13; // coordinator-reserved
 // Keep count admission and unknown-tag admission on the same supported table.
 // New extension consumers append their tag here; no separate literal bound.
 inline constexpr std::array header_extension_tags{
     graph_rules_tag, fleet_control_tag, player_economy_tag, movement_tag,
-    seat_control_tag, fiscal_tag, production_tag, control_tag, census_tag, outcomes_tag, observer_tag, income_tag, victory_tag, economy_corruption_tag, native_effects_tag, ability_host_tag};
+    seat_control_tag, fiscal_tag, production_tag, control_tag, census_tag, outcomes_tag, observer_tag, income_tag, victory_tag, economy_corruption_tag, native_effects_tag, ability_host_tag, interactive_seat_tag};
 
 template <typename T>
 [[nodiscard]] core::Result<T> fail(const std::string_view code, std::string message, const std::string_view path = {}) {
@@ -62,6 +63,9 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         return fail<void>(diagnostic_codes::replay_resource_limit, "too many commands");
     }
     const auto& seats = replay.setup.seats;
+    if (replay.setup.interactive_seat.value && std::none_of(seats.begin(), seats.end(), [&](const auto& seat) {
+        return seat.seat_id == replay.setup.interactive_seat && seat.active && seat.kind == SeatKind::human;
+    })) return fail<void>(diagnostic_codes::replay_malformed, "interactive seat must be an active human");
     // Check the final encoded size before building a potentially oversized byte vector.
     std::uint64_t encoded_size = 128 + replay.setup.players.size() * 12 + replay.setup.seats.size() * 18
         + replay.setup.planets.size() * 36 + replay.setup.routes.size() * 24 + replay.setup.fleets.size() * 24;
@@ -70,6 +74,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         encoded_size += 10;
         for (const auto& entry : replay.setup.outcomes) encoded_size += 20 + entry.payload.size();
     }
+    if (replay.setup.interactive_seat.value) encoded_size += 10;
     if (replay.setup.fleet_control) encoded_size += 20 + replay.setup.fleet_control->types.size() * 11
         + replay.setup.fleet_control->detached_units.size() * 28 + replay.setup.fleets.size() * 9;
     if (replay.setup.fiscal) {
@@ -168,7 +173,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         const auto& effect = replay.native_effects[i];
         if (effect.sequence != i + 1 || effect.frontier > replay.final_tick_count
             || effect.phase > NativeEffectPhase::world_service || effect.kind < NativeEffectKind::fleet
-            || effect.kind > NativeEffectKind::income_block
+            || effect.kind > NativeEffectKind::story_reward
             || (effect.phase == NativeEffectPhase::world_service && effect.frontier == replay.final_tick_count)
             || effect.payload.size() > galactic_replay_max_payload)
             return fail<void>(diagnostic_codes::replay_order, "invalid native effect framing, phase or frontier");
@@ -189,15 +194,15 @@ core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& repla
     Bytes bytes(replay_magic.begin(), replay_magic.end());
     detail::put_u16(bytes, galactic_replay_format_version);
     detail::put_u16(bytes, static_cast<std::uint16_t>((setup.debug_commands ? flag_debug_commands : 0)
-        | ((setup.rules.maximum_fleet_movement_distance || setup.player_economy || setup.seat_control || setup.movement || setup.fiscal || setup.control || setup.production || setup.census || !setup.outcomes.empty() || setup.observer || setup.income || setup.victory || setup.economy_corruption || setup.ability_host || !replay.native_effects.empty()) ? flag_header_extensions : 0)));
+        | ((setup.rules.maximum_fleet_movement_distance || setup.player_economy || setup.seat_control || setup.movement || setup.fiscal || setup.control || setup.production || setup.census || !setup.outcomes.empty() || setup.observer || setup.income || setup.victory || setup.economy_corruption || setup.ability_host || setup.interactive_seat.value || !replay.native_effects.empty()) ? flag_header_extensions : 0)));
     detail::put_u32(bytes, galactic_rules_version);
     detail::put_bytes(bytes, setup.content_identity);
     detail::put_bytes(bytes, setup.campaign_identity);
     detail::put_u64(bytes, setup.seed);
     detail::put_u64(bytes, replay.final_tick_count);
-    if (setup.rules.maximum_fleet_movement_distance || setup.player_economy || setup.seat_control || setup.movement || setup.fiscal || setup.control || setup.production || setup.census || !setup.outcomes.empty() || setup.observer || setup.income || setup.victory || setup.economy_corruption || setup.ability_host || !replay.native_effects.empty()) {
+    if (setup.rules.maximum_fleet_movement_distance || setup.player_economy || setup.seat_control || setup.movement || setup.fiscal || setup.control || setup.production || setup.census || !setup.outcomes.empty() || setup.observer || setup.income || setup.victory || setup.economy_corruption || setup.ability_host || setup.interactive_seat.value || !replay.native_effects.empty()) {
         detail::put_u32(bytes, (setup.rules.maximum_fleet_movement_distance ? 1U : 0U)
-            + (setup.fleet_control ? 1U : 0U) + (setup.player_economy ? 1U : 0U) + (setup.seat_control ? 1U : 0U) + (setup.movement ? 1U : 0U) + (setup.fiscal ? 1U : 0U) + (setup.control ? 1U : 0U) + (setup.production ? 1U : 0U) + (setup.census ? 1U : 0U) + (!setup.outcomes.empty() ? 1U : 0U) + (setup.observer ? 1U : 0U) + (setup.income ? 1U : 0U) + (setup.victory ? 1U : 0U) + (setup.economy_corruption ? 1U : 0U) + (setup.ability_host ? 1U : 0U) + (!replay.native_effects.empty() ? 1U : 0U));
+            + (setup.fleet_control ? 1U : 0U) + (setup.player_economy ? 1U : 0U) + (setup.seat_control ? 1U : 0U) + (setup.movement ? 1U : 0U) + (setup.fiscal ? 1U : 0U) + (setup.control ? 1U : 0U) + (setup.production ? 1U : 0U) + (setup.census ? 1U : 0U) + (!setup.outcomes.empty() ? 1U : 0U) + (setup.observer ? 1U : 0U) + (setup.income ? 1U : 0U) + (setup.victory ? 1U : 0U) + (setup.economy_corruption ? 1U : 0U) + (setup.ability_host ? 1U : 0U) + (setup.interactive_seat.value ? 1U : 0U) + (!replay.native_effects.empty() ? 1U : 0U));
     }
     if (setup.rules.maximum_fleet_movement_distance) {
         detail::put_u16(bytes, graph_rules_tag);
@@ -296,6 +301,10 @@ core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& repla
         detail::put_u16(bytes, ability_host_tag); detail::put_u32(bytes, static_cast<std::uint32_t>(payload.size()));
         detail::put_bytes(bytes, payload);
     }
+    if (setup.interactive_seat.value) {
+        detail::put_u16(bytes, interactive_seat_tag); detail::put_u32(bytes, 4);
+        detail::put_u32(bytes, setup.interactive_seat.value);
+    }
     detail::encode_players(bytes, setup.players);
     detail::put_u32(bytes, static_cast<std::uint32_t>(setup.seats.size()));
     for (const auto& seat : setup.seats) {
@@ -330,259 +339,336 @@ core::Result<std::vector<std::uint8_t>> write_replay(const GalacticReplay& repla
     return core::Result<Bytes>::success(std::move(bytes));
 }
 
-core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> bytes, const std::string_view logical_path) {
-    using Out = GalacticReplay;
+namespace {
+
+core::Result<void> parse_native_effects_extension(sim::detail::Reader& input, GalacticReplay& replay,
+    const std::string_view logical_path) {
+    using Out = void;
     const auto malformed = [&](const std::string& what) {
         return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
     };
-    if (bytes.size() > galactic_replay_max_bytes) {
-        return fail<Out>(diagnostic_codes::replay_resource_limit, "the replay exceeds the size limit", logical_path);
+    std::uint64_t effects{};
+    if (!input.read_u64(effects) || effects > galactic_max_commands || effects * 23 > input.remaining())
+        return malformed("bad native effect count");
+    for (std::uint64_t i = 0; i < effects; ++i) {
+        NativeEffect effect; std::uint8_t phase{}; std::uint16_t kind{}; std::uint32_t effect_length{};
+        if (!input.read_u64(effect.frontier) || !input.read_u64(effect.sequence) || !input.read_u8(phase)
+            || !input.read_u16(kind) || !input.read_u32(effect_length) || effect_length > galactic_replay_max_payload || effect_length > input.remaining())
+            return malformed("truncated native effect");
+        effect.phase = static_cast<NativeEffectPhase>(phase); effect.kind = static_cast<NativeEffectKind>(kind);
+        effect.payload.resize(effect_length); if (!input.read_bytes(effect.payload)) return malformed("truncated native payload");
+        replay.native_effects.push_back(std::move(effect));
     }
-    sim::detail::Reader reader(bytes);
-    std::array<std::uint8_t, 8> magic{};
-    if (!reader.read_bytes(magic) || magic != replay_magic) return malformed("not a galactic replay (EAWRGCR)");
-    std::uint16_t version{};
-    std::uint16_t flags{};
-    std::uint32_t rules{};
-    if (!reader.read_u16(version) || !reader.read_u16(flags) || !reader.read_u32(rules)) return malformed("truncated header");
-    if (version != galactic_replay_format_version) {
-        return fail<Out>(diagnostic_codes::replay_version, "unsupported galactic replay version " + std::to_string(version), logical_path);
+    if (input.remaining() || replay.native_effects.empty()) return malformed("invalid native journal extension");
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_outcomes_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    std::uint32_t entries{};
+    if (!count(entries, 20) || !entries) return malformed("invalid outcome count");
+    for (std::uint32_t i = 0; i < entries; ++i) {
+        OutcomeJournalEntry entry; std::uint32_t size{};
+        if (!input.read_u64(entry.completed_tick) || !input.read_u64(entry.conflict)
+            || !input.read_u32(size) || !size || size > 1'048'576 || size > input.remaining())
+            return malformed("invalid outcome entry");
+        entry.payload.resize(size); if (!input.read_bytes(entry.payload)) return malformed("truncated outcome payload");
+        setup.outcomes.push_back(std::move(entry));
     }
-    if (rules != galactic_rules_version) {
-        return fail<Out>(diagnostic_codes::replay_version, "recorded under galactic rules version " + std::to_string(rules)
-                + ", this build runs " + std::to_string(galactic_rules_version), logical_path);
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_graph_rules_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    std::vector<std::pair<RouteId, math::Fixed>>& route_factors, const auto& count,
+    const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    std::int64_t maximum{}; std::uint32_t routes{};
+    if (!input.read_i64(maximum) || !count(routes, 16)) return malformed("bad graph rules extension");
+    setup.rules.maximum_fleet_movement_distance = math::Fixed::from_raw(maximum);
+    for (std::uint32_t i = 0; i < routes; ++i) {
+        RouteId id{}; std::int64_t factor{};
+        if (!input.read_u64(id) || !input.read_i64(factor)) return malformed("truncated graph factors");
+        route_factors.emplace_back(id, math::Fixed::from_raw(factor));
     }
-    if ((flags & ~(flag_debug_commands | flag_header_extensions)) != 0) return malformed("unknown header flags");
-    Out replay;
-    auto& setup = replay.setup;
-    setup.debug_commands = (flags & flag_debug_commands) != 0;
-    if (!reader.read_bytes(setup.content_identity) || !reader.read_bytes(setup.campaign_identity)
-        || !reader.read_u64(setup.seed) || !reader.read_u64(replay.final_tick_count)) {
-        return malformed("truncated header");
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_seat_control_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    setup.seat_control.emplace(); auto& control = *setup.seat_control;
+    std::uint32_t teams{}, controllers{};
+    if (!count(teams, 9) || teams > 2) return malformed("bad team policy count");
+    for (std::uint32_t i = 0; i < teams; ++i) {
+        TeamLead team; std::uint8_t perspective{};
+        if (!input.read_u32(team.side) || !input.read_u32(team.lead.value)
+            || !input.read_u8(perspective) || perspective > 1) return malformed("bad team policy");
+        team.observer_ai = perspective != 0; control.teams.push_back(team);
     }
-    std::vector<std::pair<RouteId, math::Fixed>> route_factors;
-    std::vector<std::pair<FleetId, std::uint8_t>> fleet_slots;
-    std::vector<std::pair<FleetId, FleetMotion>> fleet_motions;
-    if ((flags & flag_header_extensions) != 0) {
-        std::uint32_t extensions{};
-        if (!reader.read_u32(extensions) || extensions == 0 || extensions > header_extension_tags.size()) return malformed("bad extension count");
-        std::uint16_t previous_tag{};
-        for (std::uint32_t index = 0; index < extensions; ++index) {
-            std::uint32_t length{}; std::uint16_t tag{};
-            if (!reader.read_u16(tag) || tag <= previous_tag
-                || std::find(header_extension_tags.begin(), header_extension_tags.end(), tag) == header_extension_tags.end()
-                || !reader.read_u32(length) || length > reader.remaining()) return malformed("unknown or invalid header extension");
-            previous_tag = tag;
-            std::vector<std::uint8_t> payload(length);
-            if (!reader.read_bytes(payload)) return malformed("truncated extension");
-            sim::detail::Reader input(payload);
-            const auto count = [&](std::uint32_t& value, const std::size_t width) {
-                return input.read_u32(value) && value <= galactic_max_objects && std::size_t{value} * width <= input.remaining();
-            };
-            if (tag == native_effects_tag) {
-                std::uint64_t effects{};
-                if (!input.read_u64(effects) || effects > galactic_max_commands || effects * 23 > input.remaining())
-                    return malformed("bad native effect count");
-                for (std::uint64_t i = 0; i < effects; ++i) {
-                    NativeEffect effect; std::uint8_t phase{}; std::uint16_t kind{}; std::uint32_t effect_length{};
-                    if (!input.read_u64(effect.frontier) || !input.read_u64(effect.sequence) || !input.read_u8(phase)
-                        || !input.read_u16(kind) || !input.read_u32(effect_length) || effect_length > galactic_replay_max_payload || effect_length > input.remaining())
-                        return malformed("truncated native effect");
-                    effect.phase = static_cast<NativeEffectPhase>(phase); effect.kind = static_cast<NativeEffectKind>(kind);
-                    effect.payload.resize(effect_length); if (!input.read_bytes(effect.payload)) return malformed("truncated native payload");
-                    replay.native_effects.push_back(std::move(effect));
-                }
-                if (input.remaining() || replay.native_effects.empty()) return malformed("invalid native journal extension");
-                continue;
-            }
-            if (tag == ability_host_tag) {
-                auto decoded = detail::decode_ability_setup(payload);
-                if (!decoded) return malformed("invalid live ability host extension");
-                setup.ability_host = std::move(*decoded); continue;
-            }
-            if (tag == economy_corruption_tag) {
-                auto decoded = detail::decode_economy_corruption(payload);
-                if (!decoded) return malformed("invalid corruption economy extension");
-                setup.economy_corruption = std::move(*decoded);
-                continue;
-            }
-            if (tag == income_tag) {
-                auto decoded = detail::decode_income(payload);
-                if (!decoded) return malformed("invalid income extension");
-                setup.income = std::move(*decoded);
-                continue;
-            }
-            if (tag == observer_tag) {
-                auto decoded = detail::decode_observer(payload);
-                if (!decoded) return malformed("invalid observer extension");
-                setup.observer = std::move(*decoded);
-                continue;
-            }
-            if (tag == census_tag) {
-                auto decoded = detail::decode_census(payload);
-                if (!decoded) return malformed("invalid census extension");
-                setup.census = std::move(*decoded);
-                continue;
-            } else if (tag == victory_tag) {
-                auto value = detail::decode_victory(payload);
-                if (!value) return malformed("bad victory extension");
-                setup.victory = std::move(*value);
-                continue;
-            } else if (tag == outcomes_tag) {
-                std::uint32_t entries{};
-                if (!count(entries, 20) || !entries) return malformed("invalid outcome count");
-                for (std::uint32_t i = 0; i < entries; ++i) {
-                    OutcomeJournalEntry entry; std::uint32_t size{};
-                    if (!input.read_u64(entry.completed_tick) || !input.read_u64(entry.conflict)
-                        || !input.read_u32(size) || !size || size > 1'048'576 || size > input.remaining())
-                        return malformed("invalid outcome entry");
-                    entry.payload.resize(size); if (!input.read_bytes(entry.payload)) return malformed("truncated outcome payload");
-                    setup.outcomes.push_back(std::move(entry));
-                }
-            } else if (tag == production_tag) {
-                auto decoded = detail::decode_production(payload);
-                if (!decoded) return malformed("invalid production extension");
-                setup.production = std::move(*decoded);
-                continue;
-            } else if (tag == graph_rules_tag) {
-                std::int64_t maximum{}; std::uint32_t routes{};
-                if (!input.read_i64(maximum) || !count(routes, 16)) return malformed("bad graph rules extension");
-                setup.rules.maximum_fleet_movement_distance = math::Fixed::from_raw(maximum);
-                for (std::uint32_t i = 0; i < routes; ++i) {
-                    RouteId id{}; std::int64_t factor{};
-                    if (!input.read_u64(id) || !input.read_i64(factor)) return malformed("truncated graph factors");
-                    route_factors.emplace_back(id, math::Fixed::from_raw(factor));
-                }
-            } else if (tag == control_tag) {
-                auto decoded = detail::decode_control(payload);
-                if (!decoded) return malformed(decoded.error().message);
-                setup.control = std::move(decoded).value();
-                continue;
-            } else if (tag == movement_tag) {
-                auto decoded = detail::decode_movement(payload);
-                if (!decoded) return malformed(decoded.error().message);
-                setup.movement = std::move(decoded.value().inputs);
-                fleet_motions = std::move(decoded.value().fleets);
-                continue;
-            } else if (tag == seat_control_tag) {
-                setup.seat_control.emplace(); auto& control = *setup.seat_control;
-                std::uint32_t teams{}, controllers{};
-                if (!count(teams, 9) || teams > 2) return malformed("bad team policy count");
-                for (std::uint32_t i = 0; i < teams; ++i) {
-                    TeamLead team; std::uint8_t perspective{};
-                    if (!input.read_u32(team.side) || !input.read_u32(team.lead.value)
-                        || !input.read_u8(perspective) || perspective > 1) return malformed("bad team policy");
-                    team.observer_ai = perspective != 0; control.teams.push_back(team);
-                }
-                if (!count(controllers, 14) || controllers > galactic_max_players) return malformed("bad controller count");
-                for (std::uint32_t i = 0; i < controllers; ++i) {
-                    FactionController row; std::uint8_t kind{}, dropout{};
-                    if (!input.read_u32(row.player) || !input.read_u8(kind) || !input.read_u8(dropout))
-                        return malformed("bad controller policy");
-                    row.kind = static_cast<FactionControl>(kind); row.dropout = static_cast<FactionControl>(dropout);
-                    for (auto* value : {&row.configuration, &row.state}) {
-                        std::uint32_t size{};
-                        if (!input.read_u32(size) || size > 16384 || size > input.remaining()) return malformed("bad controller payload");
-                        value->resize(size); if (!input.read_bytes(*value)) return malformed("truncated controller payload");
-                    }
-                    control.controllers.push_back(std::move(row));
-                }
-            } else if (tag == fleet_control_tag) {
-                setup.fleet_control.emplace(); auto& control = *setup.fleet_control;
-                const auto flag = [&](bool& value) {
-                    std::uint8_t raw{}; if (!input.read_u8(raw) || raw > 1) return false;
-                    value = raw != 0; return true;
-                };
-                if (!flag(control.gates.queued_campaign_conflict) || !flag(control.gates.active_speech)) return malformed("bad fleet gates");
-                std::uint32_t types{}, units{}, slots{};
-                if (!count(types, 11)) return malformed("bad fleet types");
-                for (std::uint32_t i = 0; i < types; ++i) {
-                    FleetTypeTraits row;
-                    if (!input.read_u64(row.type) || !flag(row.transport) || !flag(row.can_hyperspace_without_ability) || !flag(row.requires_live_children)) return malformed("bad fleet type");
-                    control.types.push_back(row);
-                }
-                if (!count(units, 28)) return malformed("bad detached unit count");
-                for (std::uint32_t i = 0; i < units; ++i) {
-                    DetachedUnit row;
-                    if (!input.read_u64(row.member.id) || !input.read_u64(row.member.type) || !input.read_u32(row.owner)
-                        || !input.read_u64(row.planet)) return malformed("truncated detached unit");
-                    control.detached_units.push_back(row);
-                }
-                if (!count(slots, 9)) return malformed("bad fleet slot count");
-                for (std::uint32_t i = 0; i < slots; ++i) {
-                    FleetId id{}; std::uint8_t slot{};
-                    if (!input.read_u64(id) || !input.read_u8(slot) || slot > 2) return malformed("bad fleet slot");
-                    fleet_slots.emplace_back(id, slot);
-                }
-            } else if (tag == fiscal_tag) {
-                setup.fiscal.emplace(); auto& fiscal = *setup.fiscal;
-                std::int64_t cap{}; std::uint32_t rows{};
-                if (!input.read_i64(cap) || !count(rows, 13) || rows > galactic_max_players) return malformed("bad fiscal players");
-                fiscal.credit_cap_per_planet = math::Fixed::from_raw(cap);
-                for (std::uint32_t i = 0; i < rows; ++i) {
-                    FiscalPlayer row; std::uint8_t eligible{}; std::int64_t multiplier{};
-                    if (!input.read_u32(row.player) || !input.read_u8(eligible) || eligible > 1 || !input.read_i64(multiplier)) return malformed("bad fiscal player");
-                    row.earns_planet_income = eligible != 0; row.positive_credit_multiplier = math::Fixed::from_raw(multiplier);
-                    fiscal.players.push_back(row);
-                }
-                if (!count(rows, 16)) return malformed("bad fiscal planets");
-                for (std::uint32_t i = 0; i < rows; ++i) {
-                    PlanetBaseIncome row; std::int64_t credits{};
-                    if (!input.read_u64(row.planet) || !input.read_i64(credits)) return malformed("bad fiscal planet");
-                    row.credits = math::Fixed::from_raw(credits); fiscal.planets.push_back(row);
-                }
-                if (input.remaining()) {
-                    std::uint8_t tail_version{}; std::int64_t bonus{}, penalty{};
-                    if (!input.read_u8(tail_version) || tail_version != 1 || !input.read_i64(bonus) || !input.read_i64(penalty))
-                        return malformed("bad fiscal contribution tail tail_version or constants");
-                    auto& contribution_rules = fiscal.contributions.emplace();
-                    contribution_rules.maximum_alignment_bonus = math::Fixed::from_raw(bonus);
-                    contribution_rules.maximum_alignment_penalty = math::Fixed::from_raw(penalty);
-                    if (!count(rows, 16)) return malformed("bad fiscal political curve count");
-                    for (std::uint32_t i = 0; i < rows; ++i) {
-                        std::int64_t x{}, y{};
-                        if (!input.read_i64(x) || !input.read_i64(y)) return malformed("bad fiscal curve point");
-                        contribution_rules.political_curve.push_back({math::Fixed::from_raw(x), math::Fixed::from_raw(y)});
-                    }
-                    if (!count(rows, 5) || rows != fiscal.players.size()) return malformed("bad fiscal faction count");
-                    for (std::uint32_t i = 0; i < rows; ++i) {
-                        IncomeFaction row; std::uint8_t alignment{};
-                        if (!input.read_u32(row.player) || !input.read_u8(alignment) || alignment > 2) return malformed("bad fiscal faction alignment");
-                        row.alignment = static_cast<IncomeAlignment>(alignment); contribution_rules.factions.push_back(row);
-                    }
-                    if (!count(rows, 17) || rows != fiscal.planets.size()) return malformed("bad fiscal alignment planet count");
-                    for (std::uint32_t i = 0; i < rows; ++i) {
-                        IncomePlanet row; std::uint8_t alignment{}; std::int64_t strength{};
-                        if (!input.read_u64(row.planet) || !input.read_u8(alignment) || alignment > 2 || !input.read_i64(strength))
-                            return malformed("bad fiscal planet alignment");
-                        row.alignment = static_cast<IncomeAlignment>(alignment); row.strength = math::Fixed::from_raw(strength); contribution_rules.planets.push_back(row);
-                    }
-                    if (!count(rows, 16)) return malformed("bad fiscal trade count");
-                    for (std::uint32_t i = 0; i < rows; ++i) {
-                        IncomeRoute row; std::int64_t factor{};
-                        if (!input.read_u64(row.route) || !input.read_i64(factor)) return malformed("bad fiscal trade factor");
-                        row.factor = math::Fixed::from_raw(factor); contribution_rules.routes.push_back(row);
-                    }
-                }
-            } else {
-                std::uint32_t rows{};
-                if (!count(rows, 36) || rows > galactic_max_players) return malformed("bad player economy count");
-                setup.player_economy.emplace();
-                for (std::uint32_t i = 0; i < rows; ++i) {
-                    GalacticPlayerEconomy row; std::int64_t credits{}, cap{};
-                    if (!input.read_u32(row.player) || !input.read_i64(credits) || !input.read_i64(cap)
-                        || !input.read_i64(row.current_tech) || !input.read_i64(row.maximum_tech))
-                        return malformed("truncated player economy row");
-                    row.credits = math::Fixed::from_raw(credits); row.credit_cap = math::Fixed::from_raw(cap);
-                    setup.player_economy->players.push_back(row);
-                }
-            }
-            if (input.remaining() != 0) return malformed("extension has trailing bytes");
+    if (!count(controllers, 14) || controllers > galactic_max_players) return malformed("bad controller count");
+    for (std::uint32_t i = 0; i < controllers; ++i) {
+        FactionController row; std::uint8_t kind{}, dropout{};
+        if (!input.read_u32(row.player) || !input.read_u8(kind) || !input.read_u8(dropout))
+            return malformed("bad controller policy");
+        row.kind = static_cast<FactionControl>(kind); row.dropout = static_cast<FactionControl>(dropout);
+        for (auto* value : {&row.configuration, &row.state}) {
+            std::uint32_t size{};
+            if (!input.read_u32(size) || size > 16384 || size > input.remaining()) return malformed("bad controller payload");
+            value->resize(size); if (!input.read_bytes(*value)) return malformed("truncated controller payload");
         }
+        control.controllers.push_back(std::move(row));
     }
-    // Counts are bounded before anything is reserved, so a hostile count cannot allocate.
-    const auto count = [&](std::uint32_t& value, const std::size_t limit, const std::size_t row_bytes) {
-        return reader.read_u32(value) && value <= limit && std::size_t{value} * row_bytes <= reader.remaining();
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_fleet_control_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    std::vector<std::pair<FleetId, std::uint8_t>>& fleet_slots, const auto& count,
+    const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    setup.fleet_control.emplace(); auto& control = *setup.fleet_control;
+    const auto flag = [&](bool& value) {
+        std::uint8_t raw{}; if (!input.read_u8(raw) || raw > 1) return false;
+        value = raw != 0; return true;
+    };
+    if (!flag(control.gates.queued_campaign_conflict) || !flag(control.gates.active_speech)) return malformed("bad fleet gates");
+    std::uint32_t types{}, units{}, slots{};
+    if (!count(types, 11)) return malformed("bad fleet types");
+    for (std::uint32_t i = 0; i < types; ++i) {
+        FleetTypeTraits row;
+        if (!input.read_u64(row.type) || !flag(row.transport) || !flag(row.can_hyperspace_without_ability) || !flag(row.requires_live_children)) return malformed("bad fleet type");
+        control.types.push_back(row);
+    }
+    if (!count(units, 28)) return malformed("bad detached unit count");
+    for (std::uint32_t i = 0; i < units; ++i) {
+        DetachedUnit row;
+        if (!input.read_u64(row.member.id) || !input.read_u64(row.member.type) || !input.read_u32(row.owner)
+            || !input.read_u64(row.planet)) return malformed("truncated detached unit");
+        control.detached_units.push_back(row);
+    }
+    if (!count(slots, 9)) return malformed("bad fleet slot count");
+    for (std::uint32_t i = 0; i < slots; ++i) {
+        FleetId id{}; std::uint8_t slot{};
+        if (!input.read_u64(id) || !input.read_u8(slot) || slot > 2) return malformed("bad fleet slot");
+        fleet_slots.emplace_back(id, slot);
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_fiscal_contributions(sim::detail::Reader& input, FiscalSetup& fiscal, std::uint32_t& rows,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    std::uint8_t tail_version{}; std::int64_t bonus{}, penalty{};
+    if (!input.read_u8(tail_version) || tail_version != 1 || !input.read_i64(bonus) || !input.read_i64(penalty))
+        return malformed("bad fiscal contribution tail tail_version or constants");
+    auto& contribution_rules = fiscal.contributions.emplace();
+    contribution_rules.maximum_alignment_bonus = math::Fixed::from_raw(bonus);
+    contribution_rules.maximum_alignment_penalty = math::Fixed::from_raw(penalty);
+    if (!count(rows, 16)) return malformed("bad fiscal political curve count");
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        std::int64_t x{}, y{};
+        if (!input.read_i64(x) || !input.read_i64(y)) return malformed("bad fiscal curve point");
+        contribution_rules.political_curve.push_back({math::Fixed::from_raw(x), math::Fixed::from_raw(y)});
+    }
+    if (!count(rows, 5) || rows != fiscal.players.size()) return malformed("bad fiscal faction count");
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        IncomeFaction row; std::uint8_t alignment{};
+        if (!input.read_u32(row.player) || !input.read_u8(alignment) || alignment > 2) return malformed("bad fiscal faction alignment");
+        row.alignment = static_cast<IncomeAlignment>(alignment); contribution_rules.factions.push_back(row);
+    }
+    if (!count(rows, 17) || rows != fiscal.planets.size()) return malformed("bad fiscal alignment planet count");
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        IncomePlanet row; std::uint8_t alignment{}; std::int64_t strength{};
+        if (!input.read_u64(row.planet) || !input.read_u8(alignment) || alignment > 2 || !input.read_i64(strength))
+            return malformed("bad fiscal planet alignment");
+        row.alignment = static_cast<IncomeAlignment>(alignment); row.strength = math::Fixed::from_raw(strength); contribution_rules.planets.push_back(row);
+    }
+    if (!count(rows, 16)) return malformed("bad fiscal trade count");
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        IncomeRoute row; std::int64_t factor{};
+        if (!input.read_u64(row.route) || !input.read_i64(factor)) return malformed("bad fiscal trade factor");
+        row.factor = math::Fixed::from_raw(factor); contribution_rules.routes.push_back(row);
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_fiscal_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    setup.fiscal.emplace(); auto& fiscal = *setup.fiscal;
+    std::int64_t cap{}; std::uint32_t rows{};
+    if (!input.read_i64(cap) || !count(rows, 13) || rows > galactic_max_players) return malformed("bad fiscal players");
+    fiscal.credit_cap_per_planet = math::Fixed::from_raw(cap);
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        FiscalPlayer row; std::uint8_t eligible{}; std::int64_t multiplier{};
+        if (!input.read_u32(row.player) || !input.read_u8(eligible) || eligible > 1 || !input.read_i64(multiplier)) return malformed("bad fiscal player");
+        row.earns_planet_income = eligible != 0; row.positive_credit_multiplier = math::Fixed::from_raw(multiplier);
+        fiscal.players.push_back(row);
+    }
+    if (!count(rows, 16)) return malformed("bad fiscal planets");
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        PlanetBaseIncome row; std::int64_t credits{};
+        if (!input.read_u64(row.planet) || !input.read_i64(credits)) return malformed("bad fiscal planet");
+        row.credits = math::Fixed::from_raw(credits); fiscal.planets.push_back(row);
+    }
+    if (input.remaining()) {
+        if (auto parsed = parse_fiscal_contributions(input, fiscal, rows, count, logical_path); !parsed)
+            return core::Result<Out>::failure(parsed.error());
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_player_economy_extension(sim::detail::Reader& input, GalacticSetup& setup,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    std::uint32_t rows{};
+    if (!count(rows, 36) || rows > galactic_max_players) return malformed("bad player economy count");
+    setup.player_economy.emplace();
+    for (std::uint32_t i = 0; i < rows; ++i) {
+        GalacticPlayerEconomy row; std::int64_t credits{}, cap{};
+        if (!input.read_u32(row.player) || !input.read_i64(credits) || !input.read_i64(cap)
+            || !input.read_i64(row.current_tech) || !input.read_i64(row.maximum_tech))
+            return malformed("truncated player economy row");
+        row.credits = math::Fixed::from_raw(credits); row.credit_cap = math::Fixed::from_raw(cap);
+        setup.player_economy->players.push_back(row);
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_extensions(sim::detail::Reader& reader, GalacticReplay& replay,
+    std::vector<std::pair<RouteId, math::Fixed>>& route_factors,
+    std::vector<std::pair<FleetId, std::uint8_t>>& fleet_slots,
+    std::vector<std::pair<FleetId, FleetMotion>>& fleet_motions,
+    const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    auto& setup = replay.setup;
+    std::uint32_t extensions{};
+    if (!reader.read_u32(extensions) || extensions == 0 || extensions > header_extension_tags.size()) return malformed("bad extension count");
+    std::uint16_t previous_tag{};
+    for (std::uint32_t index = 0; index < extensions; ++index) {
+        std::uint32_t length{}; std::uint16_t tag{};
+        if (!reader.read_u16(tag) || tag <= previous_tag
+            || std::find(header_extension_tags.begin(), header_extension_tags.end(), tag) == header_extension_tags.end()
+            || !reader.read_u32(length) || length > reader.remaining()) return malformed("unknown or invalid header extension");
+        previous_tag = tag;
+        std::vector<std::uint8_t> payload(length);
+        if (!reader.read_bytes(payload)) return malformed("truncated extension");
+        sim::detail::Reader input(payload);
+        const auto count = [&](std::uint32_t& value, const std::size_t width) {
+            return input.read_u32(value) && value <= galactic_max_objects && std::size_t{value} * width <= input.remaining();
+        };
+        if (tag == interactive_seat_tag) {
+            if (!input.read_u32(setup.interactive_seat.value) || !setup.interactive_seat.value || input.remaining())
+                return malformed("invalid interactive seat extension");
+            continue;
+        }
+        if (tag == native_effects_tag) {
+            if (auto parsed = parse_native_effects_extension(input, replay, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+            continue;
+        }
+        if (tag == ability_host_tag) {
+            auto decoded = detail::decode_ability_setup(payload);
+            if (!decoded) return malformed("invalid live ability host extension");
+            setup.ability_host = std::move(*decoded); continue;
+        }
+        if (tag == economy_corruption_tag) {
+            auto decoded = detail::decode_economy_corruption(payload);
+            if (!decoded) return malformed("invalid corruption economy extension");
+            setup.economy_corruption = std::move(*decoded);
+            continue;
+        }
+        if (tag == income_tag) {
+            auto decoded = detail::decode_income(payload);
+            if (!decoded) return malformed("invalid income extension");
+            setup.income = std::move(*decoded);
+            continue;
+        }
+        if (tag == observer_tag) {
+            auto decoded = detail::decode_observer(payload);
+            if (!decoded) return malformed("invalid observer extension");
+            setup.observer = std::move(*decoded);
+            continue;
+        }
+        if (tag == census_tag) {
+            auto decoded = detail::decode_census(payload);
+            if (!decoded) return malformed("invalid census extension");
+            setup.census = std::move(*decoded);
+            continue;
+        } else if (tag == victory_tag) {
+            auto value = detail::decode_victory(payload);
+            if (!value) return malformed("bad victory extension");
+            setup.victory = std::move(*value);
+            continue;
+        } else if (tag == outcomes_tag) {
+            if (auto parsed = parse_outcomes_extension(input, setup, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        } else if (tag == production_tag) {
+            auto decoded = detail::decode_production(payload);
+            if (!decoded) return malformed("invalid production extension");
+            setup.production = std::move(*decoded);
+            continue;
+        } else if (tag == graph_rules_tag) {
+            if (auto parsed = parse_graph_rules_extension(input, setup, route_factors, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        } else if (tag == control_tag) {
+            auto decoded = detail::decode_control(payload);
+            if (!decoded) return malformed(decoded.error().message);
+            setup.control = std::move(decoded).value();
+            continue;
+        } else if (tag == movement_tag) {
+            auto decoded = detail::decode_movement(payload);
+            if (!decoded) return malformed(decoded.error().message);
+            setup.movement = std::move(decoded.value().inputs);
+            fleet_motions = std::move(decoded.value().fleets);
+            continue;
+        } else if (tag == seat_control_tag) {
+            if (auto parsed = parse_seat_control_extension(input, setup, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        } else if (tag == fleet_control_tag) {
+            if (auto parsed = parse_fleet_control_extension(input, setup, fleet_slots, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        } else if (tag == fiscal_tag) {
+            if (auto parsed = parse_fiscal_extension(input, setup, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        } else {
+            if (auto parsed = parse_player_economy_extension(input, setup, count, logical_path); !parsed)
+                return core::Result<Out>::failure(parsed.error());
+        }
+        if (input.remaining() != 0) return malformed("extension has trailing bytes");
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_participants(sim::detail::Reader& reader, GalacticSetup& setup,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
     };
     std::uint32_t players{};
     if (!count(players, galactic_max_players, 12)) return malformed("bad player count");
@@ -609,6 +695,18 @@ core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> by
         setup.seats.push_back(seat);
     }
     if (!reader.read_u32(setup.rules.fiscal_cycle_frames)) return malformed("truncated rules");
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_objects(sim::detail::Reader& reader, GalacticSetup& setup,
+    std::vector<std::pair<RouteId, math::Fixed>>& route_factors,
+    std::vector<std::pair<FleetId, std::uint8_t>>& fleet_slots,
+    std::vector<std::pair<FleetId, FleetMotion>>& fleet_motions,
+    const auto& count, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
     std::uint32_t planets{};
     if (!count(planets, galactic_max_objects, 36)) return malformed("bad planet count");
     for (std::uint32_t index = 0; index < planets; ++index) {
@@ -678,6 +776,15 @@ core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> by
             setup.fleets[i].motion = std::move(fleet_motions[i].second);
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_commands(sim::detail::Reader& reader, GalacticReplay& replay,
+    const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
     std::uint64_t commands{};
     if (!reader.read_u64(commands) || commands > galactic_max_commands || commands * 27 > reader.remaining()) {
         return malformed("bad command count");
@@ -704,6 +811,81 @@ core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> by
         }
         replay.commands.push_back({key, std::move(*payload)});
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_preamble(sim::detail::Reader& reader, std::uint16_t& version, std::uint16_t& flags,
+    std::uint32_t& rules, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    if (!reader.read_u16(version) || !reader.read_u16(flags) || !reader.read_u32(rules)) return malformed("truncated header");
+    if (version != galactic_replay_format_version) {
+        return fail<Out>(diagnostic_codes::replay_version, "unsupported galactic replay version " + std::to_string(version), logical_path);
+    }
+    if (rules != galactic_rules_version) {
+        return fail<Out>(diagnostic_codes::replay_version, "recorded under galactic rules version " + std::to_string(rules)
+                + ", this build runs " + std::to_string(galactic_rules_version), logical_path);
+    }
+    if ((flags & ~(flag_debug_commands | flag_header_extensions)) != 0) return malformed("unknown header flags");
+    return core::Result<void>::success();
+}
+
+core::Result<void> parse_replay_header(sim::detail::Reader& reader, GalacticReplay& replay,
+    const std::uint16_t flags, const std::string_view logical_path) {
+    using Out = void;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    auto& setup = replay.setup;
+    setup.debug_commands = (flags & flag_debug_commands) != 0;
+    if (!reader.read_bytes(setup.content_identity) || !reader.read_bytes(setup.campaign_identity)
+        || !reader.read_u64(setup.seed) || !reader.read_u64(replay.final_tick_count)) {
+        return malformed("truncated header");
+    }
+    return core::Result<void>::success();
+}
+
+} // namespace
+
+core::Result<GalacticReplay> parse_replay(const std::span<const std::uint8_t> bytes, const std::string_view logical_path) {
+    using Out = GalacticReplay;
+    const auto malformed = [&](const std::string& what) {
+        return fail<Out>(diagnostic_codes::replay_malformed, what, logical_path);
+    };
+    if (bytes.size() > galactic_replay_max_bytes) {
+        return fail<Out>(diagnostic_codes::replay_resource_limit, "the replay exceeds the size limit", logical_path);
+    }
+    sim::detail::Reader reader(bytes);
+    std::array<std::uint8_t, 8> magic{};
+    if (!reader.read_bytes(magic) || magic != replay_magic) return malformed("not a galactic replay (EAWRGCR)");
+    std::uint16_t version{};
+    std::uint16_t flags{};
+    std::uint32_t rules{};
+    if (auto parsed = parse_replay_preamble(reader, version, flags, rules, logical_path); !parsed)
+        return core::Result<Out>::failure(parsed.error());
+    Out replay;
+    auto& setup = replay.setup;
+    if (auto parsed = parse_replay_header(reader, replay, flags, logical_path); !parsed)
+        return core::Result<Out>::failure(parsed.error());
+    std::vector<std::pair<RouteId, math::Fixed>> route_factors;
+    std::vector<std::pair<FleetId, std::uint8_t>> fleet_slots;
+    std::vector<std::pair<FleetId, FleetMotion>> fleet_motions;
+    if ((flags & flag_header_extensions) != 0) {
+        if (auto parsed = parse_replay_extensions(reader, replay, route_factors, fleet_slots, fleet_motions, logical_path); !parsed)
+            return core::Result<Out>::failure(parsed.error());
+    }
+    // Counts are bounded before anything is reserved, so a hostile count cannot allocate.
+    const auto count = [&](std::uint32_t& value, const std::size_t limit, const std::size_t row_bytes) {
+        return reader.read_u32(value) && value <= limit && std::size_t{value} * row_bytes <= reader.remaining();
+    };
+    if (auto parsed = parse_replay_participants(reader, setup, count, logical_path); !parsed)
+        return core::Result<Out>::failure(parsed.error());
+    if (auto parsed = parse_replay_objects(reader, setup, route_factors, fleet_slots, fleet_motions, count, logical_path); !parsed)
+        return core::Result<Out>::failure(parsed.error());
+    if (auto parsed = parse_replay_commands(reader, replay, logical_path); !parsed)
+        return core::Result<Out>::failure(parsed.error());
     if (reader.remaining() != 0) return malformed("trailing bytes after the last command");
     if (setup.fiscal && setup.fiscal->contributions
         && setup.fiscal->contributions->routes.size() != setup.routes.size()) return malformed("fiscal contribution route count differs from galaxy");

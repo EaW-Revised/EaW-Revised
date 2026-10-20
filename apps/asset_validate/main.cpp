@@ -1,4 +1,5 @@
 #include "asset_validate_internal.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/assets/assets.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/presentation/lighting/lighting.hpp"
@@ -89,15 +90,8 @@ std::string utf8(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(value.data()), value.size()};
 }
 
-std::string lower(std::string value) {
-    for (char& character : value) {
-        if (character >= 'A' && character <= 'Z') character = static_cast<char>(character + ('a' - 'A'));
-    }
-    return value;
-}
-
 bool ieq(const std::string_view left, const std::string_view right) {
-    return lower(std::string(left)) == lower(std::string(right));
+    return eawr::core::iequals(left, right);
 }
 
 std::filesystem::path data_root(const std::filesystem::path& root) {

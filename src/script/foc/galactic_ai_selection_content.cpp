@@ -1,12 +1,60 @@
 #include "galactic_ai_selection_content.hpp"
+#include "galactic_ai_selection_work.hpp"
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 
 namespace eawr::script::foc::ai {
 namespace {
 namespace gc = sim::galactic;
+thread_local GalacticSelectionWork selection_work;
+using ContentTypeRow = std::map<gc::TypeId, GalacticSelectionContentType>::value_type;
+struct SelectionContentIndex {
+    struct Traits { Real combat_power; std::uint64_t category_bits{}; };
+    std::map<std::string, gc::TypeId, std::less<>> names;
+    std::map<gc::TypeId, Traits> traits;
+    explicit SelectionContentIndex(const GalacticSelectionContent& content) {
+        ++selection_work.content_indices_built;
+        // Match the original first result: lowest content type ID for names,
+        // and first authored AI row for duplicate type IDs. Copied keys and
+        // traits let expired cache entries release without retaining content.
+        for (const auto& row : content.types) {
+            ++selection_work.content_index_rows;
+            names.emplace(row.second.name, row.first);
+        }
+        for (const auto& row : content.ai.types) {
+            ++selection_work.trait_index_rows;
+            traits.emplace(row.type_id, Traits{row.combat_power, row.category_bits});
+        }
+    }
+};
+std::shared_ptr<const SelectionContentIndex> prepare_content_index(
+    const std::shared_ptr<const GalacticSelectionContent>& content) {
+    if (!content) return {};
+    // The runtime reconstructs the provider for every query. Reuse by exact
+    // immutable content identity across those bindings, without keeping the
+    // content alive. Index values own their data; expired entries are pruned.
+    struct Entry {
+        std::weak_ptr<const GalacticSelectionContent> owner;
+        std::shared_ptr<const SelectionContentIndex> index;
+    };
+    static std::mutex mutex;
+    static std::vector<Entry> entries;
+    std::scoped_lock lock(mutex);
+    std::shared_ptr<const SelectionContentIndex> retained;
+    for (auto at = entries.begin(); at != entries.end();) {
+        const auto owner = at->owner.lock();
+        if (!owner) { at = entries.erase(at); continue; }
+        if (owner.get() == content.get() && !owner.owner_before(content) && !content.owner_before(owner)) retained = at->index;
+        ++at;
+    }
+    if (retained) return retained;
+    auto index = std::make_shared<const SelectionContentIndex>(*content);
+    entries.push_back({content, index});
+    return index;
+}
 core::Diagnostic unavailable(std::string message) {
     return detail::make_error(authoritative::codes::missing_api, std::move(message));
 }
@@ -17,6 +65,8 @@ Real distance(const galactic_ai::TargetInput& a, const galactic_ai::TargetInput&
     return to_single(square_root(to_single(to_single(x * x) + to_single(y * y) + to_single(z * z))));
 }
 }
+GalacticSelectionWork galactic_selection_work() noexcept { return selection_work; }
+
 core::Result<gc::TypeId> galactic_starbase_proposal(const GalacticSelectionContent& content,
     const gc::PlanetProduction* target, gc::TypeId authored) {
     using Result = core::Result<gc::TypeId>;
@@ -99,8 +149,10 @@ core::Result<std::vector<GalacticSelectionContrast>> galactic_target_contrast(co
     }
     return Result::success(std::move(out));
 }
-core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons(
-    const GalacticSelectionContent& content, gc::TypeId type, std::uint32_t tech, gc::PlanetId target) {
+namespace {
+core::Result<std::vector<GalacticSelectionGarrison>> proposal_garrisons(
+    const GalacticSelectionContent& content, gc::TypeId type, std::uint32_t tech, gc::PlanetId target,
+    const SelectionContentIndex* prepared) {
     using Result = core::Result<std::vector<GalacticSelectionGarrison>>;
     const auto source = content.types.find(type);
     if (source == content.types.end() || !source->second.original)
@@ -115,19 +167,38 @@ core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons
     std::vector<GalacticSelectionGarrison> out;
     const auto append = [&](std::string_view name) -> core::Result<void> {
         const auto canonical = upper_case(name);
-        const auto unit = std::find_if(content.types.begin(), content.types.end(),
-            [&](const auto& row) { return row.second.name == canonical; });
-        if (unit == content.types.end()) return core::Result<void>::failure(unavailable("proposal garrison type is unbound: " + canonical));
-        const auto traits = std::find_if(content.ai.types.begin(), content.ai.types.end(),
-            [&](const auto& row) { return row.type_id == unit->first; });
-        if (traits == content.ai.types.end()) return core::Result<void>::failure(unavailable("proposal garrison combat metric is unavailable"));
+        const ContentTypeRow* unit{};
+        if (prepared) {
+            ++selection_work.garrison_name_lookups;
+            const auto found = prepared->names.find(canonical);
+            if (found != prepared->names.end()) {
+                const auto row = content.types.find(found->second);
+                if (row != content.types.end()) unit = &*row;
+            }
+        } else {
+            const auto found = std::find_if(content.types.begin(), content.types.end(),
+                [&](const auto& row) { return row.second.name == canonical; });
+            if (found != content.types.end()) unit = &*found;
+        }
+        if (!unit) return core::Result<void>::failure(unavailable("proposal garrison type is unbound: " + canonical));
+        const Real* combat_power{};
+        if (prepared) {
+            ++selection_work.garrison_trait_lookups;
+            const auto found = prepared->traits.find(unit->first);
+            if (found != prepared->traits.end()) combat_power = &found->second.combat_power;
+        } else {
+            const auto found = std::find_if(content.ai.types.begin(), content.ai.types.end(),
+                [&](const auto& row) { return row.type_id == unit->first; });
+            if (found != content.ai.types.end()) combat_power = &found->combat_power;
+        }
+        if (!combat_power) return core::Result<void>::failure(unavailable("proposal garrison combat metric is unavailable"));
         Real terrain = real(1);
         if (planet != content.planets.end()) {
             if (const auto environment = content.terrain.find(planet->second.terrain); environment != content.terrain.end())
                 if (const auto movement = environment->second.find(unit->second.movement_class); movement != environment->second.end()) terrain = movement->second;
         }
         const auto fallback = unit->second.company || unit->second.ground_base ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
-        out.push_back({unit->first, fallback, to_single(traits->combat_power), terrain, true, unit->second.value.population});
+        out.push_back({unit->first, fallback, to_single(*combat_power), terrain, true, unit->second.value.population});
         return core::Result<void>::success();
     };
     for (const auto& spawn : spawned) {
@@ -142,6 +213,11 @@ core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons
         if (const auto added = append(escort); !added) return Result::failure(added.error());
     return Result::success(std::move(out));
 }
+}
+core::Result<std::vector<GalacticSelectionGarrison>> galactic_proposal_garrisons(
+    const GalacticSelectionContent& content, gc::TypeId type, std::uint32_t tech, gc::PlanetId target) {
+    return proposal_garrisons(content, type, tech, target, nullptr);
+}
 bool galactic_hero_stage_applies(bool authored_hero, bool named_hero, bool special_weapon, bool authors_script) noexcept {
     return authored_hero && (named_hero || special_weapon || authors_script);
 }
@@ -149,7 +225,8 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
     std::shared_ptr<const galactic_goals::MaterializedPlanCatalog> plans, std::shared_ptr<const GalacticWorld> world,
     std::shared_ptr<const Engine> engine, std::function<std::shared_ptr<const gc::GalacticSnapshot>()> snapshot,
     GalacticHeroSelectionProvider heroes, GalacticFreestoreSelectionProvider freestore) {
-    return [content = std::move(content), plans = std::move(plans), world = std::move(world),
+    auto prepared = prepare_content_index(content);
+    return [content = std::move(content), prepared = std::move(prepared), plans = std::move(plans), world = std::move(world),
             engine = std::weak_ptr<const Engine>(engine), snapshot = std::move(snapshot), heroes = std::move(heroes), freestore = std::move(freestore)]
         (tactical::PlayerId player, gc::PlanetId target, const GoalType& goal, const PlanDef& plan)
         -> core::Result<std::shared_ptr<const GalacticSelectionInput>> {
@@ -219,13 +296,20 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             proposals.insert(resolved.value());
         }
         const std::vector<gc::TypeId> requested(proposals.begin(), proposals.end());
-        auto producers = requested.empty() ? core::Result<std::vector<galactic_ai::ProducerInput>>::success({})
-            : input->producers.read(player, 0, requested);
-        if (!producers) return Result::failure(producers.error());
-        for (auto producer : producers.value()) {
+        // Only rows of the player's reachable production sites survive the filter below, so read exactly those
+        // planets, in ascending planet order: the same rows, in the order of the player-wide read, without
+        // evaluating the admission of every other planet's offers.
+        std::vector<gc::PlanetId> site_order = out->production_sites;
+        std::sort(site_order.begin(), site_order.end());
+        std::vector<galactic_ai::ProducerInput> site_rows;
+        if (!requested.empty()) for (const auto site : site_order) {
+            auto read = input->producers.read(player, site, requested);
+            if (!read) return Result::failure(read.error());
+            site_rows.insert(site_rows.end(), read.value().begin(), read.value().end());
+        }
+        for (auto producer : site_rows) {
             const auto type = content->types.find(producer.type); if (type == content->types.end()) continue;
-            producer.reachable = std::find(out->production_sites.begin(), out->production_sites.end(), producer.planet) != out->production_sites.end();
-            if (!producer.reachable) continue;
+            producer.reachable = true; // read for a reachable production site only
             if (target) {
                 const auto source = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == producer.planet; });
                 if (source == input->targets.end()) return Result::failure(unavailable("stock production source absent"));
@@ -263,13 +347,15 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             facts.base = source.starbase || source.ground_base;
             facts.contrast_fallback_channel = source.company || source.ground_base ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
             if (target && !plan.ignore_target) {
-                const auto garrisons = galactic_proposal_garrisons(*content, id, out->player_tech, target);
+                const auto garrisons = proposal_garrisons(*content, id, out->player_tech, target, prepared.get());
                 if (!garrisons) return Result::failure(garrisons.error());
                 facts.garrisons = garrisons.value();
             }
             facts.terrain_allowed = true; facts.terrain_effectiveness = real(1);
-            const auto type = std::find_if(content->ai.types.begin(), content->ai.types.end(), [&](const auto& row) { return row.type_id == id; });
-            if (type == content->ai.types.end()) return Result::failure(unavailable("stock original AI type missing"));
+            ++selection_work.proposal_trait_lookups;
+            const auto found_type = prepared->traits.find(id);
+            const auto* type = found_type == prepared->traits.end() ? nullptr : &found_type->second;
+            if (!type) return Result::failure(unavailable("stock original AI type missing"));
             if (planet != content->planets.end()) {
                 facts.terrain_allowed = (planet->second.restricted_categories & type->category_bits) == 0
                     && std::find(planet->second.restricted_types.begin(), planet->second.restricted_types.end(), id) == planet->second.restricted_types.end();

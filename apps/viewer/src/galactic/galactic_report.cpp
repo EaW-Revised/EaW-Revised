@@ -55,9 +55,7 @@ template <class Value>
 
 } // namespace
 
-bool GalacticMode::State::write_report() const {
-    if (options.report_path.empty()) return true;
-    std::ostringstream output;
+void GalacticMode::State::write_report_identity(std::ostringstream& output) const {
     output << "{\n  \"mode\": \"galactic\",\n  \"status\": " << json(status) << ",\n  \"failure\": " << json(failure)
            << ",\n  \"render_profile\": " << render_profile_report() << ",\n  \"campaign\": " << json(options.campaign)
            << ",\n  \"interactive\": " << (interactive ? "true" : "false") << ",\n  \"profile\": " << json(profile)
@@ -69,6 +67,9 @@ bool GalacticMode::State::write_report() const {
            << ", \"ownership\": " << json(campaign_snapshot ? "authored-starting-forces" : "synthetic-fixture");
     if (galaxy) output << ", \"tick\": " << galaxy->tick;
     output << "}";
+}
+
+void GalacticMode::State::write_report_session(std::ostringstream& output) const {
     output << ",\n  \"live_session\": {\"snapshots_presented\": " << snapshots_presented
            << ", \"native_ai_installed_at_start\": " << (options.restore_save ? "null" : native_ai_installed ? "true" : "false")
            << ", \"submitted_orders\": " << submitted_orders
@@ -91,8 +92,25 @@ bool GalacticMode::State::write_report() const {
                << ", \"sequence\": " << event.sequence << ", \"value\": " << event.value
                << ", \"reason\": " << json(sim::galactic::to_string(event.reason)) << "}";
     }
+    output << "], \"clock_orders\": [";
+    if (game) {
+        // The accepted journal distinguishes pause's speed reset from a second purchase.
+        bool first = true;
+        for (const auto& command : game->record().commands) {
+            const char* type = std::holds_alternative<sim::galactic::SetSpeed>(command.payload) ? "SetSpeed"
+                : std::holds_alternative<sim::galactic::PauseGalaxy>(command.payload) ? "PauseGalaxy"
+                : std::holds_alternative<sim::galactic::ResumeGalaxy>(command.payload) ? "ResumeGalaxy" : nullptr;
+            if (!type) continue;
+            output << (first ? "" : ", ") << "{\"type\": " << json(type)
+                   << ", \"issuer\": " << command.key.seat.value << ", \"session_tick\": " << command.key.tick << "}";
+            first = false;
+        }
+    }
     output << "]}";
     output << ",\n  \"perf_overlay\": " << perf_report_json();
+}
+
+void GalacticMode::State::write_report_ai(std::ostringstream& output) const {
     // Log-only: what the runtime installed, and its per-player activity counters.
     output << ",\n  \"native_ai_players\": [";
     for (std::size_t i = 0; i < native_ai_players.size(); ++i)
@@ -111,6 +129,9 @@ bool GalacticMode::State::write_report() const {
         }
         output << "]";
     }
+}
+
+void GalacticMode::State::write_report_controls(std::ostringstream& output) const {
     output << ",\n  \"technology\": {\"player\": " << (galaxy ? galaxy->local.player : 0);
     if (displayed_snapshot && galaxy) {
         const auto facts = galactic_view::published_player_hud_facts(*displayed_snapshot, galaxy->local.player);
@@ -130,7 +151,31 @@ bool GalacticMode::State::write_report() const {
            << ", \"update_nanoseconds\": " << hud_update_nanoseconds
            << ", \"fact_rebuilds\": " << hud_fact_rebuilds
            << ", \"label_updates\": " << hud_label_updates
+           << ", \"label_content_updates\": " << hud_label_content_updates
+           << ", \"label_placed\": " << hud_label_placed
+           << ", \"label_retained\": " << hud_label_retained
+           << ", \"label_culled\": " << hud_label_culled
+           << ", \"text_style_updates\": " << hud_text_style_updates
+           << ", \"offer_rows_visited\": " << hud_offer_rows_visited
+           << ", \"max_offer_rows\": " << hud_offer_max_rows
            << ", \"command_updates\": " << hud_command_updates << "}";
+}
+
+void GalacticMode::State::write_report_phases(std::ostringstream& output) const {
+    output << ",\n  \"presentation_phases\": [";
+    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels"};
+    static_assert(phase_names.size() == static_cast<std::size_t>(FramePhase::count));
+    for (std::size_t index = 0; index < frame_phase_costs.size(); ++index) {
+        const auto& cost = frame_phase_costs[index];
+        output << (index ? ", " : "") << "{\"name\": " << json(phase_names[index])
+               << ", \"calls\": " << cost.calls << ", \"total_ms\": " << cost.milliseconds
+               << ", \"worst_call_ms\": " << cost.worst_call_ms
+               << ", \"avg_ms\": " << (cost.calls ? cost.milliseconds / static_cast<double>(cost.calls) : 0.0) << "}";
+    }
+    output << "]";
+}
+
+void GalacticMode::State::write_report_corruption(std::ostringstream& output) const {
     std::size_t corruption_effects{}, corruption_resources{}, corruption_reserved{}, corruption_refused{};
     std::uint64_t corruption_particle_count{};
     for (const auto& particles : corruption_particles) if (particles) {
@@ -163,6 +208,9 @@ bool GalacticMode::State::write_report() const {
             << colour[0] << ',' << colour[1] << ',' << colour[2] << "]}";
     }
     output << "]}";
+}
+
+void GalacticMode::State::write_report_production(std::ostringstream& output) const {
     output << ",\n  \"production_queues\": [";
     std::size_t queue_entries{};
     if (displayed_snapshot && displayed_snapshot->production()) for (const auto& planet : displayed_snapshot->production()->planets) {
@@ -200,6 +248,9 @@ bool GalacticMode::State::write_report() const {
                << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]}";
     }
     output << "]}";
+}
+
+void GalacticMode::State::write_report_command_bar(std::ostringstream& output) const {
     output << ",\n  \"command_bar\": {\"faction\": " << json(presentation::ui::to_string(command_faction))
            << ", \"meshes\": " << command_meshes << ", \"cycle\": " << json(player_hud.cycle)
            << ", \"account\": " << json(account_text)
@@ -332,6 +383,9 @@ bool GalacticMode::State::write_report() const {
             << dial_rect.size.x << ", " << dial_rect.size.y << "]}";
     }
     output << "]}";
+}
+
+void GalacticMode::State::write_report_panels(std::ostringstream& output) const {
     const auto encyclopedia_rect = encyclopedia_panel ? encyclopedia_panel->get_global_rect() : Rect2{};
     std::string encyclopedia_body = encyclopedia_panel ? encyclopedia_panel->get_content().description : std::string{};
     if (encyclopedia_panel && !encyclopedia_panel->get_status().disabled_reason.empty())
@@ -396,6 +450,9 @@ bool GalacticMode::State::write_report() const {
                    scenes[0].instances.end(), [&](const auto& instance) {
                        return instance_planets.at(instance.entity_id) == selection_cursor_id; }) << "}";
     }
+}
+
+void GalacticMode::State::write_report_scene(std::ostringstream& output) const {
     output << ",\n  \"scene_source\": " << json(content ? "validated-campaign-art" : "synthetic-fixture")
            << ",\n  \"paused\": " << (paused ? "true" : "false")
            << ",\n  \"animation_time\": " << animation_time
@@ -450,6 +507,9 @@ bool GalacticMode::State::write_report() const {
     output << "],\n  \"light_angles\": ";
     if (content && content->light_angles) output << point(*content->light_angles);
     else output << "null";
+}
+
+void GalacticMode::State::write_report_galaxy(std::ostringstream& output) const {
     if (galaxy) {
         const galactic_view::GalaxyView& view = *galaxy;
         // ADR-020: the seat and its faction are reported separately.
@@ -556,6 +616,9 @@ bool GalacticMode::State::write_report() const {
         }
         output << "]";
     }
+}
+
+void GalacticMode::State::write_report_planet_hud(std::ostringstream& output) const {
     output << ",\n  \"hud\": {\"template\": \"g_planet_name\", \"planet_source\": \"GalacticSnapshot\", "
            << "\"observer_facts\": " << hud_facts.size()
            << ", \"production_source\": \"unavailable\", \"selected\": " << selected_hud.selected
@@ -629,6 +692,9 @@ bool GalacticMode::State::write_report() const {
         write(levels.ground, "ground"); write(levels.space, "space");
     }
     output << "], \"base_levels_visible\": " << (base_levels_visible ? "true" : "false") << "}";
+}
+
+void GalacticMode::State::write_report_battle_proof(std::ostringstream& output) const {
     output << ",\n  \"tactical_admission\": " << galactic_view::battle_tactical_report_json(
         battle_dialog ? battle_dialog->view() : galactic_view::BattleDialogView{}, json);
     output << ",\n  \"space_cycle_proof\": {\"mode\": " << json(options.space_cycle_proof)
@@ -680,6 +746,9 @@ bool GalacticMode::State::write_report() const {
         }
     }
     output << "]}}";
+}
+
+void GalacticMode::State::write_report_handoff(std::ostringstream& output) const {
     output << ",\n  \"campaign_briefing\": {\"conflict\":" << briefing_conflict
            << ",\"done\":" << (briefing_done ? "true" : "false")
            << ",\"accepted\":" << (briefing_accepted ? "true" : "false")
@@ -710,6 +779,9 @@ bool GalacticMode::State::write_report() const {
                << ", \"galaxy_same_instance\": " << (cycle_receipt.galaxy_same ? "true" : "false") << "}";
     }
     output << "],\n  \"campaign_owner_expired\": " << (owner_expired ? "true" : "false");
+}
+
+void GalacticMode::State::write_report_zoom_samples(std::ostringstream& output) const {
     output << ",\n  \"zoom_samples\": [";
     for (std::size_t index = 0; index < zoom_samples.size(); ++index) {
         const auto& sample = zoom_samples[index];
@@ -728,6 +800,9 @@ bool GalacticMode::State::write_report() const {
         output << "}";
     }
     output << "]";
+}
+
+void GalacticMode::State::write_report_models(std::ostringstream& output) const {
     output << ",\n  \"models\": [";
     for (std::size_t index = 0; index < models.size(); ++index) {
         const ModelUpload& model = models[index];
@@ -754,6 +829,27 @@ bool GalacticMode::State::write_report() const {
         output << "{\"sha256\": " << json(capture_sha256) << ", \"png\": {\"width\": " << capture_width
                << ", \"height\": " << capture_height << "}}";
     }
+}
+
+bool GalacticMode::State::write_report() const {
+    if (options.report_path.empty()) return true;
+    std::ostringstream output;
+    write_report_identity(output);
+    write_report_session(output);
+    write_report_ai(output);
+    write_report_controls(output);
+    write_report_phases(output);
+    write_report_corruption(output);
+    write_report_production(output);
+    write_report_command_bar(output);
+    write_report_panels(output);
+    write_report_scene(output);
+    write_report_galaxy(output);
+    write_report_planet_hud(output);
+    write_report_battle_proof(output);
+    write_report_handoff(output);
+    write_report_zoom_samples(output);
+    write_report_models(output);
     output << "\n}\n";
     std::error_code error;
     if (!options.report_path.parent_path().empty()) std::filesystem::create_directories(options.report_path.parent_path(), error);

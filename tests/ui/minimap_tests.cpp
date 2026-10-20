@@ -602,6 +602,49 @@ int main() {
             const auto hutt = ui::minimap_type_looks("Skirmish_Hutt_Asteroid_Base", &catalog.value().catalog);
             expect(hutt.visible && hutt.visible_when_fogged && hutt.icon == "i_radar_station1_p.tga",
                 "MM-06/12: the skirmish asteroid base inherits radar permission and icon from its parent type");
+            // MM-06/07/15: a no-slot owner supplies colour, not radar type permission.
+            const auto settings = ui::minimap_settings(*filesystem);
+            const auto pirates = ui::faction_colour(settings, "Pirates");
+            expect(pirates == data::ui::Rgba8{255, 128, 0, 255}, "MM-07: Pirates supplies orange without a lobby slot");
+            const std::array<ui::MinimapSquadronMember, 2> pirate_members{{{100, 50, 30, true}, {120, 70, 60, true}}};
+            const auto pirate_pose = ui::minimap_squadron_pose(pirate_members);
+            expect(pirate_pose.has_value(), "MM-15: a visible pirate leader admits the squadron pose");
+            if (pirate_pose && pirates) {
+                ui::MinimapUnit pirate;
+                pirate.id = 4153;
+                pirate.type = "Team";
+                pirate.team = true;
+                pirate.hostile = true;
+                pirate.owner_colour = *pirates;
+                pirate.x = pirate_pose->x;
+                pirate.y = pirate_pose->y;
+                pirate.yaw_degrees = pirate_pose->yaw_degrees;
+                const auto team = ui::minimap_type_looks("Team", &catalog.value().catalog);
+                const auto starviper = ui::minimap_type_looks("StarViper_Team", &catalog.value().catalog);
+                const auto looks = [&](const std::string_view type) -> const ui::MinimapTypeLooks& {
+                    return type == "Team" ? team : starviper;
+                };
+                const auto draw = [&] {
+                    return ui::minimap_blips(std::span(&pirate, 1), looks,
+                        ui::minimap_extents(-1000, 1000, -1000, 1000), settings);
+                };
+                const auto blips = draw();
+                expect(blips.size() == 1 && blips.front().id == pirate.id && blips.front().colour == *pirates,
+                    "MM-07/15: a radar-enabled pirate squadron draws one orange blip without a seat");
+                pirate.type = "StarViper_Team";
+                expect(!starviper.visible && draw().empty(),
+                    "MM-06: stock StarViper_Team omits radar permission; owner colour cannot override it");
+                pirate.team_radar_visible = ui::minimap_type_looks("Starviper_Fighter", &catalog.value().catalog).visible;
+                const auto starviper_blips = draw();
+                expect(starviper_blips.size() == 1 && starviper_blips.front().colour == *pirates
+                    && starviper_blips.front().icon == starviper.icon,
+                    "MM-07/15: radar-visible Starviper craft admit one orange team-styled blip without a seat");
+                pirate.team_radar_visible = false;
+                expect(draw().empty(), "MM-15: a squadron with no radar-visible live craft remains hidden");
+                pirate.team = false;
+                pirate.team_radar_visible = true;
+                expect(draw().empty(), "MM-06: the member permission override applies only to teams");
+            }
         }
         const auto constants = data::load_document(*filesystem, "data/xml/gameconstants.xml");
         expect(static_cast<bool>(constants), "stock GameConstants load for fallback contracts");

@@ -9,6 +9,8 @@
 // missing key as written (UI-T3). The sound names are not here: the screen resolves them from the
 // effective sound data.
 
+#include "eawr/sim/seat.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -28,8 +30,8 @@ inline constexpr std::size_t lan_chat_max = 128;
 inline constexpr std::size_t lan_game_name_max = 24;
 inline constexpr std::size_t lan_password_max = 16;
 inline constexpr std::size_t lan_chat_history = 200;
-// Our command-seat capacity; the viewer checks this against the match domain.
-inline constexpr std::size_t lan_command_seat_limit = 9;
+// The lobby uses the match domain's command-seat capacity.
+inline constexpr std::size_t lan_command_seat_limit = sim::max_match_seats;
 // The lobby's game list rebuilds when this much time passed since the last build (milliseconds).
 inline constexpr std::uint32_t lan_game_list_refresh_ms = 1000;
 
@@ -123,6 +125,11 @@ enum class OnlineFailure : std::uint8_t {
 [[nodiscard]] bool online_failure_keeps_prompt(OnlineFailure failure) noexcept;
 [[nodiscard]] std::string_view online_list_notice(bool service_failed, std::size_t rooms) noexcept;
 [[nodiscard]] std::string_view online_chat_closed_notice() noexcept;
+// The online browser's room-less chat (#3758). idle: not in use (a fixture, no name yet, or a room is joined or hosted);
+// connecting: opening or reopening; active: chat can be sent; unavailable: the service predates the channel.
+enum class OnlineMenuChat : std::uint8_t { idle, connecting, active, unavailable };
+// What the chat window says when the player types a line while the channel cannot carry it; empty while it is active.
+[[nodiscard]] std::string_view online_menu_chat_notice(OnlineMenuChat state) noexcept;
 
 // The password prompt of a join: the room it is for and the last refusal it shows.
 struct OnlinePasswordPrompt {
@@ -305,6 +312,13 @@ public:
     virtual void announce(const LobbyPresence& presence) = 0;
     virtual void send_chat(LobbyChatScope scope, const std::string& game, const std::string& name,
                            const std::string& text) = 0;
+    // False when a local source cannot accept the line (for example its rate limit). The edit
+    // keeps the draft and no local echo is added. Existing sources accept through send_chat.
+    [[nodiscard]] virtual bool try_send_chat(LobbyChatScope scope, const std::string& game,
+                                             const std::string& name, const std::string& text) {
+        send_chat(scope, game, name, text);
+        return true;
+    }
     // Reads what arrived and drops the stale; true when the games or players changed.
     [[nodiscard]] virtual bool pump() = 0;
     // The joinable games (a game whose host locked it for the battle is not listed).

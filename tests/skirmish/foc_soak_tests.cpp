@@ -16,11 +16,11 @@
 // See soak_options.hpp for every flag. Needs EAWR_EAW_GAME_ROOT: skipped (exit 0) without it, an
 // error (exit 2) under --strict. Exit 1 when a seed failed.
 
+#include "../support/env.hpp"
 #include "m2_battle.hpp"
 #include "soak_invariants.hpp"
 #include "soak_json.hpp"
 #include "soak_options.hpp"
-
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -33,22 +33,26 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <ctime>
 #include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <ios>
 #include <iostream>
 #include <map>
-#include <set>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -63,19 +67,7 @@ using Clock = std::chrono::steady_clock;
 std::mutex output_mutex;
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 // One thing that failed a seed: a step, an invariant, the worker comparison or the run itself.

@@ -2,6 +2,7 @@
 
 #include "checkpoint_archive_internal.hpp"
 #include "eawr/sim/galactic/session.hpp"
+#include "eawr/sim/galactic/story_engine.hpp"
 
 namespace eawr::sim::galactic::checkpoint_detail {
 
@@ -13,13 +14,13 @@ template <> struct Fields<::eawr::sim::SeatId> {
 
 template <> struct Fields<::eawr::sim::galactic::AbilityActorState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.contested_check_disabled);
+        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.contested_check_disabled);
     }
 };
 
 template <> struct Fields<::eawr::sim::galactic::AbilityPreparation> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.actor, v.planet, v.offers, v.absence, v.open, v.kind, v.theft_choices, v.corruption_choices);
+        a(v.id, v.actor, v.planet, v.offers, v.absence, v.open, v.kind, v.theft_choices, v.corruption_choices, v.target_choices);
     }
 };
 
@@ -241,7 +242,7 @@ template <> struct Fields<::eawr::sim::galactic::FleetTransit> {
 
 template <> struct Fields<::eawr::sim::galactic::GalacticAbilityState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.next_request, v.actors, v.preparations, v.results, v.transitions, v.missions, v.corruption_usage, v.planet_entitlements);
+        a(v.next_request, v.actors, v.preparations, v.results, v.transitions, v.missions, v.corruption_usage, v.planet_entitlements, v.sabotage_history, v.neutralization_history);
     }
 };
 
@@ -515,6 +516,12 @@ template <> struct Fields<::eawr::sim::galactic::PreparedCorruption> {
     }
 };
 
+template <> struct Fields<::eawr::sim::galactic::PreparedTarget> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.target, v.company, v.price, v.absence, v.target_absence, v.valid);
+    }
+};
+
 template <> struct Fields<::eawr::sim::galactic::PreparedTheft> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.technology, v.price, v.chance, v.absence, v.advance);
@@ -560,6 +567,18 @@ template <> struct Fields<::eawr::sim::galactic::ProductionSetup> {
 template <> struct Fields<::eawr::sim::galactic::Route> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.id, v.from, v.to, v.hs_speed_factor);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::NeutralizationHistory> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.company, v.attacker, v.count);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::SabotageHistory> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.planet, v.count);
     }
 };
 
@@ -686,6 +705,24 @@ template <> struct Fields<::eawr::sim::galactic::corruption_fixture::Transition>
 template <> struct Fields<::eawr::sim::math::Vec3> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.x, v.y, v.z);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::EventState> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.name, v.triggered, v.active, v.disabled, v.start, v.clock, v.clock_last, v.tech_primed, v.tech_last, v.idle_stamped, v.idle_stamp);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::SubPlotState> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.name, v.owner, v.active, v.events);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::State> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.started, v.now, v.sequence, v.subplots, v.flags);
     }
 };
 

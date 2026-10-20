@@ -260,6 +260,39 @@ void UnitEmitters::orphan_clone(Ship& ship) {
         }
     }
     ship.clone.clear();
+    ship.clone_planned = false;
+}
+
+bool UnitEmitters::retire_clone(const std::size_t index, const std::span<const animation::BonePose> final_bones) {
+    if (index >= ships_.size()) return true;
+    Ship& ship = ships_[index];
+    // A slot that never reached a sample cannot discard a future proxy birth.
+    if (!ship.clone_planned) return false;
+    for (const auto& proxy : ship.clone) {
+        if (!proxy.life) continue;
+        if (proxy.bone >= final_bones.size()) return false;
+        // Hidden-bone effects keep the existing last-frame orphan/drain path;
+        // only visible-bone effects must be exhausted to release their owner.
+        if (!final_bones[proxy.bone].visible) continue;
+        // A visible proxy can keep a permanently hidden wreck alive after its
+        // finite system has ended. Empty right now is insufficient: delayed
+        // emission and child chains must be exhausted too. An attachment that
+        // has not spawned yet still needs its owner for the next sample.
+        const auto active = proxy.life->active();
+        if (!active || !registry_->exhausted(*active)) return false;
+        for (const auto drain : proxy.life->draining()) {
+            if (!registry_->exhausted(drain)) return false;
+        }
+    }
+    // Selection above is read-only. Release only once every proxy agrees, so
+    // a still-burning sibling leaves the entire clone unchanged.
+    for (auto& proxy : ship.clone) {
+        if (!proxy.life || !final_bones[proxy.bone].visible) continue;
+        static_cast<void>(proxy.life->release_all());
+        proxy.life.reset();
+    }
+    orphan_clone(ship);
+    return true;
 }
 
 void UnitEmitters::rebuild_busy() {

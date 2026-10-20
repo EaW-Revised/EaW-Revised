@@ -1,3 +1,7 @@
+#include <system_error>
+#include <utility>
+#include <string_view>
+#include "../support/check.hpp"
 #include "eawr/assets/assets.hpp"
 
 #include <array>
@@ -13,12 +17,10 @@
 #include <vector>
 
 namespace {
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 void u8(std::vector<std::byte>& bytes, const std::uint8_t value) {
     bytes.push_back(static_cast<std::byte>(value));

@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/unit_cards.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,9 +25,7 @@ constexpr std::array<std::string_view, ability_count> ability_names{
     "DEPLOY_SQUAD", "GARRISON_NONE"};
 
 [[nodiscard]] bool same_name(const std::string_view a, const std::string_view b) noexcept {
-    const auto upper = [](const char c) { return c >= 'a' && c <= 'z' ? static_cast<char>(c - ('a' - 'A')) : c; };
-    return a.size() == b.size()
-        && std::equal(a.begin(), a.end(), b.begin(), [&](char x, char y) { return upper(x) == upper(y); });
+    return core::iequals(a, b);
 }
 
 // Add_Ship_To_Stack: one stack per type and ability state, in first-seen order; a stack keeps the

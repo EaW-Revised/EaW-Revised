@@ -1,3 +1,8 @@
+// #447 spin-away deaths (docs/behaviour/space-fighter-deaths.md, cases SC-01 to SC-07): the keyed
+// chance (SP-02), the spin's timing and path (SP-04 to SP-08) and a session's kill, spin and
+// explosion timeline with its worker-count hash equality.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -10,24 +15,20 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-// #447 spin-away deaths (docs/behaviour/space-fighter-deaths.md, cases SC-01 to SC-07): the keyed
-// chance (SP-02), the spin's timing and path (SP-04 to SP-08) and a session's kill, spin and
-// explosion timeline with its worker-count hash equality.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

@@ -1,4 +1,5 @@
 #include "planet_hud.hpp"
+#include "hud_retained.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -274,6 +275,25 @@ bool production_activity(const PlanetHudFacts& planet) {
     if (!planet.local_allegiance && !planet.queue_revealed) return false;
     return (planet.space_queue && !planet.space_queue->empty())
         || (planet.ground_queue && !planet.ground_queue->empty());
+}
+
+std::uint64_t label_placement_digest(const PlanetHudFacts& facts) {
+    HudDigest digest;
+    digest.add(facts.planet); digest.add(facts.discovered);
+    digest.add(facts.observed_owner); digest.add(facts.apparent_owner); digest.add(facts.apparent_allegiance_owner);
+    digest.add(facts.locally_controlled); digest.add(facts.local_allegiance);
+    digest.add(facts.queue_revealed); digest.add(facts.surface_accessible);
+    digest.add(std::string_view{facts.display_name}); digest.add(std::string_view{facts.observed_faction});
+    digest.add(facts.name_colour.r); digest.add(facts.name_colour.g); digest.add(facts.name_colour.b);
+    digest.add(facts.visible_income); digest.add(std::string_view{facts.income_overlay});
+    digest.add(production_activity(facts));
+    digest.add(facts.ground_level); digest.add(facts.space_level);
+    digest.add(facts.ground_capacity); digest.add(facts.space_capacity);
+    digest.add(facts.structures); digest.add(facts.political_control);
+    digest.add(facts.political_breakdown_known); digest.add(facts.structures_known);
+    digest.add(facts.ground_level_known); digest.add(facts.space_level_known);
+    digest.add(facts.corrupted); digest.add(facts.local_benefits_from_corruption);
+    return digest.value();
 }
 
 std::vector<PlanetStatusIcon> planet_status_icons(const PlanetHudFacts& planet) {

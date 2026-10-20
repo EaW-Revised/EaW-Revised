@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/world_ui.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -401,13 +402,10 @@ HardpointReticleArtTable hardpoint_reticle_art(const vfs::Vfs& filesystem) {
     const auto document = data::load_document(filesystem, "data/xml/gameconstants.xml");
     if (!document) return result;
     const auto trim = [](std::string_view text) {
-        const auto first = text.find_first_not_of(" \t\r\n");
-        if (first == std::string_view::npos) return std::string{};
-        return std::string(text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1));
+        return core::trim_view(text, core::xml_whitespace);
     };
-    const auto upper = [](std::string text) {
-        for (char& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
-        return text;
+    const auto upper = [](std::string_view text) {
+        return core::to_upper(text);
     };
     for (const auto& node : document.value().root.children) {
         std::vector<std::string> HardpointReticleArt::* member{};
@@ -466,16 +464,12 @@ std::optional<HardpointReticleSizes> hardpoint_reticle_sizes(const vfs::Vfs& fil
         const data::XmlNode* found{};
         for (const auto& node : document.value().root.children) {
             const std::string_view tag(name);
-            if (node.name.size() == tag.size() && std::equal(node.name.begin(), node.name.end(), tag.begin(),
-                [](char a, char b) { return (a >= 'A' && a <= 'Z' ? a + 'a' - 'A' : a)
-                    == (b >= 'A' && b <= 'Z' ? b + 'a' - 'A' : b); })) found = &node;
+            if (core::iequals(node.name, tag)) found = &node;
         }
         if (!found) return std::nullopt;
         data::tag_trace::used(*found);
-        const auto first = found->raw_text.find_first_not_of(" \t\r\n");
-        const auto last = found->raw_text.find_last_not_of(" \t\r\n");
-        if (first == std::string::npos) return std::nullopt;
-        const auto raw = std::string_view(found->raw_text).substr(first, last - first + 1);
+        const auto raw = core::trim_view(found->raw_text, core::xml_whitespace);
+        if (raw.empty()) return std::nullopt;
         float value{};
         const auto [end, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
         if (error != std::errc{} || end != raw.data() + raw.size() || !std::isfinite(value) || value < 0) return std::nullopt;

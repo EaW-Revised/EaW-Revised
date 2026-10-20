@@ -1,6 +1,9 @@
 // P1-07 fog-stub-v1 CPU contract tests. Expected bytes and digests come from the
 // independent oracle in fixtures/generate_fog_fixture.py, never from production.
 
+#include <cstddef>
+#include <span>
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/fog.hpp"
 #include "eawr/sim/fog_sidecar.hpp"
@@ -32,13 +35,11 @@ namespace {
 namespace fog = eawr::sim::fog;
 using Bytes = std::vector<std::uint8_t>;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 template <typename T>

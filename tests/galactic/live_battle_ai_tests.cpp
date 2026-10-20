@@ -1,14 +1,25 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic/map_input.hpp"
 #include "eawr/platform/live_game_session.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 // Live GC space battle started from the galaxy: the enemy side always fights with its
 // tactical AI, independent of whether the native galactic AI is installed. The human seat
@@ -19,20 +30,9 @@ namespace view = eawr::viewer::galactic;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 using namespace std::chrono_literals;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text);
-    return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    return text && *text ? std::optional<std::string>{text} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 std::vector<view::InputPlanet> input_planets(const gc::GalacticSnapshot& snapshot, gc::PlayerId player) {
     std::vector<view::InputPlanet> result;
@@ -132,7 +132,7 @@ BattleCommands run_battle(bool native_ai, unsigned workers, std::uint64_t battle
     }
     // Assemble the startup fleets, then send them along the authored route.
     for (const auto& row : live->frame().latest->fleets()) if (row.owner == human_player && row.orbit == home && row.id != moving_fleet)
-        live->submit(eawr::platform::LiveGameOrder{human_seat, gc::MergeFleets{row.id, moving_fleet}, {}, {}});
+        live->submit(eawr::platform::LiveGameOrder{human_seat, gc::MergeFleets{row.id, moving_fleet}, {}});
     live->advance_to(++tick);
     if (!wait_for_tick(tick)) throw std::runtime_error("fleet assembly stalled");
     view::MapInput input;
@@ -142,7 +142,7 @@ BattleCommands run_battle(bool native_ai, unsigned workers, std::uint64_t battle
     if (!intent) throw std::runtime_error("move intent refused");
     const auto move = input.command(*intent, input_planets(*snapshot, human_player));
     if (!move) throw std::runtime_error("map command refused");
-    live->submit(eawr::platform::LiveGameOrder{human_seat, *move, {}, {}});
+    live->submit(eawr::platform::LiveGameOrder{human_seat, *move, {}});
     eawr::sim::EntityId chosen{};
     const auto deadline = tick + 4000;
     while (tick < deadline) {
@@ -199,7 +199,7 @@ BattleCommands run_battle(bool native_ai, unsigned workers, std::uint64_t battle
 }
 
 void battle_ai(bool native_ai) {
-    if (!game_root()) { std::cout << "SKIPPED: live battle AI needs EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!game_root()) { eawr::testing::skip_installed("SKIPPED: live battle AI needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     constexpr std::uint64_t battle_ticks = 450; // 15 s of battle time
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -217,7 +217,7 @@ void battle_ai(bool native_ai) {
     }
 }
 } // namespace
-int main(int argc, char** argv) {
+int case_galactic_live_battle_ai_tests(int argc, char** argv) {
     try {
         const bool on = argc == 2 && std::string_view(argv[1]) == "--galactic-ai-on";
         battle_ai(on);

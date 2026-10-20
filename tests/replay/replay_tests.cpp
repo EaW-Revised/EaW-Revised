@@ -1,3 +1,4 @@
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/world.hpp"
@@ -7,24 +8,29 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <functional>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <set>
-#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 class FailingExecutor final : public eawr::sim::PartitionExecutor {
 public:
@@ -46,10 +52,7 @@ public:
 };
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] std::vector<std::uint8_t> read_bytes(const std::string& path) {

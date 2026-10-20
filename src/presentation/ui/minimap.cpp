@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/minimap.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/tag_trace.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -16,19 +17,11 @@ constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
 constexpr std::string_view factions_path = "data/xml/factions.xml";
 
 [[nodiscard]] std::string_view trim(std::string_view text) noexcept {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r' || text.front() == '\n')) {
-        text.remove_prefix(1);
-    }
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' || text.back() == '\n')) {
-        text.remove_suffix(1);
-    }
-    return text;
+    return core::trim_view(text, core::xml_whitespace);
 }
 
 [[nodiscard]] bool same_name(const std::string_view a, const std::string_view b) noexcept {
-    const auto lower = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
-    return a.size() == b.size()
-        && std::equal(a.begin(), a.end(), b.begin(), [&](const char x, const char y) { return lower(x) == lower(y); });
+    return core::iequals(a, b);
 }
 
 // The last child of that name wins, as later XML entries do.
@@ -373,7 +366,8 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
         const auto& type = looks(unit->type);
         const auto& radar = unit->radar;
         // WNO-41: the authored flag/replay bypass exactly two early presentation gates.
-        if (!type.visible || type.hazard || !radar.alive || radar.limbo) continue;
+        const bool visible = unit->team ? unit->team_radar_visible.value_or(type.visible) : type.visible;
+        if (!visible || type.hazard || !radar.alive || radar.limbo) continue;
         if (!radar.capital_layer && (unit->x < extents.playable_min_x || unit->x > extents.playable_max_x
             || unit->y < extents.playable_min_y || unit->y > extents.playable_max_y)) continue;
         if (unit->hostile && (!type.visible_to_enemy || unit->in_nebula || radar.jammed || radar.stealthed

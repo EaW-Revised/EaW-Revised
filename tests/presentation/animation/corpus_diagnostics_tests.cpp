@@ -1,6 +1,9 @@
+#include "../../support/check.hpp"
 #include "corpus_diagnostics.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -8,6 +11,7 @@
 #include <random>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -16,9 +20,10 @@ namespace playback = eawr::presentation::animation;
 namespace corpus = eawr::tests::animation_corpus;
 namespace predicates = corpus::predicates;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 assets::Bone bone(const std::string_view name, const std::int32_t parent) {

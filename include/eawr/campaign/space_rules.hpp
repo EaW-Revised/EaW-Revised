@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/campaign/conflict_entry.hpp"
+#include "eawr/campaign/space_replay_rules.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
 namespace eawr::campaign {
@@ -33,10 +34,6 @@ struct SpaceRuleInputs {
 // Decorates A's prepared scene. No IO, no galaxy mutation, no extra tactical owner.
 [[nodiscard]] core::Result<void> apply_space_rules(ConflictEntry& entry,
     const skirmish::StartInputs& content, const SpaceRuleInputs& inputs);
-// Rebind exactly the recorded campaign policy for child replay and checkpoint load.
-[[nodiscard]] core::Result<void> bind_space_rules(const sim::tactical::TacticalSetup& setup,
-    const skirmish::StartInputs& inputs, sim::tactical::TacticalContent& content);
-
 struct SpaceRuleReturn {
     std::vector<ReturnedCredits> credits; // final GC balances under the ordinary space account contract
     std::vector<sim::tactical::CampaignUpgrade> upgrades; // retained on the conflict planet

@@ -146,10 +146,7 @@ const audio::SfxEvent* BattleAudio::event(const std::string_view name, const std
     return found;
 }
 
-void BattleAudio::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
-                          const std::string_view local_faction, std::set<tactical::TypeId> first_types) {
-    core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
-    local_faction_ = std::string(local_faction);
+void BattleAudio::expand_initial_audio_types(const units::UnitTables& tables, std::set<sim::tactical::TypeId>& first_types) {
     // Follow automatic spawners and squadron composition from the actual force.
     // The rest of the table still binds all sounds, but no longer delays Begin.
     bool changed = true;
@@ -169,14 +166,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
         changed = first_types.size() != count;
     }
-    std::set<std::string> immediate_roots;
-    bool binding_unit = false, first_type = true;
-    const auto event = [this, &immediate_roots, &binding_unit, &first_type](
-            const std::string_view name, const std::string& where) {
-        const audio::SfxEvent* cue = this->event(name, where);
-        if (cue && (!binding_unit || (first_type && cue->is_3d))) immediate_roots.insert(cue->name);
-        return cue;
-    };
+}
+
+void BattleAudio::prepare_event_registry() {
     // BA-01: the SFXEvents in SFXEventFiles order (presets first), each definition in file order.
     std::vector<const data::Definition*> definitions;
     for (const data::Definition& definition : catalog_->definitions()) {
@@ -188,6 +180,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     for (const data::Definition* definition : definitions) {
         registry_.add(definition->id, fields_of(definition->root), problems_);
     }
+}
+
+template <typename Event>
+void BattleAudio::prepare_music_and_faction_cues(const std::string_view local_faction, Event& event) {
     // BA-10: audio.xml's space factors and the peace time.
     double peace_seconds = 15.0;
     std::array<std::string, 2> summary_names;
@@ -318,7 +314,9 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             std::move(ambient), std::move(battle),
             static_cast<std::uint64_t>(std::llround(peace_seconds * tactical::logical_frames_per_second)));
     }
+}
 
+void BattleAudio::prepare_speech_registry() {
     // SND-44: speech is a distinct registry, not a WAV event or a music playlist.
     if (auto document = data::load_document(*filesystem_, "data/xml/speechevents.xml")) {
         for (const data::XmlNode& node : document.value().root.children) {
@@ -333,58 +331,10 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     } else {
         problems_.push_back("speech registry: " + core::format_diagnostic(document.error()));
     }
-    std::map<tactical::TypeId, const audio::SfxEvent*> spotted;
-    const audio::SfxEvent* generic_spotted = nullptr;
-    if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
-        if (const auto* value = faction.value().value("SFXEvent_Generic_Unit_Spotted")) {
-            data::tag_trace::used(value->value);
-            generic_spotted = event(trim(value->value.raw_text), std::string(local_faction));
-        }
-        if (const auto* value = faction.value().value("SFXEvent_Enemy_Spotted")) {
-            data::tag_trace::used(value->value);
-            enemy_spotted_ = event(trim(value->value.raw_text), std::string(local_faction));
-        }
-        for (const auto& layer : faction.value().chain) {
-            const auto* definition = catalog_->find(layer, data::Category::faction);
-            if (!definition) continue;
-            for (const auto& item : definition->root.children) {
-                if (!same(item.name, "SFXEvent_Unit_Type_Spotted")) continue;
-                data::tag_trace::used(item);
-                const auto comma = item.raw_text.find(',');
-                if (comma != std::string::npos) {
-                    // BA-70: retain a matching blank override; it must not turn
-                    // into the generic fallback by dropping an empty token.
-                    const auto name = trim(std::string_view(item.raw_text).substr(0, comma));
-                    if (!name.empty()) spotted.try_emplace(battle::type_id(name),
-                        event(trim(std::string_view(item.raw_text).substr(comma + 1)), std::string(local_faction)));
-                } else {
-                    const auto pair = audio::split_list(item.raw_text);
-                    if (pair.size() == 2) spotted.try_emplace(battle::type_id(pair[0]), event(pair[1], std::string(local_faction)));
-                }
-            }
-        }
-    }
+}
 
-    for (const units::Projectile& projectile : tables.projectiles) {
-        if (auto object = catalog_->resolve(projectile.id, data::Category::game_object)) {
-            projectile_detonations_.emplace(battle::type_id(projectile.id),
-                event(tag(object.value(), "Death_SFXEvent_Start_Die"), projectile.id));
-            terminal_detonations_.emplace(battle::type_id(projectile.id),
-                event(tag(object.value(), "Projectile_SFXEvent_Detonate"), projectile.id));
-        }
-    }
-    // WCB-01: real bomb terminals use their authored object death cue.
-    for (const units::UnitType& type : tables.units) {
-        if (!type.cluster_bomb) continue;
-        const auto id = battle::type_id(type.cluster_bomb->bomb_type);
-        const auto cue = projectile_detonations_.find(id);
-        if (cue == projectile_detonations_.end()) continue;
-        if (terminal_detonations_[id] == nullptr) terminal_detonations_[id] = cue->second;
-        TypeSounds sounds;
-        sounds.name = type.cluster_bomb->bomb_type;
-        sounds.detonate[tactical::object_weapon] = cue->second;
-        types_.try_emplace(id, std::move(sounds));
-    }
+template <typename Event>
+void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, const std::set<sim::tactical::TypeId>& first_types, const std::map<sim::tactical::TypeId, const audio::SfxEvent*>& spotted, const audio::SfxEvent* generic_spotted, Event& event, bool& binding_unit, bool& first_type) {
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -620,6 +570,77 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
         }
         types_.emplace(battle::type_id(type.id), std::move(sounds));
     }
+}
+
+void BattleAudio::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat,
+                          const std::string_view local_faction, std::set<tactical::TypeId> first_types) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
+    local_faction_ = std::string(local_faction);
+    expand_initial_audio_types(tables, first_types);
+    std::set<std::string> immediate_roots;
+    bool binding_unit = false, first_type = true;
+    const auto event = [this, &immediate_roots, &binding_unit, &first_type](
+            const std::string_view name, const std::string& where) {
+        const audio::SfxEvent* cue = this->event(name, where);
+        if (cue && (!binding_unit || (first_type && cue->is_3d))) immediate_roots.insert(cue->name);
+        return cue;
+    };
+    prepare_event_registry();
+    prepare_music_and_faction_cues(local_faction, event);
+    prepare_speech_registry();
+    std::map<tactical::TypeId, const audio::SfxEvent*> spotted;
+    const audio::SfxEvent* generic_spotted = nullptr;
+    if (auto faction = catalog_->resolve(local_faction, data::Category::faction)) {
+        if (const auto* value = faction.value().value("SFXEvent_Generic_Unit_Spotted")) {
+            data::tag_trace::used(value->value);
+            generic_spotted = event(trim(value->value.raw_text), std::string(local_faction));
+        }
+        if (const auto* value = faction.value().value("SFXEvent_Enemy_Spotted")) {
+            data::tag_trace::used(value->value);
+            enemy_spotted_ = event(trim(value->value.raw_text), std::string(local_faction));
+        }
+        for (const auto& layer : faction.value().chain) {
+            const auto* definition = catalog_->find(layer, data::Category::faction);
+            if (!definition) continue;
+            for (const auto& item : definition->root.children) {
+                if (!same(item.name, "SFXEvent_Unit_Type_Spotted")) continue;
+                data::tag_trace::used(item);
+                const auto comma = item.raw_text.find(',');
+                if (comma != std::string::npos) {
+                    // BA-70: retain a matching blank override; it must not turn
+                    // into the generic fallback by dropping an empty token.
+                    const auto name = trim(std::string_view(item.raw_text).substr(0, comma));
+                    if (!name.empty()) spotted.try_emplace(battle::type_id(name),
+                        event(trim(std::string_view(item.raw_text).substr(comma + 1)), std::string(local_faction)));
+                } else {
+                    const auto pair = audio::split_list(item.raw_text);
+                    if (pair.size() == 2) spotted.try_emplace(battle::type_id(pair[0]), event(pair[1], std::string(local_faction)));
+                }
+            }
+        }
+    }
+
+    for (const units::Projectile& projectile : tables.projectiles) {
+        if (auto object = catalog_->resolve(projectile.id, data::Category::game_object)) {
+            projectile_detonations_.emplace(battle::type_id(projectile.id),
+                event(tag(object.value(), "Death_SFXEvent_Start_Die"), projectile.id));
+            terminal_detonations_.emplace(battle::type_id(projectile.id),
+                event(tag(object.value(), "Projectile_SFXEvent_Detonate"), projectile.id));
+        }
+    }
+    // WCB-01: real bomb terminals use their authored object death cue.
+    for (const units::UnitType& type : tables.units) {
+        if (!type.cluster_bomb) continue;
+        const auto id = battle::type_id(type.cluster_bomb->bomb_type);
+        const auto cue = projectile_detonations_.find(id);
+        if (cue == projectile_detonations_.end()) continue;
+        if (terminal_detonations_[id] == nullptr) terminal_detonations_[id] = cue->second;
+        TypeSounds sounds;
+        sounds.name = type.cluster_bomb->bomb_type;
+        sounds.detonate[tactical::object_weapon] = cue->second;
+        types_.try_emplace(id, std::move(sounds));
+    }
+    prepare_unit_cues(tables, combat, first_types, spotted, generic_spotted, event, binding_unit, first_type);
     start_rows_.reserve(256);
     binding_unit = false;
     // WST-14: the debug build's stealth service starts this event by name.

@@ -10,7 +10,6 @@ It extracts the four faces from that install into a temporary cache, which is
 deleted after the run; only the reports and captures are kept.
 """
 
-import json
 import os
 import pathlib
 import shutil
@@ -22,6 +21,9 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 from viewer_mode_sources import source_text  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 SRC = ROOT / "apps/viewer/src"
 KIT = ROOT / "src/presentation/godot/ui"
 TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
@@ -72,13 +74,11 @@ def run_viewer(test, directory, name, cache, *extra, resolution="1280x720"):
     test.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
     report = directory / f"{name}.json"
     capture = directory / f"{name}.png"
-    completed = subprocess.run(
-        [executable, "--resolution", resolution, "--path", str(ROOT / "apps/viewer/project"), "--",
+    completed = python_helpers.run_viewer([executable, "--resolution", resolution, "--path", str(ROOT / "apps/viewer/project"), "--",
          "--eawr-ui-gallery", "--eawr-game-root", GAME_ROOT, "--eawr-font-cache", str(cache), *extra,
-         "--eawr-report", str(report), "--eawr-capture", str(capture)],
-        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=300)
+         "--eawr-report", str(report), "--eawr-capture", str(capture)], cwd=ROOT, timeout=300)
     test.assertTrue(report.is_file(), completed.stdout)
-    result = json.loads(report.read_text(encoding="utf-8"))
+    result = python_helpers.read_json(report)
     test.assertEqual(completed.returncode, 0, result.get("failure") or completed.stdout)
     test.assertEqual(result["status"], "captured", result.get("failure"))
     width, height = (int(value) for value in resolution.split("x"))

@@ -1,4 +1,5 @@
 #include "reference_catalog.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/data/retail_values.hpp"
 #include <algorithm>
@@ -8,8 +9,7 @@ namespace eawr::viewer::galactic {
 namespace page = eawr::viewer::galactic;
 namespace {
 std::string trim(std::string text) {
-    const auto first = text.find_first_not_of(" \t\r\n");
-    return first == std::string::npos ? std::string{} : text.substr(first, text.find_last_not_of(" \t\r\n") - first + 1);
+    return core::trim(text, core::xml_whitespace);
 }
 std::string type_key(std::string text) {
     for (auto& value : text) value = static_cast<char>(core::ascii_upper(static_cast<unsigned char>(value)));

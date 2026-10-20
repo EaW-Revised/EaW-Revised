@@ -1,3 +1,15 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -5,17 +17,14 @@
 #include "eawr/sim/galactic/observer.hpp"
 
 #include <limits>
-#include <stdexcept>
+#include <exception>
 
 namespace {
 using namespace galactic_test;
 namespace cp = eawr::checkpoint;
 namespace campaign = eawr::campaign;
 using eawr::sim::math::Fixed;
-template <class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::take;
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 galactic::GalacticSetup setup() {
     galactic::SyntheticGalaxyOptions options;
@@ -529,7 +538,7 @@ void replay_and_checkpoint() {
     }
 }
 }
-int main() {
+int case_galactic_fiscal_tests() {
     try { retail_c01(); contribution_math(); trade_and_alignment(); malformed_static_tail(); preview(); preview(true); accounts(); boundaries(); ownership_at_deadline(); combined_extensions(); replay_and_checkpoint(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;

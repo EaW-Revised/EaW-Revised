@@ -119,6 +119,12 @@ struct PlanetHudFacts final {
     bool corrupted{}, local_benefits_from_corruption{};
 };
 
+// #4315: a digest of every fact the planet name, income, level, status-icon and fleet-badge placement reads. The
+// production queue rows (progress ticks every day) and the build choices (prices) are not read by the planet labels,
+// so only whether the planet shows production activity enters. The digest is a 64-bit hash of those facts: equal
+// digests mean the labels read the same facts, up to the hash's collision odds (about 2^-64 per pair).
+[[nodiscard]] std::uint64_t label_placement_digest(const PlanetHudFacts& facts);
+
 // Fills the queue rows of a planet the local observation controls and knows the production of, and, with
 // the #3931 galaxy reveal on, of any planet whose production the (revealed) observation knows: those rows
 // are marked `queue_revealed` and stay read-only. Returns whether the rows were published.

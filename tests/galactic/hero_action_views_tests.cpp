@@ -1,12 +1,18 @@
+#include <memory>
+#include <optional>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
 
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 
 namespace g = eawr::sim::galactic;
 namespace h = g::hero_actions;
 namespace {
-void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void check(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 h::Fixed fixed(int value) { return h::Fixed::from_integer(value).value(); }
 h::Fixture fixture() {
     h::Fixture world;
@@ -148,7 +154,7 @@ void contracts() {
     check(!g::observed_hero_action_menus(world, 1, row, 10, nullptr, nullptr, nullptr, &destruction)->destruction, "foreign destruction actor omitted");
 }
 }
-int main() {
+int case_galactic_hero_action_views_tests() {
     try { contracts(); std::cout << "hero action view contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -3,6 +3,9 @@
 // hand-written in the R2 receipt's line format, and every catalog is written to
 // a temporary tree and loaded through the real VFS and XML catalog.
 
+#include "../../support/check.hpp"
+#include <system_error>
+
 #include "corpus_structural_declaration.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -34,13 +37,11 @@ namespace audit = corpus::associations;
 namespace declarations = corpus::declarations;
 namespace lead_probe = corpus::structural_declaration;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 [[nodiscard]] std::string sha256(const std::string_view bytes) {

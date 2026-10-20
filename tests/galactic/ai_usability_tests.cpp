@@ -1,3 +1,4 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_usability.hpp"
 #include "galactic_ai_connecting_heap.hpp"
@@ -8,10 +9,23 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
 #include <limits>
+#include <map>
+#include <memory>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -20,11 +34,10 @@ namespace ai = eawr::script::foc::ai;
 namespace ga = eawr::script::foc::galactic_ai;
 using galactic_test::expect;
 using ai::real;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
+using eawr::testing::result_diagnostic::take;
+void done(eawr::core::Result<void> result) {
+    eawr::testing::must(std::move(result));
 }
-void done(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
 eawr::sim::math::Fixed f(std::int64_t n) { return take(eawr::sim::math::Fixed::from_integer(n)); }
 gc::GalacticSetup fixture() {
     gc::GalacticSetup s; s.seed = 71; s.debug_commands = true;
@@ -239,6 +252,63 @@ std::string route_publications(unsigned workers, bool fog) {
     expect(take(host.world.state_hash()) == native, "derived route layout does not alter native perception bytes");
     return native;
 }
+// #4199 cut 5: a refresh that is only a perception expiry replays the previous access rows and connecting-path pass,
+// while every changed input reruns them. Replayed outputs must equal a clean rebuild by an independent provider.
+std::string expiry_only_replay(unsigned workers, bool fog) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto session = take(world_session(fixture()));
+    auto setup = perception(fog); auto immutable = content(setup);
+    cp::GalacticAiUsabilityProvider provider(immutable); Host host(setup);
+    done(host.world.bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+    const auto body = [](const ai::GalacticConnectivity& value) { const auto text = trace(value); return text.substr(text.find(';') + 1); };
+    const auto clean = [&] {
+        cp::GalacticAiUsabilityProvider fresh(immutable); Host other(setup);
+        done(other.world.bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+        const auto output = take(fresh.connectivity(session, other.world, other.engine, executor));
+        expect(fresh.work().access_reuses == 0 && fresh.work().island_reuses == 0, "a first demand replays nothing");
+        return body(output);
+    };
+    const auto first = take(provider.connectivity(session, host.world, host.engine, executor));
+    const auto initial = provider.work();
+    expect(initial.access_reuses == 0 && initial.island_reuses == 0 && initial.searches > 0 && initial.edges > 0,
+        "the first demand computes the access rows and the connecting passes");
+    expect(body(first) == clean(), "the first demand equals an independent clean rebuild");
+    // A perception write that moves only the perception revision: a force term on an allied planet.
+    const auto revision = host.world.movement_input_revision();
+    expect(host.query("Variable_Target.EnemyForce.SpaceTotalUnnormalized", 1, 1).has_value()
+        && host.world.movement_input_revision() != revision, "the fixture moves only the perception revision");
+    const auto second = take(provider.connectivity(session, host.world, host.engine, executor));
+    const auto replayed = provider.work();
+    expect(replayed.generations > initial.generations
+        && replayed.access_reuses == replayed.generations - initial.generations
+        && replayed.island_reuses > 0 && replayed.site_searches == initial.site_searches && replayed.edges == initial.edges,
+        "an expiry-only refresh replays the access rows and the connecting pass without searching");
+    expect(body(second) == body(first) && body(second) == clean(), "the replayed output equals a clean rebuild");
+    // The rebuilt publication points at the site lists of the previous one: no list is copied or reallocated.
+    std::size_t shared_lists = 0;
+    expect(first.goal_reach.size() == second.goal_reach.size(), "a replayed publication keeps the row domain");
+    for (std::size_t row = 0; row < first.goal_reach.size() && row < second.goal_reach.size(); ++row) {
+        const auto& before = first.goal_reach[row].production_sites; const auto& after = second.goal_reach[row].production_sites;
+        if (before.empty()) continue;
+        expect(before.begin() == after.begin(), "an unchanged site list is shared between publications, not copied");
+        ++shared_lists;
+    }
+    expect(shared_lists > 0, "the fixture publishes non-empty site lists");
+    // The archive bytes of rows holding shared lists equal those of a provider whose rows each own their list.
+    const auto native = take(provider.capture());
+    cp::GalacticAiUsabilityProvider restored(immutable);
+    done(restored.restore(native));
+    expect(take(restored.capture()).components == native.components,
+        "serialized rows from shared and unshared lists are byte-identical");
+    // A changed access input reruns both, and still equals a clean rebuild.
+    expect(take(session.set_planet_access(2, true, true)), "restricting a planet changes the access generation");
+    const auto third = take(provider.connectivity(session, host.world, host.engine, executor));
+    const auto changed = provider.work();
+    expect(changed.access_reuses == replayed.access_reuses && changed.island_reuses == replayed.island_reuses
+        && changed.edges > replayed.edges, "a changed access input recomputes the rows and the connecting pass");
+    // Not compared with a clean rebuild: retained site lists stay valid until their sourced expiry by design (GFS-A14).
+    return trace(first) + trace(third);
+}
 std::string contracts(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
     auto config = fixture();
@@ -274,8 +344,8 @@ std::string contracts(unsigned workers, bool fog) {
         && movement.access[1].ai_relation == gc::PathRelation::hostile && movement.access[1].ai_enemy_space_force == true,
         "WGA-258 real owner, target ownership and presence are independently populated");
     expect(movement.orbital_occupants.at(2) == 2, "WGM-66 orbital occupant comes from live control");
-    const auto sites = [&](std::string_view policy, gc::PlanetId target) {
-        for (const auto& row : first.goal_reach) if (row.source == target && row.policy == policy) return row.production_sites;
+    const auto sites = [&](std::string_view policy, gc::PlanetId target) -> std::vector<gc::PlanetId> {
+        for (const auto& row : first.goal_reach) if (row.source == target && row.policy == policy) return row.production_sites.get();
         return std::vector<gc::PlanetId>{};
     };
     expect(sites("Friendly_Only", 2).empty() && sites("Enemy_Destination", 2) == std::vector<gc::PlanetId>{1}, "hostile target picks first strictly largest adjacent allied component");
@@ -307,6 +377,21 @@ std::string contracts(unsigned workers, bool fog) {
     }
     expect(quiet_provider.work().generations == quiet_work.generations && quiet_provider.work().searches == quiet_work.searches,
         "quiet advancing ticks reuse prepared inputs and searches before sourced expiries");
+    // A perception change dirties the next request. A rebuild that lands on the published reach rows keeps that storage,
+    // so the runtime's route publication copies a pointer and the world's rebind finds the same rows without a walk.
+    const auto held = take(quiet_provider.connectivity_publication(quiet, quiet_host.world, quiet_host.engine, executor));
+    quiet_host.world.visibility_changed(1, 2, false, 0);
+    const auto rebuilt = take(quiet_provider.connectivity_publication(quiet, quiet_host.world, quiet_host.engine, executor));
+    expect(rebuilt->goal_reach == held->goal_reach, "an unchanged perception rebuild publishes identical reach rows");
+    expect(rebuilt == held || rebuilt->goal_reach.shares(held->goal_reach), "identical reach rows share one storage");
+    ai::GalacticConnectivity copied = *held;
+    expect(copied.goal_reach.shares(held->goal_reach), "copying a publication shares its reach rows");
+    if (!copied.goal_reach.empty()) {
+        const auto before = copied.goal_reach[0].player;
+        copied.goal_reach.front().player = before + 1;
+        expect(!copied.goal_reach.shares(held->goal_reach) && held->goal_reach[0].player == before,
+            "editing a copy detaches it and leaves the published rows unchanged");
+    }
     const auto native = take(provider.capture()); const auto saved_world = take(host.world.capture());
     cp::GalacticAiUsabilityProvider restored(immutable); Host loaded(setup);
     done(loaded.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
@@ -863,12 +948,12 @@ void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
     encoded.push_back(0); expect(!standalone.restore_planet_access(encoded), "malformed access restore refuses atomically");
 }
 }
-int main() {
+int case_galactic_ai_usability_tests() {
     try {
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;
-            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
         }
         for (const bool fog : {false, true}) expect(partitioned_supplier(16, fog) == partitioned_supplier(1, fog), "usability supplier contract 1/16 equality");
         eawr::sim::InlineExecutor executor; access_checkpoint(executor);

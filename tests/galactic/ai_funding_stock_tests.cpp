@@ -1,3 +1,11 @@
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include "../support/result.hpp"
 // Supporting live-session contracts. The installed stock plan/build/battle/load
 // primary proof waits for the lifecycle, execution and persistence providers.
 #include "galactic_support.hpp"
@@ -25,13 +33,8 @@ namespace {
 using namespace galactic_test;
 namespace ai = eawr::script::foc::ai;
 using eawr::sim::math::Fixed;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
-void take(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-}
+using eawr::testing::result_code_colon::take;
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 ai::EvaluatedFundingTemplate policy() {
     return {1, {{1, f(1)}, {2, f(1)}}, {{1, take(Fixed::from_ratio(1, 2))}}};

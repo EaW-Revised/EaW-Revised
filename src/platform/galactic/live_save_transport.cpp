@@ -16,7 +16,7 @@ void length(std::vector<std::uint8_t>& out, std::uint32_t n) {
 }
 core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
     std::uint64_t frontier, const Input& input) {
-    checkpoint::Section result{input_section, 2, false, {}};
+    checkpoint::Section result{input_section, 3, false, {}};
     gc::GalacticReplay orders{setup, frontier, {}}, commands{setup, frontier, input.commands};
     for (std::size_t i = 0; i < input.orders.size(); ++i) {
         const auto& order = input.orders[i];
@@ -42,20 +42,12 @@ core::Result<checkpoint::Section> encode_input(const gc::GalacticSetup& setup,
         length(result.bytes, static_cast<std::uint32_t>(bytes.value().size()));
         result.bytes.insert(result.bytes.end(), bytes.value().begin(), bytes.value().end());
     }
-    for (const auto& order : input.orders) {
-        const auto width = order.accept_invasion ? 9U : 1U;
-        if (result.bytes.size() > checkpoint::max_bytes - width)
-            return fail<checkpoint::Section>("invasion intent metadata exceeds the byte budget");
-        result.bytes.push_back(order.accept_invasion ? 1 : 0);
-        if (order.accept_invasion) for (unsigned b = 0; b < 8; ++b)
-            result.bytes.push_back(static_cast<std::uint8_t>(*order.accept_invasion >> (b * 8U)));
-    }
     return core::Result<checkpoint::Section>::success(std::move(result));
 }
 core::Result<Input> decode_input(const checkpoint::Checkpoint& saved) {
     const auto at = std::find_if(saved.sections.begin(), saved.sections.end(), [](const auto& s) { return s.id == input_section; });
     if (at == saved.sections.end()) return core::Result<Input>::success({});
-    if (at->version != 2) return fail<Input>("unsupported section version");
+    if (at->version != 3) return fail<Input>("unsupported section version");
     std::size_t cursor{}; Input input;
     for (unsigned i = 0; i < 2; ++i) {
         if (at->bytes.size() - cursor < 4) return fail<Input>("missing replay length");
@@ -79,21 +71,9 @@ core::Result<Input> decode_input(const checkpoint::Checkpoint& saved) {
             if (command.key.tick < saved.header.completed_tick) return fail<Input>("queued command precedes frontier");
             if (i == 0) {
                 if (command.key.sequence != n + 1) return fail<Input>("deferred order indices are not contiguous");
-                input.orders.push_back({command.key.seat, std::move(command.payload), command.key.tick, {}});
+                input.orders.push_back({command.key.seat, std::move(command.payload), command.key.tick});
             }
             else input.commands.push_back(std::move(command));
-        }
-    }
-    for (auto& order : input.orders) {
-        if (cursor == at->bytes.size()) return fail<Input>("missing invasion intent flag");
-        const auto flag = at->bytes[cursor++];
-        if (flag > 1) return fail<Input>("invalid invasion intent flag");
-        if (flag) {
-            if (at->bytes.size() - cursor < 8) return fail<Input>("truncated invasion intent");
-            std::uint64_t conflict{};
-            for (unsigned b = 0; b < 8; ++b) conflict |= std::uint64_t(at->bytes[cursor++]) << (b * 8U);
-            if (!conflict) return fail<Input>("zero invasion conflict");
-            order.accept_invasion = conflict;
         }
     }
     if (cursor != at->bytes.size()) return fail<Input>("trailing input bytes");

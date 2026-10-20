@@ -1,3 +1,10 @@
+// #271 squadron sensors and #274 retail fog cells (docs/behaviour/space-visibility.md V-03,
+// V-11 to V-17). The fixtures stage the FoC debug-build recordings RO-1 (S-91: an X-Wing
+// squadron, enemies 300/700/900 away, a member teleported 1500 units, the leader killed, then
+// all but one member) and RO-3 (S-93: a Tartan cruiser at a cell centre, targets at
+// 1100/1200/1300/1204/1273) and check the recorded outcomes.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/fog_cells.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -16,24 +23,17 @@
 #include <utility>
 #include <vector>
 
-// #271 squadron sensors and #274 retail fog cells (docs/behaviour/space-visibility.md V-03,
-// V-11 to V-17). The fixtures stage the FoC debug-build recordings RO-1 (S-91: an X-Wing
-// squadron, enemies 300/700/900 away, a member teleported 1500 units, the leader killed, then
-// all but one member) and RO-3 (S-93: a Tartan cruiser at a cell centre, targets at
-// 1100/1200/1300/1204/1273) and check the recorded outcomes.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
@@ -662,7 +662,52 @@ void test_dense_and_multisample() {
     expect(turned.snapshot()->visible_entities(rebel).size() == 1, "V-21: rectangular sample box follows yaw");
 }
 
+// V-05/10/13/16/22: the observer's range detects every foreign target. A pad's
+// own reveal range and capture radius do not shorten the observing ship's sight.
+void test_neutral_pad_detection() {
+    constexpr tactical::PlayerId neutral = 13;
+    const std::vector<tactical::Player> players{{rebel, 0, 1, tactical::player_flag_commandable},
+        {empire, 1, 2, tactical::player_flag_commandable}, {neutral, 2, 3, 0}};
+    tactical::SensorProfile pad{enemy_type, units(275)};
+    tactical::SensorProfile observer{corvette_type, units(1000)};
+    observer.dense_multiplier = Fixed::from_raw(one / 5);
+    const std::vector<tactical::SensorProfile> table{pad, observer};
+    for (const auto distance : {50, 100, 200, 400, 800, 1000, 1100}) {
+        for (const auto owner : {rebel, empire, neutral}) {
+            for (const bool dense : {false, true}) {
+                std::string reference;
+                for (const auto workers : {1U, 2U, 4U, 8U}) {
+                    tactical::TacticalSetup setup;
+                    setup.players = players;
+                    setup.units = {unit(1, corvette_type, rebel, at(-distance, 0)),
+                        unit(2, enemy_type, owner, at(0, 0))};
+                    auto fog = coruscant();
+                    if (dense) fog.dense_circles.push_back({at(0, 0), units(2000)});
+                    auto created = tactical::TacticalSession::create(setup, table, {}, {}, fog);
+                    expect(static_cast<bool>(created), "V-10: no-slot neutral pad detection fixture creates");
+                    if (!created) continue;
+                    auto& session = created.value();
+                    const bool expected = owner == rebel || distance <= (dense ? 200 : 1000);
+                    const auto check = [&] {
+                        const auto seen = session.snapshot()->visible_entities(rebel);
+                        return std::find(seen.begin(), seen.end(), 2) != seen.end();
+                    };
+                    expect(check() == expected, "V-10/16/22: target ownership and destination fog obey observer range");
+                    const eawr::platform::ThreadWorkerAdapter executor(workers);
+                    expect(static_cast<bool>(session.step(executor)) && check() == expected,
+                        "V-10/16/22: partitioned tick preserves neutral pad detection range");
+                    if (reference.empty()) reference = session.state_sha256();
+                    else expect(reference == session.state_sha256(), "V-10: pad detection matches on 1/2/4/8 workers");
+                    if (workers == 1) std::cout << "pad detection probe: distance=" << distance << " owner=" << owner
+                        << " dense=" << dense << " seen=" << check() << '\n';
+                }
+            }
+        }
+    }
+}
+
 int main() {
+    test_neutral_pad_detection();
     test_reveal_owner_transfer();
     test_dense_and_multisample();
     test_validation();

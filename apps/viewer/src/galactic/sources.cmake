@@ -42,4 +42,5 @@ set(EAWR_VIEWER_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/radar_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_radar_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/corruption_hud.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/../../../../tests/presentation/galactic/galactic_hud_capture.cpp"
 )

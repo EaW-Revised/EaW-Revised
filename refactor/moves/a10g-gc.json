@@ -1,0 +1,6 @@
+[
+  {
+    "old": "src/campaign/game_session.cpp#reconcile_child_return",
+    "new": "src/campaign/game_session_lifecycle.cpp#reconcile_child_return"
+  }
+]

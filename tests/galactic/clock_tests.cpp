@@ -310,7 +310,7 @@ void live_equals_replay() {
 
 } // namespace
 
-int main() {
+int case_galactic_clock_tests() {
     frame_conversion();
     fiscal_window();
     pause_nesting();

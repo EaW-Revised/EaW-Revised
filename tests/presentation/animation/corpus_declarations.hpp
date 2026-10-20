@@ -21,6 +21,7 @@
 #include "corpus_associations.hpp"
 #include "corpus_diagnostics.hpp"
 
+#include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>

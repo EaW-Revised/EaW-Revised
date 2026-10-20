@@ -6,6 +6,7 @@
 // through the candidate field mapping and both irradiance policies. The host
 // installation path is an input and is never written.
 
+#include "eawr/core/text.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/presentation/lighting/lighting.hpp"
@@ -79,9 +80,10 @@ std::string number(const double value) {
 }
 
 std::string trim(std::string_view value) {
-    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
-    while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) value.remove_suffix(1);
-    return std::string(value);
+    // A carriage return is a separator only at the end of these line values.
+    const auto last = value.find_last_not_of(eawr::core::line_whitespace);
+    return std::string(eawr::core::trim_view(
+        value.substr(0, last == std::string_view::npos ? 0 : last + 1), eawr::core::horizontal_whitespace));
 }
 
 struct XmlHit final {

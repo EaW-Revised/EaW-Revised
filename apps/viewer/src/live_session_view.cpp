@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "live_session_internal.hpp"
@@ -42,18 +43,7 @@ namespace tactical = sim::tactical;
 using namespace live_session_detail;
 namespace live_session_detail {
 [[nodiscard]] std::string json(const std::string_view text) {
-    std::string result{"\""};
-    for (const char character : text) {
-        if (character == '"' || character == '\\') {
-            result += '\\';
-            result += character;
-        } else if (static_cast<unsigned char>(character) < 0x20U) {
-            result += ' ';
-        } else {
-            result += character;
-        }
-    }
-    return result + "\"";
+    return eawr::core::json_quote_space_controls(text);
 }
 
 [[nodiscard]] float to_float(const sim::math::Fixed value) {

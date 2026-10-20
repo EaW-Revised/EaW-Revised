@@ -3,8 +3,13 @@
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/setup_plan.hpp"
 
+namespace eawr::sim::galactic { class GalacticSnapshot; }
 namespace eawr::campaign {
 struct StartingForceInputs;
+// WGS-80: the original-type inputs of nested creation, rebuilt from the live production authoring of a fresh or
+// restored owner. Shared by the due heroes and the plot rewards that create units (#683).
+[[nodiscard]] core::Result<std::shared_ptr<StartingForceInputs>> rebuild_starting_force_inputs(
+    const sim::galactic::GalacticSnapshot&, const CampaignSetupPlan&);
 // WGM-109/110/132..135: stock due placement and live census, rebound on every fresh/restore owner.
 [[nodiscard]] core::Result<void> bind_stock_hero_returns(GameSession&, std::shared_ptr<const StartingForceInputs>);
 // WR-54: an optional owner can exclude locomotors that it suspends; stopped is eligible.

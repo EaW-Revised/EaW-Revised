@@ -3,12 +3,15 @@
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/campaign/starting_forces.hpp"
+#include "eawr/campaign/story_plots.hpp"
+#include "eawr/campaign/story_rewards_live.hpp"
 #include "eawr/script/numeric/q24_boundary.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "../script/foc/tactical_ai_internal.hpp"
 #include "../script/foc/host.hpp"
 #include "checkpoint_fields_internal.hpp"
+#include "battle_return_internal.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -513,13 +516,12 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         return core::Result<std::optional<AutoResolveOutcomeApplication>>::success(std::move(application).value());
     };
     result.outcomes.control = [](gc::GalacticSession& galaxy, const AutoResolveOutcomeApplication& a) {
-        gc::ControlBattleReturn returned; returned.planet = a.planet; returned.invader = a.invader; returned.defender = a.defender;
-        returned.winner = a.result.winner; returned.land = a.land; returned.station_level = a.result.station_level; returned.destroyed = a.destroyed;
         const auto snapshot = galaxy.snapshot();
         // WGM-202: the station stands for the planet's own starbase, whoever fought as the defender.
         ConflictRecord admitted; admitted.planet = a.planet; admitted.invader = a.invader; admitted.defender = a.defender;
         const auto parties = resolve_conflict_parties(snapshot.get(), {.admitted = &admitted, .current_station_owner = true});
-        returned.invader = parties.invader; returned.defender = parties.defender; returned.station_owner = parties.station_owner;
+        admitted.layer = a.land ? BattleLayer::land : BattleLayer::space;
+        auto returned = build_control_battle_return(admitted, a.result, parties, a.result.station_level, a.destroyed);
         for (const auto id : a.land_invaders) {
             std::optional<gc::SurfaceForce> force;
             if (const auto* planet = control_planet(*snapshot, a.planet)) for (const auto& row : planet->landed) if (row.id == id) force = row;
@@ -542,23 +544,44 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         const auto enemy = [&](gc::PlayerId a, gc::PlayerId b) {
             return std::any_of(p->relations.begin(), p->relations.end(), [&](const auto& relation) { return relation.player == a && relation.other == b && relation.enemy; });
         };
-        auto phase = executor.execute_phase("galactic-movement-access", sim::tick_partition_count, [&](std::size_t partition) {
+        // Index construction preserves snapshot fleet order within each orbit.
+        // Both refresh boundaries rebuild this view from their current presence.
+        const auto& fleets = snapshot.fleets();
+        std::map<gc::PlanetId, std::vector<std::size_t>> presence;
+        for (std::size_t i = 0; i < fleets.size(); ++i) presence[fleets[i].orbit].push_back(i);
+        struct FleetPresence {
+            bool any{}, all_stealth = true;
+            std::optional<core::Diagnostic> error;
+        };
+        std::vector<FleetPresence> prepared(fleets.size());
+        auto phase = executor.execute_phase("galactic-movement-presence", sim::tick_partition_count, [&](std::size_t partition) {
+            const auto range = sim::partition_range(partition, fleets.size());
+            for (auto i = range.begin; i < range.end; ++i) {
+                auto& out = prepared[i];
+                for (const auto& member : fleets[i].members) {
+                    auto value = facts(*p, snapshot, member);
+                    if (!value) { out.error = value.error(); break; }
+                    const auto stealth = [&](auto&& self, const CombatantFacts& f) -> bool {
+                        if (f.contents.empty()) return f.kind != CombatantKind::transport && f.stealth;
+                        return std::all_of(f.contents.begin(), f.contents.end(), [&](const auto& child) { return self(self, child); });
+                    };
+                    out.any = true; out.all_stealth = out.all_stealth && stealth(stealth, value.value());
+                }
+            }
+        });
+        if (!phase) return core::Result<std::vector<gc::MovementAccess>>::failure(phase.error());
+        phase = executor.execute_phase("galactic-movement-access", sim::tick_partition_count, [&](std::size_t partition) {
             const auto range = sim::partition_range(partition, rows.size());
             for (auto i = range.begin; i < range.end; ++i) {
                 auto& row = rows[i]; const auto* planet = control_planet(snapshot, row.planet);
                 if (!planet) { errors[i] = fail<void>("missing runtime control planet").error(); continue; }
                 row.potential_conflict = planet->starbase.level != 0 && enemy(row.player, planet->starbase.owner);
-                for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == row.planet && enemy(row.player, fleet.owner)) {
-                    bool any{}, all_stealth = true;
-                    for (const auto& member : fleet.members) {
-                        auto value = facts(*p, snapshot, member); if (!value) { errors[i] = value.error(); break; }
-                        const auto stealth = [&](auto&& self, const CombatantFacts& f) -> bool {
-                            if (f.contents.empty()) return f.kind != CombatantKind::transport && f.stealth;
-                            return std::all_of(f.contents.begin(), f.contents.end(), [&](const auto& child) { return self(self, child); });
-                        };
-                        any = true; all_stealth = all_stealth && stealth(stealth, value.value());
-                    }
-                    row.potential_conflict = row.potential_conflict || (any && !all_stealth);
+                const auto orbit = presence.find(row.planet);
+                if (orbit == presence.end()) continue;
+                for (const auto fleet : orbit->second) if (enemy(row.player, fleets[fleet].owner)) {
+                    const auto& value = prepared[fleet];
+                    if (value.error) errors[i] = value.error;
+                    row.potential_conflict = row.potential_conflict || (value.any && !value.all_stealth);
                 }
             }
         });
@@ -629,6 +652,14 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     const units::GalacticTypeTable& types, const CampaignSetupPlan& plan, GameSession::ContentResolver content,
     AutoResolveTimeProvider time, std::shared_ptr<const StockSpaceEntry> space) {
     bind_story_identities(game, plan); // also rebuilt for fresh checkpoint owners
+    // WGS-07/WGS-140: the campaign's plots for its active players, installed before the first step (a checkpoint
+    // restore fills the saved plot state afterwards). Missing files only log (the loader's notes).
+    auto plots = load_story_plots(filesystem, data, plan);
+    if (!plots) return core::Result<void>::failure(plots.error());
+    if (auto installed = game.install_story({plan.mode() != CampaignSetupMode::multiplayer}, std::move(plots.value().plots),
+        std::move(plots.value().subplots), std::move(plots.value().notes)); !installed) return installed;
+    // #683 part 2: the galaxy-changing rewards of those plots (WST-40/41/64) and their journal replayer.
+    if (auto bound = bind_story_rewards(game, plan, data); !bound) return bound;
     const auto& census = game.galaxy().setup().census;
     std::pair<GameSession::AutoResolveStateWriter, GameSession::AutoResolveStateReader> checkpoint;
     auto adapters = make_stock_auto_resolver(filesystem, catalog, data, types, plan, census ? std::span<const gc::CensusObject>(census->objects) : std::span<const gc::CensusObject>{}, std::move(time), &checkpoint);

@@ -128,7 +128,6 @@ public:
     [[nodiscard]] core::Result<std::string> script_sync_hash();
     [[nodiscard]] bool uses_sync_hash() const noexcept;
     // Separate shared-scheduler persistence blobs, at the completed barrier.
-    [[nodiscard]] core::Result<std::string> save_ai();
     [[nodiscard]] core::Result<std::string> save_story();
     [[nodiscard]] core::Result<GalacticScriptSave> save_scripts();
 

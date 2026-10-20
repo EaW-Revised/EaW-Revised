@@ -1,25 +1,32 @@
+#include "../support/env.hpp"
+#include "../support/temp_dir.hpp"
+#include "../support/check.hpp"
 #include "eawr/units/galactic_types.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
-#include <stdexcept>
+#include <utility>
+#include <vector>
 
 namespace {
 using eawr::sim::math::Fixed;
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool value, const std::string_view message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
 void override_free_identity() {
     eawr::units::GalacticType unchanged;
@@ -66,7 +73,7 @@ void member_timeline() {
     const auto root = std::filesystem::temp_directory_path() /
         ("eawr-member-timeline-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root / "XML");
-    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } cleanup{root};
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
     write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>A.xml</File><File>B.xml</File><File>C.xml</File></Game_Object_Files>");
     write(root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
     write(root / "XML/FactionFiles.xml", "<Faction_Files/>");
@@ -154,7 +161,7 @@ void synthetic() {
     const auto root = std::filesystem::temp_directory_path() /
         ("eawr-gc-types-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root / "XML");
-    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } cleanup{root};
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
     write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
     write(root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
     write(root / "XML/FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
@@ -306,20 +313,6 @@ void synthetic() {
     expect(identity != eawr::units::galactic_content_identity(changed), "nonempty authored stealth inputs contribute to identity");
 }
 
-std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text = nullptr;
-    std::size_t length = 0;
-    if (_dupenv_s(&text, &length, "EAWR_EAW_GAME_ROOT") != 0 || !text) return std::nullopt;
-    std::string result(text);
-    std::free(text);
-    return result.empty() ? std::nullopt : std::optional<std::string>(result);
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    return text && *text ? std::optional<std::string>(text) : std::nullopt;
-#endif
-}
-
 // WGEP-163: the credit-halt sabotage profile follows the authored ability data; the stock files
 // never author these two tags, so mods are the only source.
 void credit_halt_authoring() {
@@ -327,7 +320,7 @@ void credit_halt_authoring() {
         ("eawr-credit-halt-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root / "XML");
     write(root / "XML/TradeRouteFiles.xml", "<Trade_Route_Files/>");
-    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } cleanup{root};
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
     write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
     write(root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
     write(root / "XML/FactionFiles.xml", "<Faction_Files/>");
@@ -405,7 +398,7 @@ void technology_price_authoring() {
     const auto root = std::filesystem::temp_directory_path() /
         ("eawr-technology-price-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     std::filesystem::create_directories(root / "XML");
-    struct Cleanup { std::filesystem::path path; ~Cleanup() { std::error_code ec; std::filesystem::remove_all(path, ec); } } cleanup{root};
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
     write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
     for (const auto& [file, element] : {std::pair{"HardpointDataFiles", "Hard_Point_Files"},
             std::pair{"FactionFiles", "Faction_Files"}, std::pair{"CampaignFiles", "Campaign_Files"}, std::pair{"SFXEventFiles", "SFXEvent_Files"}})
@@ -450,7 +443,7 @@ void technology_price_authoring() {
         && row("Duplicate").technology_prices[0].reduction == Fixed::from_decimal("0.2").value(), "same authored source replaces; distinct names remain independent");
 }
 void installed() {
-    const auto root = game_root();
+    const auto root = eawr::testing::game_root();
     if (!root) { std::cout << "GC type census skipped (set EAWR_EAW_GAME_ROOT)\n"; return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& folder : {"corruption", "GameData"}) {
@@ -530,7 +523,7 @@ void installed() {
 
 int main(const int argc, char** argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--installed") {
-        const auto root = game_root();
+        const auto root = eawr::testing::game_root();
         if (!root || root->empty()) return 77;
         installed();
     } else if (argc == 1) {

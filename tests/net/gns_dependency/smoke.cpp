@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include <iostream>
 
 #if EAWR_HAS_GNS
@@ -7,7 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <stdexcept>
+#include <exception>
 #include <thread>
 
 namespace {
@@ -20,7 +22,9 @@ void changed(SteamNetConnectionStatusChangedCallback_t* event) {
             SteamNetworkingSockets()->CloseConnection(incoming, 0, "smoke accept failed", false);
     }
 }
-void expect(bool ok, const char* reason) { if (!ok) throw std::runtime_error(reason); }
+void expect(bool ok, const char* reason) {
+    if (!ok) eawr::testing::require(ok, reason);
+}
 struct Runtime {
     Runtime() {
         SteamNetworkingErrMsg reason{};

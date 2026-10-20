@@ -1,5 +1,10 @@
 #include "legacy_family_support.hpp"
 
+#include <array>
+#include <cmath>
+#include <limits>
+#include <string>
+
 namespace legacy_family_test_support {
 
 void dx8_mesh_contracts() {

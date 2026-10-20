@@ -1,0 +1,16 @@
+// Generated from the area's explicit case registrations. Each invocation runs
+// one case, preserving the standalone tests' process lifetime and argument list.
+#include <iostream>
+#include <string_view>
+
+@DECLARATIONS@
+int main(int argc, char** argv) {
+    if (argc < 2) {
+        std::cerr << "Expected a galactic case name\n";
+        return 2;
+    }
+    const std::string_view name(argv[1]);
+@DISPATCH@
+    std::cerr << "Unknown galactic case: " << name << '\n';
+    return 2;
+}

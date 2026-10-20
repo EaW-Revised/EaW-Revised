@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/battle/start.hpp"
 #include "eawr/presentation/particles/particles.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
 #include "eawr/skirmish/melee.hpp"
@@ -37,7 +38,7 @@ struct PreparedBattle {
     sim::tactical::VictoryRules victory;
     sim::tactical::EconomyRules economy;
     units::UnitTables tables;
-    std::optional<skirmish::SkirmishStart> start;
+    std::optional<battle::BattleStart> start;
 };
 
 struct ScheduledOrder final {

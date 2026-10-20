@@ -1,0 +1,47 @@
+[
+  {
+    "old": "apps/viewer/src/battle_audio_events.cpp#BattleAudio::frame",
+    "new": "apps/viewer/src/battle_audio_events.cpp#BattleAudio::present_combat_audio",
+    "tag": "Death_SFXEvent_Start_Die"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "Death_Explosion_SFXEvent"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "Death_SFXEvent_Start_Die"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "Fire_SFXEvent"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "SFXEvent_Move"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "SFXEvent_Sold_Tactical"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "Death_Breakoff_Prop"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_unit_cues",
+    "tag": "Type"
+  },
+  {
+    "old": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare",
+    "new": "apps/viewer/src/battle_audio_prepare.cpp#BattleAudio::prepare_music_and_faction_cues",
+    "tag": "Music_Event_List_Ambient"
+  }
+]

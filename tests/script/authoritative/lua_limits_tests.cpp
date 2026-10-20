@@ -8,6 +8,7 @@
 // foc_patterns takes its patterns from the retail FoC scripts and skips
 // unless EAWR_EAW_GAME_ROOT is set.
 
+#include "../../support/env.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/sim/world.hpp"
@@ -19,13 +20,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <set>
 #include <string>
 #include <string_view>
@@ -282,19 +284,7 @@ void scan_literals(std::string_view source, std::set<std::string>& literals, std
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 int run_foc_patterns() {

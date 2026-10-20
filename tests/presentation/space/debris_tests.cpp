@@ -1,12 +1,17 @@
 // #391: breakoff props (presentation::space debris rule, docs/behaviour/battle-presentation.md
 // BP-30 to BP-36). Values are the FoC Nebulon-B's front-left breakoff prop.
-#include "eawr/presentation/space/debris.hpp"
 
+#include "../../support/check.hpp"
+#include "eawr/presentation/space/debris.hpp"
+#include "eawr/presentation/space/shield_hits.hpp"
+
+#include <array>
 #include <bit>
 #include <cmath>
-#include "eawr/presentation/space/shield_hits.hpp"
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -15,13 +20,11 @@ namespace {
 
 namespace space = eawr::presentation::space;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const double a, const double b) { return std::abs(a - b) <= 1.0e-9; }

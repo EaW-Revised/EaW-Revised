@@ -2,6 +2,9 @@
 // private asset is used: every catalog is written to a temporary tree and
 // loaded through the real VFS and XML catalog.
 
+#include "../../support/check.hpp"
+#include <system_error>
+
 #include "corpus_declarations.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -31,13 +34,11 @@ namespace corpus = eawr::tests::animation_corpus;
 namespace audit = corpus::associations;
 namespace probe = corpus::declarations;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 [[nodiscard]] std::string sha256(const std::string_view bytes) {

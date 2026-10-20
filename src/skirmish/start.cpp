@@ -1,4 +1,5 @@
 #include "eawr/skirmish/start.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/assets/map.hpp"
 #include "eawr/skirmish/placement.hpp"
@@ -32,18 +33,11 @@ core::Diagnostic error(const std::string_view code, std::string message) {
 }
 
 std::string trim(const std::string_view value) {
-    const auto space = [](const char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    std::size_t first = 0;
-    std::size_t last = value.size();
-    while (first < last && space(value[first])) ++first;
-    while (last > first && space(value[last - 1])) --last;
-    return std::string(value.substr(first, last - first));
+    return core::trim(value, core::xml_whitespace);
 }
 
 bool iequals(const std::string_view left, const std::string_view right) noexcept {
-    const auto fold = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(), [&](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 
 std::vector<std::string> tokens(const std::string_view text) {
@@ -1080,14 +1074,20 @@ std::vector<sim::tactical::SensorProfile> revealed_sensor_table(const std::span<
 
 core::Result<SkirmishStart> build_start(const Fixture& fixture, const StartInputs& inputs) {
     auto start = Builder(fixture, inputs).run();
-    if (start) start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+    if (start) {
+        start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+        if (inputs.tables) start.value().arrivals = battle::plan_start_arrivals(start.value(), *inputs.tables);
+    }
     return start;
 }
 
 core::Result<SkirmishStart> build_selected_start(const Fixture& fixture, const StartInputs& inputs,
     const std::span<const SelectedStartUnit> selected, const bool map_first, const MapObjectFilter& map_filter) {
     auto start = Builder(fixture, inputs, selected, map_first, map_filter).run();
-    if (start) start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+    if (start) {
+        start.value().victory_condition = fixture.victory_condition.value_or(inputs.space_victory_condition);
+        if (inputs.tables) start.value().arrivals = battle::plan_start_arrivals(start.value(), *inputs.tables);
+    }
     return start;
 }
 

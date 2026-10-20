@@ -1,4 +1,5 @@
 #include "eawr/data/ui/sfnt.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <array>
@@ -103,11 +104,7 @@ std::string decode_name(const std::span<const std::byte> text, const bool utf16)
 }
 
 std::string trim(std::string text) {
-    const auto space = [](const char character) { return character == ' ' || character == '\t'; };
-    while (!text.empty() && space(text.back())) text.pop_back();
-    const auto first = std::find_if_not(text.begin(), text.end(), space);
-    text.erase(text.begin(), first);
-    return text;
+    return core::trim(text, core::horizontal_whitespace);
 }
 
 core::Result<SfntFace> read_names(const std::span<const std::byte> table) {

@@ -6,6 +6,8 @@
 //
 //   lua_script_bench [--instances 64] [--ticks 3000] [--warmup 30] [--workers 1,4] [--seed n] [--quick]
 
+#include "../../support/self_test.hpp"
+#include "../../support/result.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/numeric/binary64.hpp"
@@ -14,14 +16,18 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <exception>
 #include <iostream>
-#include <memory>
+#include <ratio>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
@@ -47,7 +53,7 @@ LuaNumber integer(std::int64_t value) { return LuaNumber::from_repr(b64::from_in
 
 void register_bindings(auth::ScriptScheduler& scheduler) {
     auto ok = [](eawr::core::Result<void> result) {
-        if (!result) throw std::runtime_error(result.error().message);
+        eawr::testing::must(std::move(result));
     };
     ok(scheduler.register_binding("Test_Report", [](auth::BindingContext& context, const auth::ValueList& arguments) {
         context.issue_command("report", arguments);
@@ -135,6 +141,10 @@ std::vector<std::size_t> parse_workers(std::string_view text) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     Options options;
     for (int index = 1; index < argc; ++index) {
         const std::string_view flag = argv[index];

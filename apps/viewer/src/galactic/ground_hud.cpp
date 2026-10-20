@@ -208,7 +208,7 @@ bool GalacticMode::State::build_ground_hud() {
             if (ground_hud.sale) ground_hud.sale->hide();
         }
         if (!selectable(*this) || !galaxy) return false;
-        const auto roster = ground_hud.rosters.find(selected_planet);
+        const auto roster = ground_roster_find(selected_planet);
         if (roster == ground_hud.rosters.end()) return false;
         for (const auto& [name, button] : ground_hud.buttons) {
             if (name.starts_with("Pad_") && button->is_visible_in_tree() && button->get_global_rect().has_point(point)) {
@@ -289,7 +289,7 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
         for (const auto& [name, button] : ground_hud.buttons) {
             std::size_t slot{};
             if (!structure_slot(name, slot) || !button->is_visible_in_tree() || !button->get_global_rect().has_point(point)) continue;
-            const auto roster = ground_hud.rosters.find(selected_planet);
+            const auto roster = ground_roster_find(selected_planet);
             if (!ground_hud.sale || roster == ground_hud.rosters.end() || slot >= roster->second.structures.size()) return;
             const auto& structure = roster->second.structures[slot];
             if (!galaxy || structure.owner != galaxy->local.player || !structure.sale_available) return;
@@ -315,7 +315,7 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
             if (button != ground_hud.buttons.end() && button->second->get_global_rect().has_point(point)
                 && widget.enabled && widget.object && widget.visible) { ground_hud.pressed = widget.id + 1; ground_hud.pressed_object = widget.object; break; }
         }
-        const auto found = ground_hud.rosters.find(selected_planet);
+        const auto found = ground_roster_find(selected_planet);
         if (control && ground_hud.pressed) {
             const auto widget = std::find_if(ground_hud.widgets.begin(),ground_hud.widgets.end(),
                 [this](const auto& row) { return row.id + 1 == ground_hud.pressed; });
@@ -392,11 +392,39 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
     }
 }
 
+namespace {
+using RosterMap = std::map<galactic_view::ObjectId, galactic_view::GroundRoster>;
+// The roster of one planet of `snapshot`, built on first use; the end of `cache` when the snapshot has no such planet.
+RosterMap::const_iterator lazy_roster(RosterMap& cache, const sim::galactic::GalacticSnapshot* snapshot,
+    const galactic_view::PlayerId local, const galactic_view::ObjectId planet) {
+    if (const auto found = cache.find(planet); found != cache.end()) return found;
+    if (!snapshot) return cache.end();
+    const auto planets = snapshot->planets();
+    // planets() is ascending by id; a miss is confirmed by a scan, so an out-of-order snapshot still finds its roster.
+    auto row = std::lower_bound(planets.begin(), planets.end(), planet,
+        [](const auto& value, const auto id) { return value.id < id; });
+    if (row == planets.end() || row->id != planet)
+        row = std::find_if(planets.begin(), planets.end(), [planet](const auto& value) { return value.id == planet; });
+    if (row == planets.end()) return cache.end();
+    return cache.emplace(planet, galactic_view::ground_roster(*snapshot, local, planet)).first;
+}
+}
+
 // #3931: launch and land gating reads the truth roster; with the reveal off the draw roster is the truth roster.
 const galactic_view::GroundRoster* GalacticMode::State::command_roster(galactic_view::ObjectId planet) const {
-    const auto& source = ground_hud.command_rosters.empty() ? ground_hud.rosters : ground_hud.command_rosters;
-    const auto found = source.find(planet);
-    return found == source.end() ? nullptr : &found->second;
+    if (galaxy && ground_hud.command_publication && !ground_hud.command_publication->planets().empty()) {
+        const auto found = lazy_roster(ground_hud.command_rosters, ground_hud.command_publication.get(),
+            galaxy->local.player, planet);
+        return found == ground_hud.command_rosters.end() ? nullptr : &found->second;
+    }
+    const auto found = ground_roster_find(planet);
+    return found == ground_hud.rosters.end() ? nullptr : &found->second;
+}
+
+std::map<galactic_view::ObjectId, galactic_view::GroundRoster>::const_iterator
+GalacticMode::State::ground_roster_find(galactic_view::ObjectId planet) const {
+    if (!galaxy) return ground_hud.rosters.end();
+    return lazy_roster(ground_hud.rosters, ground_hud.publication.get(), galaxy->local.player, planet);
 }
 
 bool GalacticMode::State::request_ground_land(bool submit, galactic_view::ObjectId id) {
@@ -495,7 +523,7 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
 bool GalacticMode::State::ground_pad_drop(Vector2 point) {
     if (!ground_hud.pressed || !ground_hud.pressed_object || !map_input.box_end || !selectable(*this)
         || !fleet_organize || !fleet_organize->is_visible_in_tree() || !selected_planet) return false;
-    const auto found = ground_hud.rosters.find(selected_planet);
+    const auto found = ground_roster_find(selected_planet);
     if (found == ground_hud.rosters.end() || !found->second.accessible || !found->second.allied) return false;
     const auto& roster = found->second;
     std::optional<std::size_t> target;
@@ -556,12 +584,8 @@ void GalacticMode::State::update_ground_hud() {
     ground_hud.layout_dirty = false;
     if (ground_hud.publication != displayed_snapshot) {
         ground_hud.publication = displayed_snapshot; ground_hud.rosters.clear(); ground_hud.command_rosters.clear();
-        for (const auto& planet : displayed_snapshot->planets())
-            ground_hud.rosters.emplace(planet.id, galactic_view::ground_roster(*displayed_snapshot, galaxy->local.player, planet.id));
-        if (published_snapshot && published_snapshot != displayed_snapshot)
-            for (const auto& planet : published_snapshot->planets())
-                ground_hud.command_rosters.emplace(planet.id,
-                    galactic_view::ground_roster(*published_snapshot, galaxy->local.player, planet.id));
+        ground_hud.command_publication = published_snapshot && published_snapshot != displayed_snapshot
+            ? published_snapshot : nullptr;
         ++ground_hud.rebuilds;
     }
     if (changed) {
@@ -569,7 +593,7 @@ void GalacticMode::State::update_ground_hud() {
         if (ground_hud.planet != selected_planet) {
             map_input.multiselection.clear(); map_input.box_start.reset(); map_input.box_end.reset(); ground_hud.pressed = 0;
         } else {
-            const auto roster = ground_hud.rosters.find(selected_planet);
+            const auto roster = ground_roster_find(selected_planet);
             const auto layout = roster == ground_hud.rosters.end() ? galactic_view::PadLayout{}
                 : pad_layout(ground_hud, selected_planet, roster->second);
             std::erase_if(map_input.multiselection, [&](auto id) {
@@ -582,7 +606,7 @@ void GalacticMode::State::update_ground_hud() {
         ground_hud.planet = selected_planet;
         ground_hud.widgets.clear();
     }
-    const auto found = ground_hud.rosters.find(selected_planet);
+    const auto found = ground_roster_find(selected_planet);
     const galactic_view::GroundRoster empty;
     const auto& roster = found == ground_hud.rosters.end() ? empty : found->second;
     if (ground_hud.sale && ground_hud.sale_object) {
@@ -719,7 +743,7 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
             << ",\"enabled\":" << (widget.enabled ? "true" : "false") << ",\"selected\":"
             << (std::find(map_input.multiselection.begin(),map_input.multiselection.end(),widget.id) != map_input.multiselection.end() ? "true" : "false") << "}";
     output << "],\"structures\":{";
-    const auto roster = ground_hud.rosters.find(selected_planet);
+    const auto roster = ground_roster_find(selected_planet);
     const bool have = roster != ground_hud.rosters.end();
     output << "\"capacity\":" << (have ? roster->second.structure_capacity : 0)
         << ",\"known\":" << (have && roster->second.structures_known ? "true" : "false") << ",\"slots\":[";

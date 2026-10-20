@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/presentation/ui/font_extract.hpp"
 
 #include "eawr/core/sha256.hpp"
@@ -56,11 +58,7 @@ struct Scan final {
 };
 
 std::string lower(std::string_view text) {
-    std::string out(text);
-    for (char& c : out) {
-        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-    }
-    return out;
+    return core::to_lower(text);
 }
 
 std::uint32_t u16(const std::string_view bytes, const std::size_t at) {
@@ -185,18 +183,7 @@ const PinnedFontFace* pinned_for(const FontExtractPolicy& policy, const std::str
 }
 
 std::string json_string(const std::string_view text) {
-    std::string out = "\"";
-    for (const char c : text) {
-        if (c == '"' || c == '\\') {
-            out += '\\';
-            out += c;
-        } else if (static_cast<unsigned char>(c) < 0x20U) {
-            out += ' ';
-        } else {
-            out += c;
-        }
-    }
-    return out + "\"";
+    return eawr::core::json_quote_space_controls(text);
 }
 
 // The expected faces by name, plus warnings (an unknown build whose faces differ from the pins).

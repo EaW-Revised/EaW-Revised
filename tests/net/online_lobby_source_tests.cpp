@@ -1,18 +1,29 @@
+#include "../support/check.hpp"
 #include "eawr/net/online_lobby_source.hpp"
 #include "relay_directory_codec.hpp"
+
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <exception>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace eawr::presentation::ui;
 using namespace std::chrono_literals;
-void expect(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
+void expect(bool value, const char* reason) {
+    if (!value) eawr::testing::require(value, reason);
+}
 template<class F> void until(F predicate) {
     const auto deadline = std::chrono::steady_clock::now() + 8s;
     while (!predicate()) { if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("Source worker did not reach checkpoint"); std::this_thread::sleep_for(2ms); }
@@ -71,6 +82,37 @@ public:
         return eawr::core::Result<OnlineChatPage>::success(std::move(page));
     }
     eawr::core::Result<void> kick(const OnlineRoomPublication&, std::uint32_t) override { return eawr::core::Result<void>::success(); }
+    // Menu channel (#3758). Unsupported by default: it then answers like a relay that predates the channel.
+    std::atomic<bool> menu_supported{};
+    std::atomic<unsigned> menu_enters{}, menu_leaves{}, menu_says{}, menu_polls{}, menu_fail_enters{};
+    std::mutex menu_mutex;
+    std::vector<std::pair<std::string, std::string>> menu_lines{{"Alice", "hello"}}; // sequence = index + 1
+    std::vector<std::string> menu_said;
+    std::string menu_name;
+    void menu_push(std::string name, std::string text) { std::lock_guard lock(menu_mutex); menu_lines.emplace_back(std::move(name), std::move(text)); }
+    OnlineMenuPage menu_page(std::uint32_t after, bool roster) {
+        std::lock_guard lock(menu_mutex);
+        OnlineMenuPage page; page.through = static_cast<std::uint32_t>(menu_lines.size());
+        for (std::uint32_t i = after; i < page.through; ++i) page.lines.push_back({i + 1, 1, menu_lines[i].first, menu_lines[i].second});
+        page.roster_present = roster; page.roster_version = 1;
+        if (roster) page.members = {{1, "Alice"}, {2, menu_name}};
+        return page;
+    }
+    eawr::core::Result<OnlineMenuPage> menu_enter(std::string name) override {
+        ++menu_enters;
+        if (!menu_supported) return eawr::core::Result<OnlineMenuPage>::failure(eawr::net::relay::error(1521, "Lobby chat is not available on this server."));
+        if (menu_fail_enters > 0) { --menu_fail_enters; return eawr::core::Result<OnlineMenuPage>::failure(eawr::net::relay::error(1519, "Lobby endpoint failed")); }
+        { std::lock_guard lock(menu_mutex); menu_name = std::move(name); }
+        return eawr::core::Result<OnlineMenuPage>::success(menu_page(0, true));
+    }
+    eawr::core::Result<void> menu_say(std::string text) override {
+        ++menu_says; std::lock_guard lock(menu_mutex); menu_said.push_back(text); menu_lines.emplace_back(menu_name, std::move(text));
+        return eawr::core::Result<void>::success();
+    }
+    eawr::core::Result<OnlineMenuPage> menu_poll(std::uint32_t after, std::uint32_t) override {
+        ++menu_polls; return eawr::core::Result<OnlineMenuPage>::success(menu_page(after, false));
+    }
+    void menu_leave() override { ++menu_leaves; }
 };
 void fixtures() {
     FixedOnlineLobbySource source;
@@ -232,8 +274,72 @@ void recovery_and_validation() {
     source.send_chat(LobbyChatScope::game, "Room", "Guest", "stale"); expect(fake->sends == 0, "Cleared membership cannot queue room chat");
 }
 
+
+// A relay that predates the menu channel: one probe, a neutral state, no error, no retry loop, and the room list keeps working (#3758).
+void menu_old_relay() {
+    auto service = std::make_unique<FakeService>(); auto* fake = service.get();
+    OnlineLobbyGameSource source(std::move(service), metadata());
+    LobbyPresence presence; presence.place = LobbyPlace::lobby; presence.name = "Guest"; source.announce(presence);
+    until([&] { return source.menu_state() == OnlineMenuState::unavailable; });
+    const auto lists = fake->lists.load(); until([&] { return fake->lists >= lists + 2; });
+    expect(fake->menu_enters == 1, "An old relay is probed once, not retried");
+    expect(source.take_notices().empty() && !source.last_error(), "A missing menu channel is neither a notice nor a list error");
+    expect(source.players().empty() && source.take_chat().empty(), "No players and no chat without the channel");
+    source.send_chat(LobbyChatScope::lobby, "", "Guest", "anyone?"); std::this_thread::sleep_for(100ms);
+    expect(fake->menu_says == 0 && fake->menu_polls == 0, "Nothing is sent to a relay without the channel");
+    expect(!source.games().empty(), "The room list is unaffected");
+}
+void menu_channel() {
+    auto service = std::make_unique<FakeService>(); auto* fake = service.get(); fake->menu_supported = true;
+    OnlineLobbyGameSource source(std::move(service), metadata());
+    expect(source.menu_state() == OnlineMenuState::idle, "The channel is idle until the player has a name in the browser");
+    LobbyPresence presence; presence.place = LobbyPlace::lobby; presence.name = "Guest"; source.announce(presence);
+    until([&] { return source.menu_state() == OnlineMenuState::active; });
+    auto players = source.players(); expect(players.size() == 2 && players[0].name == "Alice" && players[1].name == "Guest" && players[0].place == LobbyPlace::lobby, "Menu players are listed in the lobby place");
+    auto lines = source.take_chat(); expect(lines.size() == 1 && lines[0].scope == LobbyChatScope::lobby && lines[0].name == "Alice" && lines[0].text == "hello", "Recent menu lines arrive with the lobby scope");
+    fake->menu_push("Alice", "second");
+    until([&] { source.pump(); lines = source.take_chat(); return !lines.empty(); });
+    expect(lines.size() == 1 && lines[0].text == "second", "Polled menu lines arrive once");
+    source.send_chat(LobbyChatScope::lobby, "", "Guest", "hi there"); until([&] { return fake->menu_says == 1; });
+    source.send_chat(LobbyChatScope::lobby, "", "Guest", std::string(129, 'x')); source.send_chat(LobbyChatScope::lobby, "", "Guest", " \n");
+    std::this_thread::sleep_for(100ms); expect(fake->menu_says == 1, "An over-long or empty line is never sent");
+    until([&] { source.pump(); lines = source.take_chat(); return !lines.empty(); });
+    expect(lines[0].name == "Guest" && lines[0].text == "hi there", "The sender's own line comes back from the service");
+    // Hosting a room leaves the channel: the room's roster and chat take over.
+    presence.place = LobbyPlace::hosting; presence.game = "Room"; presence.map = "custom-map"; presence.game_type = "custom-mode"; presence.max_players = 9;
+    source.announce(presence); until([&] { return fake->publishes == 1 && source.menu_state() == OnlineMenuState::idle; });
+    expect(fake->menu_leaves >= 1, "Hosting a room leaves the menu channel");
+    until([&] { source.pump(); return source.players().size() == 2 && source.players()[0].place != LobbyPlace::lobby; });
+    source.send_chat(LobbyChatScope::lobby, "", "Guest", "not in the menu"); std::this_thread::sleep_for(100ms);
+    expect(fake->menu_says == 1, "A line for the menu is not sent while a room is hosted");
+    // Back in the browser: the channel returns and does not replay lines already shown.
+    presence.place = LobbyPlace::lobby; source.announce(presence);
+    until([&] { return fake->menu_enters == 2 && source.menu_state() == OnlineMenuState::active; });
+    std::this_thread::sleep_for(100ms); source.pump(); lines = source.take_chat();
+    expect(std::none_of(lines.begin(), lines.end(), [](const auto& line) { return line.scope == LobbyChatScope::lobby && (line.text == "hello" || line.text == "second" || line.text == "hi there"); }), "A reopened channel does not repeat shown lines");
+    // The browser tab: leaving the online list leaves the channel, coming back reopens it.
+    const auto leaves = fake->menu_leaves.load(); source.set_menu_visible(false);
+    until([&] { return fake->menu_leaves > leaves && source.menu_state() == OnlineMenuState::idle; });
+    source.set_menu_visible(true); until([&] { return fake->menu_enters == 3 && source.menu_state() == OnlineMenuState::active; });
+    // A pending join also leaves it, and a refused join brings it back.
+    const LobbyAttemptId attempt{LobbySourceKind::online, 1}; const auto before = fake->menu_leaves.load();
+    source.begin_join(attempt, std::string(32, 'a'), "private", "Guest");
+    until([&] { return fake->joins == 1; }); expect(fake->menu_leaves > before, "A join in flight leaves the menu channel");
+    source.cancel(attempt);
+    until([&] { return fake->menu_enters == 4 && source.menu_state() == OnlineMenuState::active; });
+    expect(source.last_error() == std::nullopt || source.last_error()->code != "EAWR-NET-1521", "The channel never reports through the list error");
+}
+void menu_transient_failure() {
+    auto service = std::make_unique<FakeService>(); auto* fake = service.get(); fake->menu_supported = true; fake->menu_fail_enters = 1;
+    OnlineLobbyGameSource source(std::move(service), metadata());
+    LobbyPresence presence; presence.place = LobbyPlace::lobby; presence.name = "Guest"; source.announce(presence);
+    until([&] { return fake->menu_enters == 1; });
+    expect(source.menu_state() == OnlineMenuState::connecting && source.take_notices().empty() && !source.last_error(), "An unreachable channel is connecting, not an error");
+    until([&] { return source.menu_state() == OnlineMenuState::active; });
+    expect(fake->menu_enters == 2, "The channel retries after a backoff and then opens");
+}
 }
 int main() {
-    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
+    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); menu_old_relay(); menu_channel(); menu_transient_failure(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

@@ -391,6 +391,42 @@ refused completion. The source discards cancelled join completions and releases 
 late successful seat; it never blocks a frame on I/O. Shutdown may wait for the
 configured bounded request timeout and a final removal/leave exchange.
 
+## Menu channel, room-less presence and chat (legacy EAWR-3758)
+
+The online room browser shows who else is in it and carries a short chat, before anybody joins a room. The channel is
+additive: Kind 50..53 (the menu scope is 50..57; 54..57 are spare), a TLS connection of its own, and nothing else in the protocol changes. Peer wire revision 3 (the
+in-match lockstep wire) is untouched.
+
+| Kind | Name | Direction | Body |
+| --- | --- | --- | --- |
+| 50 | menu_open | client to service | display name string (sanitised to 20 bytes) |
+| 51 | menu_chat | client to service | text string (sanitised to 128 bytes; more than 128 raw bytes is refused) |
+| 52 | menu_poll | client to service | last sequence u32, roster version u32 |
+| 53 | menu_page | service to client | through u32, line count u32, lines (sequence u32, member u32, name, text), roster flag u32 (0/1), and when 1: roster version u32, count u32, members (member u32, name) |
+
+- The reply to menu_open carries the recent lines (at most 50, none older than ten minutes) and the roster. The reply to
+  menu_poll carries the lines after the given sequence, and the roster only when its version differs from the caller's.
+  The reply to menu_chat is a page without lines or roster; the line itself reaches everybody, the sender included,
+  through the next poll (clients poll every two seconds).
+- A menu member is a connection in the menu. **Leaving is closing the connection**: a client that hosts or joins a room
+  closes its menu connection first, so it stops receiving menu chat and leaves the list; on leaving the room it opens the
+  channel again. The list shows the players who are in the menu now, not the players in rooms (a room shows its own roster).
+- Names are display names only. They are sanitised like room names and are not identities: two players may share a name
+  in the menu (a room still refuses duplicates). Nothing but the display name already sent for a room is collected, and the
+  recent lines are held in memory only (no history, no persistence; a restart empties them).
+- Limits: 256 members (1549 when full; `menu_max_members` accepts up to 4096 but is clamped to 1024, the largest roster a client decodes), one line per second per member (1551), 128 bytes per line (1540), 50 recent lines,
+  `menu_operations_per_minute` (1024) and `menu_bytes_per_minute` (4 MiB) per address prefix, the usual idle timeout. A
+  connection must open the menu first, may only send menu kinds (and ping) afterwards, and a directory, room or session
+  connection cannot enter the menu (1540).
+- **Old relay, new client.** A relay without the channel treats Kind 50 as an unknown kind on a fresh connection (`src/net/relay_server.cpp` `request()` on main: not a room kind, not 20..29, and `kind != publish && kind != join` fails with 1521) and
+  answers the legacy refusal EAWR-NET-1521, closing only that connection; the directory connection is never sent a menu
+  kind. The client reads 1521 on menu_open as "not available on this server", latches it for the life of the source, shows
+  one neutral line in the chat window ("Lobby chat is not available on this server.") and never retries. Other failures
+  (connect, timeout) are reported as "connecting" and retried with a backoff from 5 s to 60 s without touching the room
+  list or its error line.
+- **New relay, old client.** An old client never opens the channel; no existing kind, reply or limit changed.
+- The relay needs a redeploy for the channel to appear online; until then every client sees the neutral line.
+
 ## N-peer rooms (signalling scope)
 
 Design: [Online play for up to nine peers](net-online-npeer.md), slice N3. The

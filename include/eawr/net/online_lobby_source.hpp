@@ -9,6 +9,10 @@
 
 namespace eawr::net {
 enum class OnlineHostingState : std::uint8_t { idle, publishing, hosted, retrying };
+// The room-less menu channel of the online browser (#3758). idle: not in use (no name yet, or a room is joined/hosted, or a
+// fixture without the channel); connecting: opening or reopening; active: chat can be sent and the players list is live;
+// unavailable: the relay predates the channel, nothing more is asked of it.
+using OnlineMenuState = presentation::ui::OnlineMenuChat;
 struct OnlineLobbyJoinCompletion {
     presentation::ui::LobbyAttemptId attempt;
     std::optional<OnlineRoomAdmission> admission;
@@ -37,6 +41,13 @@ public:
     virtual std::optional<core::Diagnostic> last_error() const = 0;
     virtual OnlineHostingState hosting_state() const = 0;
     virtual std::vector<core::Diagnostic> take_notices() = 0;
+    // The menu channel: while it is active, players() lists the other players in the online browser (place lobby) and
+    // take_chat() delivers their lines (scope lobby); send_chat(LobbyChatScope::lobby, ...) sends one. Joining or hosting a
+    // room leaves the channel, and the room's own chat (scope game) takes over.
+    virtual OnlineMenuState menu_state() const { return OnlineMenuState::idle; }
+    // The browser tells whether the player is looking at the online room list; the channel is left while it is not
+    // (the LAN tab, or the screen closed) and reopened when it is.
+    virtual void set_menu_visible(bool) {}
     // Empty until the room is published, and again once it is removed or lost.
     virtual std::optional<OnlineHostedRoom> hosted_room() const { return {}; }
     // Stops the source's worker and waits for it (the room is removed, a held admission is left). Blocks for at most the
@@ -59,6 +70,8 @@ public:
     std::optional<core::Diagnostic> last_error() const override;
     OnlineHostingState hosting_state() const override;
     std::vector<core::Diagnostic> take_notices() override;
+    OnlineMenuState menu_state() const override;
+    void set_menu_visible(bool visible) override;
     std::optional<OnlineHostedRoom> hosted_room() const override;
     void close() override;
     void announce(const presentation::ui::LobbyPresence&) override;
@@ -84,6 +97,9 @@ public:
     void set_room_password(const std::string& room, std::string password);
     void clear_cooldown() { wrong_attempts_ = 0; }
     void set_hosting_state(OnlineHostingState state) { hosting_ = state; }
+    // Scripts the menu channel for fixtures: a state, and the players in the online browser while it is active.
+    void set_menu_state(OnlineMenuState state) { menu_ = state; changed_ = true; }
+    void set_menu_players(std::vector<std::string> names);
     void fail_listing(bool failed) { listing_failed_ = failed; changed_ = true; }
     std::size_t refreshes() const { return refreshes_; }
     const std::string& host_password() const { return host_password_; }
@@ -95,13 +111,14 @@ public:
     std::optional<core::Diagnostic> last_error() const override;
     OnlineHostingState hosting_state() const override { return hosting_; }
     std::vector<core::Diagnostic> take_notices() override { return std::exchange(notices_, {}); }
+    OnlineMenuState menu_state() const override { return menu_; }
     const presentation::ui::LobbyPresence& announced() const { return presence_; }
     const std::vector<presentation::ui::LobbyChatMessage>& sent() const { return sent_; }
     void announce(const presentation::ui::LobbyPresence& p) override;
     void send_chat(presentation::ui::LobbyChatScope, const std::string&, const std::string&, const std::string&) override;
     bool pump() override { const bool result = changed_; changed_ = false; return result; }
     std::vector<presentation::ui::LobbyGame> games() const override { return listing_failed_ ? std::vector<presentation::ui::LobbyGame>{} : games_; }
-    std::vector<presentation::ui::LobbyPlayer> players() const override { return players_; }
+    std::vector<presentation::ui::LobbyPlayer> players() const override { return players_.empty() && menu_ == OnlineMenuState::active ? menu_players_ : players_; }
     std::vector<presentation::ui::LobbyPlayer> joining(const std::string&) const override;
     std::vector<presentation::ui::LobbyChatMessage> take_chat() override;
 private:
@@ -115,6 +132,8 @@ private:
     std::vector<core::Diagnostic> notices_;
     std::string host_password_;
     OnlineHostingState hosting_{OnlineHostingState::idle};
+    OnlineMenuState menu_{OnlineMenuState::idle};
+    std::vector<presentation::ui::LobbyPlayer> menu_players_;
     std::size_t refreshes_{}, wrong_attempts_{};
     bool changed_{true}, listing_failed_{};
 };

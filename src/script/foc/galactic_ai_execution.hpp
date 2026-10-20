@@ -3,6 +3,7 @@
 #include "galactic_ai_world.hpp"
 #include "eawr/sim/world.hpp"
 
+#include <array>
 #include <functional>
 #include <set>
 
@@ -16,11 +17,38 @@ struct ExecutionPathMatrix {
     std::vector<std::uint32_t> costs;
     std::vector<std::size_t> previous;
 };
+// Derived memo of one player's last build; never saved, hashed or published. When the next build of the same
+// player stages the identical node order and packed edge matrix, its rows and matrix are exactly these.
+// Pairwise packed distances of one build, valid for as long as the planet facts, trade lanes and distance limit
+// below are unchanged. Force never enters it, so fleets moving leave it intact.
+struct ExecutionGeometry {
+    struct Fact {
+        gc::PlanetId planet{};
+        sim::math::Vec3 position;
+        std::uint64_t layer_z_adjust{};
+        bool usable{};
+        friend bool operator==(const Fact&, const Fact&) noexcept = default;
+    };
+    static constexpr std::int32_t no_edge = -1, out_of_range = -2; // else the packed distance, scaled by ten
+    std::vector<Fact> facts;
+    std::vector<std::array<std::uint64_t, 3>> trades; // from, to, speed bits; ascending
+    std::uint64_t maximum_distance{};
+    std::vector<std::int32_t> distance; // n * n
+};
+struct ExecutionBuildMemo {
+    std::shared_ptr<const ExecutionGeometry> geometry;
+    gc::PlayerId player{};
+    std::vector<gc::PlanetId> nodes;
+    std::vector<std::uint32_t> edges;
+    std::vector<ai::GalacticExecutionRoute> rows; // build order, before the publication sort
+    std::shared_ptr<const ExecutionPathMatrix> paths;
+};
 struct ExecutionRoutes {
     std::uint64_t next_refresh{}, revision{};
     bool available{};
     std::vector<ai::GalacticExecutionRoute> rows;
     std::shared_ptr<const ExecutionPathMatrix> paths;
+    std::shared_ptr<const ExecutionBuildMemo> memo;
 };
 struct ExecutionPlanet {
     gc::PlanetId planet{};
@@ -37,12 +65,16 @@ struct ExecutionRouteInput {
 struct ExecutionRouteBuild {
     std::vector<ai::GalacticExecutionRoute> rows;
     std::shared_ptr<const ExecutionPathMatrix> paths;
+    std::shared_ptr<const ExecutionBuildMemo> memo;
+    // Logical budget of the all-pairs formulation (n^2 edges, n^3 relaxations), whichever work was skipped.
     std::uint64_t edges_tested{}, relaxations_tested{};
+    bool reused{}; // rows and matrix came from the previous build's memo
 };
 // WGA-126..140: packed execution cost is separate from the movement graph.
 // Unqualified numeric overflow refuses this generation (project policy).
+// `previous` is the same player's memo from its last build; an identical staged edge matrix reuses it.
 [[nodiscard]] core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInput&,
-    const sim::PartitionExecutor&);
+    const sim::PartitionExecutor&, const std::shared_ptr<const ExecutionBuildMemo>& previous = {});
 using RouteProducer = std::function<core::Result<std::optional<std::vector<ai::GalacticExecutionRoute>>>(
     const sim::PartitionExecutor&)>;
 using ExecutionMatrixProducer = std::function<core::Result<std::optional<ExecutionRouteBuild>>(const sim::PartitionExecutor&)>;

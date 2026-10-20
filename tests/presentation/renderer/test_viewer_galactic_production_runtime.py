@@ -407,7 +407,7 @@ func _process(delta):
                                 {1000, 1001, 1002})):
             data = self.native_run(spent + tail, allow_disabled=True)
             self.assertEqual(data["command_bar"]["account"], "0")
-            self.assertEqual(data["live_session"]["submitted_orders"], 10,
+            self.assertEqual(data["live_session"]["submitted_orders"], 11,
                              "disabled clicks must not submit purchases")
             cards = data["command_bar"]["production_choices"]
             self.assertEqual({card["type_id"] for card in cards}, expected)
@@ -464,7 +464,7 @@ func _process(delta):
         self.assertTrue(all(choice["eventual"] is None for choice in choices))
         actions = [choice["button"] for choice in choices]
         data = self.native_run(actions)
-        self.assertEqual(data["live_session"]["submitted_orders"], 4)
+        self.assertEqual(data["live_session"]["submitted_orders"], 5)  # two setup clock orders + three purchases
         self.assertEqual(data["command_bar"]["account"], "600")
         self.assertEqual({entry["type"] for entry in data["production_queues"]}, {1000, 1001, 1002})
         self.assertTrue(all(entry["domain"] == 1 for entry in data["production_queues"]))
@@ -502,7 +502,7 @@ func _process(delta):
     def test_ground_company_and_structure_native_purchase(self):
         data = self.native_run(["b_planet_tab", "b_Create_00", "b_Create_01"])
         self.assertFalse(data["command_bar"]["space_tab"])
-        self.assertEqual(data["live_session"]["submitted_orders"], 3)
+        self.assertEqual(data["live_session"]["submitted_orders"], 4)  # two setup clock orders + two purchases
         self.assertEqual(data["command_bar"]["account"], "800")
         self.assertEqual({entry["type"] for entry in data["production_queues"]}, {1003, 1004})
         self.assertTrue(all(entry["domain"] == 0 for entry in data["production_queues"]))
@@ -538,7 +538,7 @@ func _process(delta):
             self.assertAlmostEqual(dx + dw / 2, bx + bw / 2, delta=1.0, msg=slot["button"])
             self.assertAlmostEqual(dy + dh / 2, by + bh / 2, delta=1.0, msg=slot["button"])
         canceled = self.native_run(buys + ["right:queue06", "right:queue05", "right:queue01", "right:queue00"])
-        self.assertEqual(canceled["live_session"]["submitted_orders"], 9)
+        self.assertEqual(canceled["live_session"]["submitted_orders"], 10)  # two clock orders + four buys + four cancels
         self.assertEqual(canceled["production_queues"], [])
         self.assertEqual(canceled["command_bar"]["queue_slots"], [])
         self.assertEqual(canceled["command_bar"]["account"], "1000")

@@ -170,6 +170,30 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    void prepare_effect_constants();
+    template <typename LookOf>
+    void prepare_unit_looks(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, LookOf& look_of);
+    void prewarm_effect_programs();
+    template <typename SampleOf>
+    bool update_corrupt_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of);
+    template <typename SampleOf>
+    bool update_lure_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of);
+    template <typename SampleOf>
+    bool update_charged_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of);
+    void remember_effect_units(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units);
+    template <typename SnapshotFor>
+    bool present_combat_effects(const platform::LiveTickEvents& record, const BoneLookup& bones, const FixedCamera& camera, SnapshotFor& snapshot_for);
+    template <typename SampleOf, typename SnapshotFor>
+    bool present_reached_effects(const std::span<const platform::LiveTickEvents> reached, const UnitLookup& units, const BoneLookup& bones, const FixedCamera& camera, const std::uint64_t due, SampleOf& sample_of, SnapshotFor& snapshot_for);
+    template <typename ViewFrame, typename Random>
+    bool draw_healing_lightning(const UnitLookup& units, const ViewFrame& view, Random& random);
+    template <typename ViewFrame>
+    bool draw_flying_projectiles(const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest, const double alpha, const ViewFrame& view);
+    bool update_weaken_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units);
+    template <typename ViewFrame>
+    bool draw_defence_beams(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const ViewFrame& view);
+    template <typename ViewFrame, typename Random>
+    bool draw_ability_beams(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const ViewFrame& view, Random& random);
     bool measure_owner_{};
     std::array<double, 9> owner_timings_{};
     std::array<std::uint64_t, 3> owner_counts_{};

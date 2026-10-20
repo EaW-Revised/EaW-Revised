@@ -1,8 +1,9 @@
 #include "eawr/assets/map.hpp"
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
-#include "eawr/core/ascii.hpp"
 #include <string>
 #include <utility>
 
@@ -47,15 +48,7 @@ namespace tactical = sim::tactical;
 }
 
 [[nodiscard]] std::string lower(const std::string_view text) {
-    std::string result;
-    result.reserve(text.size());
-    for (const auto character : text) {
-        result.push_back(static_cast<char>(core::ascii_lower(static_cast<unsigned char>(character))));
-    }
-    // Tags are trimmed by the scan; a list value may still carry spaces.
-    const auto first = result.find_first_not_of(" \t\r\n");
-    const auto last = result.find_last_not_of(" \t\r\n");
-    return first == std::string::npos ? std::string{} : result.substr(first, last - first + 1);
+    return core::to_lower(core::trim_view(text, core::xml_whitespace));
 }
 
 [[nodiscard]] std::uint32_t position(const std::vector<std::string>& names, const std::string& name) {

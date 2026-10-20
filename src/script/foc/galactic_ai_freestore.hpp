@@ -119,4 +119,11 @@ using FreestoreSelectionFacts = std::function<core::Result<std::pair<Number, boo
 [[nodiscard]] ai::GalacticFreestoreSelectionProvider qualified_freestore_selection(
     std::shared_ptr<const FreestoreInput>, std::shared_ptr<const ai::GalacticWorld>,
     std::shared_ptr<const ai::Engine>, FreestoreSelectionFacts);
+// Everything that does not depend on the actor (goal type, stage list, stage positions) is resolved once per
+// (player, target, plan) call: the batch returns the per-actor reader for that call.
+using FreestoreActorSelection = std::function<core::Result<std::pair<Number, bool>>(sim::EntityId)>;
+using FreestoreSelectionBatch = std::function<FreestoreActorSelection(gc::PlayerId, gc::PlanetId, const ai::PlanDef&)>;
+[[nodiscard]] ai::GalacticFreestoreSelectionProvider qualified_freestore_batch_selection(
+    std::shared_ptr<const FreestoreInput>, std::shared_ptr<const ai::GalacticWorld>,
+    std::shared_ptr<const ai::Engine>, FreestoreSelectionBatch);
 } // namespace eawr::script::foc::galactic_ai

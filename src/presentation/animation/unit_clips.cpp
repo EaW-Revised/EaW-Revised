@@ -1,4 +1,6 @@
 #include "eawr/presentation/animation/unit_clips.hpp"
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,7 +13,7 @@ namespace {
 static_assert(clip_type_names.back() == "HEAL", "the retail clip table has 119 types");
 
 char lower(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
+    return static_cast<char>(core::ascii_lower(static_cast<unsigned char>(value)));
 }
 
 std::string lowered(const std::string_view text) {
@@ -21,15 +23,11 @@ std::string lowered(const std::string_view text) {
 }
 
 bool equals_ignoring_case(const std::string_view left, const std::string_view right) noexcept {
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(),
-                      [](const char a, const char b) { return lower(a) == lower(b); });
+    return core::iequals(left, right);
 }
 
 std::string_view trimmed(std::string_view text) noexcept {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) text.remove_suffix(1);
-    return text;
+    return core::trim_view(text, core::horizontal_whitespace);
 }
 
 } // namespace

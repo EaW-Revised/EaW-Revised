@@ -1,21 +1,36 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/network_introduction.hpp"
 #include "eawr/net/relay_server.hpp"
 #include "relay_tls.hpp"
 #include "relay_prefix_budget.hpp"
 #include "relay_directory.hpp"
+#include "relay_menu.hpp"
 #include "relay_hash_worker.hpp"
 #include "relay_renewal.hpp"
 #include "relay_turn_refresh.hpp"
-#include <deque>
-#include <mutex>
-#include <barrier>
-#include <map>
 
+#include <algorithm>
 #include <atomic>
+#include <barrier>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <exception>
 #include <filesystem>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -31,11 +46,10 @@ using namespace eawr::net::relay;
 using namespace std::chrono_literals;
 std::atomic<std::int64_t> millis{};
 RelayServer::Clock::time_point now() { return RelayServer::Clock::time_point{} + std::chrono::milliseconds(millis.load()); }
-void expect(bool condition, const char* reason) { if (!condition) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool condition, const char* reason) {
+    if (!condition) eawr::testing::require(condition, reason);
 }
+using eawr::testing::result_code_colon::require;
 template<class F> void until(F predicate, const char* reason) {
     const auto deadline = std::chrono::steady_clock::now() + 3s;
     while (!predicate()) {
@@ -539,6 +553,100 @@ void directory_loopback(const std::string& certificate, const std::string& key) 
     require(host.heartbeat(room, info())); require(host.kick(room, seat.seat));
     refused = guest.chat(0); expect(!refused && refused.error().code == "EAWR-NET-1548", "Client host removal over TLS");
     require(guest.leave()); require(host.remove(room));
+}
+Bytes menu_open_request(const std::string& name) { auto bytes = message(Kind::menu_open); string(bytes, name); return bytes; }
+Bytes menu_chat_request(const std::string& text) { auto bytes = message(Kind::menu_chat); string(bytes, text); return bytes; }
+Bytes menu_poll_request(std::uint32_t after, std::uint32_t version) { auto bytes = message(Kind::menu_poll); u32(bytes, after); u32(bytes, version); return bytes; }
+bool menu_is_page(const Bytes& bytes) { return bytes.size() > 1 && bytes[1] == static_cast<std::uint8_t>(Kind::menu_page); }
+// The menu channel state machine on a fake clock: presence, broadcast, sanitising, limits, leave and rejoin (#3758).
+void menu_contracts() {
+    MenuChannel menu; RelayServer::Clock::time_point time{};
+    auto alice = require(menu_page_decode(menu.request(1, menu_open_request(" Alice\n\x01 "), time), 0));
+    expect(alice.roster_present && alice.members.size() == 1 && alice.members[0].name == "Alice" && alice.lines.empty(), "Menu open sanitises the name and returns the roster");
+    auto bob = require(menu_page_decode(menu.request(2, menu_open_request("Bob"), time), 0));
+    expect(bob.members.size() == 2 && bob.roster_version > alice.roster_version, "A second member changes the roster version");
+    expect(number(menu.request(2, menu_open_request("Again"), time)) == 1540, "A connection opens the menu once");
+    expect(number(menu.request(3, menu_chat_request("hi"), time)) == 1540 && number(menu.request(3, menu_poll_request(0, 0), time)) == 1540, "Chat and poll need an open menu");
+    expect(number(menu.request(3, menu_open_request(" \n\x01 "), time)) == 1540, "A name empty after sanitising is refused");
+    auto ack = require(menu_page_decode(menu.request(1, menu_chat_request(" hi\n\x01there "), time), 0));
+    expect(ack.lines.empty() && !ack.roster_present && ack.through == 1, "Chat is acknowledged with an empty page");
+    expect(number(menu.request(1, menu_chat_request("again"), time)) == 1551, "Chat spacing per member");
+    time += 1s; expect(menu_is_page(menu.request(1, menu_chat_request("again"), time)), "Chat spacing ends after a second");
+    expect(number(menu.request(1, menu_chat_request(std::string(129, 'x')), time)) == 1540, "Chat length cap enforced on the raw text");
+    auto polled = require(menu_page_decode(menu.request(2, menu_poll_request(0, bob.roster_version), time), 0));
+    expect(polled.lines.size() == 2 && polled.lines[0].name == "Alice" && polled.lines[0].text == "hithere" && !polled.roster_present,
+        "Everybody sees a line under the sender's sanitised name; the roster is sent only when it changed");
+    expect(require(menu_page_decode(menu.request(2, menu_poll_request(1, bob.roster_version), time), 1)).lines.size() == 1, "Poll returns only newer lines");
+    expect(number(menu.request(2, menu_poll_request(99, 0), time)) == 1540, "A poll beyond the sequence is refused");
+    expect(require(menu_page_decode(menu.request(2, menu_poll_request(2, 0), time), 2)).roster_present, "A stale roster version is answered with the roster");
+    menu.disconnect(1);
+    auto left = require(menu_page_decode(menu.request(2, menu_poll_request(2, bob.roster_version), time), 2));
+    expect(left.roster_present && left.members.size() == 1 && left.members[0].name == "Bob", "Leaving removes the member from the roster");
+    auto rejoined = require(menu_page_decode(menu.request(4, menu_open_request("Alice"), time), 0));
+    expect(rejoined.members.size() == 2 && rejoined.lines.size() == 2, "Rejoining shows the roster and the recent lines");
+    expect(number(menu.request(2, message(Kind::menu_page), time)) == 1540, "A service-to-client kind is not a request");
+    MenuChannel ring;
+    expect(menu_is_page(ring.request(1, menu_open_request("Talker"), time)), "Ring talker opens");
+    for (unsigned i = 0; i < 60; ++i) { time += 1s; expect(menu_is_page(ring.request(1, menu_chat_request("line " + std::to_string(i)), time)), "Ring append"); }
+    auto recent = require(menu_page_decode(ring.request(2, menu_open_request("Late"), time), 0));
+    expect(ring.recent() == 50 && recent.lines.size() == 50 && recent.lines.front().sequence == 11 && recent.through == 60, "Recent lines are a bounded fifty-line ring");
+    time += 11min; ring.expire(time); expect(ring.recent() == 0, "Lines expire after their lifetime");
+    MenuOptions tiny_menu; tiny_menu.max_members = 2; MenuChannel full(tiny_menu);
+    full.request(1, menu_open_request("A"), time); full.request(2, menu_open_request("B"), time);
+    expect(number(full.request(3, menu_open_request("C"), time)) == 1549, "The menu holds a bounded number of members");
+    full.disconnect(1); expect(menu_is_page(full.request(3, menu_open_request("C"), time)), "A freed place is reusable");
+    // A configured limit above what a client decodes is clamped, so a full roster is always a valid page.
+    MenuOptions huge_menu; huge_menu.max_members = 4096; MenuChannel huge(huge_menu);
+    for (std::uint64_t i = 1; i <= menu_roster_cap; ++i) huge.request(i, menu_open_request("P"), time);
+    expect(huge.members() == menu_roster_cap && number(huge.request(menu_roster_cap + 1, menu_open_request("P"), time)) == 1549,
+        "The menu member limit is clamped to the roster cap");
+    expect(require(menu_page_decode(huge.request(1, menu_poll_request(0, 0), time), 0)).members.size() == menu_roster_cap, "A roster at the cap decodes");
+}
+// The directory, room and menu scopes own disjoint Kind values: an enum class accepts duplicates, so check them here (#3758).
+void kind_scope_contracts() {
+    const auto value = [](Kind kind) { return static_cast<unsigned>(kind); };
+    expect(value(Kind::directory_open) == directory_kind_first && value(Kind::directory_admitted) == directory_kind_last, "The directory scope is Kind 20..33");
+    expect(value(Kind::room_open) == room_kind_first && value(Kind::room_ack) <= room_kind_last, "The room scope is Kind 34..49");
+    expect(value(Kind::menu_open) == menu_kind_first && value(Kind::menu_page) <= menu_kind_last, "The menu scope is Kind 50..57");
+    expect(directory_kind_last < room_kind_first && room_kind_last < menu_kind_first, "The Kind scopes do not overlap");
+    for (const auto kind : {Kind::menu_open, Kind::menu_chat, Kind::menu_poll, Kind::menu_page}) {
+        expect(menu_kind(value(kind)) && !room_kind(value(kind)) && !directory_kind(value(kind)), "Menu kinds belong to the menu scope only");
+    }
+    for (unsigned kind = directory_kind_first; kind <= room_kind_last; ++kind) expect(!menu_kind(kind), "No directory or room Kind is a menu Kind");
+}
+void menu_loopback(const std::string& certificate, const std::string& key) {
+    RelayServerOptions options; Fixture f(options, certificate, key, false);
+    NetworkOnlineLobby alice(f.client), bob(f.client), host(f.client);
+    auto first = require(alice.menu_enter("Alice")); expect(first.roster_present && first.members.size() == 1, "Client menu open over TLS");
+    auto second = require(bob.menu_enter("Bob")); expect(second.members.size() == 2, "Second client sees both players");
+    auto update = require(alice.menu_poll(first.through, first.roster_version)); expect(update.roster_present && update.members.size() == 2, "First client sees the newcomer");
+    require(alice.menu_say("hello"));
+    auto line = require(bob.menu_poll(second.through, second.roster_version)); expect(line.lines.size() == 1 && line.lines[0].name == "Alice" && line.lines[0].text == "hello", "Menu chat reaches the other client");
+    auto limited = alice.menu_say("again"); expect(!limited && limited.error().code == "EAWR-NET-1551", "Client chat spacing over TLS");
+    millis += 1500; require(alice.menu_say("again"));
+    const auto room = require(host.publish(info()));
+    expect(require(bob.list()).rooms.size() == 1, "The directory connection works beside the menu connection");
+    bob.menu_leave();
+    OnlineMenuPage page;
+    until([&] { page = require(alice.menu_poll(line.through, 0)); return page.members.size() == 1; }, "Joining a room leaves the menu roster");
+    expect(page.members[0].name == "Alice", "Only the player still in the menu is listed");
+    auto rejoin = require(bob.menu_enter("Bob")); expect(rejoin.members.size() == 2 && rejoin.lines.size() == 2, "Returning to the menu shows the roster and recent lines");
+    require(host.remove(room));
+    bob.menu_leave();
+    auto closed = bob.menu_say("x");
+    expect(!closed && closed.error().code == "EAWR-NET-1519", "A closed menu connection reports a transport error, not an open menu");
+    // Wire guards. A chat before an open and a menu open on a directory connection close only that connection.
+    { Raw raw(f.client); expect(number(raw.exchange(menu_chat_request("hi"))) == 1540, "Menu chat before menu open is refused"); }
+    { Raw raw(f.client); auto open = message(Kind::directory_open); string(open, "");
+      expect(raw.exchange(open)[1] == static_cast<std::uint8_t>(Kind::directory_opened), "Raw directory open");
+      expect(number(raw.exchange(menu_open_request("Mixed"))) == 1540, "A directory connection cannot enter the menu"); }
+    { Raw raw(f.client); expect(menu_is_page(raw.exchange(menu_open_request("Raw"))), "Raw menu open");
+      expect(number(raw.exchange(listing())) == 1540, "A menu connection cannot use the directory"); }
+    // What a relay without the channel answers to a kind it does not know (a menu kind is unknown to an old relay, 58 is unknown to every
+    // relay): the legacy refusal the client reads as "not available".
+    { Raw raw(f.client); auto unknown = message(Kind::ping); unknown[1] = static_cast<std::uint8_t>(menu_kind_last + 1);
+      expect(number(raw.exchange(std::move(unknown))) == 1521, "An unknown kind on a fresh connection gets the legacy 1521"); }
+    until([&] { return require(alice.menu_poll(0, 0)).members.size() == 1; }, "Raw menu members leave with their connections");
 }
 void loopback(const std::string& certificate, const std::string& key) {
     RelayServerOptions options;
@@ -1313,7 +1421,7 @@ int main(int argc, char** argv) {
         key_permissions(key);
         expect(!create_certificate(cert, key), "Certificate generator refuses overwrite");
         directory_contracts(); directory_bridge_contracts(); password_seat_chat_contracts(); directory_quota_contracts(); directory_codec_contracts();
-        hash_worker_contracts(cert, key); reconnect_and_race_contracts(cert, key); directory_loopback(cert, key); bridge_loopback(cert, key);
+        hash_worker_contracts(cert, key); reconnect_and_race_contracts(cert, key); directory_loopback(cert, key); kind_scope_contracts(); menu_contracts(); menu_loopback(cert, key); bridge_loopback(cert, key);
         loopback(cert, key); invitations(cert, key); prefix_guess_contracts(); prefix_contracts(); prefix_pressure(); pinned_expired_certificate(directory); authentication(cert, key); malformed(cert, key);
         closing_deadline(cert, key); spoofed_sender(cert, key); queue_overflow(cert, key); expiry_limits(cert, key); renewal_contracts(cert, key);
         room_routing_contracts(cert, key);

@@ -947,6 +947,17 @@ void CpuSystem::step_segment(const float delta_seconds,AdvanceStats& stats,const
     sampled_basis_=basis_;
 }
 
+bool CpuSystem::exhausted() const noexcept {
+    if (!particles_.empty() || !child_instances_.empty()) return false;
+    if (detached_) return true;
+    for (std::size_t index = 0; index < emitters_.size(); ++index) {
+        const auto creator = definition_.emitters[index].creator_id;
+        if ((creator == 34 || creator == 35) && emitters_[index].active && !emitters_[index].frozen)
+            return false;
+    }
+    return true;
+}
+
 void CpuSystem::schedule_emitter(const std::size_t index,const Particle* parent,const float segment_delta,
                                  const float before,AdvanceStats& stats,std::vector<ParentEvent>& events){
     auto& state=emitters_[index];const auto& emitter=definition_.emitters[index];

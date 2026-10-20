@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string>
 
@@ -16,8 +17,13 @@ namespace eawr::core {
 inline std::uint64_t sync_fingerprint(std::span<const std::uint8_t> bytes, std::uint64_t seed = 0) noexcept {
     constexpr std::uint64_t p1 = 0x9e3779b185ebca87ULL, p2 = 0xc2b2ae3d27d4eb4fULL;
     constexpr std::uint64_t p3 = 0x165667b19e3779f9ULL, p4 = 0x85ebca77c2b2ae63ULL, p5 = 0x27d4eb2f165667c5ULL;
+    // A little-endian host loads the word directly; any other host assembles it byte by byte (same value).
     const auto read = [&](std::size_t offset, unsigned count) {
         std::uint64_t word{};
+        if constexpr (std::endian::native == std::endian::little) {
+            if (count == 8) { std::memcpy(&word, bytes.data() + offset, 8); return word; }
+            if (count == 4) { std::uint32_t half; std::memcpy(&half, bytes.data() + offset, 4); return std::uint64_t{half}; }
+        }
         for (unsigned i = 0; i < count; ++i) word |= std::uint64_t(bytes[offset + i]) << (8U * i);
         return word;
     };

@@ -1,3 +1,20 @@
+#include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <memory>
+#include <ratio>
+#include <span>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // Native ownership/restore infrastructure coverage, not a live opponent proof.
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -14,9 +31,10 @@
 #include "galactic_ai_plans.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::must;
 
 namespace eawr::script::foc::ai {
 // Larger synthetic continuation state, using the selected stock definitions.
@@ -59,11 +77,7 @@ namespace auth = eawr::script::authoritative;
 namespace foc = eawr::script::foc;
 namespace core = eawr::core;
 using eawr::sim::math::Fixed;
-template<class T> T must(core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
-void must(core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+
 Fixed whole(std::int64_t value) { return must(Fixed::from_integer(value)); }
 core::Result<void> refused(std::string message) {
     core::Diagnostic error; error.code = "test.native-refusal"; error.message = std::move(message);
@@ -153,7 +167,72 @@ void record_sum_contracts() {
     changed[0] = 8; forward.set(0, 1, 700, changed);
     expect(forward.digest("test") != original, "record semantic keys participate in both hash lanes");
 }
+// Independent byte-at-a-time XXH64 from the published specification: the direct-load fast path must agree for
+// every tail shape (32-byte blocks, 8-byte and 4-byte steps, single bytes), every seed and any alignment.
+std::uint64_t reference_xxh64(std::span<const std::uint8_t> bytes, std::uint64_t seed) {
+    constexpr std::uint64_t p1 = 0x9e3779b185ebca87ULL, p2 = 0xc2b2ae3d27d4eb4fULL, p3 = 0x165667b19e3779f9ULL,
+        p4 = 0x85ebca77c2b2ae63ULL, p5 = 0x27d4eb2f165667c5ULL;
+    const auto load = [&](std::size_t at, unsigned count) {
+        std::uint64_t word{};
+        for (unsigned i = 0; i < count; ++i) word |= std::uint64_t(bytes[at + i]) << (8U * i);
+        return word;
+    };
+    const auto round = [&](std::uint64_t acc, std::uint64_t word) { return std::rotl(acc + word * p2, 31) * p1; };
+    std::size_t at{};
+    std::uint64_t hash = seed + p5;
+    if (bytes.size() >= 32) {
+        std::uint64_t v1 = seed + p1 + p2, v2 = seed + p2, v3 = seed, v4 = seed - p1;
+        for (; bytes.size() - at >= 32; at += 32) {
+            v1 = round(v1, load(at, 8)); v2 = round(v2, load(at + 8, 8)); v3 = round(v3, load(at + 16, 8)); v4 = round(v4, load(at + 24, 8));
+        }
+        hash = std::rotl(v1, 1) + std::rotl(v2, 7) + std::rotl(v3, 12) + std::rotl(v4, 18);
+        for (const auto v : {v1, v2, v3, v4}) hash = (hash ^ round(0, v)) * p1 + p4;
+    }
+    hash += bytes.size();
+    for (; bytes.size() - at >= 8; at += 8) hash = std::rotl(hash ^ round(0, load(at, 8)), 27) * p1 + p4;
+    if (bytes.size() - at >= 4) { hash = std::rotl(hash ^ (load(at, 4) * p1), 23) * p2 + p3; at += 4; }
+    for (; at < bytes.size(); ++at) hash = std::rotl(hash ^ (std::uint64_t(bytes[at]) * p5), 11) * p1;
+    hash = (hash ^ (hash >> 33U)) * p2; hash = (hash ^ (hash >> 29U)) * p3;
+    return hash ^ (hash >> 32U);
+}
+void fingerprint_matches_reference() {
+    std::vector<std::uint8_t> data(160);
+    std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+    for (auto& byte : data) { state = state * 6364136223846793005ULL + 1442695040888963407ULL; byte = static_cast<std::uint8_t>(state >> 56U); }
+    for (const auto seed : {std::uint64_t{0}, std::uint64_t{0x454157522d53594eULL}})
+        for (std::size_t start = 0; start < 4; ++start)
+            for (std::size_t length = 0; length + start <= 140; ++length) {
+                const std::span<const std::uint8_t> view(data.data() + start, length);
+                expect(core::sync_fingerprint(view, seed) == reference_xxh64(view, seed), "sync fingerprint equals the byte-wise reference");
+            }
+}
+// Constants computed with the byte-at-a-time code at BASE c1360927, before the direct-load paths existed.
+void pinned_base_constants() {
+    std::vector<std::uint8_t> data(140);
+    std::uint64_t state = 0x1234567890abcdefULL;
+    for (auto& byte : data) { state = state * 6364136223846793005ULL + 1442695040888963407ULL; byte = static_cast<std::uint8_t>(state >> 56U); }
+    constexpr std::size_t lengths[] = {0, 3, 7, 31, 33, 140};
+    constexpr std::uint64_t plain[] = {0xef46db3751d8e999ULL, 0xc0ec5c9ac8663453ULL, 0x5bb1fc818ab57b9eULL, 0x671ac1978eb279b3ULL, 0x1e0de80b74a9ccdaULL, 0x20f5c6307a1120a4ULL};
+    constexpr std::uint64_t seeded[] = {0x9aaf6902af288adbULL, 0x46963d53416269d9ULL, 0xbd4d213049bb0d1cULL, 0x18e8fcbac9d85448ULL, 0x6bee2ad4439cfc01ULL, 0x5c802cdc174cc834ULL};
+    for (std::size_t i = 0; i < 6; ++i) {
+        const std::span<const std::uint8_t> view(data.data(), lengths[i]);
+        expect(core::sync_fingerprint(view, 0) == plain[i], "sync fingerprint matches the pinned BASE value (seed 0)");
+        expect(core::sync_fingerprint(view, 0x454157522d53594eULL) == seeded[i], "sync fingerprint matches the pinned BASE value (seeded)");
+    }
+    core::RecordDigest::Bytes mixed;
+    core::RecordDigest::append(mixed, 0x0123456789abcdefULL);
+    mixed.push_back(0x5a); mixed.push_back(0xa5);
+    core::RecordDigest::append(mixed, 7);
+    for (const char c : std::string_view("route")) mixed.push_back(static_cast<std::uint8_t>(c));
+    core::RecordDigest::append(mixed, 0xfedcba9876543210ULL);
+    core::RecordDigest digest;
+    digest.set(1, 2, 3, mixed);
+    digest.set(2, 5, 9, std::span<const std::uint8_t>(data.data(), 33));
+    expect(digest.digest("pin") == "dcca6e740042670285c8257c1f5b8bf1f5300807ac5a047c0413e62beee98bb0", "mixed word and byte record stream matches the pinned BASE digest");
+}
 void sync_contracts() {
+    fingerprint_matches_reference();
+    pinned_base_constants();
     expect(core::sync_fingerprint({}) == 0xef46db3751d8e999ULL, "XXH64 empty published algorithm vector");
     const std::array<std::uint8_t, 3> abc{'a', 'b', 'c'};
     expect(core::sync_fingerprint(abc) == 0x44bc2cf5ad770999ULL, "XXH64 short algorithm vector");
@@ -449,15 +528,9 @@ void world_hash_boundaries() {
     }
 }
 std::string game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed composition requires game data");
-    std::string root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed composition requires game data");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed composition requires game data");
+    return std::move(*root);
 }
 void benchmark(const std::shared_ptr<cp::ComposedGalacticAiState>& state, unsigned workers, std::string_view label) {
     const auto saved = must(state->capture());

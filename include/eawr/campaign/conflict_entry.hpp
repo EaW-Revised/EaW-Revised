@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/campaign/conflict.hpp"
+#include "eawr/battle/start.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/sim/tactical/content.hpp"
 
@@ -21,7 +22,7 @@ struct ResolvedConflictEntry {
 struct ConflictEntry {
     ConflictRecord conflict;
     sim::tactical::TacticalContent content;
-    skirmish::SkirmishStart start;
+    battle::BattleStart start;
     std::vector<sim::tactical::CampaignUpgrade> scene_upgrades; // pre-force ledger inputs, WGT-113
 };
 // first_free is the galaxy allocator after reserving the conflict and all persistent objects.

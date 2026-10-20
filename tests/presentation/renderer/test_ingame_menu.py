@@ -62,8 +62,9 @@ class InGameMenuContracts(unittest.TestCase):
 
     def test_quit_game_frees_the_match_and_shows_the_main_menu(self):
         host = read("apps/viewer/src/viewer_host_process.cpp")
-        self.assertIn("map_mode_->leave_to_menu()", host)
-        self.assertIn("front_end_->return_to_main_menu()", host)
+        battle = host.split("void ViewerHost::process_battle_frame(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("map_mode_->leave_to_menu()", battle)
+        self.assertIn("front_end_->return_to_main_menu()", battle)
         # The campaign score's Main Menu used to end the whole viewer.
         self.assertNotIn("no main menu in this build", host)
         leave = host.split("void ViewerHost::leave_campaign_to_menu() {", 1)[1].split("\n}\n", 1)[0]
@@ -244,7 +245,8 @@ class InGameMenuGpu(unittest.TestCase):
         # The Gateways route (Rebel Bespin fleet into Imperial Byss) played through the ordinary Move and
         # Fight commands; the menu is opened in the space battle the campaign hands over.
         self.walk_campaign_menu("space", ["--eawr-front-end-test-campaign", "tech:Sandbox_Gateways_Rebel",
-                                          "--eawr-galactic-paused", "no", "--eawr-galactic-space-proof", "save"])
+                                          "--eawr-galactic-paused", "no", "--eawr-galactic-ai", "off",
+                                          "--eawr-galactic-space-proof", "save"])
 
     def walk_campaign_menu(self, where, campaign_arguments):
         with tempfile.TemporaryDirectory(prefix="ingame-menu-gc-") as temporary:

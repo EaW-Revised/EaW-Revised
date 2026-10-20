@@ -1,3 +1,4 @@
+#include "../support/check.hpp"
 #include "scene_test_support.hpp"
 
 // P1-11 static scene builder contracts. Every value here is invented for this
@@ -34,13 +35,11 @@
 
 namespace eawr::tests::scene_tests {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 // --- TED assembly (same chunk/mini layout the map loader documents) --------

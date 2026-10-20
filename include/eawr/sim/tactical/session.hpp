@@ -187,7 +187,6 @@ public:
     [[nodiscard]] core::Result<void> configure_retreat(RetreatConfig config);
     [[nodiscard]] std::vector<RetreatView> retreat_views() const;
     [[nodiscard]] const RetreatState& retreat_state() const noexcept;
-    [[nodiscard]] bool midbattle_solve_requested() const noexcept;
     [[nodiscard]] std::span<const DepartureControl> departure_controls() const noexcept;
     [[nodiscard]] std::span<const PlayerId> basic_ai_players() const noexcept;
     [[nodiscard]] std::span<const Player> players() const noexcept;

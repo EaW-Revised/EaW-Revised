@@ -1,0 +1,77 @@
+[
+  {
+    "old": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::frame",
+    "new": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::present_reached_effects",
+    "tag": "Abilities/Corrupt_Systems_Ability/Owner_Particle_Effect"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::frame",
+    "new": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::update_corrupt_effects",
+    "tag": "Abilities/Corrupt_Systems_Ability/Target_Particle_Effect"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::frame",
+    "new": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::present_reached_effects",
+    "tag": "Death_Explosions"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::frame",
+    "new": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::present_combat_effects",
+    "tag": "Projectile_Lifetime_Detonation_Particle"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::frame",
+    "new": "apps/viewer/src/battle_effects_impacts.cpp#BattleEffects::present_reached_effects",
+    "tag": "Unit_Abilities_Data/Unit_Ability/Particle_Effect"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Abilities/Energy_Weapon_Attack_Ability/Owner_Particle_Bone_Name"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Abilities/Energy_Weapon_Attack_Ability/Owner_Particle_Effect"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Energy_Beam_Color"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Energy_Beam_Texture"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Energy_Beam_Width"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Tractor_Beam_Color"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Tractor_Beam_Frames"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Tractor_Beam_Texture"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams",
+    "tag": "Tractor_Beam_Width"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_projectiles.cpp#draw_projectiles",
+    "new": "apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::update_weaken_effects",
+    "tag": "Projectile_Weaken_Enemy_Spawn_Effect"
+  }
+]

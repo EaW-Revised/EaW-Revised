@@ -32,7 +32,8 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         const auto& market = profile.market;
         if (market.buyer || market.owner || !market.present || market.opposing_planet
             || market.despawn_requested || market.prepared_absence.raw()
-            || (!profile.has_market && !profile.theft && !profile.corruption && !profile.lifecycle_only && !profile.hack && !profile.destruction) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
+            || (!profile.has_market && !profile.theft && !profile.corruption && !profile.lifecycle_only && !profile.hack && !profile.destruction
+            && !profile.sabotage && !profile.neutralize) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
             || market.absence_min.size() != market.absence_max.size()
             || (!market.absence_min.empty() && market.absence_min.size() != 5)
             || std::none_of(setup.census->types.begin(), setup.census->types.end(),
@@ -116,6 +117,35 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
     for (const auto& p : host.profiles) if (p.destruction && (p.destruction->name.empty() || p.destruction->name.size() > 4096
         || p.destruction->name.find('\0') != std::string::npos || !setup.control || !setup.production)) return bad();
+    // WGCH-27/28/97 and WGCH-20..24/52: sabotage and neutralization content tables and named abilities.
+    if (host.activated_sabotage_abilities.size() > galactic_max_objects || host.activated_neutralize_abilities.size() > galactic_max_objects
+        || host.sabotage_costs.size() > galactic_max_objects || host.neutralization_targets.size() > galactic_max_objects) return bad();
+    for (const auto* list : {&host.activated_sabotage_abilities, &host.activated_neutralize_abilities})
+        for (const auto& name : *list) if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
+    previous = 0;
+    for (const auto& c : host.sabotage_costs) {
+        if (!c.type || c.type <= previous || c.cost.raw() < 0) return bad();
+        previous = c.type;
+    }
+    previous = 0;
+    for (const auto& t : host.neutralization_targets) {
+        if (!t.type || t.type <= previous || t.cost.raw() < 0) return bad();
+        previous = t.type;
+    }
+    for (const auto& p : host.profiles) {
+        if (p.sabotage && (p.sabotage->name.empty() || p.sabotage->name.size() > 4096 || p.sabotage->name.find('\0') != std::string::npos
+            || p.sabotage->cost_factor.raw() < 0 || !setup.control || !setup.production || !setup.economy_corruption)) return bad();
+        if (p.neutralize) {
+            const auto& n = *p.neutralize;
+            if (n.name.empty() || n.name.size() > 4096 || n.name.find('\0') != std::string::npos || !setup.control || !setup.production
+                || n.actor_absence_min > n.actor_absence_max || n.target_absence_min > n.target_absence_max
+                || n.minor_modifier.raw() < 0 || n.major_modifier.raw() < 0) return bad();
+            for (const auto* curve : {&n.base_curve, &n.history_curve, &n.corruption_curve}) {
+                if (curve->size() > galactic_max_objects) return bad();
+                for (std::size_t i = 1; i < curve->size(); ++i) if ((*curve)[i - 1].x >= (*curve)[i].x) return bad();
+            }
+        }
+    }
     // WGCH-143/176: ruined base income is an authored per-planet host input.
     if (host.ruined_income.size() > galactic_max_objects || (!host.ruined_income.empty() && !setup.control)) return bad();
     previous_planet = 0;
@@ -143,6 +173,14 @@ PreparedAbility prepared_ability(const AbilityPreparation& menu, std::uint32_t i
         if (index < menu.offers.size()) result.price = menu.offers[index].price;
         return result;
     }
+    if (menu.kind == AbilityKind::structure_sabotage || menu.kind == AbilityKind::hero_neutralization) {
+        if (index < menu.target_choices.size()) {
+            const auto& choice = menu.target_choices[index];
+            result.target = choice.target; result.company = choice.company; result.price = choice.price;
+            result.absence = choice.absence; result.target_absence = choice.target_absence; result.valid = choice.valid;
+        }
+        return result;
+    }
     if (menu.kind == AbilityKind::technology_theft) {
         if (index < menu.theft_choices.size()) {
             result.theft = menu.theft_choices[index]; result.price = result.theft.price; result.absence = result.theft.absence;
@@ -168,7 +206,9 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
             profile->theft && profile->theft->initially_enabled, false,
             profile->corruption && profile->corruption->initially_enabled, false,
             profile->hack && profile->hack->initially_enabled, false,
-            profile->destruction && profile->destruction->initially_enabled, false, false}, [](const auto& a) { return a.actor; });
+            profile->destruction && profile->destruction->initially_enabled, false,
+            profile->sabotage && profile->sabotage->initially_enabled, false,
+            profile->neutralize && profile->neutralize->initially_enabled, false, false}, [](const auto& a) { return a.actor; });
         touch_abilities();
     }
     const auto* before = find(economy_corruption->buyers, row.id, [](const auto& p) { return p.buyer; });
@@ -316,6 +356,10 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
         ? !profile->hack || !service->hack_enabled || service->hack_cancelled
         : kind == AbilityKind::technology_theft
         ? !profile->theft || !service->theft_enabled || service->theft_cancelled
+        : kind == AbilityKind::structure_sabotage
+        ? !profile->sabotage || !service->sabotage_enabled || service->sabotage_cancelled
+        : kind == AbilityKind::hero_neutralization
+        ? !profile->neutralize || !service->neutralize_enabled || service->neutralize_cancelled
         : kind != AbilityKind::black_market || !profile->has_market || !service->enabled || service->cancelled))
         return reject(GalacticRejectReason::unknown_value);
     if (prepare || old_prepare) ++ability_work.preparations;
@@ -329,6 +373,16 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
         if (actor_value.planet != prepare->planet) return reject(GalacticRejectReason::incompatible_location);
         if (ability_host->preparations.size() >= galactic_max_objects && !retained) return reject(GalacticRejectReason::resource_limit);
         prepare_hack(command, actor_value, *profile, tick, events); return;
+    }
+    if (prepare && kind == AbilityKind::structure_sabotage) {
+        if (actor_value.planet != prepare->planet) return reject(GalacticRejectReason::incompatible_location);
+        if (ability_host->preparations.size() >= galactic_max_objects && !retained) return reject(GalacticRejectReason::resource_limit);
+        prepare_sabotage(command, actor_value, tick, events); return;
+    }
+    if (prepare && kind == AbilityKind::hero_neutralization) {
+        if (actor_value.planet != prepare->planet) return reject(GalacticRejectReason::incompatible_location);
+        if (ability_host->preparations.size() >= galactic_max_objects && !retained) return reject(GalacticRejectReason::resource_limit);
+        prepare_neutralization(command, actor_value, tick, events); return;
     }
     if (prepare && kind == AbilityKind::technology_theft) {
         if (actor_value.planet != prepare->planet) return reject(GalacticRejectReason::incompatible_location);
@@ -376,6 +430,13 @@ void GalacticSession::Impl::execute_ability(const GameCommand& command, std::uin
         if (!execute || choice >= retained->offers.size() || !retained->open
             || execute->prepared != prepared_ability(*retained, choice)) return reject(GalacticRejectReason::unknown_value);
         execute_hack(command, actor_value, execute->prepared, tick, events); return;
+    }
+    if (kind == AbilityKind::structure_sabotage || kind == AbilityKind::hero_neutralization) {
+        if (!execute || choice >= retained->target_choices.size() || !retained->open
+            || execute->prepared != prepared_ability(*retained, choice)) return reject(GalacticRejectReason::unknown_value);
+        if (kind == AbilityKind::structure_sabotage) execute_sabotage(command, actor_value, execute->prepared, tick, events);
+        else execute_neutralization(command, actor_value, execute->prepared, tick, events);
+        return;
     }
     if (kind == AbilityKind::technology_theft) {
         if (!execute || choice >= retained->theft_choices.size()
@@ -425,6 +486,7 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
     const auto* profile = state ? find(impl.setup.ability_host->profiles, state->type, [](const auto& p) { return p.type; }) : nullptr;
     if (!profile || (kind == AbilityKind::black_market ? !profile->has_market : kind == AbilityKind::technology_theft ? !profile->theft
         : kind == AbilityKind::superweapon_hack ? !profile->hack : kind == AbilityKind::planet_destruction ? !profile->destruction
+        : kind == AbilityKind::structure_sabotage ? !profile->sabotage : kind == AbilityKind::hero_neutralization ? !profile->neutralize
         : kind != AbilityKind::corruption || !profile->corruption))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command, "ability lifecycle requires a live bound kind"));
     if (!impl.native_replaying) {
@@ -436,6 +498,8 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
     else if (kind == AbilityKind::technology_theft) { state->theft_enabled = enabled; state->theft_cancelled = cancelled; }
     else if (kind == AbilityKind::superweapon_hack) { state->hack_enabled = enabled; state->hack_cancelled = cancelled; }
     else if (kind == AbilityKind::planet_destruction) { state->destruction_enabled = enabled; state->destruction_cancelled = cancelled; }
+    else if (kind == AbilityKind::structure_sabotage) { state->sabotage_enabled = enabled; state->sabotage_cancelled = cancelled; }
+    else if (kind == AbilityKind::hero_neutralization) { state->neutralize_enabled = enabled; state->neutralize_cancelled = cancelled; }
     else { state->corruption_enabled = enabled; state->corruption_cancelled = cancelled; }
     impl.touch_abilities();
     return core::Result<void>::success();

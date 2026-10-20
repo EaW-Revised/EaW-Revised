@@ -82,7 +82,7 @@ struct SpaceEntryPlan;
 [[nodiscard]] std::vector<ReturnedUpgrade> space_entry_unbound_upgrades(const ConflictRecord&, const units::UnitTables& tables);
 // WGT-113/116..118: resolve the three families against the pre-force scene only.
 [[nodiscard]] core::Result<std::vector<sim::tactical::CampaignUpgrade>> space_entry_upgrades(
-    const ConflictRecord&, const SpaceEntryInputs&, const SpaceEntryPlan&, skirmish::SkirmishStart&);
+    const ConflictRecord&, const SpaceEntryInputs&, const SpaceEntryPlan&, battle::BattleStart&);
 struct SpaceEntryPlan {
     ConflictRecord conflict;
     skirmish::Fixture fixture;
@@ -98,7 +98,7 @@ struct SpaceEntryPlan {
 
 struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
 // WGT-45..48: load-time registration/formation. Optional target coordinates do not affect poses.
-[[nodiscard]] core::Result<SpaceFormationResult> form_space_entry(skirmish::SkirmishStart&,
+[[nodiscard]] core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart&,
     const SpaceEntryInputs&, const SpaceEntryPlan&, std::optional<sim::math::Vec3> invader_target);
 
 // Pure split and marker/defence preparation; allocations are committed only by staging
@@ -112,7 +112,7 @@ struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
 
 // Display metadata projected from the immutable record for a fresh restored provider.
 // Does not rerun placement, supply gameplay policies, or invent unsaved marker IDs.
-[[nodiscard]] core::Result<skirmish::SkirmishStart> space_entry_presentation_start(
+[[nodiscard]] core::Result<battle::BattleStart> space_entry_presentation_start(
     const ConflictRecord&, const skirmish::StartInputs&);
 
 class StockSpaceEntry final {
@@ -124,7 +124,6 @@ public:
         const sim::tactical::TacticalSession&, BattleResult&) const;
     [[nodiscard]] core::Result<script::foc::PreparedAiSession> prepare_ai(const ConflictRecord&, GalacticParentQuery = {},
         std::shared_ptr<script::foc::AiJournal> journal = {}) const;
-    [[nodiscard]] GameSession::HeroDefeatResolver hero_defeat_resolver() const;
     [[nodiscard]] core::Result<void> bind_game(GameSession&) const;
     // Frozen map/cap/type closure diagnostics. Snapshot-dependent placement and
     // current station/passenger checks remain authoritative in resolve().

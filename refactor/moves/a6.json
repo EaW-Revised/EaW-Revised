@@ -1,0 +1,150 @@
+[
+  {
+    "old": "tools/release/package_release.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/shaders/translate_toolchain.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/publish_scan/publish_scan.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/validation/p1_capture/win_process_observer.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/remote_godot/payload_lib.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tests/validation/p1_capture/windows_capture_test_support.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/boundary_cache.py#sha256_file",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/inventory/common.py#canonical_bytes",
+    "new": "tools/common/eawr_python_helpers.py#json_bytes"
+  },
+  {
+    "old": "tools/inventory/common.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tools/inventory/lsp_independent_export.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tools/offload/remote_replays.py#digest",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/offload/remote_replays.py#read_json",
+    "new": "tools/common/eawr_python_helpers.py#read_json"
+  },
+  {
+    "old": "tools/offload/remote_replays.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tools/rig/lan_acceptance.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tools/validation/p1_capture/compare.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tests/presentation/acceptance/p1_04_lighting_test_support.py#read_json",
+    "new": "tools/common/eawr_python_helpers.py#read_json"
+  },
+  {
+    "old": "tests/presentation/acceptance/test_p1_12_harness.py#read_json",
+    "new": "tools/common/eawr_python_helpers.py#read_json"
+  },
+  {
+    "old": "tests/presentation/acceptance/test_p1_scene_settings.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tests/validation/p1_capture/build_manifest_test_support.py#write_json",
+    "new": "tools/common/eawr_python_helpers.py#write_json"
+  },
+  {
+    "old": "tests/presentation/renderer/test_font_mode.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_hull_preview.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_map_camera.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_map_foliage.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_map_particles.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_options_screen.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_render_profile.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_space_camera.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tests/presentation/renderer/test_ui_gallery.py#run_viewer",
+    "new": "tools/common/eawr_python_helpers.py#run_viewer"
+  },
+  {
+    "old": "tools/rig/shader_cache.py#digest",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/replay/compare_installed.py#digest",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/inventory/xml_acceptance.py#sha256",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tests/presentation/acceptance/acceptance_requirements.py#sha256",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tests/presentation/acceptance/acceptance_requirements.py#load_json",
+    "new": "tools/common/eawr_python_helpers.py#read_json"
+  },
+  {
+    "old": "tests/presentation/renderer/test_galactic_hud_capture_identity.py#sha256",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tools/numeric_ranges/report.py#sha256_path",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tests/shaders/acceptance/test_p010_acceptance.py#digest",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  },
+  {
+    "old": "tests/presentation/acceptance/p1_04_lighting_test_support.py#file_sha",
+    "new": "tools/common/eawr_python_helpers.py#sha256_file"
+  }
+]

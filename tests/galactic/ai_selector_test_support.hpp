@@ -1,6 +1,10 @@
 #pragma once
+
 // Qualified synthetic provider proof. Installed content/stock Lua integration
 // remains a separate acceptance test; these facts do not stand in for retail.
+
+#include "../support/result.hpp"
+#include "../support/check.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
 #include "galactic_ai_actions.hpp"
@@ -12,11 +16,14 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <array>
-#include <atomic>
-#include <cstdlib>
-#include <new>
-#include <set>
+#include <cstdint>
+#include <map>
+#include <memory>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace ai = eawr::script::foc::ai;
 namespace foc = eawr::script::foc;
@@ -25,9 +32,11 @@ namespace gc = eawr::sim::galactic;
 namespace auth = eawr::script::authoritative;
 using eawr::sim::math::Fixed;
 namespace selector_test {
-inline void expect(bool value, std::string_view message) { if (!value) throw std::runtime_error(std::string(message)); }
-template<class T> inline T must(eawr::core::Result<T> r) { if (!r) throw std::runtime_error(r.error().message); return std::move(r).value(); }
-inline void must(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
+inline void expect(bool value, std::string_view message) {
+    if (!value) eawr::testing::require(value, message);
+}
+using eawr::testing::must;
+
 inline Fixed f(std::int64_t n) { return must(Fixed::from_integer(n)); }
 inline void record_digest_contract(const ga::StateContributor& owner, std::string_view message) {
     const auto warm = must(owner.record_sync_hash());

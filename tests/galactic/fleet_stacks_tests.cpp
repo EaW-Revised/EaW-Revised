@@ -35,7 +35,7 @@ std::vector<const ObservedFleet*> view(const std::vector<ObservedFleet>& cards) 
 }
 }
 
-int main() {
+int case_galactic_fleet_stacks_tests() {
     {
         // GHUD-S97: whole/Ctrl stacks vacate; an ordinary member retains the
         // remainder only when the authored component requests ghost art.

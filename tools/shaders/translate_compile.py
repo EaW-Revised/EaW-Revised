@@ -284,6 +284,7 @@ def translate(source_root: Path, effect_name: str, output: Path, glslang: Path,
         "translator": {
             "name": "eawr-shader-spike",
             "source_sha256": {
+                "eawr_python_helpers.py": sha256_file(Path(__file__).parents[1] / "common/eawr_python_helpers.py"),
                 "fx_parser.py": sha256_file(Path(__file__).with_name("fx_parser.py")),
                 "fx_tokens.py": sha256_file(Path(__file__).with_name("fx_tokens.py")),
                 "fx_include.py": sha256_file(Path(__file__).with_name("fx_include.py")),

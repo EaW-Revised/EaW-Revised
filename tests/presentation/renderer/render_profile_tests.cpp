@@ -1,6 +1,10 @@
 // Render profile selection (#184, apps/viewer/src/render_profile.hpp).
+
+#include "../../support/self_test.hpp"
+#include "../../support/check.hpp"
 #include "render_profile.hpp"
 
+#include <cstddef>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
@@ -15,12 +19,12 @@ using eawr::presentation::godot_backend::RenderProfile;
 using eawr::presentation::godot_backend::RenderProfileRun;
 using eawr::presentation::godot_backend::RenderSettings;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void check(const bool condition, const std::string_view message) {
     if (condition) return;
-    ++failures;
-    std::cerr << "FAIL: " << message << '\n';
+    local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 void settings_follow_the_owner_decision() {
@@ -92,6 +96,10 @@ void only_a_players_live_view_is_enhanced() {
 } // namespace
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     settings_follow_the_owner_decision();
     names_round_trip();
     shadow_budgets_are_bounded_and_ordered();

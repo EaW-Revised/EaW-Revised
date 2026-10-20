@@ -141,6 +141,28 @@ def mesh_case(executable, seats, scenario="mesh"):
         case.kill_all()
 
 
+def lobby_retry_case(executable):
+    case = Case(executable, "newcomer first ICE failure")
+    try:
+        broker = case.start("broker", "broker", 3, 3, "peer1", "peer2", "first")
+        port = broker_port(case, broker)
+        if port is None:
+            return 77
+        probe = None
+        for slot in range(3):
+            child = member(case, port, slot, 3, f"peer{slot}", "lobby_retry", 3, "short=1")
+            if slot == 1:
+                probe = child
+            time.sleep(0.4)
+        output = case.collect(probe, 45)
+        if probe.returncode != 0:
+            print(output, end="")
+            return 1
+        return 1 if finish(case, 100) else 0
+    finally:
+        case.kill_all()
+
+
 def refused_case(executable, kind):
     """Newcomer `peer2` cannot join (blocked pair to peer1, or a different build); `peer2b` then fills slot 2."""
     case = Case(executable, f"refused newcomer ({kind})")
@@ -201,6 +223,10 @@ if __name__ == "__main__":
              lambda: mesh_case(executable, 4, "repair_late_arm"), lambda: mesh_case(executable, 3, "repair_lower")]
     if os.environ.get("EAWR_GNS_MESH_NINE") == "1":
         cases.append(lambda: mesh_case(executable, 9, "repair"))
+    if len(sys.argv) > 2 and sys.argv[2] == "lobby_stale":
+        cases = [lambda: lobby_retry_case(executable)]
+    if len(sys.argv) > 2 and sys.argv[2] == "lobby_retry":
+        cases = [lambda: lobby_retry_case(executable), lambda: refused_case(executable, "unreachable")]
     if len(sys.argv) > 2 and sys.argv[2] == "twice":
         # #4021: six members, one pair silent twice 36 s apart; then the same with seat 5 unable to re-attach. Separate
         # arguments: the same with the second acceptor arming 3 s late, and a pair given up on that a late request must

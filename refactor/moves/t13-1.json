@@ -1,0 +1,18 @@
+[
+  {
+    "old": "apps/viewer/src/live_session_prepare.cpp#missing_placed_types",
+    "new": "apps/viewer/src/battle_source_local.cpp#missing_placed_types"
+  },
+  {
+    "old": "apps/viewer/src/live_session_prepare.cpp#prepare_m2",
+    "new": "apps/viewer/src/battle_source_local.cpp#prepare_local"
+  },
+  {
+    "old": "apps/viewer/src/live_session_prepare.cpp#prepare_replay",
+    "new": "apps/viewer/src/battle_source_replay.cpp#bind_replay"
+  },
+  {
+    "old": "apps/viewer/src/live_session_prepare.cpp#map_prop_fog_bound",
+    "new": "apps/viewer/src/battle_source_local.cpp#map_prop_fog_bound"
+  }
+]

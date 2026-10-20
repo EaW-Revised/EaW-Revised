@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "loading_planet.hpp"
 #include "model_preview.hpp"
 #include "family_textures.hpp"
@@ -36,20 +38,13 @@ std::string path(std::string name, const char* root) {
     return name.starts_with("data/") ? name : std::string(root) + name;
 }
 std::string json(const std::string& value) {
-    std::string result = "\"";
-    for (char character : value) {
-        if (character == '"' || character == '\\') result += '\\';
-        if (static_cast<unsigned char>(character) < 0x20U) continue;
-        result += character;
-    }
-    return result + '"';
+    return eawr::core::json_quote_drop_controls(value);
 }
 std::string field(const data::EffectiveObject& definition, const char* tag) {
     const auto* value = definition.value(tag);
     if (!value) return {};
     const auto& raw = value->value.raw_text;
-    const auto first = raw.find_first_not_of(" \r\n\t");
-    return first == std::string::npos ? std::string() : raw.substr(first, raw.find_last_not_of(" \r\n\t") - first + 1);
+    return core::trim(raw, core::xml_whitespace);
 }
 float number(sim::math::Fixed value) { return static_cast<float>(static_cast<double>(value.raw()) / sim::math::Fixed::scale); }
 std::optional<assets::Texture> texture(const vfs::Vfs& fs, std::string_view name) {

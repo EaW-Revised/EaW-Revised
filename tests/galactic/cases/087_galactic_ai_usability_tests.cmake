@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_ai_usability
+    NO_ARGS
+
     NAME galactic_ai_usability_tests
     SOURCES ai_usability_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/script/foc" "${PROJECT_SOURCE_DIR}/src/campaign"

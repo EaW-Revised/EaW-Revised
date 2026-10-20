@@ -6,19 +6,11 @@
 
 #include "map_camera.hpp"
 
-#include <cmath>
-#include <cstdint>
 #include <cstddef>
-#include <fstream>
-#include <iostream>
-#include <iterator>
-#include <limits>
-#include <numbers>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <tuple>
 
 namespace eawr_map_camera_test {
 
@@ -27,7 +19,7 @@ namespace input = eawr::viewer::camera_input;
 using eawr::viewer::MapCameraBridge;
 using eawr::viewer::MapCameraConfig;
 
-extern int failures;
+extern int& failures;
 
 void expect(const bool condition, const std::string_view message);
 void close(const float actual, const float expected, const std::string_view message,

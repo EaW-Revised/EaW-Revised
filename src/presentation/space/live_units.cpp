@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/live_units.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/presentation/particles/render.hpp"
 
 #include <algorithm>
@@ -120,8 +121,7 @@ bool map_prop_fog_bound(const std::string_view behavior,
                         const std::string_view space_behavior) noexcept {
     const auto fog_bound = [](const std::string_view entry) {
         const auto matches = [&](const std::string_view expected) {
-            return entry.size() == expected.size() && std::equal(entry.begin(), entry.end(), expected.begin(),
-                [](const char a, const char b) { return (a >= 'a' && a <= 'z' ? a - 'a' + 'A' : a) == b; });
+            return core::iequals(entry, expected);
         };
         return matches("HIDE_WHEN_FOGGED") || matches("TEAM");
     };

@@ -89,11 +89,18 @@ void EawrLanLobby::send_chat(const std::string& typed) {
     }
     if (!line) return;
     if (impl_->join_selection.source() == model::LobbySourceKind::online && page_ == Page::lobby) {
-        // The service carries chat for the room the player is in; the service sends the line back, so
-        // there is no local echo. Without a room the window says why nothing was sent.
-        const auto members = impl_->online_rooms ? impl_->online_rooms->players() : std::vector<model::LobbyPlayer>{};
+        // The service carries chat for the room the player is in, else the browser's room-less channel (#3758); the
+        // service sends the line back, so there is no local echo. When neither can carry it the window says why.
+        auto members = impl_->online_rooms ? impl_->online_rooms->players() : std::vector<model::LobbyPlayer>{};
+        std::erase_if(members, [](const model::LobbyPlayer& player) { return player.place == model::LobbyPlace::lobby; });
         if (members.empty()) {
-            note_chat(model::ChatKind::notice, std::string(model::online_chat_closed_notice()));
+            const model::OnlineMenuChat state = impl_->online_rooms ? impl_->online_rooms->menu_state() : model::OnlineMenuChat::idle;
+            if (state != model::OnlineMenuChat::active) {
+                note_chat(model::ChatKind::notice, std::string(model::online_menu_chat_notice(state)));
+                return;
+            }
+            impl_->online_rooms->send_chat(model::LobbyChatScope::lobby, {}, impl_->name, *line);
+            play_sound("GUI_Common_Chat_Send");
             return;
         }
         impl_->online_rooms->send_chat(model::LobbyChatScope::game, members.front().game, impl_->name, *line);
@@ -106,8 +113,15 @@ void EawrLanLobby::send_chat(const std::string& typed) {
         return;
     }
     if (impl_->source) {
-        impl_->source->send_chat(page_ == Page::staging ? model::LobbyChatScope::game : model::LobbyChatScope::lobby,
-                                 page_ == Page::staging ? impl_->game : std::string{}, impl_->name, *line);
+        if (!impl_->source->try_send_chat(page_ == Page::staging ? model::LobbyChatScope::game : model::LobbyChatScope::lobby,
+                                        page_ == Page::staging ? impl_->game : std::string{}, impl_->name, *line)) {
+            if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT")) edit->set_text(text(typed));
+            return;
+        }
+    } else if (options_.lan_source_factory) {
+        // Discovery could not open: do not claim a local-only line was sent to the LAN.
+        if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT")) edit->set_text(text(typed));
+        return;
     }
     note_chat(model::ChatKind::normal, impl_->name + ": " + *line, impl_->name);
     play_sound("GUI_Common_Chat_Send");

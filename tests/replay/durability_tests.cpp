@@ -1,14 +1,20 @@
+// P2-09 (#72): hull and hardpoint health, hardpoint loss, unit death and repair
+// (docs/behaviour/space-hardpoints.md). The rule cases use FoC values; the session fixture
+// comes from the independent oracle generate_tactical_fixture.py (`tactical-durability`), and
+// every worker count, storage order and a written-and-parsed replay must reproduce its goldens.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
-#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -20,23 +26,17 @@
 #include <utility>
 #include <vector>
 
-// P2-09 (#72): hull and hardpoint health, hardpoint loss, unit death and repair
-// (docs/behaviour/space-hardpoints.md). The rule cases use FoC values; the session fixture
-// comes from the independent oracle generate_tactical_fixture.py (`tactical-durability`), and
-// every worker count, storage order and a written-and-parsed replay must reproduce its goldens.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

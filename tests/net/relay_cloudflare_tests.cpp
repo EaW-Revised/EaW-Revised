@@ -1,6 +1,9 @@
 // Contracts for the Cloudflare Realtime TURN credential provider (#3627): response handling,
 // the outbound HTTPS client against a local TLS endpoint, pairing through the relay server,
 // bounded failure, numeric TURN resolution and secret hygiene. No test reaches the internet.
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/network_introduction.hpp"
 #include "eawr/net/relay_server.hpp"
 #include "relay_cloudflare.hpp"
@@ -8,26 +11,34 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
-#include <optional>
-#include <vector>
+#include <exception>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace eawr::net::relay;
 using namespace std::chrono_literals;
-void expect(bool condition, const char* reason) { if (!condition) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool condition, const char* reason) {
+    if (!condition) eawr::testing::require(condition, reason);
 }
+using eawr::testing::result_code_colon::require;
 template<class F> void until(F predicate, const char* reason, std::chrono::milliseconds limit = 5s) {
     const auto deadline = std::chrono::steady_clock::now() + limit;
     while (!predicate()) {

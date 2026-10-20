@@ -30,6 +30,8 @@ set(EAWR_SKIRMISH_FIXTURES "${CMAKE_CURRENT_LIST_DIR}/fixtures")
 
 add_executable(skirmish_start_tests skirmish_start_tests.cpp
     skirmish_start_synthetic_tests.cpp
+    skirmish_start_placement_tests.cpp
+    skirmish_setup_contract_tests.cpp
     skirmish_start_placed_tests.cpp
     skirmish_start_foc_tests.cpp
     skirmish_start_pad_tests.cpp)
@@ -52,7 +54,11 @@ eawr_add_game_data_test(NAME sim_headless_skirmish_installed_contract
         --fixtures "${EAWR_SKIRMISH_FIXTURES}" --installed)
 
 # The FoC tactical AI battle (#79): needs EAWR_EAW_GAME_ROOT, skipped otherwise.
-add_executable(foc_ai_tests foc_ai_tests.cpp)
+add_executable(foc_ai_tests foc_ai_tests.cpp
+    foc_ai_content_tests.cpp
+    foc_ai_runner_tests.cpp
+    foc_ai_probe_tests.cpp
+    foc_ai_profile_tests.cpp)
 target_link_libraries(foc_ai_tests PRIVATE eawr::skirmish eawr::platform)
 target_compile_features(foc_ai_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(foc_ai_tests)

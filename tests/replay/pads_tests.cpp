@@ -1,16 +1,24 @@
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "../../src/sim/tactical/session_types.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
-#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <new>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace { std::atomic<std::size_t> allocations{}; }
 #if defined(__GNUC__) && !defined(__clang__)
@@ -33,11 +41,12 @@ namespace t = eawr::sim::tactical;
 namespace m = eawr::sim::math;
 using m::Fixed;
 constexpr auto one = Fixed::scale;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 Fixed q(const std::int64_t n) { return Fixed::from_raw(n * one); }
 m::Vec3 at(const std::int64_t x, const std::int64_t y = 0, const std::int64_t z = 0) { return {q(x), q(y), q(z)}; }
 void expect(const bool value, const std::string_view message) {
-    if (!value) { ++failures; std::cerr << "FAIL " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL ");
 }
 t::TacticalSetup setup() {
     t::TacticalSetup value;

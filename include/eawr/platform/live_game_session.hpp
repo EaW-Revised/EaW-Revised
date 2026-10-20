@@ -139,9 +139,11 @@ struct LiveGameOrder {
     // Without a tick, stamp on the simulation thread at its next command boundary.
     // Future orders claim their seat's sequence only when due.
     std::optional<std::uint64_t> tick;
-    // This intent replaces payload; simulation owner records native queue effects.
-    std::optional<sim::EntityId> accept_invasion{};
 };
+
+// GCMP-03 (#4359): the lockstep seam (include/eawr/platform/live_game_lockstep.hpp). It names engine-owned session types,
+// so presentation code never includes that header; here it is only an opaque handle (ADR-019, UI-07).
+class LiveGameStepDriver;
 
 // Presentation publications contain confirmed values only. Solver/application
 // services and their owning-session headers stay inside the platform producer.
@@ -208,6 +210,9 @@ struct LiveGameFrame {
     std::optional<CampaignRetreatPolicy> retreat_policy{};
     std::shared_ptr<const std::vector<campaign::GameStoryNotice>> story_notices{}; // immutable observer publication
     std::shared_ptr<const CampaignEndView> campaign_end{};
+    sim::EntityId summary_hold{};
+    sim::EntityId summary_closed{};
+    sim::galactic::SeatId summary_closed_seat{};
 };
 [[nodiscard]] std::optional<CampaignTacticalView> campaign_tactical_view_for_observer(
     const LiveGameFrame&, sim::galactic::SeatId);
@@ -313,6 +318,8 @@ public:
         std::chrono::milliseconds readiness_timeout{std::chrono::minutes(5)};
         // Called on the simulation thread before a step; stamped commands keep their keys.
         // Captures must outlive stop(). Exceptions fail only this live session.
+        // With step_driver this runs under the session state mutex: callbacks must not acquire that mutex
+        // or Feed locks (including through live-session accessors).
         std::function<std::vector<sim::galactic::GameCommand>(std::uint64_t)> command_source{};
         // Deterministic conflict-service inputs, until the fleet entry service is wired.
         struct Entry {
@@ -327,9 +334,15 @@ public:
         std::shared_ptr<const CampaignServiceConfiguration> services{};
         LiveSaveOptions saves{};
         bool await_presentation{};
+        // Opt-in recorded solo modal policy; headless captures omit it.
+        sim::galactic::SeatId interactive_seat{};
         // Real-time pacing: ticks that may be overdue before the pacer drops the missed wall time
         // (the tactical pacer's LiveSession::Options::max_catch_up, same value).
         std::uint64_t max_catch_up{5};
+        // Lockstep multiplayer (GCMP-03). Pacing::real_time follows the agreed galaxy clock (a pause runs at 1x so the
+        // resume can still be agreed); Pacing::driven follows advance_to(). Not combinable with `entries`, restored
+        // input or pre-stamped commands, and a child battle ends the session with an error until GCMP-05 (#4361).
+        std::shared_ptr<LiveGameStepDriver> step_driver{};
     };
     // The newest tick_cost_history parent steps are kept for the performance overlay.
     static constexpr std::size_t tick_cost_history = 4096;
@@ -383,6 +396,8 @@ public:
     void battle_ready(sim::EntityId conflict);
     // Optional live startup barrier for a validated restored first frame/HUD.
     void presentation_ready();
+    // Reconcile saved dismissal hints while the startup barrier is still held.
+    void reconcile_battle_summary(sim::galactic::SeatId, sim::EntityId acknowledged);
     [[nodiscard]] bool battle_paused(sim::EntityId conflict) const;
     [[nodiscard]] bool battle_is_ready(sim::EntityId conflict) const;
     [[nodiscard]] std::uint64_t completed_tick() const;

@@ -29,6 +29,8 @@ namespace eawr::presentation::godot_backend {
 // Without it the window stays open: WASD/arrows and right-drag pan, left-click
 // selects, double-click toggles planet focus, wheel enters/leaves focus or the
 // advanced-map state, Home restores overview (project bindings).
+class GalacticHudFixture;
+
 class GalacticMode final {
 public:
     struct Options final {
@@ -45,7 +47,8 @@ public:
         std::uint32_t flight_milliseconds{};
         bool camera_options_invalid{};
         bool paused{};
-        std::string hud_fixture; // Explicit synthetic HUD qualification; never campaign facts.
+        std::string hud_fixture; // Capture command-line input, resolved to a provider.
+        std::shared_ptr<GalacticHudFixture> hud_provider;
         // Qualification hook: queue one admitted offer of this object type for the local player at start.
         std::string queue_type;
         std::uint32_t queue_planet{}; // 0 = first planet the local player is offered the type on

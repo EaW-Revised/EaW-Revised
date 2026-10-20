@@ -4,16 +4,9 @@
 #include "legacy/registry.hpp"
 #include "shader_adapter.hpp"
 #include "../../../apps/viewer/src/family_textures.hpp"
-#include <array>
-#include <cmath>
-#include <cstdlib>
-#include <iostream>
-#include <limits>
-#include <regex>
+
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <utility>
 #include <variant>
 #include <vector>
 
@@ -25,7 +18,7 @@ namespace legacy = eawr::presentation::godot_backend::legacy;
 using presentation::MaterialBinding;
 using presentation::MaterialDescription;
 using presentation::RenderPass;
-extern int failures;
+extern int& failures;
 
 
 

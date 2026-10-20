@@ -89,224 +89,196 @@ void MapMode::close_requested() {
     if (state_->space && state_->live_session) state_->space->close();
 }
 
-std::optional<int> MapMode::process(const double delta) {
-    State& state = *state_;
-    state.service_game_menu();
-    core::tick_profile::Recording ui_recording;
-    std::optional<core::tick_profile::Capture> ui_capture;
-    if (state.perf_trace) ui_capture.emplace(ui_recording);
-    if (state.perf_trace) state.perf_trace->begin_frame();
-    state.hud_ms = 0.0;
-    core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);
-    // BLD-12: the loading screen's Begin button, pressed since the last frame.
-    if (state.loading != nullptr && state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready
-        && state.loading->take_begin()) {
-        state.begin_battle();
-    }
-    state.sync_net_perf(delta);
-    state.sync_perf_overlay();
-    if (state.space) {
-        const std::optional<int> finished = state.space->process(delta);
-        if (!finished && state.attract_motion && state.live_session) {
-            // The attract's camera follows the fight: presentation only, read from the session's
-            // snapshot; the battle itself is never touched.
-            state.attract_ships.clear();
-            const double presented = state.live_session->presented_tick();
-            const auto snapshot = state.live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, presented)));
-            if (snapshot) {
-                const auto scale = static_cast<double>(sim::math::Fixed::scale);
-                for (const sim::tactical::TacticalInstance& instance : snapshot->instances()) {
-                    if (!instance.durability) continue;
-                    const auto& rows = instance.fixed_transform.rows;
-                    state.attract_ships.push_back({static_cast<float>(static_cast<double>(rows[0][3].raw()) / scale),
-                                                   static_cast<float>(static_cast<double>(rows[2][3].raw()) / scale),
-                                                   -static_cast<float>(static_cast<double>(rows[1][3].raw()) / scale)});
-                }
-            }
-            const AttractCameraPose pose = state.attract_motion->update(
-                delta, AttractBattleView{state.attract_ships, state.live_session->time().paused()});
-            if (state.attract_motion->valid()) {
-                if (state.attract_camera_updates++ == 0) state.attract_first_eye = pose.eye;
-                state.space->set_attract_pose(pose.eye, pose.target);
-            }
+void MapMode::State::record_frame_trace(double delta, const core::tick_profile::Recording& ui_recording) {
+    State& state = *this;
+    if (state.perf_trace && state.live_session) {
+        PerfTrace::Frame trace_frame;
+        trace_frame.frame_ms = delta * 1000.0;
+        trace_frame.presented_tick = static_cast<std::uint64_t>(std::max(0.0, state.live_session->presented_tick()));
+        trace_frame.units = state.live_session->visible_units().size();
+        if (const auto trace_snapshot = state.live_session->snapshot_at(trace_frame.presented_tick)) {
+            trace_frame.projectiles = trace_snapshot->projectiles().size();
         }
-        // #82: selection and orders see the frame the view just drew.
-        // #848: the overview level the camera just took decides what the battle UI draws this frame.
-        if (!finished) state.sync_overview_ui();
-        if (!finished && state.battle && state.live_session && state.space_population) {
-            FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr, true);
-            state.battle->frame(*state.live_session, *state.space_population, *state.space);
-            gpu_memory_trace.at_tick(state.live_session->presented_tick());
-            if (state.hud && state.hud->minimap()) {
-                state.hud->minimap()->order_frame(state.live_session->presented_tick() / 30.0);
-            }
-            state.live_session->placement_preview(state.battle->placing(), state.battle->placement_point());
-            state.battle->cursor_frame(*state.live_session, *state.space, delta, !state.options.capture_path.empty());
-            state.sync_cards();
-            state.sync_production();
-            state.sync_minimap();
+        if (state.battle_effects) {
+            trace_frame.effects = state.battle_effects->live_effects();
+            trace_frame.effect_particles = state.battle_effects->particles();
         }
-        if (state.perf_trace && state.live_session) {
-            PerfTrace::Frame frame;
-            frame.frame_ms = delta * 1000.0;
-            frame.presented_tick = static_cast<std::uint64_t>(std::max(0.0, state.live_session->presented_tick()));
-            frame.units = state.live_session->visible_units().size();
-            if (const auto snapshot = state.live_session->snapshot_at(frame.presented_tick)) {
-                frame.projectiles = snapshot->projectiles().size();
-            }
-            if (state.battle_effects) {
-                frame.effects = state.battle_effects->live_effects();
-                frame.effect_particles = state.battle_effects->particles();
-            }
-            if (state.unit_emitters) frame.emitter_particles = state.unit_emitters->particles();
-            frame.particle_ms = state.particle_ms;
-            frame.emitter_frame_ms = state.emitter_frame_ms;
-            if (state.unit_emitters) frame.emitter_owner_ms = state.unit_emitters->owner_timings();
-            if (state.battle_effects) {
-                frame.effects_owner_ms = state.battle_effects->owner_timings();
-                frame.effects_owner_counts = state.battle_effects->owner_counts();
-            }
-            frame.effects_frame_ms = state.effects_frame_ms;
-            frame.debris_frame_ms = state.debris_frame_ms;
-            frame.tick_wait_ms = state.live_session->tick_wait_ms();
-            frame.live_frame_ms = state.live_session->live_frame_ms();
-            frame.session_tail_ms = state.live_session->session_tail_ms();
-            frame.clip_pose_ms = state.live_session->clip_pose_ms();
-            if (state.unit_emitters) {
-                frame.emitter_prepare_ms = state.unit_emitters->emitter_prepare_ms();
-                frame.clone_prepare_ms = state.unit_emitters->clone_prepare_ms();
-            }
-            if (state.battle_effects) frame.projectile_prepare_ms = state.battle_effects->projectile_prepare_ms();
-            frame.particle_work = GodotParticleBackend::frame_work();
-            if (state.unit_emitters) frame.emitter_timing = state.unit_emitters->particle_timings();
-            if (state.battle_effects) frame.effects_timing = state.battle_effects->particle_timings();
-            if (state.debris_props) frame.debris_timing = state.debris_props->particle_timings();
-            frame.submit_ms = state.space->live_submit_ms();
-            frame.pieces = state.space->live_submit_pieces();
-            frame.sent = state.space->live_submit_sent();
-            frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
-            frame.hud_ms = state.hud_ms;
-            frame.audio_ms = state.audio_ms;
-            frame.fog_ms = state.fog_ms;
-            frame.pose_ms = state.live_session->pose_ms();
-            frame.opacity_ms = state.live_session->opacity_ms();
-            frame.compose_ms = state.space_population->compose_ms();
-            frame.refresh_ms = state.space_population->refresh_ms();
-            frame.idle_frame_ms = state.space_population->idle_frame_ms();
-            frame.idle_sample_ms = state.space_population->idle_sample_ms();
-            frame.idle_upload_ms = state.space_population->idle_upload_ms();
-            frame.idle_skin_work = state.space_population->idle_skin_work();
-            frame.idle_placements = state.space_population->idle_placement_count();
-            frame.idle_surfaces = state.space_population->idle_surface_count();
+        if (state.unit_emitters) trace_frame.emitter_particles = state.unit_emitters->particles();
+        trace_frame.particle_ms = state.particle_ms;
+        trace_frame.emitter_frame_ms = state.emitter_frame_ms;
+        if (state.unit_emitters) trace_frame.emitter_owner_ms = state.unit_emitters->owner_timings();
+        if (state.battle_effects) {
+            trace_frame.effects_owner_ms = state.battle_effects->owner_timings();
+            trace_frame.effects_owner_counts = state.battle_effects->owner_counts();
+        }
+        trace_frame.effects_frame_ms = state.effects_frame_ms;
+        trace_frame.debris_frame_ms = state.debris_frame_ms;
+        trace_frame.tick_wait_ms = state.live_session->tick_wait_ms();
+        trace_frame.live_frame_ms = state.live_session->live_frame_ms();
+        trace_frame.session_tail_ms = state.live_session->session_tail_ms();
+        trace_frame.clip_pose_ms = state.live_session->clip_pose_ms();
+        if (state.unit_emitters) {
+            trace_frame.emitter_prepare_ms = state.unit_emitters->emitter_prepare_ms();
+            trace_frame.clone_prepare_ms = state.unit_emitters->clone_prepare_ms();
+        }
+        if (state.battle_effects) trace_frame.projectile_prepare_ms = state.battle_effects->projectile_prepare_ms();
+        trace_frame.particle_work = GodotParticleBackend::frame_work();
+        if (state.unit_emitters) trace_frame.emitter_timing = state.unit_emitters->particle_timings();
+        if (state.battle_effects) trace_frame.effects_timing = state.battle_effects->particle_timings();
+        if (state.debris_props) trace_frame.debris_timing = state.debris_props->particle_timings();
+        trace_frame.submit_ms = state.space->live_submit_ms();
+        trace_frame.pieces = state.space->live_submit_pieces();
+        trace_frame.sent = state.space->live_submit_sent();
+        trace_frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
+        trace_frame.hud_ms = state.hud_ms;
+        trace_frame.audio_ms = state.audio_ms;
+        trace_frame.fog_ms = state.fog_ms;
+        trace_frame.pose_ms = state.live_session->pose_ms();
+        trace_frame.opacity_ms = state.live_session->opacity_ms();
+        trace_frame.compose_ms = state.space_population->compose_ms();
+        trace_frame.refresh_ms = state.space_population->refresh_ms();
+        trace_frame.idle_frame_ms = state.space_population->idle_frame_ms();
+        trace_frame.idle_sample_ms = state.space_population->idle_sample_ms();
+        trace_frame.idle_upload_ms = state.space_population->idle_upload_ms();
+        trace_frame.idle_skin_work = state.space_population->idle_skin_work();
+        trace_frame.idle_placements = state.space_population->idle_placement_count();
+        trace_frame.idle_surfaces = state.space_population->idle_surface_count();
 
-            for (const platform::LiveTickCost& cost : state.live_session->tick_costs_after(state.perf_trace_tick)) {
-                state.perf_trace_tick = cost.tick;
-                ++frame.ticks;
-                frame.tick_ms += cost.total_ms;
-                for (const platform::LivePhaseCost& phase : cost.phases) {
-                    if (phase.name == "ai") {
-                        frame.ai_ms += phase.ms;
-                        frame.ai_worst_ms = std::max(frame.ai_worst_ms, phase.ms);
-                    } else if (phase.name == "lua") {
-                        frame.lua_ms += phase.ms;
-                        frame.lua_worst_ms = std::max(frame.lua_worst_ms, phase.ms);
-                    } else if (phase.name == "world") {
-                        frame.world_ms += phase.ms;
-                    } else if (phase.name == "worker-total") {
-                        frame.worker_ms += phase.ms;
-                    } else if (phase.name == "serial-remainder") {
-                        frame.serial_ms += phase.ms;
-                    } else if (phase.name == "fog") {
-                        frame.sim_fog_ms += phase.ms;
-                    } else if (phase.name == "session-lock") {
-                        frame.sim_lock_ms += phase.ms;
-                    } else if (phase.name == "publish-tail") {
-                        frame.sim_publish_ms += phase.ms;
-                    } else if (phase.name == "pacing-lag") {
-                        frame.sim_pacing_lag_ms = std::max(frame.sim_pacing_lag_ms, phase.ms);
-                    } else if (phase.name == "pacing-discarded-wall") {
-                        frame.sim_discarded_wall_ms += phase.ms;
-                    } else if (phase.name.starts_with("worker.")) {
-                        frame.worker_phases.emplace_back(phase.name.substr(7), phase.ms);
-                    } else if (phase.name.starts_with("serial.")) {
-                        // A scope may occur thousands of times per tick. Copy and format each
-                        // distinct name once per frame, summing all completed ticks' instances.
-                        const auto found = std::find_if(frame.serial_phases.begin(), frame.serial_phases.end(),
-                            [&](const auto& entry) { return entry.first == phase.name; });
-                        if (found == frame.serial_phases.end()) frame.serial_phases.emplace_back(phase.name, phase.ms);
-                        else found->second += phase.ms;
+        for (const platform::LiveTickCost& cost : state.live_session->tick_costs_after(state.perf_trace_tick)) {
+            state.perf_trace_tick = cost.tick;
+            ++trace_frame.ticks;
+            trace_frame.tick_ms += cost.total_ms;
+            for (const platform::LivePhaseCost& phase : cost.phases) {
+                if (phase.name == "ai") {
+                    trace_frame.ai_ms += phase.ms;
+                    trace_frame.ai_worst_ms = std::max(trace_frame.ai_worst_ms, phase.ms);
+                } else if (phase.name == "lua") {
+                    trace_frame.lua_ms += phase.ms;
+                    trace_frame.lua_worst_ms = std::max(trace_frame.lua_worst_ms, phase.ms);
+                } else if (phase.name == "world") {
+                    trace_frame.world_ms += phase.ms;
+                } else if (phase.name == "worker-total") {
+                    trace_frame.worker_ms += phase.ms;
+                } else if (phase.name == "serial-remainder") {
+                    trace_frame.serial_ms += phase.ms;
+                } else if (phase.name == "fog") {
+                    trace_frame.sim_fog_ms += phase.ms;
+                } else if (phase.name == "session-lock") {
+                    trace_frame.sim_lock_ms += phase.ms;
+                } else if (phase.name == "publish-tail") {
+                    trace_frame.sim_publish_ms += phase.ms;
+                } else if (phase.name == "pacing-lag") {
+                    trace_frame.sim_pacing_lag_ms = std::max(trace_frame.sim_pacing_lag_ms, phase.ms);
+                } else if (phase.name == "pacing-discarded-wall") {
+                    trace_frame.sim_discarded_wall_ms += phase.ms;
+                } else if (phase.name.starts_with("worker.")) {
+                    trace_frame.worker_phases.emplace_back(phase.name.substr(7), phase.ms);
+                } else if (phase.name.starts_with("serial.")) {
+                    // A scope may occur thousands of times per tick. Copy and format each
+                    // distinct name once per frame, summing all completed ticks' instances.
+                    const auto found = std::find_if(trace_frame.serial_phases.begin(), trace_frame.serial_phases.end(),
+                        [&](const auto& entry) { return entry.first == phase.name; });
+                    if (found == trace_frame.serial_phases.end()) trace_frame.serial_phases.emplace_back(phase.name, phase.ms);
+                    else found->second += phase.ms;
+                }
+            }
+        }
+        trace_frame.sim_completed_tick = state.perf_trace_tick;
+        trace_frame.presentation_lag_ticks = static_cast<double>(trace_frame.sim_completed_tick)
+            - state.live_session->presented_tick();
+        for (const auto& phase : ui_recording.costs) {
+            if (!phase.name.starts_with("ui.lock.")) continue;
+            trace_frame.ui_accessor_lock_wait_ms += phase.ms;
+            const auto found = std::find_if(trace_frame.ui_accessor_lock_phases.begin(), trace_frame.ui_accessor_lock_phases.end(),
+                [&](const auto& entry) { return entry.first == phase.name; });
+            if (found == trace_frame.ui_accessor_lock_phases.end()) trace_frame.ui_accessor_lock_phases.emplace_back(phase.name, phase.ms);
+            else found->second += phase.ms;
+        }
+        state.perf_trace->frame(trace_frame);
+    }
+}
+
+void MapMode::State::update_attract_camera(double delta, const std::optional<int>& finished) {
+    State& state = *this;
+    if (!finished && state.attract_motion && state.live_session) {
+        // The attract's camera follows the fight: presentation only, read from the session's
+        // snapshot; the battle itself is never touched.
+        state.attract_ships.clear();
+        const double presented = state.live_session->presented_tick();
+        const auto attract_snapshot = state.live_session->snapshot_at(static_cast<std::uint64_t>(std::max(0.0, presented)));
+        if (attract_snapshot) {
+            const auto scale = static_cast<double>(sim::math::Fixed::scale);
+            for (const sim::tactical::TacticalInstance& instance : attract_snapshot->instances()) {
+                if (!instance.durability) continue;
+                const auto& rows = instance.fixed_transform.rows;
+                state.attract_ships.push_back({static_cast<float>(static_cast<double>(rows[0][3].raw()) / scale),
+                                               static_cast<float>(static_cast<double>(rows[2][3].raw()) / scale),
+                                               -static_cast<float>(static_cast<double>(rows[1][3].raw()) / scale)});
+            }
+        }
+        const AttractCameraPose pose = state.attract_motion->update(
+            delta, AttractBattleView{state.attract_ships, state.live_session->time().paused()});
+        if (state.attract_motion->valid()) {
+            if (state.attract_camera_updates++ == 0) state.attract_first_eye = pose.eye;
+            state.space->set_attract_pose(pose.eye, pose.target);
+        }
+    }
+}
+
+void MapMode::State::update_follow_camera(const std::optional<int>& finished) {
+    State& state = *this;
+    // #447 --eawr-live-follow: the next frame looks at the unit where this one drew it.
+    if (!finished && state.live_session && state.live_session->options().follow
+        && !state.followed_projectile) {
+        if (const auto unit = state.live_session->unit_frame(*state.live_session->options().follow)) {
+            state.space->live_camera_focus(static_cast<float>(unit->position[0]),
+                                           static_cast<float>(unit->position[1]));
+        }
+    }
+    // #660 capture-only: BP-61 supplies the same interpolation the missile model uses.
+    // Once selected, keep this ID after impact so a later shot cannot jump the camera.
+    if (!finished && state.live_session && state.live_session->options().follow_projectile) {
+        const auto& follow_frame = state.live_session->battle_frame();
+        if (follow_frame.latest) {
+            const auto projectiles = follow_frame.latest->projectiles();
+            if (!state.followed_projectile) {
+                const auto first = std::find_if(projectiles.begin(), projectiles.end(), [&](const auto& shot) {
+                    return shot.homing && shot.shooter == *state.live_session->options().follow_projectile;
+                });
+                if (first != projectiles.end()) state.followed_projectile = first->id;
+            }
+            if (state.followed_projectile) {
+                const auto latest = std::find_if(projectiles.begin(), projectiles.end(), [&](const auto& shot) {
+                    return shot.id == *state.followed_projectile;
+                });
+                if (latest != projectiles.end()) {
+                    const sim::tactical::Projectile* previous = nullptr;
+                    if (follow_frame.previous) {
+                        const auto before = follow_frame.previous->projectiles();
+                        const auto found = std::find_if(before.begin(), before.end(), [&](const auto& shot) {
+                            return shot.id == latest->id;
+                        });
+                        if (found != before.end()) previous = &*found;
+                    }
+                    if (const auto pose = space::interpolate_projectile(previous, *latest, follow_frame.alpha)) {
+                        state.space->live_camera_focus(static_cast<float>(pose->position[0]),
+                                                       static_cast<float>(pose->position[1]));
                     }
                 }
             }
-            frame.sim_completed_tick = state.perf_trace_tick;
-            frame.presentation_lag_ticks = static_cast<double>(frame.sim_completed_tick)
-                - state.live_session->presented_tick();
-            for (const auto& phase : ui_recording.costs) {
-                if (!phase.name.starts_with("ui.lock.")) continue;
-                frame.ui_accessor_lock_wait_ms += phase.ms;
-                const auto found = std::find_if(frame.ui_accessor_lock_phases.begin(), frame.ui_accessor_lock_phases.end(),
-                    [&](const auto& entry) { return entry.first == phase.name; });
-                if (found == frame.ui_accessor_lock_phases.end()) frame.ui_accessor_lock_phases.emplace_back(phase.name, phase.ms);
-                else found->second += phase.ms;
-            }
-            state.perf_trace->frame(frame);
         }
-        // #447 --eawr-live-follow: the next frame looks at the unit where this one drew it.
-        if (!finished && state.live_session && state.live_session->options().follow
-            && !state.followed_projectile) {
-            if (const auto unit = state.live_session->unit_frame(*state.live_session->options().follow)) {
-                state.space->live_camera_focus(static_cast<float>(unit->position[0]),
-                                               static_cast<float>(unit->position[1]));
-            }
-        }
-        // #660 capture-only: BP-61 supplies the same interpolation the missile model uses.
-        // Once selected, keep this ID after impact so a later shot cannot jump the camera.
-        if (!finished && state.live_session && state.live_session->options().follow_projectile) {
-            const auto& frame = state.live_session->battle_frame();
-            if (frame.latest) {
-                const auto projectiles = frame.latest->projectiles();
-                if (!state.followed_projectile) {
-                    const auto first = std::find_if(projectiles.begin(), projectiles.end(), [&](const auto& shot) {
-                        return shot.homing && shot.shooter == *state.live_session->options().follow_projectile;
-                    });
-                    if (first != projectiles.end()) state.followed_projectile = first->id;
-                }
-                if (state.followed_projectile) {
-                    const auto latest = std::find_if(projectiles.begin(), projectiles.end(), [&](const auto& shot) {
-                        return shot.id == *state.followed_projectile;
-                    });
-                    if (latest != projectiles.end()) {
-                        const sim::tactical::Projectile* previous = nullptr;
-                        if (frame.previous) {
-                            const auto before = frame.previous->projectiles();
-                            const auto found = std::find_if(before.begin(), before.end(), [&](const auto& shot) {
-                                return shot.id == latest->id;
-                            });
-                            if (found != before.end()) previous = &*found;
-                        }
-                        if (const auto pose = space::interpolate_projectile(previous, *latest, frame.alpha)) {
-                            state.space->live_camera_focus(static_cast<float>(pose->position[0]),
-                                                           static_cast<float>(pose->position[1]));
-                        }
-                    }
-                }
-            }
-        }
-        return finished;
     }
-    if (state.completed || !state.renderer) return std::nullopt;
-    if (state.map_camera && !state.failure.empty()) {
-        state.completed = true;
-        static_cast<void>(state.write_report());
-        return 2;
-    }
+}
+
+bool MapMode::State::advance_map_camera(double delta) {
+    State& state = *this;
     if (state.map_camera && state.phases.empty() && !state.map_camera_settle_started) {
         if (!std::isfinite(delta) || delta < 0.0
             || delta > static_cast<double>(std::numeric_limits<float>::max())) {
             state.failure = "map camera process delta is invalid";
             state.completed = true;
             static_cast<void>(state.write_report());
-            return 2;
+            return false;
         }
         const std::uint32_t tick = state.frame + 1U;
         const std::uint32_t terminal = state.options.warmup_frames + state.options.timed_frames;
@@ -328,7 +300,7 @@ std::optional<int> MapMode::process(const double delta) {
             state.failure = core::format_diagnostic(stepped.error());
             state.completed = true;
             static_cast<void>(state.write_report());
-            return 2;
+            return false;
         }
         state.camera_selftest_tick();
         state.free_selftest_tick();
@@ -363,6 +335,11 @@ std::optional<int> MapMode::process(const double delta) {
         state.camera = render_camera(state.map_camera->frame());
         state.renderer->set_camera(state.camera);
     }
+    return true;
+}
+
+std::optional<int> MapMode::State::process_comparison_capture() {
+    State& state = *this;
     if (!state.phases.empty()) {
         // Comparison phases: the same camera with one setting changed. The
         // renderer reads back the last drawn frame, so a few frames are drawn
@@ -407,6 +384,11 @@ std::optional<int> MapMode::process(const double delta) {
         if (!state.phases.empty()) return std::nullopt;
         return state.finish();
     }
+    return std::nullopt;
+}
+
+std::optional<int> MapMode::State::draw_map_frame(double delta) {
+    State& state = *this;
     ++state.frame;
     // The frame's presentation tick: its frame count in a capture, real time
     // at 30 Hz in the live view. A capture holds after its particle frames.
@@ -484,46 +466,11 @@ std::optional<int> MapMode::process(const double delta) {
             state.refresh_fog_snapshots();
         }
     }
-    if (state.frame == state.options.warmup_frames) {
-        state.timing_start = std::chrono::steady_clock::now();
-        return std::nullopt;
-    }
-    if (state.frame < state.options.warmup_frames + state.options.timed_frames) {
-        return std::nullopt;
-    }
-    state.timed_seconds = std::chrono::duration<double>(
-        std::chrono::steady_clock::now() - state.timing_start).count();
+    return std::nullopt;
+}
 
-    if (state.map_camera && !state.map_camera->controller().capture_locked()) {
-        const std::uint32_t terminal = state.options.warmup_frames + state.options.timed_frames;
-        if (state.map_camera_selftest && state.frame == terminal) {
-            auto before = state.renderer->capture(state.camera);
-            if (!before) {
-                state.failure = core::format_diagnostic(before.error());
-                state.completed = true;
-                static_cast<void>(state.write_report());
-                return 2;
-            }
-            state.map_camera_terminal_before = std::move(before.value().png_bytes);
-        }
-        const std::uint32_t last_interactive = terminal + (state.map_camera_selftest ? 3U : 0U);
-        if (state.frame < last_interactive) return std::nullopt;
-        if (!state.map_camera_settle_started) {
-            state.map_camera_settle_started = true;
-            state.map_camera_steps_at_freeze = state.map_camera->steps();
-            return std::nullopt;
-        }
-        ++state.map_camera_settle_frames;
-        if (state.map_camera_settle_frames < 3U) return std::nullopt;
-        if (state.map_camera->steps() != state.map_camera_steps_at_freeze
-            || camera_frame(render_camera(state.map_camera->frame())) != camera_frame(state.camera)) {
-            state.failure = "map camera changed during terminal settle";
-            state.completed = true;
-            static_cast<void>(state.write_report());
-            return 2;
-        }
-    }
-
+std::optional<int> MapMode::State::capture_map_frame() {
+    State& state = *this;
     auto capture = state.renderer->capture(state.camera);
     if (!capture) {
         state.completed = true;
@@ -704,6 +651,97 @@ std::optional<int> MapMode::process(const double delta) {
     }
     if (!state.phases.empty()) return std::nullopt;
     return state.finish();
+}
+
+std::optional<int> MapMode::process(const double delta) {
+    State& state = *state_;
+    state.service_game_menu();
+    core::tick_profile::Recording ui_recording;
+    std::optional<core::tick_profile::Capture> ui_capture;
+    if (state.perf_trace) ui_capture.emplace(ui_recording);
+    if (state.perf_trace) state.perf_trace->begin_frame();
+    state.hud_ms = 0.0;
+    core::load_profile::Scope first_frame_scope(core::load_profile::Phase::session);
+    // BLD-12: the loading screen's Begin button, pressed since the last frame.
+    if (state.loading != nullptr && state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready
+        && state.loading->take_begin()) {
+        state.begin_battle();
+    }
+    state.sync_net_perf(delta);
+    state.sync_perf_overlay();
+    if (state.space) {
+        const std::optional<int> finished = state.space->process(delta);
+        state.update_attract_camera(delta, finished);
+        // #82: selection and orders see the frame the view just drew.
+        // #848: the overview level the camera just took decides what the battle UI draws this frame.
+        if (!finished) state.sync_overview_ui();
+        if (!finished && state.battle && state.live_session && state.space_population) {
+            FrameTimer timer(state.perf_trace ? &state.hud_ms : nullptr, true);
+            state.battle->frame(*state.live_session, *state.space_population, *state.space);
+            gpu_memory_trace.at_tick(state.live_session->presented_tick());
+            if (state.hud && state.hud->minimap()) {
+                state.hud->minimap()->order_frame(state.live_session->presented_tick() / 30.0);
+            }
+            state.live_session->placement_preview(state.battle->placing(), state.battle->placement_point());
+            state.battle->cursor_frame(*state.live_session, *state.space, delta, !state.options.capture_path.empty());
+            state.sync_cards();
+            state.sync_production();
+            state.sync_minimap();
+        }
+        state.record_frame_trace(delta, ui_recording);
+        state.update_follow_camera(finished);
+        return finished;
+    }
+    if (state.completed || !state.renderer) return std::nullopt;
+    if (state.map_camera && !state.failure.empty()) {
+        state.completed = true;
+        static_cast<void>(state.write_report());
+        return 2;
+    }
+    if (!state.advance_map_camera(delta)) return 2;
+    if (!state.phases.empty()) return state.process_comparison_capture();
+    if (const auto failed = state.draw_map_frame(delta)) return failed;
+    if (state.frame == state.options.warmup_frames) {
+        state.timing_start = std::chrono::steady_clock::now();
+        return std::nullopt;
+    }
+    if (state.frame < state.options.warmup_frames + state.options.timed_frames) {
+        return std::nullopt;
+    }
+    state.timed_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - state.timing_start).count();
+
+    if (state.map_camera && !state.map_camera->controller().capture_locked()) {
+        const std::uint32_t terminal = state.options.warmup_frames + state.options.timed_frames;
+        if (state.map_camera_selftest && state.frame == terminal) {
+            auto before = state.renderer->capture(state.camera);
+            if (!before) {
+                state.failure = core::format_diagnostic(before.error());
+                state.completed = true;
+                static_cast<void>(state.write_report());
+                return 2;
+            }
+            state.map_camera_terminal_before = std::move(before.value().png_bytes);
+        }
+        const std::uint32_t last_interactive = terminal + (state.map_camera_selftest ? 3U : 0U);
+        if (state.frame < last_interactive) return std::nullopt;
+        if (!state.map_camera_settle_started) {
+            state.map_camera_settle_started = true;
+            state.map_camera_steps_at_freeze = state.map_camera->steps();
+            return std::nullopt;
+        }
+        ++state.map_camera_settle_frames;
+        if (state.map_camera_settle_frames < 3U) return std::nullopt;
+        if (state.map_camera->steps() != state.map_camera_steps_at_freeze
+            || camera_frame(render_camera(state.map_camera->frame())) != camera_frame(state.camera)) {
+            state.failure = "map camera changed during terminal settle";
+            state.completed = true;
+            static_cast<void>(state.write_report());
+            return 2;
+        }
+    }
+
+    return state.capture_map_frame();
 }
 
 void MapMode::observe_pointer(const Ref<InputEvent>& event) {

@@ -2,6 +2,15 @@
 #include "resource_lease_ledger.hpp"
 #include "../../../apps/viewer/src/effect_clock_assets.hpp"
 
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+
 namespace legacy_family_test_support {
 
 void binding_contracts() {

@@ -1,4 +1,5 @@
 #include "eawr/campaign/planet_economy.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -16,7 +17,6 @@ template<class T> core::Result<T> fail(std::string message) {
     return core::Result<T>::failure(std::move(d));
 }
 std::string key(std::string_view text) { std::string r(text); for (auto& c : r) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A'); return r; }
-std::string trim(std::string_view text) { const auto first = text.find_first_not_of(" \r\n\t"); if (first == std::string_view::npos) return {}; return std::string(text.substr(first, text.find_last_not_of(" \r\n\t") - first + 1)); }
 std::vector<const data::Definition*> layers(const data::Catalog& c, std::string_view name, data::Category category) {
     std::vector<const data::Definition*> result; auto resolved = c.resolve(name, category);
     if (resolved) for (const auto& layer : resolved.value().chain) if (const auto* p = c.find(layer, category)) result.push_back(p);
@@ -71,8 +71,9 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
     result.factor_min = low.value(); result.factor_max = high.value();
     const auto campaign = layers(catalog, plan.campaign_name(), data::Category::campaign);
     if (const auto* n = data::retail::single(campaign, "Tutorial")) { auto value = flag(n); if (!value) return fail<gc::EconomyCorruptionState>("invalid tutorial flag"); result.tutorial = value.value(); }
-    // Exact campaign multiplayer authoring; number of local human seats is not a proxy.
-    if (const auto* n = data::retail::single(campaign, "Is_Multiplayer")) { auto value = flag(n); if (!value) return fail<gc::EconomyCorruptionState>("invalid multiplayer flag"); result.multiplayer = value.value(); }
+    // The setup's multiplayer mode, the one flag every multiplayer rule branches on (GCMP-24). Neither the
+    // campaign's Is_Multiplayer menu tag nor the number of local human seats is a proxy for it.
+    result.multiplayer = plan.mode() == CampaignSetupMode::multiplayer;
     std::map<std::string, std::uint32_t> factions;
     for (const auto& d : catalog.definitions()) if (d.active && d.category == data::Category::faction) factions.emplace(key(d.id), 0);
     std::uint32_t next = 1; for (auto& [name, id] : factions) { (void)name; id = next++; }
@@ -117,8 +118,8 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
         if (key(node.name) != "ITEM") continue;
         gc::corruption_fixture::MarketItem item; item.id = item_id++;
         const auto* faction = child(node, "Faction");
-        if (!faction || !factions.contains(key(trim(faction->raw_text)))) return fail<gc::EconomyCorruptionState>("unbound item faction");
-        data::tag_trace::used(faction); item.faction = factions.at(key(trim(faction->raw_text)));
+        if (!faction || !factions.contains(key(core::trim(faction->raw_text, core::xml_whitespace)))) return fail<gc::EconomyCorruptionState>("unbound item faction");
+        data::tag_trace::used(faction); item.faction = factions.at(key(core::trim(faction->raw_text, core::xml_whitespace)));
         // WGEP-105: the ordinary item constructor supplies 1/0/0.
         auto tech = number_or(child(node, "Tech_Level"), gc::corruption_fixture::one);
         auto cost = number_or(child(node, "Base_Cost_Credits"), Fixed{});

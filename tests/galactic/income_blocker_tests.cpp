@@ -1,3 +1,11 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../support/result.hpp"
 // WGEP-05/163..165: saved source-scoped income blockers and the native credit-halt writer.
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/income.hpp"
@@ -7,17 +15,14 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 
-#include <stdexcept>
+#include <exception>
+using eawr::testing::take;
 
 namespace {
 using namespace galactic_test;
 using eawr::sim::math::Fixed;
 namespace gc = eawr::sim::galactic;
-template <class T> T take(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().message);
-    return std::move(value).value();
-}
-void take(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 Fixed d(std::string_view n) { return take(Fixed::from_decimal(n)); }
 
@@ -275,7 +280,7 @@ void political_source_preserved() {
     }
 }
 } // namespace
-int main() {
+int case_galactic_income_blocker_tests() {
     try { authored_profile(); writer_contracts(); collection_and_forecast(); checkpoint_pause_and_overlap(); political_source_preserved(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;

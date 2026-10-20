@@ -1,4 +1,6 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_ai_execution
+
     NAME galactic_ai_execution_tests
     SOURCES ai_execution_stock_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/script/foc"
@@ -6,7 +8,7 @@ eawr_add_test_case(
     TESTS galactic_ai_execution_contracts
 )
 
-eawr_add_game_data_test(NAME galactic_ai_execution_stock COMMAND galactic_ai_execution_tests --installed)
+eawr_add_game_data_test(NAME galactic_ai_execution_stock COMMAND galactic_area_ai_execution galactic_ai_execution_tests --installed)
 set_tests_properties(galactic_ai_execution_stock PROPERTIES LABELS game-data)
 
 # WGA-227..231/234: direct fleet admission, ordinary hop recomputation and native continuation.

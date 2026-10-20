@@ -55,7 +55,16 @@ void SpacePopulation::pose_pending_units(GodotRenderer& renderer) {
     pose_units(renderer, sample);
 }
 
+void SpacePopulation::schedule_arrival_sample() noexcept {
+    // Preserve an already pending frame (including attract's external clock).
+    if (!pending_unit_sample_ && last_unit_sample_) pending_unit_sample_ = last_unit_sample_;
+    // Appended idle/turret palettes and additive materials have not seen this sample yet.
+    animation_sample_.reset();
+    effect_sample_.reset();
+}
+
 void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample) {
+    last_unit_sample_ = sample;
     idle_frame_ms_ = idle_sample_ms_ = idle_upload_ms_ = 0.0;
     idle_skin_work_ = {};
     FrameTimer frame_timer(trace_frames_ ? &idle_frame_ms_ : nullptr);
@@ -75,6 +84,8 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     std::vector<std::optional<animation::Pose>> poses(idle_placements_.size());
     FrameTimer sample_timer(trace_frames_ ? &idle_sample_ms_ : nullptr);
     for (std::size_t index = 0; index < idle_placements_.size(); ++index) {
+        const auto live = idle_live_ships_.find(index);
+        if (live != idle_live_ships_.end() && live_retired_[live->second]) continue;
         const IdlePlacement& idle = idle_placements_[index];
         auto pose = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame, tick,
                                            particles::map_owner_ticks_per_second);
@@ -173,29 +184,106 @@ const animation::Player* SpacePopulation::live_clip(const std::size_t ship, cons
     return ship < bound.size() && bound[ship] ? clips_[*bound[ship]].get() : nullptr;
 }
 
-bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<const LiveClipPose> poses) {
-    for (const LiveClipPose& request : poses) {
-        const animation::Player* player = live_clip(request.ship, request.alternate);
-        if (player == nullptr) continue;
-        auto pose = animation::sample_death_frame(*player, {request.position, request.blend_from});
-        if (!pose) {
-            failure_ = "live clip of ship " + std::to_string(request.ship) + ": " + core::format_diagnostic(pose.error());
+bool SpacePopulation::live_clip_terminal_hidden(const std::size_t ship) const noexcept {
+    const auto held = held_clips_.find(ship);
+    return held != held_clips_.end() && held->second.hidden;
+}
+
+std::span<const animation::BonePose> SpacePopulation::terminal_clip_bones(const std::size_t ship) const noexcept {
+    const auto held = held_clips_.find(ship);
+    return held == held_clips_.end() ? std::span<const animation::BonePose>{} : held->second.bones;
+}
+
+std::span<const animation::BonePose> SpacePopulation::held_clip_bones(const std::size_t ship,
+    const animation::ClipPosition position, const float blend_from) const noexcept {
+    const auto held = held_clips_.find(ship);
+    if (blend_from != 0.0F || held == held_clips_.end() || held->second.position != position) return {};
+    return held->second.bones;
+}
+
+void SpacePopulation::prepare_live_clip(const std::size_t index) {
+    const auto& request = pending_clip_poses_[index];
+    auto& row = prepared_clips_[index];
+    if (!row.player || row.cached || request.ship >= live_retired_.size() || live_retired_[request.ship]) return;
+    auto pose = animation::sample_death_frame(*row.player, {request.position, request.blend_from});
+    if (!pose) { row.failure = core::format_diagnostic(pose.error()); return; }
+    row.pose = std::move(pose.value());
+    // A visible unused root does not keep a wreck alive. Every piece must
+    // instead prove all of its actually weighted geometry bones hidden.
+    row.hidden = row.terminal && !row.geometry.empty();
+    for (const auto& used : row.geometry) {
+        if (used.size() != row.pose->bones.size()
+            || std::none_of(used.begin(), used.end(), [](const auto value) { return value != 0; })) {
+            row.hidden = false;
+            break;
+        }
+        for (std::size_t bone = 0; bone < used.size(); ++bone)
+            if (used[bone] && row.pose->bones[bone].visible) row.hidden = false;
+    }
+}
+
+bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<const LiveClipPose> poses,
+    const particles::StepExecutor* workers) {
+    if (poses.empty()) return true;
+    prepared_clips_.resize(poses.size());
+    auto& prepared = prepared_clips_;
+    pending_clip_poses_ = poses;
+    // Snapshot immutable upload metadata before dispatch. Workers never call Godot.
+    for (std::size_t index = 0; index < poses.size(); ++index) {
+        const auto& request = poses[index];
+        auto& row = prepared[index];
+        row = PreparedLiveClip{};
+        row.player = live_clip(request.ship, request.alternate);
+        if (!row.player || request.ship >= live_retired_.size() || live_retired_[request.ship]) continue;
+        row.terminal = live_death_clone_[request.ship] && !request.alternate && request.blend_from == 0.0F
+            && request.position.subdivisions != 0 && request.position.position
+                >= static_cast<std::uint64_t>(row.player->playable_frames()) * request.position.subdivisions;
+        const auto held = held_clips_.find(request.ship);
+        row.cached = row.terminal && held != held_clips_.end() && held->second.position == request.position;
+        if (!row.terminal || row.cached) continue;
+        for (const auto piece : piece_index_.pieces(request.ship)) {
+            const auto& geometry = pieces_[piece];
+            const auto clips = piece_index_.clips(request.ship);
+            const bool posed = std::any_of(clips.begin(), clips.end(), [&](const auto clip) {
+                return live_clip_instances_[clip].entity == geometry.instance.entity_id;
+            });
+            row.geometry.push_back(posed ? renderer.skin_geometry_bones(geometry.instance.asset_id)
+                                          : std::vector<std::uint8_t>{});
+        }
+    }
+    constexpr std::size_t parallel_threshold = 256;
+    if (workers && poses.size() >= parallel_threshold) {
+        if (!workers->run(poses.size(), live_clip_task_)) {
+            pending_clip_poses_ = {};
+            failure_ = "live clip workers failed";
             return false;
         }
-        // Bone visibility is part of a clip (a death clip hides the pieces it
-        // breaks off); the palette has no visibility, so a hidden bone's
-        // geometry collapses to the bone's origin.
-        std::vector<animation::BonePose> bones = std::move(pose.value().bones);
+    } else {
+        for (std::size_t index = 0; index < poses.size(); ++index) prepare_live_clip(index);
+    }
+    pending_clip_poses_ = {};
+    // Stable request order controls diagnostics, palette commits and retire requests.
+    for (std::size_t index = 0; index < poses.size(); ++index) {
+        const auto& request = poses[index];
+        auto& row = prepared[index];
+        if (!row.failure.empty()) {
+            failure_ = "live clip of ship " + std::to_string(request.ship) + ": " + row.failure;
+            return false;
+        }
+        if (row.cached || !row.pose) continue;
+        auto bones = std::move(row.pose->bones);
         contact_bones_[request.ship] = bones;
-        for (animation::BonePose& bone : bones) {
+        if (row.terminal) held_clips_.insert_or_assign(request.ship,
+            HeldClip{request.position, bones, row.hidden});
+        else held_clips_.erase(request.ship);
+        for (auto& bone : bones) {
             if (bone.visible) continue;
             ++live_clip_hidden_bones_;
-            for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset}) {
-                for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
-            }
+            for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                for (std::size_t entry = 0; entry < 12; ++entry) (*matrix)[entry] = 0.0F;
         }
-        for (const std::size_t index : piece_index_.clips(request.ship)) {
-            const LiveClipInstance& instance = live_clip_instances_[index];
+        for (const auto clip : piece_index_.clips(request.ship)) {
+            const auto& instance = live_clip_instances_[clip];
             const auto posed = renderer.set_skin_pose(instance.entity, instance.asset, bones);
             if (!posed) {
                 failure_ = "entity " + std::to_string(instance.entity) + " live clip pose: "
@@ -227,7 +315,42 @@ std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_e
     view.death_clone = options_.placed_ships[ship].death_clone;
     view.projectile = options_.placed_ships[ship].projectile_slot;
     view.entity = options_.placed_ships[ship].live_entity;
+    view.identity = view.placement;
+    if (ship < live_identity_.size() && live_identity_[ship] != ship) {
+        if (const scene::Placement* identity = live_placement(live_identity_[ship])) view.identity = identity;
+    }
     return view;
+}
+
+const scene::Placement* SpacePopulation::live_placement(const std::size_t ship) const noexcept {
+    if (!scene_ || ship >= live_decisions_.size() || !live_decisions_[ship]) return nullptr;
+    const std::size_t decision = *live_decisions_[ship];
+    if (decision >= decisions_.size() || decisions_[decision].scene_ordinal >= scene_->placements.size()) return nullptr;
+    return &scene_->placements[decisions_[decision].scene_ordinal];
+}
+
+void SpacePopulation::bind_live_identity(const std::size_t ship, const std::size_t identity_ship) {
+    if (ship >= live_decisions_.size()) return;
+    if (ship >= live_identity_.size()) {
+        const std::size_t known = live_identity_.size();
+        live_identity_.resize(live_decisions_.size());
+        for (std::size_t index = known; index < live_identity_.size(); ++index) live_identity_[index] = index;
+    }
+    // Unchanged: a spin-away craft rebinds the same slot every frame. UnitEmitters replans only when the entity
+    // changes (as for a physical rebind in BASE), so an identity change under the same entity keeps its seeds.
+    if (live_identity_[ship] == identity_ship) return;
+    live_identity_[ship] = identity_ship;
+    // An animated hull starts its idle clip at a frame hashed from its slot's placement: the identity slot's.
+    const scene::Placement* identity = live_placement(identity_ship);
+    if (identity == nullptr) return;
+    for (const auto& [idle_index, idle_ship] : idle_live_ships_) {
+        if (idle_ship != ship) continue;
+        IdlePlacement& idle = idle_placements_[idle_index];
+        const auto start = placement_start_frame(*identity, clips_[idle.clip]->playable_frames());
+        if (idle.start_frame == start) continue;
+        idle.start_frame = start;
+        schedule_arrival_sample();
+    }
 }
 
 std::optional<SpacePopulation::LiveShipEmitterView> SpacePopulation::live_ship_emitter_view(const std::size_t ship) const {
@@ -340,13 +463,24 @@ void SpacePopulation::prepare_fog_model_capture() {
 
 bool SpacePopulation::remember_fog_model(GodotRenderer& renderer, const sim::EntityId entity,
                                          const std::size_t ship, const std::span<const animation::BonePose> neutral_pose,
-                                         const std::optional<std::array<float, 3>> neutral_colour) {
+                                         const std::optional<std::array<float, 3>> neutral_colour, const bool initial) {
     if (!live_ship_drawn(ship)) return true;
+    const auto& placement = scene_->placements[decisions_[*live_decisions_[ship]].scene_ordinal];
+    if (initial && !placement.transform) return true;
     auto& saved = fog_models_[entity];
     std::vector<const GatedInstance*> shown;
     for (const auto index : piece_index_.pieces(ship)) {
         const auto& piece = pieces_[index];
         if (piece.shield) continue;
+        if (initial) {
+            // Battle-start knowledge cannot expose a later hidden damage, cloak,
+            // construction or ability state. Ordinary loss-of-sight copies below
+            // still retain exactly the previously submitted art.
+            if (piece.cloak || piece.blast_charged || (piece.alternate && *piece.alternate != 0)
+                || (piece.gate && piece.gate->art != HardpointGate::Art::attached_model)) continue;
+            shown.push_back(&piece);
+            continue;
+        }
         // Copy the submitted alternate and damage art, never an unshown piece.
         if (std::binary_search(fog_drawn_entities_.begin(), fog_drawn_entities_.end(),
                 piece.instance.entity_id)) shown.push_back(&piece);
@@ -366,6 +500,15 @@ bool SpacePopulation::remember_fog_model(GodotRenderer& renderer, const sim::Ent
             return copy.source == piece->instance.entity_id && copy.instance.asset_id == piece->instance.asset_id;
         });
         sim::RenderInstance copy = piece->instance;
+        if (initial) {
+            const auto transform = sim::math::compose(placement.transform->matrix, piece->local);
+            if (!transform) {
+                failure_ = "initial fog model: piece transform leaves the Q24 range";
+                discard_new();
+                return false;
+            }
+            copy.fixed_transform = source_to_render(transform.value());
+        }
         if (old != saved.end()) {
             copy.entity_id = old->instance.entity_id;
             reused.insert(copy.entity_id);
@@ -442,7 +585,7 @@ void SpacePopulation::set_shield_time(GodotRenderer& renderer, const float secon
     }
 }
 
-void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_t ship) {
+void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_t ship, const bool reusable) {
     if (ship >= live_retired_.size() || live_retired_[ship]) return;
     live_retired_[ship] = true;
     std::set<sim::AssetId> dropped;
@@ -453,16 +596,34 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
         dropped.insert(piece.instance.asset_id);
         entities.insert(piece.instance.entity_id);
     }
+    if (reusable) {
+        auto& parked = parked_ships_[ship];
+        for (const auto index : piece_index_.pieces(ship)) parked.pieces.push_back(pieces_[index]);
+        for (const auto index : piece_index_.clips(ship)) parked.clips.push_back(live_clip_instances_[index]);
+        for (const auto& animated : animated_instances_)
+            if (entities.contains(animated.entity)) parked.animated.push_back(animated);
+    }
     std::erase_if(pieces_, [&](const GatedInstance& piece) { return piece.live == ship; });
     std::erase_if(live_clip_instances_, [&](const LiveClipInstance& instance) { return instance.ship == ship; });
     std::erase_if(animated_instances_, [&](const AnimatedInstance& instance) { return entities.contains(instance.entity); });
-    if (live_clips_[ship]) clips_[*live_clips_[ship]].reset();
-    live_clips_[ship].reset();
-    if (live_alternate_clips_[ship]) clips_[*live_alternate_clips_[ship]].reset();
-    live_alternate_clips_[ship].reset();
+    if (!reusable) {
+        if (live_clips_[ship]) clips_[*live_clips_[ship]].reset();
+        live_clips_[ship].reset();
+        if (live_alternate_clips_[ship]) clips_[*live_alternate_clips_[ship]].reset();
+        live_alternate_clips_[ship].reset();
+    }
+    held_clips_.erase(ship);
+    std::vector<animation::BonePose>{}.swap(contact_bones_[ship]);
+    live_transforms_[ship].reset();
+    std::erase_if(contact_live_ships_, [&](const auto& entry) { return entry.second == ship; });
     live_shown_[ship] = false;
+    piece_index_.reset_opacity(ship);
     // Uploads are shared by model and surface: another clone of the same type keeps them.
     for (const GatedInstance& piece : pieces_) dropped.erase(piece.instance.asset_id);
+    for (const auto& [slot, parked] : parked_ships_) {
+        static_cast<void>(slot);
+        for (const auto& piece : parked.pieces) dropped.erase(piece.instance.asset_id);
+    }
     for (const sim::AssetId asset : dropped) {
         static_cast<void>(renderer.release(asset));
         std::erase(uploaded_, asset);
@@ -472,6 +633,37 @@ void SpacePopulation::retire_live_ship(GodotRenderer& renderer, const std::size_
     if (!dropped.empty()) prune_effect_clock_assets(effect_clock_assets_, renderer.resources());
     rebuild_piece_index();
     refresh_instances();
+}
+
+void SpacePopulation::restore_live_ship(GodotRenderer& renderer, const std::size_t ship) {
+    const auto parked = parked_ships_.find(ship);
+    if (parked == parked_ships_.end()) return;
+    for (const auto& piece : parked->second.pieces) {
+        if (!piece.colour) continue;
+        const auto& rgb = *piece.colour;
+        renderer.set_unit_colorization(piece.instance.entity_id, {static_cast<float>(rgb[0]) / 255.0F,
+            static_cast<float>(rgb[1]) / 255.0F, static_cast<float>(rgb[2]) / 255.0F});
+    }
+    pieces_.insert(pieces_.end(), parked->second.pieces.begin(), parked->second.pieces.end());
+    live_clip_instances_.insert(live_clip_instances_.end(), parked->second.clips.begin(), parked->second.clips.end());
+    animated_instances_.insert(animated_instances_.end(), parked->second.animated.begin(), parked->second.animated.end());
+    const bool idle = !parked->second.animated.empty();
+    parked_ships_.erase(parked);
+    std::sort(animated_instances_.begin(), animated_instances_.end(), [](const auto& left, const auto& right) {
+        return left.entity < right.entity;
+    });
+    // Reuse preserves the original compose identities and submission order.
+    std::sort(pieces_.begin(), pieces_.end(), [](const auto& left, const auto& right) {
+        return left.instance.entity_id < right.instance.entity_id;
+    });
+    std::sort(live_clip_instances_.begin(), live_clip_instances_.end(), [](const auto& left, const auto& right) {
+        return left.entity < right.entity;
+    });
+    live_retired_[ship] = false;
+    live_shown_[ship] = false;
+    held_clips_.erase(ship);
+    if (idle) schedule_arrival_sample();
+    rebuild_piece_index();
 }
 
 

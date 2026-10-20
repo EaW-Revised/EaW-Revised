@@ -407,12 +407,308 @@ core::Result<gc::FleetTypeTraits> CampaignSetupPlan::resolve_fleet_type(gc::Type
     return core::Result<gc::FleetTypeTraits>::success(traits.value().front());
 }
 
+namespace {
+
+core::Result<void> plan_fiscal_setup(const data::galactic::GalacticData& data, const CampaignSetupOptions& options, const auto* campaign,
+    auto& model, auto& fiscal_setup) {
+    const auto* cap = data.constant("Credit_Cap_Per_Planet");
+    if (!cap || !cap->number) return invalid<void>("missing Credit_Cap_Per_Planet", campaign->file);
+    fiscal_setup = gc::FiscalSetup{*cap->number, *options.fiscal_players, {}};
+    // WGEP-05: current, intact planet basic income. Destroyed/blocked state,
+    // alignment, politics, trade and structure modifiers are separate seams.
+    for (const auto& planet : model.value().planets) {
+        const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
+            [&](const auto& row) { return row.id == planet.id; });
+        const auto* source = data.planet(named->name);
+        if (!source || !source->planet_credit_value)
+            return invalid<void>("missing Planet_Credit_Value for " + named->name, campaign->file);
+        fiscal_setup->planets.push_back({planet.id, *source->planet_credit_value});
+    }
+    // Old/synthetic data without the new constant group keeps the legacy slice.
+    const auto* maximum_bonus = data.constant("MaxCreditIncomeAlignmentBonus");
+    const auto* maximum_penalty = data.constant("MaxCreditIncomeAlignmentPenalty");
+    const auto* curve = data.constant("Political_Income_Curve");
+    if (maximum_bonus || maximum_penalty || curve) {
+        if (!maximum_bonus || !maximum_bonus->number || !maximum_penalty || !maximum_penalty->number || !curve)
+            return invalid<void>("incomplete WGEP-07/63 income constants", campaign->file);
+        auto points = gc::parse_income_curve(curve->text);
+        if (!points) return core::Result<void>::failure(points.error());
+        auto& rules = fiscal_setup->contributions.emplace();
+        rules.maximum_alignment_bonus = *maximum_bonus->number;
+        rules.maximum_alignment_penalty = *maximum_penalty->number;
+        rules.political_curve = std::move(points.value());
+        const auto alignment = [](std::string_view name) -> std::optional<gc::IncomeAlignment> {
+            if (key(name) == "NEUTRAL") return gc::IncomeAlignment::neutral;
+            if (key(name) == "LIGHT") return gc::IncomeAlignment::light;
+            if (key(name) == "DARK") return gc::IncomeAlignment::dark;
+            return std::nullopt;
+        };
+        for (const auto& player : options.players) {
+            const auto value = alignment(data.faction(player.faction)->force_alignment);
+            if (!value) return invalid<void>("invalid or absent Force_Alignment", campaign->file);
+            rules.factions.push_back({player.player.player_id, *value});
+        }
+        for (const auto& planet : model.value().planets) {
+            const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
+                [&](const auto& row) { return row.id == planet.id; });
+            const auto* source = data.planet(named->name);
+            const auto value = alignment(source->force_alignment);
+            if (!value || !source->force_strength) return invalid<void>("invalid or absent planet alignment/strength", source->file);
+            rules.planets.push_back({planet.id, *value, *source->force_strength});
+        }
+        for (const auto& route : model.value().routes) {
+            const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
+                [&](const auto& row) { return row.id == route.id; });
+            const auto* source = data.trade_route(named->name);
+            if (!source || !source->credit_gain_factor) return invalid<void>("missing Credit_Gain_Factor", campaign->file);
+            rules.routes.push_back({route.id, *source->credit_gain_factor});
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> plan_location_requests(const auto* campaign, gc::PlayerId neutral, auto& planets,
+    auto& galaxy_setup, auto& locations) {
+    for (const auto& name : campaign->locations) {
+        const auto id = planets.find(key(name));
+        CampaignLocation location{name, neutral, std::nullopt};
+        if (id != planets.end()) location.planet = *std::find_if(galaxy_setup.planets.begin(), galaxy_setup.planets.end(),
+            [&](const auto& row) { return row.id == id->second; });
+        locations.push_back(std::move(location));
+    }
+    if (campaign->locations.empty() || std::any_of(campaign->planets.begin(), campaign->planets.end(), [&](const auto& name) {
+            return std::none_of(campaign->locations.begin(), campaign->locations.end(), [&](const auto& location) { return key(name) == key(location); });
+        })) return invalid<void>("planet list is not a subset of authored Locations", campaign->file);
+    return core::Result<void>::success();
+}
+
+core::Result<void> plan_starting_placements(const auto* campaign, const CampaignSetupOptions& options, auto& locations,
+    auto& original_types, auto& type_ids, auto& players, auto& referenced_types,
+    auto& placement_plan, auto& force_plan) {
+    // WGS-70: per matching planet, special placements precede stored force traversal. Missing
+    // or inactive owners are skipped before consulting the placement provider.
+    for (const auto& location : locations) {
+        if (!location.planet) continue;
+        std::set<gc::TypeId> marked;
+        for (const auto& record : campaign->special_case_production) {
+            if (key(record.location) != key(location.original_type)) continue;
+            const auto original = original_types.find(key(record.type));
+            if (original == original_types.end()) return invalid<void>("unknown special-placement type " + record.type, campaign->file);
+            const auto* type = original->second;
+            const auto id = type_ids.find(key(record.type));
+            if (id == type_ids.end()) return invalid<void>("missing original identity for " + record.type, campaign->file);
+            referenced_types.insert(id->second);
+            // WGS-72: use the inherited/authored value before the shared false default.
+            if (!type->build_requires_initial_placement.value_or(false)) continue;
+            if (marked.insert(id->second).second) placement_plan.push_back({location.planet->id, id->second});
+        }
+        for (const auto& record : campaign->starting_forces) {
+            if (key(record.location) != key(location.original_type)) continue;
+            const auto owner = players.find(key(record.faction));
+            if (owner == players.end() || !owner->second->active) continue;
+            const auto id = type_ids.find(key(record.type));
+            if (id == type_ids.end()) return invalid<void>("missing original identity for starting force " + record.type, campaign->file);
+            referenced_types.insert(id->second);
+            const auto player = owner->second->player.player_id;
+            const bool human = std::any_of(options.seats.begin(), options.seats.end(), [=](const auto& seat) {
+                return seat.player == player && seat.kind == gc::SeatKind::human;
+            });
+            force_plan.push_back({location.planet->id, player, id->second, record.type, human,
+                sim::math::Fixed::from_raw(sim::math::Fixed::scale)});
+        }
+    }
+    return core::Result<void>::success();
+}
+
+void plan_home_locations(const auto* campaign, const CampaignSetupOptions& options, auto& planets, auto& homes) {
+    for (const auto& binding : options.players) {
+        CampaignHome home{binding.player.player_id, {}, std::nullopt};
+        const auto record = std::find_if(campaign->home_locations.begin(), campaign->home_locations.end(),
+            [&](const auto& row) { return key(row.faction) == key(binding.faction); });
+        if (record != campaign->home_locations.end()) {
+            home.original_type = record->name;
+            if (const auto planet = planets.find(key(record->name)); planet != planets.end()) home.planet = planet->second;
+        }
+        homes.push_back(std::move(home));
+    }
+}
+
+core::Result<void> plan_player_resources(const data::galactic::GalacticData& data, const auto* campaign, const CampaignSetupOptions& options,
+    auto& homes, auto& type_ids, auto& referenced_types, auto& credits_plan,
+    auto& tech_plan, auto& hero_plan) {
+    for (std::size_t index = 0; index < options.players.size(); ++index) {
+        const auto& binding = options.players[index];
+        const auto* faction = data.faction(binding.faction);
+        const auto amount = options.custom ? options.custom->credits : authored_number(campaign->starting_credits, binding.faction, 0);
+        // WGS-74: the runtime custom-credit getter supplies a signed 32-bit integer.
+        if (options.custom && !source_integer(amount))
+            return invalid<void>("custom credits do not fit the source integer", campaign->file);
+        auto credits = sim::math::Fixed::from_integer(amount);
+        if (!credits) return invalid<void>("starting credits are outside the represented numeric range", campaign->file);
+        credits_plan.push_back({binding.player.player_id, credits.value()});
+        auto current = options.custom ? options.custom->starting_tech : authored_number(campaign->starting_tech_levels, binding.faction, 0);
+        // WGS-73: max-tech getter's missing-record default is the code value 5.
+        auto maximum = options.custom ? options.custom->maximum_tech : authored_number(campaign->max_tech_levels, binding.faction, 5);
+        if (!source_integer(current) || !source_integer(maximum)) return invalid<void>("tech input does not fit the source integer", campaign->file);
+        // WGS-76: the faction constructor initializes this adjustment to zero.
+        if (options.custom && faction->displayed_tech_level_adjustment.value_or(0) != 0) {
+            --current; --maximum; // WGS-13: subtract exactly one, regardless of adjustment magnitude/sign.
+            if (!source_integer(current) || !source_integer(maximum)) return invalid<void>("custom tech adjustment exceeds the source integer", campaign->file);
+        }
+        tech_plan.push_back({binding.player.player_id, current, maximum});
+        const auto& home = homes[index];
+        if (options.mode == CampaignSetupMode::multiplayer && (!options.custom || options.custom->allow_heroes) && home.planet) {
+            for (const auto& original : faction->multiplayer_campaign_heroes) {
+                const auto type = type_ids.find(key(original));
+                if (type == type_ids.end()) return invalid<void>("missing original identity for multiplayer hero " + original, campaign->file);
+                referenced_types.insert(type->second);
+                hero_plan.push_back({binding.player.player_id, *home.planet, type->second, original});
+            }
+        }
+    }
+    return core::Result<void>::success();
+}
+
+void plan_fleet_traits(const CampaignSetupOptions& options, auto& referenced_types, auto& bound_types,
+    auto& diagnostics, auto& galaxy_setup) {
+    for (const auto& binding : options.types) {
+        if (!referenced_types.contains(binding.id)) continue;
+        auto traits = build_fleet_type_traits(bound_types, std::span(&binding, 1));
+        if (!traits) {
+            // Planning records placement intent without deciding fleet movement. An unresolved
+            // trait is diagnosed and absent from the live table; placement_frontier refuses a
+            // provider that tries to create a persistent member with that unresolved identity.
+            auto diagnostic = traits.error();
+            diagnostic.severity = core::Severity::warning;
+            diagnostics.push_back(std::move(diagnostic));
+        } else {
+            galaxy_setup.fleet_control->types.push_back(traits.value().front());
+        }
+    }
+}
+
+core::Result<void> plan_victory_setup(const data::galactic::GalacticData& data, const auto* campaign, const CampaignSetupOptions& options,
+    auto& original_types, auto& type_ids, auto& planets, auto& model,
+    auto& bound_types, auto& galaxy_setup) {
+    gc::VictoryAuthoring authoring;
+    const auto parse_conditions = [&](const auto& names, auto& out) -> core::Result<void> {
+        for (const auto& name : names) {
+            const auto n = key(name);
+            if (n == "GALACTIC_ALL_PLANETS_CONTROLLED") out.push_back(gc::VictoryKind::all_planets);
+            else if (n == "GALACTIC_CONTROL_NAMED_PLANETS") out.push_back(gc::VictoryKind::named_planets);
+            else if (n == "GALACTIC_CYCLES_ELAPSED") out.push_back(gc::VictoryKind::cycles);
+            else if (n == "GALACTIC_SUPER_WEAPON_DESTRUCTION") out.push_back(gc::VictoryKind::destroy_superweapon);
+            else if (n == "GALACTIC_OPPONENT_CONTROLS_NO_PLANETS") out.push_back(gc::VictoryKind::no_enemy_planets);
+            else if (n == "GALACTIC_CREDITS_ACCRUED") out.push_back(gc::VictoryKind::credits);
+            else if (n == "GALACTIC_PERCENTAGE_CONTROL") out.push_back(gc::VictoryKind::control_fraction);
+            else if (n == "GALACTIC_CONQUER_ENEMY_HOMEWORLD_AND_LEADER") out.push_back(gc::VictoryKind::homeworld_and_leader);
+            else if (n == "GALACTIC_SUPER_WEAPON_DESTROYS_LAST_ENEMY_PLANET") out.push_back(gc::VictoryKind::superweapon_last_planet);
+            else if (n == "GALACTIC_SUPER_WEAPON_KILLS_ENEMY_LEADER") out.push_back(gc::VictoryKind::superweapon_kill_leader);
+            else if (n == "GALACTIC_KILL_ENEMY_LEADER") out.push_back(gc::VictoryKind::kill_leader);
+            else return invalid<void>("unsupported authored victory condition " + name, campaign->file);
+        }
+        return core::Result<void>::success();
+    };
+    if (auto parsed = parse_conditions(campaign->human_victory_conditions, authoring.human); !parsed)
+        return core::Result<void>::failure(parsed.error());
+    if (auto parsed = parse_conditions(campaign->ai_victory_conditions, authoring.ai); !parsed)
+        return core::Result<void>::failure(parsed.error());
+    const auto one = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
+    authoring.human_parameters = {campaign->human_victory_credit_target.value_or(0), campaign->human_victory_cycle_limit.value_or(0),
+        campaign->human_victory_galactic_control.value_or(one), campaign->human_victory_faction_names,
+        campaign->human_victory_leader_names, campaign->human_victory_planet_names};
+    authoring.ai_parameters = {campaign->ai_victory_credit_target.value_or(0), campaign->ai_victory_cycle_limit.value_or(0),
+        campaign->ai_victory_galactic_control.value_or(one), campaign->ai_victory_faction_names,
+        campaign->ai_victory_leader_names, campaign->ai_victory_planet_names};
+    gc::VictoryContext context;
+    context.multiplayer = options.mode == CampaignSetupMode::multiplayer;
+    gc::PlayerId starting{};
+    for (const auto& binding : options.players) {
+        const auto* faction = data.faction(binding.faction);
+        gc::VictoryPlayer p; p.player = binding.player.player_id; p.faction = faction->name;
+        p.neutral = faction->is_neutral.value_or(false); p.playable = faction->is_playable.value_or(false);
+        p.human = std::any_of(options.seats.begin(), options.seats.end(), [&](const auto& seat) { return seat.player == p.player && seat.kind == gc::SeatKind::human; });
+        p.ai = std::any_of(options.seats.begin(), options.seats.end(), [&](const auto& seat) { return seat.player == p.player && seat.kind == gc::SeatKind::ai; });
+        if (key(binding.faction) == key(campaign->starting_active_player)) starting = p.player;
+        for (const auto& other : options.players) if (key(other.faction) == key(faction->primary_enemy)) p.primary_enemy = other.player.player_id;
+        p.planet_leader_unit = faction->faction_leader;
+        if (const auto company = original_types.find(key(faction->faction_leader_company)); company != original_types.end()
+            && !company->second->company_units.empty()) p.leader_unit = company->second->company_units.front();
+        if (const auto t = type_ids.find(key(faction->faction_leader_company)); t != type_ids.end()) p.leader_company = t->second;
+        if (const auto t = type_ids.find(key(p.leader_unit)); t != type_ids.end()) p.leader_unit_type = t->second;
+        if (const auto t = type_ids.find(key(p.planet_leader_unit)); t != type_ids.end()) p.planet_leader_type = t->second;
+        if (const auto home = planets.find(key(faction->home_planet)); home != planets.end()) p.home = home->second;
+        context.players.push_back(std::move(p));
+    }
+    for (const auto& named : model.value().names) {
+        const auto p = std::find_if(galaxy_setup.planets.begin(), galaxy_setup.planets.end(), [&](const auto& row) { return row.id == named.id; });
+        if (p == galaxy_setup.planets.end()) continue;
+        context.types.push_back({named.name, named.id});
+        context.planets.push_back({named.id, named.id, p->owner, p->owner, p->owner, false});
+    }
+    // WGS-25: a valid original planet type with no active instances remains resolvable.
+    gc::TypeId next_victory_type = model.value().next_id;
+    for (const auto& original : data.planets)
+        if (std::none_of(context.types.begin(), context.types.end(), [&](const auto& t) { return key(t.name) == key(original.name); }))
+            context.types.push_back({original.name, next_victory_type++});
+    // Political relations and leader lifecycle remain owning-provider inputs, gathered live.
+    for (const auto& p : context.players) context.relations.push_back({p.player, p.player, true});
+    for (std::size_t i = 0; i < bound_types.types.size(); ++i)
+        if (bound_types.types[i].superweapon_killer.value_or(false)) context.superweapon_killers.push_back(options.types[i].id);
+    galaxy_setup.victory = gc::install_victory(authoring, context, starting);
+    return core::Result<void>::success();
+}
+
+void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& options, auto& galaxy_setup) {
+    // Coordinator-reserved identity domain. Explicit bindings and owner activity join the
+    // selected definition/content, so two menus selecting different roots cannot alias.
+    Identity identity;
+    identity.text("eawr-campaign-setup-v1");
+    identity.bytes.insert(identity.bytes.end(), galaxy_setup.content_identity.begin(), galaxy_setup.content_identity.end());
+    identity.text(key(campaign->name));
+    identity.integer(options.players.size());
+    for (const auto& player : options.players) {
+        identity.integer(player.player.player_id); identity.integer(player.player.faction_id);
+        identity.integer(player.player.flags); identity.text(key(player.faction)); identity.integer(player.active ? 1 : 0);
+    }
+    identity.integer(options.types.size());
+    for (const auto& type : options.types) { identity.integer(type.id); identity.text(key(type.original_type)); }
+    identity.integer(options.mode == CampaignSetupMode::multiplayer ? 1 : 0);
+    identity.integer(options.custom ? 1 : 0);
+    if (options.custom) {
+        identity.integer(static_cast<std::uint64_t>(options.custom->credits));
+        identity.integer(static_cast<std::uint64_t>(options.custom->starting_tech));
+        identity.integer(static_cast<std::uint64_t>(options.custom->maximum_tech));
+        identity.integer(options.custom->allow_heroes ? 1 : 0);
+    }
+    if (options.seat_control) {
+        // Appended only when present, so a single-player identity keeps its bytes.
+        identity.text("seat-control");
+        identity.integer(options.seat_control->teams.size());
+        for (const auto& team : options.seat_control->teams) {
+            identity.integer(team.side); identity.integer(team.lead.value); identity.integer(team.observer_ai ? 1 : 0);
+        }
+        identity.integer(options.seat_control->controllers.size());
+        for (const auto& controller : options.seat_control->controllers) {
+            identity.integer(controller.player); identity.integer(static_cast<std::uint64_t>(controller.kind));
+            identity.integer(static_cast<std::uint64_t>(controller.dropout));
+            identity.integer(controller.configuration.size());
+            identity.bytes.insert(identity.bytes.end(), controller.configuration.begin(), controller.configuration.end());
+        }
+    }
+    galaxy_setup.campaign_identity = core::sha256(identity.bytes);
+}
+
+} // namespace
+
 core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, const std::string_view campaign_name, const CampaignSetupOptions& options) {
     const auto* campaign = data.campaign(campaign_name);
     if (!campaign) return invalid<CampaignSetupPlan>("unknown selected campaign " + std::string(campaign_name));
     if (options.mode != CampaignSetupMode::single_player && options.mode != CampaignSetupMode::multiplayer)
         return invalid<CampaignSetupPlan>("unknown galactic mode", campaign->file);
+    if (options.seat_control && options.mode != CampaignSetupMode::multiplayer)
+        return invalid<CampaignSetupPlan>("seat control requires multiplayer mode", campaign->file);
     // WGS-75: campaign staging resets custom options on selection and exposes its
     // option dialog only for definitions that support it. Omission retains WGP-74's true default.
     if (options.custom && !campaign->supports_custom_settings.value_or(true))
@@ -427,6 +723,7 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     plan.campaign_name_ = campaign->name;
     plan.galaxy_.seed = options.forced_seed.value_or(options.seed);
     plan.galaxy_.seats = options.seats;
+    plan.galaxy_.seat_control = options.seat_control;
     std::map<std::string, const CampaignPlayerBinding*> players;
     std::set<gc::FactionId> faction_ids;
     gc::PlayerId neutral{};
@@ -494,245 +791,21 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
             return invalid<CampaignSetupPlan>("galaxy model has missing or duplicate planet names", campaign->file);
     }
     if (options.fiscal_players) {
-        const auto* cap = data.constant("Credit_Cap_Per_Planet");
-        if (!cap || !cap->number) return invalid<CampaignSetupPlan>("missing Credit_Cap_Per_Planet", campaign->file);
-        plan.fiscal_ = gc::FiscalSetup{*cap->number, *options.fiscal_players, {}};
-        // WGEP-05: current, intact planet basic income. Destroyed/blocked state,
-        // alignment, politics, trade and structure modifiers are separate seams.
-        for (const auto& planet : model.value().planets) {
-            const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
-                [&](const auto& row) { return row.id == planet.id; });
-            const auto* source = data.planet(named->name);
-            if (!source || !source->planet_credit_value)
-                return invalid<CampaignSetupPlan>("missing Planet_Credit_Value for " + named->name, campaign->file);
-            plan.fiscal_->planets.push_back({planet.id, *source->planet_credit_value});
-        }
-        // Old/synthetic data without the new constant group keeps the legacy slice.
-        const auto* maximum_bonus = data.constant("MaxCreditIncomeAlignmentBonus");
-        const auto* maximum_penalty = data.constant("MaxCreditIncomeAlignmentPenalty");
-        const auto* curve = data.constant("Political_Income_Curve");
-        if (maximum_bonus || maximum_penalty || curve) {
-            if (!maximum_bonus || !maximum_bonus->number || !maximum_penalty || !maximum_penalty->number || !curve)
-                return invalid<CampaignSetupPlan>("incomplete WGEP-07/63 income constants", campaign->file);
-            auto points = gc::parse_income_curve(curve->text);
-            if (!points) return core::Result<CampaignSetupPlan>::failure(points.error());
-            auto& rules = plan.fiscal_->contributions.emplace();
-            rules.maximum_alignment_bonus = *maximum_bonus->number;
-            rules.maximum_alignment_penalty = *maximum_penalty->number;
-            rules.political_curve = std::move(points.value());
-            const auto alignment = [](std::string_view name) -> std::optional<gc::IncomeAlignment> {
-                if (key(name) == "NEUTRAL") return gc::IncomeAlignment::neutral;
-                if (key(name) == "LIGHT") return gc::IncomeAlignment::light;
-                if (key(name) == "DARK") return gc::IncomeAlignment::dark;
-                return std::nullopt;
-            };
-            for (const auto& player : options.players) {
-                const auto value = alignment(data.faction(player.faction)->force_alignment);
-                if (!value) return invalid<CampaignSetupPlan>("invalid or absent Force_Alignment", campaign->file);
-                rules.factions.push_back({player.player.player_id, *value});
-            }
-            for (const auto& planet : model.value().planets) {
-                const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
-                    [&](const auto& row) { return row.id == planet.id; });
-                const auto* source = data.planet(named->name);
-                const auto value = alignment(source->force_alignment);
-                if (!value || !source->force_strength) return invalid<CampaignSetupPlan>("invalid or absent planet alignment/strength", source->file);
-                rules.planets.push_back({planet.id, *value, *source->force_strength});
-            }
-            for (const auto& route : model.value().routes) {
-                const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
-                    [&](const auto& row) { return row.id == route.id; });
-                const auto* source = data.trade_route(named->name);
-                if (!source || !source->credit_gain_factor) return invalid<CampaignSetupPlan>("missing Credit_Gain_Factor", campaign->file);
-                rules.routes.push_back({route.id, *source->credit_gain_factor});
-            }
-        }
+        if (auto phase = plan_fiscal_setup(data, options, campaign, model, plan.fiscal_); !phase)
+            return core::Result<CampaignSetupPlan>::failure(phase.error());
     }
-    for (const auto& name : campaign->locations) {
-        const auto id = planets.find(key(name));
-        CampaignLocation location{name, neutral, std::nullopt};
-        if (id != planets.end()) location.planet = *std::find_if(plan.galaxy_.planets.begin(), plan.galaxy_.planets.end(),
-            [&](const auto& row) { return row.id == id->second; });
-        plan.locations_.push_back(std::move(location));
-    }
-    if (campaign->locations.empty() || std::any_of(campaign->planets.begin(), campaign->planets.end(), [&](const auto& name) {
-            return std::none_of(campaign->locations.begin(), campaign->locations.end(), [&](const auto& location) { return key(name) == key(location); });
-        })) return invalid<CampaignSetupPlan>("planet list is not a subset of authored Locations", campaign->file);
-    // WGS-70: per matching planet, special placements precede stored force traversal. Missing
-    // or inactive owners are skipped before consulting the placement provider.
-    for (const auto& location : plan.locations_) {
-        if (!location.planet) continue;
-        std::set<gc::TypeId> marked;
-        for (const auto& record : campaign->special_case_production) {
-            if (key(record.location) != key(location.original_type)) continue;
-            const auto original = original_types.find(key(record.type));
-            if (original == original_types.end()) return invalid<CampaignSetupPlan>("unknown special-placement type " + record.type, campaign->file);
-            const auto* type = original->second;
-            const auto id = type_ids.find(key(record.type));
-            if (id == type_ids.end()) return invalid<CampaignSetupPlan>("missing original identity for " + record.type, campaign->file);
-            referenced_types.insert(id->second);
-            // WGS-72: use the inherited/authored value before the shared false default.
-            if (!type->build_requires_initial_placement.value_or(false)) continue;
-            if (marked.insert(id->second).second) plan.initial_placements_.push_back({location.planet->id, id->second});
-        }
-        for (const auto& record : campaign->starting_forces) {
-            if (key(record.location) != key(location.original_type)) continue;
-            const auto owner = players.find(key(record.faction));
-            if (owner == players.end() || !owner->second->active) continue;
-            const auto id = type_ids.find(key(record.type));
-            if (id == type_ids.end()) return invalid<CampaignSetupPlan>("missing original identity for starting force " + record.type, campaign->file);
-            referenced_types.insert(id->second);
-            const auto player = owner->second->player.player_id;
-            const bool human = std::any_of(options.seats.begin(), options.seats.end(), [=](const auto& seat) {
-                return seat.player == player && seat.kind == gc::SeatKind::human;
-            });
-            plan.forces_.push_back({location.planet->id, player, id->second, record.type, human,
-                sim::math::Fixed::from_raw(sim::math::Fixed::scale)});
-        }
-    }
-    for (const auto& binding : options.players) {
-        CampaignHome home{binding.player.player_id, {}, std::nullopt};
-        const auto record = std::find_if(campaign->home_locations.begin(), campaign->home_locations.end(),
-            [&](const auto& row) { return key(row.faction) == key(binding.faction); });
-        if (record != campaign->home_locations.end()) {
-            home.original_type = record->name;
-            if (const auto planet = planets.find(key(record->name)); planet != planets.end()) home.planet = planet->second;
-        }
-        plan.homes_.push_back(std::move(home));
-    }
-    for (std::size_t index = 0; index < options.players.size(); ++index) {
-        const auto& binding = options.players[index];
-        const auto* faction = data.faction(binding.faction);
-        const auto amount = options.custom ? options.custom->credits : authored_number(campaign->starting_credits, binding.faction, 0);
-        // WGS-74: the runtime custom-credit getter supplies a signed 32-bit integer.
-        if (options.custom && !source_integer(amount))
-            return invalid<CampaignSetupPlan>("custom credits do not fit the source integer", campaign->file);
-        auto credits = sim::math::Fixed::from_integer(amount);
-        if (!credits) return invalid<CampaignSetupPlan>("starting credits are outside the represented numeric range", campaign->file);
-        plan.credits_.push_back({binding.player.player_id, credits.value()});
-        auto current = options.custom ? options.custom->starting_tech : authored_number(campaign->starting_tech_levels, binding.faction, 0);
-        // WGS-73: max-tech getter's missing-record default is the code value 5.
-        auto maximum = options.custom ? options.custom->maximum_tech : authored_number(campaign->max_tech_levels, binding.faction, 5);
-        if (!source_integer(current) || !source_integer(maximum)) return invalid<CampaignSetupPlan>("tech input does not fit the source integer", campaign->file);
-        // WGS-76: the faction constructor initializes this adjustment to zero.
-        if (options.custom && faction->displayed_tech_level_adjustment.value_or(0) != 0) {
-            --current; --maximum; // WGS-13: subtract exactly one, regardless of adjustment magnitude/sign.
-            if (!source_integer(current) || !source_integer(maximum)) return invalid<CampaignSetupPlan>("custom tech adjustment exceeds the source integer", campaign->file);
-        }
-        plan.tech_.push_back({binding.player.player_id, current, maximum});
-        const auto& home = plan.homes_[index];
-        if (options.mode == CampaignSetupMode::multiplayer && (!options.custom || options.custom->allow_heroes) && home.planet) {
-            for (const auto& original : faction->multiplayer_campaign_heroes) {
-                const auto type = type_ids.find(key(original));
-                if (type == type_ids.end()) return invalid<CampaignSetupPlan>("missing original identity for multiplayer hero " + original, campaign->file);
-                referenced_types.insert(type->second);
-                plan.heroes_.push_back({binding.player.player_id, *home.planet, type->second, original});
-            }
-        }
-    }
-    for (const auto& binding : options.types) {
-        if (!referenced_types.contains(binding.id)) continue;
-        auto traits = build_fleet_type_traits(plan.bound_types_, std::span(&binding, 1));
-        if (!traits) {
-            // Planning records placement intent without deciding fleet movement. An unresolved
-            // trait is diagnosed and absent from the live table; placement_frontier refuses a
-            // provider that tries to create a persistent member with that unresolved identity.
-            auto diagnostic = traits.error();
-            diagnostic.severity = core::Severity::warning;
-            plan.diagnostics_.push_back(std::move(diagnostic));
-        } else {
-            plan.galaxy_.fleet_control->types.push_back(traits.value().front());
-        }
-    }
-    gc::VictoryAuthoring authoring;
-    const auto parse_conditions = [&](const auto& names, auto& out) -> core::Result<void> {
-        for (const auto& name : names) {
-            const auto n = key(name);
-            if (n == "GALACTIC_ALL_PLANETS_CONTROLLED") out.push_back(gc::VictoryKind::all_planets);
-            else if (n == "GALACTIC_CONTROL_NAMED_PLANETS") out.push_back(gc::VictoryKind::named_planets);
-            else if (n == "GALACTIC_CYCLES_ELAPSED") out.push_back(gc::VictoryKind::cycles);
-            else if (n == "GALACTIC_SUPER_WEAPON_DESTRUCTION") out.push_back(gc::VictoryKind::destroy_superweapon);
-            else if (n == "GALACTIC_OPPONENT_CONTROLS_NO_PLANETS") out.push_back(gc::VictoryKind::no_enemy_planets);
-            else if (n == "GALACTIC_CREDITS_ACCRUED") out.push_back(gc::VictoryKind::credits);
-            else if (n == "GALACTIC_PERCENTAGE_CONTROL") out.push_back(gc::VictoryKind::control_fraction);
-            else if (n == "GALACTIC_CONQUER_ENEMY_HOMEWORLD_AND_LEADER") out.push_back(gc::VictoryKind::homeworld_and_leader);
-            else if (n == "GALACTIC_SUPER_WEAPON_DESTROYS_LAST_ENEMY_PLANET") out.push_back(gc::VictoryKind::superweapon_last_planet);
-            else if (n == "GALACTIC_SUPER_WEAPON_KILLS_ENEMY_LEADER") out.push_back(gc::VictoryKind::superweapon_kill_leader);
-            else if (n == "GALACTIC_KILL_ENEMY_LEADER") out.push_back(gc::VictoryKind::kill_leader);
-            else return invalid<void>("unsupported authored victory condition " + name, campaign->file);
-        }
-        return core::Result<void>::success();
-    };
-    if (auto parsed = parse_conditions(campaign->human_victory_conditions, authoring.human); !parsed)
-        return core::Result<CampaignSetupPlan>::failure(parsed.error());
-    if (auto parsed = parse_conditions(campaign->ai_victory_conditions, authoring.ai); !parsed)
-        return core::Result<CampaignSetupPlan>::failure(parsed.error());
-    const auto one = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
-    authoring.human_parameters = {campaign->human_victory_credit_target.value_or(0), campaign->human_victory_cycle_limit.value_or(0),
-        campaign->human_victory_galactic_control.value_or(one), campaign->human_victory_faction_names,
-        campaign->human_victory_leader_names, campaign->human_victory_planet_names};
-    authoring.ai_parameters = {campaign->ai_victory_credit_target.value_or(0), campaign->ai_victory_cycle_limit.value_or(0),
-        campaign->ai_victory_galactic_control.value_or(one), campaign->ai_victory_faction_names,
-        campaign->ai_victory_leader_names, campaign->ai_victory_planet_names};
-    gc::VictoryContext context;
-    context.multiplayer = options.mode == CampaignSetupMode::multiplayer;
-    gc::PlayerId starting{};
-    for (const auto& binding : options.players) {
-        const auto* faction = data.faction(binding.faction);
-        gc::VictoryPlayer p; p.player = binding.player.player_id; p.faction = faction->name;
-        p.neutral = faction->is_neutral.value_or(false); p.playable = faction->is_playable.value_or(false);
-        p.human = std::any_of(options.seats.begin(), options.seats.end(), [&](const auto& seat) { return seat.player == p.player && seat.kind == gc::SeatKind::human; });
-        p.ai = std::any_of(options.seats.begin(), options.seats.end(), [&](const auto& seat) { return seat.player == p.player && seat.kind == gc::SeatKind::ai; });
-        if (key(binding.faction) == key(campaign->starting_active_player)) starting = p.player;
-        for (const auto& other : options.players) if (key(other.faction) == key(faction->primary_enemy)) p.primary_enemy = other.player.player_id;
-        p.planet_leader_unit = faction->faction_leader;
-        if (const auto company = original_types.find(key(faction->faction_leader_company)); company != original_types.end()
-            && !company->second->company_units.empty()) p.leader_unit = company->second->company_units.front();
-        if (const auto t = type_ids.find(key(faction->faction_leader_company)); t != type_ids.end()) p.leader_company = t->second;
-        if (const auto t = type_ids.find(key(p.leader_unit)); t != type_ids.end()) p.leader_unit_type = t->second;
-        if (const auto t = type_ids.find(key(p.planet_leader_unit)); t != type_ids.end()) p.planet_leader_type = t->second;
-        if (const auto home = planets.find(key(faction->home_planet)); home != planets.end()) p.home = home->second;
-        context.players.push_back(std::move(p));
-    }
-    for (const auto& named : model.value().names) {
-        const auto p = std::find_if(plan.galaxy_.planets.begin(), plan.galaxy_.planets.end(), [&](const auto& row) { return row.id == named.id; });
-        if (p == plan.galaxy_.planets.end()) continue;
-        context.types.push_back({named.name, named.id});
-        context.planets.push_back({named.id, named.id, p->owner, p->owner, p->owner, false});
-    }
-    // WGS-25: a valid original planet type with no active instances remains resolvable.
-    gc::TypeId next_victory_type = model.value().next_id;
-    for (const auto& original : data.planets)
-        if (std::none_of(context.types.begin(), context.types.end(), [&](const auto& t) { return key(t.name) == key(original.name); }))
-            context.types.push_back({original.name, next_victory_type++});
-    // Political relations and leader lifecycle remain owning-provider inputs, gathered live.
-    for (const auto& p : context.players) context.relations.push_back({p.player, p.player, true});
-    for (std::size_t i = 0; i < plan.bound_types_.types.size(); ++i)
-        if (plan.bound_types_.types[i].superweapon_killer.value_or(false)) context.superweapon_killers.push_back(options.types[i].id);
-    plan.galaxy_.victory = gc::install_victory(authoring, context, starting);
+    if (auto phase = plan_location_requests(campaign, neutral, planets, plan.galaxy_, plan.locations_); !phase)
+        return core::Result<CampaignSetupPlan>::failure(phase.error());
+    if (auto phase = plan_starting_placements(campaign, options, plan.locations_, original_types, type_ids, players, referenced_types, plan.initial_placements_, plan.forces_); !phase)
+        return core::Result<CampaignSetupPlan>::failure(phase.error());
+    plan_home_locations(campaign, options, planets, plan.homes_);
+    if (auto phase = plan_player_resources(data, campaign, options, plan.homes_, type_ids, referenced_types, plan.credits_, plan.tech_, plan.heroes_); !phase)
+        return core::Result<CampaignSetupPlan>::failure(phase.error());
+    plan_fleet_traits(options, referenced_types, plan.bound_types_, plan.diagnostics_, plan.galaxy_);
+    if (auto phase = plan_victory_setup(data, campaign, options, original_types, type_ids, planets, model, plan.bound_types_, plan.galaxy_); !phase)
+        return core::Result<CampaignSetupPlan>::failure(phase.error());
     if (auto valid = gc::validate_setup(plan.galaxy_); !valid) return core::Result<CampaignSetupPlan>::failure(valid.error());
-    // Coordinator-reserved identity domain. Explicit bindings and owner activity join the
-    // selected definition/content, so two menus selecting different roots cannot alias.
-    Identity identity;
-    identity.text("eawr-campaign-setup-v1");
-    identity.bytes.insert(identity.bytes.end(), plan.galaxy_.content_identity.begin(), plan.galaxy_.content_identity.end());
-    identity.text(key(campaign->name));
-    identity.integer(options.players.size());
-    for (const auto& player : options.players) {
-        identity.integer(player.player.player_id); identity.integer(player.player.faction_id);
-        identity.integer(player.player.flags); identity.text(key(player.faction)); identity.integer(player.active ? 1 : 0);
-    }
-    identity.integer(options.types.size());
-    for (const auto& type : options.types) { identity.integer(type.id); identity.text(key(type.original_type)); }
-    identity.integer(options.mode == CampaignSetupMode::multiplayer ? 1 : 0);
-    identity.integer(options.custom ? 1 : 0);
-    if (options.custom) {
-        identity.integer(static_cast<std::uint64_t>(options.custom->credits));
-        identity.integer(static_cast<std::uint64_t>(options.custom->starting_tech));
-        identity.integer(static_cast<std::uint64_t>(options.custom->maximum_tech));
-        identity.integer(options.custom->allow_heroes ? 1 : 0);
-    }
-    plan.galaxy_.campaign_identity = core::sha256(identity.bytes);
+    seal_campaign_identity(campaign, options, plan.galaxy_);
     return core::Result<CampaignSetupPlan>::success(std::move(plan));
 }
 

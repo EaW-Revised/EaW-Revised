@@ -1,3 +1,8 @@
+// P2-05 (#68): deterministic space queries and per-player sensor visibility. Query
+// results are checked against a brute-force filter and across insertion orders; the
+// visibility fixture comes from the independent oracle generate_tactical_fixture.py.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -9,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -20,21 +26,16 @@
 #include <utility>
 #include <vector>
 
-// P2-05 (#68): deterministic space queries and per-player sensor visibility. Query
-// results are checked against a brute-force filter and across insertion orders; the
-// visibility fixture comes from the independent oracle generate_tactical_fixture.py.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

@@ -1,3 +1,11 @@
+// P2-11 (#74): projectiles, damage types against armor, shield absorption and regeneration
+// (docs/behaviour/space-damage.md). The pure rules are checked against FoC values; the session
+// fixtures cover shield loss, a hit destroying a hardpoint and an out-of-range miss; a battle's
+// hashes are pinned in tactical-damage.hashes.csv and must be reproduced by every worker count,
+// a scrambled storage order and a written-and-parsed replay. `damage_tests <fixtures> --update`
+// rewrites the pin.
+
+#include "../support/check.hpp"
 #include "damage_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -10,10 +18,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -21,22 +29,14 @@
 #include <utility>
 #include <vector>
 
-// P2-11 (#74): projectiles, damage types against armor, shield absorption and regeneration
-// (docs/behaviour/space-damage.md). The pure rules are checked against FoC values; the session
-// fixtures cover shield loss, a hit destroying a hardpoint and an out-of-range miss; a battle's
-// hashes are pinned in tactical-damage.hashes.csv and must be reproduced by every worker count,
-// a scrambled storage order and a written-and-parsed replay. `damage_tests <fixtures> --update`
-// rewrites the pin.
 namespace damage_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 

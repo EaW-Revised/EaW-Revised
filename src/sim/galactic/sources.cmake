@@ -29,14 +29,17 @@ set(EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/observer_service.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production_actions.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/native_action_shadow.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/production_encoding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/replay.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scoring.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/session.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/session_state.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/snapshot.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/synthetic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_adapters.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/story_engine.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/story_goals.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/victory.cpp"
 )
@@ -44,6 +47,8 @@ set(EAWR_SIM_GALACTIC_SOURCES
 # Fixture-level galactic hero actions, WGCH-20..115.
 list(APPEND EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/ability_theft.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_sabotage.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_neutralize.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hero_actions.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hero_action_views.cpp"
 )

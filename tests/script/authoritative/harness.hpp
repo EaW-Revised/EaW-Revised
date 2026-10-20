@@ -3,6 +3,9 @@
 // Shared harness of the authoritative Lua tests (#247, #248): value text,
 // the test bindings and a scheduler session.
 
+#include <cstddef>
+#include <utility>
+#include "../../support/check.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/numeric/binary64.hpp"
 #include "eawr/sim/world.hpp"
@@ -24,13 +27,11 @@ namespace auth = eawr::script::authoritative;
 namespace b64 = eawr::script::numeric::binary64;
 using eawr::script::numeric::LuaNumber;
 
-inline int failures = 0;
+inline eawr::testing::Checker local_checker;
+inline int& failures = local_checker.failures;
 
 inline void expect(bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 inline std::string hex(std::uint64_t value) {

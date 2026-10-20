@@ -1,0 +1,30 @@
+[
+  {
+    "old": "tests/replay/blast_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/combat_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/damage_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/fighter_death_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/fighter_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/formation_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/squadron_fog_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  }
+]

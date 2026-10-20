@@ -1,0 +1,6 @@
+[
+  {
+    "old": "src/presentation/godot/ui/unit_cards_view.cpp#json",
+    "new": "src/presentation/godot/ui/unit_cards_view.cpp#json_space_controls_with_newline"
+  }
+]

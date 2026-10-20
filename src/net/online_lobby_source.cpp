@@ -79,6 +79,11 @@ struct OnlineLobbyGameSource::Impl {
     std::deque<std::string> sends;
     std::vector<LobbyGame> games;
     std::vector<LobbyPlayer> players;
+    // Menu channel (#3758): the players in the online browser and the lines the player queued for it.
+    std::vector<LobbyPlayer> menu_players;
+    std::deque<std::string> menu_sends;
+    OnlineMenuState menu{OnlineMenuState::idle};
+    bool menu_visible{true};
     std::vector<LobbyChatMessage> incoming;
     std::vector<OnlineLobbyJoinCompletion> results;
     std::optional<core::Diagnostic> failure;
@@ -104,6 +109,12 @@ struct OnlineLobbyGameSource::Impl {
         std::string host_password;
         std::string invitation, invitation_owner;
         std::uint32_t chat_sequence{};
+        // Menu channel state of this worker. menu_dead latches when the relay predates the channel (EAWR-NET-1521).
+        bool menu_connected{}, menu_dead{};
+        std::string menu_name;
+        std::uint32_t menu_after{}, menu_version{}, menu_seen{};
+        auto menu_retry = std::chrono::seconds(5);
+        auto next_menu_try = Clock::now(), next_menu_poll = next_menu_try, next_menu_send = next_menu_try;
         auto next_list = Clock::now(), next_heartbeat = next_list, next_chat = next_list, next_publish = next_list;
         auto last_list = Clock::time_point{};
         std::string cursor;
@@ -111,6 +122,27 @@ struct OnlineLobbyGameSource::Impl {
         auto clear_admission = [&] {
             admitted = false; chat_sequence = 0;
             std::lock_guard lock(mutex); active_name.clear(); players.clear(); incoming.clear(); sends.clear(); changed = true;
+        };
+        // Applies a menu page: lines newer than the last one shown (a reopened channel replays its recent lines), then the roster.
+        auto menu_apply = [&](const OnlineMenuPage& page) {
+            std::lock_guard lock(mutex);
+            for (const auto& line : page.lines) {
+                if (line.sequence <= menu_seen) continue;
+                if (incoming.size() == 200) incoming.erase(incoming.begin());
+                incoming.push_back({LobbyChatScope::lobby, {}, line.name, line.text});
+            }
+            menu_seen = std::max(menu_seen, page.through); menu_after = page.through;
+            if (page.roster_present) {
+                menu_version = page.roster_version; menu_players.clear();
+                for (const auto& member : page.members)
+                    if (menu_players.size() < 1024) menu_players.push_back({member.id, member.name, 0, LobbyPlace::lobby, {}});
+            }
+            changed = true;
+        };
+        auto menu_drop = [&](OnlineMenuState state) {
+            if (menu_connected) service->menu_leave();
+            menu_connected = false; menu_name.clear();
+            std::lock_guard lock(mutex); menu_players.clear(); menu_sends.clear(); menu = state; changed = true;
         };
         auto heartbeat = [&] {
             auto result = service->heartbeat(*publication, hosted);
@@ -189,6 +221,49 @@ struct OnlineLobbyGameSource::Impl {
                     room_handle = OnlineHostedRoom{*publication, service->principal()};
                 }
             }
+            // The menu channel runs while the player is in the online browser: named, and no room joined, hosted or being joined.
+            // It never feeds error() or the notices: a relay without it only changes the state, and the room list is unaffected.
+            if (!menu_dead) {
+                std::string want;
+                { std::lock_guard lock(mutex);
+                  if (menu_visible && presence.place == LobbyPlace::lobby && !current_attempt && !leave_requested) want = relay::clean_text(presence.name, 20); }
+                if (admitted || publication || wants_host || join) want.clear();
+                if (want.empty() || want != menu_name) { if (menu_connected || !menu_name.empty()) menu_drop(OnlineMenuState::idle); }
+                const auto menu_now = Clock::now();
+                if (!want.empty() && !menu_connected && menu_now >= next_menu_try) {
+                    { std::lock_guard lock(mutex); menu = OnlineMenuState::connecting; }
+                    auto result = service->menu_enter(want);
+                    if (result) {
+                        menu_connected = true; menu_name = want; menu_retry = std::chrono::seconds(5);
+                        if (result.value().through < menu_seen) menu_seen = 0; // the service restarted
+                        menu_apply(result.value());
+                        std::lock_guard lock(mutex); menu = OnlineMenuState::active;
+                        next_menu_poll = Clock::now() + std::chrono::seconds(2);
+                    } else if (result.error().code == "EAWR-NET-1521") {
+                        menu_dead = true; std::lock_guard lock(mutex); menu = OnlineMenuState::unavailable; changed = true;
+                    } else {
+                        next_menu_try = Clock::now() + menu_retry; menu_retry = std::min(menu_retry * 2, std::chrono::seconds(60));
+                    }
+                }
+                if (menu_connected) {
+                    std::string say;
+                    { std::lock_guard lock(mutex);
+                      if (!menu_sends.empty() && menu_now >= next_menu_send) { say = std::move(menu_sends.front()); menu_sends.pop_front(); } }
+                    bool lost = false;
+                    if (!say.empty()) {
+                        // The relay spaces a player's lines one second apart; ours go out a little wider than that.
+                        next_menu_send = Clock::now() + std::chrono::milliseconds(1100);
+                        auto sent = service->menu_say(std::move(say));
+                        if (!sent && sent.error().code != "EAWR-NET-1551" && sent.error().code != "EAWR-NET-1540") lost = true;
+                    }
+                    if (!lost && menu_now >= next_menu_poll) {
+                        auto page = service->menu_poll(menu_after, menu_version);
+                        if (page) { menu_apply(page.value()); next_menu_poll = Clock::now() + std::chrono::seconds(2); }
+                        else lost = true;
+                    }
+                    if (lost) { menu_drop(OnlineMenuState::connecting); next_menu_try = Clock::now() + std::chrono::seconds(3); }
+                }
+            }
             if (join && join->generation == generation.load()) {
                 auto result = service->join(join->room, join->password, join->name);
                 if (join->generation != generation.load()) {
@@ -253,6 +328,7 @@ struct OnlineLobbyGameSource::Impl {
         }
         if (publication) (void)service->remove(*publication);
         else if (admitted) (void)service->leave();
+        service->menu_leave();
         forget_room();
     }
 
@@ -333,6 +409,12 @@ std::optional<OnlineHostedRoom> OnlineLobbyGameSource::hosted_room() const { std
 std::vector<core::Diagnostic> OnlineLobbyGameSource::take_notices() { std::lock_guard lock(impl_->mutex); auto result = std::move(impl_->notices); impl_->notices.clear(); return result; }
 void OnlineLobbyGameSource::send_chat(LobbyChatScope scope, const std::string& game, const std::string&, const std::string& text) {
     std::lock_guard lock(impl_->mutex);
+    if (scope == LobbyChatScope::lobby) {
+        // Menu chat: only while the channel is active. An over-long line or a full queue is dropped here, never sent.
+        const auto clean = relay::clean_text(text, 128);
+        if (impl_->menu != OnlineMenuState::active || clean.empty() || text.size() > 128 || impl_->menu_sends.size() >= 16) return;
+        impl_->menu_sends.push_back(clean); impl_->condition.notify_all(); return;
+    }
     if (scope != LobbyChatScope::game || game != impl_->active_name || text.empty()) return;
     if (text.size() > 128 || impl_->sends.size() == 64) {
         // A refused line is a notice for the chat window, not a failure of the room list.
@@ -344,7 +426,16 @@ void OnlineLobbyGameSource::send_chat(LobbyChatScope scope, const std::string& g
 }
 bool OnlineLobbyGameSource::pump() { std::lock_guard lock(impl_->mutex); const bool changed = impl_->changed; impl_->changed = false; return changed; }
 std::vector<LobbyGame> OnlineLobbyGameSource::games() const { std::lock_guard lock(impl_->mutex); return impl_->games; }
-std::vector<LobbyPlayer> OnlineLobbyGameSource::players() const { std::lock_guard lock(impl_->mutex); return impl_->players; }
+void OnlineLobbyGameSource::set_menu_visible(bool visible) {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->menu_visible != visible) { impl_->menu_visible = visible; impl_->condition.notify_all(); }
+}
+OnlineMenuState OnlineLobbyGameSource::menu_state() const { std::lock_guard lock(impl_->mutex); return impl_->menu; }
+std::vector<LobbyPlayer> OnlineLobbyGameSource::players() const {
+    std::lock_guard lock(impl_->mutex);
+    // The room's members once a room is joined or hosted; before that the players of the menu channel.
+    return impl_->players.empty() ? impl_->menu_players : impl_->players;
+}
 std::vector<LobbyPlayer> OnlineLobbyGameSource::joining(const std::string& game) const {
     auto players = this->players(); std::erase_if(players, [&](const auto& p) { return p.place != LobbyPlace::joining || p.game != game; }); return players;
 }
@@ -397,9 +488,16 @@ std::optional<core::Diagnostic> FixedOnlineLobbySource::last_error() const {
     return std::nullopt;
 }
 void FixedOnlineLobbySource::send_chat(LobbyChatScope scope, const std::string& game, const std::string& name, const std::string& text) {
-    if (scope != LobbyChatScope::game) return;
+    if (scope == LobbyChatScope::lobby && menu_ != OnlineMenuState::active) return;
+    if (scope != LobbyChatScope::game && scope != LobbyChatScope::lobby) return;
     if (sent_.size() == 200) sent_.erase(sent_.begin());
     sent_.push_back({scope, game, relay::clean_text(name, 20), relay::clean_text(text, 128)});
+}
+void FixedOnlineLobbySource::set_menu_players(std::vector<std::string> names) {
+    menu_players_.clear();
+    std::uint64_t id = 0;
+    for (const auto& name : names) if (menu_players_.size() < 1024) menu_players_.push_back({++id, relay::clean_text(name, 20), 0, LobbyPlace::lobby, {}});
+    changed_ = true;
 }
 std::vector<LobbyPlayer> FixedOnlineLobbySource::joining(const std::string& game) const {
     auto result = players_; std::erase_if(result, [&](const auto& p) { return p.place != LobbyPlace::joining || p.game != game; }); return result;

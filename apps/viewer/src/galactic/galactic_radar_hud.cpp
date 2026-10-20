@@ -159,6 +159,57 @@ bool GalacticMode::State::request_radar_position(galactic_view::PointerPoint poi
     return update_routes(); // WGUI-56: position without changing advanced-map state.
 }
 
+void GalacticMode::State::update_radar_blips(std::size_t index, Vector2 size, double placement_scale) {
+    // Loop invariants are hoisted; a blip is rewritten only when its key changed,
+    // and a radar resize or scale change repaints every blip.
+    auto& cache = radar_blip_cache[index];
+    const bool repaint = cache.size != size || cache.scale != placement_scale;
+    cache.size = size; cache.scale = placement_scale;
+    const auto* component = command_catalog.find("g_radar_blip");
+    const auto* neutral = content ? galactic_view::affiliation_for_owner(*content, std::nullopt) : nullptr;
+    const auto neutral_tint = neutral ? neutral->primary : galactic_view::Rgb{100.0F / 255, 100.0F / 255, 100.0F / 255};
+    const auto& blips = radar_blips[index];
+    Vector2 glyph_size, selected_size;
+    if (component) {
+        const auto scale = component->number(data::ui::Field::scale).value_or(1.0F) * static_cast<float>(placement_scale);
+        if (!blips.empty()) {
+            const auto texture = static_cast<EawrHudButton*>(blips.begin()->second)->get_texture_normal();
+            if (texture.is_valid()) glyph_size = texture->get_size() * scale;
+        }
+        const auto selected_texture = command_texture(first(*component, data::ui::Field::selected_texture_name));
+        if (selected_texture.is_valid()) selected_size = selected_texture->get_size() * scale;
+    }
+    for (const auto& planet : galaxy->planets) {
+        auto* blip = static_cast<EawrHudButton*>(blips.at(planet.id));
+        const auto discovery = displayed_snapshot ? galactic_view::observer_discovery(*displayed_snapshot,
+            galaxy->local.player, planet.id) : std::nullopt;
+        const auto fact = hud_facts.find(planet.id);
+        const bool discovered = fact != hud_facts.end() ? fact->second.discovered : discovery.value_or(false);
+        const auto local = galactic_view::world_to_radar(planet.position, size.x, size.y);
+        auto tint = neutral_tint;
+        // Owner RGB colours the icon, while selected art keeps its
+        // authored RGB. WGP-119's discovery alpha applies to both.
+        if (discovered && fact != hud_facts.end() && fact->second.observed_owner)
+            tint = fact->second.name_colour;
+        const RadarBlipKey key{discovered, planet.id == selected_planet, local.has_value(), tint.r, tint.g, tint.b,
+            local ? local->x : 0.0F, local ? local->y : 0.0F};
+        auto [slot, inserted] = cache.keys.try_emplace(planet.id, key);
+        if (!repaint && !inserted && slot->second == key) continue;
+        slot->second = key;
+        // WGP-119..121: discovery dims the glyph, independently of
+        // ownership permission and background radar positioning.
+        blip->set_visible(local.has_value());
+        if (!local) continue;
+        blip->set_self_modulate(Color(tint.r, tint.g, tint.b, 1.0F));
+        blip->set_modulate(Color(1.0F, 1.0F, 1.0F, discovered ? 1.0F : 128.0F / 255));
+        if (!component) { blip->hide(); continue; }
+        blip->set_order_selected(key.selected);
+        blip->set_size(glyph_size);
+        blip->set_position(Vector2(size.x * .5F + local->x, size.y * .5F - local->y) - glyph_size * .5F);
+        blip->set_special_overlay_box(Rect2((glyph_size - selected_size) * .5F, selected_size));
+    }
+}
+
 void GalacticMode::State::update_radar_hud() {
     if (!galaxy || !command_bar) return;
     const bool advanced = seat_flight().advanced_map();
@@ -217,38 +268,7 @@ void GalacticMode::State::update_radar_hud() {
             radar->set_visible(index != 0 || !advanced);
             radar->set_enabled(map_input.gates.hud_enabled && !map_input.gates.tutorial_locked);
             const auto size = radar->get_size();
-            if (changed) for (const auto& planet : galaxy->planets) {
-                auto* blip = static_cast<EawrHudButton*>(radar_blips[index].at(planet.id));
-                const auto discovery = displayed_snapshot ? galactic_view::observer_discovery(*displayed_snapshot,
-                    galaxy->local.player, planet.id) : std::nullopt;
-                const auto fact = hud_facts.find(planet.id);
-                const bool discovered = fact != hud_facts.end() ? fact->second.discovered : discovery.value_or(false);
-                const auto local = galactic_view::world_to_radar(planet.position, size.x, size.y);
-                // WGP-119..121: discovery dims the glyph, independently of
-                // ownership permission and background radar positioning.
-                blip->set_visible(local.has_value());
-                if (!local) continue;
-                const auto* neutral = content ? galactic_view::affiliation_for_owner(*content, std::nullopt) : nullptr;
-                auto tint = neutral ? neutral->primary : galactic_view::Rgb{100.0F / 255, 100.0F / 255, 100.0F / 255};
-                if (discovered && fact != hud_facts.end() && fact->second.observed_owner)
-                    tint = fact->second.name_colour;
-                // Owner RGB colours the icon, while selected art keeps its
-                // authored RGB. WGP-119's discovery alpha applies to both.
-                blip->set_self_modulate(Color(tint.r, tint.g, tint.b, 1.0F));
-                blip->set_modulate(Color(1.0F, 1.0F, 1.0F, discovered ? 1.0F : 128.0F / 255));
-                const auto* component = command_catalog.find("g_radar_blip");
-                if (!component) { blip->hide(); continue; }
-                blip->set_order_selected(planet.id == selected_planet);
-                const auto texture = blip->get_texture_normal();
-                const auto scale = component->number(data::ui::Field::scale).value_or(1.0F);
-                const auto glyph_size = texture.is_valid() ? texture->get_size() * (scale * static_cast<float>(placement.scale)) : Vector2{};
-                blip->set_size(glyph_size);
-                blip->set_position(Vector2(size.x * .5F + local->x, size.y * .5F - local->y) - glyph_size * .5F);
-                const auto selected_texture = command_texture(first(*component, data::ui::Field::selected_texture_name));
-                const auto selected_size = selected_texture.is_valid()
-                    ? selected_texture->get_size() * (scale * static_cast<float>(placement.scale)) : Vector2{};
-                blip->set_special_overlay_box(Rect2((glyph_size - selected_size) * .5F, selected_size));
-            }
+            if (changed) update_radar_blips(index, size, placement.scale);
             if (auto* view = radar_view_icons[index]) {
                 const auto local = galactic_view::world_to_radar(seat_flight().pose().target, size.x, size.y);
                 const auto texture = view->get_texture();

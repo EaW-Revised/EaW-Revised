@@ -1,5 +1,7 @@
 // #80 part A: where the viewer draws a live session's units between two published ticks
 // (presentation::space::interpolate_units). Synthetic snapshots only.
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
@@ -7,15 +9,17 @@
 
 #include <algorithm>
 #include <atomic>
-#include <functional>
-#include <memory>
-#include <thread>
-
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -24,13 +28,11 @@ namespace space = eawr::presentation::space;
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const double a, const double b) { return std::abs(a - b) <= 1.0e-3; }

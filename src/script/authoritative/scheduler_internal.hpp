@@ -162,7 +162,6 @@ void install_bindings(Instance& instance);
 void push_value(lua_State* state, const Value& value);
 void add_diagnostic(Instance& instance, std::string_view code, std::string message);
 void end_slot(Instance& instance, std::size_t slot);
-[[nodiscard]] bool queue_limit_reached(const Instance& instance) noexcept;
 
 } // namespace eawr::script::authoritative::detail
 

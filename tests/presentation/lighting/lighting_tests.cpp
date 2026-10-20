@@ -3,6 +3,8 @@
 // Ramamoorthi-Hanrahan packing, alo-viewer default environment), not from
 // this implementation's output.
 
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/lighting/lighting.hpp"
 
 #include "shader_adapter.hpp"
@@ -26,13 +28,11 @@ namespace {
 namespace lighting = eawr::presentation::lighting;
 using lighting::Vec3;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 bool near(const float left, const double right, const double tolerance = 2e-5) {

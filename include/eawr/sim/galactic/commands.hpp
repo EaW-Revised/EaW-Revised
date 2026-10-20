@@ -37,7 +37,8 @@ inline constexpr std::uint16_t seat_rejoin = 12;
 inline constexpr std::uint16_t post_load_fixup = 13; // coordinator-reserved
 inline constexpr std::uint16_t battle_team_role = 14; // coordinator-reserved
 inline constexpr std::uint16_t auto_resolve_withdraw = 15; // WGM-182, conflict owner
-inline constexpr std::uint16_t first_reserved = 16;
+inline constexpr std::uint16_t invasion_accept = 16; // coordinator-reserved, GCMP-04, WGP-89
+inline constexpr std::uint16_t first_reserved = 17;
 inline constexpr std::uint16_t last_reserved = 61;
 inline constexpr std::uint16_t debug_set_planet_owner = 62;
 inline constexpr std::uint16_t debug_set_fleet_orbit = 63;
@@ -82,6 +83,11 @@ struct PauseGalaxy {
 };
 struct ResumeGalaxy {
     friend constexpr bool operator==(const ResumeGalaxy&, const ResumeGalaxy&) noexcept = default;
+};
+// WGP-81/89: close only the summary belonging to this conflict and issuing seat.
+struct BattleSummaryAcknowledge {
+    EntityId conflict{};
+    friend bool operator==(const BattleSummaryAcknowledge&, const BattleSummaryAcknowledge&) = default;
 };
 // WGS-P03: the trusted session service records departures/reconnects at an agreed tick.
 // The envelope identifies the affected seat; no player may remove another seat.
@@ -234,6 +240,13 @@ struct BattleChoice {
     bool tactical{};
     friend bool operator==(const BattleChoice&, const BattleChoice&) = default;
 };
+// WGP-89 / GCMP-04: the sending seat accepts the prepared invasion selection of a finished conflict.
+// Every peer decides it at execution from the agreed session state; no payload field names a fleet or a
+// transport, because the selection is retained session state (WGP-88/136).
+struct InvasionAccept {
+    EntityId conflict{};
+    friend bool operator==(const InvasionAccept&, const InvasionAccept&) = default;
+};
 
 struct PrepareBlackMarket {
     EntityId buyer{};
@@ -285,7 +298,7 @@ using CommandPayload =
         SaveRequest, PostLoadFixup, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
         ProductionCommand, SellObject, SeatLeave, SeatRejoin, AssignBattleTeamRole, RecheckOrbit, MoveFleet, LandFleet, BattleChoice, AutoResolveWithdraw, ObserverCommand,
         PrepareBlackMarket, BuyBlackMarket, PrepareGalacticAbility, ExecutePreparedAbility, CancelGalacticAbility,
-        LaunchFromSurface, LaunchFleet, TransferFleetMembers>;
+        LaunchFromSurface, LaunchFleet, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept>;
 
 struct CommandOrderKey {
     std::uint64_t tick{};

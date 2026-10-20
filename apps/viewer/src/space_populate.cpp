@@ -171,6 +171,10 @@ void SpacePopulation::release(GodotRenderer& renderer) {
     piece_index_.clear();
     instances_.clear();
     live_clip_instances_.clear();
+    held_clips_.clear();
+    prepared_clips_.clear();
+    pending_clip_poses_ = {};
+    parked_ships_.clear();
 }
 
 

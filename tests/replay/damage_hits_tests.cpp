@@ -1,6 +1,18 @@
 #include "damage_support.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace damage_test_support {
 

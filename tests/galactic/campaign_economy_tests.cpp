@@ -1,14 +1,25 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <filesystem>
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace cp = eawr::campaign;
@@ -249,8 +260,7 @@ void starting_levels() {
     d.constants.push_back({"Credit_Cap_Per_Planet", "1000", f(1000)});
     d.planets[0].planet_credit_value = f(0);
     const auto checked = []<class T>(Result<T> result) -> T {
-        if (!result) throw std::runtime_error(result.error().message);
-        return std::move(result).value();
+        return eawr::testing::take(std::move(result));
     };
     const std::vector<std::string> renamed{"Wardens", "Raiders", "Syndicate", "Unaligned"};
     for (std::size_t i = 0; i < d.factions.size(); ++i) {
@@ -322,6 +332,11 @@ void heroes() {
     const auto first_hero = std::find(trace.calls.begin(), trace.calls.end(), "hero");
     const auto last_home = std::find(trace.calls.rbegin(), trace.calls.rend(), "home").base();
     expect(first_hero >= last_home && first_hero < std::find(trace.calls.begin(), trace.calls.end(), "tech"), "heroes follow all homes and precede credits/tech");
+    {
+        // GCMP-24: the setup mode decides, not the campaign's Is_Multiplayer menu tag (this campaign authors it true).
+        auto solo = opts; solo.mode = cp::CampaignSetupMode::single_player; Trace solo_trace; static_cast<void>(root(d, solo, solo_trace, "Multiplayer"));
+        expect(std::count(solo_trace.calls.begin(), solo_trace.calls.end(), "hero") == 0, "WGS-14 multiplayer heroes need the multiplayer setup mode");
+    }
     opts.custom = cp::CampaignCustomOptions{1000, 2, 5, false}; Trace off; static_cast<void>(root(d, opts, off, "Multiplayer"));
     expect(std::find(off.calls.begin(), off.calls.end(), "production") == off.calls.end(), "custom heroes off suppresses helper entirely");
     opts.custom->allow_heroes = true; Trace on; static_cast<void>(root(d, opts, on, "Multiplayer"));
@@ -412,7 +427,7 @@ void persistence(const std::filesystem::path& fixtures) {
     }
 }
 } // namespace
-int main(int argc, const char* const argv[]) {
+int case_galactic_campaign_economy_tests(int argc, const char* const argv[]) {
     try {
         authored_and_custom(); heroes(); fiscal_inputs(); live_fiscal_inputs();
         starting_levels();

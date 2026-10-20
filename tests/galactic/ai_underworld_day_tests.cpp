@@ -1,3 +1,19 @@
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <memory>
+#include <ostream>
+#include <set>
+#include <tuple>
+#include <vector>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // #3944: seeded idle-human day run of the stock Underworld AI (Sandbox_Equal_Footing_Empire, Underworld is an AI seat).
 // Observation first: per-player production by authored type, credit track, funding categories, hostile moves.
 #include "galactic_support.hpp"
@@ -11,27 +27,21 @@
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/data/retail_values.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::must;
 
 namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using namespace galactic_test;
-template<class T> T must(eawr::core::Result<T> value) { if (!value) throw std::runtime_error(value.error().message); return std::move(value).value(); }
-void must(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+
 std::filesystem::path game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    std::filesystem::path root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
+    return std::filesystem::path(std::move(*root));
 }
 struct Result {
     std::string hash;                     // state hash at the last tick, for the 1/2/4/8 worker equality
@@ -264,4 +274,4 @@ int main_run(int argc, char** argv) {
     return galactic_test::failures == 0 ? 0 : 1;
 }
 } // namespace
-int main(int argc, char** argv) { try { return main_run(argc, argv); } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; } }
+int case_galactic_ai_underworld_day_tests(int argc, char** argv) { try { return main_run(argc, argv); } catch (const std::exception& error) { std::cerr << error.what() << std::endl; return 1; } }

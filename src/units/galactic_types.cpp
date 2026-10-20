@@ -1,4 +1,5 @@
 #include "eawr/units/galactic_types.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"
 #include "eawr/data/retail_values.hpp"
@@ -17,17 +18,13 @@ using Fixed = sim::math::Fixed;
 using IssueKind = data::galactic::IssueKind;
 
 bool equal(const std::string_view left, const std::string_view right) noexcept {
-    const auto lower = [](const char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; };
-    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(),
-        [&](const char a, const char b) { return lower(a) == lower(b); });
+    return core::iequals(left, right);
 }
 
 bool space(const char c) noexcept { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
 
 std::string trim(std::string_view text) {
-    while (!text.empty() && space(text.front())) text.remove_prefix(1);
-    while (!text.empty() && space(text.back())) text.remove_suffix(1);
-    return std::string(text);
+    return core::trim(text);
 }
 
 std::vector<std::string> names(const std::string_view text, const bool category_mask = false) {

@@ -23,6 +23,8 @@ struct LanBroadcastOptions {
     // What a presence is compared with to say a game's version matches.
     std::uint32_t protocol{1};
     std::string build;
+    // Opt in for the production multiplayer browser; legacy staging/fixtures retain their limits.
+    bool menu_chat_limits{};
 };
 
 class LanBroadcaster {
@@ -40,6 +42,9 @@ public:
     // pump after a change sends it at once.
     void set_presence(LanPresence presence);
     void send_chat(ChatScope scope, std::string game, std::string name, std::string text);
+    // Menu chat returns false without sending when it is empty, oversized, or too soon.
+    [[nodiscard]] bool try_send_chat(ChatScope scope, std::string game, std::string name, std::string text,
+                                     LanClock::time_point now);
 
     // Sends the presence when it is due, reads every pending datagram and drops stale players.
     // True when the lists changed.
@@ -47,8 +52,6 @@ public:
 
     [[nodiscard]] LanDirectory& directory() noexcept;
     [[nodiscard]] const LanDirectory& directory() const noexcept;
-    // Datagrams received that were not LAN lobby traffic, for the report.
-    [[nodiscard]] std::uint64_t ignored_datagrams() const noexcept;
 
 private:
     struct Impl;

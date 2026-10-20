@@ -4,6 +4,8 @@
 // direction the craft travels. A synthetic carrier launches a squadron nose down (FL-06) at a
 // frigate above it, so the craft dive, climb and turn; over 300 ticks every drawn craft keeps its
 // nose on its travel.
+
+#include "../../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
@@ -14,11 +16,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -28,13 +33,11 @@ namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

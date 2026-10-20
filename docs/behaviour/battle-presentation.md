@@ -425,7 +425,7 @@ changing continuous interpolation to a rounded frame countdown.
 
 Missing or invalid values produce a diagnostic and use the stock fallback
 (beam 8, kite 1.2, flash RGB 1/1.1/1.25, duration 0.1 seconds).
-`live_session_effect_cases.py::test_effective_constants_change_drawn_width_and_flash` perturbs each value in a scratch effective
+`live_session_effect_emitter_cases.py::test_effective_constants_change_drawn_width_and_flash` perturbs each value in a scratch effective
 VFS and measures drawn widths, applied flash scales and active flash samples.
 The data contracts cover zero scales, numeric selectors and invalid inputs.
 

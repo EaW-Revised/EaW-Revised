@@ -32,15 +32,8 @@ bool MapMode::State::fail_ready(std::string message) {
         return false;
     }
 
-bool MapMode::ready(Node3D& host) {
-    core::load_profile::Scope ready_scope(core::load_profile::Phase::scene);
-    State& state = *state_;
-    startup_trace.report_path(state.options.report_path);
-    std::string lighting_argument = state.options.lighting;
-    std::string shadows_argument = state.options.shadows;
-    std::string environment_argument = state.options.environment;
-    std::string bloom_argument;
-    std::string fog_argument_error;
+void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error) {
+    State& state = *this;
     {
         const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
         for (int64_t index = 0; index < arguments.size(); ++index) {
@@ -374,6 +367,10 @@ bool MapMode::ready(Node3D& host) {
             if (argument == String("--eawr-space-control")) state.space_control = value.get_data();
         }
     }
+}
+
+bool MapMode::State::configure_ready_options(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error) {
+    State& state = *this;
     if (state.options.populate) state.populate = *state.options.populate;
     if (state.options.attract) {
         // MAT-08, MAT-09: a demo map starts at once, spectated, with every unit drawn.
@@ -580,15 +577,18 @@ bool MapMode::ready(Node3D& host) {
         state.bloom = false;
     }
 
-    assets::ObjectTypeCatalog catalog;
-    std::string catalog_failure;
+    return true;
+}
+
+bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure) {
+    State& state = *this;
     if (state.options.content) {
         const auto& content = *state.options.content;
         state.filesystem = content.filesystem;
         state.catalog = content.catalog;
         state.profile = content.profile;
         state.layers = content.layers;
-        catalog = assets::object_type_catalog(*state.catalog);
+        placement_catalog = assets::object_type_catalog(*state.catalog);
     } else {
         // The installed layers select the default; an explicit profile keeps the
         // base-game corpus available for regression fixtures.
@@ -626,29 +626,198 @@ bool MapMode::ready(Node3D& host) {
             state.layers.push_back(manifest.mount.layer_id);
             specs.push_back(std::move(manifest.mount));
         }
-        auto filesystem = vfs::Vfs::mount(specs);
-        if (!filesystem) return state.fail_ready(core::format_diagnostic(filesystem.error()));
-        state.filesystem = std::make_shared<const vfs::Vfs>(std::move(filesystem.value()));
+        auto mounted_filesystem = vfs::Vfs::mount(specs);
+        if (!mounted_filesystem) return state.fail_ready(core::format_diagnostic(mounted_filesystem.error()));
+        state.filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted_filesystem.value()));
 
         // The catalog is needed because a TED skydome field names an XML object,
         // not an art file. A catalog that cannot load is a recorded diagnostic, not
         // a silently skipped skydome.
-        const data::Profile profile = state.profile == "remake" ? data::Profile::remake
+        const data::Profile catalog_profile = state.profile == "remake" ? data::Profile::remake
             : state.profile == "foc" ? data::Profile::foc : data::Profile::eaw;
-        if (auto loaded = data::load_catalog(*state.filesystem, profile)) {
+        if (auto loaded = data::load_catalog(*state.filesystem, catalog_profile)) {
             // Map mode also runs on partial synthetic trees, so a failed registry does not stop it, but it is
             // never silent (R-10, R-13, C-06).
             if (!loaded.value().health.clean()) {
                 UtilityFunctions::printerr(String::utf8((std::string(loaded.value().health.failed() ? "EAWR catalog load FAILED: " : "EAWR catalog load: ")
                     + data::describe_load_health(loaded.value().health)).c_str()));
             }
-            catalog = assets::object_type_catalog(loaded.value().catalog);
+            placement_catalog = assets::object_type_catalog(loaded.value().catalog);
             state.catalog = std::make_shared<const data::Catalog>(std::move(loaded.value().catalog));
         } else {
             catalog_failure = core::format_diagnostic(loaded.error());
         }
     }
 
+    return true;
+}
+
+bool MapMode::State::configure_ready_camera(Node3D& host, const assets::Map& map, const terrain::Mesh& mesh, const assets::Vec3f& minimum, const assets::Vec3f& maximum) {
+    State& state = *this;
+    const float centre_x = (minimum.x + maximum.x) * 0.5F;
+    const float centre_z = (minimum.z + maximum.z) * 0.5F;
+    const float extent_x = std::abs(maximum.x - minimum.x);
+    const float extent_z = std::abs(maximum.z - minimum.z);
+    const float aspect = static_cast<float>(state.camera.width)
+        / static_cast<float>(state.camera.height);
+    // Fit the larger extent into 70% of the frame so the whole map, and a
+    // margin of background, are both inside the capture.
+    constexpr float fill = 0.70F;
+    const float half_height_world = std::max(
+        extent_z * 0.5F / fill, (extent_x * 0.5F / fill) / aspect);
+    const float half_fov = state.camera.vertical_fov_degrees * 0.5F * 3.14159265F / 180.0F;
+    const float distance = half_height_world / std::tan(half_fov);
+    state.camera.target = {centre_x, 0.0F, centre_z};
+    state.camera.eye = {centre_x, distance, centre_z};
+    // Looking straight down needs an up vector that is not the view direction.
+    state.camera.up = {0.0F, 0.0F, -1.0F};
+    state.camera.near_plane = std::max(1.0F, distance * 0.01F);
+    state.camera.far_plane = distance * 8.0F;
+    state.footprint_half_height = (extent_z * 0.5F) / half_height_world;
+    state.footprint_half_width = (extent_x * 0.5F) / (half_height_world * aspect);
+
+    // P1-06 #27 default framing: the Land_Mode tactical view at the skirmish
+    // start when the effective VFS carries the XML camera constants. The
+    // top-down overview above stays for `--eawr-map-view overview`, for a map
+    // camera config (which frames itself) and when the constants are absent.
+    if (state.requested_view == "overview") {
+        state.camera_view_cause = "requested";
+    } else if (!state.map_camera_config_path.empty() && state.options.capture_path.empty()) {
+        state.camera_view_cause = "a map camera config frames the view";
+    } else {
+        auto tactical_view = land_look::tactical_default(*state.filesystem, map, mesh,
+            state.camera.width, state.camera.height,
+            {state.requested_zoom, state.requested_yaw, state.requested_target});
+        if (tactical_view) {
+            state.camera = tactical_view.value().camera;
+            state.tactical = std::move(tactical_view.value());
+            state.camera_view = "tactical";
+            state.camera_view_cause = "default";
+            // No single terrain footprint: the whole frame is the view.
+            state.footprint_half_width = 1.0F / 0.85F;
+            state.footprint_half_height = 1.0F / 0.85F;
+        } else if (state.requested_view == "tactical") {
+            return state.fail_ready("--eawr-map-view tactical: " + core::format_diagnostic(tactical_view.error()));
+        } else {
+            state.camera_view_cause = "tactical constants unavailable: "
+                + core::format_diagnostic(tactical_view.error());
+        }
+    }
+
+    if (!state.map_camera_config_path.empty()) {
+        std::string camera_failure;
+        auto source = state.load_map_camera(camera::Mode::land, camera_failure);
+        if (!source) return state.fail_ready(camera_failure);
+        state.map_camera_config_sha256 = source->config_sha256;
+        state.map_camera_bindings_sha256 = source->bindings_sha256;
+        state.map_camera_tactical_xml_sha256 = source->tactical_xml_sha256;
+        state.map_camera_gameconstants_xml_sha256 = source->gameconstants_xml_sha256;
+        state.map_camera_constant_sources = std::move(source->provenance);
+        state.map_camera_constant_overrides = std::move(source->overrides);
+        const auto viewport = host.get_viewport()->get_visible_rect().size;
+        const std::uint32_t width = state.options.capture_path.empty()
+            ? static_cast<std::uint32_t>(viewport.x) : state.camera.width;
+        const std::uint32_t height = state.options.capture_path.empty()
+            ? static_cast<std::uint32_t>(viewport.y) : state.camera.height;
+        auto* display = DisplayServer::get_singleton();
+        auto bridge = std::make_unique<eawr::viewer::MapCameraBridge>(
+            display && display->window_is_focused());
+        if (map.terrain) {
+            // Location_Follows_Terrain: the same samples terrain::build meshes.
+            eawr::viewer::TerrainGround ground{map.terrain->width, map.terrain->height,
+                map.terrain->cell_spacing, {}};
+            ground.heights.reserve(map.terrain->samples.size());
+            for (const auto& sample : map.terrain->samples) {
+                ground.heights.push_back(static_cast<float>(
+                    static_cast<double>(sample.height_sample) * map.terrain->height_scale));
+            }
+            bridge->set_ground(std::move(ground));
+        }
+        const std::optional<camera::TacticalFrame> fixed = state.options.capture_path.empty()
+            ? std::nullopt : std::optional<camera::TacticalFrame>(camera_frame(state.camera));
+        if (auto active = bridge->activate(std::move(source->config),
+                std::move(source->constants), source->bindings_json, width, height, fixed);
+            !active) {
+            return state.fail_ready(core::format_diagnostic(active.error()));
+        }
+        state.camera = render_camera(bridge->frame());
+        state.map_camera_initial_frame = state.camera;
+        state.map_camera = std::move(bridge);
+        state.map_camera_host = &host;
+        if (fixed || !(state.options.interactive || state.map_camera_selftest || state.map_free_selftest)) {
+            // Keep the render target at the capture identity while the real
+            // host window is resized: by the locked graphical probe, or by a
+            // window manager (FancyZones snaps a new window into its zone)
+            // under an unlocked probe, which then never sees a resize. Only an
+            // interactive run and an unlocked self-test, whose subject is
+            // following real resizes, draw at the window size.
+            pin_capture_viewport(*host.get_window(), width, height);
+        }
+        host.set_process_input(true);
+        host.set_process_unhandled_input(true);
+    } else {
+        // Without a map camera bridge every map run reads its fixed camera
+        // back, captured or not. Pin its render target before drawing begins.
+        pin_capture_viewport(*host.get_window(), state.camera.width, state.camera.height);
+    }
+
+    // The renderer reads back the last drawn frame, so the capture camera has
+    // to be live before the timed window rather than only at capture time;
+    // otherwise the image returned was drawn with the previous camera.
+    state.renderer->set_camera(state.camera);
+
+    return true;
+}
+
+bool MapMode::State::prepare_ready_particles(Node3D& host, const assets::Map& map) {
+    State& state = *this;
+    const bool has_admitted_attached = std::any_of(state.attached_plan.records.begin(),
+        state.attached_plan.records.end(), [](const particles::MapEffectRecord& record) {
+            return record.status == particles::MapEffectStatus::admitted;
+        });
+    if (state.populate && state.options.map_effects && state.scene
+        && (state.scene->count(scene::Cause::model_particle_system) != 0
+            || state.scene->count(scene::Cause::model_not_in_vfs) != 0 || has_admitted_attached)) {
+        if ((state.scene->count(scene::Cause::model_particle_system) != 0 || has_admitted_attached)
+            && static_cast<std::uint64_t>(state.options.particle_frames)
+                >= static_cast<std::uint64_t>(state.options.warmup_frames)
+                    + state.options.timed_frames) {
+            return state.fail_ready("map particle frames must be less than warmup plus timed frames "
+                "to leave a rendered frame before capture");
+        }
+        if (!state.attached_animation_failure.empty()) return state.fail_ready(state.attached_animation_failure);
+        state.particles = std::make_unique<MapParticleProvider>(host, *state.filesystem,
+            state.fog ? state.renderer.get() : nullptr, state.fog ? &*state.fog : nullptr);
+        // Ordinary placements get what the attached allocation and its drain
+        // headroom leave; the headroom is 0 unless idle owners exist.
+        const bool prepared = state.particles->prepare(map, *state.scene,
+            state.options.particle_seed,
+            state.options.particle_capacity - static_cast<std::uint32_t>(state.attached_plan.allocated_capacity)
+                - static_cast<std::uint32_t>(state.attached_drain_headroom));
+        const bool attached_prepared = state.particles->prepare_attached(state.attached_plan, *state.scene,
+            state.effect_animation_idle() ? &state.attached_owners : nullptr);
+        if (!prepared || !attached_prepared) {
+            return state.fail_ready("one or more map particle placements failed; identities and causes are in map_particles");
+        }
+    }
+
+    return true;
+}
+
+bool MapMode::ready(Node3D& host) {
+    core::load_profile::Scope ready_scope(core::load_profile::Phase::scene);
+    State& state = *state_;
+    startup_trace.report_path(state.options.report_path);
+    std::string lighting_argument = state.options.lighting;
+    std::string shadows_argument = state.options.shadows;
+    std::string environment_argument = state.options.environment;
+    std::string bloom_argument;
+    std::string fog_argument_error;
+    state.parse_ready_arguments(lighting_argument, shadows_argument, environment_argument, bloom_argument, fog_argument_error);
+    if (!state.configure_ready_options(lighting_argument, shadows_argument, environment_argument, bloom_argument, fog_argument_error)) return false;
+    assets::ObjectTypeCatalog catalog;
+    std::string catalog_failure;
+    if (!state.mount_ready_content(catalog, catalog_failure)) return false;
     auto map_bytes = state.filesystem->open(state.options.map_path);
     if (!map_bytes) return state.fail_ready(core::format_diagnostic(map_bytes.error()));
     state.map_hash = hash_bytes(map_bytes.value());
@@ -811,148 +980,8 @@ bool MapMode::ready(Node3D& host) {
     // something drew.
     const assets::Vec3f minimum = terrain::asset_to_render(mesh.bounds_min);
     const assets::Vec3f maximum = terrain::asset_to_render(mesh.bounds_max);
-    const float centre_x = (minimum.x + maximum.x) * 0.5F;
-    const float centre_z = (minimum.z + maximum.z) * 0.5F;
-    const float extent_x = std::abs(maximum.x - minimum.x);
-    const float extent_z = std::abs(maximum.z - minimum.z);
-    const float aspect = static_cast<float>(state.camera.width)
-        / static_cast<float>(state.camera.height);
-    // Fit the larger extent into 70% of the frame so the whole map, and a
-    // margin of background, are both inside the capture.
-    constexpr float fill = 0.70F;
-    const float half_height_world = std::max(
-        extent_z * 0.5F / fill, (extent_x * 0.5F / fill) / aspect);
-    const float half_fov = state.camera.vertical_fov_degrees * 0.5F * 3.14159265F / 180.0F;
-    const float distance = half_height_world / std::tan(half_fov);
-    state.camera.target = {centre_x, 0.0F, centre_z};
-    state.camera.eye = {centre_x, distance, centre_z};
-    // Looking straight down needs an up vector that is not the view direction.
-    state.camera.up = {0.0F, 0.0F, -1.0F};
-    state.camera.near_plane = std::max(1.0F, distance * 0.01F);
-    state.camera.far_plane = distance * 8.0F;
-    state.footprint_half_height = (extent_z * 0.5F) / half_height_world;
-    state.footprint_half_width = (extent_x * 0.5F) / (half_height_world * aspect);
-
-    // P1-06 #27 default framing: the Land_Mode tactical view at the skirmish
-    // start when the effective VFS carries the XML camera constants. The
-    // top-down overview above stays for `--eawr-map-view overview`, for a map
-    // camera config (which frames itself) and when the constants are absent.
-    if (state.requested_view == "overview") {
-        state.camera_view_cause = "requested";
-    } else if (!state.map_camera_config_path.empty() && state.options.capture_path.empty()) {
-        state.camera_view_cause = "a map camera config frames the view";
-    } else {
-        auto tactical = land_look::tactical_default(*state.filesystem, map, mesh,
-            state.camera.width, state.camera.height,
-            {state.requested_zoom, state.requested_yaw, state.requested_target});
-        if (tactical) {
-            state.camera = tactical.value().camera;
-            state.tactical = std::move(tactical.value());
-            state.camera_view = "tactical";
-            state.camera_view_cause = "default";
-            // No single terrain footprint: the whole frame is the view.
-            state.footprint_half_width = 1.0F / 0.85F;
-            state.footprint_half_height = 1.0F / 0.85F;
-        } else if (state.requested_view == "tactical") {
-            return state.fail_ready("--eawr-map-view tactical: " + core::format_diagnostic(tactical.error()));
-        } else {
-            state.camera_view_cause = "tactical constants unavailable: "
-                + core::format_diagnostic(tactical.error());
-        }
-    }
-
-    if (!state.map_camera_config_path.empty()) {
-        std::string camera_failure;
-        auto source = state.load_map_camera(camera::Mode::land, camera_failure);
-        if (!source) return state.fail_ready(camera_failure);
-        state.map_camera_config_sha256 = source->config_sha256;
-        state.map_camera_bindings_sha256 = source->bindings_sha256;
-        state.map_camera_tactical_xml_sha256 = source->tactical_xml_sha256;
-        state.map_camera_gameconstants_xml_sha256 = source->gameconstants_xml_sha256;
-        state.map_camera_constant_sources = std::move(source->provenance);
-        state.map_camera_constant_overrides = std::move(source->overrides);
-        const auto viewport = host.get_viewport()->get_visible_rect().size;
-        const std::uint32_t width = state.options.capture_path.empty()
-            ? static_cast<std::uint32_t>(viewport.x) : state.camera.width;
-        const std::uint32_t height = state.options.capture_path.empty()
-            ? static_cast<std::uint32_t>(viewport.y) : state.camera.height;
-        auto* display = DisplayServer::get_singleton();
-        auto bridge = std::make_unique<eawr::viewer::MapCameraBridge>(
-            display && display->window_is_focused());
-        if (map.terrain) {
-            // Location_Follows_Terrain: the same samples terrain::build meshes.
-            eawr::viewer::TerrainGround ground{map.terrain->width, map.terrain->height,
-                map.terrain->cell_spacing, {}};
-            ground.heights.reserve(map.terrain->samples.size());
-            for (const auto& sample : map.terrain->samples) {
-                ground.heights.push_back(static_cast<float>(
-                    static_cast<double>(sample.height_sample) * map.terrain->height_scale));
-            }
-            bridge->set_ground(std::move(ground));
-        }
-        const std::optional<camera::TacticalFrame> fixed = state.options.capture_path.empty()
-            ? std::nullopt : std::optional<camera::TacticalFrame>(camera_frame(state.camera));
-        if (auto active = bridge->activate(std::move(source->config),
-                std::move(source->constants), source->bindings_json, width, height, fixed);
-            !active) {
-            return state.fail_ready(core::format_diagnostic(active.error()));
-        }
-        state.camera = render_camera(bridge->frame());
-        state.map_camera_initial_frame = state.camera;
-        state.map_camera = std::move(bridge);
-        state.map_camera_host = &host;
-        if (fixed || !(state.options.interactive || state.map_camera_selftest || state.map_free_selftest)) {
-            // Keep the render target at the capture identity while the real
-            // host window is resized: by the locked graphical probe, or by a
-            // window manager (FancyZones snaps a new window into its zone)
-            // under an unlocked probe, which then never sees a resize. Only an
-            // interactive run and an unlocked self-test, whose subject is
-            // following real resizes, draw at the window size.
-            pin_capture_viewport(*host.get_window(), width, height);
-        }
-        host.set_process_input(true);
-        host.set_process_unhandled_input(true);
-    } else {
-        // Without a map camera bridge every map run reads its fixed camera
-        // back, captured or not. Pin its render target before drawing begins.
-        pin_capture_viewport(*host.get_window(), state.camera.width, state.camera.height);
-    }
-
-    // The renderer reads back the last drawn frame, so the capture camera has
-    // to be live before the timed window rather than only at capture time;
-    // otherwise the image returned was drawn with the previous camera.
-    state.renderer->set_camera(state.camera);
-
-    const bool has_admitted_attached = std::any_of(state.attached_plan.records.begin(),
-        state.attached_plan.records.end(), [](const particles::MapEffectRecord& record) {
-            return record.status == particles::MapEffectStatus::admitted;
-        });
-    if (state.populate && state.options.map_effects && state.scene
-        && (state.scene->count(scene::Cause::model_particle_system) != 0
-            || state.scene->count(scene::Cause::model_not_in_vfs) != 0 || has_admitted_attached)) {
-        if ((state.scene->count(scene::Cause::model_particle_system) != 0 || has_admitted_attached)
-            && static_cast<std::uint64_t>(state.options.particle_frames)
-                >= static_cast<std::uint64_t>(state.options.warmup_frames)
-                    + state.options.timed_frames) {
-            return state.fail_ready("map particle frames must be less than warmup plus timed frames "
-                "to leave a rendered frame before capture");
-        }
-        if (!state.attached_animation_failure.empty()) return state.fail_ready(state.attached_animation_failure);
-        state.particles = std::make_unique<MapParticleProvider>(host, *state.filesystem,
-            state.fog ? state.renderer.get() : nullptr, state.fog ? &*state.fog : nullptr);
-        // Ordinary placements get what the attached allocation and its drain
-        // headroom leave; the headroom is 0 unless idle owners exist.
-        const bool prepared = state.particles->prepare(map, *state.scene,
-            state.options.particle_seed,
-            state.options.particle_capacity - static_cast<std::uint32_t>(state.attached_plan.allocated_capacity)
-                - static_cast<std::uint32_t>(state.attached_drain_headroom));
-        const bool attached_prepared = state.particles->prepare_attached(state.attached_plan, *state.scene,
-            state.effect_animation_idle() ? &state.attached_owners : nullptr);
-        if (!prepared || !attached_prepared) {
-            return state.fail_ready("one or more map particle placements failed; identities and causes are in map_particles");
-        }
-    }
-
+    if (!state.configure_ready_camera(host, map, mesh, minimum, maximum)) return false;
+    if (!state.prepare_ready_particles(host, map)) return false;
     if (state.policy != lighting::Policy::off) {
         // The shadow range covers the farthest terrain corner seen by the
         // capture camera. Cascades split by view depth: the tactical and live

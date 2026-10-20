@@ -1,9 +1,12 @@
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/diagnostic.hpp"
+#include "eawr/core/json_text.hpp"
 #include "galactic_mode_internal.hpp"
 #include "family_textures.hpp"
 #include "model_preview.hpp"
 
-#include "eawr/core/diagnostic.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/scene/scene.hpp"
@@ -39,12 +42,11 @@ void fragment() {
 )GODOT";
 
 [[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+    return static_cast<char>(core::ascii_lower(static_cast<unsigned char>(value)));
 }
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(), [](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 
 void synchronize_zoom_rotation(assets::Animation& clip) {
@@ -236,23 +238,7 @@ std::optional<std::string> resolve_texture(const vfs::Vfs& filesystem, std::stri
 }
 
 std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20) output << "\\u00" << hex[character >> 4] << hex[character & 0x0f];
-            else output << static_cast<char>(character);
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote(value);
 }
 
 std::string utf8(const String& value) {
@@ -628,6 +614,7 @@ bool GalacticMode::State::upload_models() {
 }
 
 bool GalacticMode::State::refresh_model_instances() {
+    const auto measured = measure_frame(FramePhase::instances);
     // Rebuild immutable instance values from cached uploads; no models or textures reload.
     instances.clear();
     instance_planets.clear();
@@ -638,8 +625,7 @@ bool GalacticMode::State::refresh_model_instances() {
     const auto objects = render_objects();
     // Explicit before/after GPU control: reproduce the former planet matrix
     // in a synthetic overview only, never in an authored campaign.
-    const bool align_world_planets = !(options.campaign == galactic_view::synthetic_campaign
-        && options.hud_fixture == "orbit-placement-yavin-overview-before");
+    const bool align_world_planets = !fixture_enabled(GalacticHudFixture::Feature::unaligned_planets);
     std::unordered_set<galactic_view::ObjectId> world_planets;
     if (align_world_planets) {
         world_planets.reserve(galaxy->planets.size());
@@ -734,6 +720,7 @@ bool GalacticMode::State::build_overlay() {
 }
 
 bool GalacticMode::State::service_corruption(const double elapsed) {
+    const auto measured = measure_frame(FramePhase::corruption);
     if (!galaxy || !content) return true;
     auto& publication = corruption_frame_publication;
     publication.planets.clear(); publication.effects.clear(); publication.seat = galaxy->local.seat;
@@ -741,46 +728,7 @@ bool GalacticMode::State::service_corruption(const double elapsed) {
     if (!corruption_publication && displayed_snapshot)
         galactic_view::observed_corruption(*displayed_snapshot, *galaxy, content->corruption_particle,
             publication, corruption_observation_scratch);
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "corruption") {
-        publication.seat = galaxy->local.seat;
-        galactic_view::CorruptionPlanetFact fact;
-        fact.planet = 101; fact.corrupted = true; fact.particle_type = content->corruption_particle;
-        fact.source_nonempty = fact.target_nonempty = true;
-        publication.planets = {std::move(fact)};
-    }
-    corruption_fixture_seconds += std::max(0.0, elapsed);
-    const bool spread_fixture = options.campaign == galactic_view::synthetic_campaign
-        && options.hud_fixture.starts_with("corruption-spread");
-    if (spread_fixture) {
-        publication.seat = galaxy->local.seat; publication.planets.clear();
-        for (const auto id : {101U, 102U, 103U}) {
-            galactic_view::CorruptionPlanetFact fact;
-            fact.planet = id; fact.corrupted = id != 102;
-            fact.source_nonempty = fact.target_nonempty = fact.corrupted;
-            fact.particle_type = content->corruption_particle;
-            if (id == 102) {
-                fact.transitioning = fact.increasing = true; fact.target_nonempty = true;
-                fact.fraction = static_cast<float>(std::clamp(corruption_fixture_seconds/5, 0.0, 1.0));
-                if (options.hud_fixture == "corruption-spread-settled" || fact.fraction >= 1) {
-                    fact.corrupted = true; fact.transitioning = fact.increasing = false;
-                    fact.source_nonempty = true; fact.fraction = 1;
-                }
-                if (options.hud_fixture == "corruption-spread-removing") {
-                    fact.corrupted = true; fact.transitioning = true; fact.increasing = false;
-                    fact.source_nonempty = true; fact.target_nonempty = false;
-                }
-                if (options.hud_fixture == "corruption-spread-removed") {
-                    fact.corrupted = fact.transitioning = fact.increasing = false;
-                    fact.source_nonempty = fact.target_nonempty = false;
-                }
-            }
-            if (options.hud_fixture == "corruption-spread-replaced" && id == 102 && corruption_fixture_seconds >= 1)
-                fact.particle_type = content->corruption_style.line_particle;
-            publication.planets.push_back(std::move(fact));
-        }
-        if (options.hud_fixture == "corruption-spread-removed" && corruption_fixture_seconds >= 1)
-            publication.planets.clear();
-    }
+    if (options.hud_provider) options.hud_provider->corruption_frame(*this, elapsed);
     for (auto& fact : publication.planets) galactic_view::configure_corruption(fact, content->corruption_parameters);
     corruption_visuals.update(*galaxy, publication);
     const auto mounted = filesystem ? filesystem : (battle_content ? battle_content->filesystem : nullptr);
@@ -803,9 +751,8 @@ bool GalacticMode::State::service_corruption(const double elapsed) {
         const auto layer = static_cast<std::size_t>(galactic_view::galactic_particle_layer(*audio_catalog, style.line_particle));
         if (scenes[layer].host) corruption_lines = std::make_unique<CorruptionParticles>(*scenes[layer].host, mounted);
     }
-    const auto logical_frame = spread_fixture
-        ? static_cast<std::uint64_t>(corruption_fixture_seconds*sim::galactic::galactic_frames_per_second)
-        : (displayed_snapshot ? displayed_snapshot->clock().galactic_frame : 0);
+    const auto injected_frame = options.hud_provider ? options.hud_provider->corruption_display_frame() : std::nullopt;
+    const auto logical_frame = injected_frame.value_or(displayed_snapshot ? displayed_snapshot->clock().galactic_frame : 0);
     if (corruption_lines && content->corruption_line_system
         && !corruption_lines->service_lines(corruption_visuals, *galaxy, style, *content->corruption_line_system,
             logical_frame, camera, elapsed, failure)) return false;
@@ -852,12 +799,10 @@ bool GalacticMode::State::service_station_rotation(const double elapsed,
     constexpr auto fps = static_cast<float>(sim::galactic::galactic_frames_per_second);
     // Explicit injected provider inputs for the covering GPU case, independent
     // of machine speed and the asynchronous simulation publication.
-    const bool fixture = options.campaign == galactic_view::synthetic_campaign
-        && options.hud_fixture.starts_with("orbit-rotation-");
-    constexpr std::array<double, 5> probe_elapsed{20.0, 0.0, 0.001, 0.032, 0.033};
-    const double input_elapsed = fixture
-        ? (frames >= 1 && frames <= probe_elapsed.size() ? probe_elapsed[frames - 1] : 0.0) : elapsed;
-    const bool input_paused = synchronizer_paused || (fixture && options.hud_fixture.ends_with("-zero"));
+    const auto injected = options.hud_provider ? options.hud_provider->rotation_input(frames) : std::nullopt;
+    const bool fixture = injected.has_value();
+    const double input_elapsed = injected ? injected->elapsed : elapsed;
+    const bool input_paused = synchronizer_paused || (injected && injected->paused);
     const float advances = orbit_hud.display_clock.advance(input_elapsed, admission_rate, input_paused);
     if (fixture && frames >= 1 && frames <= orbit_hud.rotation_probe_advances.size())
         orbit_hud.rotation_probe_advances[frames - 1] = advances;

@@ -1,0 +1,34 @@
+[
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#healing_lights_",
+    "new": "apps/viewer/src/live_session_frame.cpp#observe_frame_ability_lights"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#fog_ghosts_.advance",
+    "new": "apps/viewer/src/live_session_frame.cpp#remember_frame_fog"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#cloak_tint",
+    "new": "apps/viewer/src/live_session_frame.cpp#apply_frame_opacity"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#nebula_colour_",
+    "new": "apps/viewer/src/live_session_frame.cpp#apply_frame_opacity"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#score_cost_credits",
+    "new": "apps/viewer/src/live_session_frame.cpp#observe_frame_outcome"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#type.named_hero",
+    "new": "apps/viewer/src/live_session_frame.cpp#observe_frame_outcome"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#visible_to_enemy",
+    "new": "apps/viewer/src/live_session_frame.cpp#compose_frame_projectiles"
+  },
+  {
+    "old": "apps/viewer/src/live_session_frame.cpp#shield_flash_constants_",
+    "new": "apps/viewer/src/live_session_frame.cpp#apply_frame_shield_flashes"
+  }
+]

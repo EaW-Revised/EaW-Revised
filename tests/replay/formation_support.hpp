@@ -5,18 +5,12 @@
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/pathfind.hpp"
 #include "eawr/sim/tactical/session.hpp"
-#include <algorithm>
-#include <cmath>
+
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <fstream>
-#include <functional>
-#include <iostream>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace formation_test_support {
@@ -27,7 +21,7 @@ using math::Fixed;
 using math::Vec2;
 using math::Vec3;
 
-extern int failures;
+extern int& failures;
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
 constexpr tactical::TypeId corvette_type = 2011;

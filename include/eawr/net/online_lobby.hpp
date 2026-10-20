@@ -37,9 +37,25 @@ struct OnlineChatLine {
 };
 struct OnlineRoomMember { std::uint32_t seat{}; std::string name; };
 struct OnlineChatPage { std::vector<OnlineChatLine> lines; std::uint32_t through{}; std::vector<OnlineRoomMember> members; };
+// The room-less menu channel (#3758): who is in the online room browser and what they say there. A line carries the
+// sender's display name only; the member id is a per-connection number that is never reused for a capability.
+struct OnlineMenuLine { std::uint32_t sequence{}, member{}; std::string name, text; };
+struct OnlineMenuMember { std::uint32_t id{}; std::string name; };
+struct OnlineMenuPage {
+    std::vector<OnlineMenuLine> lines;
+    std::uint32_t through{};
+    // The roster is sent only when it differs from the version the caller already holds.
+    bool roster_present{};
+    std::uint32_t roster_version{};
+    std::vector<OnlineMenuMember> members;
+};
 
 // Blocking, bounded service calls: invoke on an I/O worker, never a frame/sim thread.
 class OnlineLobbyService {
+    template<class T> static core::Result<T> menu_unavailable() {
+        core::Diagnostic error; error.code = "EAWR-NET-1521"; error.message = "Lobby chat is not available on this server.";
+        return core::Result<T>::failure(std::move(error));
+    }
 public:
     virtual ~OnlineLobbyService() = default;
     virtual core::Result<OnlineRoomPage> list(std::string after = {}, std::uint32_t limit = 50) = 0;
@@ -56,6 +72,14 @@ public:
     virtual core::Result<void> send_chat(std::string text) = 0;
     virtual core::Result<OnlineChatPage> chat(std::uint32_t after) = 0;
     virtual core::Result<void> kick(const OnlineRoomPublication&, std::uint32_t seat) = 0;
+    // Menu channel (#3758), on a connection of its own so a relay without it never disturbs the directory connection.
+    // A relay that predates the channel answers menu_enter with EAWR-NET-1521; callers treat that as "not available on
+    // this server" and stop asking. The defaults below behave like such a relay.
+    virtual core::Result<OnlineMenuPage> menu_enter(std::string /*display_name*/) { return menu_unavailable<OnlineMenuPage>(); }
+    virtual core::Result<void> menu_say(std::string /*text*/) { return menu_unavailable<void>(); }
+    virtual core::Result<OnlineMenuPage> menu_poll(std::uint32_t /*after*/, std::uint32_t /*roster_version*/) { return menu_unavailable<OnlineMenuPage>(); }
+    // Drops the menu connection (joining or hosting a room, or closing the browser). Never fails.
+    virtual void menu_leave() {}
     // The directory principal of this connection, the capability that proves the room's owner when its signalling scope is
     // opened (NetworkGnsRoom::open). A secret: never copy it into a row, chat, profile or report. Empty when there is none.
     virtual std::string principal() const { return {}; }

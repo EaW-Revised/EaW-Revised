@@ -1,3 +1,4 @@
+#include "../support/self_test.hpp"
 #include "ui_test_support.hpp"
 
 #include <iostream>
@@ -9,6 +10,10 @@ void shell_anchor_contracts();
 void movie_contracts();
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     text_database_contracts();
     dialog_catalog_contracts();
     command_bar_contracts();

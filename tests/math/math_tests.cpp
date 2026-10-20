@@ -1,3 +1,5 @@
+#include <utility>
+#include "../support/check.hpp"
 #include "math_support.hpp"
 #include "eawr/sim/math/math.hpp"
 #include "../../src/sim/math/cordic_constants.hpp"
@@ -17,13 +19,11 @@
 namespace math_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 void expect_raw(const eawr::core::Result<Fixed>& result, std::int64_t raw,

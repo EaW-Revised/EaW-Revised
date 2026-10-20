@@ -1,10 +1,12 @@
+#include "../../support/check.hpp"
+#include <exception>
+
 #include "eawr/presentation/space/event_snapshot_cache.hpp"
 
 #include <cstdint>
 #include <iostream>
 #include <limits>
 #include <memory>
-#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -14,9 +16,7 @@ struct Snapshot final {
     [[nodiscard]] std::uint64_t completed_tick() const noexcept { return tick; }
 };
 
-void require(const bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
-}
+using eawr::testing::require;
 
 void admitted_pair_needs_no_history() {
     const Snapshot previous{5999, 1}, latest{6000, 2};

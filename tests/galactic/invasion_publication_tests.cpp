@@ -1,3 +1,9 @@
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/invasion_offer.hpp"
 #include "eawr/campaign/tactical_return.hpp"
@@ -31,10 +37,7 @@ namespace gc = eawr::sim::galactic;
 namespace cp = eawr::campaign;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 Fixed f(std::int64_t value) { return Fixed::from_integer(value).value(); }
 gc::GalacticSetup fixture() {
     gc::GalacticSetup setup;
@@ -124,7 +127,7 @@ void publication_contract(unsigned workers) {
         "actual direct cargo loss refreshes the publication without a result revision change");
 }
 }
-int main() {
+int case_galactic_invasion_publication_tests() {
     try { for (const unsigned workers : {1U, 2U, 4U, 8U}) publication_contract(workers); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

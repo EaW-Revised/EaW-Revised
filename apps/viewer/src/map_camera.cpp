@@ -1,3 +1,4 @@
+#include "eawr/battle/start.hpp"
 #include "map_camera.hpp"
 
 #include <pugixml.hpp>
@@ -227,7 +228,7 @@ core::Result<MapCameraConfig> parse_map_camera_config(
 }
 
 core::Result<MapCameraConfig> skirmish_camera_config(
-    const assets::Map& map, const skirmish::SkirmishStart& start, const sim::tactical::PlayerId local_player) {
+    const assets::Map& map, const battle::BattleStart& start, const sim::tactical::PlayerId local_player) {
     using Result = core::Result<MapCameraConfig>;
     if (!map.declared_extents || !std::isfinite(map.declared_extents->first)
         || !std::isfinite(map.declared_extents->second)
@@ -235,17 +236,17 @@ core::Result<MapCameraConfig> skirmish_camera_config(
         return Result::failure(invalid("live skirmish camera needs positive declared map extents or a camera XML"));
     }
     const auto marker = std::find_if(start.markers.begin(), start.markers.end(), [&](const auto& entry) {
-        return entry.use == skirmish::MarkerUse::spawn && entry.player == local_player;
+        return entry.use == battle::MarkerUse::spawn && entry.player == local_player;
     });
-    const auto number = [](const skirmish::Fixed value) {
-        return static_cast<double>(value.raw()) / static_cast<double>(skirmish::Fixed::scale);
+    const auto number = [](const sim::math::Fixed value) {
+        return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
     };
     double x = 0, y = 0;
     std::size_t count = 0;
     if (marker != start.markers.end()) {
         for (const auto& unit : start.units) {
             if (unit.state.owner != local_player || unit.record != marker->record
-                || (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit)) continue;
+                || (unit.role != battle::UnitRole::fleet && unit.role != battle::UnitRole::free_unit)) continue;
             x += number(unit.state.position.x);
             y += number(unit.state.position.y);
             ++count;
@@ -256,7 +257,7 @@ core::Result<MapCameraConfig> skirmish_camera_config(
             return entry.player.player_id == local_player;
         });
         if (player == start.players.end()) return Result::failure(invalid("live skirmish camera has no local player"));
-        const auto on_team = [&](const skirmish::StartMarker& entry) {
+        const auto on_team = [&](const battle::StartMarker& entry) {
             const auto& side = player->start_side;
             if (side.empty() || entry.type.size() <= side.size() || entry.type[side.size()] != '_') return false;
             return std::equal(side.begin(), side.end(), entry.type.begin(), [](const char a, const char b) {
@@ -267,13 +268,13 @@ core::Result<MapCameraConfig> skirmish_camera_config(
         // R-SETUP-01 project camera choice: retail assigns no overflow camera.
         // Use the team's spawn centroid, then its first station, then the extents centre.
         for (const auto& entry : start.markers) {
-            if (!on_team(entry) || (entry.use != skirmish::MarkerUse::spawn
-                && entry.use != skirmish::MarkerUse::spawn_unused)) continue;
+            if (!on_team(entry) || (entry.use != battle::MarkerUse::spawn
+                && entry.use != battle::MarkerUse::spawn_unused)) continue;
             x += number(entry.position.x); y += number(entry.position.y); ++count;
         }
         if (count == 0) {
             const auto station = std::find_if(start.markers.begin(), start.markers.end(), [&](const auto& entry) {
-                return entry.use == skirmish::MarkerUse::station && on_team(entry);
+                return entry.use == battle::MarkerUse::station && on_team(entry);
             });
             if (station != start.markers.end()) { x = number(station->position.x); y = number(station->position.y); }
             count = 1; // Declared extents are centred on the origin when no team marker exists.

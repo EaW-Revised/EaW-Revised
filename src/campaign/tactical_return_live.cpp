@@ -40,6 +40,26 @@ bool carries_named_hero(const std::span<const tactical::CarriedObject> children,
     return false;
 }
 }
+core::Result<std::shared_ptr<StartingForceInputs>> rebuild_starting_force_inputs(
+    const gc::GalacticSnapshot& snapshot, const CampaignSetupPlan& plan) {
+    using Result = core::Result<std::shared_ptr<StartingForceInputs>>;
+    if (!snapshot.production() || !snapshot.production()->nested_creation)
+        return fail<std::shared_ptr<StartingForceInputs>>("stock due heroes require live production authoring");
+    const auto& creation = *snapshot.production()->nested_creation;
+    auto starting = std::make_shared<StartingForceInputs>();
+    starting->fleet_type = creation.fleet_type;
+    for (const auto& row : creation.types) {
+        const auto* original = plan.original_type(row.type);
+        if (!original) return fail<std::shared_ptr<StartingForceInputs>>("stock due hero original binding is absent");
+        starting->types.types.push_back(*original);
+        starting->bindings.push_back({row.type, original->name});
+        starting->runtime_types.push_back({row.type, row.skips_combat, row.always_spawn_in_orbit, {}});
+        if (original->name == "Galactic_Squadron") starting->squadron_type = row.type;
+    }
+    for (const auto& relation : creation.relations)
+        starting->relations.push_back({relation.player, relation.other, relation.enemy});
+    return Result::success(std::move(starting));
+}
 core::Result<void> bind_stock_hero_returns(GameSession& game, std::shared_ptr<const StartingForceInputs> inputs) {
     const auto snapshot = game.galaxy().snapshot();
     if (!inputs || !snapshot->production() || !snapshot->production()->nested_creation
@@ -74,23 +94,9 @@ core::Result<StockTacticalReturnServices> prepare_stock_tactical_return(const vf
     auto input = std::make_shared<Inputs>(Inputs{catalog, plan, hero.value(), factor.value(), lockout.value()});
     StockTacticalReturnServices services;
     services.bind_game = [input](GameSession& game) -> core::Result<void> {
-        const auto snapshot = game.galaxy().snapshot();
-        if (!snapshot->production() || !snapshot->production()->nested_creation)
-            return fail<void>("stock due heroes require live production authoring");
-        const auto& creation = *snapshot->production()->nested_creation;
-        auto starting = std::make_shared<StartingForceInputs>();
-        starting->fleet_type = creation.fleet_type;
-        for (const auto& row : creation.types) {
-            const auto* original = input->plan.original_type(row.type);
-            if (!original) return fail<void>("stock due hero original binding is absent");
-            starting->types.types.push_back(*original);
-            starting->bindings.push_back({row.type, original->name});
-            starting->runtime_types.push_back({row.type, row.skips_combat, row.always_spawn_in_orbit, {}});
-            if (original->name == "Galactic_Squadron") starting->squadron_type = row.type;
-        }
-        for (const auto& relation : creation.relations)
-            starting->relations.push_back({relation.player, relation.other, relation.enemy});
-        return bind_stock_hero_returns(game, std::move(starting));
+        auto starting = rebuild_starting_force_inputs(*game.galaxy().snapshot(), input->plan);
+        if (!starting) return core::Result<void>::failure(starting.error());
+        return bind_stock_hero_returns(game, std::move(starting).value());
     };
     services.bind = [input, locomotor](const ConflictRecord& conflict, tactical::TacticalContent& content) -> core::Result<void> {
         tactical::RetreatConfig config; config.rules.campaign = true; config.rules.lockout_frames = input->lockout;

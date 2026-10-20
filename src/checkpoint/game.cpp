@@ -384,10 +384,13 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     Checkpoint out; out.header.flags = flag_galaxy;
     out.header.identities = build; out.header.seed = session.galaxy().setup().seed;
     out.header.completed_tick = session.completed_tick(); out.header.galactic_frame = session.galaxy().clock().galactic_frame;
-    if (!recorded.value().commands.commands.empty()) {
+    // #4058: the digest chains the history base through this window; the key is the last sealed command, even when
+    // the window holds none.
+    auto sealed = campaign::history_frontier_of(recorded.value(), replay.value(), session.completed_tick());
+    if (!sealed) return core::Result<Checkpoint>::failure(sealed.error());
+    if (const auto& key = sealed.value().last_key) {
         out.header.flags |= flag_frontier;
-        const auto key = recorded.value().commands.commands.back().key;
-        out.header.frontier = {key.tick, key.seat.value, key.sequence, core::sha256(replay.value())};
+        out.header.frontier = {key->tick, key->seat.value, key->sequence, sealed.value().digest};
     }
     const auto add = [&](SectionId id, Bytes bytes, std::uint16_t version = galaxy_section_version) {
         out.sections.push_back({static_cast<std::uint16_t>(id), version, true, std::move(bytes)});
@@ -398,6 +401,7 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     context.raw(hash); context.u64(static_cast<std::uint64_t>(session.galaxy().clock().strategic_speed.raw()));
     context.u64(static_cast<std::uint64_t>(session.galaxy().clock().tactical_speed.raw()));
     blob(context, state[0]); blob(context, replay.value());
+    detail::write_history_base(context, recorded.value().base);
     context.u32(static_cast<std::uint32_t>(recorded.value().load_fixups.size()));
     for (const auto& command : recorded.value().load_fixups) {
         context.u64(command.key.tick); context.u32(command.key.seat.value); context.u64(command.key.sequence);
@@ -539,22 +543,397 @@ core::Result<Bytes> save_game_checkpoint(const campaign::GameSession& session, c
     return write_checkpoint(captured.value());
 }
 
-static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::uint8_t> bytes, const Identities& build,
-    const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path, bool direct) {
-    auto parsed = parse_checkpoint(bytes, path);
-    if (!parsed) return core::Result<GameRestore>::failure(parsed.error());
-    const auto& saved = parsed.value();
-    if (auto identity = check_identities(saved.header, build, path); !identity) return core::Result<GameRestore>::failure(identity.error());
-    if (!(saved.header.flags & flag_galaxy)) return fail<GameRestore>("not a galaxy checkpoint", path);
+namespace {
+
+core::Result<void> validate_checkpoint_sections(const Checkpoint& saved, const Identities& build,
+    const GameLoadOptions& options, std::string_view path) {
+    if (auto identity = check_identities(saved.header, build, path); !identity) return core::Result<void>::failure(identity.error());
+    if (!(saved.header.flags & flag_galaxy)) return fail<void>("not a galaxy checkpoint", path);
     if (saved.header.completed_tick > options.max_restore_ticks || saved.header.completed_tick > gc::galactic_max_ticks)
-        return fail<GameRestore>("restore tick budget exceeded", path, diagnostic_codes::resource_limit);
+        return fail<void>("restore tick budget exceeded", path, diagnostic_codes::resource_limit);
     for (const auto id : {SectionId::session, SectionId::seats, SectionId::players, SectionId::planets,
         SectionId::fleets, SectionId::production, SectionId::conflicts, SectionId::victory, SectionId::scripts, SectionId::mod_list,
         SectionId::galactic_abilities, SectionId::campaign_scoring, SectionId::galactic_owner}) {
         const auto* section = saved.find(id);
-        if (!section || !section->required) return fail<GameRestore>("missing required section " + std::string(section_name(static_cast<std::uint16_t>(id))), path);
-        if (section->version != galaxy_section_version) return fail<GameRestore>("unsupported galaxy section version", path, diagnostic_codes::version);
+        if (!section || !section->required) return fail<void>("missing required section " + std::string(section_name(static_cast<std::uint16_t>(id))), path);
+        if (section->version != galaxy_section_version)
+            return fail<void>("unsupported galaxy section version " + std::to_string(section->version) + " (this build reads "
+                + std::to_string(galaxy_section_version) + ")", path, diagnostic_codes::version);
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> decode_checkpoint_return_result(detail::Reader& returned, const auto& has_result,
+    std::optional<campaign::ConflictRecord>& latest_context,
+    std::optional<campaign::BattleResult>& latest_result, std::string_view path) {
+    if (has_result == 1) {
+        auto decoded_context = decode_conflict(blob(returned), path);
+        if (!decoded_context) return core::Result<void>::failure(decoded_context.error());
+        auto decoded_result = decode_result(blob(returned), path);
+        if (!decoded_result) return core::Result<void>::failure(decoded_result.error());
+        latest_context = std::move(decoded_context).value(); latest_result = std::move(decoded_result).value();
+        if (latest_context->id != latest_result->conflict) return fail<void>("tactical result context differs", path);
+    }
+    if (has_result > 1 || returned.failed() || returned.remaining()) return fail<void>("malformed tactical return section", path);
+    return core::Result<void>::success();
+}
+
+core::Result<void> decode_checkpoint_child(const auto* child_state, const auto* child_section, auto& child_save,
+    const Checkpoint& saved, std::optional<ChildLog>& child_log,
+    std::optional<campaign::ConflictRecord>& active_conflict, std::string_view path) {
+    if (!child_state->required || !child_section->required || child_state->version != child_state_section_version
+        || child_section->version != child_log_section_version) return fail<void>("unsupported or optional child section", path);
+    auto log = decode_child_log(child_section->bytes, path);
+    if (!log) return core::Result<void>::failure(log.error());
+    auto conflict = decode_conflict(log.value().conflict_record, path);
+    if (!conflict) return core::Result<void>::failure(conflict.error());
+    if (log.value().completed_tick != child_save.value()->scripts.completed_tick
+        || log.value().completed_tick > saved.header.completed_tick)
+        return fail<void>("child log and host clocks differ", path);
+    child_save.value()->state = child_state->bytes;
+    child_log = std::move(log).value(); active_conflict = std::move(conflict).value();
+    return core::Result<void>::success();
+}
+
+core::Result<void> decode_checkpoint_fixups(detail::Reader& context, campaign::GameRecording& recording, std::string_view path) {
+    const auto fixups = context.u32();
+    if (fixups > gc::galactic_max_commands || fixups > context.remaining() / 35) return fail<void>("section session: invalid prologue count", path);
+    for (std::uint32_t i = 0; i < fixups; ++i) {
+        gc::GameCommand command; command.key.tick = context.u64(); command.key.seat = sim::SeatId{context.u32()}; command.key.sequence = context.u64();
+        const auto payload = blob(context);
+        auto decoded = gc::decode_payload(gc::CommandLayer::session, gc::session_opcodes::post_load_fixup, Bytes(payload.begin(), payload.end()));
+        if (!decoded) return fail<void>("section session: malformed load command", path);
+        command.payload = *decoded; recording.load_fixups.push_back(std::move(command));
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> decode_checkpoint_timelines(detail::Reader& context, campaign::ModeTimelineState& timelines,
+    const auto& completed, const Checkpoint& saved, campaign::GameRecording& recording,
+    const auto& strategic, const auto& tactical, std::string_view path) {
+    const auto galaxy_timeline = context.u32(); const auto historical = context.u8();
+    if (galaxy_timeline > 5 || historical > 1) return fail<void>("invalid saved timeline", path);
+    timelines.galaxy = static_cast<std::int32_t>(galaxy_timeline);
+    if (historical) {
+        const auto conflict = context.u64(); const auto tick = context.u64(); const auto value = context.u32();
+        if (value > 5) return fail<void>("invalid historical timeline", path);
+        timelines.historical_child = campaign::ModeTimelineSnapshot{{campaign::SessionMode::battle, conflict}, tick, static_cast<std::int32_t>(value)};
+    }
+    if (context.failed() || context.remaining() != 0 || completed != saved.header.completed_tick
+        || completed > recording.commands.final_tick_count || strategic == 0 || tactical == 0
+        || strategic > static_cast<std::uint64_t>(gc::max_speed_factor_raw) || tactical > static_cast<std::uint64_t>(gc::max_speed_factor_raw))
+        return fail<void>("section session: inconsistent clocks or frontier", path, diagnostic_codes::inconsistent);
+    return core::Result<void>::success();
+}
+
+core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campaign::GameRecording& recording, auto& active_conflict,
+    const auto& completed, auto& child_log, const auto& replay_bytes,
+    const Identities& build, campaign::HistoryBoundary& boundary, std::string_view path) {
+    if (recording.base.at.tick > completed)
+        return fail<void>("section session: history base is after the saved tick", path, diagnostic_codes::inconsistent);
+    detail::Reader conflicts(saved.find(SectionId::conflicts)->bytes);
+    const auto count = conflicts.u32();
+    if (count > gc::galactic_max_objects || count > conflicts.remaining() / 16) return fail<void>("section conflicts: invalid count", path);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto tick = conflicts.u64(); auto conflict = decode_conflict(blob(conflicts), path);
+        if (!conflict) return core::Result<void>::failure(conflict.error());
+        recording.conflicts.push_back({tick, std::move(conflict).value()});
+    }
+    if (!conflicts.failed() && conflicts.remaining()) {
+        const auto admissions = conflicts.u32();
+        recording.conflict_services = true;
+        if (admissions > gc::galactic_max_objects || admissions > conflicts.remaining() / 19)
+            return fail<void>("section conflicts: invalid admission count", path);
+        for (std::uint32_t i = 0; i < admissions; ++i) {
+            campaign::RecordedAdmission entry; entry.entry_tick = conflicts.u64();
+            auto conflict = decode_conflict(blob(conflicts), path);
+            if (!conflict) return core::Result<void>::failure(conflict.error());
+            entry.conflict = std::move(conflict).value();
+            const auto route = conflicts.u8(), forced = conflicts.u8(), overrun = conflicts.u8();
+            if (route > static_cast<std::uint8_t>(campaign::ConflictRoute::tactical) || forced > 1 || overrun > 1)
+                return fail<void>("section conflicts: invalid admission policy", path);
+            entry.arbitration = {static_cast<campaign::ConflictRoute>(route), forced != 0, overrun != 0};
+            recording.admissions.push_back(std::move(entry));
+        }
+    }
+    if (conflicts.failed() || conflicts.remaining() != 0) return fail<void>("section conflicts: malformed", path);
+    if (active_conflict && std::none_of(recording.conflicts.begin(), recording.conflicts.end(), [&](const auto& entry) {
+        // WGS-P09: roles/departures evolve only the effective mapping; history keeps
+        // the original entry for replay. Readiness and save-only barriers advance only the parent clock.
+        // Final recapture below still compares every effective seat and exact saved section.
+        auto initial = *active_conflict;
+        const bool roles = recording.commands.setup.seat_control.has_value();
+        if (roles) initial.seats = entry.conflict.seats;
+        if (entry.conflict != initial || entry.entry_tick >= completed) return false;
+        const auto elapsed = completed - entry.entry_tick - 1;
+        if (roles) return elapsed >= child_log->completed_tick;
+        // Save barriers before the history base left with their history (#4058): only the upper bound is checkable.
+        if (entry.entry_tick < recording.base.at.tick) return elapsed >= child_log->completed_tick;
+        std::uint64_t save_barriers{};
+        const auto& commands = recording.commands.commands;
+        for (auto first = commands.begin(); first != commands.end();) {
+            const auto tick = first->key.tick;
+            auto last = std::find_if(first, commands.end(), [tick](const auto& command) { return command.key.tick != tick; });
+            if (tick > entry.entry_tick && tick < completed && std::all_of(first, last, [](const auto& command) {
+                return std::holds_alternative<gc::SaveRequest>(command.payload);
+            })) ++save_barriers;
+            first = last;
+        }
+        return elapsed >= save_barriers && elapsed - save_barriers == child_log->completed_tick;
+    })) return fail<void>("active child disagrees with conflict history", path);
+    // Validate canonical replay and header references before expensive reconstruction.
+    auto canonical = gc::write_replay(recording.commands);
+    if (!canonical || !std::equal(replay_bytes.begin(), replay_bytes.end(), canonical.value().begin(), canonical.value().end())
+        || recording.commands.setup.seed != saved.header.seed || recording.commands.setup.content_identity != build.content
+        || recording.commands.setup.campaign_identity != build.campaign)
+        return fail<void>("section session: inconsistent replay identity", path, diagnostic_codes::inconsistent);
+    auto sealed = campaign::history_frontier_of(recording, replay_bytes, completed);
+    if (!sealed) return core::Result<void>::failure(sealed.error());
+    InputFrontier frontier{};
+    if (const auto& key = sealed.value().last_key) frontier = {key->tick, key->seat.value, key->sequence, sealed.value().digest};
+    if (frontier != saved.header.frontier || ((saved.header.flags & flag_frontier) != 0) != sealed.value().last_key.has_value())
+        return fail<void>("section session: inconsistent sealed input frontier", path, diagnostic_codes::inconsistent);
+    boundary = std::move(sealed).value();
+    return core::Result<void>::success();
+}
+
+core::Result<void> prepare_checkpoint_runtime(const GameLoadOptions& options, auto& prepared_runtime, std::string_view path) {
+    auto prepared = options.prepare_galactic();
+    if (!prepared) return core::Result<void>::failure(prepared.error());
+    if (!prepared.value().configure_native_ai)
+        return fail<void>("prepared galactic runtime has no native installer", path);
+    if (static_cast<bool>(prepared.value().child_scripts) != static_cast<bool>(prepared.value().configure_child))
+        return fail<void>("prepared galactic runtime has an incomplete child script pair", path);
+    prepared_runtime.emplace(std::move(prepared).value());
+    return core::Result<void>::success();
+}
+
+core::Result<void> bind_checkpoint_services(campaign::GameSession& session, const GameLoadOptions& options,
+    auto& prepared_runtime, const bool direct) {
+    if (!direct) session.begin_native_reconstruction();
+    session.set_result_applier(options.apply_result); session.set_child_configurator(options.configure_child);
+    session.set_auto_resolve_outcome_services(options.auto_resolve_outcomes);
+    session.set_auto_resolver(options.auto_resolve); session.set_vote_progress(options.vote_progress);
+    session.set_conflict_gate(options.conflict_gate);
+    if (options.conflict_service) session.set_conflict_service(options.conflict_service, options.content, options.scripts, options.script_requirement);
+    if (options.configure_session) {
+        auto configured = options.configure_session(session);
+        if (!configured) return core::Result<void>::failure(configured.error());
+    }
+    if (prepared_runtime && prepared_runtime->child_parent_queries) {
+        for (const auto layer : {campaign::BattleLayer::space, campaign::BattleLayer::land}) {
+            auto bound = session.add_conflict_parent_queries(layer, prepared_runtime->child_parent_queries);
+            if (!bound) return core::Result<void>::failure(bound.error());
+        }
+    }
+    if (prepared_runtime && prepared_runtime->child_scripts) {
+        auto configured = session.set_child_script_services(prepared_runtime->child_scripts, prepared_runtime->configure_child);
+        if (!configured) return core::Result<void>::failure(configured.error());
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> restore_checkpoint_frontier(campaign::GameSession& session, const Checkpoint& saved, const bool direct,
+    const auto& completed, auto& active_conflict, auto& child_save, auto& child_log,
+    const sim::PartitionExecutor& executor, std::uint64_t& resimulated,
+    bool& child_restored, std::string_view path) {
+    if (direct) {
+        auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes);
+        if (!restored) return fail<void>("direct owner restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
+        if (session.completed_tick() != completed) return fail<void>("direct owner clock differs", path);
+    } else {
+    while (session.completed_tick() < completed) {
+        if (active_conflict && session.conflict() && session.conflict()->id == active_conflict->id) {
+            auto restored = session.restore_battle_checkpoint(*child_save.value(), child_log->log, completed, executor);
+            if (!restored) return fail<void>("child restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
+            child_restored = true;
+            break;
+        }
+        auto stepped = session.step(executor);
+        if (!stepped) return fail<void>("recording reconstruction failed: " + stepped.error().message, path, diagnostic_codes::restore_failed);
+        ++resimulated;
+    }
+    // A save at the activation barrier has a zero-tick child and still needs its host/state.
+    if (active_conflict && child_log->completed_tick == 0 && !child_restored) {
+        auto restored = session.restore_battle_checkpoint(*child_save.value(), child_log->log, completed, executor);
+        if (!restored) return fail<void>("child restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
+    }
+    if (auto finished = session.finish_native_reconstruction(executor); !finished)
+        return fail<void>("native effect reconstruction failed: " + finished.error().message, path, diagnostic_codes::restore_failed);
+    // A player-load prologue at the saved barrier has already run and must not run twice.
+    if (auto prologue = session.apply_restore_prologue(); !prologue) return core::Result<void>::failure(prologue.error());
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> restore_checkpoint_scripts(campaign::GameSession& session, auto& script_save, auto& prepared_runtime,
+    const GameLoadOptions& options, auto& prepared_native) {
+    if (script_save.value()) {
+        auto schedulers = [&]() -> core::Result<GameLoadOptions::GalacticSchedulers> {
+            if (!prepared_runtime) return options.galactic_scripts();
+            prepared_native = std::move(prepared_runtime->configure_native_ai);
+            return core::Result<GameLoadOptions::GalacticSchedulers>::success(std::move(prepared_runtime->schedulers));
+        }();
+        if (!schedulers) return core::Result<void>::failure(schedulers.error());
+        auto installed = session.install_galactic_scripts(std::move(schedulers.value().first), std::move(schedulers.value().second), script_save.value());
+        if (!installed) return core::Result<void>::failure(installed.error());
+        if (options.configure_galactic) {
+            auto configured = options.configure_galactic(*session.galactic_scripts());
+            if (!configured) return core::Result<void>::failure(configured.error());
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> restore_checkpoint_publication(campaign::GameSession& session, const auto& return_state_bytes,
+    auto& latest_context, auto& latest_result, const Checkpoint& saved,
+    const bool direct, campaign::ModeTimelineState& timelines, std::string_view path) {
+    if (auto restored = session.restore_return_state(return_state_bytes); !restored)
+        return core::Result<void>::failure(restored.error());
+    if (latest_result) {
+        auto restored = session.restore_latest_tactical_result(std::move(*latest_context), std::move(*latest_result));
+        if (!restored) return core::Result<void>::failure(restored.error());
+    }
+    else session.clear_latest_tactical_result();
+    // WGA-256: access is restored before any derived AI route/connectivity owner.
+    detail::Reader access_reader(saved.find(SectionId::planets)->bytes);
+    (void)blob(access_reader); (void)blob(access_reader);
+    if (session.galaxy().graph()) (void)blob(access_reader);
+    if (session.galaxy().setup().control) (void)blob(access_reader);
+    if (session.galaxy().setup().observer) (void)blob(access_reader);
+    if (session.galaxy().setup().economy_corruption) (void)blob(access_reader);
+    (void)blob(access_reader); // native invasion queue precedes the access component
+    const auto access_bytes = blob(access_reader);
+    if (access_reader.failed() || access_reader.remaining())
+        return fail<void>("malformed planet access boundary", path);
+    if (!direct && session.galaxy().snapshot()->planet_access()) {
+        auto restored = session.restore_planet_access(access_bytes);
+        if (!restored) return core::Result<void>::failure(restored.error());
+    } else if (!session.galaxy().snapshot()->planet_access() && !access_bytes.empty()) return fail<void>("unexpected planet access owner", path);
+    if (!direct) if (auto restored = session.restore_timeline(timelines); !restored)
+        return core::Result<void>::failure(restored.error());
+    // WGA-56/139: fixup only after world/child/Lua/return identities exist. No
+    // native engine is initialized or serviced while reconstructing the log.
+    if (!direct && session.galaxy().setup().census) {
+        detail::Reader production(saved.find(SectionId::production)->bytes);
+        (void)blob(production);
+        const auto census = blob(production);
+        if (production.failed()) return fail<void>("malformed saved actor census", path);
+        if (auto restored = session.restore_actor_representations(census); !restored)
+            return core::Result<void>::failure(restored.error());
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> validate_checkpoint_reconstruction(campaign::GameSession& session, const auto& expected_hash, const auto& strategic,
+    const auto& tactical, const Checkpoint& saved, const Identities& build,
+    const bool direct, std::string_view path) {
+    Digest actual{}; (void)detail::from_hex(session.state_sha256(), actual);
+    if (actual != expected_hash || session.galaxy().clock().strategic_speed.raw() != static_cast<std::int64_t>(strategic)
+        || session.galaxy().clock().tactical_speed.raw() != static_cast<std::int64_t>(tactical)) {
+        // Name the sections whose canonical bytes differ so a hash mismatch is actionable.
+        std::string detail_text;
+        if (auto probe = capture(session, build)) {
+            for (const auto& section : saved.sections) {
+                const auto* other = probe.value().find(static_cast<SectionId>(section.id));
+                if (!other || *other == section) continue;
+                std::size_t at = 0;
+                while (at < other->bytes.size() && at < section.bytes.size() && other->bytes[at] == section.bytes[at]) ++at;
+                detail_text += " " + std::string(section_name(section.id)) + "@" + std::to_string(at) + "("
+                    + std::to_string(section.bytes.size()) + "/" + std::to_string(other->bytes.size()) + ")";
+            }
+        }
+        return fail<void>("reconstructed game state differs" + (detail_text.empty() ? std::string{} : ";" + detail_text),
+            path, diagnostic_codes::restore_failed);
+    }
+    auto recaptured = capture(session, build);
+    if (!recaptured) return core::Result<void>::failure(recaptured.error());
+    if (recaptured.value().header != saved.header) return fail<void>("reconstructed header differs", path, diagnostic_codes::inconsistent);
+    for (const auto& section : saved.sections) {
+        if (section.id >= 0x8000 || !known_section(section.id)) continue;
+        if (!direct && section.id == static_cast<std::uint16_t>(SectionId::galactic_owner)) continue;
+        const auto* expected = recaptured.value().find(static_cast<SectionId>(section.id));
+        if (!expected || *expected != section) {
+            std::size_t at{};
+            if (expected) while (at < expected->bytes.size() && at < section.bytes.size() && expected->bytes[at] == section.bytes[at]) ++at;
+            return fail<void>("reconstructed section differs: " + std::string(section_name(section.id))
+                + "@" + std::to_string(at), path, diagnostic_codes::inconsistent);
+        }
+    }
+    for (const auto& section : recaptured.value().sections)
+        if (!saved.find(static_cast<SectionId>(section.id))) return fail<void>("missing child section", path);
+    return core::Result<void>::success();
+}
+
+core::Result<void> apply_checkpoint_player_load(GameRestore& result, campaign::GameRecording& recording, const auto& completed,
+    const GameLoadOptions& options, std::string_view path) {
+    const auto& setup = result.session.galaxy().setup();
+    const auto live_seats = result.session.galaxy().seats();
+    const auto human = std::find_if(live_seats.begin(), live_seats.end(), [](const auto& row) { return row.kind == gc::SeatKind::human && row.active; });
+    if (human == live_seats.end()) return fail<void>("player load needs an active human seat", path);
+    const auto humans = std::count_if(setup.seats.begin(), setup.seats.end(), [](const auto& row) { return row.kind == gc::SeatKind::human; });
+    // WGS-43 differs deliberately from runtime/resync pause preservation.
+    const auto depth = result.session.galaxy().clock().pause_depth;
+    const auto normalized = depth != 0 && (result.session.mode() == campaign::SessionMode::battle
+        || result.session.pending_conflict()) ? 1U : 0U;
+    const bool pending = result.session.conflict() || result.session.pending_conflict() || std::any_of(recording.conflicts.begin(), recording.conflicts.end(),
+        [&](const auto& entry) { return entry.entry_tick >= completed; });
+    gc::GameCommand fixup{{completed, human->seat_id, 0}, gc::PostLoadFixup{normalized, humans == 1 && normalized == 0, pending, options.reserved_autosave}};
+    if (auto applied = result.session.apply_load_fixup(fixup); !applied) return core::Result<void>::failure(applied.error());
+    result.first_commands.push_back(fixup);
+    return core::Result<void>::success();
+}
+
+} // namespace
+
+namespace {
+
+// Test oracle for a save whose history starts at an earlier save: import that save's world/game owner (no scripts, AI
+// or child; a window is replayed the way a new game's history is) and check it is the boundary the save names.
+core::Result<campaign::GameSession> import_oracle_base(std::span<const std::uint8_t> base_bytes, const Identities& build,
+    const GameLoadOptions& options, const campaign::GameSession::ScriptFactory& child_scripts, auto& prepared_runtime,
+    const campaign::HistoryBoundary& expected, std::string_view path) {
+    using Session = campaign::GameSession;
+    auto parsed = parse_checkpoint(base_bytes, path);
+    if (!parsed) return core::Result<Session>::failure(parsed.error());
+    const auto& saved = parsed.value();
+    if (auto phase = validate_checkpoint_sections(saved, build, options, path); !phase) return core::Result<Session>::failure(phase.error());
+    if ((saved.header.flags & flag_child) != 0) return fail<Session>("the replay oracle cannot start from a save with a battle in progress", path);
+    detail::Reader context(saved.find(SectionId::session)->bytes);
+    const auto prefix = detail::read_session_prefix(context);
+    auto replay = gc::parse_replay(prefix.replay, path);
+    if (!replay || context.failed()) return fail<Session>("base save: invalid recording", path);
+    campaign::GameRecording recording{std::move(replay).value(), {}, {}};
+    recording.base = prefix.base;
+    if (auto phase = decode_checkpoint_fixups(context, recording, path); !phase) return core::Result<Session>::failure(phase.error());
+    std::optional<ChildLog> no_child;
+    std::optional<campaign::ConflictRecord> no_conflict;
+    campaign::HistoryBoundary boundary;
+    if (auto phase = validate_checkpoint_recording(saved, recording, no_conflict, prefix.completed, no_child, prefix.replay, build, boundary, path); !phase)
+        return core::Result<Session>::failure(phase.error());
+    if (boundary.tick != expected.tick || boundary.digest != expected.digest || boundary.last_key != expected.last_key)
+        return fail<Session>("section session: history base differs from the earlier save it names", path, diagnostic_codes::inconsistent);
+    auto created = Session::from_recording(recording, options.content, child_scripts, options.script_requirement);
+    if (!created) return created;
+    auto session = std::move(created).value();
+    if (auto phase = bind_checkpoint_services(session, options, prepared_runtime, true); !phase) return core::Result<Session>::failure(phase.error());
+    auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes);
+    if (!restored) return fail<Session>("base owner restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
+    if (session.completed_tick() != prefix.completed) return fail<Session>("base owner clock differs", path);
+    session.schedule_history_rebase(std::move(boundary));
+    return core::Result<Session>::success(std::move(session));
+}
+
+} // namespace
+
+static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::uint8_t> bytes, const Identities& build,
+    const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path, bool direct,
+    std::span<const std::uint8_t> oracle_base = {}) {
+    auto parsed = parse_checkpoint(bytes, path);
+    if (!parsed) return core::Result<GameRestore>::failure(parsed.error());
+    const auto& saved = parsed.value();
+    if (auto phase = validate_checkpoint_sections(saved, build, options, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     const auto& scripts_bytes = saved.find(SectionId::scripts)->bytes;
     const auto* ai_section = saved.find(SectionId::galactic_ai);
     if (!ai_section || !ai_section->required || ai_section->version != 1)
@@ -573,15 +952,8 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     const auto has_result = returned.u8();
     std::optional<campaign::ConflictRecord> latest_context;
     std::optional<campaign::BattleResult> latest_result;
-    if (has_result == 1) {
-        auto decoded_context = decode_conflict(blob(returned), path);
-        if (!decoded_context) return core::Result<GameRestore>::failure(decoded_context.error());
-        auto decoded_result = decode_result(blob(returned), path);
-        if (!decoded_result) return core::Result<GameRestore>::failure(decoded_result.error());
-        latest_context = std::move(decoded_context).value(); latest_result = std::move(decoded_result).value();
-        if (latest_context->id != latest_result->conflict) return fail<GameRestore>("tactical result context differs", path);
-    }
-    if (has_result > 1 || returned.failed() || returned.remaining()) return fail<GameRestore>("malformed tactical return section", path);
+    if (auto phase = decode_checkpoint_return_result(returned, has_result, latest_context, latest_result, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     std::size_t script_length{};
     auto script_save = decode_scripts(scripts_bytes, path, script_length);
     if (!script_save) return core::Result<GameRestore>::failure(script_save.error());
@@ -595,17 +967,8 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     std::optional<ChildLog> child_log;
     std::optional<campaign::ConflictRecord> active_conflict;
     if (has_child) {
-        if (!child_state->required || !child_section->required || child_state->version != child_state_section_version
-            || child_section->version != child_log_section_version) return fail<GameRestore>("unsupported or optional child section", path);
-        auto log = decode_child_log(child_section->bytes, path);
-        if (!log) return core::Result<GameRestore>::failure(log.error());
-        auto conflict = decode_conflict(log.value().conflict_record, path);
-        if (!conflict) return core::Result<GameRestore>::failure(conflict.error());
-        if (log.value().completed_tick != child_save.value()->scripts.completed_tick
-            || log.value().completed_tick > saved.header.completed_tick)
-            return fail<GameRestore>("child log and host clocks differ", path);
-        child_save.value()->state = child_state->bytes;
-        child_log = std::move(log).value(); active_conflict = std::move(conflict).value();
+        if (auto phase = decode_checkpoint_child(child_state, child_section, child_save, saved, child_log, active_conflict, path); !phase)
+            return core::Result<GameRestore>::failure(phase.error());
     }
     if (script_save.value() && !options.galactic_scripts && !options.prepare_galactic) return fail<GameRestore>("section scripts needs pinned scheduler resolver", path);
     detail::Reader context(saved.find(SectionId::session)->bytes);
@@ -616,153 +979,42 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
     auto replay = gc::parse_replay(replay_bytes, path);
     if (!replay || context.failed()) return fail<GameRestore>("section session: invalid recording", path);
     campaign::GameRecording recording{std::move(replay).value(), {}, {}};
-    const auto fixups = context.u32();
-    if (fixups > gc::galactic_max_commands || fixups > context.remaining() / 35) return fail<GameRestore>("section session: invalid prologue count", path);
-    for (std::uint32_t i = 0; i < fixups; ++i) {
-        gc::GameCommand command; command.key.tick = context.u64(); command.key.seat = sim::SeatId{context.u32()}; command.key.sequence = context.u64();
-        const auto payload = blob(context);
-        auto decoded = gc::decode_payload(gc::CommandLayer::session, gc::session_opcodes::post_load_fixup, Bytes(payload.begin(), payload.end()));
-        if (!decoded) return fail<GameRestore>("section session: malformed load command", path);
-        command.payload = *decoded; recording.load_fixups.push_back(std::move(command));
-    }
+    recording.base = prefix.base;
+    if (auto phase = decode_checkpoint_fixups(context, recording, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     campaign::ModeTimelineState timelines;
-    const auto galaxy_timeline = context.u32(); const auto historical = context.u8();
-    if (galaxy_timeline > 5 || historical > 1) return fail<GameRestore>("invalid saved timeline", path);
-    timelines.galaxy = static_cast<std::int32_t>(galaxy_timeline);
-    if (historical) {
-        const auto conflict = context.u64(); const auto tick = context.u64(); const auto value = context.u32();
-        if (value > 5) return fail<GameRestore>("invalid historical timeline", path);
-        timelines.historical_child = campaign::ModeTimelineSnapshot{{campaign::SessionMode::battle, conflict}, tick, static_cast<std::int32_t>(value)};
-    }
-    if (context.failed() || context.remaining() != 0 || completed != saved.header.completed_tick
-        || completed > recording.commands.final_tick_count || strategic == 0 || tactical == 0
-        || strategic > static_cast<std::uint64_t>(gc::max_speed_factor_raw) || tactical > static_cast<std::uint64_t>(gc::max_speed_factor_raw))
-        return fail<GameRestore>("section session: inconsistent clocks or frontier", path, diagnostic_codes::inconsistent);
-    detail::Reader conflicts(saved.find(SectionId::conflicts)->bytes);
-    const auto count = conflicts.u32();
-    if (count > gc::galactic_max_objects || count > conflicts.remaining() / 16) return fail<GameRestore>("section conflicts: invalid count", path);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        const auto tick = conflicts.u64(); auto conflict = decode_conflict(blob(conflicts), path);
-        if (!conflict) return core::Result<GameRestore>::failure(conflict.error());
-        recording.conflicts.push_back({tick, std::move(conflict).value()});
-    }
-    if (!conflicts.failed() && conflicts.remaining()) {
-        const auto admissions = conflicts.u32();
-        recording.conflict_services = true;
-        if (admissions > gc::galactic_max_objects || admissions > conflicts.remaining() / 19)
-            return fail<GameRestore>("section conflicts: invalid admission count", path);
-        for (std::uint32_t i = 0; i < admissions; ++i) {
-            campaign::RecordedAdmission entry; entry.entry_tick = conflicts.u64();
-            auto conflict = decode_conflict(blob(conflicts), path);
-            if (!conflict) return core::Result<GameRestore>::failure(conflict.error());
-            entry.conflict = std::move(conflict).value();
-            const auto route = conflicts.u8(), forced = conflicts.u8(), overrun = conflicts.u8();
-            if (route > static_cast<std::uint8_t>(campaign::ConflictRoute::tactical) || forced > 1 || overrun > 1)
-                return fail<GameRestore>("section conflicts: invalid admission policy", path);
-            entry.arbitration = {static_cast<campaign::ConflictRoute>(route), forced != 0, overrun != 0};
-            recording.admissions.push_back(std::move(entry));
-        }
-    }
-    if (conflicts.failed() || conflicts.remaining() != 0) return fail<GameRestore>("section conflicts: malformed", path);
-    if (active_conflict && std::none_of(recording.conflicts.begin(), recording.conflicts.end(), [&](const auto& entry) {
-        // WGS-P09: roles/departures evolve only the effective mapping; history keeps
-        // the original entry for replay. Readiness and save-only barriers advance only the parent clock.
-        // Final recapture below still compares every effective seat and exact saved section.
-        auto initial = *active_conflict;
-        const bool roles = recording.commands.setup.seat_control.has_value();
-        if (roles) initial.seats = entry.conflict.seats;
-        if (entry.conflict != initial || entry.entry_tick >= completed) return false;
-        const auto elapsed = completed - entry.entry_tick - 1;
-        if (roles) return elapsed >= child_log->completed_tick;
-        std::uint64_t save_barriers{};
-        const auto& commands = recording.commands.commands;
-        for (auto first = commands.begin(); first != commands.end();) {
-            const auto tick = first->key.tick;
-            auto last = std::find_if(first, commands.end(), [tick](const auto& command) { return command.key.tick != tick; });
-            if (tick > entry.entry_tick && tick < completed && std::all_of(first, last, [](const auto& command) {
-                return std::holds_alternative<gc::SaveRequest>(command.payload);
-            })) ++save_barriers;
-            first = last;
-        }
-        return elapsed >= save_barriers && elapsed - save_barriers == child_log->completed_tick;
-    })) return fail<GameRestore>("active child disagrees with conflict history", path);
-    // Validate canonical replay and header references before expensive reconstruction.
-    auto canonical = gc::write_replay(recording.commands);
-    if (!canonical || !std::equal(replay_bytes.begin(), replay_bytes.end(), canonical.value().begin(), canonical.value().end())
-        || recording.commands.setup.seed != saved.header.seed || recording.commands.setup.content_identity != build.content
-        || recording.commands.setup.campaign_identity != build.campaign)
-        return fail<GameRestore>("section session: inconsistent replay identity", path, diagnostic_codes::inconsistent);
-    InputFrontier frontier{};
-    if (!recording.commands.commands.empty()) {
-        const auto key = recording.commands.commands.back().key;
-        frontier = {key.tick, key.seat.value, key.sequence, core::sha256(replay_bytes)};
-    }
-    if (frontier != saved.header.frontier || ((saved.header.flags & flag_frontier) != 0) != !recording.commands.commands.empty())
-        return fail<GameRestore>("section session: inconsistent sealed input frontier", path, diagnostic_codes::inconsistent);
+    if (auto phase = decode_checkpoint_timelines(context, timelines, completed, saved, recording, strategic, tactical, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
+    campaign::HistoryBoundary boundary;
+    if (auto phase = validate_checkpoint_recording(saved, recording, active_conflict, completed, child_log, replay_bytes, build, boundary, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
+    const bool windowed_oracle = !direct && recording.base.at.tick != 0;
+    if (windowed_oracle && (oracle_base.empty() || has_child))
+        return fail<GameRestore>(has_child ? "the replay oracle cannot replay a window with a battle in progress"
+            : "section session: history starts at an earlier save that the replay oracle needs", path, diagnostic_codes::inconsistent);
     // Prepare parent owners without servicing them. Their child bindings must
     // already exist when reconstructing/restoring a parent-aware Lua graph.
     std::optional<GameLoadOptions::PreparedGalacticScripts> prepared_runtime;
     if (script_save.value() && options.prepare_galactic) {
-        auto prepared = options.prepare_galactic();
-        if (!prepared) return core::Result<GameRestore>::failure(prepared.error());
-        if (!prepared.value().configure_native_ai)
-            return fail<GameRestore>("prepared galactic runtime has no native installer", path);
-        if (static_cast<bool>(prepared.value().child_scripts) != static_cast<bool>(prepared.value().configure_child))
-            return fail<GameRestore>("prepared galactic runtime has an incomplete child script pair", path);
-        prepared_runtime.emplace(std::move(prepared).value());
+        if (auto phase = prepare_checkpoint_runtime(options, prepared_runtime, path); !phase)
+            return core::Result<GameRestore>::failure(phase.error());
     }
     const auto& child_scripts = prepared_runtime && prepared_runtime->child_scripts ? prepared_runtime->child_scripts : options.scripts;
-    auto created = campaign::GameSession::from_recording(recording, options.content, child_scripts, options.script_requirement);
+    auto created = windowed_oracle
+        ? import_oracle_base(oracle_base, build, options, child_scripts, prepared_runtime, recording.base.at, path)
+        : campaign::GameSession::from_recording(recording, options.content, child_scripts, options.script_requirement);
     if (!created) return core::Result<GameRestore>::failure(created.error());
     auto session = std::move(created).value();
-    if (!direct) session.begin_native_reconstruction();
-    session.set_result_applier(options.apply_result); session.set_child_configurator(options.configure_child);
-    session.set_auto_resolve_outcome_services(options.auto_resolve_outcomes);
-    session.set_auto_resolver(options.auto_resolve); session.set_vote_progress(options.vote_progress);
-    session.set_conflict_gate(options.conflict_gate);
-    if (options.conflict_service) session.set_conflict_service(options.conflict_service, options.content, options.scripts, options.script_requirement);
-    if (options.configure_session) {
-        auto configured = options.configure_session(session);
-        if (!configured) return core::Result<GameRestore>::failure(configured.error());
-    }
-    if (prepared_runtime && prepared_runtime->child_parent_queries) {
-        for (const auto layer : {campaign::BattleLayer::space, campaign::BattleLayer::land}) {
-            auto bound = session.add_conflict_parent_queries(layer, prepared_runtime->child_parent_queries);
-            if (!bound) return core::Result<GameRestore>::failure(bound.error());
-        }
-    }
-    if (prepared_runtime && prepared_runtime->child_scripts) {
-        auto configured = session.set_child_script_services(prepared_runtime->child_scripts, prepared_runtime->configure_child);
-        if (!configured) return core::Result<GameRestore>::failure(configured.error());
-    }
+    if (windowed_oracle) {
+        // The base is imported; the window now replays on top of it exactly as a new game's history does.
+        if (auto appended = session.append_recording_window(recording); !appended) return core::Result<GameRestore>::failure(appended.error());
+        session.begin_native_reconstruction();
+    } else if (auto phase = bind_checkpoint_services(session, options, prepared_runtime, direct); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     std::uint64_t resimulated{};
     bool child_restored{};
-    if (direct) {
-        auto restored = session.load_checkpoint_state(saved.find(SectionId::galactic_owner)->bytes);
-        if (!restored) return fail<GameRestore>("direct owner restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
-        if (session.completed_tick() != completed) return fail<GameRestore>("direct owner clock differs", path);
-    } else {
-    while (session.completed_tick() < completed) {
-        if (active_conflict && session.conflict() && session.conflict()->id == active_conflict->id) {
-            auto restored = session.restore_battle_checkpoint(*child_save.value(), child_log->log, completed, executor);
-            if (!restored) return fail<GameRestore>("child restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
-            child_restored = true;
-            break;
-        }
-        auto stepped = session.step(executor);
-        if (!stepped) return fail<GameRestore>("recording reconstruction failed: " + stepped.error().message, path, diagnostic_codes::restore_failed);
-        ++resimulated;
-    }
-    // A save at the activation barrier has a zero-tick child and still needs its host/state.
-    if (active_conflict && child_log->completed_tick == 0 && !child_restored) {
-        auto restored = session.restore_battle_checkpoint(*child_save.value(), child_log->log, completed, executor);
-        if (!restored) return fail<GameRestore>("child restoration failed: " + restored.error().message, path, diagnostic_codes::restore_failed);
-    }
-    if (auto finished = session.finish_native_reconstruction(executor); !finished)
-        return fail<GameRestore>("native effect reconstruction failed: " + finished.error().message, path, diagnostic_codes::restore_failed);
-    // A player-load prologue at the saved barrier has already run and must not run twice.
-    if (auto prologue = session.apply_restore_prologue(); !prologue) return core::Result<GameRestore>::failure(prologue.error());
-    }
+    if (auto phase = restore_checkpoint_frontier(session, saved, direct, completed, active_conflict, child_save, child_log, executor, resimulated, child_restored, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     // WGS-57/173: story rewards mutate the active monitor synchronously rather
     // than issuing ordinary replay commands. Restore its sealed owner before
     // script-host world-hash checks, without replaying registration notices.
@@ -773,112 +1025,26 @@ static core::Result<GameRestore> load_game_checkpoint_impl(std::span<const std::
             return core::Result<GameRestore>::failure(restored.error());
     }
     std::function<core::Result<void>(campaign::GameSession&)> prepared_native;
-    if (script_save.value()) {
-        auto schedulers = [&]() -> core::Result<GameLoadOptions::GalacticSchedulers> {
-            if (!prepared_runtime) return options.galactic_scripts();
-            prepared_native = std::move(prepared_runtime->configure_native_ai);
-            return core::Result<GameLoadOptions::GalacticSchedulers>::success(std::move(prepared_runtime->schedulers));
-        }();
-        if (!schedulers) return core::Result<GameRestore>::failure(schedulers.error());
-        auto installed = session.install_galactic_scripts(std::move(schedulers.value().first), std::move(schedulers.value().second), script_save.value());
-        if (!installed) return core::Result<GameRestore>::failure(installed.error());
-        if (options.configure_galactic) {
-            auto configured = options.configure_galactic(*session.galactic_scripts());
-            if (!configured) return core::Result<GameRestore>::failure(configured.error());
-        }
-    }
-    if (auto restored = session.restore_return_state(return_state_bytes); !restored)
-        return core::Result<GameRestore>::failure(restored.error());
-    if (latest_result) {
-        auto restored = session.restore_latest_tactical_result(std::move(*latest_context), std::move(*latest_result));
-        if (!restored) return core::Result<GameRestore>::failure(restored.error());
-    }
-    else session.clear_latest_tactical_result();
-    // WGA-256: access is restored before any derived AI route/connectivity owner.
-    detail::Reader access_reader(saved.find(SectionId::planets)->bytes);
-    (void)blob(access_reader); (void)blob(access_reader);
-    if (session.galaxy().graph()) (void)blob(access_reader);
-    if (session.galaxy().setup().control) (void)blob(access_reader);
-    if (session.galaxy().setup().observer) (void)blob(access_reader);
-    if (session.galaxy().setup().economy_corruption) (void)blob(access_reader);
-    (void)blob(access_reader); // native invasion queue precedes the access component
-    const auto access_bytes = blob(access_reader);
-    if (access_reader.failed() || access_reader.remaining())
-        return fail<GameRestore>("malformed planet access boundary", path);
-    if (!direct && session.galaxy().snapshot()->planet_access()) {
-        auto restored = session.restore_planet_access(access_bytes);
-        if (!restored) return core::Result<GameRestore>::failure(restored.error());
-    } else if (!session.galaxy().snapshot()->planet_access() && !access_bytes.empty()) return fail<GameRestore>("unexpected planet access owner", path);
-    if (!direct) if (auto restored = session.restore_timeline(timelines); !restored)
-        return core::Result<GameRestore>::failure(restored.error());
-    // WGA-56/139: fixup only after world/child/Lua/return identities exist. No
-    // native engine is initialized or serviced while reconstructing the log.
-    if (!direct && session.galaxy().setup().census) {
-        detail::Reader production(saved.find(SectionId::production)->bytes);
-        (void)blob(production);
-        const auto census = blob(production);
-        if (production.failed()) return fail<GameRestore>("malformed saved actor census", path);
-        if (auto restored = session.restore_actor_representations(census); !restored)
-            return core::Result<GameRestore>::failure(restored.error());
-    }
+    if (auto phase = restore_checkpoint_scripts(session, script_save, prepared_runtime, options, prepared_native); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
+    if (auto phase = restore_checkpoint_publication(session, return_state_bytes, latest_context, latest_result, saved, direct, timelines, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
     if (prepared_native || options.configure_native_ai) {
         auto configured = prepared_native ? prepared_native(session) : options.configure_native_ai(session);
         if (!configured) return core::Result<GameRestore>::failure(configured.error());
     }
     if (auto restored = session.restore_galactic_ai(ai_save.value()); !restored)
         return core::Result<GameRestore>::failure(restored.error());
-    Digest actual{}; (void)detail::from_hex(session.state_sha256(), actual);
-    if (actual != expected_hash || session.galaxy().clock().strategic_speed.raw() != static_cast<std::int64_t>(strategic)
-        || session.galaxy().clock().tactical_speed.raw() != static_cast<std::int64_t>(tactical)) {
-        // Name the sections whose canonical bytes differ so a hash mismatch is actionable.
-        std::string detail_text;
-        if (auto probe = capture(session, build)) {
-            for (const auto& section : saved.sections) {
-                const auto* other = probe.value().find(static_cast<SectionId>(section.id));
-                if (!other || *other == section) continue;
-                std::size_t at = 0;
-                while (at < other->bytes.size() && at < section.bytes.size() && other->bytes[at] == section.bytes[at]) ++at;
-                detail_text += " " + std::string(section_name(section.id)) + "@" + std::to_string(at) + "("
-                    + std::to_string(section.bytes.size()) + "/" + std::to_string(other->bytes.size()) + ")";
-            }
-        }
-        return fail<GameRestore>("reconstructed game state differs" + (detail_text.empty() ? std::string{} : ";" + detail_text),
-            path, diagnostic_codes::restore_failed);
-    }
-    auto recaptured = capture(session, build);
-    if (!recaptured) return core::Result<GameRestore>::failure(recaptured.error());
-    if (recaptured.value().header != saved.header) return fail<GameRestore>("reconstructed header differs", path, diagnostic_codes::inconsistent);
-    for (const auto& section : saved.sections) {
-        if (section.id >= 0x8000 || !known_section(section.id)) continue;
-        if (!direct && section.id == static_cast<std::uint16_t>(SectionId::galactic_owner)) continue;
-        const auto* expected = recaptured.value().find(static_cast<SectionId>(section.id));
-        if (!expected || *expected != section) {
-            std::size_t at{};
-            if (expected) while (at < expected->bytes.size() && at < section.bytes.size() && expected->bytes[at] == section.bytes[at]) ++at;
-            return fail<GameRestore>("reconstructed section differs: " + std::string(section_name(section.id))
-                + "@" + std::to_string(at), path, diagnostic_codes::inconsistent);
-        }
-    }
-    for (const auto& section : recaptured.value().sections)
-        if (!saved.find(static_cast<SectionId>(section.id))) return fail<GameRestore>("missing child section", path);
+    if (auto phase = validate_checkpoint_reconstruction(session, expected_hash, strategic, tactical, saved, build, direct, path); !phase)
+        return core::Result<GameRestore>::failure(phase.error());
+    // #4058: the loaded save is the new history boundary; the first step drops the window it was restored with.
+    session.schedule_history_rebase(std::move(boundary));
     session.clear_auto_resolve_history(); // WAR-63: result reconstruction does not persist the runtime ring.
     GameRestore result{std::move(session), saved.header, {resimulated, bytes.size()}, {}, {}};
     if (const auto* hints = saved.find(SectionId::presentation_hints)) result.presentation_hints = hints->bytes;
     if (options.player_load) {
-        const auto& setup = result.session.galaxy().setup();
-        const auto live_seats = result.session.galaxy().seats();
-        const auto human = std::find_if(live_seats.begin(), live_seats.end(), [](const auto& row) { return row.kind == gc::SeatKind::human && row.active; });
-        if (human == live_seats.end()) return fail<GameRestore>("player load needs an active human seat", path);
-        const auto humans = std::count_if(setup.seats.begin(), setup.seats.end(), [](const auto& row) { return row.kind == gc::SeatKind::human; });
-        // WGS-43 differs deliberately from runtime/resync pause preservation.
-        const auto depth = result.session.galaxy().clock().pause_depth;
-        const auto normalized = depth != 0 && (result.session.mode() == campaign::SessionMode::battle
-            || result.session.pending_conflict()) ? 1U : 0U;
-        const bool pending = result.session.conflict() || result.session.pending_conflict() || std::any_of(recording.conflicts.begin(), recording.conflicts.end(),
-            [&](const auto& entry) { return entry.entry_tick >= completed; });
-        gc::GameCommand fixup{{completed, human->seat_id, 0}, gc::PostLoadFixup{normalized, humans == 1 && normalized == 0, pending, options.reserved_autosave}};
-        if (auto applied = result.session.apply_load_fixup(fixup); !applied) return core::Result<GameRestore>::failure(applied.error());
-        result.first_commands.push_back(fixup);
+        if (auto phase = apply_checkpoint_player_load(result, recording, completed, options, path); !phase)
+            return core::Result<GameRestore>::failure(phase.error());
     }
     return core::Result<GameRestore>::success(std::move(result));
 }
@@ -887,8 +1053,9 @@ core::Result<GameRestore> load_game_checkpoint(std::span<const std::uint8_t> byt
     return load_game_checkpoint_impl(bytes, build, options, executor, path, true);
 }
 core::Result<GameRestore> replay_game_checkpoint_for_testing(std::span<const std::uint8_t> bytes,
-    const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor) {
-    return load_game_checkpoint_impl(bytes, build, options, executor, {}, false);
+    const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
+    std::span<const std::uint8_t> base) {
+    return load_game_checkpoint_impl(bytes, build, options, executor, {}, false, base);
 }
 core::Result<void> restore_game_checkpoint(GameRestore& running, std::span<const std::uint8_t> bytes,
     const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor, std::string_view path) {

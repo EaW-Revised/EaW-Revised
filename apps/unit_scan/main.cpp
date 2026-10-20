@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 // P2-02 (#65) scan of the pinned M2 fleet: loads the FoC unit tables from an
 // installation read-only and lists each selected unit with every unresolved
 // field or reference, the notes and the replay content identity. Nothing from
@@ -93,23 +94,7 @@ std::string decimal(const std::optional<Fixed>& value) {
 }
 
 std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        default:
-            if (character < 0x20U || character >= 0x7fU) {
-                output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
-            } else {
-                output << static_cast<char>(character);
-            }
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote_ascii(value);
 }
 
 std::string hex(const std::array<std::uint8_t, 32>& bytes) {

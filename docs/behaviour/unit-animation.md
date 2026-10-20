@@ -167,6 +167,17 @@ clip when they die.
 - **UA-C6** `rv_corvette_d_die_00` hides its pieces by visibility keys as it plays; with the default
   persistence the corvette clone then stays, drawn with nothing visible, for the rest of the
   battle (UA-08, UA-11).
+  The viewer releases a retained wreck's instance and palette once its completed final pose hides
+  every weighted geometry piece and its emitters no longer need the host. Finite hidden-particle
+  drains retain their last frames; visible geometry or emitting fire keeps its presentation.
+  The authoritative wreck record stays unchanged. A terminally hidden launch clone keeps its
+  source slot bound until session teardown, while releasing its render state. Returning that
+  lease changes late-battle pixels; terminal slot recycling is deferred. Ordinary
+  finite-expiry purchase slots still retain immutable compose templates for their next owner.
+  Hidden skin bones retain their translations, so the shortcut also requires every uploaded
+  triangle to collapse under the hidden palette. Mixed influence streams that may still span
+  geometry, unskinned components, billboards and independent vertex deformation keep the final
+  cached pose instead. This conservative check preserves existing mod geometry.
 
 <a id="retail-references-81"></a>
 

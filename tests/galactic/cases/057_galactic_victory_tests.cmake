@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_campaign_transitions
+    NO_ARGS
+
     NAME galactic_victory_tests
     SOURCES victory_tests.cpp
     LIBS eawr::campaign eawr::platform eawr::checkpoint

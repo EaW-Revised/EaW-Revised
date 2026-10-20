@@ -1,0 +1,6 @@
+[
+  {
+    "old": "tests/script/authoritative/lua_script_bench.cpp#ok",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  }
+]

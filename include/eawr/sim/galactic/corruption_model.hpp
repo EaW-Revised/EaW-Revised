@@ -129,6 +129,11 @@ struct Offer { Id item{}; Fixed price; bool owned{}; friend bool operator==(cons
 // WGEP-58/WGCH-37: authored list order, faction filter, retain owned offers.
 [[nodiscard]] core::Result<std::vector<Offer>> offers(const MarketContext&,
     std::span<const MarketItem>, std::span<const MarketPlayer>, const std::set<Id>& owned);
+// WGEP-109: the technology the menu header shows. Ordinary games read the first player of the first offer's item
+// faction; multiplayer GC takes the highest displayed technology of every other player (from -1) and keeps the
+// faction player's value when none beats -1. Not a purchase admission check. Unverified: a faction shared by
+// several players uses the first in player order, and a faction with no player yields no header.
+[[nodiscard]] std::optional<int> menu_header_tech(bool multiplayer, Id item_faction, std::span<const MarketPlayer>);
 // WGEP-80: rounded UI affordability is separate from exact execution comparison.
 [[nodiscard]] core::Result<bool> menu_enabled(const Offer&, Fixed credits);
 // WGEP-55/80, WGCH-74: caller resolves current buyer owner into Player (prepared

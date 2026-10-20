@@ -1,5 +1,15 @@
 #include "skirmish_start_support.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 namespace skirmish_start_test_support {
 
 // MAT-08, MAT-09: a demo map's start keeps the map's own forces, owned by the editor player each

@@ -5,15 +5,10 @@
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
+
 #include <cstdint>
-#include <iostream>
 #include <optional>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace economy_test_support {
@@ -23,7 +18,7 @@ namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-extern int failures;
+extern int& failures;
 extern const std::vector<tactical::SensorProfile> sensors;
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

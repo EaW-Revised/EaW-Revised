@@ -21,7 +21,7 @@
 
 namespace eawr_terrain_test {
 
-extern int failures;
+extern int& failures;
 
 void expect(bool condition, const char* message);
 eawr::assets::Map synthetic_map(

@@ -157,6 +157,7 @@ void GalacticSaveControls::publish_save() {
     }
     platform::LiveSaveRequest request; request.seat = sim::SeatId{state_.galaxy->local.seat};
     request.name = pending_name_; request.overwrite = pending_overwrite_; request.quick = pending_quick_;
+    request.autosave = pending_autosave_quit_;
     ViewHints hints{state_.acknowledged_battle_summary, state_.map_input.selected,
         state_.briefing_conflict, state_.briefing_done, state_.fleet_order_for_save()};
     const auto frame = state_.battle_dialog_frame();
@@ -222,6 +223,8 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     }
     options.pacing = state_.interactive ? platform::LiveGameSession::Pacing::real_time : platform::LiveGameSession::Pacing::driven;
     options.await_presentation = true;
+    // The recorded interactive seat is retained by the restored owner.
+
     auto started = platform::LiveGameSession::start(std::move(prepared), options);
     if (!started) return refuse_load(started.error().message, at_start);
     const auto first = started.value()->frame();
@@ -233,6 +236,9 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     observe_world_selection();
     state_.release_battle_presentation(); state_.game->stop(); state_.game = std::move(started).value();
     state_.owner_lifetime = state_.game->lifetime(); galaxy_pause_ = false; paused_child_ = 0;
+    const auto held_summary = first.summary_hold;
+    if (held_summary && hints.acknowledgement.contains(held_summary))
+        state_.game->reconcile_battle_summary(seat, held_summary);
     state_.restored_auto_summary = std::move(saved_summary);
     state_.audio_event_cursor = 0; state_.acknowledged_battle_summary = hints.acknowledgement; state_.presented_conflict.reset();
     state_.briefing_conflict = hints.briefing; state_.briefing_done = hints.briefing_done;
@@ -244,7 +250,7 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     for (auto& particles : state_.corruption_particles) particles.reset();
     state_.corruption_lines.reset(); state_.corruption_paths.reset(); state_.corruption_path_quads = 0;
     state_.corruption_uploaded_quads.clear(); state_.corruption_quads.clear(); state_.corruption_particle_layers.clear();
-    state_.economy_hud_snapshot.reset(); state_.hud_facts_snapshot.reset(); state_.hud_command_key.reset(); state_.hud_label_key.reset();
+    state_.economy_hud_snapshot.reset(); state_.hud_facts_snapshot.reset(); state_.hud_command_key.reset(); state_.hud_label_key.reset(); state_.reset_label_placement();
     state_.income_labels_snapshot.reset();
     if (!state_.refresh_game()) { message(state_.failure); return false; }
     state_.update_hud(); menu_selection_ = state_.map_input.selected;
@@ -287,7 +293,10 @@ void GalacticSaveControls::service() {
     }
     if (token_ && state_.game) if (const auto terminal = state_.game->terminal_save_outcome(token_)) {
         const auto& outcome = *terminal;
-        if (outcome.phase == platform::LiveSavePhase::completed) {
+        if (pending_autosave_quit_) {
+            pending_autosave_quit_ = false; state_.leave_requested = true; // WGS-165/145: no toast, no hold-back
+            quit_autosave_phase_ = outcome.phase;
+        } else if (outcome.phase == platform::LiveSavePhase::completed) {
             ++completed_saves_; show_modal(Modal::acknowledgement, localized("TEXT_SAVED_OK"));
         } else show_modal(Modal::acknowledgement, outcome.diagnostic ? outcome.diagnostic->message : localized("TEXT_SAVE_FAILED"));
         token_ = 0;

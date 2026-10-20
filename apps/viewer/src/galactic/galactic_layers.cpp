@@ -113,12 +113,14 @@ void fragment() {
 }
 
 bool GalacticMode::State::advance_animation(const double elapsed) {
+    const auto measured = measure_frame(FramePhase::animation);
     const double step = galactic_view::animation_elapsed(elapsed, paused, content && content->animate_during_pause);
     if (!service_corruption(step)) return false;
     if (step == 0.0 && animation_updates != 0) return true;
     animation_time += step;
     // AVC-05: advance each shared material once, on the same held/live clock
     // as skeletal idles. Static materials need no per-frame renderer writes.
+    auto material_clock_timer = measure_frame(FramePhase::material_clock);
     for (const auto& model : models) {
         GodotRenderer& target = model.layer == 0 ? *renderer : *scenes[model.layer].renderer;
         for (const auto asset : model.effect_clock_assets) {
@@ -126,31 +128,61 @@ bool GalacticMode::State::advance_animation(const double elapsed) {
             if (!clock) { failure = core::format_diagnostic(clock.error()); return false; }
         }
     }
-    for (const auto& planet : render_objects()) {
+    material_clock_timer.finish();
+    const auto objects = render_objects();
+    // Every surface upload retains the complete model skeleton and the same
+    // idle clip. Sample it once per object, retaining the source bones until
+    // every renderer has finished its shared-palette batch.
+    std::vector<std::optional<animation::Pose>> poses(objects.size());
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        const auto& planet = objects[index];
         const auto chosen = planet_models.at(planet.id);
         if (!chosen) continue;
+        const auto& surfaces = models[*chosen].surfaces;
+        const auto idle = std::find_if(surfaces.begin(), surfaces.end(),
+            [](const auto& surface) { return surface.idle.has_value(); });
+        if (idle == surfaces.end()) continue;
         bool loop = true;
         if (content) {
             const auto art = content->art.find(planet.id);
             if (art != content->art.end()) loop = art->second.loop_idle;
         }
-        for (auto& surface : models[*chosen].surfaces) {
+        // WGP-09: the cursor keeps its own restart clock.
+        const double clock = planet.id == selection_cursor_id ? animation_time - selection_cursor.started : animation_time;
+        auto sample_timer = measure_frame(FramePhase::sample);
+        auto pose = idle->idle->sample({static_cast<float>(clock),
+            loop ? animation::PlaybackMode::loop : animation::PlaybackMode::clamp, 0.0F});
+        sample_timer.finish();
+        if (!pose) {
+            failure = core::format_diagnostic(pose.error());
+            return false;
+        }
+        poses[index] = std::move(pose.value());
+    }
+    for (std::size_t index = 0; index < scenes.size(); ++index)
+        (index == 0 ? *renderer : *scenes[index].renderer).begin_skin_batch(false);
+    struct FinishBatches final {
+        State& state;
+        ~FinishBatches() {
+            for (std::size_t index = 0; index < state.scenes.size(); ++index)
+                static_cast<void>((index == 0 ? *state.renderer : *state.scenes[index].renderer).end_skin_batch());
+        }
+    } finish{*this};
+    for (std::size_t index = 0; index < objects.size(); ++index) {
+        if (!poses[index]) continue;
+        const auto& planet = objects[index];
+        for (const auto& surface : models[*planet_models.at(planet.id)].surfaces) {
             if (!surface.idle) continue;
-            // WGP-09: the cursor's clip starts when it is added.
-            const double clock = planet.id == selection_cursor_id ? animation_time - selection_cursor.started : animation_time;
-            auto pose = surface.idle->sample({static_cast<float>(clock),
-                loop ? animation::PlaybackMode::loop : animation::PlaybackMode::clamp, 0.0F});
-            if (!pose) {
-                failure = core::format_diagnostic(pose.error());
+            // Instance identities are established by refresh_model_instances,
+            // including retained hidden zoom alternatives. Never scan another
+            // object's pieces to find this object's surface.
+            const auto bind_timer = measure_frame(FramePhase::bind);
+            const auto piece = piece_entities.find({planet.id, surface.asset});
+            if (piece == piece_entities.end()) continue;
+            auto applied = planet_renderer(planet.id).set_skin_pose(piece->second, surface.asset, poses[index]->bones);
+            if (!applied) {
+                failure = core::format_diagnostic(applied.error());
                 return false;
-            }
-            for (const auto& instance : scenes[planet_layer(planet.id)].instances) {
-                if (instance.asset_id != surface.asset || instance_planets.at(instance.entity_id) != planet.id) continue;
-                auto applied = planet_renderer(planet.id).set_skin_pose(instance.entity_id, surface.asset, pose.value().bones);
-                if (!applied) {
-                    failure = core::format_diagnostic(applied.error());
-                    return false;
-                }
             }
         }
     }

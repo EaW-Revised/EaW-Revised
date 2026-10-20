@@ -1,20 +1,24 @@
-#include "pair_network.hpp"
-#include "eawr/net/tactical_adapter.hpp"
-#include "eawr/platform/sim_workers.hpp"
-
-#include <algorithm>
-#include <array>
-#include <iostream>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <string_view>
-#include <vector>
-
 // The pair-loss hand-off over the real tactical simulation, with 1, 2, 4 and 8 sim workers: pairs cut among four seats (the
 // all-open decider), a crashed seat among four and three lost pairs among five (the majority-clique decider). The agreed
 // cutoff ticks and the survivors' final state hashes must not depend on the worker count (networking stays outside the sim;
 // docs/net-online-npeer.md, section 6).
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
+#include "pair_network.hpp"
+#include "eawr/net/tactical_adapter.hpp"
+#include "eawr/platform/sim_workers.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 namespace {
 namespace net = eawr::net;
 namespace sim = eawr::sim;
@@ -22,14 +26,12 @@ namespace tactical = sim::tactical;
 using eawr::testing::PairNetwork;
 using eawr::testing::PairTransport;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool value, const std::string& message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::require;
 
 struct Scenario {
     std::string name;

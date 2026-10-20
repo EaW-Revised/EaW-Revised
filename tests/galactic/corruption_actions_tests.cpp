@@ -1,7 +1,10 @@
+#include <array>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/corruption_actions.hpp"
 
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 
 namespace ca = eawr::sim::galactic::corruption_actions;
 using ca::Fixture;
@@ -10,7 +13,9 @@ using ca::Id;
 using ca::Type;
 using ca::Refusal;
 namespace {
-void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void check(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 Fixed f(const char* text) { return Fixed::from_decimal(text).value(); }
 Fixture fixture() {
     Fixture world;
@@ -178,8 +183,9 @@ void consumption_and_missions() {
     }
 }
 } // namespace
-int main() {
+int case_galactic_corruption_actions_tests() {
     try { admission(); prerequisites_and_ai(); execution(); consumption_and_missions(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "corruption action fixture contracts passed\n";
+    return 0;
 }

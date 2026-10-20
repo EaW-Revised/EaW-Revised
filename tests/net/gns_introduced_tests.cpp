@@ -1,6 +1,16 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/gns_transport.hpp"
 #include "../../src/net/platform_socket.hpp"
 #include "../../src/net/gns_frame_codec.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <optional>
+#include <span>
+#include <utility>
 
 #if EAWR_HAS_GNS
 #include <steam/steamnetworkingsockets.h>
@@ -31,15 +41,14 @@ using Clock = std::chrono::steady_clock;
 std::atomic<std::int64_t> broker_time_ms{};
 Clock::time_point broker_now() { return Clock::time_point(std::chrono::duration_cast<Clock::duration>(
     std::chrono::milliseconds(broker_time_ms.load()))); }
-void expect(bool ok, const char* reason) { if (!ok) throw std::runtime_error(reason); }
+void expect(bool ok, const char* reason) {
+    if (!ok) eawr::testing::require(ok, reason);
+}
 void expect_clean(const GnsTransport& transport, const char* reason) {
     if (const auto diagnostic = transport.diagnostic())
         throw std::runtime_error(std::string(reason) + " [" + diagnostic->code + ": " + diagnostic->message + "]");
 }
-template<class T> T require(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().code + ": " + value.error().message);
-    return std::move(value).value();
-}
+using eawr::testing::result_code_colon::require;
 eawr::core::Diagnostic failure(const char* message) {
     eawr::core::Diagnostic diagnostic; diagnostic.code = "EAWR-NET-1517"; diagnostic.message = message; return diagnostic;
 }

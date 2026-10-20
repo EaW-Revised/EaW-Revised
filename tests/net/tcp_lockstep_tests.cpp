@@ -1,4 +1,16 @@
+#include "../support/self_test.hpp"
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "eawr/net/tcp_transport.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <string>
+#include <variant>
+#include <vector>
+
 #if defined(EAWR_TEST_GNS)
 #include "eawr/net/gns_transport.hpp"
 #endif
@@ -9,7 +21,7 @@
 #include <array>
 #include <chrono>
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 #include <thread>
 
 namespace {
@@ -28,11 +40,10 @@ using TestTransport = net::TcpTransport;
 using TestOptions = net::TcpOptions;
 constexpr auto transport_timeout_code = "EAWR-NET-0207";
 #endif
-void expect(bool condition, const char* reason) { if (!condition) throw std::runtime_error(reason); }
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool condition, const char* reason) {
+    if (!condition) eawr::testing::require(condition, reason);
 }
+using eawr::testing::result_code_colon::take;
 Fixed units(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 
 enum class DepartureCase { none, closed, silent };
@@ -247,6 +258,10 @@ void mutual_loss_or_real_quit(unsigned workers, bool hash_gap, bool real_quit = 
 
 }
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     try {
 #if defined(EAWR_TEST_GNS)
         if (!TestTransport::available()) { std::cout << "GNS disabled: lockstep test skipped\n"; return 77; }

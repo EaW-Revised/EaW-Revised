@@ -3,6 +3,8 @@
 // Expected values come from the traced retail pass and loader defaults, not
 // from this implementation's output.
 
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/lighting/scene_bloom.hpp"
 
 #include <bit>
@@ -17,13 +19,11 @@ namespace {
 namespace bloom = eawr::presentation::lighting::bloom;
 namespace assets = eawr::assets;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 assets::RawField float_mini(const std::uint32_t id, const float value, const std::size_t size = 4) {

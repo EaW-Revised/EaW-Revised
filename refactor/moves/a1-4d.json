@@ -1,0 +1,50 @@
+[
+  {
+    "old": "tests/core/sha256_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/data/main.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/online_test/online_test_unit_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/scene/idle_tags_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/script/acceptance/acceptance_harness.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/script/foc/ai_equation_scratch_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/units/galactic_types_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/units/unit_tables_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/vfs/main.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/units/galactic_types_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/units/unit_tables_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  }
+]

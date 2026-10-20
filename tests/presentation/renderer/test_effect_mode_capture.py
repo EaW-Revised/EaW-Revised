@@ -16,9 +16,101 @@ from effect_mode_fixtures import (build_proxy_host, _capture_path, DETACH_FRAME,
     EFFECT_LOGICAL_PATH, install_fixture, INVENTORY, PARENT_EFFECT_LOGICAL_PATH,
     PROXY_ANIMATION_LOGICAL_PATH, PROXY_EFFECT_LOGICAL_PATH, PROXY_HOST_LOGICAL_PATH,
     RELEASE_EFFECT_LOGICAL_PATH, _run, VISIBILITY_ANIMATION_LOGICAL_PATH, VISIBILITY_ATTACH)  # noqa: E402
+from effect_mode_fixtures import _chunk, _emitter, _group, _text  # noqa: E402
+import struct
 
 
 class EffectModeGraphical(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
+                         "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical effect mode")
+    def test_opaque_retained_rids_and_empty_terminal_upgrade(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-opaque-residency-") as temporary:
+            directory = pathlib.Path(temporary)
+            root = install_fixture(directory)
+            emitter = _emitter("opaque-intermittent", blend=0, texture="p_synthetic_glow.tga",
+                               position=_group(0), velocity=_group(3, sphere=3),
+                               rgb=(0.4, 0.7, 1.0), size=(3, 5), rate=4,
+                               lifetime=0.25, burst_interval=1.2)
+            effect = _chunk(0x900, _chunk(0, _text("opaque-residency"))
+                            + _chunk(1, struct.pack("<I", 1))
+                            + _chunk(0x800, emitter, True) + _chunk(2, b"\x01"), True)
+            logical = "data/art/models/p_opaque_residency.alo"
+            (root / "GameData/Data/Art/Models/P_Opaque_Residency.ALO").write_bytes(effect)
+            for label, extra in (("resume", ("--eawr-effect-frames", "78")),
+                                 ("terminal", ("--eawr-effect-detach-frame", "34"))):
+                with self.subTest(label=label):
+                    results = []
+                    for run in range(2):
+                        result, completed = _run(root, logical, directory / f"{label}-{run}.json",
+                            extra=(*extra, "--eawr-particle-residency-trace"))
+                        self.assertEqual(completed.returncode, 0, result.get("failure") or completed.stdout)
+                        samples = [[int(value) for value in line.split(" ", 1)[1].split(",")]
+                                   for line in completed.stdout.splitlines()
+                                   if line.startswith("EAWR_PARTICLE_RESIDENCY ")]
+                        self.assertTrue(samples)
+                        self.assertTrue(all(len(row) == 11 and row[10] == row[1] * 3 + row[8]
+                                            for row in samples), "live_rids counts every owned draw and shared RID")
+                        if label == "resume":
+                            held = [row for row in samples if row[9] > 0]
+                            self.assertTrue(held, "the opaque emitter must actually retire to retained identities")
+                            self.assertTrue(all(row[9] == 3 and row[10] == 5 for row in held))
+                            self.assertGreaterEqual(result["lifecycle"]["lazy_recreations"], 2)
+                            self.assertGreater(result["frames"][-1]["quads"], 0)
+                            self.assertEqual(result["lifecycle"]["live_rids_before_release"], 5)
+                        else:
+                            frames = result["frames"]
+                            self.assertEqual(frames[33]["particles"], 0)
+                            self.assertEqual(frames[33]["resources"], 1)
+                            self.assertTrue(frames[34]["released"])
+                            self.assertEqual(result["lifecycle"]["live_rids_before_release"], 2,
+                                "terminal upgrade frees three retained IDs before owner release")
+                        self.assertEqual(result["lifecycle"]["restore_asset_acquisitions"], 0)
+                        self.assertEqual(result["lifecycle"]["asset_acquisitions"], 2)
+                        self.assertEqual(result["lifecycle"]["live_rids_after_release"], 0)
+                        self.assertEqual(result["lifecycle"]["registry_resources_after_release"], 0)
+                        self.assertTrue(result["determinism"]["dry_run_matches"])
+                        self.assertTrue(result["evidence"]["verified"])
+                        results.append(result)
+                    self.assertEqual(results[0]["frames"], results[1]["frames"])
+                    self.assertEqual(results[0]["evidence"]["capture_sha256"],
+                                     results[1]["evidence"]["capture_sha256"])
+
+    @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
+                         "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical effect mode")
+    def test_dormant_emitter_recreates_without_restarting_its_stream(self):
+        results = []
+        with tempfile.TemporaryDirectory(prefix="eawr-dormant-effect-") as temporary:
+            directory = pathlib.Path(temporary)
+            root = install_fixture(directory)
+            emitter = _emitter("intermittent", blend=2, texture="p_synthetic_glow.tga",
+                               position=_group(0), velocity=_group(3, sphere=3),
+                               rgb=(0.4, 0.7, 1.0), size=(3, 5), rate=4,
+                               lifetime=0.25, burst_interval=0.6)
+            effect = _chunk(0x900, _chunk(0, _text("dormant"))
+                            + _chunk(1, struct.pack("<I", 1))
+                            + _chunk(0x800, emitter, True) + _chunk(2, b"\x01"), True)
+            logical = "data/art/models/p_dormant.alo"
+            (root / "GameData/Data/Art/Models/P_Dormant.ALO").write_bytes(effect)
+            for run in range(2):
+                result, completed = _run(root, logical, directory / f"dormant-{run}.json")
+                self.assertEqual(completed.returncode, 0, result.get("failure") or completed.stdout)
+                results.append(result)
+        first, second = results
+        populations = [frame["particles"] for frame in first["frames"]]
+        self.assertGreater(sum(value == 0 for value in populations), 10)
+        self.assertGreater(sum(a == 0 and b > 0 for a, b in zip(populations, populations[1:])), 2)
+        self.assertTrue(all(not frame["finished"] and not frame["detached"] for frame in first["frames"]))
+        self.assertGreaterEqual(first["lifecycle"]["empty_suspensions"], 3)
+        self.assertGreaterEqual(first["lifecycle"]["lazy_recreations"], 3)
+        self.assertEqual(first["lifecycle"]["restore_asset_acquisitions"], 0)
+        self.assertEqual(first["lifecycle"]["asset_acquisitions"], 2,
+                         "one colour and one program acquisition cover cold start and every restored burst")
+        self.assertEqual(first["lifecycle"]["live_rids_after_release"], 0)
+        self.assertTrue(first["determinism"]["dry_run_matches"])
+        self.assertTrue(first["evidence"]["verified"])
+        self.assertEqual(first["frames"], second["frames"])
+        self.assertEqual(first["evidence"]["capture_sha256"], second["evidence"]["capture_sha256"])
+
     @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"),
                          "set EAWR_GODOT_VIEWER_RUNTIME_TEST to run the graphical effect mode")
     def test_unicode_capture_basename_preserves_detach_suffixes(self):
@@ -169,7 +261,11 @@ class EffectModeGraphical(unittest.TestCase):
         self.assertTrue(all(not frame["advanced"] and frame["released"] for frame in frames[release + 1:]))
         self.assertTrue(all(frame["resources"] > 0 for frame in frames[:release]))
         self.assertTrue(all(frame["resources"] == 0 for frame in frames[release:]))
-        self.assertGreater(first["lifecycle"]["live_rids_before_release"], 0)
+        # The empty terminal submission already retired the render storage;
+        # completion releases only the still-valid logical registry handle.
+        self.assertEqual(first["lifecycle"]["live_rids_before_release"], 2,
+                         "only the shared colour texture and program survive the empty drain")
+        self.assertGreaterEqual(first["lifecycle"]["empty_suspensions"], 3)
         self.assertEqual(first["lifecycle"]["live_rids_after_release"], 0)
         self.assertEqual(first["lifecycle"]["registry_resources_after_release"], 0)
         # Decoded pixels: the pre-detach and draining captures are drawn inside

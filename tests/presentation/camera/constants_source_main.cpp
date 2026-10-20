@@ -1,7 +1,13 @@
+#include "../../support/check.hpp"
+#include <span>
+#include <utility>
+
 #include "eawr/presentation/camera/constants_source.hpp"
 
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -10,13 +16,11 @@ namespace camera = eawr::presentation::camera;
 
 namespace {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 std::string camera_xml(std::string_view name, std::string_view extra = {}) {
@@ -211,7 +215,24 @@ void test_map_overrides(const std::string& global) {
 
 } // namespace
 
+namespace {
+bool presentation_support_self_test() {
+    eawr::testing::Checker checker;
+    std::ostringstream output;
+    checker.check(false, "counting self-test", output);
+    if (checker.finish() != 1 || checker.failures != 1
+        || output.str() != "FAIL: counting self-test\n") return false;
+    try {
+        eawr::testing::require(false, "throwing self-test");
+    } catch (const std::runtime_error& error) {
+        return std::string(error.what()) == "throwing self-test";
+    }
+    return false;
+}
+} // namespace
+
 int main() {
+    if (!presentation_support_self_test()) return EXIT_FAILURE;
     const std::string global = scroll_xml();
     for (const camera::Mode mode : {camera::Mode::land, camera::Mode::space,
                                     camera::Mode::unlocked}) {

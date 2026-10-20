@@ -51,6 +51,7 @@ int main() {
     test_batch_hashes_on_request();
     test_batch_work_counts();
     test_offscreen_updates_and_bounds();
+    test_empty_stream_residency();
     test_batch_rejects_repeats_and_unknown();
     test_batch_present_allocates_nothing();
     if (failures != 0) { std::cerr << failures << " particle render contract(s) failed\n"; return 1; }

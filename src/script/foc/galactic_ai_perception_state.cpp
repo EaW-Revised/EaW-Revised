@@ -2,6 +2,10 @@
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
+#include <bit>
+#include <cassert>
+#include <cstring>
+
 namespace eawr::script::foc::ai {
 namespace {
 constexpr std::string_view component = "GALACTIC_PERCEPTION";
@@ -16,7 +20,11 @@ struct Writer {
     Writer() : bytes(own) {}
     explicit Writer(Bytes& target) : bytes(target) {}
     void word(std::uint64_t value, std::size_t width = 8) {
-        for (std::size_t i = 0; i < width; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+        assert(width <= 8);
+        const auto at = bytes.size();
+        bytes.resize(at + width);
+        if constexpr (std::endian::native == std::endian::little) std::memcpy(bytes.data() + at, &value, width);
+        else for (std::size_t i = 0; i < width; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (i * 8U));
     }
     void text(std::string_view value) { word(value.size(), 4); bytes.insert(bytes.end(), value.begin(), value.end()); }
     void optional_player(std::optional<tactical::PlayerId> value) { word(value.has_value(), 1); if (value) word(*value, 4); }

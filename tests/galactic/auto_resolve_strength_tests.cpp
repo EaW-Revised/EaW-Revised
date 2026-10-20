@@ -1,3 +1,14 @@
+#include <algorithm>
+#include <array>
+#include <cstdint>
+#include <exception>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/temp_dir.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/auto_resolve_strength.hpp"
 #include "eawr/assets/map.hpp"
@@ -5,7 +16,6 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -68,7 +78,7 @@ struct TemporaryXml {
           <SpaceUnit Name="EmptyLastCommander"><Variant_Of_Existing_Type>Commander</Variant_Of_Existing_Type><Abilities><Combat_Bonus_Ability Name="First"><Unit_Strength_Category>Fighter</Unit_Strength_Category><Health_Bonus_Percentage>0.1</Health_Bonus_Percentage></Combat_Bonus_Ability></Abilities><Abilities/></SpaceUnit>
         </GameObjectData>)xml";
     }
-    ~TemporaryXml() { std::error_code ec; std::filesystem::remove_all(root, ec); }
+    ~TemporaryXml() { eawr::testing::remove_temp_directory(root); }
     TemporaryXml(const TemporaryXml&) = delete;
     TemporaryXml& operator=(const TemporaryXml&) = delete;
 };
@@ -392,18 +402,11 @@ void type_resolution(const GalacticTypeTable& types) {
     expect(strength(conflict(), input, types).sides[0].force[1] == f(1), "invalid tech has no garrison, not a clamped tech-five row");
 }
 std::optional<std::string> environment() {
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t length{};
-    if (_dupenv_s(&value, &length, "EAWR_EAW_GAME_ROOT") != 0 || !value) return std::nullopt;
-    std::string result(value); std::free(value); return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>{value} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void installed() {
     const auto root = environment();
-    if (!root) { std::cout << "SKIPPED: installed auto-resolve stock tables need EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: installed auto-resolve stock tables need EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto* folder : {"corruption", "GameData"}) {
         const auto manifest = eawr::vfs::resolve_manifest_mount(folder, std::filesystem::path(*root) / folder / "Data");
@@ -455,7 +458,7 @@ void installed() {
     std::cout << "stock XML auto-resolve force=" << reference.value().sides[0].force[1].trunc_to_integer() << '\n';
 }
 } // namespace
-int main(int argc, char**) {
+int case_galactic_auto_resolve_strength_tests(int argc, char**) {
     try {
         if (argc > 1) installed();
         else { const auto types = synthetic_types(); space(types); land(types); skipped_forces(types); contract_and_workers(types); type_resolution(types); }

@@ -329,8 +329,8 @@ public:
             }
             input.planets = std::move(ordered); input.maximum_distance = row.maximum_distance;
         }
-        const auto producer = [&input](const sim::PartitionExecutor& executor) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
-            auto built = ga::build_execution_routes(input, executor);
+        const auto producer = [&input, previous = routes[player].memo](const sim::PartitionExecutor& executor) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
+            auto built = ga::build_execution_routes(input, executor, previous);
             if (!built) return core::Result<std::optional<ga::ExecutionRouteBuild>>::failure(built.error());
             return core::Result<std::optional<ga::ExecutionRouteBuild>>::success(std::move(built).value());
         };

@@ -755,18 +755,20 @@ core::Result<std::vector<sim::EntityId>> initial_freestore_offers(const gc::Gala
     }
     return core::Result<std::vector<sim::EntityId>>::success(std::move(out));
 }
-ai::GalacticFreestoreSelectionProvider qualified_freestore_selection(std::shared_ptr<const FreestoreInput> input,
-    std::shared_ptr<const ai::GalacticWorld> world, std::shared_ptr<const ai::Engine> engine, FreestoreSelectionFacts selection) {
-    return [input = std::move(input), world = std::move(world), manager = std::weak_ptr<const ai::Engine>(engine), selection = std::move(selection)]
+namespace {
+ai::GalacticFreestoreSelectionProvider freestore_selection_provider(std::shared_ptr<const FreestoreInput> input,
+    std::shared_ptr<const ai::GalacticWorld> world, std::weak_ptr<const ai::Engine> manager, FreestoreSelectionBatch batch) {
+    return [input = std::move(input), world = std::move(world), manager = std::move(manager), batch = std::move(batch)]
         (gc::PlayerId player, gc::PlanetId target, const ai::PlanDef& plan) -> core::Result<std::vector<ai::GalacticSelectionObject>> {
         if (!input || !input->pool || !input->pool->qualified || !input->pool->qualified_players.contains(player)
-            || !world || !manager.lock() || !selection)
+            || !world || !manager.lock() || !batch)
             return unavailable_store<std::vector<ai::GalacticSelectionObject>>("qualified freestore membership, assignment, path and garrison producers are required");
         std::vector<ai::GalacticSelectionObject> out;
         const auto shard = input->pool->players.find(player);
         const auto& objects = shard == input->pool->players.end() ? input->pool->objects : shard->second->objects;
+        const auto selection = batch(player, target, plan);
         for (const auto& row : objects) if (row.owner == player) {
-            const auto copied = selection(player, target, row.id, plan);
+            const auto copied = selection(row.id);
             if (!copied) return core::Result<std::vector<ai::GalacticSelectionObject>>::failure(copied.error());
             const auto cost = copied.value().first;
             if ((cost.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL || cost < Number(0))
@@ -778,6 +780,20 @@ ai::GalacticFreestoreSelectionProvider qualified_freestore_selection(std::shared
         }
         return core::Result<std::vector<ai::GalacticSelectionObject>>::success(std::move(out));
     };
+}
+}
+ai::GalacticFreestoreSelectionProvider qualified_freestore_selection(std::shared_ptr<const FreestoreInput> input,
+    std::shared_ptr<const ai::GalacticWorld> world, std::shared_ptr<const ai::Engine> engine, FreestoreSelectionFacts selection) {
+    // A per-actor reader has nothing to hoist: each actor's read is the whole batch.
+    FreestoreSelectionBatch batch;
+    if (selection) batch = [selection = std::move(selection)](gc::PlayerId player, gc::PlanetId target, const ai::PlanDef& plan) -> FreestoreActorSelection {
+        return [selection, player, target, &plan](sim::EntityId actor) { return selection(player, target, actor, plan); };
+    };
+    return freestore_selection_provider(std::move(input), std::move(world), std::weak_ptr<const ai::Engine>(engine), std::move(batch));
+}
+ai::GalacticFreestoreSelectionProvider qualified_freestore_batch_selection(std::shared_ptr<const FreestoreInput> input,
+    std::shared_ptr<const ai::GalacticWorld> world, std::shared_ptr<const ai::Engine> engine, FreestoreSelectionBatch batch) {
+    return freestore_selection_provider(std::move(input), std::move(world), std::weak_ptr<const ai::Engine>(engine), std::move(batch));
 }
 core::Result<void> register_qualified_freestore_bindings(auth::ScriptScheduler& scripts, std::weak_ptr<QualifiedFreestore> owner) {
     return register_qualified_freestore_bindings(scripts, [owner] { return owner.lock(); });

@@ -1,7 +1,7 @@
 #include "data_test_support.hpp"
-
 #include "eawr/data/xml.hpp"
 
+#include <cstddef>
 #include <string>
 #include <thread>
 #include <vector>

@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/terrain/terrain.hpp"
 
 #include <algorithm>
@@ -18,13 +20,11 @@
 
 namespace eawr_terrain_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 // A wholly original synthetic heightfield.  Nothing here is copied from an

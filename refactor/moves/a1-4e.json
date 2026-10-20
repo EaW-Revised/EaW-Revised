@@ -1,0 +1,6 @@
+[
+  {
+    "old": "tests/presentation/renderer/render_profile_tests.cpp#check",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  }
+]

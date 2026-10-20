@@ -220,12 +220,7 @@ using IdentityLookup = std::function<std::optional<AssetIdentity>(const std::str
 }
 
 [[nodiscard]] inline std::string trimmed(const std::string_view value) {
-    std::size_t first = 0;
-    std::size_t last = value.size();
-    const auto space = [](const char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
-    while (first < last && space(value[first])) ++first;
-    while (last > first && space(value[last - 1])) --last;
-    return std::string(value.substr(first, last - first));
+    return eawr::core::trim(value, eawr::core::xml_whitespace);
 }
 
 // A declared model name as the canonical effective-VFS path the asset layer

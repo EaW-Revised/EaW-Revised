@@ -1,5 +1,12 @@
 #include "legacy_family_support.hpp"
 
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <string_view>
+
 namespace legacy_family_test_support {
 
 void gloss_colorize_contracts() {

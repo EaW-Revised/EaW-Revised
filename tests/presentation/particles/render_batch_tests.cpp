@@ -486,6 +486,8 @@ void test_offscreen_updates_and_bounds() {
         "invalid deltas do not poison the saved clock");
     const auto drain = paced.advance(a, 0.45F, camera).value();
     expect(drain.finished && drain.particles == 0 && close(drain.elapsed_seconds, 0.65F), "hidden live particles drain with all saved time");
+    expect(!paced_backend.recording.last.empty() && paced_backend.recording.last.begin()->second.indices.empty(),
+        "a finished hidden drain clears its last backend submission");
     const auto empty_steps = paced.work().steps;
     expect(bool(paced.advance(a, 0.1F, camera)) && paced.work().steps == empty_steps, "hidden empty finished groups skip CPU work");
 
@@ -553,6 +555,160 @@ void test_offscreen_updates_and_bounds() {
         }
         expect(serial.work.steps == other.work.steps && serial.work.streams_built == other.work.streams_built && serial.work.uploads == other.work.uploads &&
             serial.work.groups_prepared == other.work.groups_prepared && serial.work.updates_deferred == other.work.updates_deferred, "culled worker schedules retain deterministic counts");
+    }
+}
+
+void test_empty_stream_residency() {
+    auto system = culling_system();
+    auto& emitter = system.emitters.front();
+    emitter.spawn_interval = 0.4F;
+    emitter.stop_time = 0;
+    emitter.lifetime = 0.06F;
+    emitter.lifetime_variation = 0.2F;
+    emitter.velocity.shape = particles::Shape::sphere;
+    emitter.velocity.radius_min = 1;
+    emitter.velocity.radius_max = 3;
+    const auto plans = particles::plan_system(system);
+    const auto camera = test_camera();
+    // A finite system may be naturally exhausted without being detached. The
+    // query cannot consume future scheduling, RNG or the current live drain.
+    {
+        RecordingBackend backend;
+        particles::EffectRegistry registry(backend);
+        auto finite = system;
+        finite.emitters.front().blend_mode = 0;
+        finite.emitters.front().spawn_interval = 10;
+        finite.emitters.front().freeze_time = 1;
+        finite.emitters.front().lifetime = 0.1F;
+        const auto handle = registry.spawn(finite, 11, 64).value();
+        expect(bool(registry.advance(handle, 0.01F, camera)), "opaque finite generation starts");
+        const auto empty = registry.advance(handle, 0.2F, camera).value();
+        expect(empty.particles == 0 && !registry.exhausted(handle)
+            && backend.empty_notifications.size() == 1 && !backend.empty_notifications.back().second,
+            "an empty opaque span first notifies resumable residency");
+        expect(bool(registry.advance(handle, 1.0F, camera)) && registry.exhausted(handle)
+            && backend.empty_notifications.size() == 2 && backend.empty_notifications.back().second,
+            "natural freeze inside an empty span upgrades the same resource to terminal");
+        expect(backend.empty_notifications.front().first == backend.empty_notifications.back().first,
+            "terminal upgrade preserves the logical resource handle");
+        expect(bool(registry.present(handle, camera)) && bool(registry.advance(handle, 0.2F, camera))
+            && backend.empty_notifications.size() == 2,
+            "terminal emptiness is not re-notified after the upgrade");
+    }
+    {
+        RecordingBackend backend;
+        particles::EffectRegistry registry(backend);
+        auto finite = system;
+        finite.emitters.front().spawn_interval = 0.05F;
+        finite.emitters.front().stop_time = 0.1F;
+        finite.emitters.front().lifetime = 0.2F;
+        const auto handle = registry.spawn(finite, 11, 64).value();
+        const auto looping = registry.spawn(system, 11, 64).value();
+        expect(!registry.exhausted(handle) && !registry.exhausted(looping) && !registry.exhausted(9999),
+            "finite future births, loops and unknown handles are not exhausted");
+        expect(bool(registry.advance(handle, 0.01F, camera)), "finite generation starts");
+        auto alive = registry.advance(handle, 0.16F, camera).value();
+        expect(alive.particles > 0 && !registry.exhausted(handle), "finite live particles keep the effect unexhausted");
+        const auto empty = registry.advance(handle, 0.5F, camera).value();
+        expect(empty.particles == 0 && !empty.finished && !empty.detached && registry.exhausted(handle),
+            "finite exhaustion is read-only and independent of the detached finished predicate");
+        expect(registry.exhausted(handle) && registry.live_effects() == 2,
+            "repeated exhaustion queries leave ownership intact");
+        expect(bool(registry.advance(looping, 0.01F, camera)) && !registry.exhausted(looping),
+            "a loop remains live between its future root emissions");
+        expect(bool(registry.set_detail({0, 0, false})) && !registry.exhausted(looping),
+            "transient detail gates cannot prove exhaustion");
+        auto delayed = finite;
+        delayed.emitters.front().start_delay = 10;
+        const auto pending = registry.spawn(delayed, 11, 64).value();
+        expect(!registry.exhausted(pending), "delayed future emission is not exhausted before its first birth");
+    }
+    {
+        auto finite = system;
+        finite.emitters.front().spawn_interval = 0.05F;
+        finite.emitters.front().stop_time = 0.1F;
+        finite.emitters.front().lifetime = 0.2F;
+        auto child = spray_emitter();
+        child.creator_id = 39;
+        child.parent_emitter = 0;
+        child.stop_time = 0;
+        child.spawn_interval = 0.1F;
+        child.particles_per_interval = 2;
+        child.lifetime = 0.3F;
+        finite.emitters.push_back(child);
+        RecordingBackend queried_backend, reference_backend;
+        particles::EffectRegistry queried(queried_backend), reference(reference_backend);
+        const auto a = queried.spawn(finite, 97, 256).value();
+        const auto b = reference.spawn(finite, 97, 256).value();
+        bool saw_child{};
+        for (int frame = 0; frame < 90; ++frame) {
+            for (int query = 0; query < 5; ++query) static_cast<void>(queried.exhausted(a));
+            const auto qa = queried.advance(a, 1.0F / 30.0F, camera).value();
+            const auto rb = reference.advance(b, 1.0F / 30.0F, camera).value();
+            expect(same_stats(qa, rb) && qa.elapsed_seconds == rb.elapsed_seconds
+                && qa.deferred_seconds == rb.deferred_seconds && qa.advance.requested == rb.advance.requested,
+                "exhaustion queries preserve RNG, scheduling, complete streams and advance statistics against an unqueried twin");
+            if (qa.emitters[1].particles != 0) {
+                saw_child = true;
+                expect(!queried.exhausted(a), "a live child drain keeps a finite parent effect unexhausted");
+            }
+        }
+        expect(saw_child && queried.exhausted(a) && !queried.advance(a, 0, camera).value().finished,
+            "a finite undetached effect with children naturally exhausts after the last child dies");
+        expect(bool(queried.stop_emission(a)) && queried.exhausted(a)
+            && queried.advance(a, 0, camera).value().finished,
+            "an empty detached effect is both exhausted and finished");
+    }
+    const auto run = [&](const particles::StepExecutor* executor) {
+        RecordingBackend backend;
+        particles::EffectRegistry registry(backend);
+        registry.set_executor(executor);
+        constexpr std::size_t count = 16;
+        std::vector<particles::EffectHandle> handles;
+        std::vector<particles::CpuSystem> references;
+        for (std::uint32_t index = 0; index < count; ++index) {
+            handles.push_back(registry.spawn(system, 170 + index, 64).value());
+            references.emplace_back(system, 170 + index, 64);
+        }
+        std::vector<particles::EffectFrameStats> stats;
+        std::vector<std::uint64_t> hashes;
+        std::size_t empty_frames{}, resumptions{};
+        bool was_empty = false;
+        for (int frame = 0; frame < 90; ++frame) {
+            const float dt = frame == 0 ? 0 : 1.0F / 30.0F;
+            expect(bool(registry.advance_all(handles, dt, camera, stats)), "dormant batch advances");
+            const bool empty = stats.front().particles == 0;
+            if (empty) ++empty_frames;
+            if (was_empty && !empty) ++resumptions;
+            was_empty = empty;
+            for (std::size_t index = 0; index < count; ++index) {
+                const auto advanced = references[index].advance(dt);
+                particles::VertexStream stream;
+                particles::build_stream(plans.front(), references[index].particles(), camera, stream);
+                expect(stats[index].hash == particles::stream_hash(stream)
+                    && stats[index].advance.spawned == advanced.spawned
+                    && stats[index].advance.killed == advanced.killed,
+                    "dormancy preserves every RNG bit, birth and death against the direct CPU reference");
+                expect(!stats[index].finished && stats[index].emitters.front().drawn,
+                    "empty undetached emitters retain logical draw admission and future emission");
+                hashes.push_back(stats[index].hash);
+            }
+            const auto uploads = backend.record.size();
+            expect(bool(registry.present_all(handles, camera)), "dormant batch presents");
+            if (empty) expect(backend.record.size() == uploads, "repeated empty presents do no backend work");
+        }
+        expect(empty_frames > 30 && resumptions > 4, "fixture repeatedly drains and emits again on the same handles");
+        expect(backend.created == count && registry.live_effects() == count,
+            "resource dormancy never restarts the CPU lifecycle or replaces logical handles");
+        for (const auto handle : handles) expect(bool(registry.release(handle)), "dormant handles release");
+        expect(backend.created == backend.destroyed && backend.invalid_destroys == 0 && backend.wrong_thread == 0,
+            "empty/resumed handles release exactly once on the caller");
+        return hashes;
+    };
+    const auto serial = run(nullptr);
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const ThreadExecutor executor(workers);
+        expect(run(&executor) == serial, "dormant/resumed streams match on 1/2/4/8 workers");
     }
 }
 

@@ -3,6 +3,7 @@
 #include "eawr/campaign/setup_plan.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
 #include "../script/foc/galactic_ai_world.hpp"
+#include "eawr/sim/galactic/graph.hpp"
 
 namespace eawr::campaign {
 // Immutable campaign identities; each fresh/load runtime owns a distinct cache.
@@ -15,6 +16,20 @@ struct GalacticAiUsabilityContent {
 [[nodiscard]] core::Result<std::shared_ptr<const GalacticAiUsabilityContent>>
 prepare_stock_galactic_ai_usability(const data::galactic::GalacticData&, const CampaignSetupPlan&,
     const script::foc::ai::GalacticPerceptionSetup&);
+
+// Exact inputs and results of one player's last connecting-path pass (derived, never archived or hashed).
+// The pass is a pure function of these inputs; an equal key replays its three connector sets.
+struct GalacticAiIslandMemo {
+    std::vector<sim::galactic::PlanetId> planets, representatives;
+    std::vector<std::uint8_t> access;                          // relation | usable << 2, per planet
+    std::vector<std::array<std::uint64_t, 3>> force;           // planet, space bits, ground bits
+    std::vector<script::foc::ai::SharedPlanetList> goals;      // policy-0 site list per representative
+    std::vector<std::size_t> sizes;                            // policy-1 site count per representative
+    std::vector<sim::galactic::GraphNode> nodes;               // graph and route inputs, stored with a result only
+    std::optional<sim::math::Fixed> largest_factor;
+    std::vector<sim::galactic::Route> routes;
+    std::set<sim::galactic::PlanetId> shortest, least, largest;
+};
 
 class GalacticAiUsabilityProvider final : public script::foc::galactic_ai::TrackedStateContributor {
 public:
@@ -42,7 +57,8 @@ public:
     [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return records_.byte_size() + prepared_through_.size() * 13 + 1024; }
     // Pending invalidation also depends on upstream writers after our last read.
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return std::nullopt; }
-    struct Work { std::uint64_t generations{}, planets{}, searches{}, edges{}, stealth_preparations{}, site_searches{}; };
+    struct Work { std::uint64_t generations{}, planets{}, searches{}, edges{}, stealth_preparations{}, site_searches{},
+        island_reuses{}, access_reuses{}; };
     [[nodiscard]] Work work() const noexcept { return work_; }
 private:
     [[nodiscard]] core::Result<void> prepare_stealth(const sim::galactic::GalacticSnapshot&);
@@ -62,6 +78,7 @@ private:
         std::map<sim::galactic::PlanetId, std::pair<script::numeric::LuaNumber, script::numeric::LuaNumber>> force;
         std::vector<script::foc::ai::GalacticGoalReach> goal_reach;
         std::vector<script::foc::ai::GalacticConnectivity::Island> islands;
+        std::shared_ptr<const GalacticAiIslandMemo> island_memo; // carried across refreshes of this player
         std::array<std::int32_t, 2> island_sizes{-1, -1}; // WGA-476, derived from the retained site lists
         bool connectivity_ready{};
         bool source_changed{};
@@ -81,7 +98,7 @@ private:
     std::map<sim::galactic::PlayerId, PreparedInput> prepared_through_;
     ConnectivityPublication published_{std::make_shared<const script::foc::ai::GalacticConnectivity>()};
     struct Reach {
-        std::array<std::vector<sim::galactic::PlanetId>, 6> sites;
+        std::array<script::foc::ai::SharedPlanetList, 6> sites;
         std::array<std::optional<std::uint64_t>, 6> frames;
         bool shortest{}, least_force{}, largest{};
         bool operator==(const Reach&) const = default;

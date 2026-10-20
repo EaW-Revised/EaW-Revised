@@ -198,9 +198,11 @@ void EawrLanLobby::show(Node& parent, std::optional<model::LobbySourceKind> init
     set_process(true);
     set_process_input(true);
 
-    impl_->source = impl_->join_selection.source() == model::LobbySourceKind::lan ? options_.source
+    impl_->source = impl_->join_selection.source() == model::LobbySourceKind::lan
+                    && initial_source != model::LobbySourceKind::online ? lan_source()
                   : std::shared_ptr<model::LobbyGameSource>(impl_->online_rooms);
     open_lobby();
+    if (impl_->online_rooms) impl_->online_rooms->set_menu_visible(impl_->join_selection.source() == model::LobbySourceKind::online);
     if (initial_source) select_source(*initial_source);
 }
 
@@ -216,11 +218,13 @@ void EawrLanLobby::clear_page() {
 void EawrLanLobby::close_screen(const bool emit) {
     if (!shown_) return;
     cancel_join();
+    if (impl_->online_rooms) impl_->online_rooms->set_menu_visible(false);
     shown_ = false;
     set_process(false);
     set_process_input(false);
     clear_page();
     impl_->source.reset();
+    owned_lan_source_.reset();
     set_visible(false);
     if (Node* parent = get_parent()) parent->remove_child(this);
     if (emit) emit_signal("closed");
@@ -743,6 +747,7 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     shot.box_open = impl.box != nullptr;
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
     shot.source = online ? "online" : "lan";
+    shot.chat_open = !online && static_cast<bool>(impl.source);
     if (online) {
         const model::OnlinePageView view = model::online_page(impl.online_rooms_total, impl.online_page);
         shot.room_page = view.page;

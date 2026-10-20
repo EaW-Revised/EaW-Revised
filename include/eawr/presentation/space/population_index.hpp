@@ -71,6 +71,10 @@ public:
         ++work_.opacity_changes;
         return true;
     }
+    // Explicit retirement forgets the renderer parameters while preserving the slot.
+    void reset_opacity(const std::size_t ship) {
+        if (ship < rows_.size()) rows_[ship].opacity.reset();
+    }
     [[nodiscard]] const Work& work() const noexcept { return work_; }
     void clear() { rows_.clear(); work_ = {}; }
 

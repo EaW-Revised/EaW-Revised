@@ -1,3 +1,10 @@
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 // Supporting pure contracts only. The installed galactic_ai_plans_stock proof
 // still requires live A/B/C/E providers and retail U-02..04 qualification.
 #include "galactic_ai_estimates.hpp"
@@ -7,21 +14,20 @@
 
 #include <iostream>
 #include <limits>
-#include <stdexcept>
+#include <exception>
+using eawr::testing::must;
 
 namespace {
 namespace ai = eawr::script::foc::ai;
 namespace g = ai::galactic_goals;
 using R = ai::Real;
 using Channel = g::ProductionChannel;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool ok, const char* message) {
-    if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
 }
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
+
 g::ProducerInput producer(std::uint64_t id, std::uint64_t type, Channel channel,
     std::int64_t queue, std::int64_t build) {
     g::ProducerInput row;
@@ -148,7 +154,7 @@ public:
 };
 }
 
-int main() {
+int case_galactic_ai_plans_tests() {
     try {
         exclusions();
         for (const auto workers : {1u, 2u, 4u, 8u}) {

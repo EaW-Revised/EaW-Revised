@@ -618,7 +618,7 @@ void game_session_loopback() {
 
 } // namespace
 
-int main() {
+int case_galactic_game_session_tests() {
     {
         const auto setup = eawr::campaign::build_synthetic_campaign(coop_campaign()).value();
         auto game = GameSession::create(setup);

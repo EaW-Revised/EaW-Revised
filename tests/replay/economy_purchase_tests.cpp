@@ -1,6 +1,16 @@
 #include "economy_support.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace economy_test_support {
 

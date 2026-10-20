@@ -1,0 +1,142 @@
+[
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#synthetic_tables",
+    "new": "tests/galactic/space_entry_synthetic.cpp#synthetic_tables"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#marker",
+    "new": "tests/galactic/space_entry_synthetic.cpp#marker"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#synthetic_inputs",
+    "new": "tests/galactic/space_entry_synthetic.cpp#synthetic_inputs"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#entry_inputs",
+    "new": "tests/galactic/space_entry_synthetic.cpp#entry_inputs"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#tables_for_entry",
+    "new": "tests/galactic/space_entry_synthetic.cpp#tables_for_entry"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#rider_bonus",
+    "new": "tests/galactic/space_entry_synthetic.cpp#rider_bonus"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#galaxy_for_entry",
+    "new": "tests/galactic/space_entry_synthetic.cpp#galaxy_for_entry"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#salvage_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#salvage_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#script_manifest_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#script_manifest_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#nonparticipant_team_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#nonparticipant_team_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#reserve_order_contract",
+    "new": "tests/galactic/space_entry_synthetic.cpp#reserve_order_contract"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#ground_passenger_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#ground_passenger_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#admitted_cycle",
+    "new": "tests/galactic/space_entry_synthetic.cpp#admitted_cycle"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#preparation_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#preparation_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#scene_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#scene_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#orbital_owner_admission",
+    "new": "tests/galactic/space_entry_synthetic.cpp#orbital_owner_admission"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#formation_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#formation_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#team_origin_contract",
+    "new": "tests/galactic/space_entry_synthetic.cpp#team_origin_contract"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#formation_stage_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#formation_stage_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#mixed_class_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#mixed_class_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#garrison_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#garrison_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#station_ship_spawn_scenario",
+    "new": "tests/galactic/space_entry_synthetic.cpp#station_ship_spawn_scenario"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#station_ship_blocked_contract",
+    "new": "tests/galactic/space_entry_synthetic.cpp#station_ship_blocked_contract"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#station_ship_spawn_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#station_ship_spawn_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#commander_contracts",
+    "new": "tests/galactic/space_entry_synthetic.cpp#commander_contracts"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#ai_retreat_completion",
+    "new": "tests/galactic/space_entry_synthetic.cpp#ai_retreat_completion"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#gateway_route",
+    "new": "tests/galactic/space_entry_stock.cpp#gateway_route"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#installed_reserve_order",
+    "new": "tests/galactic/space_entry_stock.cpp#installed_reserve_order"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#installed_garrison",
+    "new": "tests/galactic/space_entry_stock.cpp#installed_garrison"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#stock_scene_relation_graphs",
+    "new": "tests/galactic/space_entry_stock.cpp#stock_scene_relation_graphs"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#installed_commanders",
+    "new": "tests/galactic/space_entry_stock.cpp#installed_commanders"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#installed_layer_services",
+    "new": "tests/galactic/space_entry_stock.cpp#installed_layer_services"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#installed",
+    "new": "tests/galactic/space_entry_stock.cpp#installed"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#whole",
+    "new": "tests/galactic/space_entry_synthetic.cpp#whole"
+  },
+  {
+    "old": "tests/galactic/space_entry_tests.cpp#check",
+    "new": "tests/galactic/space_entry_synthetic.cpp#check"
+  }
+]

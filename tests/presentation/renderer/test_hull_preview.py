@@ -10,11 +10,9 @@ acceptance. The graphical assertions are opt-in: they need the pinned Godot
 """
 
 import hashlib
-import json
 import os
 import pathlib
 import re
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -28,6 +26,9 @@ sys.path.insert(0, str(ROOT / "tools" / "validation" / "p1_capture"))
 import build_manifest  # noqa: E402
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
 from viewer_mode_sources import mode_source, source_text  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 
 PREVIEW_HEADER = ROOT / "apps/viewer/src/model_preview.hpp"
 HULL_TEXTURE_SHA256 = "456e88d85c9569d173c2b68bc4cc59a51e5a201aa2bf4cac8ee23afc26fab7cb"
@@ -115,15 +116,11 @@ class HullPreviewContract(unittest.TestCase):
 def run_viewer(workspace, *arguments):
     executable = os.environ["EAWR_GODOT_EXECUTABLE"]
     report = workspace / "report.json"
-    completed = subprocess.run(
-        [executable, "--path", str(ROOT / "apps/viewer/project"), "--",
+    completed = python_helpers.run_viewer([executable, "--path", str(ROOT / "apps/viewer/project"), "--",
          "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
          "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"],
-         "--eawr-report", str(report), "--eawr-benchmark", *arguments],
-        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False,
-        timeout=600,
-    )
-    result = json.loads(report.read_text(encoding="utf-8")) if report.exists() else None
+         "--eawr-report", str(report), "--eawr-benchmark", *arguments], cwd=ROOT, timeout=600)
+    result = python_helpers.read_json(report) if report.exists() else None
     return completed, result
 
 

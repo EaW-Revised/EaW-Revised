@@ -1,3 +1,4 @@
+#include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "eawr/presentation/ui/pads.hpp"
@@ -140,7 +141,7 @@ std::string LiveSessionView::slotless_report_rows() const {
     for (const auto& [key, entities] : slotless_hits_) {
         std::string name = "?";
         bool container = false;
-        if (tables_) for (const auto& type : tables_->units) if (skirmish::type_id(type.id) == key.second) {
+        if (tables_) for (const auto& type : tables_->units) if (battle::type_id(type.id) == key.second) {
             name = type.id;
             container = type.kind == units::UnitKind::squadron && !type.members.empty();
         }
@@ -293,19 +294,60 @@ std::string LiveSessionView::draw_digest_report() const {
 }
 
 void LiveSessionView::write_report(std::ostream& output) const {
-    output << "  \"live_session\": {\"fixture\": " << json(options_.fixture)
+    output << "  \"live_session\": {";
+    write_report_identity(output);
+    write_report_carrier_riders(output);
+    write_report_results(output);
+    write_report_intentional_quits(output);
+    write_report_beacons(output);
+    write_report_runtime(output);
+    write_report_slots(output);
+    write_report_squadrons(output);
+    write_report_frame_progress_and_visibility(output);
+    write_report_fog(output);
+    write_report_battle_start(output);
+    write_report_time_controls(output);
+    write_report_light_effects(output);
+    write_report_visibility_blends(output);
+    write_report_own_units(output);
+    write_report_object_turrets(output);
+    write_report_launch_colours(output);
+    write_report_hostile_units(output);
+    write_report_orders(output);
+    write_report_first_hits(output);
+    write_report_rejected_orders(output);
+    write_report_ai(output);
+    write_report_ability_effects(output);
+    write_report_pads(output);
+    write_report_economy(output);
+    write_report_placement_preview(output);
+    write_report_arrivals(output);
+    write_report_death_clones(output);
+    write_report_spin_away(output);
+    write_report_event_gaps(output);
+    write_report_final_state(output);
+    write_report_battle_end(output);
+    write_report_status(output);
+    output << "},\n";
+}
+
+void LiveSessionView::write_report_identity(std::ostream& output) const {
+    output << "\"fixture\": " << json(options_.fixture)
            << ", \"victory_condition\": " << json(tactical::to_string(victory_.condition))
            << ", \"phase\": " << json(phase_ == Phase::loading ? "loading" : phase_ == Phase::ready ? "ready"
                 : phase_ == Phase::running ? "running" : phase_ == Phase::quitting ? "quitting"
                 : phase_ == Phase::results ? "results" : "returning")
            << ", \"ready_tick\": " << (ready_tick_ ? std::to_string(*ready_tick_) : "null")
            << ", \"begin_tick\": " << (begin_tick_ ? std::to_string(*begin_tick_) : "null")
-           << ", \"begin_frame\": " << (begin_frame_ ? std::to_string(*begin_frame_) : "null")
-           << ", \"carrier_riders\": [" << [&] {
+           << ", \"begin_frame\": " << (begin_frame_ ? std::to_string(*begin_frame_) : "null");
+}
+
+void LiveSessionView::write_report_carrier_riders(std::ostream& output) const {
+    output << ", \"carrier_riders\": [" << [&] {
                 std::string rows;
                 if (battle_frame_.latest) for (const auto& instance : battle_frame_.latest->instances()) {
                     const auto named = [&](const tactical::TypeId type) {
-                        if (tables_) for (const auto& row : tables_->units) if (skirmish::type_id(row.id) == type) return row.id;
+                        if (tables_) for (const auto& row : tables_->units) if (battle::type_id(row.id) == type) return row.id;
                         return std::string{};
                     };
                     const auto* type = tables_ ? tables_->find(named(instance.type_id)) : nullptr;
@@ -323,8 +365,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                     append(append, instance.contained);
                 }
                 return rows;
-              }() << "]"
-           << ", \"results\": {\"elapsed_milliseconds\": " << results_.elapsed_milliseconds
+              }() << "]";
+}
+
+void LiveSessionView::write_report_results(std::ostream& output) const {
+    output << ", \"results\": {\"elapsed_milliseconds\": " << results_.elapsed_milliseconds
            << ", \"time\": " << json(ui::battle_time_text(results_.elapsed_milliseconds))
            << ", \"scoring_pumps\": " << (scoring_ ? scoring_->pumps() : 0U)
            << ", \"scoring_diagnostic\": " << json(results_.scoring_diagnostic)
@@ -350,16 +395,22 @@ void LiveSessionView::write_report(std::ostream& output) const {
                           + ", \"losses\": [" + rows + "], \"heroes\": [" + heroes + "], \"statistics\": {" + statistics + "}}";
                   }
                   return sides;
-              }() << "]}"
-           << ", \"intentional_quits\": [" << [&] {
+              }() << "]}";
+}
+
+void LiveSessionView::write_report_intentional_quits(std::ostream& output) const {
+    output << ", \"intentional_quits\": [" << [&] {
                   std::string rows;
                   if (battle_frame_.latest) for (const auto& quit : battle_frame_.latest->quits()) {
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"player\": ") + std::to_string(quit.player)
                           + ", \"tick\": " + std::to_string(quit.tick) + "}";
                   }
                   return rows;
-              }() << "]"
-           << ", \"beacons\": [" << [&] {
+              }() << "]";
+}
+
+void LiveSessionView::write_report_beacons(std::ostream& output) const {
+    output << ", \"beacons\": [" << [&] {
                   std::string rows;
                   for (const auto& beacon : visible_beacons())
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"player\": ") + std::to_string(beacon.player)
@@ -368,8 +419,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                           + ", \"expires_tick\": " + std::to_string(beacon.expires_tick)
                           + ", \"sequence\": " + std::to_string(beacon.sequence) + "}";
                   return rows;
-              }() << "]"
-           << ", \"replay\": " << json(ViewerPath::utf8(options_.replay_input))
+              }() << "]";
+}
+
+void LiveSessionView::write_report_runtime(std::ostream& output) const {
+    output << ", \"replay\": " << json(ViewerPath::utf8(options_.replay_input))
            << ", \"reveal\": " << (options_.reveal ? "true" : "false")
            << ", \"pacing\": " << json(options_.real_time ? "real_time" : "driven")
            << ", \"workers\": " << (session_ ? session_->worker_count() : 0U)
@@ -377,13 +431,26 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"multiplayer\": " << (multiplayer() ? "true" : "false")
            << ", \"lan_message\": " << json(multiplayer() ? lan_message(lan_view()) : std::string{})
            << ", \"lan_input_delay\": " << (multiplayer() ? lan_view().input_delay : 0)
-           << ", \"lan_desync\": " << (multiplayer() && lan_view().desync_tick ? "true" : "false")
-           << ", \"units\": " << ship_of_entity_.size()
+           << ", \"lan_desync\": " << (multiplayer() && lan_view().desync_tick ? "true" : "false");
+}
+
+void LiveSessionView::write_report_slots(std::ostream& output) const {
+    output << ", \"units\": " << ship_of_entity_.size()
            << ", \"launch_slots\": " << launch_slots_.size()
            << ", \"launched_drawn\": " << launched_ship_of_entity_.size()
            << ", \"slots_released\": " << slots_released_
-           << ", \"slotless\": [" << slotless_report_rows() << "]"
-           << ", \"squadrons\": [" << [&] {
+           << ", \"slot_identity\": {\"shadow_held\": " << shadow_held_ << ", \"shadow_peak\": " << shadow_peak_
+           << ", \"real_peak\": " << real_peak_ << ", \"fallbacks\": " << identity_fallbacks_
+           << ", \"undrawn_fallbacks\": " << identity_undrawn_ << ", \"both_undrawn\": " << identity_both_undrawn_
+           << ", \"entries\": " << slot_identity_of_entity_.size() << "}"
+           << ", \"slots_grown\": " << arrival_slots_.grown
+           << ", \"undrawn_entities\": " << arrival_slots_.undrawn.size()
+           << ", \"slot_growth_failure\": " << (arrival_slots_.failure.empty() ? "null" : json(arrival_slots_.failure))
+           << ", \"slotless\": [" << slotless_report_rows() << "]";
+}
+
+void LiveSessionView::write_report_squadrons(std::ostream& output) const {
+    output << ", \"squadrons\": [" << [&] {
                   // #518: every registered squadron, the setup's and the launched, as first seen.
                   std::string rows;
                   for (const auto& [container, squadron] : squadrons_) {
@@ -416,8 +483,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                           + ", \"members\": [" + members + "]}";
                   }
                   return rows;
-              }() << "]"
-           << ", \"session_records\": " << session_records_.size()
+              }() << "]";
+}
+
+void LiveSessionView::write_report_frame_progress_and_visibility(std::ostream& output) const {
+    output << ", \"session_records\": " << session_records_.size()
            << ", \"frames\": " << frames_
            << ", \"presented_tick\": " << presented_tick_
            << ", \"latest_tick\": " << latest_tick_
@@ -441,8 +511,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                           + ", \"opacity\": " + std::to_string(fade_.opacity(entity).value_or(0)) + "}";
                   }
                   return rows;
-              }() << "]"
-           << ", \"fading_units\": " << fading_units_
+              }() << "]";
+}
+
+void LiveSessionView::write_report_fog(std::ostream& output) const {
+    output << ", \"fading_units\": " << fading_units_
            << ", \"fog_ghost_pieces\": " << fog_ghost_instances_.size()
            << ", \"fog_ghost_log\": [" << [&] {
                   std::string rows;
@@ -465,8 +538,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   std::string rows;
                   for (const std::string& row : fading_log_rows_) rows += (rows.empty() ? "" : ", ") + row;
                   return rows;
-              }() << "]"
-           << ", \"scripted_inputs\": " << options_.inputs.size()
+              }() << "]";
+}
+
+void LiveSessionView::write_report_battle_start(std::ostream& output) const {
+    output << ", \"scripted_inputs\": " << options_.inputs.size()
            << ", \"start_map\": " << json(start_ ? start_->map : "")
            << ", \"start_map_sha256\": " << json(start_ ? start_->map_sha256 : "")
            << ", \"match_policy\": {\"heroes\": " << (start_ && start_->match.allow_heroes ? "true" : "false")
@@ -475,7 +551,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"free_starting_forces\": [" << [&] {
                   std::string rows;
                   if (start_) for (const auto& unit : start_->units) {
-                      if (unit.role != skirmish::UnitRole::free_unit) continue;
+                      if (unit.role != battle::UnitRole::free_unit) continue;
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"player\": ") + std::to_string(unit.state.owner)
                           + ", \"type\": " + json(unit.type) + "}";
                   }
@@ -525,7 +601,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   std::string rows;
                   if (start_) for (const auto& marker : start_->markers) {
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"record\": ") + std::to_string(marker.record)
-                          + ", \"player\": " + std::to_string(marker.player) + ", \"use\": " + json(skirmish::to_string(marker.use))
+                          + ", \"player\": " + std::to_string(marker.player) + ", \"use\": " + json(battle::to_string(marker.use))
                           + ", \"position\": [" + std::to_string(to_float(marker.position.x)) + ", "
                           + std::to_string(to_float(marker.position.y)) + ", " + std::to_string(to_float(marker.position.z)) + "]}";
                   }
@@ -534,7 +610,7 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"start_fleet\": [" << [&] {
                   std::string rows;
                   if (start_) for (const auto& unit : start_->units) {
-                      if (unit.role != skirmish::UnitRole::fleet && unit.role != skirmish::UnitRole::free_unit) continue;
+                      if (unit.role != battle::UnitRole::fleet && unit.role != battle::UnitRole::free_unit) continue;
                       rows += (rows.empty() ? "" : ", ") + std::string("{\"entity\": ") + std::to_string(unit.state.entity_id)
                           + ", \"player\": " + std::to_string(unit.state.owner) + ", \"record\": " + std::to_string(unit.record)
                           + ", \"type\": " + json(unit.type) + ", \"position\": [" + std::to_string(to_float(unit.state.position.x))
@@ -543,8 +619,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   }
                   return rows;
               }() << "]"
-           << ", \"ai_flag_ignored\": " << (ai_flag_ignored_ ? "true" : "false")
-           << ", \"time\": {\"speed_step\": " << time_.speed_step() << ", \"state\": "
+           << ", \"ai_flag_ignored\": " << (ai_flag_ignored_ ? "true" : "false");
+}
+
+void LiveSessionView::write_report_time_controls(std::ostream& output) const {
+    output << ", \"time\": {\"speed_step\": " << time_.speed_step() << ", \"state\": "
            << json(time_.ended() ? std::string("ended") : std::string(ui::to_string(time_.state())))
            << ", \"target_rate\": " << time_.target_rate() << ", \"track\": ["
            << [&] {
@@ -556,8 +635,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   }
                   return rows;
               }()
-           << "]}"
-           << ", \"defend\": " << (options_.defend ? "true" : "false")
+           << "]}";
+}
+
+void LiveSessionView::write_report_light_effects(std::ostream& output) const {
+    output << ", \"defend\": " << (options_.defend ? "true" : "false")
            << ", \"shield_flash\": " << (options_.shield_flash ? "true" : "false")
            << ", \"shield_flashes\": " << shield_flashes_
            << ", \"self_destruct_pulses\": " << self_destruct_pulses_
@@ -567,9 +649,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
            << ", \"shield_flash_samples\": " << shield_flash_samples_
            << ", \"shield_flash_duration\": " << shield_flash_constants_.duration
            << ", \"max_shield_flash_scale\": [" << max_shield_flash_scale_[0] << ','
-           << max_shield_flash_scale_[1] << ',' << max_shield_flash_scale_[2] << ']'
+           << max_shield_flash_scale_[1] << ',' << max_shield_flash_scale_[2] << ']';
+}
 
-           << ", \"stealth_blends\": [" << [&] {
+void LiveSessionView::write_report_visibility_blends(std::ostream& output) const {
+    output << ", \"stealth_blends\": [" << [&] {
                   std::ostringstream rows;
                   bool first = true;
                   for (const auto& [id, blend] : stealth_blends_) {
@@ -597,8 +681,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                   }
                   return rows.str();
               }() << "]"
-           << ", \"nebula_blend_missing_ticks\": " << nebula_blend_missing_ticks_
-           << ", \"own_units\": [";
+           << ", \"nebula_blend_missing_ticks\": " << nebula_blend_missing_ticks_;
+}
+
+void LiveSessionView::write_report_own_units(std::ostream& output) const {
+    output << ", \"own_units\": [";
     bool first_unit = true;
     for (const VisibleUnit& unit : visible_) {
         if (!unit.own) continue;
@@ -606,7 +693,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                << ", " << unit.position[1] << ", " << unit.position[2] << "], \"yaw\": " << unit.yaw << "}";
         first_unit = false;
     }
-    output << "], \"object_turrets\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_object_turrets(std::ostream& output) const {
+    output << ", \"object_turrets\": [";
     bool first_turret = true;
     if (ability_snapshot_) for (const auto& instance : ability_snapshot_->instances()) {
         if (!instance.object_turret) continue;
@@ -618,8 +709,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
                << ", \"ready\": " << (turret.ready ? "true" : "false") << "}";
         first_turret = false;
     }
-    output << "]"
-           << ", \"drawn_launch_colours\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_launch_colours(std::ostream& output) const {
+    output << ", \"drawn_launch_colours\": [";
     bool first_launch = true;
     for (const VisibleUnit& unit : visible_) {
         if (!launched_ship_of_entity_.contains(unit.entity)) continue;
@@ -637,16 +731,22 @@ void LiveSessionView::write_report(std::ostream& output) const {
         output << "}";
         first_launch = false;
     }
-    output << "]"
-           << ", \"hostile_units\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_hostile_units(std::ostream& output) const {
+    output << ", \"hostile_units\": [";
     bool first_hostile = true;
     for (const VisibleUnit& unit : visible_) {
         if (!unit.hostile) continue;
         output << (first_hostile ? "" : ", ") << "{\"entity\": " << unit.entity << "}";
         first_hostile = false;
     }
-    output << "]"
-           << ", \"orders\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_orders(std::ostream& output) const {
+    output << ", \"orders\": [";
     for (std::size_t index = 0; index < options_.orders.size(); ++index) {
         const ScheduledOrder& order = options_.orders[index];
         output << (index ? ", " : "") << "{\"tick\": " << order.tick << ", \"kind\": " << json(tactical::to_string(order.kind))
@@ -654,19 +754,31 @@ void LiveSessionView::write_report(std::ostream& output) const {
         if (order.target != 0) output << ", \"target\": " << order.target;
         output << "}";
     }
-    output << "], \"first_hits\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_first_hits(std::ostream& output) const {
+    output << ", \"first_hits\": [";
     for (auto hit = first_hits_.begin(); hit != first_hits_.end(); ++hit) {
         output << (hit == first_hits_.begin() ? "" : ", ") << "{\"shooter\": " << hit->first.first
                << ", \"target\": " << hit->first.second << ", \"tick\": " << hit->second << "}";
     }
-    output << "], \"rejected\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_rejected_orders(std::ostream& output) const {
+    output << ", \"rejected\": [";
     if (session_) {
         const auto rejected = session_->rejected_orders();
         for (std::size_t index = 0; index < rejected.size(); ++index) {
             output << (index ? ", " : "") << json(rejected[index].code + " " + rejected[index].message);
         }
     }
-    output << "], \"ai\": ";
+    output << "]";
+}
+
+void LiveSessionView::write_report_ai(std::ostream& output) const {
+    output << ", \"ai\": ";
     if (session_ && ai_scripts_) {
         // #79: the FoC AI's players, Lua load and the calls it could not make.
         const auto report = session_->script_report();
@@ -681,6 +793,9 @@ void LiveSessionView::write_report(std::ostream& output) const {
     } else {
         output << "null";
     }
+}
+
+void LiveSessionView::write_report_ability_effects(std::ostream& output) const {
     output << ", \"unit_clips\": [";
     for (std::size_t index = 0; index < unit_clip_rows_.size(); ++index) output << (index ? ", " : "") << unit_clip_rows_[index];
     output << "], \"ion_shots\": {\"squadrons\": [";
@@ -696,6 +811,9 @@ void LiveSessionView::write_report(std::ostream& output) const {
     }
     output << "]}, \"sfoil_switches\": " << sfoil_switches_ << ", \"ability_requests\": {\"issued\": "
            << abilities_.issued() << ", \"refused\": " << abilities_.refused() << "}";
+}
+
+void LiveSessionView::write_report_pads(std::ostream& output) const {
     // #530: the economy requests, the local player's economy at the last frame and the arrivals.
     output << ", \"pads\": [";
     if (const auto snapshot = battle_frame_.latest) {
@@ -724,7 +842,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
             output << "}";
         }
     }
-    output << "], \"economy_requests\": {\"buys\": " << economy_requests_.buys << ", \"cancels\": "
+    output << "]";
+}
+
+void LiveSessionView::write_report_economy(std::ostream& output) const {
+    output << ", \"economy_requests\": {\"buys\": " << economy_requests_.buys << ", \"cancels\": "
            << economy_requests_.cancels << ", \"reinforcements\": " << economy_requests_.reinforcements
            << ", \"refused\": " << economy_requests_.refused << "}, \"economy\": ";
     if (const tactical::EconomyView* view = local_economy()) {
@@ -742,17 +864,28 @@ void LiveSessionView::write_report(std::ostream& output) const {
     } else {
         output << "null";
     }
+}
+
+void LiveSessionView::write_report_placement_preview(std::ostream& output) const {
     output << ", \"placement_preview\": {\"frames\": " << preview_frames_ << ", \"queries\": "
            << preview_queries_ << ", \"samples\": [";
     for (std::size_t index = 0; index < preview_rows_.size(); ++index) output << (index ? ", " : "") << preview_rows_[index];
-    output << "]}, \"arrivals\": [";
+    output << "]}";
+}
+
+void LiveSessionView::write_report_arrivals(std::ostream& output) const {
+    output << ", \"arrivals\": [";
     std::size_t arrival_index = 0;
     for (const auto& [entity, row] : arrivals_) {
         output << (arrival_index++ ? ", " : "") << "{\"unit\": " << entity << ", \"owner\": " << row.owner
                << ", \"type\": " << row.type << ", \"first_tick\": " << row.first_tick << ", \"visible_tick\": "
                << row.visible_tick << ", \"landed_tick\": " << row.landed_tick << ", \"facing_yaw\": " << row.facing_yaw << "}";
     }
-    output << "], \"death_clones\": [";
+    output << "]";
+}
+
+void LiveSessionView::write_report_death_clones(std::ostream& output) const {
+    output << ", \"death_clones\": [";
     for (std::size_t index = 0; index < death_clone_rows_.size(); ++index) output << (index ? ", " : "") << death_clone_rows_[index];
     output << "], \"death_clones_shown\": [";
     for (std::size_t index = 0; index < active_clones_.size(); ++index) {
@@ -763,7 +896,11 @@ void LiveSessionView::write_report(std::ostream& output) const {
     for (std::size_t index = 0; index < retired_clone_rows_.size(); ++index) {
         output << (index ? ", " : "") << retired_clone_rows_[index];
     }
-    output << "], \"spin_away\": {\"drawn_max\": " << spinning_drawn_max_ << ", \"ships_max\": " << spinning_ships_max_
+    output << "]";
+}
+
+void LiveSessionView::write_report_spin_away(std::ostream& output) const {
+    output << ", \"spin_away\": {\"drawn_max\": " << spinning_drawn_max_ << ", \"ships_max\": " << spinning_ships_max_
            << ", \"spins\": [";
     bool first_spin = true;
     for (const auto& [unit, row] : spin_rows_) {
@@ -771,9 +908,16 @@ void LiveSessionView::write_report(std::ostream& output) const {
                << ", \"ended\": " << (row.ended ? std::to_string(*row.ended) : std::string("null")) << "}";
         first_spin = false;
     }
-    output << "]}, \"event_gaps\": [";
+    output << "]}";
+}
+
+void LiveSessionView::write_report_event_gaps(std::ostream& output) const {
+    output << ", \"event_gaps\": [";
     for (std::size_t index = 0; index < event_gap_rows_.size(); ++index) output << (index ? ", " : "") << event_gap_rows_[index];
     output << "]";
+}
+
+void LiveSessionView::write_report_final_state(std::ostream& output) const {
     if (!options_.hashes_path.empty()) output << ", \"draw_digest\": " << draw_digest_report();
     output << ", \"completed_ticks\": " << hashes_.size()
            << ", \"final_state_sha256\": " << json(hashes_.empty() ? "" : hashes_.back())
@@ -791,6 +935,9 @@ void LiveSessionView::write_report(std::ostream& output) const {
     } else {
         output << "null";
     }
+}
+
+void LiveSessionView::write_report_battle_end(std::ostream& output) const {
     output << ", \"battle_end\": ";
     if (battle_end_) {
         output << "{\"message\": " << json(ui::battle_message_key(battle_end_->result))
@@ -804,9 +951,13 @@ void LiveSessionView::write_report(std::ostream& output) const {
     } else {
         output << "null";
     }
+}
+
+void LiveSessionView::write_report_status(std::ostream& output) const {
     output << ", \"status\": " << json(finish_status_)
            << ", \"error\": " << (simulation_error_.empty() ? std::string("null") : json(simulation_error_))
-           << ", \"failure_replay\": " << (failure_replay_.empty() ? std::string("null") : json(failure_replay_)) << "},\n";
+           << ", \"failure_replay\": " << (failure_replay_.empty() ? std::string("null") : json(failure_replay_));
 }
+
 
 } // namespace eawr::presentation::godot_backend

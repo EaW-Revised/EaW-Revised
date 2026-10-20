@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "sky_scan_internal.hpp"
 // sky_scan: a CPU-only ledger of the surfaces and shader families of every
 // environment sky model the effective map corpus references (P1-06, #27).
@@ -83,21 +85,12 @@ std::string utf8(const std::filesystem::path& path) {
     return {reinterpret_cast<const char*>(value.data()), value.size()};
 }
 
-char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
-
 std::string lower(std::string value) {
-    for (char& character : value) character = fold(character);
-    return value;
+    return eawr::core::to_lower(value);
 }
 
 bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return eawr::core::iequals(left, right);
 }
 
 // The same data-root rule and profile layer order as asset_validate: the
@@ -128,29 +121,7 @@ std::optional<std::vector<std::pair<std::string, std::filesystem::path>>> roots(
 // Authored names are arbitrary bytes. Every byte outside printable ASCII is
 // escaped as its Latin-1 code point so the report is always valid UTF-8 JSON.
 std::string json(const std::string_view value) {
-    std::string output;
-    output.reserve(value.size() + 2);
-    output.push_back('"');
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output += "\\\""; break;
-        case '\\': output += "\\\\"; break;
-        case '\n': output += "\\n"; break;
-        case '\r': output += "\\r"; break;
-        case '\t': output += "\\t"; break;
-        default:
-            if (character < 0x20U || character >= 0x7fU) {
-                output += "\\u00";
-                output.push_back(hex[character >> 4U]);
-                output.push_back(hex[character & 15U]);
-            } else {
-                output.push_back(static_cast<char>(character));
-            }
-        }
-    }
-    output.push_back('"');
-    return output;
+    return eawr::core::json_quote_ascii_short_controls(value);
 }
 
 std::string sha256_hex(const std::span<const std::byte> bytes) {

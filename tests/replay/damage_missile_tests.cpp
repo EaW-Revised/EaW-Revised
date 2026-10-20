@@ -1,5 +1,15 @@
 #include "damage_support.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace damage_test_support {
 
 // --- Missiles (MS-01 to MS-07, #361) ------------------------------------------------------------

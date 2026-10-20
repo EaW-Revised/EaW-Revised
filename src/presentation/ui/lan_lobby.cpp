@@ -215,6 +215,16 @@ std::string_view online_list_notice(const bool service_failed, const std::size_t
 
 std::string_view online_chat_closed_notice() noexcept { return "Join or host a room to chat."; }
 
+std::string_view online_menu_chat_notice(const OnlineMenuChat state) noexcept {
+    switch (state) {
+        case OnlineMenuChat::active: return {};
+        case OnlineMenuChat::connecting: return "Connecting to lobby chat...";
+        case OnlineMenuChat::unavailable: return "Lobby chat is not available on this server.";
+        case OnlineMenuChat::idle: break;
+    }
+    return online_chat_closed_notice();
+}
+
 std::string clamp_room_password(const std::string_view typed) {
     return cut(std::string(typed), lan_password_max);
 }

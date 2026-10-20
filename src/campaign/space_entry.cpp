@@ -55,7 +55,7 @@ core::Result<Fixed> distance(Vec3 a, Vec3 b) {
 }
 // WGT-07/08: stable type-identifier buckets, last-listed member first. This load-time
 // pass is serial because each admission consumes the same population budget.
-core::Result<std::vector<sim::EntityId>> split(const ConflictRecord& record,
+core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const ConflictRecord& record,
     const SpaceEntryInputs& input, const SpaceEntrySide& side) {
     if (side.cap < Fixed{}) return fail<std::vector<sim::EntityId>>("negative faction cap");
     std::vector<sim::EntityId> selected;
@@ -122,58 +122,91 @@ core::Result<std::vector<sim::EntityId>> split(const ConflictRecord& record,
 }
 } // namespace
 
-core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
-    const SpaceEntryInputs& input, sim::EntityId first_free, std::uint64_t session_seed) {
-    if (!input.map.tables || record.layer != BattleLayer::space || !record.id || first_free <= record.id
-        || record.invader == 0 || record.defender == 0 || record.invader == record.defender
-        || record.map_identity != input.map.map || record.forces.size() > gc::galactic_max_objects)
-        return fail<SpaceEntryPlan>("invalid admitted space conflict or authored map");
+namespace {
+// The phases share only this preparation transaction. Inputs remain immutable;
+// plan and creation order are committed in the same sequence as scene admission.
+struct SpaceEntryPreparation {
+    const ConflictRecord& record;
+    const SpaceEntryInputs& input;
+    sim::EntityId first_free;
+    std::uint64_t session_seed;
     SpaceEntryPlan plan;
-    plan.conflict = record; plan.map = input.map; plan.first_free = first_free;
-    plan.fixture.map = input.map.map; plan.fixture.map_sha256 = input.map.map_sha256;
-    plan.fixture.free_starting_units = false; plan.fixture.pre_built_base = false;
-    plan.fixture.victory_condition = tt::VictoryCondition::all_enemy_units_destroyed;
     std::map<gc::PlayerId, const SpaceEntrySide*> sides;
-    for (const auto& side : input.sides) {
-        if (!sides.emplace(side.player, &side).second) return fail<SpaceEntryPlan>("duplicate side binding");
-    }
-    for (const auto owner : {record.invader, record.defender}) if (!sides.contains(owner))
-        return fail<SpaceEntryPlan>("both owners need explicit faction/cap bindings");
-    sim::EntityId previous{};
-    for (const auto& force : record.forces) {
-        if (force.id <= previous || force.id >= first_free || force.id == record.id
-            || (force.owner != record.invader && force.owner != record.defender) || !type_of(input, force.type))
-            return fail<SpaceEntryPlan>("invalid persistent roster identity or binding");
-        previous = force.id;
-    }
-    auto defenders = markers(input.map, "Defending Forces Position");
-    auto attackers = markers(input.map, "Attacker Entry Position");
-    for (const auto* p : defenders) if (!usable(*p)) return fail<SpaceEntryPlan>("invalid defender marker pose");
-    for (const auto* p : attackers) if (!usable(*p)) return fail<SpaceEntryPlan>("invalid attacker marker pose");
-    // WGT-18/42: ordinary closest-defender branch. The prevention-source qualification
-    // is retained explicitly; no ground-scene lookup is guessed from galactic structures.
-    const auto* attack = attackers.empty() ? nullptr : attackers.front();
-    if (attack && !defenders.empty()) {
-        auto nearest = distance(*attack->position, *defenders.front()->position);
-        if (!nearest) return core::Result<SpaceEntryPlan>::failure(nearest.error());
-        for (const auto* p : attackers) {
-            auto d = distance(*p->position, *defenders.front()->position);
-            if (!d) return core::Result<SpaceEntryPlan>::failure(d.error());
-            if (d.value() < nearest.value()) { nearest = d; attack = p; }
-        }
-    }
+    std::vector<const battle::MapPlacement*> defenders;
+    std::vector<const battle::MapPlacement*> attackers;
+    const battle::MapPlacement* attack{};
     std::uint32_t creation{};
-    const auto allocate = [&]() -> std::optional<sim::EntityId> {
+    std::map<gc::PlayerId, std::vector<sim::EntityId>> initial_forces;
+    std::map<gc::PlayerId, std::pair<Fixed, sim::EntityId>> flagships;
+    std::vector<const ConflictForce*> source_roster;
+
+    SpaceEntryPreparation(const ConflictRecord& conflict, const SpaceEntryInputs& inputs,
+        sim::EntityId first, std::uint64_t seed)
+        : record(conflict), input(inputs), first_free(first), session_seed(seed) {}
+
+    std::optional<sim::EntityId> allocate() {
         if (plan.first_free == std::numeric_limits<sim::EntityId>::max()) return {};
         return plan.first_free++;
-    };
-    const auto append = [&](const SpaceEntryType& type, gc::PlayerId owner, std::uint32_t marker,
+    }
+    void append(const SpaceEntryType& type, gc::PlayerId owner, std::uint32_t marker,
         sim::EntityId id, bool temporary) {
         ConflictForce force{id, type.galactic, owner, 0, ForceRole::escort};
         force.destroy_after_tactical = temporary;
         plan.conflict.forces.push_back(force);
         plan.placements.push_back({id, marker, true, ++creation});
-    };
+    }
+
+    core::Result<void> validate_and_select_markers();
+    core::Result<void> place_station_and_structures();
+    core::Result<void> select_initial_forces();
+    core::Result<void> deploy_initial_forces();
+    core::Result<void> order_reinforcements();
+    core::Result<void> attach_passengers();
+    core::Result<void> finalize_forces();
+    core::Result<void> bind_scene_owners();
+};
+
+core::Result<void> SpaceEntryPreparation::validate_and_select_markers() {
+    if (!input.map.tables || record.layer != BattleLayer::space || !record.id || first_free <= record.id
+        || record.invader == 0 || record.defender == 0 || record.invader == record.defender
+        || record.map_identity != input.map.map || record.forces.size() > gc::galactic_max_objects)
+        return fail<void>("invalid admitted space conflict or authored map");
+    plan.conflict = record; plan.map = input.map; plan.first_free = first_free;
+    plan.fixture.map = input.map.map; plan.fixture.map_sha256 = input.map.map_sha256;
+    plan.fixture.free_starting_units = false; plan.fixture.pre_built_base = false;
+    plan.fixture.victory_condition = tt::VictoryCondition::all_enemy_units_destroyed;
+    for (const auto& side : input.sides) {
+        if (!sides.emplace(side.player, &side).second) return fail<void>("duplicate side binding");
+    }
+    for (const auto owner : {record.invader, record.defender}) if (!sides.contains(owner))
+        return fail<void>("both owners need explicit faction/cap bindings");
+    sim::EntityId previous{};
+    for (const auto& force : record.forces) {
+        if (force.id <= previous || force.id >= first_free || force.id == record.id
+            || (force.owner != record.invader && force.owner != record.defender) || !type_of(input, force.type))
+            return fail<void>("invalid persistent roster identity or binding");
+        previous = force.id;
+    }
+    defenders = markers(input.map, "Defending Forces Position");
+    attackers = markers(input.map, "Attacker Entry Position");
+    for (const auto* p : defenders) if (!usable(*p)) return fail<void>("invalid defender marker pose");
+    for (const auto* p : attackers) if (!usable(*p)) return fail<void>("invalid attacker marker pose");
+    // WGT-18/42: ordinary closest-defender branch. The prevention-source qualification
+    // is retained explicitly; no ground-scene lookup is guessed from galactic structures.
+    attack = attackers.empty() ? nullptr : attackers.front();
+    if (attack && !defenders.empty()) {
+        auto nearest = distance(*attack->position, *defenders.front()->position);
+        if (!nearest) return core::Result<void>::failure(nearest.error());
+        for (const auto* p : attackers) {
+            auto d = distance(*p->position, *defenders.front()->position);
+            if (!d) return core::Result<void>::failure(d.error());
+            if (d.value() < nearest.value()) { nearest = d; attack = p; }
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
     auto stations = markers(input.map, "Space Station Position");
     script::authoritative::RandomStream random(child_seed(session_seed, record.id), 0, 0);
     // WGT-09: one draw only for multiple station markers, even if no station exists.
@@ -181,13 +214,13 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
     plan.marker_draws = random.draws();
     if (stations.empty()) { plan.conflict.station = 0; plan.conflict.station_type = 0; }
     if (record.station_level && !stations.empty()) {
-        if (!usable(*stations[station_index])) return fail<SpaceEntryPlan>("invalid station marker pose");
+        if (!usable(*stations[station_index])) return fail<void>("invalid station marker pose");
         const auto* station = type_of(input, input.station_galactic_type);
         if (!station || station->tactical != input.station_type || !input.map.tables->find(station->tactical)
             || input.map.tables->find(station->tactical)->kind != units::UnitKind::station)
-            return fail<SpaceEntryPlan>("missing current-level station binding");
+            return fail<void>("missing current-level station binding");
         if (!plan.conflict.station) {
-            const auto id = allocate(); if (!id) return fail<SpaceEntryPlan>("station allocator exhausted");
+            const auto id = allocate(); if (!id) return fail<void>("station allocator exhausted");
             plan.conflict.station = *id; plan.conflict.station_type = station->galactic;
             append(*station, station_side(record), stations[station_index]->record, *id, true);
         } else plan.placements.push_back({record.station, stations[station_index]->record, true, ++creation});
@@ -200,10 +233,10 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
     std::vector<SpaceEntryStructure> structures = input.structures;
     for (const auto& s : input.structures) {
         const auto* type = type_of(input, s.type);
-        if (!type) return fail<SpaceEntryPlan>("missing structure binding");
+        if (!type) return fail<void>("missing structure binding");
         if (!type->additional_structure.empty()) {
             const auto* added = named_type(input, type->additional_structure);
-            if (!added) return fail<SpaceEntryPlan>("missing additional structure type");
+            if (!added) return fail<void>("missing additional structure type");
             if (std::none_of(structures.begin(), structures.end(), [&](const auto& row) { return row.type == added->galactic; }))
                 structures.push_back({0, added->galactic, s.owner, {}});
         }
@@ -235,10 +268,10 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
                     if (candidates.size() > 1) candidates.resize(1);
                 }
                 const auto* placed = type->every_marker_type.empty() ? type : named_type(input, type->every_marker_type);
-                if (!placed) return fail<SpaceEntryPlan>("missing every-marker type");
+                if (!placed) return fail<void>("missing every-marker type");
                 for (const auto* p : candidates) {
-                    if (!usable(*p)) return fail<SpaceEntryPlan>("invalid orbital marker pose");
-                    const auto id = allocate(); if (!id) return fail<SpaceEntryPlan>("structure allocator exhausted");
+                    if (!usable(*p)) return fail<void>("invalid orbital marker pose");
+                    const auto id = allocate(); if (!id) return fail<void>("structure allocator exhausted");
                     append(*placed, type->every_marker_type.empty() ? record.defender : s.owner, p->record, *id, !s.id);
                     if (s.id) {
                         auto& copy = plan.conflict.forces.back();
@@ -259,31 +292,32 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
                 source.type = "campaign weapon source"; source.marker = true;
                 source.record = 1;
                 for (const auto& p : plan.map.placements) {
-                    if (p.record == std::numeric_limits<std::uint32_t>::max()) return fail<SpaceEntryPlan>("map marker ordinal exhausted");
+                    if (p.record == std::numeric_limits<std::uint32_t>::max()) return fail<void>("map marker ordinal exhausted");
                     source.record = std::max(source.record, p.record + 1);
                 }
-                if (!source.position || !source.orientation_degrees) return fail<SpaceEntryPlan>("invalid weapon source pose");
+                if (!source.position || !source.orientation_degrees) return fail<void>("invalid weapon source pose");
                 // The shared selected-force builder accepts yaw-only marker poses.
                 auto yaw_only = source;
                 yaw_only.orientation_degrees->x = {}; yaw_only.orientation_degrees->y = {};
                 plan.map.placements.push_back(yaw_only);
-                const auto id = allocate(); if (!id) return fail<SpaceEntryPlan>("weapon allocator exhausted");
+                const auto id = allocate(); if (!id) return fail<void>("weapon allocator exhausted");
                 append(*type, input.planet_owner, source.record, *id, !s.id);
                 if (s.id) { auto& copy = plan.conflict.forces.back(); copy.role = ForceRole::orbital; copy.parent = s.id; }
                 plan.fixed_poses.emplace_back(*id, source);
             }
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::select_initial_forces() {
     auto durability_table = units::durability_table(*input.map.tables);
-    if (!durability_table) return core::Result<SpaceEntryPlan>::failure(durability_table.error());
-    std::map<gc::PlayerId, std::vector<sim::EntityId>> initial_forces;
-    std::map<gc::PlayerId, std::pair<Fixed, sim::EntityId>> flagships;
+    if (!durability_table) return core::Result<void>::failure(durability_table.error());
     for (const auto owner : {record.defender, record.invader}) {
-        auto initial = split(record, input, *sides.at(owner));
-        if (!initial) return core::Result<SpaceEntryPlan>::failure(initial.error());
+        auto initial = select_initial_force_ids(record, input, *sides.at(owner));
+        if (!initial) return core::Result<void>::failure(initial.error());
         initial_forces.emplace(owner, std::move(initial).value());
     }
-    std::vector<const ConflictForce*> source_roster;
     for (const auto id : input.roster_order) {
         const auto at = std::find_if(record.forces.begin(), record.forces.end(), [id](const auto& f) { return f.id == id; });
         if (at != record.forces.end()) source_roster.push_back(&*at);
@@ -295,13 +329,17 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         const auto& initial = initial_forces.at(force->owner);
         if (type->transport || type->superweapon || std::find(initial.begin(), initial.end(), force->id) == initial.end()) continue;
         const auto* profile = durability_table.value().find(type->purchase_type ? type->purchase_type : battle::type_id(type->tactical));
-        if (!type->source_flagship_rating && !profile) return fail<SpaceEntryPlan>("flagship source durability profile is absent for " + type->tactical);
+        if (!type->source_flagship_rating && !profile) return fail<void>("flagship source durability profile is absent for " + type->tactical);
         auto rating = type->source_flagship_rating ? core::Result<Fixed>::success(*type->source_flagship_rating)
             : sim::math::add(profile ? profile->max_hull : Fixed{}, profile ? profile->max_shields : Fixed{});
-        if (!rating) return core::Result<SpaceEntryPlan>::failure(rating.error());
+        if (!rating) return core::Result<void>::failure(rating.error());
         auto& best = flagships[force->owner];
         if (rating.value() > best.first) best = {rating.value(), force->id};
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::deploy_initial_forces() {
     // WGT-05: defender split is committed before invader split.
     for (const auto owner : {record.defender, record.invader}) {
         const auto& initial = initial_forces.at(owner);
@@ -327,7 +365,7 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             auto selected_marker = marker;
             if (type->superweapon) {
                 const auto death_star = markers(input.map, "Death_Star_Position");
-                if (death_star.empty() || !usable(*death_star.front())) return fail<SpaceEntryPlan>("superweapon marker unavailable");
+                if (death_star.empty() || !usable(*death_star.front())) return fail<void>("superweapon marker unavailable");
                 selected_marker = death_star.front()->record; plan.conflict.superweapon = id;
             }
             plan.placements.push_back({id, selected_marker, true, ++creation});
@@ -340,12 +378,16 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             // WGT-17/37: escort objects have child-only identities and are discarded on return.
             for (const auto& name : type->escorts) {
                 const auto* escort = named_type(input, name);
-                if (!escort) return fail<SpaceEntryPlan>("missing escort type binding");
-                const auto escort_id = allocate(); if (!escort_id) return fail<SpaceEntryPlan>("escort allocator exhausted");
+                if (!escort) return fail<void>("missing escort type binding");
+                const auto escort_id = allocate(); if (!escort_id) return fail<void>("escort allocator exhausted");
                 append(*escort, owner, marker, *escort_id, true);
             }
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::order_reinforcements() {
     // WGT-07/08: transport overflow retains source order; ordinary leftovers
     // walk each type bucket forward after deployment has removed its back.
     // Keep the identity manifest canonical and record the pool order separately.
@@ -363,16 +405,20 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             plan.reserve_order.insert(plan.reserve_order.end(), ids.begin(), ids.end());
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::attach_passengers() {
     std::set<sim::EntityId> stowed;
     std::map<sim::EntityId, std::uint64_t> passenger_counts;
     for (const auto& source : input.riders) {
         auto rider = source;
         const auto* type = type_of(input, rider.force.type);
         if (!type || rider.force.id == 0 || rider.force.id >= first_free || rider.force.id == record.id)
-            return fail<SpaceEntryPlan>("invalid passenger identity or binding");
+            return fail<void>("invalid passenger identity or binding");
         const auto transport = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == rider.transport; });
         if (transport == plan.conflict.forces.end() || transport->owner != rider.force.owner)
-            return fail<SpaceEntryPlan>("passenger has no owning transport");
+            return fail<void>("passenger has no owning transport");
         rider.force.tactical_type = battle::type_id(rider.tactical);
         rider.force.carrier = rider.transport;
         rider.force.role = transport->role == ForceRole::retained ? ForceRole::retained : ForceRole::reinforcement;
@@ -382,12 +428,12 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             const auto placement = std::find_if(plan.placements.begin(), plan.placements.end(), [&](const auto& p) { return p.force == rider.transport; });
             const auto marker = placement->marker;
             const auto passenger_order_wide = static_cast<std::uint64_t>(placement->creation_order) + 1 + passenger_counts[rider.transport];
-            if (passenger_order_wide > std::numeric_limits<std::uint32_t>::max()) return fail<SpaceEntryPlan>("passenger creation order exhausted");
+            if (passenger_order_wide > std::numeric_limits<std::uint32_t>::max()) return fail<void>("passenger creation order exhausted");
             const auto passenger_order = static_cast<std::uint32_t>(passenger_order_wide);
             if (!type->unique_space_unit.empty()) {
                 const auto* container = named_type(input, type->unique_space_unit);
-                if (!container) return fail<SpaceEntryPlan>("passenger unique container has no binding");
-                const auto id = allocate(); if (!id) return fail<SpaceEntryPlan>("passenger container allocator exhausted");
+                if (!container) return fail<void>("passenger unique container has no binding");
+                const auto id = allocate(); if (!id) return fail<void>("passenger container allocator exhausted");
                 append(*container, owner, marker, *id, true);
                 for (auto& p : plan.placements) if (p.force != *id && p.creation_order >= passenger_order) ++p.creation_order;
                 plan.placements.back().creation_order = passenger_order;
@@ -398,13 +444,13 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
             plan.riders.push_back(rider);
         }
         if (std::any_of(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == rider.force.id; }))
-            return fail<SpaceEntryPlan>("passenger identity already exists in the flattened roster");
+            return fail<void>("passenger identity already exists in the flattened roster");
         plan.conflict.forces.push_back(rider.force);
         for (auto member : rider.member_forces) {
             if (!member.id || member.id >= first_free || member.id == record.id || !type_of(input, member.type)
                 || member.owner != rider.force.owner || !member.carrier
                 || std::any_of(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == member.id; }))
-                return fail<SpaceEntryPlan>("invalid nested passenger identity or binding");
+                return fail<void>("invalid nested passenger identity or binding");
             member.role = rider.force.role;
             plan.conflict.forces.push_back(member);
         }
@@ -414,10 +460,14 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         force.role = ForceRole::retained; // WGT-21: removal without galactic death, never a reserve offer.
         std::erase_if(plan.placements, [&](const auto& p) { return p.force == force.id; });
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::finalize_forces() {
     for (auto& force : plan.conflict.forces) {
         if (force.role == ForceRole::rider || force.carrier) continue; // passenger type is its contained identity
         const auto* type = type_of(input, force.type);
-        if (!type) return fail<SpaceEntryPlan>("missing final tactical type binding");
+        if (!type) return fail<void>("missing final tactical type binding");
         force.tactical_type = battle::type_id(type->tactical);
         force.purchase_type = type->purchase_type;
     }
@@ -440,10 +490,14 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
     if (std::any_of(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& force) {
         return force.id >= plan.first_free || force.parent >= plan.first_free || force.carrier >= plan.first_free;
     }) || std::any_of(plan.placements.begin(), plan.placements.end(), [&](const auto& placement) { return placement.force >= plan.first_free; }))
-        return fail<SpaceEntryPlan>("force, parent, carrier or placement exceeds the reserved scene boundary");
+        return fail<void>("force, parent, carrier or placement exceeds the reserved scene boundary");
     std::sort(plan.conflict.forces.begin(), plan.conflict.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
     plan.conflict.structure_markers = plan.structure_markers;
     std::sort(plan.conflict.structure_markers.begin(), plan.conflict.structure_markers.end());
+    return core::Result<void>::success();
+}
+
+core::Result<void> SpaceEntryPreparation::bind_scene_owners() {
     // WGT-123: only scene owners need a relation-class label. Unused galactic
     // players do not become tactical sides; neutral scenery retains its binding.
     std::set<gc::PlayerId> active{record.invader, record.defender};
@@ -555,9 +609,33 @@ core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
         for (const auto owner : legacy_map_owners) active.erase(owner);
         binding = bind();
     }
-    if (!binding) return core::Result<SpaceEntryPlan>::failure(binding.error());
+    if (!binding) return core::Result<void>::failure(binding.error());
     plan.fixture.slots = std::move(binding).value();
-    return core::Result<SpaceEntryPlan>::success(std::move(plan));
+    return core::Result<void>::success();
+}
+
+} // namespace
+
+core::Result<SpaceEntryPlan> prepare_space_entry(const ConflictRecord& record,
+    const SpaceEntryInputs& input, sim::EntityId first_free, std::uint64_t session_seed) {
+    SpaceEntryPreparation preparation(record, input, first_free, session_seed);
+    if (auto phase = preparation.validate_and_select_markers(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.place_station_and_structures(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.select_initial_forces(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.deploy_initial_forces(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.order_reinforcements(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.attach_passengers(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.finalize_forces(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    if (auto phase = preparation.bind_scene_owners(); !phase)
+        return core::Result<SpaceEntryPlan>::failure(phase.error());
+    return core::Result<SpaceEntryPlan>::success(std::move(preparation.plan));
 }
 
 namespace {
@@ -576,6 +654,35 @@ struct SceneMath {
     Fixed div(Fixed a, Fixed b) { return take(sim::math::divide(a, b)); }
     Fixed half(Fixed a) { return Fixed::from_raw(a.raw() / 2); }
 };
+core::Result<void> position_tactical_super_weapons(std::vector<battle::StartUnit>& staged,
+    const SpaceEntryInputs& input, const SpaceEntryPlan& plan, SceneMath& math) {
+    using Result = core::Result<void>;
+    const auto find = [&](sim::EntityId id) -> battle::StartUnit* {
+        const auto at = std::find_if(staged.begin(), staged.end(), [id](const auto& u) { return u.state.entity_id == id; });
+        return at == staged.end() ? nullptr : &*at;
+    };
+    // TSW-01: a tactical super weapon is repositioned once, at its first service, from the nearest enemy-owned
+    // target, wherever formation put it; the defending player's one stands at its attack distance.
+    {
+        for (const auto& placement : plan.placements) {
+            const auto force = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == placement.force; });
+            auto* object = force == plan.conflict.forces.end() ? nullptr : find(force->id);
+            const auto* type = object ? input.map.tables->find(object->type) : nullptr;
+            if (!type || !type->tactical_super_weapon) continue;
+            const auto side = std::find_if(input.sides.begin(), input.sides.end(), [&](const auto& s) { return s.player == force->owner; });
+            const auto targets = battle::tactical_super_weapon_targets(plan.map.placements, side == input.sides.end() ? std::string_view{} : std::string_view{side->faction});
+            if (!targets) return Result::failure(targets.error());
+            const auto started = battle::tactical_super_weapon_start(*type->tactical_super_weapon, object->state.position,
+                targets.value(), force->owner == plan.conflict.defender);
+            if (!started) return Result::failure(started.error());
+            object->state.position = started.value().position;
+            object->state.rotation = math.take(tt::yaw_rotation(started.value().yaw_degrees));
+            object->yaw_degrees = started.value().yaw_degrees;
+        }
+    }
+    return Result::success();
+}
+
 }
 core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
     const SpaceEntryInputs& input, const SpaceEntryPlan& plan, std::optional<Vec3> invader_target) {
@@ -758,25 +865,8 @@ core::Result<SpaceFormationResult> form_space_entry(battle::BattleStart& scene,
             }
         }
     }
-    // TSW-01: a tactical super weapon is repositioned once, at its first service, from the nearest enemy-owned
-    // target, wherever formation put it; the defending player's one stands at its attack distance.
-    {
-        for (const auto& placement : plan.placements) {
-            const auto force = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == placement.force; });
-            auto* object = force == plan.conflict.forces.end() ? nullptr : find(force->id);
-            const auto* type = object ? input.map.tables->find(object->type) : nullptr;
-            if (!type || !type->tactical_super_weapon) continue;
-            const auto side = std::find_if(input.sides.begin(), input.sides.end(), [&](const auto& s) { return s.player == force->owner; });
-            const auto targets = battle::tactical_super_weapon_targets(plan.map.placements, side == input.sides.end() ? std::string_view{} : std::string_view{side->faction});
-            if (!targets) return Result::failure(targets.error());
-            const auto started = battle::tactical_super_weapon_start(*type->tactical_super_weapon, object->state.position,
-                targets.value(), force->owner == plan.conflict.defender);
-            if (!started) return Result::failure(started.error());
-            object->state.position = started.value().position;
-            object->state.rotation = math.take(tt::yaw_rotation(started.value().yaw_degrees));
-            object->yaw_degrees = started.value().yaw_degrees;
-        }
-    }
+    auto positioned = position_tactical_super_weapons(staged, input, plan, math);
+    if (!positioned) return Result::failure(positioned.error());
     if (math.error) return Result::failure(*math.error);
     scene.units = std::move(staged);
     return Result::success({attacker && invader_target.has_value()});
@@ -984,6 +1074,7 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
     auto content = space_entry_content(entry.conflict.tactical, plan.map);
     if (!content) return core::Result<ConflictEntry>::failure(content.error());
     entry.content = std::move(content).value();
+    entry.start.arrivals = battle::plan_start_arrivals(entry.start, *input.map.tables, &entry.content.economy);
     return built;
 }
 

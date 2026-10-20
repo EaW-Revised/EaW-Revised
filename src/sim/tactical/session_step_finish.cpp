@@ -199,17 +199,46 @@ void session_detail::Tick::track_victory_change(const UnitState* before, const U
 core::Result<void> session_detail::Tick::finalize() {
     const auto& arrivals = staging_.value().arrivals.value();
     const auto& combat_events = targets_.value().combat_events.value();
-    const auto& frame = tracked_.value().frame.value();
-    const auto& rebuilt = tracked_.value().rebuilt.value();
-    const auto& members_before = tracked_.value().members_before.value();
-    auto& events = impacts_.value().events.value();
-    auto& instances = systems_.value().instances.value();
     auto& survivors = surviving_.value().survivors.value();
-    const auto& spins = fighters_.value().spins.value();
     const auto& world = targets_.value().world.value();
     const auto& view = world.value();
-    const auto& table = impl_->motion;
     finalized_.emplace();
+    if (auto result = finalize_departures(); !result) return result;
+    if (auto result = finalize_defences(); !result) return result;
+    std::vector<UnitState> positions;
+    positions.reserve(survivors.size());
+    for (const auto& unit : survivors) {
+        positions.push_back(unit.state);
+    }
+
+    // Visibility phase: after every per-unit system, workers read one sensor field built
+    // from the tick's final positions and fill the same disjoint slots.
+    // WR-35/39: only the few active arrivals supply disabled IDs; the field's existing
+    // observer build filters them. Model visibility at 35 never enables a sensor.
+    // WR-43: the disabled service never releases what the creation frame marked at the drop point,
+    // so the fog grid keeps that circle (the arrivals map is ascending by ID).
+    std::vector<EntityId> disabled_revealers;
+    std::vector<Impl::HeldReveal> held_reveals;
+    for (const auto& [id, arrival] : arrivals) {
+        if (arrival.frame >= arrival_reveal_frame) continue;
+        disabled_revealers.push_back(id);
+        held_reveals.push_back({id, arrival.exit});
+    }
+    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors, disabled_revealers,
+        bonuses_->command_ledger ? bonuses_->command_ledger->reveal_multipliers : impl_->command_ledger.reveal_multipliers);
+    if (!field) {
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
+            "tick " + std::to_string(tick) + ": " + field.error().message));
+    }
+    const auto& sensing = field.value();
+    if (auto result = finalize_fog(positions, sensing, held_reveals, combat_events, view); !result) return result;
+    if (auto result = finalize_visibility(positions, sensing, disabled_revealers); !result) return result;
+    return finalize_outcomes();
+}
+
+core::Result<void> session_detail::Tick::finalize_departures() {
+    auto& survivors = surviving_.value().survivors.value();
+    auto& instances = systems_.value().instances.value();
     auto& basic_ai = finalized_->basic_ai.emplace(impl_->basic_ai);
     auto& controls = finalized_->departure_controls.emplace(impl_->departure_controls);
     if (impl_->setup.departure_policy && !pending_quits_.empty()) {
@@ -280,6 +309,11 @@ core::Result<void> session_detail::Tick::finalize() {
                 }
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::finalize_defences() {
+    auto& survivors = surviving_.value().survivors.value();
     if (radar_dirty_) {
         auto radar = impl_->publish_named_abilities(survivors, named_ability_locks_,
             radar_roster_ ? *radar_roster_ : impl_->radar_roster, executor);
@@ -321,32 +355,12 @@ core::Result<void> session_detail::Tick::finalize() {
                     projectile_defence_order_.push_back(id);
         }
     }
-    std::vector<UnitState> positions;
-    positions.reserve(survivors.size());
-    for (const auto& unit : survivors) {
-        positions.push_back(unit.state);
-    }
+    return core::Result<void>::success();
+}
 
-    // Visibility phase: after every per-unit system, workers read one sensor field built
-    // from the tick's final positions and fill the same disjoint slots.
-    // WR-35/39: only the few active arrivals supply disabled IDs; the field's existing
-    // observer build filters them. Model visibility at 35 never enables a sensor.
-    // WR-43: the disabled service never releases what the creation frame marked at the drop point,
-    // so the fog grid keeps that circle (the arrivals map is ascending by ID).
-    std::vector<EntityId> disabled_revealers;
-    std::vector<Impl::HeldReveal> held_reveals;
-    for (const auto& [id, arrival] : arrivals) {
-        if (arrival.frame >= arrival_reveal_frame) continue;
-        disabled_revealers.push_back(id);
-        held_reveals.push_back({id, arrival.exit});
-    }
-    auto field = SensorField::build(impl_->setup.players, positions, impl_->sensors, disabled_revealers,
-        bonuses_->command_ledger ? bonuses_->command_ledger->reveal_multipliers : impl_->command_ledger.reveal_multipliers);
-    if (!field) {
-        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
-            "tick " + std::to_string(tick) + ": " + field.error().message));
-    }
-    const auto& sensing = field.value();
+core::Result<void> session_detail::Tick::finalize_fog(const std::vector<UnitState>& positions,
+    const SensorField& sensing, const std::vector<Impl::HeldReveal>& held_reveals,
+    const std::vector<CombatEvent>& combat_events, const detail::CombatWorld& view) {
     // Fog cells (#274): the grids due this tick are serviced, then revealers release and mark
     // their circles, from the same final positions.
     // A transactional view of the session's shared rows: pointer metadata only, never grids.
@@ -408,6 +422,16 @@ core::Result<void> session_detail::Tick::finalize() {
             return core::Result<void>::failure(advanced.error());
         }
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::finalize_visibility(const std::vector<UnitState>& positions,
+    const SensorField& sensing, const std::vector<EntityId>& disabled_revealers) {
+    auto& fog = finalized_.value().fog.value();
+    auto& survivors = surviving_.value().survivors.value();
+    auto& instances = systems_.value().instances.value();
+    const auto& spins = fighters_.value().spins.value();
+    const auto& arrivals = staging_.value().arrivals.value();
     const FogCells* cells = fog ? &*fog : nullptr;
     // Spinning craft (#447) are seen like their owner's units at their spin positions.
     auto& spinning = finalized_.value().spinning.emplace(spins.size());
@@ -487,6 +511,16 @@ core::Result<void> session_detail::Tick::finalize() {
         }
     }
 
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::finalize_outcomes() {
+    const auto& table = impl_->motion;
+    auto& survivors = surviving_.value().survivors.value();
+    const auto& rebuilt = tracked_.value().rebuilt.value();
+    const auto& members_before = tracked_.value().members_before.value();
+    const auto& frame = tracked_.value().frame.value();
+    auto& events = impacts_.value().events.value();
     // A layer that a submission or a member change rebuilt this tick rolls from this frame.
     auto& anchors = finalized_.value().anchors.emplace(impl_->tracking_anchor);
     if (table.avoidance) {

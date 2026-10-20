@@ -1,3 +1,11 @@
+// P2-10 (#73): target choice and weapon fire (docs/behaviour/space-targeting.md,
+// docs/behaviour/space-weapon-fire.md). The targeting note's cases run through the opportunity
+// service; the session cases use a TIE Defender-like shooter; a combat battle's hashes are pinned
+// in tactical-combat.hashes.csv and must be reproduced by every worker count, a scrambled storage
+// order and a written-and-parsed replay. `combat_tests <fixtures> <cases.json> --update` rewrites the pin.
+
+#include "../support/self_test.hpp"
+#include "../support/check.hpp"
 #include "combat_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -7,45 +15,34 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 #include "../../src/sim/tactical/fighters_internal.hpp"
-
 #include "../../apps/sim_headless/json.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <functional>
+#include <ios>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-// P2-10 (#73): target choice and weapon fire (docs/behaviour/space-targeting.md,
-// docs/behaviour/space-weapon-fire.md). The targeting note's cases run through the opportunity
-// service; the session cases use a TIE Defender-like shooter; a combat battle's hashes are pinned
-// in tactical-combat.hashes.csv and must be reproduced by every worker count, a scrambled storage
-// order and a written-and-parsed replay. `combat_tests <fixtures> <cases.json> --update` rewrites the pin.
 namespace combat_test_support {
 
 using sim_headless::Json;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 
@@ -1398,6 +1395,10 @@ void test_squadron_adoption_and_retention() {
 }
 
 int main(int argc, char** argv) {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     if (argc < 3) {
         std::cerr << "usage: combat_tests <fixtures directory> <space-targeting-cases.json> [--update]\n";
         return 2;

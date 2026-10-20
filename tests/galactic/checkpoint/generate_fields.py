@@ -40,14 +40,17 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller (feedback)": "feedback_notice_handler",
         "unhealthy or in-flight state cannot reach a save barrier": "failed native_applying",
         "applied native journal history is carried by the recording section; the owner keeps only its length (#4058)": "native_effects",
+        "prebattle autosave admission window derived by the conflict owner each step, never saved (#2524)": "prebattle_autosave_window",
     },
     "eawr::campaign::GameSession::Impl": {
-        "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai",
-        "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler vote_progress",
+        "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine",
+        "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards technology_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_planets",
-        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index story_notices",
+        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index story_notes story_notices story_reported story_triggers",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
+        "history rebase scheduled by a save or load and applied at the next step; a recapture before it sees the saved window (#4058)": "scheduled_base",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
+        "the running step's executor, set only inside a step (#683)": "executor",
     },
     "eawr::campaign::GameSession::Impl::TimelinePublication": {
         "process-local publication slots rebuilt from saved timelines": "child_slot historical_slot",
@@ -67,7 +70,7 @@ FIELD_SOURCES = {
 }
 OWNERS = {
     "src/sim/galactic/session.cpp": ("checkpoint_owner", "eawr::sim::galactic::GalacticSession::Impl"),
-    "src/campaign/game_session.cpp": ("checkpoint_game_owner", "eawr::campaign::GameSession::Impl"),
+    "src/campaign/game_session_lifecycle.cpp": ("checkpoint_game_owner", "eawr::campaign::GameSession::Impl"),
 }
 # These Fields specializations delegate to independently checked replay codecs.
 CUSTOM_CODECS = {

@@ -5,20 +5,13 @@
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
-#include <algorithm>
-#include <cmath>
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
-#include <fstream>
-#include <iostream>
-#include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <utility>
 #include <vector>
 
 namespace dogfight_test_support {
@@ -28,7 +21,7 @@ namespace math = eawr::sim::math;
 using math::Fixed;
 using eawr::sim::EntityId;
 
-extern int failures;
+extern int& failures;
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
 constexpr std::uint64_t seed = 4570;

@@ -43,6 +43,7 @@ std::shared_ptr<BroadcastLobbySource> BroadcastLobbySource::open(Options options
     net::LanBroadcastOptions broadcast;
     broadcast.listen_port = options.port;
     broadcast.extra_ports = std::move(options.extra_ports);
+    broadcast.menu_chat_limits = options.menu_chat_limits;
     // The version a game is listed with: the transport's protocol number and this build.
     broadcast.protocol = net::TcpOptions{}.protocol_version;
     broadcast.build = std::string(core::build_identity());
@@ -71,8 +72,13 @@ void BroadcastLobbySource::announce(const model::LobbyPresence& presence) {
 
 void BroadcastLobbySource::send_chat(const model::LobbyChatScope scope, const std::string& game,
                                      const std::string& name, const std::string& text) {
-    broadcaster_->send_chat(scope == model::LobbyChatScope::game ? net::ChatScope::game : net::ChatScope::lobby, game,
-                            name, text);
+    static_cast<void>(try_send_chat(scope, game, name, text));
+}
+
+bool BroadcastLobbySource::try_send_chat(const model::LobbyChatScope scope, const std::string& game,
+                                        const std::string& name, const std::string& text) {
+    return broadcaster_->try_send_chat(scope == model::LobbyChatScope::game ? net::ChatScope::game : net::ChatScope::lobby,
+                                      game, name, text, net::LanClock::now());
 }
 
 bool BroadcastLobbySource::pump() { return broadcaster_->pump(net::LanClock::now()); }

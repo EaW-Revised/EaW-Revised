@@ -1,3 +1,14 @@
+#include <array>
+#include <cstdint>
+#include <exception>
+#include <map>
+#include <vector>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include "../support/env.hpp"
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 // WGA-25/38/42: stock definition/pacing data, independent of live world actions.
 #if defined(_MSC_VER) && __has_include(<hash_map>)
 #define _SILENCE_STDEXT_HASH_DEPRECATION_WARNINGS
@@ -12,26 +23,25 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <set>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::must;
 
 int galactic_learning_contracts();
 
 namespace {
 namespace ai = eawr::script::foc::ai;
 namespace g = ai::galactic_goals;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool ok, const char* message) {
-    if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
 }
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
+
 const g::PlanDefinitionData& plan(const g::PlanCatalog& catalog, std::string_view name) {
     const auto found = std::find_if(catalog.plans.begin(), catalog.plans.end(),
         [&](const auto& row) { return row.name == name; });
@@ -143,17 +153,10 @@ function main() error("definition loading must not run a plan thread") end
     expect(!g::load_plan_catalog({}, {}), "empty module set fails");
 }
 std::string game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") != 0 || !value) throw std::runtime_error("Stock loading requires EAWR_EAW_GAME_ROOT");
-    std::string result(value); std::free(value);
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("Stock loading requires EAWR_EAW_GAME_ROOT");
-    std::string result(value);
-#endif
-    if (result.empty()) throw std::runtime_error("Stock loading requires a nonempty game root");
-    return result;
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("Stock loading requires EAWR_EAW_GAME_ROOT");
+    if (root->empty()) throw std::runtime_error("Stock loading requires a nonempty game root");
+    return std::move(*root);
 }
 std::map<std::string, std::string> modules(const eawr::vfs::Vfs& fs) {
     std::map<std::string, std::string> out;

@@ -1,3 +1,12 @@
+#include <algorithm>
+#include <cstddef>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_usability.hpp"
 #include "galactic_ai_selection_content.hpp"
@@ -7,30 +16,24 @@
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 namespace ai = eawr::script::foc::ai;
 using galactic_test::expect;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 std::string game_root() {
-#ifdef _MSC_VER
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) throw std::runtime_error("installed usability requires verified game data");
-    const std::string out(text); std::free(text); return out;
-#else
-    const char* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!text || !*text) { throw std::runtime_error("installed usability requires verified game data"); }
-    return text;
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed usability requires verified game data");
+#if !defined(_MSC_VER)
+    if (root->empty()) throw std::runtime_error("installed usability requires verified game data");
 #endif
+    return std::move(*root);
 }
 void installed() {
     const auto root = std::filesystem::path(game_root());
@@ -133,7 +136,7 @@ void installed() {
     }
 }
 }
-int main() {
+int case_galactic_ai_usability_stock_tests() {
     try { installed(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

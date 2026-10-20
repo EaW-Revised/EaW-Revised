@@ -20,6 +20,7 @@ struct Budget {
 struct PrefixBudget : Budget {
     std::size_t live{}, unpaired{}, directory_rooms{};
     Budget directory, directory_principals, directory_hashes;
+    Budget menu; // menu channel traffic (kinds 50..57), apart from the legacy per-prefix budget
     Budget room; // room member traffic (kinds 34..49 and its renew/ping), apart from the legacy per-prefix budget
     RelayServer::Clock::time_point guess_cooldown{};
     std::deque<RelayServer::Clock::time_point> guesses;
@@ -51,7 +52,7 @@ public:
                 entry = entries_.erase(entry);
             else { entry->second.refresh(now); entry->second.directory.refresh(now);
                 entry->second.directory_principals.refresh(now); entry->second.directory_hashes.refresh(now);
-                entry->second.room.refresh(now);
+                entry->second.room.refresh(now); entry->second.menu.refresh(now);
                 entry->second.prune_guesses(now); entry->second.prune_expiries(now); ++entry; }
         }
     }

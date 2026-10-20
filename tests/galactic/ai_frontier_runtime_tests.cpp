@@ -1,3 +1,18 @@
+#include <algorithm>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <memory>
+#include <optional>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // Same seeded stock campaign, with full preparation as the independent oracle.
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
@@ -9,11 +24,11 @@
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace cp = eawr::campaign;
 namespace ck = eawr::checkpoint;
@@ -21,22 +36,15 @@ namespace gc = eawr::sim::galactic;
 namespace ga = eawr::script::foc::galactic_ai;
 namespace ai = eawr::script::foc::ai;
 namespace {
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + " " + result.error().message);
-    return std::move(result).value();
+using eawr::testing::result_code_space_value::must;
+
+void expect(bool value, std::string_view message) {
+    if (!value) eawr::testing::require(value, message);
 }
-void must(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
-void expect(bool value, std::string_view message) { if (!value) throw std::runtime_error(std::string(message)); }
 std::string game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("frontier stock probe needs game data");
-    std::string root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("frontier stock probe needs game data");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("frontier stock probe needs game data");
+    return std::move(*root);
 }
 struct Evidence {
     std::vector<std::string> hashes;
@@ -132,7 +140,7 @@ Evidence run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
     return evidence;
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_frontier_runtime_tests(int argc, char** argv) {
     try {
         const std::uint64_t frames = argc > 1 ? std::stoull(argv[1]) : 600;
         expect(frames >= 600, "frontier stock probe spans two native perception deadlines");

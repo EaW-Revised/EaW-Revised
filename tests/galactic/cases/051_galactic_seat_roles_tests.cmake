@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_campaign_transitions
+    NO_ARGS
+
     NAME galactic_seat_roles_tests
     SOURCES seat_roles_tests.cpp
     LIBS eawr::campaign eawr::checkpoint eawr::platform

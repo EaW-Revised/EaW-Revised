@@ -1,3 +1,11 @@
+#include <chrono>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <string>
+#include <string_view>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // GC #4030: a live Equal Footing campaign with the native galactic AI on. Every tick the local seat's battle-dialog
 // projection (the one the viewer presents) is sampled. A conflict the local seat is not part of opens nothing, and a
 // conflict it is part of opens each dialog phase once instead of opening and closing it again and again.
@@ -11,32 +19,23 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <stdexcept>
 #include <vector>
+#include <utility>
 
 namespace {
 namespace gc = eawr::sim::galactic;
 namespace cp = eawr::campaign;
 namespace view = eawr::viewer::galactic;
 using galactic_test::expect;
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::must;
 std::filesystem::path game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    std::filesystem::path root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed campaign gate requires EAWR_EAW_GAME_ROOT");
+    return std::filesystem::path(std::move(*root));
 }
 const char* phase_name(view::BattleDialogPhase phase) {
     switch (phase) {
@@ -159,7 +158,7 @@ int run(std::uint64_t frames) {
     return galactic_test::failures ? 1 : 0;
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_uninvolved_conflict_ui_tests(int argc, char** argv) {
     try { return run(argc > 1 ? std::stoull(argv[1]) : 12500); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
 }

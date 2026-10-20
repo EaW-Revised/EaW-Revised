@@ -1,0 +1,82 @@
+[
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_fiscal_setup",
+    "tag": "Credit_Cap_Per_Planet"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_fiscal_setup",
+    "tag": "Planet_Credit_Value"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_location_requests",
+    "tag": "Locations"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_starting_placements",
+    "tag": "Special_Case_Production"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_starting_placements",
+    "tag": "Starting_Forces"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_home_locations",
+    "tag": "Home_Location"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_player_resources",
+    "tag": "Starting_Credits"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_player_resources",
+    "tag": "Starting_Tech_Level"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_player_resources",
+    "tag": "Max_Tech_Level"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_player_resources",
+    "tag": "Multiplayer_Campaign_Heroes"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "AI_Victory_Conditions"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "AI_Victory_Cycle_Limit"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "Human_Victory_Conditions"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "Human_Victory_Planet_Names"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "Home_Planet"
+  },
+  {
+    "old": "src/campaign/setup.cpp#plan_campaign_setup",
+    "new": "src/campaign/setup.cpp#plan_victory_setup",
+    "tag": "Starting_Active_Player"
+  }
+]

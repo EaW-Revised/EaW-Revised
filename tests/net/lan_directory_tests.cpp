@@ -3,27 +3,29 @@
 // repeated chat) with a fake clock, and two LanBroadcasters exchanging presence and chat over real
 // loopback UDP sockets.
 
+#include "../support/check.hpp"
 #include "eawr/net/lan_broadcast.hpp"
 #include "eawr/net/lan_directory.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
 namespace net = eawr::net;
 using Clock = net::LanClock;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 net::LanPresence hosting(std::uint64_t sender, std::string name, std::string game) {
@@ -172,10 +174,12 @@ void loopback() {
     for (std::uint16_t candidate = 47710; candidate < 47790 && (!a || !b); candidate += 2) {
         net::LanBroadcastOptions first;
         first.listen_port = candidate;
+        first.menu_chat_limits = true;
         first.extra_ports = {static_cast<std::uint16_t>(candidate + 1)};
         first.build = "build-a";
         net::LanBroadcastOptions second;
         second.listen_port = static_cast<std::uint16_t>(candidate + 1);
+        second.menu_chat_limits = true;
         second.extra_ports = {candidate};
         second.build = "build-a";
         auto opened_a = net::LanBroadcaster::open(first);
@@ -382,8 +386,72 @@ void hostile_text() {
            "the player list shows the repaired name");
 }
 
+void menu_chat_limits() {
+    const auto now = Clock::time_point{};
+    net::LanDirectory menu({1, 1, "build-a", true});
+    net::LanChat line;
+    line.sender = 2; line.sequence = 1; line.name = "  Alice\n "; line.text = "  hello\n ";
+    expect(menu.receive(net::encode_chat(line), "10.0.0.2", now), "menu accepts the first line");
+    auto taken = menu.take_chat();
+    expect(taken.size() == 1 && taken[0].name == "Alice" && taken[0].text == "hello",
+           "menu text and names remove controls and surrounding spaces");
+    line.sequence = 2;
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::milliseconds(500)),
+           "menu still rejects a sender flooding at 500 ms");
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::milliseconds(749)),
+           "receive spacing remains bounded just below the jitter allowance");
+    auto other = line; other.sender = 3;
+    expect(menu.receive(net::encode_chat(other), "10.0.0.3", now), "a different menu sender has its own spacing");
+    expect(menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::milliseconds(760)),
+           "menu accepts legal one-second sends received 760 ms apart due to network/pump jitter");
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(2)),
+           "rate spacing does not defeat sequence dedupe");
+    line.sequence = 3; line.text = std::string(net::lan_menu_max_chat + 1, 'x');
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(2)),
+           "menu refuses oversized text without spending the rate allowance");
+    line.text = std::string(net::lan_menu_max_chat - 2, 'x') + "\xC3\xA9";
+    line.name = std::string(30, 'n');
+    expect(menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(2)),
+           "menu accepts an exact 128-byte UTF-8 line");
+    taken = menu.take_chat();
+    expect(taken.size() == 3 && taken.back().text == line.text && taken.back().name.size() == net::lan_menu_max_name,
+           "menu keeps the exact UTF-8 boundary and clamps a remote name");
+    line.sequence = 4; line.text = "\n\t\xC2\x85\xE2\x80\xAE\xE2\x81\xA6";
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(3)),
+           "menu drops empty control and directional-only lines");
+    line.scope = net::ChatScope::game; line.text = std::string(300, 'x');
+    expect(menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(2)),
+           "game scope retains its existing 400-byte limit and independent timing");
+    line.sequence = 5; line.scope = net::ChatScope::lobby; line.text = "hello";
+    expect(!menu.receive(net::encode_chat(line), "10.0.0.2", now + std::chrono::seconds(2)),
+           "a game line does not reset the menu rate limiter");
+    menu.prune(now + net::lan_chat_window + std::chrono::seconds(3));
+    expect(menu.receive(net::encode_chat(line), "10.0.0.2", now + net::lan_chat_window + std::chrono::seconds(3)),
+           "sender accounting expires and menu chat returns after inactivity");
+
+    net::LanPresence presence = hosting(8, std::string(30, 'p'), "Room");
+    menu.receive(net::encode_presence(presence), "10.0.0.8", now);
+    expect(menu.players().size() == 1 && menu.players()[0].name.size() == net::lan_menu_max_name,
+           "production menu roster names use the same bound as chat names");
+
+    net::LanBroadcastOptions options; options.listen_port = 0; options.menu_chat_limits = true;
+    auto opened = net::LanBroadcaster::open(options);
+    expect(static_cast<bool>(opened), "menu broadcaster opens using the existing UDP transport");
+    if (!opened) return;
+    auto sender = std::move(opened).value();
+    expect(sender->try_send_chat(net::ChatScope::lobby, {}, "Alice", "first", now), "first outgoing menu line sends");
+    expect(!sender->try_send_chat(net::ChatScope::lobby, {}, "Alice", "fast", now), "outgoing menu flood is refused");
+    expect(!sender->try_send_chat(net::ChatScope::lobby, {}, "Alice", std::string(129, 'x'), now + std::chrono::seconds(1)),
+           "outgoing menu oversized text is refused");
+    expect(sender->try_send_chat(net::ChatScope::lobby, {}, "Alice", "next", now + std::chrono::seconds(1)),
+           "outgoing menu accepts exactly one second later");
+    expect(sender->try_send_chat(net::ChatScope::game, "Room", "Alice", std::string(300, 'x'), now),
+           "outgoing room chat keeps its original behavior");
+}
+
 int main() {
     codec();
+    menu_chat_limits();
     hostile_text();
     directory();
     flood();

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/battle/start.hpp"
 #include "live_session_options.hpp"
 #include "live_session_slots.hpp"
 #include "live_session_economy_view.hpp"
@@ -53,6 +54,8 @@
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
+
+class BattleSource;
 
 // `--eawr-live-session m2` on a space map with `--eawr-populate` (#80 part A): the viewer runs
 // the authoritative tactical session of the M2 skirmish (plan/phase-2/m2-skirmish.md) and draws
@@ -271,7 +274,7 @@ public:
         }
         return false;
     }
-    [[nodiscard]] const skirmish::SkirmishStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
+    [[nodiscard]] const battle::BattleStart* start_data() const noexcept { return start_ ? &*start_ : nullptr; }
     // The tick the last frame drew (fractional between ticks).
     [[nodiscard]] double presented_tick() const noexcept { return presented_tick_; }
     // The frames shown after the warm-up (scripted f<frame> gestures count these).
@@ -356,7 +359,8 @@ public:
     // #429: retires the ships of the clones frame() stopped drawing. The map mode calls it once
     // the unit emitters have run the frame's samples, a stall's catch-up included, in which such
     // a clone may still have stood; frame() calls it first in case the last frame did not.
-    void retire_clones(SpacePopulation& population, GodotRenderer& renderer);
+    void retire_clones(SpacePopulation& population, GodotRenderer& renderer,
+        const std::function<bool(std::size_t)>& terminal_ready = {});
     // Stops the session, checks its hashes against a headless run of its recording and writes
     // the requested hash and replay files. Idempotent.
     void finish();
@@ -478,16 +482,114 @@ public:
     void attach_projectile_models(BattleEffects& effects);
 
 private:
-    [[nodiscard]] bool prepare_borrowed(std::string& failure);
-    [[nodiscard]] bool prepare_native(const PreparedBattle& battle, std::string& failure);
-    [[nodiscard]] bool prepare_m2(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string& failure);
-    [[nodiscard]] bool prepare_replay(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-        std::string_view map_path, std::string& failure);
+    core::Diagnostic frame_failure(std::string message) const;
+    void synchronize_frame_lan();
+    void register_frame_squadrons(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& previous,
+        const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest);
+    void collect_frame_events(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        std::optional<std::uint64_t>& lost_through);
+    void observe_frame_ability_lights(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest);
+    void observe_frame_outcome(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest);
+    void publish_frame_snapshot(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& previous,
+        const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        double alpha,
+        const std::optional<std::uint64_t>& lost_through);
+    void index_frame_construction(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest);
+    std::optional<core::Diagnostic> remember_frame_fog(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        SpacePopulation& population,
+        GodotRenderer& renderer,
+        const std::vector<sim::EntityId>& visible_now,
+        const std::vector<sim::EntityId>& drawn_now,
+        std::vector<sim::EntityId>& immediate,
+        std::vector<space::FogGhosts::Observation>& observations);
+    void advance_frame_visibility(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        const std::vector<sim::EntityId>& alive_now,
+        const std::vector<sim::EntityId>& drawn_now,
+        const std::vector<sim::EntityId>& immediate);
+    void collect_frame_fades(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        const std::vector<sim::EntityId>& drawn_now,
+        std::vector<sim::EntityId>& fading_entities);
+    void bind_frame_units(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        const std::vector<space::LiveUnitPose>& poses,
+        const std::vector<space::LiveUnitPose>& spinning,
+        const std::vector<sim::EntityId>& visible_now);
+    std::optional<core::Diagnostic> compose_frame_units(SpacePopulation& population,
+        const std::vector<space::LiveUnitPose>& poses,
+        const std::vector<space::LiveUnitPose>& spinning,
+        std::vector<SpacePopulation::LivePose>& live,
+        std::vector<SpacePopulation::LiveClipPose>& clip_poses);
+    void compose_frame_wrecks(SpacePopulation& population,
+        GodotRenderer& renderer,
+        std::vector<SpacePopulation::LivePose>& live,
+        std::vector<SpacePopulation::LiveClipPose>& clip_poses);
+    void compose_frame_projectiles(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& previous,
+        const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        SpacePopulation& population,
+        GodotRenderer& renderer,
+        std::vector<SpacePopulation::LivePose>& live);
+    std::optional<core::Diagnostic> compose_frame_preview(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        SpacePopulation& population,
+        GodotRenderer& renderer,
+        std::vector<SpacePopulation::LivePose>& live);
+    void compose_frame_beacons(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        std::vector<SpacePopulation::LivePose>& live);
+    void apply_frame_opacity(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        SpacePopulation& population,
+        GodotRenderer& renderer,
+        const std::vector<space::LiveUnitPose>& poses,
+        std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
+    void apply_frame_shield_flashes(SpacePopulation& population,
+        GodotRenderer& renderer,
+        const std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
+    void publish_frame_instances(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
+        SpacePopulation& population,
+        GodotRenderer& renderer,
+        const std::vector<space::FogGhosts::Observation>& observations,
+        SpaceLiveUpdate& update);
+    std::optional<core::Diagnostic> schedule_frame_capture(SpaceLiveUpdate& update);
+
+    void write_report_identity(std::ostream& output) const;
+    void write_report_carrier_riders(std::ostream& output) const;
+    void write_report_results(std::ostream& output) const;
+    void write_report_intentional_quits(std::ostream& output) const;
+    void write_report_beacons(std::ostream& output) const;
+    void write_report_runtime(std::ostream& output) const;
+    void write_report_slots(std::ostream& output) const;
+    void write_report_squadrons(std::ostream& output) const;
+    void write_report_frame_progress_and_visibility(std::ostream& output) const;
+    void write_report_fog(std::ostream& output) const;
+    void write_report_battle_start(std::ostream& output) const;
+    void write_report_time_controls(std::ostream& output) const;
+    void write_report_light_effects(std::ostream& output) const;
+    void write_report_visibility_blends(std::ostream& output) const;
+    void write_report_own_units(std::ostream& output) const;
+    void write_report_object_turrets(std::ostream& output) const;
+    void write_report_launch_colours(std::ostream& output) const;
+    void write_report_hostile_units(std::ostream& output) const;
+    void write_report_orders(std::ostream& output) const;
+    void write_report_first_hits(std::ostream& output) const;
+    void write_report_rejected_orders(std::ostream& output) const;
+    void write_report_ai(std::ostream& output) const;
+    void write_report_ability_effects(std::ostream& output) const;
+    void write_report_pads(std::ostream& output) const;
+    void write_report_economy(std::ostream& output) const;
+    void write_report_placement_preview(std::ostream& output) const;
+    void write_report_arrivals(std::ostream& output) const;
+    void write_report_death_clones(std::ostream& output) const;
+    void write_report_spin_away(std::ostream& output) const;
+    void write_report_event_gaps(std::ostream& output) const;
+    void write_report_final_state(std::ostream& output) const;
+    void write_report_battle_end(std::ostream& output) const;
+    void write_report_status(std::ostream& output) const;
+
+    [[nodiscard]] bool prepare_source(const BattleSource& source, const vfs::Vfs& filesystem,
+        const data::Catalog& catalog, std::string_view map_path, std::optional<battle::ArrivalPlan>& arrivals,
+        std::string& failure);
     // #459: hands the time panel's state to the session (pause, target rate).
     void apply_time();
 
     Options options_;
-    std::optional<skirmish::SkirmishStart> start_;
+    std::optional<battle::BattleStart> start_;
     // #79: the FoC AI beside the world (m2 with the AI on), and the players it runs.
     std::shared_ptr<const platform::LiveScripts> ai_scripts_;
     std::vector<sim::tactical::PlayerId> ai_players_;
@@ -543,6 +645,7 @@ private:
     std::optional<std::uint64_t> preview_checked_tick_;
     std::vector<std::string> preview_rows_;
     std::size_t slots_released_{};  // slots freed by a unit leaving the snapshot (report: slots_released)
+    live_session::ArrivalSlotState arrival_slots_;
     // `--eawr-live-hashes` runs only (report row draw_digest): one digest of the visible units and drawn poses
     // (model slots included) per tick, and of the slot plan at the end. Visible doubles and clip blend floats use
     // hundredths; fixed-point poses stay exact. Keep the last frame per tick, stable at integral presented_tick.
@@ -698,7 +801,14 @@ private:
     // Nullopt when the type has no Death_Clone, or the clone is not drawn.
     [[nodiscard]] std::optional<DeathClone> prepare_death_clone(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                                 std::size_t source, std::uint64_t variant_key);
-    void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog);
+    // `selected` is the arrival plan the source chose; the slots below only add to it.
+    void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                              std::optional<battle::ArrivalPlan> selected);
+    void add_launch_slot(const vfs::Vfs&, const data::Catalog&, const std::string&,
+                         const battle::StartUnit&, const std::optional<battle::LobbyColour>&,
+                         sim::tactical::TypeId required_station = 0, bool ability_proxy_owner = false);
+    [[nodiscard]] std::optional<std::size_t> grow_launch_slot(sim::EntityId, sim::tactical::TypeId,
+                                                           sim::tactical::PlayerId);
     // A slot whose unit is no longer in the tactical snapshot, and whose death clone (if any) has
     // left, is free for the next unit of its type (space-purchasing PU-G25).
     void release_dead_slots(const sim::tactical::TacticalSnapshot& latest);
@@ -726,6 +836,13 @@ private:
     std::vector<ActiveClone> active_clones_;
     // Clones frame() stopped drawing this frame; their ships are retired by retire_clones().
     std::vector<ActiveClone> retiring_clones_;
+    // Hidden clones release render state at once, and their source slot returns to the pool. The shadow pool
+    // keeps these units' slots reserved for the session, so a reused slot still draws its particle seeds and idle
+    // start from the slot the reservation policy would have given the unit (#4218).
+    std::set<sim::EntityId> terminal_source_leases_;
+    std::map<sim::EntityId, live_session::SlotIdentity> slot_identity_of_entity_;
+    std::size_t identity_fallbacks_{}, identity_undrawn_{}, identity_both_undrawn_{}, shadow_held_{}, shadow_peak_{}, real_peak_{};
+    LaunchSlot& bind_slot_identity(sim::EntityId entity, LaunchSlot& real, sim::tactical::TypeId type, sim::tactical::PlayerId owner);
     std::vector<std::string> retired_clone_rows_;
     bool trace_frames_{};
     double bookkeeping_ms_{};

@@ -1,3 +1,13 @@
+#include <algorithm>
+#include <cstdint>
+#include <variant>
+#include <vector>
+#include <exception>
+#include <iostream>
+#include <cstddef>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/campaign/space_briefing.hpp"
@@ -11,11 +21,8 @@
 #include "eawr/skirmish/ai.hpp"
 
 #include <array>
-#include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <limits>
-#include <sstream>
+#include <utility>
 
 namespace {
 using namespace eawr;
@@ -530,19 +537,11 @@ void presentation_gates() {
         "AI context carries campaign, per-player defender and current base level");
 }
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t length{};
-    if (_dupenv_s(&value, &length, "EAWR_EAW_GAME_ROOT") != 0 || !value) return {};
-    std::string result(value); std::free(value);
-    return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>{value} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void installed() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: campaign space rules require EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: campaign space rules require EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<vfs::MountSpec> mounts;
     for (const auto* folder : {"corruption", "GameData"}) {
         auto manifest = vfs::resolve_manifest_mount(folder, std::filesystem::path(*root) / folder / "Data");
@@ -609,7 +608,7 @@ void installed() {
     if (child) expect(static_cast<bool>(child.value().step(sim::InlineExecutor{})), "campaign child services stock AI");
 }
 }
-int main(int argc, char**) {
+int case_galactic_space_rules_tests(int argc, char**) {
     try { if (argc > 1) installed(); else { proof(); campaign_pad_difficulty(); carrier_codec(); reserve_admission(); presentation_gates(); } }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures == 0 ? 0 : 1;

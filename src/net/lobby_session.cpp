@@ -711,7 +711,8 @@ core::Result<void> LobbySession::refuse_unreachable(PeerIndex newcomer, PeerInde
     const auto* guest = value.seat(newcomer);
     const std::string other_name = other ? other->selection.name : "another player";
     const std::string guest_name = guest ? guest->selection.name : "A player";
-    const auto line = guest_name + " could not connect to " + other_name + " and was not admitted.";
+    const auto line = guest_name + " (Seat " + std::to_string(newcomer + 1) + ") could not connect to "
+        + other_name + " (Seat " + std::to_string(unreachable + 1) + ") and was not admitted.";
     value.notice = LobbyNotice{value.state.room, value.state.revision, LobbyReason::pair_unreachable,
         sanitize_lobby_text(line, 400) + " " + lobby_diagnostic(LobbyReason::pair_unreachable, "").code};
     // The room hears it once, as a line from the host's seat; the newcomer hears why through its closed notice.

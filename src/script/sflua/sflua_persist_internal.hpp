@@ -200,7 +200,6 @@ private:
 
     [[nodiscard]] bool is(::std::uint32_t id, Kind kind) const noexcept;
 
-    [[nodiscard]] bool is_table(::std::uint32_t id) const noexcept;
 
     [[nodiscard]] bool is_value(const IrValue& value) const noexcept;
 

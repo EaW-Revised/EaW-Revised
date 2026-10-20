@@ -14,6 +14,7 @@
 #include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
+#include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/sim/galactic/story_rewards.hpp"
 #include "eawr/campaign/story_notices.hpp"
 #include "eawr/sim/state_hash.hpp"
@@ -21,11 +22,13 @@
 
 #include "eawr/script/numeric/lua_number.hpp"
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <map>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 
@@ -60,6 +63,14 @@ struct BattleChoiceResponse {
     sim::SeatId seat{};
     std::string refusal;
 };
+// GCMP-04: the executed outcome of an InvasionAccept command, in execution order. `summary_closed` is
+// true when the accepting seat's own battle-summary hold ended with the acceptance.
+struct InvasionAcceptResponse {
+    sim::EntityId conflict{};
+    sim::SeatId seat{};
+    std::string refusal;
+    bool summary_closed{};
+};
 struct PendingConflictAlert {
     sim::galactic::PlayerId invader{}, defender{};
     bool land{};
@@ -79,11 +90,15 @@ struct GameTick {
     std::optional<BattleResult> result;
     std::vector<core::Diagnostic> diagnostics;
     std::vector<BattleChoiceResponse> battle_choice_responses;
+    std::vector<InvasionAcceptResponse> invasion_accept_responses;
     // Save callbacks are emitted at the command boundary, before invasion mutation, in both
     // layers. They survive the following galaxy/child snapshot publication.
     std::vector<sim::galactic::GalacticEvent> save_events;
     std::vector<sim::galactic::GalacticEvent> conflict_events;
     std::vector<GameStoryNotice> story_notices;
+    // WST-20: this step's triggered plot events with their rewards, in trigger order, each with the outcome of
+    // its application (#683: engine-run graph rewards, the bound reward provider, or a named refusal).
+    std::vector<sim::galactic::story::Triggered> story_triggers;
     [[nodiscard]] std::vector<GameStoryNotice> observer_story_notices(sim::galactic::PlayerId) const;
     // WGP-26: retain emission context even when this step selects or retires the conflict.
     std::map<sim::EntityId, PendingConflictAlert> pending_alerts;
@@ -100,6 +115,25 @@ struct RecordedAdmission {
     Arbitration arbitration;
     friend bool operator==(const RecordedAdmission&, const RecordedAdmission&) = default;
 };
+// #4058: a save keeps only the history since the previous save or load. The boundary it starts at carries the
+// chained frontier: input_digest(k) = sha256(input_digest(k-1) || canonical bytes of the window), zero at a new game.
+using HistoryDigest = std::array<std::uint8_t, 32>;
+struct HistoryBoundary {
+    std::uint64_t tick{};   // completed tick of the boundary; 0 for a new game
+    HistoryDigest digest{}; // chained input digest through the boundary
+    std::optional<sim::galactic::CommandOrderKey> last_key; // last sealed command (executed or pending) through it
+    friend bool operator==(const HistoryBoundary&, const HistoryBoundary&) = default;
+};
+struct HistoryBase {
+    HistoryBoundary at;
+    // Counts keep command limits and the absolute native sequence identical to an unbounded session.
+    std::uint64_t executed_dropped{}; // session-level executed commands before the boundary
+    std::uint64_t native_dropped{};   // applied native journal entries before the boundary
+    // Tactical envelopes dropped before the boundary, per conflict still unfinished (child cursor sanity bound).
+    std::map<sim::EntityId, std::uint64_t> child_attempts;
+    friend bool operator==(const HistoryBase&, const HistoryBase&) = default;
+};
+
 // The command envelope plus deterministic conflict-service selections. The flat EAWRGCR v1
 // stream has no conflict-entry section yet; checkpoint/container owners serialize this seam.
 struct GameRecording {
@@ -110,7 +144,13 @@ struct GameRecording {
     std::vector<sim::galactic::GameCommand> load_fixups{};
     std::vector<RecordedAdmission> admissions{};
     bool conflict_services{}; // opt-in ordered tail/timer context, even before the first arrival
+    // The history in `commands` (numbered from native sequence 1) is the window after this boundary.
+    HistoryBase base{};
 };
+// The frontier a recording seals: chained over its base and the canonical replay bytes of its window; the key is the
+// later of the base's last sealed command and the window's last command.
+[[nodiscard]] core::Result<HistoryBoundary> history_frontier_of(const GameRecording& recording,
+    std::span<const std::uint8_t> replay_bytes, std::uint64_t completed_tick);
 
 struct BattleCheckpoint {
     std::vector<std::uint8_t> state;
@@ -176,7 +216,6 @@ public:
         const ConflictRecord&, const sim::galactic::GalacticSnapshot&, sim::EntityId)>;
     // Assembly seams for synthetic owners; a complete layer install seals these setters.
     void set_entry_resolver(EntryResolver resolver);
-    [[nodiscard]] bool has_entry_resolver() const noexcept;
     using ScriptFactory = std::function<core::Result<script::authoritative::ScriptScheduler>(const ConflictRecord&)>;
     // Resolvers rebuild pinned content/scripts without embedding content tables in replay state.
     [[nodiscard]] static core::Result<GameSession> from_recording(const GameRecording& recording,
@@ -199,8 +238,6 @@ public:
     // Every player, AI, script and test input enters here (ADR-015). Session and galactic layers
     // go to the galaxy; a tactical command needs a running battle, so without one it is refused.
     [[nodiscard]] core::Result<void> submit(const sim::galactic::GameCommand& command);
-    // WGP-89: simulation-thread intent, revalidating the retained result selection.
-    [[nodiscard]] core::Result<void> accept_invasion_offer(sim::galactic::SeatId, sim::EntityId conflict);
     [[nodiscard]] core::Result<GameTick> step(const sim::PartitionExecutor& executor);
     // Ordered conflict-service seam: stage an already selected entry for the next galaxy commit.
     // This is not a player-input path. The caller supplies immutable content matching its identity.
@@ -212,7 +249,6 @@ public:
     using ResultApplier = std::function<core::Result<void>(sim::galactic::GalacticSession&, const BattleResult&)>;
     using ResultDecorator = std::function<core::Result<void>(const ConflictRecord&,
         const sim::tactical::TacticalSession&, BattleResult&)>;
-    void set_result_decorator(ResultDecorator decorate);
     using HeroDefeatResolver = std::function<core::Result<std::optional<sim::galactic::HeroDefeat>>(
         const ConflictRecord&, const ConflictForce&, const ForceResult&, const sim::galactic::GalacticSnapshot&)>;
     void set_hero_defeat_resolver(HeroDefeatResolver resolver);
@@ -221,7 +257,6 @@ public:
     [[nodiscard]] core::Result<sim::galactic::HeroSchedule> schedule_hero_defeat(
         const sim::galactic::HeroDefeat&, const sim::PartitionExecutor&);
     void set_hero_placement(sim::galactic::HeroPlacement placement);
-    void set_hero_structure_resolver(sim::galactic::HeroStructureResolver resolver);
     struct LiveHeroReturns {
         std::function<core::Result<bool>(sim::galactic::GalacticSession&,
             const sim::galactic::HeroReturnRecord&, sim::galactic::PlanetId, const sim::PartitionExecutor&)> place;
@@ -230,13 +265,22 @@ public:
     };
     // Fresh and restored owners bind providers; callbacks receive the current world and tick executor.
     void set_live_hero_returns(LiveHeroReturns services);
+    // #683: the plot rewards the engine queued (WST-40/41/64) are applied once per galaxy step after the hosted work
+    // (GFS-15), inside the tick executor. The provider owns the stock bindings; a reward it declines, or that no
+    // provider is bound for, is reported by name and never dropped silently. A step that replays the native journal
+    // applies nothing: the journal carries the effects.
+    struct StoryRewardOutcome { bool applied{}; std::string note; };
+    using StoryRewardApplier = std::function<core::Result<StoryRewardOutcome>(
+        sim::galactic::GalacticSession&, const sim::galactic::story::Triggered&, const sim::PartitionExecutor&)>;
+    void set_story_rewards(StoryRewardApplier);
     [[nodiscard]] const BattleResult* latest_tactical_result() const noexcept;
+    // Recorded solo presentation policy; configure before the live owner starts.
+    [[nodiscard]] core::Result<void> set_interactive_seat(sim::galactic::SeatId);
+    [[nodiscard]] sim::EntityId battle_summary_hold() const noexcept;
     [[nodiscard]] const ConflictRecord* latest_tactical_context() const noexcept;
-    [[nodiscard]] const ConflictRecord* latest_tactical_conflict() const noexcept;
     [[nodiscard]] core::Result<void> restore_latest_tactical_result(ConflictRecord context, BattleResult result);
     void clear_latest_tactical_result() noexcept;
     [[nodiscard]] const TacticalReturnState& return_state() const noexcept;
-    [[nodiscard]] std::optional<std::uint32_t> remembered_structure_marker(sim::EntityId structure) const;
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_return_state() const;
     [[nodiscard]] core::Result<void> restore_return_state(std::span<const std::uint8_t> bytes);
     using ChildConfigurator = std::function<core::Result<void>(script::authoritative::ScriptedTacticalSession&)>;
@@ -264,6 +308,13 @@ public:
     void set_story_identities(std::map<sim::galactic::PlanetId, std::string> planets,
         std::map<sim::galactic::PlayerId, std::string> factions);
     void set_technology_notice_handler(sim::galactic::GalacticSession::TechnologyNoticeHandler);
+    // WGS-07/WGS-140: install the loaded plots before the first step (or before a checkpoint restore
+    // fills the saved state). Fails when plots are already installed or the session has stepped.
+    // `notes` (the loader's skipped files and dropped events) and the engine's own refusals are published once,
+    // one line each, as diagnostics of the first step.
+    [[nodiscard]] core::Result<void> install_story(sim::galactic::story::Config, std::vector<sim::galactic::story::PlotRecord>,
+        std::vector<sim::galactic::story::SubPlotDef>, std::vector<std::string> notes = {});
+    [[nodiscard]] const sim::galactic::story::Engine* story_engine() const noexcept;
     void set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler);
     [[nodiscard]] core::Result<sim::math::Fixed> set_technology_price_modifier(const sim::galactic::GalacticSession::TechnologyPriceWrite&);
     // WGEP-05/163..165 native credit-halt sabotage writer and explicit source removal.
@@ -272,6 +323,9 @@ public:
     [[nodiscard]] core::Result<bool> remove_income_blocker(sim::galactic::PlanetId planet, sim::EntityId source);
     [[nodiscard]] core::Result<std::int64_t> set_technology(const sim::galactic::GalacticSession::TechnologyWrite&);
     [[nodiscard]] core::Result<std::int64_t> increment_technology(sim::galactic::PlayerId);
+    // WST-64 (#683): the journaled production unlock/lock writer and its faction post-check.
+    [[nodiscard]] core::Result<sim::galactic::GalacticSession::ProductionLockReceipt> apply_production_lock(
+        const sim::galactic::GalacticSession::ProductionLockWrite&);
     void set_movement_access_provider(sim::galactic::GalacticSession::MovementAccessProvider provider);
     // Installs pinned translators/AI engine on each newly built child, before its first step.
     void set_child_configurator(ChildConfigurator configure);
@@ -311,7 +365,6 @@ public:
     [[nodiscard]] core::Result<bool> request_planet_ruins(sim::galactic::PlanetId, bool destroy = true);
     [[nodiscard]] core::Result<void> queue_conflict(ConflictRecord record, Arbitration arbitration);
     [[nodiscard]] const ConflictRecord* pending_conflict() const noexcept;
-    [[nodiscard]] bool has_outstanding_conflicts() const noexcept;
     // Same pending/staged fact passed to the ordinary world's management admission.
     [[nodiscard]] bool has_pending_conflict_for_admission() const noexcept;
     struct NativeConflictReaders { std::function<bool()> admission, global; };
@@ -320,7 +373,6 @@ public:
     [[nodiscard]] NativeConflictReaders native_conflict_readers() const;
     [[nodiscard]] std::optional<PendingConflictView> pending_conflict_view() const;
     using PendingBattleAlertReader = std::function<std::optional<PendingBattleAlertInputs>(const ConflictRecord&)>;
-    void set_pending_battle_alert_reader(PendingBattleAlertReader reader);
     // Empty result means its sourced delay/solver has not completed. No frame-to-wall-clock
     // conversion or substitute winner is invented by this session.
     using AutoResolver = std::function<core::Result<std::optional<AutoResolveOutcomeApplication>>(
@@ -373,6 +425,14 @@ public:
     // Complete accepted input, including future commands/conflicts and load prologues.
     // A failed session cannot be saved. Staged child scripts must be replayable by the resolver.
     [[nodiscard]] core::Result<GameRecording> checkpoint_recording() const;
+    // #4058 bounded history. A save/load moves the base at the START of the next step, so a capture or recapture
+    // right after either still sees the window it was taken with. The frontier is what a save taken now seals.
+    [[nodiscard]] const HistoryBase& history_base() const noexcept;
+    [[nodiscard]] core::Result<HistoryBoundary> history_frontier() const;
+    void schedule_history_rebase(HistoryBoundary boundary);
+    // Replay-oracle seam: continue a session restored at a save with the next save's window (the commands, conflicts,
+    // admissions, prologues and native effects after that boundary that it does not already hold).
+    [[nodiscard]] core::Result<void> append_recording_window(const GameRecording& window);
     [[nodiscard]] core::Result<void> apply_load_fixup(const sim::galactic::GameCommand& command);
     [[nodiscard]] core::Result<void> apply_restore_prologue();
     [[nodiscard]] const ConflictRecord* conflict() const noexcept;
@@ -395,6 +455,16 @@ public:
 
 private:
     explicit GameSession(sim::galactic::GalacticSession galaxy);
+    struct StepContext;
+    // WGP-89 / GCMP-04: executes a journaled InvasionAccept from the agreed session state, revalidating the
+    // retained result selection. Called only from process_session_commands.
+    [[nodiscard]] core::Result<void> execute_invasion_accept(sim::galactic::SeatId, sim::EntityId conflict, bool& summary_closed);
+    [[nodiscard]] core::Result<void> process_session_commands(StepContext&, const sim::PartitionExecutor&);
+    [[nodiscard]] core::Result<void> step_child(StepContext&, const sim::PartitionExecutor&);
+    [[nodiscard]] core::Result<void> reconcile_child_return(StepContext&, const sim::PartitionExecutor&);
+    [[nodiscard]] core::Result<void> step_galaxy(StepContext&, const sim::PartitionExecutor&);
+    [[nodiscard]] core::Result<void> apply_pending_returns(StepContext&, const sim::PartitionExecutor&);
+    [[nodiscard]] core::Result<GameTick> finish_step(StepContext&);
     class Impl;
     std::unique_ptr<Impl> impl_;
     [[nodiscard]] core::Result<void> select_pending_battle(bool tactical, const sim::PartitionExecutor& executor);

@@ -26,10 +26,23 @@ enum class Kind : std::uint8_t {
     directory_chat_page = directory_page, directory_ok = directory_opened,
     // N-peer room scope (34..49, EAWR-NET-1772..1777): layouts and rules in relay_room.hpp. 48..49 stay spare.
     room_open = 34, room_opened, room_attach, room_attached, room_roster, room_signal, room_forwarded,
-    room_leave, room_release, room_kick, room_lock, room_reattach, room_closed, room_ack
+    room_leave, room_release, room_kick, room_lock, room_reattach, room_closed, room_ack,
+    // Menu channel (50..57, #3758): a room-less presence + chat channel on a connection of its own, for clients that
+    // are in the online room browser and not in a room. Layouts and rules in relay_menu.hpp. 54..57 stay spare. A relay
+    // that predates it answers menu_open with the legacy 1521 refusal and closes only that connection.
+    menu_open = 50, menu_chat, menu_poll, menu_page
 };
+inline constexpr unsigned directory_kind_first = 20, directory_kind_last = 33;
 inline constexpr unsigned room_kind_first = 34, room_kind_last = 49;
-inline bool room_kind(unsigned kind) { return kind >= room_kind_first && kind <= room_kind_last; }
+inline constexpr unsigned menu_kind_first = 50, menu_kind_last = 57;
+inline constexpr bool directory_kind(unsigned kind) { return kind >= directory_kind_first && kind <= directory_kind_last; }
+inline constexpr bool room_kind(unsigned kind) { return kind >= room_kind_first && kind <= room_kind_last; }
+inline constexpr bool menu_kind(unsigned kind) { return kind >= menu_kind_first && kind <= menu_kind_last; }
+// The scopes never share a Kind value (the enum does not reject duplicates, so the ranges are pinned here).
+static_assert(directory_kind_last < room_kind_first && room_kind_last < menu_kind_first, "relay Kind scopes overlap");
+static_assert(static_cast<unsigned>(Kind::directory_admitted) <= directory_kind_last && directory_kind(static_cast<unsigned>(Kind::directory_open))
+    && room_kind(static_cast<unsigned>(Kind::room_open)) && room_kind(static_cast<unsigned>(Kind::room_ack))
+    && menu_kind(static_cast<unsigned>(Kind::menu_open)) && menu_kind(static_cast<unsigned>(Kind::menu_page)), "relay Kind outside its scope");
 // Typed reasons of the room scope (EAWR-NET-1772..1777), in a Kind::error frame or room_closed.
 inline constexpr unsigned room_unknown = 1772;      // no such room, closed room, or not yours to open
 inline constexpr unsigned room_capability = 1773;   // capability, identity or membership does not match

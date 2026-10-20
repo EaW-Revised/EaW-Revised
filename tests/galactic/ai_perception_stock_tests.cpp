@@ -1,3 +1,20 @@
+#include <algorithm>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <limits>
+#include <map>
+#include <memory>
+#include <system_error>
+#include <tuple>
+#include <variant>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
 #include "galactic_ai_selection_content.hpp"
@@ -7,7 +24,6 @@
 #include "eawr/campaign/ai_perception_content.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <cstdlib>
 #include <array>
 #include <charconv>
 #include <filesystem>
@@ -15,6 +31,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <thread>
+#include <utility>
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -1097,13 +1114,7 @@ std::string force_contracts(unsigned workers) {
 }
 
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text); return result.empty() ? std::nullopt : std::optional{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT"); return text && *text ? std::optional{std::string(text)} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 std::string read(const eawr::vfs::Vfs& filesystem, std::string_view path) {
     const auto opened = filesystem.open(path); if (!opened) throw std::runtime_error(eawr::core::format_diagnostic(opened.error()));
@@ -1157,7 +1168,7 @@ ai::GalacticPerceptionSetup stock_setup(const cp::CampaignSetupPlan& planned,
 }
 
 void installed() {
-    const auto root = game_root(); if (!root) { std::cout << "SKIPPED: stock perception requires EAWR_EAW_GAME_ROOT\n"; return; }
+    const auto root = game_root(); if (!root) { eawr::testing::skip_installed("SKIPPED: stock perception requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
         mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
@@ -1358,7 +1369,7 @@ end
 }
 } // namespace
 
-int main(int argc, char**) {
+int case_galactic_ai_perception_stock_tests(int argc, char**) {
     try {
         if (argc > 1) installed();
         else {

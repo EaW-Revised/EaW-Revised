@@ -1,29 +1,11 @@
+#include "eawr/core/json_text.hpp"
 #include "effect_mode_internal.hpp"
 #include "render_profile_viewport.hpp"
 
 namespace eawr::presentation::godot_backend {
 
 [[nodiscard]] std::string effect_mode_detail::json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20U || character >= 0x7fU) {
-                output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
-            } else {
-                output << static_cast<char>(character);
-            }
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote_ascii_short_controls(value);
 }
 namespace {
 
@@ -240,6 +222,10 @@ bool EffectMode::State::write_report() const {
         << "  \"lifecycle\": {\"live_rids_before_release\": " << live_rids_before_release
         << ", \"live_rids_after_release\": " << live_rids_after_release
         << ", \"registry_resources_after_release\": " << registry_resources_after_release
+        << ", \"empty_suspensions\": " << (backend ? backend->suspensions() : 0)
+        << ", \"lazy_recreations\": " << (backend ? backend->recreations() : 0)
+        << ", \"restore_asset_acquisitions\": " << (backend ? backend->restore_asset_acquisitions() : 0)
+        << ", \"asset_acquisitions\": " << (backend ? backend->asset_acquisitions() : 0)
         << ", \"released_by\": " << json(released_by) << "},\n"
         << "  \"detach\": {\"requested\": " << (detach_frame ? "true" : "false")
         << ", \"frame\": " << (detach_frame ? std::to_string(*detach_frame) : std::string("null"))

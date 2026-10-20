@@ -4,33 +4,34 @@
 // tests/assets/fixtures/camera_fixture.py. The committed map configs are
 // project-authored FoC map pins and bounds; these tests make no claims about
 // original camera constants.
+
+#include "../../support/check.hpp"
 #include "map_camera.hpp"
+#include "eawr/battle/start.hpp"
+#include "eawr/sim/math/fixed.hpp"
+#include "map_camera_test_support.hpp"
 
 #include <cmath>
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <limits>
-#include <numbers>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
-#include <tuple>
-
-#include "map_camera_test_support.hpp"
+#include <utility>
 
 namespace eawr_map_camera_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 void close(const float actual, const float expected, const std::string_view message,
            const float tolerance) {
@@ -179,19 +180,19 @@ int main() {
     {
         eawr::assets::Map map;
         map.declared_extents = eawr::assets::DeclaredExtents{0x10, 10000, 0x11, 8000, 0, 0};
-        eawr::skirmish::SkirmishStart start;
+        eawr::battle::BattleStart start;
         start.map = "synthetic.ted";
-        const auto whole = [](const std::int64_t v) { return eawr::skirmish::Fixed::from_raw(v * eawr::skirmish::Fixed::scale); };
-        start.markers.push_back({42, "Team_01_Spawn_Point_Marker", 2, eawr::skirmish::MarkerUse::spawn,
+        const auto whole = [](const std::int64_t v) { return eawr::sim::math::Fixed::from_raw(v * eawr::sim::math::Fixed::scale); };
+        start.markers.push_back({42, "Team_01_Spawn_Point_Marker", 2, eawr::battle::MarkerUse::spawn,
             {whole(1000), whole(-2000), {}}, {}});
         auto config = eawr::viewer::skirmish_camera_config(map, start, 2);
         expect(config && config.value().bounds.min_x == -5000 && config.value().bounds.max_y == 4000
                && config.value().target_x == 1000 && config.value().target_y == -2000,
                "auto camera uses rectangular extents and the selected player's spawn");
-        eawr::skirmish::StartUnit unit;
+        eawr::battle::StartUnit unit;
         unit.state.owner = 2;
         unit.record = 42;
-        unit.role = eawr::skirmish::UnitRole::fleet;
+        unit.role = eawr::battle::UnitRole::fleet;
         unit.state.position = {whole(1400), whole(-2300), whole(999)};
         start.units.push_back(unit);
         unit.state.position = {whole(1800), whole(-2500), {}};
@@ -201,19 +202,19 @@ int main() {
         config = eawr::viewer::skirmish_camera_config(map, start, 2);
         expect(config && config.value().target_x == 1600 && config.value().target_y == -2400
                && config.value().target_height == 0, "auto camera centres the local placed fleet on the battle plane");
-        eawr::skirmish::StartPlayer guest;
+        eawr::battle::StartPlayer guest;
         guest.player.player_id = 3; guest.player.team_id = 1; guest.start_side = "Team_01";
         guest.lobby = guest.human = true;
         start.players.push_back(guest);
-        start.markers.push_back({43, "team_01_spawn_point_marker", 0, eawr::skirmish::MarkerUse::spawn_unused,
+        start.markers.push_back({43, "team_01_spawn_point_marker", 0, eawr::battle::MarkerUse::spawn_unused,
             {whole(3000), whole(-1000), {}}, {}});
-        start.markers.push_back({44, "Team_00_Spawn_Point_Marker", 1, eawr::skirmish::MarkerUse::spawn,
+        start.markers.push_back({44, "Team_00_Spawn_Point_Marker", 1, eawr::battle::MarkerUse::spawn,
             {whole(-4000), whole(3000), {}}, {}});
         config = eawr::viewer::skirmish_camera_config(map, start, 3);
         expect(config && config.value().target_x == 2000 && config.value().target_y == -1500,
             "project camera for a LAN overflow seat uses its team's complete spawn centroid");
         start.markers.erase(start.markers.begin(), start.markers.begin() + 2);
-        start.markers.push_back({45, "Team_01_Space_Station", 2, eawr::skirmish::MarkerUse::station,
+        start.markers.push_back({45, "Team_01_Space_Station", 2, eawr::battle::MarkerUse::station,
             {whole(4200), whole(3200), {}}, {}});
         config = eawr::viewer::skirmish_camera_config(map, start, 3);
         expect(config && config.value().target_x == 4200 && config.value().target_y == 3200,

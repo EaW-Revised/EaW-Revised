@@ -895,9 +895,14 @@ void MapMode::State::sync_minimap() {
         if (container == nullptr) continue;
         members.clear();
         const LiveSessionView::VisibleUnit* leader = nullptr;
+        bool member_radar_visible = false;
         for (const auto id : ids) {
             const auto* instance = live.snapshot_index().instance(id);
             if (instance == nullptr) continue; // dead and docked craft do not belong to the live team centre
+            const auto member_type = minimap_type_names.find(instance->type_id);
+            if (member_type != minimap_type_names.end()) {
+                member_radar_visible = member_radar_visible || hud->minimap_looks(member_type->second).visible;
+            }
             const auto shown = std::lower_bound(visible.begin(), visible.end(), id,
                 [](const auto* unit, const sim::EntityId member) { return unit->entity < member; });
             const bool seen = shown != visible.end() && (*shown)->entity == id;
@@ -910,12 +915,13 @@ void MapMode::State::sync_minimap() {
         const auto pose = presentation::ui::minimap_squadron_pose(members);
         if (!pose || leader == nullptr) continue;
         auto blip = make_blip(squadron, container->type_id, container->owner, leader->hostile);
-        // MM-15: our selectable identity keeps the dummy squadron type, while the debug
-        // build creates a separate Team (or Create_Team_Type) for the radar's type policy.
+        // MM-15: the team's authored type supplies geometry/style. Live craft supply
+        // radar permission, including teams whose own type omits the radar flag.
         const auto* type = live.tables() != nullptr ? live.tables()->find(blip.type) : nullptr;
         if (type == nullptr || type->team_type.empty()) continue;
         blip.type = type->team_type;
         blip.team = true; // MM-17: model-free team extent, independent of member spread
+        blip.team_radar_visible = member_radar_visible;
         blip.radar.display_enemies = display_enemies;
         blip.x = pose->x;
         blip.y = pose->y;

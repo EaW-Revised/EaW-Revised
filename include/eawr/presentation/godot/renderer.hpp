@@ -193,6 +193,10 @@ public:
     // Geometry and authored team colour remain on the retained mesh asset.
     void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
     void forget_instance_pose(sim::EntityId entity_id);
+    // Immutable upload metadata, copied before worker visibility preparation.
+    // Empty if missing, unskinned, independently deformed, or the uploaded
+    // triangles cannot be proved degenerate when their weighted bones hide.
+    [[nodiscard]] std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId asset_id) const;
     // Presentation scale for an individual billboard surface. Environment
     // glows may enlarge their authored quad to clear the opaque planet rim.
     // World-space direction toward light 0 for a mode-6 sunlight glow bone.

@@ -143,5 +143,4 @@ std::vector<RetreatView> TacticalSession::Impl::retreat_views() const {
     return out;
 }
 const RetreatState& TacticalSession::retreat_state() const noexcept { return impl_->retreat_state; }
-bool TacticalSession::midbattle_solve_requested() const noexcept { return impl_->midbattle_solve.has_value(); }
 } // namespace eawr::sim::tactical

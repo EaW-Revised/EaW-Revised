@@ -1,0 +1,86 @@
+[
+  {
+    "old": "tests/skirmish/ai_progression_probe.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/ai_progression_probe.cpp#take",
+    "new": "tests/support/result.hpp#result_diagnostic::take"
+  },
+  {
+    "old": "tests/skirmish/ai_progression_probe.cpp#check",
+    "new": "tests/support/result.hpp#result_diagnostic::must"
+  },
+  {
+    "old": "tests/skirmish/attract_lively_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/attract_lively_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/attract_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_content_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_content_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_burn_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/foc_burn_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_plan_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/foc_plan_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_soak_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_tag_perturb_install.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_turn_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/foc_turn_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_tests.cpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/skirmish/soak_unit_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/skirmish/upgrade_identity_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/skirmish/upgrade_identity_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  }
+]

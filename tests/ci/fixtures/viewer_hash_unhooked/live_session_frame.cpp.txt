@@ -1,0 +1,7 @@
+// Frozen hook-free historical source context; this git-only fixture is not compiled.
+        pose.position = beacon.position;
+        live.push_back(std::move(pose));
+    }
+    if (!population.pose_live(live, pose_workers_)) return fail(population.failure());
+    pose_timer.finish();
+    FrameTimer opacity_timer(trace_frames_ ? &opacity_ms_ : nullptr);

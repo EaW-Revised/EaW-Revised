@@ -1,4 +1,5 @@
 #include "campaign_setup_screen.hpp"
+#include "eawr/core/text.hpp"
 
 #include "ui/kit.hpp"
 #include "ui/theme_builder.hpp"
@@ -32,9 +33,7 @@ namespace {
 String text(const std::string_view value) { return String::utf8(value.data(), static_cast<int64_t>(value.size())); }
 
 std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    return std::string(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
+    return core::trim(value, core::xml_whitespace);
 }
 
 // WGP-73: the preview's backdrop is the shared galactic backdrop texture; a texture reference is

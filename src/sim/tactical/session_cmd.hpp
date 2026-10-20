@@ -47,6 +47,43 @@ struct Tick::CommandHandlers final {
 
     std::vector<LiveUnit*> ordinary_ability_holders(EntityId unit_id, AbilityKind kind) const;
     core::Result<RejectReason> apply_ability(EntityId unit_id, const AbilityPayload& payload) const;
+private:
+    core::Result<RejectReason> switch_ordinary_ability(const AbilityPayload& payload,
+        const std::vector<LiveUnit*>& holders, auto& slot_of, auto& profile_of, const std::uint64_t& command_tick,
+        const std::uint64_t& frame, std::vector<PlayerEconomy>& ledgers, detail::MapStage<CraftState>& crafts,
+        UnitStage& staged, std::vector<EntityId>& changed_speed, bool& hunt_stopped) const;
+    core::Result<RejectReason> apply_blast(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, UnitStage& staged) const;
+    core::Result<RejectReason> apply_corrupt_systems(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, std::map<EntityId, ArrivalState>& arrivals, const std::uint64_t& frame,
+        UnitStage& staged, const MotionTable& table) const;
+    core::Result<RejectReason> apply_replenish_wingmen(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, TacticalSession::PlacementWork& reinforcement_work,
+        detail::MapStage<SquadronState>& minds, detail::MapStage<CraftState>& crafts,
+        std::map<EntityId, ArrivalState>& arrivals, std::vector<PlayerEconomy>& ledgers,
+        std::vector<PlayerCommand>& pad_requests, std::map<EntityId, PopulationShare>& shares,
+        std::vector<Squadron>& arrived_squadrons, std::vector<std::pair<EntityId, PlayerId>>& earners,
+        EntityId& next_id, UnitStage& staged, const SquadronTable& squadron_table,
+        std::map<EntityId, PadState>& pads, std::map<EntityId, ConstructionState>& construction) const;
+    core::Result<RejectReason> apply_spawned_ability(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick) const;
+    core::Result<RejectReason> apply_beam_ability(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, std::vector<PlayerEconomy>& ledgers, UnitStage& staged) const;
+    core::Result<RejectReason> apply_concentrate_fire(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, std::map<EntityId, ArrivalState>& arrivals,
+        std::vector<PlayerEconomy>& ledgers, UnitStage& staged, const detail::CombatWorld& view) const;
+    core::Result<RejectReason> apply_buzz_droids(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, EntityId& next_id,
+        const std::uint64_t& frame, UnitStage& staged, const SquadronTable& squadron_table,
+        const MotionTable& table) const;
+    core::Result<RejectReason> apply_ion_cannon_shot(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, UnitStage& staged,
+        const SquadronTable& squadron_table) const;
+    core::Result<RejectReason> apply_ordinary_ability(EntityId unit_id, const AbilityPayload& payload,
+        const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds,
+        detail::MapStage<CraftState>& crafts, std::vector<PlayerEconomy>& ledgers, const std::uint64_t& frame,
+        UnitStage& staged, const SquadronTable& squadron_table, const MotionTable& table) const;
+public:
     core::Result<RejectReason> apply_area_ability(EntityId unit_id, const AreaAbilityPayload& payload) const;
     core::Result<RejectReason> apply_manual_target(EntityId unit_id, const ManualTargetPayload& payload,
         PlayerId issuer, bool player_clock = true) const;

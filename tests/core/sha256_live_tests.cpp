@@ -1,3 +1,12 @@
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <memory>
+#include <utility>
+#include <exception>
+#include <string>
+#include "../support/result.hpp"
+#include "../support/check.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/live_session.hpp"
@@ -6,7 +15,6 @@
 #include <algorithm>
 #include <chrono>
 #include <iostream>
-#include <stdexcept>
 #include <string_view>
 #include <vector>
 
@@ -17,12 +25,9 @@ namespace platform = eawr::platform;
 namespace tactical = eawr::sim::tactical;
 namespace auth = eawr::script::authoritative;
 
-template<class T> T take(core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::take;
 void check(const bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
+    eawr::testing::require(condition, message);
 }
 double elapsed_us(const Clock::time_point start) {
     return std::chrono::duration<double, std::micro>(Clock::now() - start).count();

@@ -1,0 +1,27 @@
+[
+  {
+    "old": "src/units/unit_motion.cpp#motion_table",
+    "new": "src/units/unit_motion.cpp#append_squadron_motion_profiles",
+    "tag": "Max_Speed"
+  },
+  {
+    "old": "src/units/unit_motion.cpp#motion_table",
+    "new": "src/units/unit_motion.cpp#append_spawner_motion_profiles",
+    "tag": "Hyperspace"
+  },
+  {
+    "old": "src/units/unit_motion.cpp#motion_table",
+    "new": "src/units/unit_motion.cpp#append_spawner_motion_profiles",
+    "tag": "Reserve_Spawned_Units_Tech_0"
+  },
+  {
+    "old": "src/units/unit_motion.cpp#motion_table",
+    "new": "src/units/unit_motion.cpp#append_spawner_motion_profiles",
+    "tag": "Starting_Spawned_Units_Tech_0"
+  },
+  {
+    "old": "src/units/unit_motion.cpp#motion_table",
+    "new": "src/units/unit_motion.cpp#append_avoidance_footprints",
+    "tag": "SpacePathingTries"
+  }
+]

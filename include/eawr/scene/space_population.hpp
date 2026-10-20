@@ -78,6 +78,14 @@ struct HardpointOwnerArt final {
     const assets::Model& owner, std::span<const HardpointAttachment> hardpoints,
     std::span<const HardpointState> states);
 
+// Live composition accepts only unit rendering facts, with no environment-layer flags.
+struct LiveUnitTags final {
+    std::string type_name;
+    bool marker{};
+    IdleTags idle{};
+    std::vector<HardpointAttachment> hardpoints{};
+};
+
 // Catalog facts about one placed object type.
 struct SpaceObjectTags final {
     std::string type_name;  // XML element of the catalog winner, e.g. SpaceProp
@@ -89,6 +97,10 @@ struct SpaceObjectTags final {
 };
 
 using ObjectResolver = std::function<std::optional<data::EffectiveObject>(std::string_view object_id, data::Category category)>;
+
+// Reads unit rendering facts without querying Is_Nebula or In_Background.
+[[nodiscard]] LiveUnitTags live_unit_tags(const data::EffectiveObject& object,
+                                        const ObjectResolver& resolve = {});
 
 // Reads the tags above from a resolved object. XML booleans are accepted as
 // yes/true/1 in any case, with surrounding whitespace. HardPoints is a comma
@@ -134,6 +146,12 @@ struct SpacePlacementDecision final {
     // causes that block it. Stencil-shadow surfaces are counted, not listed.
     std::vector<std::string> missing;
 };
+
+// BP-75: a live unit is drawn at its simulated pose, including types authored
+// In_Background. Map environment ownership never participates in this decision.
+[[nodiscard]] SpacePlacementDecision classify_live_unit(
+    const Placement& placement, const std::optional<LiveUnitTags>& tags,
+    bool ability_proxy_owner = false);
 
 // One decision per scene placement, in scene order. `tags_of` returns the
 // catalog facts of an object id, or nullopt when it has none. WAB-75: only

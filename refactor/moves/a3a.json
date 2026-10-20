@@ -1,0 +1,106 @@
+[
+  {
+    "old": "src/units/unit_support.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/units/unit_support.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "src/units/unit_support.cpp#upper",
+    "new": "include/eawr/core/text.hpp#to_upper"
+  },
+  {
+    "old": "src/units/unit_support.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/units/unit_support.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/units/unit_abilities.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/units/unit_durability.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "src/units/galactic_types.cpp#equal",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/units/galactic_types.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/skirmish/start.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/skirmish/start.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/battle/start.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/data/xml_registry.cpp#ascii_lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "src/data/xml_registry.cpp#ascii_iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/data/xml_registry.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/data/retail_values.cpp#stripped",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/data/ui/cursors.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/data/ui/dialog_catalog.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/data/ui/dialog_catalog.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "src/data/ui/dialog_catalog.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/data/ui/dialog_catalog.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/data/ui/dialog_script_tokens.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/data/ui/movie.cpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/data/ui/sfnt.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/data/ui/ui_internal.hpp#ascii_lower",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/data/ui/ui_internal.hpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  }
+]

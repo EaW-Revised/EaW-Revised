@@ -1,3 +1,4 @@
+#include "../../support/check.hpp"
 #include "ai_equations.hpp"
 
 #include <array>
@@ -38,10 +39,11 @@ EAWR_TEST_NOINLINE void operator delete(void* const memory, std::size_t) noexcep
 
 namespace {
 namespace ai = eawr::script::foc::ai;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool value, const std::string_view message) {
-    if (!value) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!value) local_checker.check(value, message, std::cerr, "FAILED: ");
 }
 
 ai::Equation equation(const std::string& payload) {

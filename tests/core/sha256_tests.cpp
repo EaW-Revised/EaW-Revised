@@ -1,16 +1,20 @@
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/core/sha256.hpp"
 
-#include <algorithm>
-#include <array>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
+#include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace {
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const char* message) {
-    if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 void check(const std::span<const std::uint8_t> bytes, const std::string_view expected) {
@@ -41,14 +45,8 @@ int main() {
     }
     expect(sha256_backend(Sha256Backend::x86_sha) == sha256_backend_for_features(features),
         "explicit acceleration is guarded by actual features");
-#if defined(_MSC_VER)
-    char override_buffer[16]{};
-    std::size_t override_length{};
-    const auto* forced = getenv_s(&override_length, override_buffer, sizeof(override_buffer), "EAWR_SHA256_BACKEND") == 0
-        ? override_buffer : nullptr;
-#else
-    const auto* forced = std::getenv("EAWR_SHA256_BACKEND");
-#endif
+    const auto forced_value = eawr::testing::environment("EAWR_SHA256_BACKEND");
+    const auto* forced = forced_value ? forced_value->c_str() : nullptr;
     expect(sha256_backend() == (forced && std::string_view(forced) == "scalar"
         ? Sha256Backend::scalar : sha256_backend_for_features(features)), "startup selection respects scalar override");
     const auto text = [](const std::string_view value) {

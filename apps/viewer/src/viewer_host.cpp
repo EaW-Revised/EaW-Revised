@@ -1,4 +1,5 @@
 #include "viewer_host_internal.hpp"
+#include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
 #include "gpu_memory_trace.hpp"
@@ -13,14 +14,7 @@ namespace viewer_host_detail {
 }
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto fold = [](const char value) {
-            return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-        };
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] std::string hash_bytes(const std::span<const std::byte> bytes) {

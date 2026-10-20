@@ -7,23 +7,9 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
-#include <functional>
-#include <iostream>
-#include <iterator>
-#include <map>
-#include <optional>
-#include <sstream>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
 namespace combat_test_support {
@@ -32,7 +18,7 @@ namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-extern int failures;
+extern int& failures;
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
 constexpr tactical::TypeId shooter_type = 1;

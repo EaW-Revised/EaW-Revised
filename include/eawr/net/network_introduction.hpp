@@ -49,6 +49,10 @@ public:
     core::Result<void> send_chat(std::string text) override;
     core::Result<OnlineChatPage> chat(std::uint32_t after) override;
     core::Result<void> kick(const OnlineRoomPublication&, std::uint32_t seat) override;
+    core::Result<OnlineMenuPage> menu_enter(std::string display_name) override;
+    core::Result<void> menu_say(std::string text) override;
+    core::Result<OnlineMenuPage> menu_poll(std::uint32_t after, std::uint32_t roster_version) override;
+    void menu_leave() override;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

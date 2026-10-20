@@ -7,7 +7,6 @@ shader bodies, generated source, and rich compiler logs are never printed.
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -38,6 +37,7 @@ from tools.shaders.translate import (
     skin_transform,
     translate,
 )
+from tools.common.eawr_python_helpers import sha256_file as digest
 
 FIXTURES = ROOT / "tests" / "shaders" / "fixtures"
 TOOLCHAIN_ROOT = ROOT / "out" / "tools" / "glslang-16.5.0"
@@ -53,14 +53,6 @@ EXPECTED_COUNTS = {
     "MESHSHIELD": (3, 2, 6),
     "PRIMALPHA": (1, 0, 2),
 }
-
-
-def digest(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
 
 
 def write(path: Path, text: str) -> None:

@@ -1,6 +1,16 @@
 #include "skirmish_start_support.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <string>
+#include <vector>
+
 namespace skirmish_start_test_support {
 
 void foc_pad_capture_build(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,

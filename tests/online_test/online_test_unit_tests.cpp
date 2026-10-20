@@ -1,16 +1,23 @@
+#include "../support/check.hpp"
 #include "log.hpp"
 #include "options.hpp"
 #include "gns_link_stats.hpp"
+
 #include <chrono>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <string>
+#include <vector>
 
 using namespace eawr::online_test;
 namespace {
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool value, const char* what) {
-    if (!value) { std::cerr << "FAILED: " << what << '\n'; ++failures; }
+    if (!value) local_checker.check(value, what, std::cerr, "FAILED: ");
 }
 const std::string pin(64, 'a');
 

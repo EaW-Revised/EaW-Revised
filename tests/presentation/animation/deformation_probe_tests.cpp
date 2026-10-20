@@ -2,8 +2,10 @@
 // position below is derived by hand from the bone transforms, not from the
 // probe or the Player.
 
+#include "../../support/check.hpp"
 #include "deformation_probe.hpp"
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -22,9 +25,10 @@ namespace probe = eawr::tests::animation_deformation;
 using assets::Vec3f;
 using assets::Vec4f;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 bool close(const float left, const float right, const float tolerance = 1.0e-5F) {
     return std::abs(left - right) <= tolerance;

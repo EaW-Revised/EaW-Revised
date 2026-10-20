@@ -1,3 +1,15 @@
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <memory>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // WGA-284..299: economy readers consume immutable completed inputs.
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
@@ -18,10 +30,11 @@
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <thread>
+#include <utility>
+using eawr::testing::must;
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -31,11 +44,6 @@ using galactic_test::expect;
 using ai::real;
 using eawr::sim::math::Fixed;
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T must(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().message);
-    return std::move(value).value();
-}
-void must(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
 
 ai::GalacticPerceptionSetup setup() {
     ai::GalacticPerceptionSetup out; out.maximum_ground_level = out.maximum_space_level = real(5);
@@ -351,15 +359,9 @@ void generations(unsigned workers) {
     expect(live.world->work().prepared_objects != 0, "an inclusive perception deadline admits the atomic row refresh");
 }
 std::string game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("installed economy contracts require game root");
-    std::string result(value); std::free(value); return result;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("installed economy contracts require game root");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("installed economy contracts require game root");
+    return std::move(*root);
 }
 std::string read(const eawr::vfs::Vfs& filesystem, std::string_view path) {
     const auto bytes = must(filesystem.open(path)); std::string text(bytes.size(), '\0');
@@ -599,7 +601,7 @@ void installed() {
     }
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_economy_tokens_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures ? 1 : 0; }
         if (argc != 1) throw std::runtime_error("economy contracts accept only --installed");

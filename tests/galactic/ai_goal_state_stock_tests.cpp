@@ -1,3 +1,15 @@
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "ai_goal_state_stock.hpp"
 #include "galactic_ai_goal_state.hpp"
 #include "galactic_ai_world.hpp"
@@ -10,6 +22,7 @@
 #include <algorithm>
 #include <iostream>
 #include <stdexcept>
+using eawr::testing::must;
 
 namespace ai = eawr::script::foc::ai;
 namespace foc = eawr::script::foc;
@@ -18,13 +31,12 @@ namespace auth = eawr::script::authoritative;
 namespace lifecycle = foc::galactic_ai;
 namespace cp = eawr::campaign;
 namespace {
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
 }
-void must(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+
 struct Owner {
     std::shared_ptr<foc::detail::Host> host = std::make_shared<foc::detail::Host>();
     std::shared_ptr<ai::GalacticWorld> world;

@@ -1,4 +1,5 @@
 #include "route_lines.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"
 
 #include <algorithm>
@@ -9,13 +10,10 @@
 namespace eawr::viewer::galactic {
 namespace {
 std::string upper(std::string_view text) {
-    std::string result(text);
-    for (char& c : result) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
-    return result;
+    return core::to_upper(text);
 }
 std::string trim(std::string_view text) {
-    const auto start = text.find_first_not_of(" \t\r\n");
-    return start == std::string_view::npos ? std::string() : std::string(text.substr(start, text.find_last_not_of(" \t\r\n") - start + 1));
+    return core::trim(text, core::xml_whitespace);
 }
 std::string attribute(const data::XmlNode& node, std::string_view name) {
     for (const auto& item : node.attributes) if (upper(item.name) == upper(name)) return trim(item.value);

@@ -152,7 +152,6 @@ public:
     [[nodiscard]] WideString substr(std::size_t zero_based_position, std::size_t count) const;
     [[nodiscard]] core::Result<WideString> append_ascii(std::string_view ascii);
     [[nodiscard]] WideString append(const WideString& other);
-    [[nodiscard]] core::Result<WideString> assign_ascii(std::string_view ascii);
     [[nodiscard]] WideString erase(std::size_t zero_based_position, std::size_t count);
     [[nodiscard]] core::Result<WideString> insert_ascii(
         std::size_t zero_based_position,

@@ -1,3 +1,13 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <ostream>
+#include <span>
+#include <string>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "ability_fixture.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -7,19 +17,16 @@
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 
-#include <stdexcept>
+#include <exception>
 #include <utility>
+using eawr::testing::take;
 
 namespace {
 namespace gc = eawr::sim::galactic;
 namespace cp = eawr::checkpoint;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
-template<class T> T take(eawr::core::Result<T> r) {
-    if (!r) throw std::runtime_error(r.error().message);
-    return std::move(r).value();
-}
-void take(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 using ability_fixture::base_setup;
 eawr::sim::EntityId buyer(const gc::GalacticSetup& s) { return s.fleets[1].members[0].id; }
@@ -317,7 +324,7 @@ void accepted_space_mission(const eawr::sim::PartitionExecutor& pool, std::vecto
     }
 }
 } // namespace
-int main() {
+int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);

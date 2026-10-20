@@ -5,6 +5,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
     set(CMAKE_CXX_EXTENSIONS OFF)
     get_filename_component(EAWR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+    include("${EAWR_ROOT}/cmake/EawrTestTiers.cmake")
     add_executable(camera_tests
         main.cpp
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
@@ -31,6 +32,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     "${EAWR_ROOT}/apps/viewer/src/camera_binding_table.cpp"
         "${EAWR_ROOT}/apps/viewer/src/camera_input.cpp"
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
+        "${EAWR_ROOT}/src/core/json_text.cpp"
         "${EAWR_ROOT}/src/presentation/camera/camera.cpp"
         "${EAWR_ROOT}/src/presentation/camera/free_camera.cpp"
         "${EAWR_ROOT}/src/presentation/camera/input.cpp"
@@ -130,6 +132,7 @@ target_compile_definitions(map_camera_bridge_tests PRIVATE
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     target_sources(map_camera_bridge_tests PRIVATE
         "${EAWR_ROOT}/src/core/diagnostic.cpp"
+        "${EAWR_ROOT}/src/core/json_text.cpp"
         "${EAWR_ROOT}/src/presentation/camera/camera.cpp"
         "${EAWR_ROOT}/src/presentation/camera/constants_source.cpp"
         "${EAWR_ROOT}/src/presentation/camera/controller.cpp"

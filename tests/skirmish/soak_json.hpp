@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/json_text.hpp"
+
 // Just enough JSON for the soak's summaries (#627): a quoted string and a finite number.
 
 #include <cmath>
@@ -9,25 +11,7 @@
 namespace eawr::soak {
 
 [[nodiscard]] inline std::string json_string(const std::string& text) {
-    std::string quoted = "\"";
-    for (const char letter : text) {
-        switch (letter) {
-        case '"': quoted += "\\\""; break;
-        case '\\': quoted += "\\\\"; break;
-        case '\n': quoted += "\\n"; break;
-        case '\r': quoted += "\\r"; break;
-        case '\t': quoted += "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(letter) < 0x20) {
-                char escape[8];
-                std::snprintf(escape, sizeof escape, "\\u%04x", static_cast<unsigned>(static_cast<unsigned char>(letter)));
-                quoted += escape;
-            } else {
-                quoted += letter;
-            }
-        }
-    }
-    return quoted + '"';
+    return eawr::core::json_quote(text);
 }
 
 // Six decimals; a value that is not finite (never, by construction) is written as 0.

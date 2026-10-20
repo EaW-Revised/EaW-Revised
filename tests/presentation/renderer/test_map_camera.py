@@ -4,7 +4,6 @@ import hashlib
 import json
 import os
 import pathlib
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +14,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/assets/fixtures"))
 import camera_fixture  # noqa: E402
 import scene_fixture  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 
 CONFIG = ROOT / "apps/viewer/project/config/map-camera.xml"
 BINDINGS = ROOT / "apps/viewer/project/config/map-camera-bindings.json"
@@ -41,11 +43,10 @@ def run_viewer(root, name, extra=(), capture=False, unlocked_capture=False):
     if unlocked_capture:
         command += ["--eawr-map-camera-unlocked-capture", str(png)]
     command += list(extra)
-    completed = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, timeout=120, check=False)
+    completed = python_helpers.run_viewer(command, cwd=ROOT, timeout=120)
     if not report.exists():
         raise AssertionError(completed.stdout)
-    return completed, json.loads(report.read_text(encoding="utf-8")), png
+    return completed, python_helpers.read_json(report), png
 
 
 class MapCameraStructure(unittest.TestCase):

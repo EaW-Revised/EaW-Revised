@@ -1,3 +1,6 @@
+#include <system_error>
+#include <utility>
+#include "../support/check.hpp"
 #include "host_support.hpp"
 #include "eawr/script/pglua.hpp"
 #include "eawr/script/script_host.hpp"
@@ -19,17 +22,15 @@
 
 namespace host_test_support {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 TempTree::TempTree() { std::filesystem::create_directories(root); }
 TempTree::~TempTree() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
 
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 void write_text(const std::filesystem::path& path, const std::string_view text) {

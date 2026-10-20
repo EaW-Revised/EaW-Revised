@@ -20,7 +20,7 @@
 namespace host_test_support {
 
 
-extern int failures;
+extern int& failures;
 
 
 struct TempTree;

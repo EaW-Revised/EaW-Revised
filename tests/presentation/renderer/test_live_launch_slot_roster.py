@@ -1,9 +1,8 @@
-"""A campaign battle draws every reserve it fields, without Godot.
+"""Arrival demand and runtime slot growth, without Godot.
 
-The viewer draws a unit that appears after tick zero through a pre-composed launch slot. The slots used to come
-from the station menus only, at most ten per type, so the eleventh ship of one type (or any reserve type no menu
-offers) was fought by the simulation and never drawn. This compiles the real prepare_launch_slots and ship_of
-sources against stand-in types and checks the slots against the campaign roster.
+Compile the production arrival planner, slot preparation and binding/growth functions against renderer stand-ins.
+Exercise twelve campaign reinforcements, count-budget catch-up, stable standing bindings, owner separation,
+the unchanged ordinary skirmish capacities and authored launch counts above 64.
 """
 import os
 from pathlib import Path
@@ -38,6 +37,10 @@ HARNESS = r'''
 #include <set>
 #include <string>
 #include <vector>
+#include <span>
+#include <tuple>
+#include <utility>
+#include <string_view>
 
 namespace sim {
 using EntityId = std::uint64_t;
@@ -60,9 +63,17 @@ struct HeroDeployment { TypeId purchase{}, deployed{}; };
 struct FootprintProfile { math::Fixed layer_z; };
 struct PadChild { TypeId type{}, constructed{}; };
 struct Pads {
+    std::vector<TypeId> points;
+    std::vector<PadChild> children;
     const void* replacement(TypeId) const { return nullptr; }
-    const void* point(TypeId) const { return nullptr; }
-    const PadChild* child(TypeId) const { return nullptr; }
+    const void* point(TypeId type) const {
+        const auto found = std::find(points.begin(), points.end(), type);
+        return found == points.end() ? nullptr : &*found;
+    }
+    const PadChild* child(TypeId type) const {
+        const auto found = std::find_if(children.begin(), children.end(), [&](const auto& row) { return row.type == type; });
+        return found == children.end() ? nullptr : &*found;
+    }
 };
 struct EconomyRules {
     Pads pads; std::vector<StationMenu> menus; std::vector<EconomyPlayer> players;
@@ -84,9 +95,10 @@ struct Spawner { std::vector<SpawnEntry> starting, reserves;
     std::array<std::vector<SpawnEntry>, 6> campaign_starting, campaign_reserves; };
 struct BuzzDroids { std::string object_type; };
 enum class UnitKind { ship, squadron };
+struct Ability { std::string type; };
 struct UnitType {
     std::string id; bool under_construction = false; std::vector<SquadronMember> members; UnitKind kind = UnitKind::ship;
-    std::optional<Spawner> spawner; std::optional<BuzzDroids> buzz_droids, team_buzz_droids;
+    std::optional<Spawner> spawner; std::optional<BuzzDroids> buzz_droids, team_buzz_droids; std::vector<Ability> abilities;
 };
 struct UnitTables {
     std::vector<UnitType> units;
@@ -96,6 +108,8 @@ struct UnitTables {
     }
 };
 }
+namespace skirmish { struct SkirmishStart; tactical::TypeId type_id(const std::string&); }
+__ARRIVAL_HEADER__
 namespace skirmish {
 tactical::TypeId type_id(const std::string& name) {
     std::uint32_t hash = 2166136261U;
@@ -105,16 +119,24 @@ tactical::TypeId type_id(const std::string& name) {
 struct LobbyColour { std::array<std::uint8_t, 3> rgb{}; };
 struct StartUnit { struct State { sim::EntityId entity_id{}; tactical::TypeId type_id{}; tactical::PlayerId owner{};
                                   sim::math::Vec3 position; } state; sim::math::Fixed yaw_degrees; std::string type; };
-struct StartPlayer { struct P { tactical::PlayerId player_id{}; tactical::FactionId faction_id{}; } player;
+struct StartPlayer { struct P { tactical::PlayerId player_id{}; std::uint32_t team_id{}; tactical::FactionId faction_id{}; std::uint32_t flags{}; } player;
                      bool lobby = false; std::optional<LobbyColour> colour; };
 struct Launch { sim::EntityId spawner{}; tactical::PlayerId owner{}; std::string squadron; std::int32_t count{}; };
-struct SkirmishStart { std::vector<StartUnit> units; std::vector<StartPlayer> players; std::vector<Launch> launches; };
+struct SkirmishStart { std::vector<StartUnit> units; std::vector<StartPlayer> players; std::vector<Launch> launches; tactical::TacticalSetup setup; battle::ArrivalPlan arrivals; };
 }
+namespace battle {
+using skirmish::StartUnit;
+using skirmish::StartPlayer;
+using skirmish::LobbyColour;
+}
+__ARRIVAL_IMPL__
 namespace live_session_detail { std::string json(const std::string& text) { return "\"" + text + "\""; } }
 using live_session_detail::json;
 namespace data { enum class Category { game_object }; struct Catalog { std::optional<int> resolve(const std::string&, Category) const { return 1; } }; }
 namespace vfs { struct Vfs { bool stat(const std::string&) const { return true; } }; }
+struct GodotRenderer {};
 namespace animation {
+namespace clip_types { constexpr int deploy = 1, undeploy = 2; }
 std::optional<int> clip_type_index(const char*) { return 1; }
 template<class F> std::vector<std::string> model_clip_paths(const std::string&, int, F, const std::string&) { return {}; }
 }
@@ -125,9 +147,21 @@ std::string tag_text(int, const char*) { return {}; }
 struct SpacePopulation { struct Options { struct PlacedShip {
     std::string object_id; std::array<float, 3> position{}; float yaw_degrees = 0; sim::EntityId live_entity = 0;
     bool launch_slot = false, ability_proxy_owner = false, construction = false, placement_preview = false;
-    std::string clip; std::optional<std::array<std::uint8_t, 3>> team_colour;
-}; }; };
-struct DeathClone {};
+    std::string clip, alternate_clip; bool defend_shell = false, stealth_shell = false;
+    std::optional<std::array<std::uint8_t, 3>> team_colour;
+}; };
+    std::size_t appended = 0; bool drawn = true;
+    std::vector<std::size_t> restored;
+    void restore_live_ship(GodotRenderer&, std::size_t ship) { restored.push_back(ship); }
+    void bind_live_identity(std::size_t, std::size_t) {}
+    bool append_live_ships(GodotRenderer&, const vfs::Vfs&, std::span<const Options::PlacedShip> ships) {
+        appended += ships.size(); return true;
+    }
+    bool live_ship_drawn(std::size_t) const { return drawn; }
+    std::string failure() const { return "model unavailable"; }
+};
+struct DeathClone { std::size_t ship{}; };
+namespace live_session { struct SlotIdentity final { std::size_t ship{}; bool held{}; }; }
 
 struct LiveSessionView {
     struct { std::uint32_t purchase_slots = 10; } options_;
@@ -139,19 +173,37 @@ struct LiveSessionView {
     bool colorization_enabled_ = true;
     std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
     struct LaunchSlot { tactical::TypeId type{}; std::size_t ship{}; bool bound{}; std::optional<std::size_t> clone;
-                        tactical::TypeId required_station{}; tactical::PlayerId station_owner{}; };
+                        tactical::TypeId required_station{}; tactical::PlayerId station_owner{}; bool shadow_bound{}; };
     std::vector<LaunchSlot> launch_slots_;
     struct PlacementClone { tactical::TypeId type{}; std::size_t ship{}; sim::math::Vec3 offset; sim::math::Fixed layer_z; };
     std::vector<PlacementClone> placement_clones_;
     std::vector<DeathClone> launch_clones_;
     std::map<sim::EntityId, DeathClone> death_clones_;
     std::map<sim::EntityId, std::size_t> ship_of_entity_, launched_ship_of_entity_;
+    std::map<sim::EntityId, live_session::SlotIdentity> slot_identity_of_entity_;
+    std::size_t identity_fallbacks_{}, identity_undrawn_{}, identity_both_undrawn_{}, shadow_held_{}, shadow_peak_{}, real_peak_{};
+    LaunchSlot& bind_slot_identity(sim::EntityId, LaunchSlot&, tactical::TypeId, tactical::PlayerId);
     std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::set<sim::EntityId>> slotless_hits_;
     std::optional<std::array<std::uint8_t, 3>> model_colour(tactical::PlayerId, const std::string&) { return std::nullopt; }
     std::optional<DeathClone> prepare_death_clone(const vfs::Vfs&, const data::Catalog&, std::size_t, sim::EntityId) {
         return std::nullopt;
     }
-    void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog);
+    struct ArrivalSlotState {
+        battle::ArrivalPlan plan;
+        const vfs::Vfs* filesystem{}; const data::Catalog* catalog{};
+        SpacePopulation* population{}; GodotRenderer* renderer{};
+        std::size_t remaining{}, grown{};
+        std::vector<sim::EntityId> undrawn;
+        std::set<std::pair<tactical::PlayerId, tactical::TypeId>> purchases, failed;
+        std::string failure;
+    } arrival_slots_;
+    std::map<tactical::TypeId, const units::UnitType*> presentation_types_;
+    std::map<sim::EntityId, int> arrivals_;
+    void add_launch_slot(const vfs::Vfs&, const data::Catalog&, const std::string&, const skirmish::StartUnit&,
+        const std::optional<skirmish::LobbyColour>&, tactical::TypeId = 0, bool = false);
+    std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId);
+    void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
+                              std::optional<battle::ArrivalPlan> selected);
     std::optional<std::size_t> ship_of(sim::EntityId entity, tactical::TypeId type, tactical::PlayerId owner);
     std::string slotless_report_rows() const;
     std::size_t slotless_units() const {
@@ -165,9 +217,29 @@ struct LiveSessionView {
         }));
     }
 };
+__ADD_SLOT__
 __PREPARE__
+__GROW__
+__BIND_IDENTITY__
 __SHIP_OF__
 __ROWS__
+// The source-side selection, copied from production, over the same inputs the view holds.
+struct BattleSourceState {
+    std::optional<skirmish::SkirmishStart> start_;
+    std::optional<units::UnitTables> tables_;
+    tactical::EconomyRules economy_;
+    std::optional<tactical::TacticalSetup> setup_;
+    std::optional<battle::ArrivalPlan> arrivals_;
+    void select_arrivals();
+};
+__SELECT__
+std::optional<battle::ArrivalPlan> selected_arrivals(const LiveSessionView& view) {
+    BattleSourceState source;
+    source.start_ = view.start_; source.tables_ = view.tables_;
+    source.economy_ = view.economy_; source.setup_ = view.setup_;
+    source.select_arrivals();
+    return std::move(source.arrivals_);
+}
 
 namespace {
 LiveSessionView session(const bool campaign) {
@@ -189,7 +261,7 @@ LiveSessionView session(const bool campaign) {
     tables.units[6].spawner->campaign_starting[2] = {{"Tartan", 2}};
     view.tables_ = tables;
     skirmish::SkirmishStart start;
-    start.players = {{{1, 7}, false, std::nullopt}, {{2, 8}, false, std::nullopt}};
+    start.players = {{{1, 0, 7}, false, std::nullopt}, {{2, 1, 8}, false, std::nullopt}};
     start.units = {{{100, skirmish::type_id("Station"), 1, {}}, sim::math::Fixed{}, "Station"},
                    {{200, skirmish::type_id("Station2"), 2, {}}, sim::math::Fixed{}, "Station2"}};
     view.start_ = start;
@@ -204,7 +276,7 @@ LiveSessionView session(const bool campaign) {
             for (int index = 0; index < count; ++index) roster.reserves.push_back({next++, skirmish::type_id(model), owner});
         };
         add(1, "Nebulon_B", 11);      // eleven of one type on the Rebel side
-        add(1, "Corvette", 3);        // a reserve type no station menu offers
+        add(1, "Corvette", 12);       // twelve reserves of a type no station menu offers
         add(1, "XWing_Squadron", 2);  // a squadron: its craft are what is drawn
         add(2, "Tartan", 12);         // and the other side
         roster.reserves.push_back({next++, skirmish::type_id("Corvette"), 1, true});  // restricted: never arrives
@@ -217,59 +289,143 @@ LiveSessionView session(const bool campaign) {
         setup.campaign = std::move(roster);
     }
     view.setup_ = setup;
+    view.start_->setup = setup;
+    view.start_->arrivals = battle::plan_start_arrivals(*view.start_, *view.tables_, &view.economy_);
+    for (const auto& type : view.tables_->units) view.presentation_types_.emplace(skirmish::type_id(type.id), &type);
     return view;
 }
 }
 
+__STORAGE__
 int main() {
+    if (!storage_contract()) return 99;
     const vfs::Vfs filesystem; const data::Catalog catalog;
-    // A campaign battle: slots follow the roster of both sides.
+    // Arrival-plan selection (#4278): the start's own rows win unless they are empty or the setup is campaign.
+    const auto same_plan = [](const battle::ArrivalPlan& left, const battle::ArrivalPlan& right) {
+        if (left.rows.size() != right.rows.size()) return false;
+        for (std::size_t index = 0; index < left.rows.size(); ++index) {
+            const auto& a = left.rows[index]; const auto& b = right.rows[index];
+            if (a.owner != b.owner || a.type != b.type || a.simultaneous_maximum != b.simultaneous_maximum
+                || a.source != b.source || a.anchor != b.anchor) return false;
+        }
+        return true;
+    };
+    {
+        battle::ArrivalPlan marker;
+        marker.add(2, "Marker", 3, battle::ArrivalSource::purchase, 77);
+        auto skirmish_view = session(false);
+        const auto recomputed = battle::plan_start_arrivals(*skirmish_view.start_, *skirmish_view.tables_, &skirmish_view.economy_);
+        skirmish_view.start_->arrivals = {};
+        const auto empty_rows = selected_arrivals(skirmish_view);
+        if (!empty_rows || !same_plan(*empty_rows, recomputed)) return 30; // empty rows recompute with the economy
+        skirmish_view.start_->arrivals = marker;
+        const auto kept_rows = selected_arrivals(skirmish_view);
+        if (!kept_rows || !same_plan(*kept_rows, marker)) return 31; // non-empty skirmish rows are kept verbatim
+        auto campaign_view = session(true);
+        const auto campaign_recomputed = battle::plan_start_arrivals(*campaign_view.start_, *campaign_view.tables_, &campaign_view.economy_);
+        campaign_view.start_->arrivals = marker;
+        const auto campaign_rows = selected_arrivals(campaign_view);
+        if (!campaign_rows || !same_plan(*campaign_rows, campaign_recomputed) || same_plan(*campaign_rows, marker)) return 32;
+        auto no_start = session(false);
+        no_start.start_.reset();
+        if (selected_arrivals(no_start)) return 33;
+        auto no_tables = session(false);
+        no_tables.tables_.reset();
+        if (selected_arrivals(no_tables)) return 34;
+    }
     auto battle = session(true);
-    battle.prepare_launch_slots(filesystem, catalog);
-    std::cout << "campaign slots: nebulon=" << battle.slots(1, "Nebulon_B") << " corvette=" << battle.slots(1, "Corvette")
-              << " xwing=" << battle.slots(1, "XWing") << " tartan=" << battle.slots(2, "Tartan") << "\n";
-    // 11 reserves on top of the ten the station menu keeps for purchases: a unit bought while the
-    // reserves still stand needs its own slot.
-    if (battle.slots(1, "Nebulon_B") != 21) return 1;
-    // A reserve type no menu offers gets its roster; a restricted row (never arrives) gets none.
-    if (battle.slots(1, "Corvette") != 3 || battle.slots(2, "Corvette") != 0) return 2;
-    // 2 reserve squadrons x 2 craft, the station's own squadron (2 craft), and the carried squadron's
-    // 2 craft counted once (not once as the container's craft and again as its listed members).
-    if (battle.slots(1, "XWing") != 8) return 3;
-    if (battle.slots(2, "XWing") != 0) return 10;
-    if (battle.slots(1, "Carrier") != 1) return 11;
-    // 12 Tartan reserves + 10 menu slots + the Empire station's own spawn (at most 2 standing at once,
-    // the largest tier; its unused reserve list adds nothing).
-    if (battle.slots(2, "Tartan") != 24) return 4;
-    // Ships and squadron craft a station spawns get slots though no reserve names them.
-    if (battle.slots(2, "TIE") != 2) return 8;
-    // Every reserve binds a distinct slot; none is left without a model.
+    battle.prepare_launch_slots(filesystem, catalog, selected_arrivals(battle));
+    if (battle.slots(1, "Nebulon_B") != 11 || battle.slots(1, "Corvette") != 1
+        || battle.slots(1, "XWing") != 3 || battle.slots(2, "Tartan") != 13
+        || battle.slots(2, "TIE") != 2 || battle.slots(1, "Carrier") != 1) return 1;
+    // Full simultaneous demand survives lazy realization, and carried craft count once.
+    std::size_t corvettes = 0, xwings = 0;
+    for (const auto& row : battle.arrival_slots_.plan.rows) if (row.source == battle::ArrivalSource::reinforcement_pool) {
+        if (row.owner == 1 && row.type == "Corvette") corvettes += row.simultaneous_maximum;
+        if (row.owner == 1 && row.type == "XWing") xwings += row.simultaneous_maximum;
+    }
+    if (corvettes != 12 || xwings != 6) return 2;
+    SpacePopulation population; GodotRenderer renderer;
+    battle.arrival_slots_.population = &population; battle.arrival_slots_.renderer = &renderer;
+    battle.arrival_slots_.remaining = 8;
     std::set<std::size_t> drawn;
-    for (int index = 0; index < 21; ++index) {
-        const auto ship = battle.ship_of(5000 + index, skirmish::type_id("Nebulon_B"), 1);
-        if (!ship) return 5;
+    // Twelve reinforcements of a type no menu offers. The first frame has a count budget.
+    for (int index = 0; index < 12; ++index)
+        if (auto ship = battle.ship_of(5000 + index, skirmish::type_id("Corvette"), 1)) drawn.insert(*ship);
+    if (drawn.size() != 9 || battle.arrival_slots_.grown != 8 || battle.arrival_slots_.undrawn.size() != 3) return 3;
+    battle.arrival_slots_.remaining = 8; battle.arrival_slots_.undrawn.clear();
+    for (int index = 0; index < 12; ++index) {
+        const auto ship = battle.ship_of(5000 + index, skirmish::type_id("Corvette"), 1);
+        if (!ship) return 4;
         drawn.insert(*ship);
     }
-    if (drawn.size() != 21) return 6;
-    // A live unit with no slot is never silent: the twenty-second Nebulon is counted for the report,
-    // once per entity however often the frame asks (it asks about the same pose several times).
-    for (int call = 0; call < 3; ++call) {
-        if (battle.ship_of(5100, skirmish::type_id("Nebulon_B"), 1)) return 9;
+    if (drawn.size() != 12 || battle.arrival_slots_.grown != 11 || !battle.arrival_slots_.undrawn.empty()
+        || battle.slotless_units() != 0) return 5;
+    // Once standing, bindings and storage remain stable across repeated frames.
+    const auto before = battle.placed_ships_.size();
+    const auto capacity = battle.placed_ships_.capacity();
+    const auto bindings = battle.launched_ship_of_entity_;
+    for (int frame = 0; frame < 20; ++frame) for (int index = 0; index < 12; ++index)
+        if (battle.ship_of(5000 + index, skirmish::type_id("Corvette"), 1) != bindings.at(5000 + index)) return 6;
+    if (battle.placed_ships_.size() != before || battle.placed_ships_.capacity() != capacity
+        || battle.arrival_slots_.grown != 11) return 7;
+    // An owner/type without any planned pool still grows, and does not steal another owner's slot.
+    const auto other = battle.ship_of(6000, skirmish::type_id("Corvette"), 2);
+    if (!other || drawn.contains(*other) || battle.arrival_slots_.grown != 12) return 8;
+    const auto missing_before = battle.arrival_slots_.undrawn.size();
+    battle.ship_of(7000, skirmish::type_id("XWing_Squadron"), 1);
+    if (battle.arrival_slots_.undrawn.size() != missing_before) return 9;
+    // A composition refusal never retries allocations every frame or reuses its broken slot.
+    population.drawn = false;
+    const auto failed_before = battle.placed_ships_.size();
+    for (int frame = 0; frame < 3; ++frame) {
+        if (battle.ship_of(8000, skirmish::type_id("Tartan"), 3)) return 12;
+        if (battle.ship_of(8001, skirmish::type_id("Tartan"), 3)) return 13;
     }
-    if (battle.slotless_units() != 1) return 12;
-    const auto rows = battle.slotless_report_rows();
-    if (rows != "{\"owner\": 1, \"type\": \"Nebulon_B\", \"units\": 1}") { std::cout << rows << "\n"; return 13; }
-    // A squadron container draws nothing by design: it is counted but never reported.
-    battle.ship_of(5200, skirmish::type_id("XWing_Squadron"), 1);
-    if (battle.slotless_report_rows() != rows) return 14;
-    // A skirmish (no campaign roster) keeps the purchase-menu slots, ten at most per type.
+    if (battle.placed_ships_.size() != failed_before + 1
+        || battle.arrival_slots_.undrawn.size() != missing_before + 2
+        || battle.arrival_slots_.failure != "model unavailable") return 14;
+    population.drawn = true;
+    // A skirmish retains the exact old initial menu capacities and no campaign reserve pool.
     auto skirmish_battle = session(false);
-    skirmish_battle.prepare_launch_slots(filesystem, catalog);
-    std::cout << "skirmish slots: nebulon=" << skirmish_battle.slots(1, "Nebulon_B")
-              << " corvette=" << skirmish_battle.slots(1, "Corvette") << "\n";
+    skirmish_battle.prepare_launch_slots(filesystem, catalog, selected_arrivals(skirmish_battle));
     if (skirmish_battle.slots(1, "Nebulon_B") != 10 || skirmish_battle.slots(1, "Corvette") != 0
         || skirmish_battle.slots(2, "Tartan") != 10 || skirmish_battle.slots(2, "TIE") != 0
-        || skirmish_battle.slots(1, "XWing") != 0 || skirmish_battle.slots(1, "Carrier") != 0) return 7;
+        || skirmish_battle.slots(1, "XWing") != 0 || skirmish_battle.slots(1, "Carrier") != 0) return 10;
+    // Skirmish station/ability/launch overflow retains its old slotless result, even if
+    // its type could be bought. A purchase needs both planned purchase capacity and arrival provenance.
+    skirmish_battle.arrival_slots_.population = &population;
+    skirmish_battle.arrival_slots_.renderer = &renderer;
+    skirmish_battle.arrival_slots_.remaining = 8;
+    const auto sk_before = skirmish_battle.placed_ships_.size();
+    for (int call = 0; call < 3; ++call)
+        if (skirmish_battle.ship_of(9000, skirmish::type_id("TIE"), 2)) return 15;
+    if (skirmish_battle.slotless_units() != 1 || skirmish_battle.placed_ships_.size() != sk_before) return 16;
+    const auto sk_slotless = skirmish_battle.slotless_report_rows();
+    if (sk_slotless != "{\"owner\": 2, \"type\": \"TIE\", \"units\": 1}") return 24;
+    for (int index = 0; index < 10; ++index)
+        if (!skirmish_battle.ship_of(9100 + index, skirmish::type_id("Nebulon_B"), 1)) return 17;
+    if (skirmish_battle.ship_of(9200, skirmish::type_id("Nebulon_B"), 1)) return 18;
+    if (skirmish_battle.arrival_slots_.grown != 0 || skirmish_battle.slotless_units() != 2) return 19;
+    skirmish_battle.arrivals_.emplace(9200, 1);
+    if (!skirmish_battle.ship_of(9200, skirmish::type_id("Nebulon_B"), 1)
+        || skirmish_battle.arrival_slots_.grown != 1 || skirmish_battle.slotless_units() != 1) return 20;
+    if (skirmish_battle.slotless_report_rows() != sk_slotless) return 25;
+    skirmish_battle.arrivals_.emplace(9000, 1); // No purchase demand for TIE: provenance alone is insufficient.
+    if (skirmish_battle.ship_of(9000, skirmish::type_id("TIE"), 2)) return 21;
+    // Counts above 64 and non-squadron launch rows retain the old skirmish stream.
+    auto launch = session(false);
+    launch.start_->launches = {{100, 1, "XWing_Squadron", 65}, {100, 1, "Carrier", 1}};
+    launch.start_->arrivals = battle::plan_start_arrivals(*launch.start_, *launch.tables_);
+    launch.prepare_launch_slots(filesystem, catalog, selected_arrivals(launch));
+    if (launch.slots(1, "XWing") != 0 || launch.slots(1, "Carrier") != 0) return 22;
+    // Campaign launch rows have no menu cap and include ships as well as squadrons.
+    auto gc_launch = session(true);
+    gc_launch.start_->launches = launch.start_->launches;
+    gc_launch.start_->arrivals = battle::plan_start_arrivals(*gc_launch.start_, *gc_launch.tables_);
+    gc_launch.prepare_launch_slots(filesystem, catalog, selected_arrivals(gc_launch));
+    if (gc_launch.slots(1, "XWing") != 133 || gc_launch.slots(1, "Carrier") != 2) return 23;
+    std::cout << "twelve GC reinforcements drawn; undrawn_entities=0; slots_grown=11; stable steady-state bindings\n";
     return 0;
 }
 '''
@@ -281,15 +437,75 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         if toolchain is None:
             self.skipTest('requires C++ compiler')
         source = source_text('apps/viewer/src/live_session_fighters.cpp')
+        add_slot = extract_function(source, 'void LiveSessionView::add_launch_slot(')
+        grow = extract_function(source, 'std::optional<std::size_t> LiveSessionView::grow_launch_slot(')
+        header = (ROOT / 'include/eawr/battle/arrival_plan.hpp').read_text()
+        header = '\n'.join(line for line in header.splitlines() if not line.startswith('#'))
+        header = header.replace('eawr::units', 'units').replace('eawr::sim::tactical', 'sim::tactical')
+        header = header.replace('eawr::battle', 'battle').replace('struct BattleStart;', 'using BattleStart = skirmish::SkirmishStart;\nusing skirmish::type_id;')
+        plan = (ROOT / 'src/battle/arrival_plan.cpp').read_text()
+        plan = '\n'.join(line for line in plan.splitlines() if not line.startswith('#')).replace('eawr::battle', 'battle')
         prepare = extract_function(source, 'void LiveSessionView::prepare_launch_slots(')
+        select = extract_function(source_text('apps/viewer/src/battle_source.cpp'),
+                                  'void BattleSourceState::select_arrivals(')
         ship_of = extract_function(source, 'std::optional<std::size_t> LiveSessionView::ship_of(')
+        bind_identity = extract_function(source, 'LiveSessionView::LaunchSlot& LiveSessionView::bind_slot_identity(')
         rows = extract_function(source_text('apps/viewer/src/live_session_report.cpp'),
                                 'std::string LiveSessionView::slotless_report_rows() const')
+        storage_source = source_text('apps/viewer/src/space_populate_arrivals.cpp')
+        storage_prefix = extract_function(storage_source, 'void SpacePopulation::prepare_compose_slots(')
+        storage_prefix = storage_prefix.split('{', 1)[1].rsplit('}', 1)[0]
+        storage = r'''
+struct PopulationStorage {
+    bool composed_ = true;
+    struct { std::vector<int> placed_ships; } options_;
+    std::vector<std::optional<int>> live_decisions_, live_models_, live_clips_, turret_bindings_, live_alternate_clips_;
+    std::vector<std::vector<int>> hull_surface_assets_, contact_bones_, hardpoint_states_;
+    std::vector<bool> live_shown_, live_defend_, live_stealth_, live_blast_charging_, live_blast_charged_,
+        live_retired_, live_death_clone_, backdrop_ships_;
+    std::vector<int> live_alternates_, live_alternate_counts_;
+    std::vector<std::optional<int>> live_bounds_, live_transforms_;
+    unsigned shadow_receiving_ = 3, shadow_variant_failures_ = 4;
+    std::optional<std::uint32_t> pending_unit_sample_, last_unit_sample_, animation_sample_, effect_sample_;
+    void schedule_arrival_sample() noexcept;
+    void grow() {
+        const bool appending = composed_;
+__STORAGE_PREFIX__
+    }
+};
+__SCHEDULE__
+bool storage_contract() {
+    PopulationStorage storage;
+    storage.last_unit_sample_ = 90; storage.animation_sample_ = 90; storage.effect_sample_ = 90;
+    storage.schedule_arrival_sample();
+    if (storage.pending_unit_sample_ != 90 || storage.animation_sample_ || storage.effect_sample_) return false;
+    storage.pending_unit_sample_ = 91; // An externally scheduled attract frame wins over the prior sample.
+    storage.schedule_arrival_sample();
+    if (storage.pending_unit_sample_ != 91) return false;
+    storage.options_.placed_ships.resize(3);
+    storage.live_shown_ = {true, false};
+    storage.live_defend_ = {true, false};
+    storage.live_clips_ = {7, 9};
+    storage.hardpoint_states_ = {{2}, {3}};
+    storage.grow();
+    if (storage.live_shown_ != std::vector<bool>({true, false, false})
+        || !storage.live_defend_[0] || storage.live_defend_[2]
+        || storage.live_clips_[0] != 7 || storage.live_clips_[1] != 9 || storage.live_clips_[2]
+        || storage.hardpoint_states_ != std::vector<std::vector<int>>({{2}, {3}})) return false;
+    storage.composed_ = false;
+    storage.grow();
+    return storage.live_shown_ == std::vector<bool>({true, true, true})
+        && storage.live_defend_ == std::vector<bool>({false, false, false})
+        && !storage.live_clips_[0] && storage.hardpoint_states_.empty();
+}
+'''.replace('__STORAGE_PREFIX__', storage_prefix).replace('__SCHEDULE__', extract_function(
+            source_text('apps/viewer/src/space_populate_animation.cpp'),
+            'void SpacePopulation::schedule_arrival_sample(').replace('SpacePopulation::', 'PopulationStorage::'))
         with tempfile.TemporaryDirectory(prefix='eawr-launch-slots-') as temp:
             directory = Path(temp)
             cpp = directory / 'launch_slots.cpp'
             exe = directory / ('launch_slots.exe' if os.name == 'nt' else 'launch_slots')
-            cpp.write_text(HARNESS.replace('__PREPARE__', prepare).replace('__SHIP_OF__', ship_of).replace('__ROWS__', rows), encoding='utf-8')
+            cpp.write_text(HARNESS.replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__ROWS__', rows), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

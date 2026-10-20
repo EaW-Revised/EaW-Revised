@@ -489,6 +489,11 @@ void online_rows_and_paging() {
     expect(ui::online_list_notice(false, 3).empty() && !ui::online_list_notice(false, 0).empty() && !ui::online_list_notice(true, 3).empty(),
            "the list line explains an empty or unavailable list and stays quiet for rooms");
     expect(!ui::online_chat_closed_notice().empty(), "the chat window says why a line was not sent");
+    expect(ui::online_menu_chat_notice(ui::OnlineMenuChat::active).empty()
+               && ui::online_menu_chat_notice(ui::OnlineMenuChat::idle) == ui::online_chat_closed_notice()
+               && ui::online_menu_chat_notice(ui::OnlineMenuChat::unavailable) == "Lobby chat is not available on this server."
+               && !ui::online_menu_chat_notice(ui::OnlineMenuChat::connecting).empty(),
+           "the browser's chat window says why a line cannot be sent: connecting, an old service, or no channel");
     expect(ui::online_hosting_notice(ui::OnlineHostingPhase::idle).empty()
                && !ui::online_hosting_notice(ui::OnlineHostingPhase::publishing).empty()
                && ui::online_hosting_notice(ui::OnlineHostingPhase::hosted) == "Your room is listed."
@@ -519,6 +524,20 @@ void online_password_and_codes() {
     expect(!selection.begin(ui::OnlineInvitationTarget{"online", "zz99"}), "one join at a time");
     expect(selection.complete(*attempt) && !selection.attempt(), "the answer clears the attempt");
     expect(selection.begin(ui::OnlineInvitationTarget{"online", std::string(32, 'a')}).has_value(), "a listed room id starts an attempt too");
+}
+
+void lan_menu_chat_acceptance() {
+    ui::FixedLobbySource source;
+    expect(source.try_send_chat(ui::LobbyChatScope::lobby, {}, "Me", "hello LAN"),
+           "an existing source accepts menu chat through the optional refusal seam");
+    expect(source.sent().size() == 1 && source.sent()[0].scope == ui::LobbyChatScope::lobby
+               && source.sent()[0].game.empty() && source.sent()[0].text == "hello LAN",
+           "LAN menu sends remain room-less and reach the selected source exactly once");
+    source.queue_chat({ui::LobbyChatScope::lobby, {}, "Peer", "welcome"});
+    expect(source.take_chat().size() == 1 && source.take_chat().empty(), "LAN menu arrivals drain once");
+    expect(source.try_send_chat(ui::LobbyChatScope::game, "Room", "Me", "room only")
+               && source.sent().back().scope == ui::LobbyChatScope::game && source.sent().back().game == "Room",
+           "the same source still separates staging chat by room");
 }
 
 void online_chat_state() {
@@ -555,6 +574,7 @@ int main() {
     online_rows_and_paging();
     online_password_and_codes();
     online_chat_state();
+    lan_menu_chat_acceptance();
     if (eawr::test::ui::failures() != 0) {
         std::cerr << eawr::test::ui::failures() << " LAN lobby contract(s) failed\n";
         return 1;

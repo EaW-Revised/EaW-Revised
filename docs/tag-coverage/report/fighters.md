@@ -108,7 +108,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Unit_Abilities_Data/Unit_Ability/Spawned_Object_Type | partial | HARMONIC_BOMB and WEAKEN_ENEMY space abilities (src/sim/tactical/session_step_commands.cpp); missing: Other spawned abilities; U-10 exact placement/cancellation/autofire policy | WHE-28, WHE-29, WHE-61, WHE-62 | 941 | src/sim/tactical/session_step_commands.cpp | G8 binds spawned projectile types, countdowns, timed category-0 modifiers and attached status particles. Nonzero placement Z offsets remain unsupported.; basis: reviewed |
+| Unit_Abilities_Data/Unit_Ability/Spawned_Object_Type | partial | HARMONIC_BOMB and WEAKEN_ENEMY space abilities (src/sim/tactical/session_cmd_abilities.cpp); missing: Other spawned abilities; U-10 exact placement/cancellation/autofire policy | WHE-28, WHE-29, WHE-61, WHE-62 | 941 | src/sim/tactical/session_cmd_abilities.cpp | G8 binds spawned projectile types, countdowns, timed category-0 modifiers and attached status particles. Nonzero placement Z offsets remain unsupported.; basis: reviewed |
 
 ## Projectile
 
@@ -125,13 +125,13 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Spawned_Squadron_Delay_Seconds | todo | application not recorded | — | 651 | — | the loader reads it for other classes; the M2 scene's objects of this class never have it read |
-| Starting_Spawned_Units_Tech_0 | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC space scene (src/campaign/space_entry.cpp) | WAR-23; WGT-58, WGT-59 | — | src/campaign/auto_resolve_strength.cpp; src/campaign/space_entry.cpp | the loader reads it for other classes; the M2 scene's objects of this class never have it read Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Starting_Spawned_Units_Tech_0 | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC space scene (src/units/unit_motion.cpp) | WAR-23; WGT-58, WGT-59 | — | src/campaign/auto_resolve_strength.cpp; src/units/unit_motion.cpp | the loader reads it for other classes; the M2 scene's objects of this class never have it read Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 
 ## SecondaryStructure, SpaceUnit, SpecialStructure, StarBase, UniqueUnit
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Reserve_Spawned_Units_Tech_0 | partial | prepared campaign space garrisons (src/campaign/space_entry.cpp); GC space scene (src/campaign/space_entry.cpp); missing: standalone skirmish deliberately ignores reserves | WGT-10; WGT-58, WGT-59 | 651 | src/campaign/space_entry.cpp | read by a loader, but nothing applies the value Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Reserve_Spawned_Units_Tech_0 | partial | prepared campaign space garrisons (src/units/unit_motion.cpp); GC space scene (src/units/unit_motion.cpp); missing: standalone skirmish deliberately ignores reserves | WGT-10; WGT-58, WGT-59 | 651 | src/units/unit_motion.cpp | read by a loader, but nothing applies the value Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 
 ## SecondaryStructure, SpecialStructure
 
@@ -151,14 +151,14 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Spawned_Squadron_Delay_Seconds | applied | whole class (src/units/unit_motion.cpp) | FL-05 | — | src/units/unit_motion.cpp | basis: auto |
-| Starting_Spawned_Units_Tech_0 | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC space scene (src/campaign/space_entry.cpp); whole class (src/units/unit_motion.cpp) | WAR-23; WGT-58, WGT-59; FL-02 | — | src/campaign/auto_resolve_strength.cpp; src/campaign/space_entry.cpp; src/units/unit_motion.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
+| Starting_Spawned_Units_Tech_0 | applied | galactic auto-resolve (src/campaign/auto_resolve_strength.cpp); GC space scene (src/units/unit_motion.cpp); whole class (src/units/unit_motion.cpp) | WAR-23; WGT-58, WGT-59; FL-02 | — | src/campaign/auto_resolve_strength.cpp; src/units/unit_motion.cpp |  Galactic auto-resolve gathering and strength use the validated original-type table (WAR-15..26); live roster binding remains with the conflict integration consumer. GC space scene consumer: docs/behaviour/galactic-space-entry.md.; basis: reviewed |
 
 ## SpaceUnit, Squadron
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
 | Is_Escort | deferred | application not recorded | — | 651 | — | Debug-build combatant classification reads this flag; auto-resolve/classification implementation is missing and the complete mode boundary is unverified.; TCFA-05; basis: reviewed |
-| Unit_Abilities_Data/Unit_Ability/Spawned_Object_Type | partial | FOW_REVEAL_PING owner projectile (src/sim/tactical/session_step_commands.cpp); missing: FOW_REVEAL_PING fog-regrowth appearance (WFP-U1) | WFP-01, WFP-02, WFP-03 | 2192 | src/sim/tactical/session_step_commands.cpp | Creates the owner reveal projectile; absent lifetime ends the stock zero-distance ping on its first flight step (WFP-03), followed by ordinary fog regrowth. WFP-U1 regrowth appearance remains capture-needed.; basis: reviewed |
+| Unit_Abilities_Data/Unit_Ability/Spawned_Object_Type | partial | FOW_REVEAL_PING owner projectile (src/sim/tactical/session_cmd_abilities.cpp); missing: FOW_REVEAL_PING fog-regrowth appearance (WFP-U1) | WFP-01, WFP-02, WFP-03 | 2192 | src/sim/tactical/session_cmd_abilities.cpp | Creates the owner reveal projectile; absent lifetime ends the stock zero-distance ping on its first flight step (WFP-03), followed by ordinary fog regrowth. WFP-U1 regrowth appearance remains capture-needed.; basis: reviewed |
 
 ## SpecialStructure
 

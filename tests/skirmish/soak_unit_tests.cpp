@@ -2,11 +2,14 @@
 // would make a run pass vacuously, and each invariant fails on a state built to break it and stays
 // quiet on one that does not. The units, types and numbers here are invented.
 
+#include "../support/check.hpp"
 #include "soak_invariants.hpp"
 #include "soak_json.hpp"
 #include "soak_options.hpp"
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -19,13 +22,11 @@ namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 namespace soak = eawr::soak;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 math::Fixed fx(const std::int64_t whole) {

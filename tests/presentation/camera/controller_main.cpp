@@ -1,7 +1,9 @@
+#include "../../support/check.hpp"
 #include "eawr/presentation/camera/controller.hpp"
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -11,10 +13,11 @@
 
 namespace {
 namespace camera = eawr::presentation::camera;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 void close(float actual, float expected, std::string_view message, float tolerance = 1e-3F) {
     expect(std::abs(actual - expected) <= tolerance, message);

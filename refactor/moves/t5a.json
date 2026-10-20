@@ -1,0 +1,478 @@
+[
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#Fixed",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#Fixed"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#evaluate",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#evaluate"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#equations",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#equations"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#random_and_hash",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#random_and_hash"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#game_random_forms",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#game_random_forms"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#capture_target_application",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#capture_target_application"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#forced_object_fog",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#forced_object_fog"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#freestore_unit_service",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#freestore_unit_service"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#time_till_dead_bindings",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#time_till_dead_bindings"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#type_range_and_hero_bindings",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#type_range_and_hero_bindings"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#collect_free_categories",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#collect_free_categories"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#order_destinations",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#order_destinations"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#special_weapon_bindings",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#special_weapon_bindings"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#manual_special_weapon_binding",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#manual_special_weapon_binding"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#special_weapon_attachment",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#special_weapon_attachment"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#plan_definition_paths",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#plan_definition_paths"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#mounted_ai_discovery",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#mounted_ai_discovery"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#authored_goal_extension",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#authored_goal_extension"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#unit_concentration",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#unit_concentration"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#coroutine_module_loading",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#coroutine_module_loading"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#movement_query_projection",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#movement_query_projection"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#mod_ai_calls",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#mod_ai_calls"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#taskforce_definitions",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#taskforce_definitions"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#named_team_authored_order",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#named_team_authored_order"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#category_team_table_order",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#category_team_table_order"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#required_category_unions",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#required_category_unions"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#scheduler_reads",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#scheduler_reads"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#taskforce_team_order",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#taskforce_team_order"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#optional_taskforce_startup",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#optional_taskforce_startup"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#hazard_plan_events",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#hazard_plan_events"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#FindTargetFixture",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#FindTargetFixture"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#find_target_reach_contract",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#find_target_reach_contract"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reachable_target_contract",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#reachable_target_contract"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#installed_galactic_freestore",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#installed_galactic_freestore"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#ai_difficulty_levels",
+    "new": "tests/script/foc/foc_ai_contract_bindings_tests.cpp#ai_difficulty_levels"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#station_barrier_expiry",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#station_barrier_expiry"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shared_station_perception",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#shared_station_perception"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#campaign_defender_fallback",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#campaign_defender_fallback"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#campaign_retreat_inputs",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#campaign_retreat_inputs"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#economy_inputs",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#economy_inputs"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#tactical_activation_estimate",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#tactical_activation_estimate"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#production_lifecycle",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#production_lifecycle"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#spending_pad_states",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#spending_pad_states"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#spending_pad_refunds",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#spending_pad_refunds"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#spending_wallet_reservations",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#spending_wallet_reservations"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#allied_resource_upgrade_selection",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#allied_resource_upgrade_selection"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#completed_purchases_are_available",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#completed_purchases_are_available"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reinforcement_work_budget",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#reinforcement_work_budget"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#duplicate_reinforcement_calls",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#duplicate_reinforcement_calls"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#taskforce_attachment_waits_for_arrival",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#taskforce_attachment_waits_for_arrival"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#concurrent_reserved_arrivals",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#concurrent_reserved_arrivals"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reinforcement_service_budget",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#reinforcement_service_budget"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reinforcement_gravity_well",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#reinforcement_gravity_well"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reinforcement_fog_persistence",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#reinforcement_fog_persistence"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stealth_blind_queries",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#stealth_blind_queries"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#ai_ability_bound",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#ai_ability_bound"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reinforcement_population_wait",
+    "new": "tests/script/foc/foc_ai_contract_economy_tests.cpp#reinforcement_population_wait"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#running_target_contrast",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#running_target_contrast"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#running_reservation_contrast",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#running_reservation_contrast"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#retiring_pool_reservations",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#retiring_pool_reservations"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#active_tactical_desire",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#active_tactical_desire"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#active_tactical_preference",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#active_tactical_preference"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#initial_goal_budget",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#initial_goal_budget"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#selection_team_starts",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#selection_team_starts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#threat_grid",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#threat_grid"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#unit_ai_grid_admission",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#unit_ai_grid_admission"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#QueryExecutor",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#QueryExecutor"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shared_view_prepass",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#shared_view_prepass"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shared_view_formation_join",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#shared_view_formation_join"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shared_input_prepasses",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#shared_input_prepasses"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#threat_preparation",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#threat_preparation"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#threat_flat_storage",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#threat_flat_storage"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#squadron_target_in_range",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#squadron_target_in_range"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#point_defence_stand_in",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#point_defence_stand_in"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#corrupt_systems_stand_in",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#corrupt_systems_stand_in"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#corrupt_systems_cluster_coordinates",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#corrupt_systems_cluster_coordinates"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#squadron_ability_context",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#squadron_ability_context"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#buzz_droids_lua_point",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#buzz_droids_lua_point"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#squadron_movement_blocks",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#squadron_movement_blocks"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#guard_block_lifecycle",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#guard_block_lifecycle"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#refused_attack_block",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#refused_attack_block"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#attack_positioning",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#attack_positioning"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#target_choice",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#target_choice"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#threat_decay_constant",
+    "new": "tests/script/foc/foc_ai_contract_tactical_tests.cpp#threat_decay_constant"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#proximity_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#proximity_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#reveal_all_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#reveal_all_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#faction_controller_inventory",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#faction_controller_inventory"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_manifest",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_manifest"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_object_scripts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_object_scripts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#SlaveScene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#SlaveScene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#slave_scene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#slave_scene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#slave_scene_arrivals",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#slave_scene_arrivals"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#slave_setup",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#slave_setup"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_slave_i",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_slave_i"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#slave_i_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#slave_i_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#SunderedScene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#SunderedScene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#sundered_setup",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#sundered_setup"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#sundered_unit",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#sundered_unit"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#sundered_scene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#sundered_scene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#sundered_arrivals",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#sundered_arrivals"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_sundered_heart",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_sundered_heart"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#sundered_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#sundered_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#ShieldScene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#ShieldScene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shield_setup",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#shield_setup"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shield_scene",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#shield_scene"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shield_events",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#shield_events"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#shield_commands",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#shield_commands"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_missile_shield",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_missile_shield"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#missile_shield_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#missile_shield_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#stock_script_admission",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#stock_script_admission"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#native_object_script_ownership",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#native_object_script_ownership"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#ReverseObjectTurns",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#ReverseObjectTurns"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#LegacyObjectTurnReference",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#LegacyObjectTurnReference"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#object_turn_cadence_pins",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#object_turn_cadence_pins"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#production_object_turns",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#production_object_turns"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#object_script_contracts",
+    "new": "tests/script/foc/foc_ai_contract_objects_tests.cpp#object_script_contracts"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#World",
+    "new": "tests/script/foc/foc_ai_contract_fixtures.hpp#World"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#ModeWorld",
+    "new": "tests/script/foc/foc_ai_contract_fixtures.hpp#ModeWorld"
+  },
+  {
+    "old": "tests/script/foc/foc_ai_contract_tests.cpp#EngineContractAccess",
+    "new": "tests/script/foc/foc_ai_contract_fixtures.hpp#EngineContractAccess"
+  }
+]

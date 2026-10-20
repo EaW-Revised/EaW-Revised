@@ -55,13 +55,6 @@ WideString WideString::append(const WideString& other) {
     return WideString(units_);
 }
 
-core::Result<WideString> WideString::assign_ascii(const std::string_view ascii) {
-    auto converted = ascii_units(ascii);
-    if (!converted) return core::Result<WideString>::failure(converted.error());
-    units_ = std::move(converted).value();
-    return core::Result<WideString>::success(WideString(units_));
-}
-
 WideString WideString::erase(const std::size_t zero_based_position, const std::size_t count) {
     if (zero_based_position <= units_.size()) {
         units_.erase(zero_based_position, count);

@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/fog/fog.hpp"
 #include "eawr/sim/snapshot.hpp"
 #include "eawr/sim/tactical/session.hpp"
@@ -25,13 +27,11 @@ namespace {
 namespace fog = eawr::presentation::fog;
 namespace sim_fog = eawr::sim::fog;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
@@ -414,7 +414,6 @@ void test_byte_counts_scale() {
     expect(h.cache->stats().upload_bytes == 4096 && h.backend.bytes == 4096, "64x32 create plus one update is 4096 bytes");
     expect(h.cache->stats().uploads == 2 && h.cache->stats().updates == 1, "two uploads for one create and one update");
 }
-
 
 class SerialExecutor final : public eawr::sim::PartitionExecutor {
 public:

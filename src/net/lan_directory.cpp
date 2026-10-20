@@ -153,6 +153,27 @@ std::string sanitize_lan_text(const std::string_view text, const std::size_t lim
     return result;
 }
 
+std::string sanitize_lan_menu_text(const std::string_view text, const std::size_t limit) {
+    std::string clean = sanitize_lan_text(text, lan_max_datagram);
+    std::string visible;
+    for (std::size_t at = 0; at < clean.size();) {
+        const auto lead = static_cast<unsigned char>(clean[at]);
+        const std::size_t length = lead < 128 ? 1 : lead < 224 ? 2 : lead < 240 ? 3 : 4;
+        std::uint32_t point = lead & (length == 1 ? 127U : length == 2 ? 31U : length == 3 ? 15U : 7U);
+        for (std::size_t part = 1; part < length; ++part)
+            point = (point << 6) | (static_cast<unsigned char>(clean[at + part]) & 63U);
+        if (point >= 32 && !(point >= 127 && point <= 159)
+            && !(point >= 0x2028 && point <= 0x202e) && !(point >= 0x2066 && point <= 0x2069))
+            visible.append(clean, at, length);
+        at += length;
+    }
+    clean = std::move(visible);
+    const auto first = clean.find_first_not_of(' ');
+    if (first == std::string::npos) return {};
+    const auto last = clean.find_last_not_of(' ');
+    return sanitize_lan_text(std::string_view(clean).substr(first, last - first + 1), limit);
+}
+
 std::vector<std::uint8_t> encode_presence(const LanPresence& presence) {
     Writer out;
     out.header(kind_presence, presence.sender);
@@ -240,7 +261,8 @@ bool LanDirectory::receive(const std::span<const std::uint8_t> datagram, const s
     if (!decoded) return false;
     const LanMessage& message = decoded.value();
     if (message.presence) {
-        const LanPresence& presence = *message.presence;
+        LanPresence presence = *message.presence;
+        if (options_.menu_chat_limits) presence.name = sanitize_lan_menu_text(presence.name, lan_menu_max_name);
         if (presence.sender == options_.self || presence.sender == 0) return false;
         if (entries_.size() >= lan_max_peers && entries_.find(presence.sender) == entries_.end()) return false;
         Entry& entry = entries_[presence.sender];
@@ -252,13 +274,25 @@ bool LanDirectory::receive(const std::span<const std::uint8_t> datagram, const s
         return changed;
     }
     if (message.chat) {
-        const LanChat& chat = *message.chat;
+        LanChat chat = *message.chat;
+        const bool menu = options_.menu_chat_limits && chat.scope == ChatScope::lobby;
+        if (menu) {
+            if (chat.text.size() > lan_menu_max_chat) return false;
+            chat.name = sanitize_lan_menu_text(chat.name, lan_menu_max_name);
+            chat.text = sanitize_lan_menu_text(chat.text, lan_menu_max_chat);
+            if (chat.name.empty() || chat.text.empty()) return false;
+        }
         if (chat.sender == options_.self || chat.sender == 0) return false;
         // The same line can arrive more than once when a sender uses several targets.
         const auto known = chat_sequences_.find(chat.sender);
         if (known != chat_sequences_.end() && chat.sequence <= known->second.sequence) return false;
         if (known == chat_sequences_.end() && chat_sequences_.size() >= lan_max_chat_senders) return false;
-        chat_sequences_[chat.sender] = {chat.sequence, now};
+        if (menu && known != chat_sequences_.end() && known->second.menu_seen
+            && now - *known->second.menu_seen < lan_menu_receive_spacing) return false;
+        auto& sequence = chat_sequences_[chat.sender];
+        sequence.sequence = chat.sequence;
+        sequence.seen = now;
+        if (menu) sequence.menu_seen = now;
         chat_.push_back(chat);
         while (chat_.size() > lan_max_queued_chat) chat_.pop_front();
         return true;

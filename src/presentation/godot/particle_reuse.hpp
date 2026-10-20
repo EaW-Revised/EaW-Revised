@@ -11,12 +11,63 @@
 
 namespace eawr::presentation::godot_backend::detail {
 
+struct ParticleResidencyPolicy final {
+    [[nodiscard]] static constexpr bool immediate(const bool terminal, const bool reuse_enabled,
+        const bool reuse_allowed) noexcept { return terminal && !(reuse_enabled && reuse_allowed); }
+    [[nodiscard]] static constexpr bool keep_identity(const bool terminal, const bool opaque) noexcept {
+        return !terminal && opaque;
+    }
+    [[nodiscard]] static constexpr std::size_t live_rids(const std::size_t active, const std::size_t pooled,
+        const std::size_t retained, const std::size_t shared) noexcept { return (active + pooled + retained) * 3 + shared; }
+};
+
 // Reuse only identical material state. Geometry and per-effect simulation state
 // are deliberately absent: a new owner uploads its own stream before visibility.
 struct ParticleReusePolicy final {
     std::string texture, normal, program;
     std::int32_t priority{};
     friend bool operator==(const ParticleReusePolicy&, const ParticleReusePolicy&) = default;
+};
+
+// Resource-failure policy only. It never gates CPU emission or RNG. The first
+// failed attempt requests a diagnostic; further failures back off to 120 frames.
+class ParticleRestoreRetry final {
+public:
+    [[nodiscard]] bool admits(const std::uint64_t frame) const noexcept { return frame >= next_; }
+    [[nodiscard]] bool failed(const std::uint64_t frame) noexcept {
+        const bool first = !reported_;
+        reported_ = true;
+        next_ = frame > std::numeric_limits<std::uint64_t>::max() - delay_
+            ? std::numeric_limits<std::uint64_t>::max() : frame + delay_;
+        delay_ = std::min<std::uint64_t>(delay_ * 2, 120);
+        return first;
+    }
+    void succeeded() noexcept { next_ = 0; delay_ = 1; reported_ = false; }
+private:
+    std::uint64_t next_{}, delay_{1};
+    bool reported_{};
+};
+
+// The acquisition entry points count unconditionally. Scope identifies restore
+// work even if a future implementation accidentally reintroduces an acquisition.
+class ParticleAssetWork final {
+public:
+    class RestoreScope final {
+    public:
+        explicit RestoreScope(ParticleAssetWork& work) : work_(work) { ++work_.restore_depth_; }
+        ~RestoreScope() { --work_.restore_depth_; }
+        RestoreScope(const RestoreScope&) = delete;
+        RestoreScope& operator=(const RestoreScope&) = delete;
+    private:
+        ParticleAssetWork& work_;
+    };
+    [[nodiscard]] RestoreScope restoring() { return RestoreScope{*this}; }
+    void acquired() noexcept { ++total_; if (restore_depth_ != 0) ++restores_; }
+    [[nodiscard]] std::uint64_t total() const noexcept { return total_; }
+    [[nodiscard]] std::uint64_t restores() const noexcept { return restores_; }
+private:
+    std::size_t restore_depth_{};
+    std::uint64_t total_{}, restores_{};
 };
 
 // Saturation makes oversized authored resources fail cache admission; it never
@@ -46,12 +97,13 @@ public:
     static constexpr std::size_t max_emitters = 128;
     static constexpr std::uint64_t max_bytes = 32U * 1024U * 1024U;
 
-    [[nodiscard]] bool retain(ParticleReusePolicy policy, const std::uint64_t bytes, Value& value) {
+    [[nodiscard]] bool retain(ParticleReusePolicy policy, const std::uint64_t bytes, Value& value,
+        const std::uint64_t frame) {
         if (entries_.size() >= max_emitters || bytes > max_bytes - bytes_) {
             ++refusals_;
             return false;
         }
-        entries_.push_back({std::move(policy), bytes, std::move(value)});
+        entries_.push_back({std::move(policy), bytes, std::move(value), frame});
         bytes_ += bytes;
         peak_bytes_ = std::max(peak_bytes_, bytes_);
         peak_emitters_ = std::max(peak_emitters_, entries_.size());
@@ -70,6 +122,21 @@ public:
     }
 
     template<class Release>
+    void expire(const std::uint64_t frame, Release&& release) {
+        // Residency policy only: two seconds at 60 Hz, with a bounded retirement
+        // burst. Authored emission clocks and live geometry never use this age.
+        constexpr std::uint64_t cold_frames = 120;
+        constexpr std::size_t retirement_budget = 8;
+        for (std::size_t retired = 0; retired < retirement_budget && !entries_.empty(); ++retired) {
+            auto& entry = entries_.front();
+            if (frame < entry.frame || frame - entry.frame < cold_frames) break;
+            release(entry.value);
+            bytes_ -= entry.bytes;
+            entries_.pop_front();
+        }
+    }
+
+    template<class Release>
     void drain(Release&& release) {
         for (auto& entry : entries_) release(entry.value);
         entries_.clear();
@@ -85,7 +152,7 @@ public:
     [[nodiscard]] std::uint64_t refusals() const noexcept { return refusals_; }
 
 private:
-    struct Entry final { ParticleReusePolicy policy; std::uint64_t bytes; Value value; };
+    struct Entry final { ParticleReusePolicy policy; std::uint64_t bytes; Value value; std::uint64_t frame; };
     std::list<Entry> entries_;
     std::uint64_t bytes_{}, peak_bytes_{}, hits_{}, misses_{}, refusals_{};
     std::size_t peak_emitters_{};

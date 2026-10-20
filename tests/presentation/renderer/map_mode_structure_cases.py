@@ -176,7 +176,7 @@ class PopulatedStructureCases:
         self.assertIn("declared_idle(scene::space_object_tags(*object).idle)", space)
         self.assertIn("animation::idle_start_frame(", glue)
         # #81: a death clone's clip is posed by the shared death rule too.
-        self.assertIn("animation::sample_death_frame(*player, {request.position, request.blend_from})", space)
+        self.assertIn("animation::sample_death_frame(*row.player, {request.position, request.blend_from})", space)
         for token in ("godot", "RenderingServer"):
             self.assertNotIn(token, (ROOT / "src/scene/idle_tags.cpp").read_text(encoding="utf-8"))
 

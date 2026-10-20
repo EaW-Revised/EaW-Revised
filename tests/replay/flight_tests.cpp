@@ -1,3 +1,10 @@
+// #479 flight feel (docs/behaviour/space-fighters.md, cases C-18 to C-21): a squadron flown by the
+// fighter locomotor as the session flies it (every craft reads the frame's copied views, the
+// leader first) with FoC's X-wing values. No craft slides off its nose (FM-07), the bank leans
+// into every turn and follows the turn's size (FM-03), a reversal is a loop through the vertical
+// and a roll out, never a jump (FM-06), and the formation banks with its leader (FM-14).
+
+#include "../support/check.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 
 #include <algorithm>
@@ -5,31 +12,26 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-// #479 flight feel (docs/behaviour/space-fighters.md, cases C-18 to C-21): a squadron flown by the
-// fighter locomotor as the session flies it (every craft reads the frame's copied views, the
-// leader first) with FoC's X-wing values. No craft slides off its nose (FM-07), the bank leans
-// into every turn and follows the turn's size (FM-03), a reversal is a loop through the vertical
-// and a roll out, never a jump (FM-06), and the formation banks with its leader (FM-14).
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

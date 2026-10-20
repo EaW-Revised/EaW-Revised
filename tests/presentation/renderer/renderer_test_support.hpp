@@ -33,7 +33,7 @@
 
 namespace eawr_renderer_test {
 
-extern int failures;
+extern int& failures;
 
 void check(const bool condition, const std::string_view message);
 eawr::sim::math::Fixed fixed(const std::int64_t integer);

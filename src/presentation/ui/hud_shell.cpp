@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/hud_shell.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/data/ui/text_database.hpp"
 #include "eawr/data/xml.hpp"
@@ -23,10 +24,8 @@
 namespace eawr::presentation::ui {
 namespace {
 
-char lower(const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
 bool equal_name(const std::string_view a, const std::string_view b) {
-    return a.size() == b.size()
-        && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) { return lower(x) == lower(y); });
+    return core::iequals(a, b);
 }
 bool contains(const std::string_view text, const std::string_view part) {
     for (std::size_t i = 0; i + part.size() <= text.size(); ++i)
@@ -308,10 +307,8 @@ std::optional<double> beacon_place_delay(const vfs::Vfs& filesystem) {
         if (equal_name(node.name, "BeaconPlaceDelay")) found = &node;
     if (!found) return std::nullopt;
     data::tag_trace::used(found);
-    const auto start = found->raw_text.find_first_not_of(" \t\r\n");
-    const auto end = found->raw_text.find_last_not_of(" \t\r\n");
-    if (start == std::string::npos) return std::nullopt;
-    const auto text = std::string_view(found->raw_text).substr(start, end - start + 1);
+    const auto text = core::trim_view(found->raw_text, core::xml_whitespace);
+    if (text.empty()) return std::nullopt;
     double value{};
     const auto [last, error] = std::from_chars(text.data(), text.data() + text.size(), value);
     if (error != std::errc{} || last != text.data() + text.size() || !std::isfinite(value) || value < 0)
@@ -710,9 +707,7 @@ PlanetName planet_name(const std::optional<std::string>& context_name, const dat
     if (text_id == nullptr) return fall_back("Planet " + out.context + " has no Text_ID");
     out.text_id = text_id->value.raw_text;
     const auto trim = [](std::string& value) {
-        const auto first = value.find_first_not_of(" \t\r\n");
-        const auto last = value.find_last_not_of(" \t\r\n");
-        value = first == std::string::npos ? std::string() : value.substr(first, last - first + 1U);
+        value = core::trim(value, core::xml_whitespace);
     };
     trim(out.text_id);
     const data::ui::TextEntry* entry = text != nullptr && !out.text_id.empty() ? text->find(out.text_id) : nullptr;
@@ -765,10 +760,8 @@ EncyclopediaConstants encyclopedia_constants(const vfs::Vfs& filesystem) {
         const data::XmlNode* found{};
         for (const auto& child : document.value().root.children) if (equal_name(child.name, tag)) found = &child;
         if (!found) return invalid();
-        const auto start = found->raw_text.find_first_not_of(" \t\r\n");
-        const auto end = found->raw_text.find_last_not_of(" \t\r\n");
-        if (start == std::string::npos) return invalid();
-        const auto raw = std::string_view(found->raw_text).substr(start, end - start + 1);
+        const auto raw = core::trim_view(found->raw_text, core::xml_whitespace);
+        if (raw.empty()) return invalid();
         double value{};
         const auto [last, error] = std::from_chars(raw.data(), raw.data() + raw.size(), value);
         if (error != std::errc{} || last != raw.data() + raw.size() || !std::isfinite(value)
@@ -818,8 +811,7 @@ static UnitCardLooks ability_card_looks_bounded(const std::string_view type, con
     std::string description = "TEXT_TOOLTIP_ABILITY_" + name + "_DESCRIPTION";
     out.icon = ability_icon(ability);
     const auto trim = [](std::string_view raw) {
-        const auto first = raw.find_first_not_of(" \t\r\n");
-        return first == std::string_view::npos ? std::string{} : std::string(raw.substr(first, raw.find_last_not_of(" \t\r\n") - first + 1));
+        return core::trim(raw, core::xml_whitespace);
     };
     if (objects && objects->find(type, data::Category::game_object)) {
         if (auto resolved = objects->resolve(type, data::Category::game_object)) {
@@ -869,9 +861,7 @@ UnitCardLooks unit_card_looks(const std::string_view type, const data::Catalog* 
     auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return out;
     const auto trimmed = [](const std::string& value) {
-        const auto first = value.find_first_not_of(" \t\r\n");
-        const auto last = value.find_last_not_of(" \t\r\n");
-        return first == std::string::npos ? std::string() : value.substr(first, last - first + 1U);
+        return core::trim(value, core::xml_whitespace);
     };
     if (const data::EffectiveValue* icon = resolved.value().value("Icon_Name")) out.icon = trimmed(icon->value.raw_text);
     const auto integer = [&](const std::string_view tag) {

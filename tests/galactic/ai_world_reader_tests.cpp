@@ -1,3 +1,15 @@
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "../support/result.hpp"
 // GC AI S3a: the world reader's structural index, fog bits and double-buffered view, against an ordered-map
 // reference and against a cold world, over a sequence of motion, credit, queue-clock and roster changes. Every
 // check repeats at 1/2/4/8 workers and in both fog sources.
@@ -7,8 +19,9 @@
 
 #include <map>
 #include <set>
-#include <stdexcept>
+#include <exception>
 #include <tuple>
+using eawr::testing::must;
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -19,11 +32,6 @@ using ai::real;
 using eawr::sim::math::Fixed;
 using eawr::sim::math::Vec3;
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T must(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().message);
-    return std::move(value).value();
-}
-void must(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
 
 ai::GalacticPerceptionSetup setup(bool fog_traits) {
     ai::GalacticPerceptionSetup out; out.seed = 7; out.uses_fog = true;
@@ -322,7 +330,7 @@ void identity_contracts() {
 }
 } // namespace
 
-int main() {
+int case_galactic_ai_world_reader_tests() {
     try {
         for (const unsigned workers : {1U, 2U, 4U, 8U}) for (const bool with_observer : {true, false}) run(workers, with_observer);
         identity_contracts();

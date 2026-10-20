@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "galactic_report.hpp"
 
 #include "eawr/core/sha256.hpp"
@@ -18,23 +19,7 @@ namespace galactic = eawr::data::galactic;
 using galactic::Fixed;
 
 std::string text(const std::string_view value) {
-    std::ostringstream out;
-    out << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char ch : value) {
-        switch (ch) {
-        case '"': out << "\\\""; break;
-        case '\\': out << "\\\\"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
-        default:
-            if (ch < 0x20U) out << "\\u00" << hex[ch >> 4U] << hex[ch & 15U];
-            else out << static_cast<char>(ch);
-        }
-    }
-    out << '"';
-    return out.str();
+    return eawr::core::json_quote(value);
 }
 
 // A Q24 value as a display decimal string (six fractional digits, truncated toward zero).

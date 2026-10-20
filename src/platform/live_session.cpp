@@ -1021,6 +1021,17 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
     const tactical::AbilityTable& abilities,
     const tactical::EconomyRules& economy,
     const tactical::MapBox& map_box) {
+    tactical::TacticalContent content;
+    content.sensors.assign(sensors.begin(), sensors.end());
+    content.durability = durability; content.motion = motion; content.combat = combat;
+    content.victory = victory; content.fog = fog; content.abilities = abilities;
+    content.economy = economy; content.map_box = map_box;
+    return start_impl(setup, content, options, nullptr);
+}
+
+core::Result<std::unique_ptr<LiveSession>> LiveSession::start_impl(
+    const tactical::TacticalSetup& setup, const tactical::TacticalContent& content,
+    Options options, const tactical::TacticalReplay* replay) {
     using StartResult = core::Result<std::unique_ptr<LiveSession>>;
     if (options.workers == 0 || options.workers > ThreadWorkerAdapter::max_worker_count) {
         core::Diagnostic diagnostic;
@@ -1028,15 +1039,47 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
         diagnostic.message = "live session worker count must be 1 to 256";
         return StartResult::failure(std::move(diagnostic));
     }
-    auto session = tactical::TacticalSession::create(
-        setup, sensors, durability, motion, fog, combat, victory, abilities, economy, map_box);
+    if (replay) {
+        if (auto valid = tactical::validate_replay(*replay); !valid) return StartResult::failure(valid.error());
+        if (options.step_driver || (options.scripts && options.scripts->wrap)) {
+            core::Diagnostic error;
+            error.code = "EAWR-PLATFORM-0600";
+            error.message = "Replay playback cannot attach live scripts or an external step driver.";
+            return StartResult::failure(std::move(error));
+        }
+    }
+    // Retain the same initializer for recovery as for the original start. Replay
+    // input is owned here, so a caller may release its parsed file after start().
+    const auto recording = replay ? std::make_shared<const tactical::TacticalReplay>(*replay) : nullptr;
+    auto rebuild_world = [setup, rules = content, recording] {
+        if (recording) {
+            // Restore every non-player stream through the shared initializer.
+            // Player commands enter at their ticks so live input can precede a
+            // recording's future keys, just as in an ordinary live session.
+            auto initial = *recording;
+            initial.commands.clear();
+            return tactical::TacticalSession::from_replay(initial,
+                rules.sensors, rules.durability, rules.motion, rules.fog, rules.combat,
+                rules.victory, rules.abilities, rules.economy, rules.map_box);
+        }
+        return tactical::TacticalSession::create(setup, rules.sensors, rules.durability, rules.motion,
+            rules.fog, rules.combat, rules.victory, rules.abilities, rules.economy, rules.map_box);
+    };
+    auto session = rebuild_world();
     if (!session) return StartResult::failure(session.error());
-    tactical::TacticalContent recovery_content;
-    recovery_content.sensors.assign(sensors.begin(), sensors.end());
-    recovery_content.durability = durability; recovery_content.motion = motion; recovery_content.combat = combat;
-    recovery_content.victory = victory; recovery_content.fog = fog; recovery_content.abilities = abilities;
-    recovery_content.economy = economy; recovery_content.map_box = map_box;
-    auto rebuild_world = [setup, rules = std::move(recovery_content)] { return tactical::TacticalSession::create(setup, rules); };
+    if (recording) {
+        options.command_source = [recording, local = std::move(options.command_source)](const std::uint64_t tick) {
+            std::vector<tactical::PlayerCommand> commands;
+            auto at = std::lower_bound(recording->commands.begin(), recording->commands.end(), tick,
+                [](const auto& command, const std::uint64_t due) { return command.key.tick < due; });
+            for (; at != recording->commands.end() && at->key.tick == tick; ++at) commands.push_back(*at);
+            if (local) {
+                auto taken = local(tick);
+                commands.insert(commands.end(), std::make_move_iterator(taken.begin()), std::make_move_iterator(taken.end()));
+            }
+            return commands;
+        };
+    }
     if (options.scripts && options.scripts->wrap) {
         core::load_profile::Scope lua_scope(core::load_profile::Phase::lua);
         auto scripted = options.scripts->wrap(std::move(session).value());
@@ -1050,8 +1093,12 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
 
 core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
     const tactical::TacticalSetup& setup, const tactical::TacticalContent& content, Options options) {
-    return start(setup, content.sensors, content.durability, content.motion, content.combat, std::move(options),
-        content.victory, content.fog, content.abilities, content.economy, content.map_box);
+    return start_impl(setup, content, std::move(options), nullptr);
+}
+
+core::Result<std::unique_ptr<LiveSession>> LiveSession::start(
+    const tactical::TacticalReplay& replay, const tactical::TacticalContent& content, Options options) {
+    return start_impl(replay.setup, content, std::move(options), &replay);
 }
 
 core::Result<std::vector<std::string>> headless_tick_hashes(

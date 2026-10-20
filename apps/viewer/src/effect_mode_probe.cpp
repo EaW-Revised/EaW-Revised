@@ -1,4 +1,5 @@
 #include "effect_mode_internal.hpp"
+#include "particle_culling.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace effect_mode_detail {
@@ -56,7 +57,8 @@ namespace {
 // camera to the effect before the graphical run without a second random draw.
 class ProbeBackend final : public particles::RenderBackend {
 public:
-    explicit ProbeBackend(GodotParticleBackend::TextureResolver resolver) : resolver_(std::move(resolver)) {}
+    ProbeBackend(GodotParticleBackend::TextureResolver resolver, const particles::CullingFrame& culling)
+        : culling_(culling), resolver_(std::move(resolver)) {}
     std::uint64_t create_emitter(const particles::EmitterRenderPlan& plan) override {
         if (resolver_(plan.texture) != nullptr) return next_++;
         cause_ = "colour texture '" + plan.texture + "' did not resolve";
@@ -65,8 +67,10 @@ public:
     void update_emitter(std::uint64_t, const particles::VertexStream&) override {}
     void destroy_emitter(std::uint64_t) override {}
     std::string failure_cause() const override { return cause_; }
+    particles::CullingFrame culling_frame() const override { return culling_; }
 private:
     std::string cause_;
+    particles::CullingFrame culling_;
     GodotParticleBackend::TextureResolver resolver_;
     std::uint64_t next_{1};
 };
@@ -236,7 +240,7 @@ bool EffectMode::State::fit_camera() {
         return fitted;
     };
     FixedCamera provisional = frame_for({0.0F, 0.0F, 0.0F}, 100.0F);
-    ProbeBackend probe([this](const std::string_view name) { return resolve(name); });
+    ProbeBackend probe([this](const std::string_view name) { return resolve(name); }, {});
     particles::EffectRegistry dry(probe);
     const auto spawned = spawn(dry);
     if (!spawned) {
@@ -317,7 +321,10 @@ bool EffectMode::State::fit_camera() {
 
     // A second, independent CPU instance under the fitted camera: its per-frame
     // stream hashes must equal the graphical run's, frame for frame.
-    ProbeBackend replay_probe([this](const std::string_view name) { return resolve(name); });
+    // PS-38/PS-42: replay the same culling snapshot and accumulated-time gate,
+    // including empty spans and completed drains. Camera fitting stays unchanged.
+    ProbeBackend replay_probe([this](const std::string_view name) { return resolve(name); },
+        particle_culling::snapshot(camera));
     particles::EffectRegistry replay(replay_probe);
     std::optional<particles::AttachmentLifecycle> replay_visibility_life;
     particles::EffectHandle replayed{};

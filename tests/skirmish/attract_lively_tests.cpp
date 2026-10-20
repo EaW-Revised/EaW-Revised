@@ -10,6 +10,8 @@
 // has no pool return, which verifies that recycling remains attract-only. Recycling also feeds
 // more combat, so the two battles' final live-unit counts need not be ordered.
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -20,8 +22,8 @@
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -30,6 +32,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -38,29 +41,15 @@ namespace tactical = eawr::sim::tactical;
 namespace skirmish = eawr::skirmish;
 namespace foc = eawr::script::foc;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 struct Battle final {
@@ -73,7 +62,7 @@ struct Battle final {
     std::string map;
 };
 
-// The viewer's attract start (apps/viewer live_session_prepare.cpp), headless: the first map the
+// The viewer's attract start (apps/viewer battle_source_local.cpp), headless: the first map the
 // game constants list, its placed forces, the AI player types of MAT-09.
 std::optional<Battle> load(const std::filesystem::path& root, const bool pool_return) {
     std::vector<eawr::vfs::MountSpec> specs;

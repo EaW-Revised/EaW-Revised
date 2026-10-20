@@ -1,5 +1,16 @@
 #include "dogfight_support.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
 namespace dogfight_test_support {
 
 // the rebels then order 20 onto hardpoint 1 of the empire frigate 40. The service turns 20 back

@@ -1,15 +1,21 @@
+#include "../support/self_test.hpp"
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/math/math.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace { std::atomic<std::size_t> allocations{}; }
@@ -31,9 +37,10 @@ void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 namespace {
 namespace math = eawr::sim::math;
 namespace tactical = eawr::sim::tactical;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool ok, std::string_view message) {
-    if (!ok) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
+    if (!ok) local_checker.check(ok, message, std::cerr, "FAIL: ");
 }
 constexpr math::Fixed whole(std::int64_t n) { return math::Fixed::from_raw(n * math::Fixed::scale); }
 
@@ -145,6 +152,10 @@ void locomotor_budget() {
 }
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     matrix_budget();
     locomotor_budget();
     return failures == 0 ? 0 : 1;

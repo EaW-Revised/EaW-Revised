@@ -1,20 +1,32 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/gns_transport.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace std::chrono_literals;
 using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
-void expect(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
 }
+using eawr::testing::result_code_colon::require;
 template<class F> void until(F predicate, std::chrono::milliseconds timeout = 5s) {
     const auto deadline = Clock::now() + timeout;
     while (!predicate()) {
@@ -257,13 +269,96 @@ void room_contracts() {
     guest_transport->cancel();
     expect(!guest_transport->commit_room(), "A cancelled mesh cannot commit");
 }
+class RefusedEndpoint final : public GnsSignallingEndpoint {
+public:
+    std::optional<GnsTurnCredentials> turn;
+    GnsRendezvous rendezvous() const override { return {"refusal-session", "refusal-local", "refusal-remote"}; }
+    std::optional<GnsTurnCredentials> turn_credentials() const override { return turn; }
+    eawr::core::Result<void> send(std::span<const std::uint8_t>) override {
+        throw std::runtime_error("Refused credentials must not send signals");
+    }
+    eawr::core::Result<std::optional<GnsSignal>> poll() override {
+        throw std::runtime_error("Refused credentials must not poll signals");
+    }
+};
+void turn_refusal_logs() {
+    const std::string user = "secret-user-4157", password = "secret-password-4157", uri = "turn:secret-host-4157:3478";
+    struct Case { std::optional<GnsTurnCredentials> turn; const char* check; };
+    std::vector<Case> cases{{{}, "credentials_absent"}};
+    auto add = [&](GnsTurnCredentials turn, const char* check) { cases.push_back({std::move(turn), check}); };
+    add({"", user, password, 60s}, "uri_empty");
+    add({uri, "", password, 60s}, "user_empty");
+    add({uri, user, "", 60s}, "cred_empty");
+    add({"invalid-secret-uri", user, password, 60s}, "uri_list");
+    add({uri + "," + uri, user + ",other", password, 60s}, "user_comma");
+    add({uri, user, password + ",other", 60s}, "cred_comma");
+    add({uri, user, password, 0s}, "lifetime_nonpositive");
+    add({uri, user, password, -7s}, "lifetime_nonpositive");
+    std::vector<std::string> lines;
+    const auto generation = GnsTransport::set_log_sink([&](std::string_view line) { lines.emplace_back(line); });
+    for (const auto& test : cases) {
+        for (unsigned factory = 0; factory < 4; ++factory) {
+            lines.clear();
+            auto config = options(); config.turn_only = true;
+            auto result = [&] {
+                if (factory < 2) {
+                    auto endpoint = std::make_shared<RefusedEndpoint>(); endpoint->turn = test.turn;
+                    return factory == 0 ? GnsTransport::host_introduced(endpoint, config)
+                        : GnsTransport::connect_introduced(endpoint, config);
+                }
+                InProcessGnsRoom room(2);
+                const auto seat = factory == 2 ? 0U : 1U;
+                std::shared_ptr<GnsRoomEndpoint> host;
+                if (seat == 1) host = require(room.attach(0, "refusal-host"));
+                auto endpoint = require(room.attach(seat, "refusal-member", test.turn));
+                return seat == 0 ? GnsTransport::host_room(endpoint, config) : GnsTransport::join_room(endpoint, config);
+            }();
+            expect(!result && result.error().code == "EAWR-NET-1519", "Refusal retains 1519");
+            expect(result.error().message == (test.turn ? "Invalid TURN rendezvous credentials"
+                : "TURN-only connection requires relay credentials"), "Refusal retains UI text");
+            const auto found = std::find_if(lines.begin(), lines.end(), [](const auto& line) {
+                return line.starts_with("EAWR net event=turn-refused ");
+            });
+            expect(found != lines.end() && std::count_if(lines.begin(), lines.end(), [](const auto& line) {
+                return line.starts_with("EAWR net event=turn-refused ");
+            }) == 1, "Exactly one refusal line is delivered without poll");
+            const auto field = [&](const std::string& text) { return (*found + " ").find(" " + text + " ") != std::string::npos; };
+            expect(field(test.turn ? "reason=invalid" : "reason=missing"), "Refusal reason");
+            expect(field(std::string("check=") + test.check), "Failed TURN validation check");
+            const auto uris = !test.turn || test.turn->uri.empty() ? std::size_t{}
+                : static_cast<std::size_t>(std::count(test.turn->uri.begin(), test.turn->uri.end(), ',')) + 1;
+            expect(field("uris=" + std::to_string(uris)), "TURN URI count");
+            expect(field(!test.turn || test.turn->username.empty() ? "user_empty=1" : "user_empty=0"), "Username empty flag");
+            expect(field(!test.turn || test.turn->password.empty() ? "cred_empty=1" : "cred_empty=0"), "Credential empty flag");
+            expect(field("expires_in_s=" + (test.turn ? std::to_string(test.turn->lifetime.count()) : "unknown")), "TURN expiry");
+            expect(field(factory == 0 || factory == 2 ? "seat=0" : "seat=1"), "Refused seat");
+            for (const auto& line : lines) {
+                expect(line.find(user) == std::string::npos && line.find(password) == std::string::npos
+                    && line.find("secret-host-4157") == std::string::npos && line.find("invalid-secret-uri") == std::string::npos,
+                    "No secret or raw URI in diagnostics");
+            }
+        }
+    }
+    // Direct TURN-only factories also lack credentials, without a signalling endpoint.
+    for (bool hosting : {true, false}) {
+        lines.clear(); auto config = options(); config.turn_only = true;
+        auto result = hosting ? GnsTransport::host("127.0.0.1", 0, config) : GnsTransport::connect("127.0.0.1", 12345, config);
+        expect(!result && result.error().code == "EAWR-NET-1519", "Direct TURN-only refusal");
+        expect(lines.size() == 1 && lines.front().find("reason=missing check=credentials_absent uris=0 user_empty=1 cred_empty=1 expires_in_s=unknown")
+            != std::string::npos, "Direct refusal is delivered immediately");
+    }
+    GnsTransport::clear_log_sink(generation);
 }
-int main() {
+}
+int main(int argc, char** argv) {
     try {
         if (!GnsTransport::available()) {
             const auto disabled = GnsTransport::host("127.0.0.1", 0, options());
             expect(!disabled && disabled.error().code == "EAWR-NET-1500", "Typed disabled GNS factory");
             std::cout << "GNS disabled: transport contracts skipped\n"; return 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--turn-refusals") {
+            turn_refusal_logs(); std::cout << "TURN refusal diagnostics passed\n"; return 0;
         }
         invalid_options(); room_contracts(); frames(); mismatch(0); mismatch(1); mismatch(2); link_stats(); lifecycle(); capacity();
         std::cout << "GNS message/lifecycle contracts passed\n"; return 0;

@@ -10,8 +10,6 @@ record and never treated as an XML-derived map bound.
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 import math
 import re
 import struct
@@ -21,6 +19,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from typing import BinaryIO, Iterable, Iterator, Sequence
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file as sha256_path  # noqa: E402
 
 
 SCHEMA_VERSION = 2
@@ -225,14 +226,6 @@ def parse_labelled_path(argument: str) -> LabelledPath:
     if not raw_path:
         raise argparse.ArgumentTypeError("PATH must not be empty")
     return LabelledPath(label, Path(raw_path))
-
-
-def sha256_path(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def decimal_from_evidence(category: dict[str, object], key: str) -> Decimal | None:

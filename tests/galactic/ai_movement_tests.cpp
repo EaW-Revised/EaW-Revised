@@ -1,3 +1,6 @@
+#include "../support/self_test.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_movement_runtime.hpp"
@@ -10,11 +13,22 @@
 #include "eawr/campaign/invasion_offer.hpp"
 #include "eawr/campaign/tactical_return.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
+#include <iostream>
+#include <map>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace eawr::script::foc::ai {
 struct EngineContractAccess {
@@ -43,12 +57,9 @@ namespace cp = eawr::campaign;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 Fixed f(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 void done(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
+    eawr::testing::result_diagnostic::must(std::move(result));
 }
 gc::GalacticSetup fixture() {
     gc::GalacticSetup s;
@@ -233,6 +244,20 @@ cp::GameSession::NativeConflictService fixture_invasion_provider() {
         return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success(cp::RecordedAdmission{snapshot.completed_tick(), std::move(record), {cp::ConflictRoute::pending_tactical, false, false}});
     };
 }
+// GCMP-04: acceptance is the journaled InvasionAccept session command, decided by the step that executes it.
+struct AcceptOutcome {
+    std::string refusal;
+    bool summary_closed{};
+    [[nodiscard]] bool accepted() const noexcept { return refusal.empty(); }
+};
+AcceptOutcome accept_by_command(cp::GameSession& game, const eawr::sim::PartitionExecutor& executor,
+    const gc::SeatId seat, const eawr::sim::EntityId conflict) {
+    done(game.submit({{game.completed_tick(), seat, 1}, gc::InvasionAccept{conflict}}));
+    const auto tick = take(game.step(executor));
+    expect(tick.invasion_accept_responses.size() == 1, "one accept command yields exactly one executed response");
+    if (tick.invasion_accept_responses.size() != 1) return {"missing response", false};
+    return {tick.invasion_accept_responses.front().refusal, tick.invasion_accept_responses.front().summary_closed};
+}
 void invasion_queue_disk() {
     for (const bool defended : {false, true}) {
         std::string baseline;
@@ -312,8 +337,13 @@ void invasion_retention() {
         setup.movement->contents = {{21, {{40, 1}}}, {22, {{41, 1}}}, {23, {{42, 1}}}};
         auto game = take(cp::GameSession::create(setup));
         gc::GalacticSession* owner{};
+        // Every dispatch the native owner makes, with the request exactly as it was queued.
+        std::vector<gc::GalacticSession::NativeInvasion> dispatched;
         const auto configure_summary = [&](cp::GameSession& current) {
-            current.set_native_conflict_service(fixture_invasion_provider());
+            current.set_native_conflict_service([&dispatched, source = fixture_invasion_provider()](
+                const gc::GalacticSnapshot& snapshot, const gc::GalacticSession::NativeInvasion& request, eawr::sim::EntityId first_free) {
+                dispatched.push_back(request); return source(snapshot, request, first_free);
+            });
             return current.configure_native_replay_owners([&](auto& world) { owner = &world; return eawr::core::Result<void>::success(); });
         };
         done(configure_summary(game));
@@ -331,16 +361,22 @@ void invasion_retention() {
             "opponent observer receives no winner cargo selection");
         result.invasion_offers.front().transports = {21, 999};
         done(game.restore_latest_tactical_result(context, result));
-        expect(!game.accept_invasion_offer({2}, 90) && !game.accept_invasion_offer({1}, 91),
-            "opponent and stale result accept intents do not mutate the queue");
-        done(game.accept_invasion_offer({1}, 90));
-        const auto* request = owner->pending_native_invasion();
-        expect(request && request->transports == std::vector<gc::FleetMember>{{21, 2}} && request->reader_released,
+        expect(!accept_by_command(game, executor, gc::SeatId{2}, 90).accepted() && !accept_by_command(game, executor, gc::SeatId{1}, 91).accepted()
+            && dispatched.empty() && !owner->pending_native_invasion(),
+            "opponent and stale result accept commands do not mutate the queue");
+        const auto journal_before = owner->native_effects().size();
+        expect(accept_by_command(game, executor, gc::SeatId{1}, 90).accepted(), "the winner's accept command is admitted at execution");
+        expect(dispatched.size() == 1 && dispatched.front().transports == std::vector<gc::FleetMember>{{21, 2}} && dispatched.front().reader_released,
             "accept skips missing retained IDs and excludes unselected transports");
-        const auto* next = request ? owner->native_invasion(request->request + 1) : nullptr;
-        expect(next && next->fleet == 11 && next->transports == std::vector<gc::FleetMember>{{23, 2}},
+        const auto* next = owner->pending_native_invasion();
+        expect(next && next->fleet == 11 && next->transports == std::vector<gc::FleetMember>{{23, 2}} && next->reader_released,
             "accept queues transports from every prepared fleet rather than only the first fleet");
-        expect(!game.accept_invasion_offer({1}, 90), "accepted selection cannot enqueue twice");
+        expect(std::none_of(owner->native_effects().begin() + static_cast<std::ptrdiff_t>(journal_before), owner->native_effects().end(), [](const auto& effect) {
+            return effect.phase == gc::NativeEffectPhase::barrier && effect.kind == gc::NativeEffectKind::invasion;
+        }), "the accept command is its own journal entry: no native invasion effect is appended for its admission or release");
+        expect(game.record().commands.back().payload == gc::CommandPayload{gc::InvasionAccept{90}}
+            && game.record().commands.back().key.seat == gc::SeatId{1}, "the accepted command is journaled with its seat");
+        expect(!accept_by_command(game, executor, gc::SeatId{1}, 90).accepted(), "accepted selection cannot enqueue twice");
         const auto build = eawr::checkpoint::game_identities(setup);
         eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.configure_session = configure_summary;
         auto restored = take(eawr::checkpoint::load_game_checkpoint(take(eawr::checkpoint::save_game_checkpoint(game, build)), build, load, executor));
@@ -350,6 +386,36 @@ void invasion_retention() {
         const auto trace = game.state_sha256();
         if (summary_baseline.empty()) summary_baseline = trace;
         else expect(summary_baseline == trace, "summary invasion equality on 1/2/4/8 workers");
+        {
+            auto modal_setup = setup; modal_setup.interactive_seat = {1};
+            auto modal = take(cp::GameSession::create(modal_setup)); done(configure_summary(modal));
+            cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+            outcome.planet = context.planet; outcome.invader = context.invader; outcome.defender = context.defender;
+            outcome.result.conflict = context.id; outcome.result.winner = result.winner;
+            done(modal.stage_auto_resolve_outcome(outcome)); (void)take(modal.step(executor));
+            done(modal.restore_latest_tactical_result(context, result));
+            expect(modal.battle_summary_hold() == 90 && modal.galaxy().clock().pause_depth == 1,
+                "invasion fixture owns only its outcome summary hold");
+            expect(!accept_by_command(modal, executor, gc::SeatId{1}, 91).accepted() && modal.battle_summary_hold() == 90,
+                "stale invasion leaves matching summary hold intact");
+            done(modal.submit({{modal.completed_tick(), {1}, 1}, gc::PauseGalaxy{}})); (void)take(modal.step(executor));
+            expect(!accept_by_command(modal, executor, gc::SeatId{1}, 90).accepted() && modal.galaxy().clock().pause_depth == 2
+                && modal.battle_summary_hold() == 90, "player pause refuses invasion without consuming either hold");
+            done(modal.submit({{modal.completed_tick(), {1}, 2}, gc::ResumeGalaxy{}})); (void)take(modal.step(executor));
+            auto empty_offer = result; empty_offer.invasion_offers.clear();
+            done(modal.restore_latest_tactical_result(context, empty_offer));
+            expect(!accept_by_command(modal, executor, gc::SeatId{1}, 90).accepted() && modal.galaxy().clock().pause_depth == 1
+                && modal.battle_summary_hold() == 90, "refused invasion keeps summary pause ownership");
+            done(modal.restore_latest_tactical_result(context, result));
+            const auto closed = accept_by_command(modal, executor, gc::SeatId{1}, 90);
+            expect(closed.accepted() && closed.summary_closed && owner->pending_native_invasion()
+                && modal.galaxy().clock().pause_depth == 0 && !modal.battle_summary_hold(),
+                "the accept command admits native invasion through the summary-only exemption and releases exactly its own seat's summary hold");
+            const auto modal_build = eawr::checkpoint::game_identities(modal.record().setup);
+            auto continued = take(eawr::checkpoint::load_game_checkpoint(take(eawr::checkpoint::save_game_checkpoint(modal, modal_build)),
+                modal_build, load, executor));
+            expect(continued.session.state_sha256() == modal.state_sha256(), "accepted summary invasion and acknowledgement survive journal/checkpoint reconstruction");
+        }
         auto own = setup; own.planets.front().owner = 1;
         // WGM-C04 reconstructs tick-zero ownership from live surface presence.
         own.control->planets.front().ground_base = {1, 1};
@@ -374,8 +440,9 @@ void invasion_retention() {
         capped.invasion_offers = cp::tactical_invasion_offers(context, capped, *owner->snapshot());
         expect(capped.invasion_offers.front().transports.size() == 130, "candidate preparation is not capped at the accepted-event limit");
         done(capped_game.restore_latest_tactical_result(context, capped));
-        done(capped_game.accept_invasion_offer({1}, 90));
-        expect(owner->pending_native_invasion() && owner->pending_native_invasion()->transports.size() == 127,
+        dispatched.clear();
+        expect(accept_by_command(capped_game, executor, gc::SeatId{1}, 90).accepted() && dispatched.size() == 1
+            && dispatched.front().transports.size() == 127,
             "WGP-136 caps accepted retained selection across fleets at 127");
         auto changed_owner = capped_setup;
         changed_owner.fleets.push_back({12, 2, 1, {}});
@@ -385,7 +452,8 @@ void invasion_retention() {
             changed_owner.fleets.front().members.begin() + 127);
         auto changed_game = take(cp::GameSession::create(changed_owner)); done(configure_summary(changed_game));
         done(changed_game.restore_latest_tactical_result(context, capped));
-        expect(!changed_game.accept_invasion_offer({1}, 90) && !owner->pending_native_invasion(),
+        dispatched.clear();
+        expect(!accept_by_command(changed_game, executor, gc::SeatId{1}, 90).accepted() && dispatched.empty() && !owner->pending_native_invasion(),
             "WGP-136 ownership filtering never backfills transports beyond the first 127 resolved IDs");
     }
     eawr::platform::ThreadWorkerAdapter executor(1);
@@ -717,15 +785,7 @@ void native_management_gate() {
     expect(world.state_sha256() == original, "all gated native management operations retain the original world hash");
 }
 void installed() {
-    std::string root;
-#if defined(_MSC_VER)
-    char* environment{}; std::size_t size{};
-    if (_dupenv_s(&environment, &size, "EAWR_EAW_GAME_ROOT") == 0 && environment) {
-        root = environment; std::free(environment);
-    }
-#else
-    if (const auto* environment = std::getenv("EAWR_EAW_GAME_ROOT")) root = environment;
-#endif
+    std::string root = eawr::testing::game_root().value_or("");
     if (root.empty()) throw std::runtime_error("installed movement requires EAWR_EAW_GAME_ROOT");
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -795,7 +855,11 @@ void installed() {
     }
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_movement_tests(int argc, char** argv) {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }

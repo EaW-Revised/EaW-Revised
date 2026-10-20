@@ -1,0 +1,42 @@
+[
+  {
+    "old": "apps/viewer/src/lan_match.cpp",
+    "new": "src/platform/net/lan_match.cpp"
+  },
+  {
+    "old": "apps/viewer/src/lan_match.hpp",
+    "new": "src/platform/net/lan_match.hpp"
+  },
+  {
+    "old": "apps/viewer/src/lan_match_fake.cpp",
+    "new": "src/platform/net/lan_match_fake.cpp"
+  },
+  {
+    "old": "apps/viewer/src/match_transport.hpp",
+    "new": "src/platform/net/match_transport.hpp"
+  },
+  {
+    "old": "apps/viewer/src/online_match.cpp",
+    "new": "src/platform/net/online_match.cpp"
+  },
+  {
+    "old": "apps/viewer/src/online_match.hpp",
+    "new": "src/platform/net/online_match.hpp"
+  },
+  {
+    "old": "apps/viewer/src/skirmish_prepare.cpp",
+    "new": "src/platform/net/skirmish_prepare.cpp"
+  },
+  {
+    "old": "apps/viewer/src/skirmish_prepare.hpp",
+    "new": "src/platform/net/skirmish_prepare.hpp"
+  },
+  {
+    "old": "apps/viewer/src/lan_diagnostics.hpp",
+    "new": "src/platform/net/lan_diagnostics.hpp"
+  },
+  {
+    "old": "apps/viewer/src/online_service_settings.hpp",
+    "new": "src/platform/net/online_service_settings.hpp"
+  }
+]

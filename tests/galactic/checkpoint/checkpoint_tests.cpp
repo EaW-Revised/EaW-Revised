@@ -1,3 +1,10 @@
+#include <cstddef>
+#include <functional>
+#include <ios>
+#include <optional>
+#include <span>
+#include <utility>
+#include "../../support/check.hpp"
 // The EAWRCKP container and the child-log section (docs/checkpoint-format.md, ADR-016): round
 // trips, every refusal leaving the running battle untouched, and restore-and-continue with
 // identical per-tick hashes on 1, 2, 4 and 8 workers.
@@ -30,13 +37,11 @@ namespace math = eawr::sim::math;
 using math::Fixed;
 using Bytes = std::vector<std::uint8_t>;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 template <typename T>

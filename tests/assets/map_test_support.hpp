@@ -23,7 +23,7 @@
 #include <vector>
 
 namespace eawr::tests::map_contracts {
-extern int failures;
+extern int& failures;
 void expect(bool condition, const char* message);
 void u8(std::vector<std::byte>& out, std::uint8_t value);
 void u16(std::vector<std::byte>& out, std::uint16_t value);

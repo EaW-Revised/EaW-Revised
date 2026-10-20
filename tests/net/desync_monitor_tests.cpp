@@ -1,3 +1,4 @@
+#include "../support/check.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/transport.hpp"
 #include "eawr/core/sha256.hpp"
@@ -6,15 +7,22 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -24,7 +32,7 @@ namespace loopback = eawr::testing::lockstep;
 namespace tactical = eawr::sim::tactical;
 
 void require(bool value, const std::string& message) {
-    if (!value) throw std::runtime_error(message);
+    if (!value) eawr::testing::require(value, message);
 }
 void good(const core::Result<void>& result) {
     require(static_cast<bool>(result), result ? "" : result.error().message);

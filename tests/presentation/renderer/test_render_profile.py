@@ -13,14 +13,16 @@ the stored-value decode still runs once with MSAA and after SMAA
 (docs/rendering.md, render profiles). Captures stay in temporary directories.
 """
 
-import json
 import os
 import pathlib
-import subprocess
 import tempfile
 import unittest
 
 from PIL import Image
+import sys
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -34,12 +36,11 @@ ENHANCED = {"name": "enhanced", "msaa_samples": 4, "screen_space_aa": "smaa", "a
 def run_viewer(directory: pathlib.Path, name: str, *arguments: str):
     report = directory / f"{name}.json"
     capture = directory / f"{name}.png"
-    completed = subprocess.run([
+    completed = python_helpers.run_viewer([
         os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
         "--path", str(ROOT / "apps/viewer/project"), "--", *arguments,
-        "--eawr-report", str(report), "--eawr-capture", str(capture)],
-        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=300, check=False)
-    result = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
+        "--eawr-report", str(report), "--eawr-capture", str(capture)], cwd=ROOT, timeout=300)
+    result = python_helpers.read_json(report) if report.is_file() else {}
     return completed, result, capture
 
 

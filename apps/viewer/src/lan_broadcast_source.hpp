@@ -23,6 +23,7 @@ public:
         std::uint16_t port{net::lan_broadcast_port};
         // More ports to send to: another lobby on the same machine, or a subnet the broadcast does not reach.
         std::vector<std::uint16_t> extra_ports;
+        bool menu_chat_limits{};
     };
 
     // Null when the socket cannot be opened; `failure` then says why.
@@ -31,6 +32,8 @@ public:
     void announce(const presentation::ui::LobbyPresence& presence) override;
     void send_chat(presentation::ui::LobbyChatScope scope, const std::string& game, const std::string& name,
                    const std::string& text) override;
+    [[nodiscard]] bool try_send_chat(presentation::ui::LobbyChatScope scope, const std::string& game,
+                                     const std::string& name, const std::string& text) override;
     [[nodiscard]] bool pump() override;
     [[nodiscard]] std::vector<presentation::ui::LobbyGame> games() const override;
     [[nodiscard]] std::vector<presentation::ui::LobbyPlayer> players() const override;

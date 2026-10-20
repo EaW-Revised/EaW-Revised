@@ -17,7 +17,7 @@
 namespace math_test_support {
 
 using namespace eawr::sim::math;
-extern int failures;
+extern int& failures;
 
 
 

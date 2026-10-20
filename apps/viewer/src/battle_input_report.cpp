@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "battle_input.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
@@ -28,12 +29,7 @@ using namespace godot;
 
 namespace {
 [[nodiscard]] std::string json(const std::string& text) {
-    std::string result{"\""};
-    for (const char character : text) {
-        if (character == '"' || character == '\\') result += '\\';
-        result += static_cast<unsigned char>(character) < 0x20U ? ' ' : character;
-    }
-    return result + "\"";
+    return eawr::core::json_quote_space_controls(text);
 }
 
 } // namespace

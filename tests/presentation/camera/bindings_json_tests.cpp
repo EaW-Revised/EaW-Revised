@@ -1,5 +1,14 @@
 #include "camera_binding_test_support.hpp"
 
+#include <cstddef>
+#include <fstream>
+#include <ios>
+#include <iostream>
+#include <iterator>
+#include <string>
+#include <string_view>
+#include <vector>
+
 namespace eawr_camera_binding_test {
 
 void test_committed_project_table_is_valid_and_labelled() {

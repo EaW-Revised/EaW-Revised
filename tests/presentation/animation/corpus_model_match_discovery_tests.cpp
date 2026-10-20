@@ -1,18 +1,21 @@
+#include "../../support/check.hpp"
+#include "../../support/temp_dir.hpp"
 #include "corpus_model_match_discovery.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <limits>
-#include <map>
 #include <optional>
 #include <random>
 #include <span>
@@ -30,9 +33,10 @@ namespace sources = eawr::tests::animation_corpus::source_versions;
 namespace structural = eawr::tests::animation_corpus::structural_discovery;
 namespace discovery = eawr::tests::animation_corpus::model_match_discovery;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 bool contains(const std::string& haystack, const std::string_view needle) { return haystack.find(needle) != std::string::npos; }
 
@@ -148,7 +152,7 @@ struct TempTree final {
             / ("eawr-model-match-discovery-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(root);
     }
-    ~TempTree() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
+    ~TempTree() { eawr::testing::remove_temp_directory(root); }
     TempTree(const TempTree&) = delete;
     TempTree& operator=(const TempTree&) = delete;
     [[nodiscard]] std::filesystem::path data(const std::string& layer) const { return root / layer / "Data"; }

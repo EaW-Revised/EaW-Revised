@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_live_campaign
+    NO_ARGS
+
     NAME galactic_live_battle_dialog_tests
     SOURCES live_battle_dialog_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/apps/viewer/src"

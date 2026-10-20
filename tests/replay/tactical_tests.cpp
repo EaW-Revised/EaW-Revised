@@ -1,3 +1,4 @@
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/sim/replay.hpp"
@@ -8,9 +9,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -18,20 +21,20 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 // #3644: a provider whose object turn is due every tick and asks for nothing.

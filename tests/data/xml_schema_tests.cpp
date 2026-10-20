@@ -1,5 +1,5 @@
+#include "../support/temp_dir.hpp"
 #include "data_test_support.hpp"
-
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>
@@ -7,10 +7,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
+#include <ios>
 #include <string>
-#include <string_view>
-#include <vector>
 
 namespace eawr::tests::data_contracts {
 namespace {
@@ -19,7 +17,7 @@ void byte_provenance_contracts() {
         ("eawr-xml-byte-provenance-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     struct Cleanup {
         std::filesystem::path folder;
-        ~Cleanup() { std::error_code ignored; std::filesystem::remove_all(folder, ignored); }
+        ~Cleanup() { eawr::testing::remove_temp_directory(folder); }
     } cleanup{folder};
     std::filesystem::create_directories(folder / "XML");
     // LF advances the line; CR and each UTF-8 byte still advance the byte column.

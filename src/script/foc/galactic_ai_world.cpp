@@ -145,7 +145,8 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
         rows.insert(rows.end(), staged[index].begin(), staged[index].end());
         if (first_allowed && !rows.empty()) break;
     }
-    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    // Equal keys (duplicate offers) keep their registration order, whatever the row count or standard library.
+    std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
         return std::tie(a.player, a.planet, a.domain, a.type) < std::tie(b.player, b.planet, b.domain, b.type);
     });
     return Result::success(std::move(rows));
@@ -1061,14 +1062,14 @@ core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const ga
     for (auto group = input->producers.begin(); group != input->producers.end();) {
         const auto end = std::find_if(group, input->producers.end(),
             [&](const auto& row) { return row.player != group->player || row.planet != group->planet; });
-        std::sort(group, end, canonical);
+        std::stable_sort(group, end, canonical); // equal-key offers keep builds_ order on every library (#4329)
         group = end;
     }
     if (std::adjacent_find(input->producers.begin(), input->producers.end(),
         [&](const auto& a, const auto& b) { return !canonical(a, b); }) != input->producers.end()) {
         input->producers.clear();
         for (const auto& row : builds_) input->producers.push_back(row.input);
-        std::sort(input->producers.begin(), input->producers.end(), canonical);
+        std::stable_sort(input->producers.begin(), input->producers.end(), canonical); // as above
     }
     }
     for (const auto& row : accounts_) input->credits.emplace(row.player, row.credits);
@@ -1103,6 +1104,8 @@ void GalacticWorld::bind_connectivity(std::shared_ptr<const GalacticConnectivity
             mine.cache.resize(kept);
         }
     }
+    if (!(connectivity->goal_reach == connectivity_->goal_reach))
+        goal_reach_index_ = std::make_shared<const GalacticGoalReachIndex>(GalacticGoalReachIndex::build(connectivity->goal_reach));
     connectivity_ = std::move(connectivity);
 }
 

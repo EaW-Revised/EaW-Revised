@@ -106,7 +106,7 @@ void aborts_transition(const eawr::sim::PartitionExecutor& pool, std::vector<std
         && world.snapshot()->player_economy()->players[0].credits >= cash, "an aborted transition never completes later or rewards");
 }
 } // namespace
-int main() {
+int case_galactic_ability_ruins_tests() {
     try {
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);
         ruins(one, baseline, false); ruins(one, baseline, true); without_flag(one, baseline); aborts_transition(one, baseline);

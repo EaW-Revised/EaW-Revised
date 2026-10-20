@@ -500,6 +500,11 @@ void GodotRenderer::copy_instance_pose(const sim::EntityId source, const sim::En
 void GodotRenderer::forget_instance_pose(const sim::EntityId entity_id) {
     impl_->forget_instance_pose(entity_id);
 }
+
+std::vector<std::uint8_t> GodotRenderer::skin_geometry_bones(const sim::AssetId asset_id) const {
+    return impl_->skin_geometry_bones(asset_id);
+}
+
 void GodotRenderer::set_billboard_light(const sim::AssetId asset_id,
                                        const std::array<float, 3>& toward_light) {
     impl_->set_billboard_light(asset_id, toward_light);

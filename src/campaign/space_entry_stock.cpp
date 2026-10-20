@@ -806,7 +806,6 @@ core::Result<tt::TacticalContent> StockSpaceEntry::content(const ConflictRecord&
         return core::Result<tt::TacticalContent>::failure(bound.error());
     return content;
 }
-GameSession::HeroDefeatResolver StockSpaceEntry::hero_defeat_resolver() const { return impl_->returning.hero; }
 core::Result<void> StockSpaceEntry::bind_game(GameSession& game) const {
     game.set_hero_defeat_resolver(impl_->returning.hero);
     return impl_->returning.bind_game(game);
@@ -956,6 +955,7 @@ core::Result<battle::BattleStart> space_entry_presentation_start(
             }
             start.units.push_back(std::move(visual));
     }
+    start.arrivals = battle::plan_start_arrivals(start, *inputs.tables);
     return core::Result<battle::BattleStart>::success(std::move(start));
 }
 

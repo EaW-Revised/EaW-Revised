@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/theme.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,12 +23,7 @@ constexpr std::int32_t fallback_point_size = 8;
 constexpr data::ui::Rgba fallback_colour{255, 255, 255, 255};
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    const auto lower = [](const char value) {
-        return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-    };
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(),
-                      [&](const char a, const char b) { return lower(a) == lower(b); });
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] std::string variation_name(const std::string_view entry) {

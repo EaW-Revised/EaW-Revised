@@ -185,8 +185,13 @@ void map_mode_detail::MapParticleProvider::capture_fog_evidence(const GodotRende
                 emitter.fog_revision = selected ? selected->revision() : 0;
                 const auto resource = std::find_if(resources.begin(), resources.end(),
                     [&](const auto& item) { return item.resource == emitter.resource; });
+                // The logical resource survives empty spans, while a recreated
+                // material owns a new fog-consumer registration.
+                emitter.fog_handle = resource == resources.end() ? 0 : resource->fog_handle;
                 const auto consumer = std::find_if(consumers.begin(), consumers.end(),
                     [&](const auto& item) { return item.handle == emitter.fog_handle; });
+                emitter.quads = 0;
+                emitter.minimum_attenuation = emitter.maximum_attenuation = 0;
                 if (resource != resources.end()) {
                     emitter.quads = resource->quads;
                     emitter.minimum_attenuation = resource->minimum_attenuation;

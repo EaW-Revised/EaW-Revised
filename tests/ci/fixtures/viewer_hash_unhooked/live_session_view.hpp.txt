@@ -1,0 +1,7 @@
+// Frozen hook-free historical source context; this git-only fixture is not compiled.
+    std::optional<std::uint64_t> preview_checked_tick_;
+    std::vector<std::string> preview_rows_;
+    std::size_t slots_released_{};  // slots freed by a unit leaving the snapshot (report: slots_released)
+    // #3957: the live units of (owner, type) that found no launch slot, so were simulated but not drawn (report: slotless).
+    std::map<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>, std::set<sim::EntityId>> slotless_hits_;
+    std::map<sim::EntityId, std::size_t> launched_ship_of_entity_;

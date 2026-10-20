@@ -1,4 +1,6 @@
 #include "camera_binding_config_internal.hpp"
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -12,15 +14,11 @@ namespace camera_binding_detail {
 namespace {
 
 [[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+    return static_cast<char>(core::ascii_lower(static_cast<unsigned char>(value)));
 }
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 // --- Vocabulary ---------------------------------------------------------------

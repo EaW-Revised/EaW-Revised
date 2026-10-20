@@ -31,7 +31,9 @@ enum class NativeEffectKind : std::uint16_t {
     invasion = 10, actor_land = 11, technology = 12, technology_price = 13,
     ability_lifecycle = 14, tactical_built = 15, corruption_lifecycle = 16,
     planet_ruins = 17, // coordinator-reserved: shared live ruins adapter
-    income_block = 18 // coordinator-reserved: WGEP-163 source-scoped income blockers
+    income_block = 18, // coordinator-reserved: WGEP-163 source-scoped income blockers
+    production_lock = 19, // coordinator-reserved: story production lock (#683)
+    story_reward = 20 // coordinator-reserved: story spawn and credits (#683); its replayer is registered by the campaign owner
 };
 struct NativeEffect {
     std::uint64_t frontier{}, sequence{};

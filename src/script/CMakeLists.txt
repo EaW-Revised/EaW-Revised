@@ -76,6 +76,8 @@ function(eawr_add_sflua_library target_name)
         # Upstream relies on the same aliasing latitude as the P0 C build.
         target_compile_options(${target_name} PRIVATE -fno-strict-aliasing)
     endif()
+    # An MSVC that drops the guard before a shift (legacy #3930, #1287) compiles the table sizing at /Od.
+    eawr_msvc_guard_apply(${target_name} "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/sflua/upstream/ltable.cpp")
 endfunction()
 
 eawr_add_sflua_library(eawr_lua_502_sf)

@@ -39,6 +39,23 @@ struct SpacePopulation::SurfaceUpload final {
     std::array<float, 3> maximum{-1e30F, -1e30F, -1e30F};
 };
 
+struct SpacePopulation::ComposeContext final {
+    GodotRenderer& renderer;
+    const assets::Map& map;
+    const vfs::Vfs& filesystem;
+    const FixedCamera& camera;
+    std::span<const std::uint32_t> environment_records;
+    scene::VfsAssetCache& cache;
+    const scene::BuildInput& input;
+    const scene::ObjectResolver& resolve;
+};
+
+// Shared by the initial debug ship and every prepared or appended live slot.
+[[nodiscard]] inline scene::SpacePlacementDecision classify_composed_unit(const scene::Placement& placement,
+    const data::EffectiveObject& object, const scene::ObjectResolver& resolve, const bool ability_proxy_owner = false) {
+    return scene::classify_live_unit(placement, scene::live_unit_tags(object, resolve), ability_proxy_owner);
+}
+
 namespace space_populate_detail {
 [[nodiscard]] GodotRenderer::LightingState lighting_state(const SpacePopulation::Options& options, float max_distance);
 } // namespace space_populate_detail

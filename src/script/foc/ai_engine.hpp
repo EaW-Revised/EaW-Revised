@@ -227,9 +227,18 @@ private:
     struct Contribution {
         const ViewUnit* unit{};
         std::optional<Real> total;
-        std::vector<Real> entries;
+        std::size_t offset{}, count{};
     };
-    using Contributions = std::map<sim::EntityId, Contribution>;
+    struct Contributions {
+        std::vector<Contribution> rows;
+        std::vector<Real> entries;
+        std::vector<std::vector<std::size_t>> owners;
+    };
+    struct ContributionSlot {
+        sim::EntityId id{};
+        const Tracked* tracked{};
+    };
+    void prepare_slots();
     [[nodiscard]] const Contributions* contributions(std::uint64_t category, Real attenuator,
         tactical::PlayerId player) const;
     [[nodiscard]] bool preparing(const Host& host, const WorldView& view) const noexcept {
@@ -241,7 +250,17 @@ private:
     const WorldView* preparation_view_{};
     mutable std::map<TotalKey, Real> total_queries_;
     mutable std::map<ForceKey, Real> force_queries_;
-    std::map<ContributionKey, Contributions> contributions_;
+    // Topology contains no completed-view pointers and changes only with grid membership/zones.
+    bool slots_dirty_{true};
+    std::vector<ContributionSlot> slots_;
+    std::vector<std::vector<std::size_t>> cell_slots_;
+    // The map size is the used prefix; clear_queries expires its rows and view pointers.
+    // Backing vectors are staging until contributions_ready_ publishes the completed pass.
+    bool contributions_ready_{};
+    std::map<ContributionKey, std::size_t> contributions_;
+    std::vector<Contributions> contribution_storage_;
+    std::vector<tactical::PlayerId> contribution_owners_;
+    std::vector<std::tuple<Contribution*, const Tracked*, Real, Real*>> contribution_work_;
     mutable std::map<ContributionKey, std::set<tactical::PlayerId>> requested_;
     std::map<ContributionKey, std::set<tactical::PlayerId>> pending_;
     mutable QueryCounts query_counts_;
@@ -846,6 +865,12 @@ public:
     void set_galactic_stage_speed(GalacticStageSpeed reader) { galactic_stage_speed_ = std::move(reader); }
     [[nodiscard]] core::Result<std::pair<Real, bool>> galactic_freestore_selection_facts(
         tactical::PlayerId, sim::galactic::PlanetId target, sim::EntityId object, const PlanDef&) const;
+    // One (player, target, plan) read of many actors: the goal type, stage list and stage positions do not depend
+    // on the actor, so the batch resolves them once, at the first actor that reaches them. Actor predicates,
+    // usability and route arithmetic stay live per call. The plan must outlive the returned reader.
+    using GalacticFreestoreActorFacts = std::function<core::Result<std::pair<Real, bool>>(sim::EntityId)>;
+    [[nodiscard]] GalacticFreestoreActorFacts galactic_freestore_selection_batch(
+        tactical::PlayerId, sim::galactic::PlanetId target, const PlanDef&) const;
     void set_galactic_build_observer(GalacticBuildObserver observer) { galactic_build_observer_ = std::move(observer); }
     // Allocation is separate from force selection, funding and plan execution.
     // Positive authored desire chooses a template-enabled plan with the shared
@@ -944,8 +969,6 @@ public:
     [[nodiscard]] std::int64_t frame() const noexcept { return frame_; }
     [[nodiscard]] const AiData& data() const noexcept { return data_; }
     [[nodiscard]] const std::vector<PlanDef>& plans() const noexcept { return plans_; }
-    // The region target that holds a point (FT-02).
-    [[nodiscard]] const Target* region_at(Real x, Real y) const;
     [[nodiscard]] const std::vector<std::uint64_t>* target_list(tactical::PlayerId player) const;
     // WGA-452: exact category membership of the current manager's active set.
     [[nodiscard]] std::optional<std::uint64_t> active_goal_count(tactical::PlayerId player, std::uint64_t category) const;
@@ -1278,7 +1301,6 @@ private:
     }
     [[nodiscard]] const Block* raw_block(std::uint64_t) const;
     [[nodiscard]] PlayerAi* positioning_owner(sim::EntityId);
-    [[nodiscard]] Plan* mutable_plan(std::uint64_t);
     [[nodiscard]] Plan* mutable_plan_of_instance(std::uint64_t);
     [[nodiscard]] AttackPositioning* positioning(sim::EntityId);
     template<class T> auto ordered_runtime(std::map<std::uint64_t, T> PlayerAi::* member) {

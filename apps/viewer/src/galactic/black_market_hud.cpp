@@ -1,5 +1,5 @@
 #include "galactic_mode_internal.hpp"
-#include "black_market_hud_fixture.hpp"
+#include "eawr/core/text.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/input_routing.hpp"
 #include "eawr/presentation/ui/layout.hpp"
@@ -27,8 +27,7 @@ std::string first(const data::ui::CommandBarComponent& component, data::ui::Fiel
 }
 bool GalacticMode::State::build_black_market_hud() {
     if (!filesystem || !hud || !hud_fonts) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::black_market_fixture(options.hud_fixture))
-        market_menu.fixture = galactic_view::black_market_fixture_snapshot(galaxy->local.player, options.hud_fixture);
+    if (options.hud_provider && !options.hud_provider->black_market(*this)) return false;
     market_menu.blocker = memnew(Control);
     hud->add_child(market_menu.blocker);
     market_menu.blocker->set_name("black_market_modal");
@@ -112,9 +111,8 @@ bool GalacticMode::State::build_black_market_encyclopedia() {
     // No fixed item list; metadata follows the same VFS overlay as preparation.
     auto document = data::load_document(*filesystem, "Data/XML/BlackMarketItems.xml");
     if (!document) { failure = core::format_diagnostic(document.error()); return false; }
-    const auto trim = [](std::string value) {
-        const auto start = value.find_first_not_of(" \t\r\n");
-        return start == std::string::npos ? std::string{} : value.substr(start, value.find_last_not_of(" \t\r\n") - start + 1);
+    const auto trim = [](std::string_view value) {
+        return core::trim(value, core::xml_whitespace);
     };
     const auto field = [&](const data::XmlNode& node, std::string_view tag) {
         for (const auto& child : node.children) if (upper(child.name) == upper(std::string(tag))) {

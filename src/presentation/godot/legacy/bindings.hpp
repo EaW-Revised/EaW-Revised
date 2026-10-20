@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/text.hpp"
 #include "eawr/presentation/renderer.hpp"
 
 #include <array>
@@ -135,14 +136,7 @@ namespace eawr::presentation::godot_backend::legacy::bindings {
 // ASCII case-insensitive equality: texture references resolve through the
 // case-insensitive game file system.
 [[nodiscard]] inline bool same_texture(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto fold = [](const char value) {
-            return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-        };
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] constexpr float saturate(const float value) noexcept {

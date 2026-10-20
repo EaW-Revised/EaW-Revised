@@ -1,0 +1,202 @@
+[
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#player_row_parser",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#player_row_parser"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#StagingIngress",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#StagingIngress"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#staging_ingress_bounds",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#staging_ingress_bounds"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#refused_rosters",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#refused_rosters"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#separate_mesh",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#separate_mesh"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#shared_builder_matches_former_live_encoding",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#shared_builder_matches_former_live_encoding"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#lan_overflow_human_keeps_its_seat",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#lan_overflow_human_keeps_its_seat"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#lan_ai_defaults_follow_authored_constraints",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#lan_ai_defaults_follow_authored_constraints"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#lobby_refusal_and_placeholder_contracts",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#lobby_refusal_and_placeholder_contracts"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#terminal_lobby_commands_are_inert",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#terminal_lobby_commands_are_inert"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#close_one_mesh_edge",
+    "new": "tests/net/viewer_lan_mesh_tests.cpp#close_one_mesh_edge"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#missing_planned_owner_is_refused",
+    "new": "tests/net/viewer_lan_staging_tests.cpp#missing_planned_owner_is_refused"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#nine_seat_staging",
+    "new": "tests/net/viewer_lan_staging_tests.cpp#nine_seat_staging"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#editable_staging_team_rules",
+    "new": "tests/net/viewer_lan_staging_tests.cpp#editable_staging_team_rules"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#advanced_options_three_peers",
+    "new": "tests/net/viewer_lan_staging_tests.cpp#advanced_options_three_peers"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#authoritative_staging",
+    "new": "tests/net/viewer_lan_staging_tests.cpp#authoritative_staging"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#loopback",
+    "new": "tests/net/viewer_lan_recovery_tests.cpp#loopback"
+  },
+  {
+    "old": "tests/net/viewer_lan_tests.cpp#recovery_worker_hashes",
+    "new": "tests/net/viewer_lan_recovery_tests.cpp#recovery_worker_hashes"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#expect",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#expect"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#units",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#units"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#setup",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#setup"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#content",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#content"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#bindings",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#bindings"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#Match",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#Match"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#batch_tick",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#batch_tick"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#object_turn_only_command_log",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#object_turn_only_command_log"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#adaptive_agreement",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#adaptive_agreement"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#adaptive_policy_and_refusals",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#adaptive_policy_and_refusals"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#agreement",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#agreement"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#missing_and_faults",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#missing_and_faults"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#strict_codec_and_admission",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#strict_codec_and_admission"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#lan_click_latency",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#lan_click_latency"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#monitor_quit_and_options",
+    "new": "tests/net/lockstep_session_agreement_tests.cpp#monitor_quit_and_options"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#DepartureMatch",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#DepartureMatch"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#allied_last_human_is_named_winner",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#allied_last_human_is_named_winner"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#ai_slot_does_not_hold_one_human_match",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#ai_slot_does_not_hold_one_human_match"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#partially_delivered_quit",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#partially_delivered_quit"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#departure_wire_refusals",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#departure_wire_refusals"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#monitored_maximum_lead",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#monitored_maximum_lead"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#monitor_send_close_race",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#monitor_send_close_race"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#monitored_silent_peer",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#monitored_silent_peer"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#monitored_departures",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#monitored_departures"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#chained_tactical_departures",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#chained_tactical_departures"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#retained_timing_departure",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#retained_timing_departure"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#triple_tactical_departures",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#triple_tactical_departures"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#maximum_roster_departures",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#maximum_roster_departures"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#agreed_departures",
+    "new": "tests/net/lockstep_session_departure_tests.cpp#agreed_departures"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#Monitor",
+    "new": "tests/net/lockstep_session_fixtures.hpp#Monitor"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#DepartureGate",
+    "new": "tests/net/lockstep_session_fixtures.hpp#DepartureGate"
+  },
+  {
+    "old": "tests/net/lockstep_session_tests.cpp#require",
+    "new": "tests/net/lockstep_session_fixtures.hpp#require"
+  }
+]

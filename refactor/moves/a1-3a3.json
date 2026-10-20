@@ -1,0 +1,82 @@
+[
+  {
+    "old": "tests/replay/collection_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/durability_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/flight_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/hotpath_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/ion_shot_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/ion_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/live_session_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/lockstep_loopback_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/motion_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/object_turn_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/pads_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/replay/path_cost_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/pathfind_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/publish_files_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/replay_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/rocket_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/replay/space_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/tactical_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/victory_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  }
+]

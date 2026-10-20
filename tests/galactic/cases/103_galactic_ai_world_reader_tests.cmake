@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_ai_execution
+    NO_ARGS
+
     NAME galactic_ai_world_reader_tests
     SOURCES ai_world_reader_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/script/foc"

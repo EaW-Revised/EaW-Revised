@@ -109,14 +109,6 @@ core::Result<std::array<float, 3>> free_camera_forward(const FreeCameraPose& pos
     return core::Result<Vector>::success(forward_of(pose.yaw_degrees, pose.pitch_degrees));
 }
 
-core::Result<std::array<float, 3>> free_camera_right(const FreeCameraPose& pose) {
-    using Vector = std::array<float, 3>;
-    if (!finite(pose.yaw_degrees)) {
-        return reject_request<Vector>("free camera right needs a finite yaw");
-    }
-    return core::Result<Vector>::success(right_of(pose.yaw_degrees));
-}
-
 core::Result<FreeCameraPose> enter_free_camera(
     const FreeCameraSettings& settings, const std::span<const float, 3> eye,
     const float yaw_degrees, const float pitch_degrees) {

@@ -63,7 +63,23 @@ class InputRoutingStructure(unittest.TestCase):
         sync = function_body(host_source("void ViewerHost::sync_modal_holds("), "void ViewerHost::sync_modal_holds(")
         self.assertIn("world_capture_.clear();", sync)
         self.assertIn("cancel_held_world_input();", sync)
-        self.assertIn("sync_modal_holds();", function_body(host_source("void ViewerHost::_process("), "void ViewerHost::_process("))
+        process_source = host_source("void ViewerHost::_process(")
+        process = function_body(process_source, "void ViewerHost::_process(")
+        dispatch_order = [process.index(step) for step in (
+            "sync_modal_holds();",
+            "if (input_routing_mode_) {",
+            "input_routing_mode_->process()) stop(*exit_code);\n        return;",
+            "if (front_end_ && !map_mode_) {",
+            "if (map_mode_) {",
+            "process_battle_frame(delta);\n        return;",
+            "if (skirmish_setup_) {",
+            "process_battle_setup_frame();\n        return;",
+            "if (!renderer_) return;",
+            "process_replay_frame();",
+        )]
+        self.assertEqual(dispatch_order, sorted(dispatch_order))
+        campaign = function_body(process_source, "void ViewerHost::process_campaign_frame(")
+        self.assertLess(campaign.index("sync_modal_holds();"), campaign.index("galactic_mode_->process(delta)"))
         self.assertIn("set_input_as_handled()", before_gui)
         after_gui = function_body(host_source("void ViewerHost::_unhandled_input("), "void ViewerHost::_unhandled_input(")
         self.assertIn("world_accepts(", after_gui)

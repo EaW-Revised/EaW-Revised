@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/renderer.hpp"
 #include "diagnostic_buffer.hpp"
 #include "instance_reconciliation.hpp"
@@ -32,12 +34,11 @@
 
 namespace eawr_renderer_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void check(const bool condition, const std::string_view message) {
-    if (condition) return;
-    std::cerr << "FAIL: " << message << '\n';
-    ++failures;
+    local_checker.check(condition, message, std::cerr);
 }
 
 eawr::sim::math::Fixed fixed(const std::int64_t integer) {

@@ -1,11 +1,13 @@
+#include "../support/temp_dir.hpp"
+#include "../support/check.hpp"
 #include "eawr/platform/publish_files.hpp"
 
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <map>
-#include <optional>
 #include <random>
 #include <string>
 #include <string_view>
@@ -21,13 +23,11 @@ using eawr::platform::PublishFault;
 using eawr::platform::publish_files;
 using eawr::platform::publish_path_files;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 void write(const fs::path& path, const std::string& text) {
@@ -200,8 +200,7 @@ int main() {
     test_native_narrow_publication(base);
     test_failed_steps_keep_targets(base);
     test_cleanup_failures_are_reported(base);
-    std::error_code ignored;
-    fs::remove_all(base, ignored);
+    eawr::testing::remove_temp_directory(base);
     if (failures != 0) {
         std::cerr << failures << " publish_files test(s) failed\n";
         return 1;

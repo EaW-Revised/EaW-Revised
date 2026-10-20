@@ -1,3 +1,15 @@
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <span>
+#include <variant>
+#include <vector>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include <utility>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/auto_resolve_outcome.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -7,17 +19,15 @@
 #include <algorithm>
 #include <fstream>
 #include <iterator>
+using eawr::testing::take;
 
 namespace {
 using namespace eawr::campaign;
 using galactic_test::expect;
 namespace gc = eawr::sim::galactic;
 namespace cp = eawr::checkpoint;
-template <typename T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
-void check(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+
+void check(eawr::core::Result<void> result) { eawr::testing::must(std::move(result)); }
 struct Fixture {
     gc::GalacticSetup setup;
     ConflictRecord conflict;
@@ -310,7 +320,7 @@ void ring_and_failed_callback() {
     check(failed.stage_auto_resolve_outcome(a)); expect(!failed.step(workers) && failed.auto_resolve_history().empty(), "failed lethal delivery never records a successful battle");
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_auto_resolve_outcome_tests(int argc, char** argv) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") {
             const auto f = fixture();

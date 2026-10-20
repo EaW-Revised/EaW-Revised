@@ -12,6 +12,7 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <filesystem>
 #include <stdexcept>
 #include <thread>
 
@@ -550,6 +551,225 @@ void campaign_end_movies() {
         "WGS-117 queued tutorial supplies no menu/lobby activation or invented retry");
 }
 
+// WGP-81/89: session ticks may service input, but an open summary freezes campaign time.
+void summary_clock_hold() {
+    const galactic::CommandPayload close = galactic::BattleSummaryAcknowledge{900};
+    const auto encoded_close = galactic::encode_payload(close);
+    expect(galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::dialog_acknowledge, encoded_close)
+        == std::optional(close), "summary close has a canonical conflict-only session payload");
+    auto short_close = encoded_close; short_close.pop_back();
+    auto long_close = encoded_close; long_close.push_back(0);
+    for (const auto& invalid : {short_close, long_close, std::vector<std::uint8_t>(8)})
+        expect(!galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::dialog_acknowledge, invalid),
+            "summary command rejects truncated, trailing and zero-conflict payloads");
+    namespace cp = eawr::campaign;
+    using eawr::core::Result;
+    const eawr::sim::InlineExecutor executor;
+    std::string multiplayer_initial;
+    std::vector<std::string> multiplayer_ticks;
+    std::vector<std::uint8_t> multiplayer_record;
+    for (const auto observer : {eawr::sim::SeatId{}, eawr::sim::SeatId{1}, eawr::sim::SeatId{2}, eawr::sim::SeatId{3}}) {
+        auto initial = ending_setup(true); initial.interactive_seat = observer;
+        auto game = cp::GameSession::create(initial).value();
+        if (observer.value) expect(bool(game.set_interactive_seat(observer)), "multiplayer accepts the valid local observer without synchronized policy");
+        expect(!game.galaxy().setup().interactive_seat.value && !game.record().setup.interactive_seat.value,
+            "multiplayer owner setup and recordings omit the local interactive-seat policy");
+        const auto initial_hash = game.state_sha256();
+        cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+        outcome.planet = initial.planets.front().id; outcome.invader = 1; outcome.defender = 2;
+        outcome.result.conflict = 902; outcome.result.winner = 1;
+        expect(bool(game.stage_auto_resolve_outcome(outcome)), "multiplayer peer fixture stages the same outcome");
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 4; ++tick) hashes.push_back(game.step(executor).value().state_hash.get());
+        const auto bytes = galactic::write_replay(game.record()).value();
+        if (!observer.value) { multiplayer_initial = initial_hash; multiplayer_ticks = hashes; multiplayer_record = bytes; }
+        else expect(initial_hash == multiplayer_initial && hashes == multiplayer_ticks && bytes == multiplayer_record,
+            "multiplayer peers and headless owner retain identical hashes and replay bytes despite different local observers");
+    }
+    for (unsigned policy = 0; policy < 3; ++policy) {
+        auto initial = policy == 2 ? ending_setup(true) : setup();
+        if (policy == 1) {
+            initial.interactive_seat = {3}; initial.seats[2].kind = galactic::SeatKind::human;
+            initial.seats[2].human_side_id = 3;
+        }
+        if (policy == 2) initial.interactive_seat = {1};
+        auto game = cp::GameSession::create(initial).value();
+        cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+        outcome.planet = initial.planets.front().id; outcome.invader = 1; outcome.defender = 2;
+        outcome.result.conflict = 901; outcome.result.winner = 1;
+        expect(bool(game.stage_auto_resolve_outcome(outcome)), "nonmodal fixture stages outcome");
+        (void)game.step(executor).value(); const auto frame = game.galaxy().clock().galactic_frame;
+        (void)game.step(executor).value();
+        expect(!game.battle_summary_hold() && !game.galaxy().clock().pause_depth
+            && game.galaxy().clock().galactic_frame > frame, "headless, uninvolved and pinned multiplayer policies add no summary pause");
+    }
+    for (const bool land : {false, true}) for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup(); initial.interactive_seat = {1};
+        cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+        outcome.planet = initial.planets.front().id; outcome.invader = 1; outcome.defender = 2;
+        outcome.land = land; outcome.result.conflict = 900; outcome.result.winner = 1;
+        auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+        services->configure = [outcome](auto& game) {
+            cp::AutoResolveOutcomeServices adapters;
+            adapters.control = [](auto&, const auto&) { return Result<void>::success(); };
+            game.set_auto_resolve_outcome_services(std::move(adapters));
+            return game.stage_auto_resolve_outcome(outcome);
+        };
+        LiveGameSession::Options options;
+        options.workers = workers; options.pacing = LiveGameSession::Pacing::driven; options.services = services;
+        auto live = LiveGameSession::start(initial, options).value();
+        live->advance_to(30);
+        expect(live->wait_for(1, 5s), "outcome is published");
+        const auto published = live->frame(); const auto frozen = published.latest->clock().galactic_frame;
+        expect(published.result && published.summary_hold == 900 && published.latest->clock().pause_depth == 1,
+            "auto outcome publication already owns the matching solo summary hold in both modes");
+        expect(!live->wait_for(2, 30ms), "driven demand cannot advance an open summary");
+        live->submit(LiveGameOrder{{1}, galactic::BattleSummaryAcknowledge{901}, {}});
+        expect(live->wait_for(2, 5s) && live->frame().summary_hold == 900
+            && live->frame().latest->clock().galactic_frame == frozen, "stale close leaves actual galactic frame frozen");
+        live->submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+        expect(live->wait_for(3, 5s) && live->frame().latest->clock().pause_depth == 2, "player pause nests over summary hold");
+        live->submit(LiveGameOrder{{2}, galactic::BattleSummaryAcknowledge{900}, {}});
+        expect(live->wait_for(4, 5s) && live->frame().summary_hold == 900, "another seat cannot close the owning observer's summary");
+        live->submit(LiveGameOrder{{1}, galactic::BattleSummaryAcknowledge{900}, {}});
+        expect(live->wait_for(5, 5s) && !live->frame().summary_hold
+            && live->frame().latest->clock().pause_depth == 1
+            && live->frame().latest->clock().galactic_frame == frozen, "matching close preserves independently owned player pause");
+        expect(!live->wait_for(6, 30ms), "remaining player hold still parks the pacer");
+        live->submit(LiveGameOrder{{1}, galactic::ResumeGalaxy{}, {}});
+        expect(live->wait_for(30, 5s) && live->frame().latest->clock().galactic_frame > frozen, "campaign frame advances after both owners release");
+        live->stop();
+        const auto hashes = live->tick_hashes(); const auto recorded = live->record();
+        const auto bytes = galactic::write_replay(recorded).value();
+        const auto parsed = galactic::parse_replay(bytes).value();
+        expect(parsed.setup.interactive_seat == eawr::sim::SeatId{1}, "interactive policy survives replay wire encoding");
+        auto replayed = cp::GameSession::from_replay(parsed).value();
+        cp::AutoResolveOutcomeServices adapters; adapters.control = [](auto&, const auto&) { return Result<void>::success(); };
+        replayed.set_auto_resolve_outcome_services(std::move(adapters));
+        std::vector<std::string> replay_hashes;
+        for (std::size_t tick = 0; tick < hashes.size(); ++tick) replay_hashes.push_back(replayed.step(executor).value().state_hash.get());
+        expect(hashes == replay_hashes, "summary policy and recorded close replay identically to the threaded live owner");
+
+        // Direct paused-owner checkpoint and player-load normalization retain the hold.
+        auto game = cp::GameSession::create(initial).value();
+        cp::AutoResolveOutcomeServices restore_adapters; restore_adapters.control = [](auto&, const auto&) { return Result<void>::success(); };
+        game.set_auto_resolve_outcome_services(std::move(restore_adapters));
+        expect(bool(game.stage_auto_resolve_outcome(outcome)), "checkpoint fixture stages outcome");
+        (void)game.step(executor).value();
+        auto restored = cp::GameSession::create(game.record().setup).value();
+        expect(bool(restored.load_checkpoint_state(game.save_checkpoint_state().value()))
+            && restored.state_sha256() == game.state_sha256() && restored.battle_summary_hold() == 900,
+            "checkpoint retains the conflict-scoped hold and its state hash");
+        expect(bool(restored.apply_load_fixup({{restored.completed_tick(), {1}, 0}, galactic::PostLoadFixup{0, true, false, false}}))
+            && restored.galaxy().clock().pause_depth == 1, "player-load normalization cannot clear an unacknowledged summary hold");
+        const auto before = restored.galaxy().clock().galactic_frame;
+        for (unsigned i = 0; i < 20; ++i) (void)restored.step(executor).value();
+        expect(restored.galaxy().clock().galactic_frame == before, "twenty requested headless frames do not advance held campaign time");
+        expect(bool(restored.submit({{restored.completed_tick(), {1}, 1}, galactic::BattleSummaryAcknowledge{900}})), "restored close is admitted");
+        (void)restored.step(executor).value();
+        expect(restored.galaxy().clock().galactic_frame > before, "restored summary close permits the next galactic frame");
+    }
+}
+
+void summary_startup_reconciliation() {
+    namespace cp = eawr::campaign;
+    auto initial = setup(); initial.interactive_seat = {1};
+    auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+    services->restore.script_requirement = cp::ScriptRequirement::none;
+    services->configure = [planet = initial.planets.front().id](auto& game) {
+        cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet"; outcome.planet = planet;
+        outcome.invader = 1; outcome.defender = 2; outcome.result.conflict = 900; outcome.result.winner = 1;
+        return game.stage_auto_resolve_outcome(outcome);
+    };
+    const auto directory = std::filesystem::temp_directory_path()
+        / ("eawr-summary-clock-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    LiveGameSession::Options options; options.pacing = LiveGameSession::Pacing::driven; options.services = services;
+    const auto utf8 = directory.u8string(); options.saves.directory.assign(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+    auto live = LiveGameSession::start(initial, options).value();
+    live->advance_to(1); expect(live->wait_for(1, 5s), "saved summary reaches its held outcome");
+    eawr::platform::LiveSaveRequest request; request.seat = {1}; request.name = "summary";
+    const auto token = live->request_save(request);
+    expect(live->wait_save(token, 5s) && live->terminal_save_outcome(token)->phase == eawr::platform::LiveSavePhase::completed,
+        "open-summary checkpoint completes under its hold");
+    const auto barrier = live->completed_tick();
+    for (const bool acknowledged : {false, true}) {
+        auto prepared = live->prepare_load("summary").value();
+        auto restore_options = options; restore_options.await_presentation = true;
+        auto restored = LiveGameSession::start(std::move(prepared), restore_options).value();
+        const auto first = restored->frame();
+        expect(first.summary_hold == 900 && first.latest->clock().pause_depth == 1,
+            "restored first frame retains the summary hold before startup readiness");
+        restored->advance_to(barrier + 10);
+        if (acknowledged) restored->reconcile_battle_summary({1}, 900);
+        else restored->reconcile_battle_summary({1}, 901);
+        expect(!restored->wait_for(barrier + 1, 20ms), "restore acknowledgement reconciliation waits behind startup readiness");
+        restored->presentation_ready();
+        if (acknowledged) expect(restored->wait_for(barrier + 10, 5s) && !restored->frame().summary_hold
+            && restored->frame().latest->clock().galactic_frame > first.latest->clock().galactic_frame,
+            "acknowledged restored summary releases before the first resumed galactic frame");
+        else expect(!restored->wait_for(barrier + 1, 30ms) && restored->frame().summary_hold == 900
+            && restored->frame().latest->clock().galactic_frame == first.latest->clock().galactic_frame,
+            "unacknowledged restored summary remains frozen after startup readiness");
+        restored->stop();
+    }
+    live->stop(); std::filesystem::remove_all(directory);
+}
+
+void tactical_summary_clock_hold() {
+    namespace cp = eawr::campaign;
+    namespace tactical = eawr::sim::tactical;
+    for (const auto workers : {1U, 4U}) {
+        const auto initial = setup();
+        auto game = cp::GameSession::create(initial).value();
+        cp::ConflictRecord entry; entry.id = game.galaxy().next_entity_id();
+        entry.planet = initial.planets.front().id; entry.invader = 1; entry.defender = 2;
+        entry.tactical.content_identity = initial.content_identity; entry.tactical.first_free_entity_id = entry.id + 1;
+        entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+        tactical::TacticalContent content;
+        for (const auto owner : {1U, 2U}) {
+            const auto fleet = std::find_if(initial.fleets.begin(), initial.fleets.end(), [owner](const auto& row) { return row.owner == owner; });
+            const auto member = fleet->members.front();
+            entry.forces.push_back({member.id, member.type, owner, fleet->id});
+            tactical::UnitState unit; unit.entity_id = member.id; unit.type_id = member.type; unit.owner = owner;
+            entry.tactical.units.push_back(unit);
+        }
+        for (const auto& seat : initial.seats) if (seat.player <= 2) entry.seats.push_back({seat.seat_id, seat.player});
+        tactical::DurabilityProfile hull; hull.type_id = entry.forces.front().type; hull.max_hull = Fixed::from_integer(100).value();
+        content.durability.profiles.push_back(hull);
+        content.victory.condition = tactical::VictoryCondition::all_enemy_units_destroyed;
+        content.victory.contenders = {1, 2}; content.victory.controlled_players = {1, 2}; content.victory.humans = {1};
+        content.victory.countdown_frames = 2; content.victory.relevant_types = {hull.type_id};
+        LiveGameSession::Options options; options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
+        options.interactive_seat = {1}; options.entries.push_back({0, entry, content, cp::ScriptRequirement::none});
+        auto live = LiveGameSession::start(initial, options).value();
+        live->advance_to(1); expect(live->wait_for(1, 5s), "summary fixture enters tactical child");
+        auto feed = live->battle_feed(entry.id, {1}); live->battle_ready(entry.id); feed->set_paused(false);
+        feed->submit({1, {entry.forces.back().id}, tactical::DamagePayload{Fixed::from_integer(1000).value()}, {}});
+        live->advance_to(30);
+        for (unsigned tick = 2; tick <= 20 && !live->frame().result; ++tick) (void)live->wait_for(tick, 100ms);
+        const auto returned = live->frame();
+        expect(returned.result && !returned.conflict && returned.summary_hold == entry.id
+            && returned.latest->clock().pause_depth == 1, "tactical return publishes the summary with its owner pause already acquired");
+        const auto frozen = returned.latest->clock().galactic_frame;
+        expect(!live->wait_for(returned.session_tick + 1, 30ms), "tactical summary parks driven demand immediately");
+        live->submit(LiveGameOrder{{1}, galactic::ResumeGalaxy{}, {}});
+        expect(live->wait_for(returned.session_tick + 1, 5s) && live->frame().latest->clock().galactic_frame == frozen,
+            "generic ResumeGalaxy cannot consume summary ownership");
+        live->submit(LiveGameOrder{{1}, galactic::BattleSummaryAcknowledge{entry.id}, {}});
+        expect(live->wait_for(30, 5s) && live->frame().latest->clock().galactic_frame > frozen,
+            "tactical Continue releases its matching hold and advances the galaxy");
+        live->stop(); feed->stop();
+        cp::GameRecording recording{live->record(), {{0, entry}}};
+        auto replayed = cp::GameSession::from_recording(recording, [content](const auto&) {
+            return eawr::core::Result<tactical::TacticalContent>::success(content);
+        }, {}, cp::ScriptRequirement::none).value();
+        const eawr::sim::InlineExecutor executor;
+        std::vector<std::string> replay_hashes;
+        for (std::size_t tick = 0; tick < live->tick_hashes().size(); ++tick) replay_hashes.push_back(replayed.step(executor).value().state_hash.get());
+        expect(replay_hashes == live->tick_hashes(), "interactive tactical outcome hold and acknowledgement reproduce headless");
+    }
+}
+
 void pending_choice_publication() {
     namespace cp = eawr::campaign;
     const auto initial = setup();
@@ -1062,9 +1282,47 @@ void repeated_child_lifetimes() {
 
 }
 
+
+// GCMP-04 / WGP-89: invasion acceptance is a typed session command. It round-trips its canonical bytes, and the
+// live owner journals it and decides it on the simulation thread at its tick, so a replay refuses it identically.
+void invasion_accept_command() {
+    const galactic::CommandPayload accept = galactic::InvasionAccept{900};
+    const auto encoded = galactic::encode_payload(accept);
+    expect(galactic::layer_of(accept) == galactic::CommandLayer::session
+        && galactic::opcode_of(accept) == galactic::session_opcodes::invasion_accept && encoded.size() == 8
+        && galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::invasion_accept, encoded)
+            == std::optional(accept), "invasion accept has a canonical conflict-only session payload");
+    auto short_accept = encoded; short_accept.pop_back();
+    auto long_accept = encoded; long_accept.push_back(0);
+    for (const auto& invalid : {short_accept, long_accept, std::vector<std::uint8_t>(8)})
+        expect(!galactic::decode_payload(galactic::CommandLayer::session, galactic::session_opcodes::invasion_accept, invalid),
+            "invasion accept rejects truncated, trailing and zero-conflict payloads");
+    expect(galactic::session_opcodes::invasion_accept == 16 && galactic::session_opcodes::first_reserved == 17,
+        "the coordinator-assigned session opcode leaves the reserved walk range after it");
+
+    auto started = LiveGameSession::start(setup(), {.pacing = LiveGameSession::Pacing::driven});
+    expect(static_cast<bool>(started), "invasion accept session starts"); if (!started) return;
+    auto& live = *started.value();
+    live.submit(LiveGameOrder{{1}, accept, {}});
+    live.advance_to(1);
+    expect(live.wait_for(1, 5s), "the accept command drives one tick even though no offer exists");
+    live.stop();
+    const auto rejected = live.rejected_orders();
+    expect(rejected.size() == 1 && rejected.front().message == "invasion offer is no longer available",
+        "the simulation thread refuses an acceptance with no retained offer at its tick");
+    const auto record = live.record();
+    expect(record.commands.size() == 1 && record.commands.front().payload == accept
+        && record.commands.front().key.seat == eawr::sim::SeatId{1},
+        "a refused acceptance is still journaled, because every peer decides it at execution");
+    auto replayed = eawr::campaign::GameSession::from_replay(record).value();
+    const eawr::sim::InlineExecutor executor;
+    std::vector<std::string> hashes;
+    while (replayed.completed_tick() < record.final_tick_count) hashes.push_back(replayed.step(executor).value().state_sha256);
+    expect(hashes == live.tick_hashes(), "the journaled acceptance replays to the same hashes");
+}
 }
 
-int main() {
+int case_galactic_live_game_session_tests() {
     retained_campaign_root();
     intervals();
     applied_speed_schedule();
@@ -1073,6 +1331,10 @@ int main() {
     campaign_end_owner();
     campaign_end_movies();
     observer_story_publication();
+    summary_clock_hold();
+    tactical_summary_clock_hold();
+    invasion_accept_command();
+    summary_startup_reconciliation();
     pending_choice_publication();
     replay_parity();
     pause_and_sequences(LiveGameSession::Pacing::driven);

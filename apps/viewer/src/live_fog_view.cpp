@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_fog_view.hpp"
 
@@ -21,7 +22,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <iomanip>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -71,26 +71,7 @@ void fragment() {
 constexpr int fog_render_priority = 1;
 
 [[nodiscard]] std::string json(const std::string_view text) {
-    std::ostringstream output;
-    output << '"';
-    for (const char character : text) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (static_cast<unsigned char>(character) < 0x20U) {
-                output << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                       << static_cast<int>(static_cast<unsigned char>(character)) << std::dec;
-            } else {
-                output << character;
-            }
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote(text);
 }
 
 [[nodiscard]] double to_double(const sim::math::Fixed value) {

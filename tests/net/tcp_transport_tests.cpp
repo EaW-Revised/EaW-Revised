@@ -1,23 +1,32 @@
+#include "../support/check.hpp"
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/net/lan_directory.hpp"
 #include "../../src/net/platform_socket.hpp"
 
-#include <chrono>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
-#include <stdexcept>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
 #include <thread>
-#include <utility>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace std::chrono_literals;
 using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
-void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void require(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 template<class F> void until(F predicate, std::chrono::milliseconds timeout = 3000ms) {
     const auto deadline = Clock::now() + timeout;
     while (!predicate()) {

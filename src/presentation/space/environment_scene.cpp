@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/environment_scene.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/presentation/space/sun_retail.hpp"
 
@@ -14,13 +15,8 @@
 namespace eawr::presentation::space {
 namespace {
 
-[[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
-
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(), [](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] bool finite(const assets::Vec3f& value) noexcept {

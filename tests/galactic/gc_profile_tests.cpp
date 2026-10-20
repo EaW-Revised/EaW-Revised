@@ -1,3 +1,7 @@
+#include <cstdint>
+#include <cstddef>
+#include <string>
+#include "../support/check.hpp"
 #include "eawr/core/gc_profile.hpp"
 
 #include <iostream>
@@ -6,9 +10,10 @@
 
 namespace gp = eawr::gc_profile;
 int main() {
-    int failures{};
+    eawr::testing::Checker checker;
+    int& failures = checker.failures;
     const auto expect = [&](bool condition, const char* message) {
-        if (!condition) { std::cerr << message << '\n'; ++failures; }
+        checker.check(condition, message, std::cerr, "");
     };
     expect(gp::enabled.load() == gp::requested(), "environment switch is read once at process startup");
     gp::enabled.store(false);

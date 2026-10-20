@@ -159,6 +159,10 @@ public:
     [[nodiscard]] double emitter_prepare_ms() const noexcept { return emitter_prepare_ms_; }
     [[nodiscard]] double clone_prepare_ms() const noexcept { return clone_prepare_ms_; }
     [[nodiscard]] double* clone_prepare_timer() noexcept { return measure_preparation_ ? &clone_prepare_ms_ : nullptr; }
+    // Called after sample catch-up only for a terminal geometry-hidden clone.
+    // Visible-bone effects must be exhausted; hidden-bone effects move to the
+    // existing orphan/drain path with their last frames.
+    [[nodiscard]] bool retire_clone(std::size_t ship, std::span<const animation::BonePose> final_bones);
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "unit_emitters" member, followed by ",\n".

@@ -64,6 +64,16 @@ protected:
 private:
     struct Options;
     void read_host_options(const godot::PackedStringArray& arguments);
+    void ready_battle_setup();
+    bool ready_requested_mode();
+    void ready_replay_scene();
+    void process_campaign_frame(const double delta);
+    void process_battle_frame(const double delta);
+    void process_battle_setup_frame();
+    void process_camera_exercise_frame(const double delta);
+    void process_atlas_exercise_frame();
+    void process_renderer_exercise_frame();
+    void process_replay_frame();
     // Presentation-only screen-space atlas overlay. It owns its own canvas
     // RIDs and never contributes to the 3D scenario or the material routes.
     struct AtlasOverlay;

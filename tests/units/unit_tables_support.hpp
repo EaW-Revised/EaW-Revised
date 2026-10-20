@@ -13,24 +13,15 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/vfs/vfs.hpp"
+
 #include <array>
-#include <algorithm>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <limits>
 #include <map>
 #include <optional>
-#include <set>
-#include <span>
-#include <utility>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <vector>
 
 namespace unit_tables_test_support {
@@ -38,7 +29,7 @@ namespace unit_tables_test_support {
 using eawr::units::Fixed;
 using eawr::units::UnitKind;
 using eawr::units::Vec3;
-extern int failures;
+extern int& failures;
 
 
 struct TempTree;
@@ -46,7 +37,6 @@ struct Loaded;
 
 extern const std::string_view hardpoints_xml;
 void expect(const bool condition, const std::string_view message);
-std::optional<std::string> environment(const char* name);
 std::int64_t raw(const std::int64_t whole);
 Vec3 point(const std::int64_t x, const std::int64_t y, const std::int64_t z);
 void write(const std::filesystem::path& path, const std::string_view text);

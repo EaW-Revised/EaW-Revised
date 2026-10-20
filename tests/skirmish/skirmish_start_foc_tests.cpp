@@ -2,6 +2,21 @@
 #include "setup_map_reference.hpp"
 #include "setup_map_golden.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace skirmish_start_test_support {
 
 // WTA-46 (#735): a lobby AI's level, through the installed XML and the start, scales what its objects spawn with.

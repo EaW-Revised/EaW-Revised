@@ -107,6 +107,18 @@ public:
     void write_report(std::ostream& output) const;
 
 private:
+    void present_outcome_cues(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const bool recovery_quiet);
+    void update_listener(const LiveSessionView& live, const FixedCamera& camera);
+    void remember_visible_units(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle);
+    void present_reached_audio(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const sim::tactical::PlayerId local);
+    void present_combat_audio(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const sim::tactical::PlayerId local, const std::vector<BattleEffects::TerminalSound>& terminal_sounds);
+    void expand_initial_audio_types(const units::UnitTables& tables, std::set<sim::tactical::TypeId>& first_types);
+    void prepare_event_registry();
+    template <typename Event>
+    void prepare_music_and_faction_cues(const std::string_view local_faction, Event& event);
+    void prepare_speech_registry();
+    template <typename Event>
+    void prepare_unit_cues(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, const std::set<sim::tactical::TypeId>& first_types, const std::map<sim::tactical::TypeId, const audio::SfxEvent*>& spotted, const audio::SfxEvent* generic_spotted, Event& event, bool& binding_unit, bool& first_type);
     // The sound events of one unit type (BA-13 to BA-17, BA-20 to BA-22).
     struct TypeSounds final {
         std::string name;

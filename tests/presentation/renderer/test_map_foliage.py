@@ -31,6 +31,9 @@ sys.path.insert(0, str(ROOT / "tests/assets/fixtures"))
 import camera_fixture  # noqa: E402
 import foliage_fixture as fixture  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 RENDERERS = ("forward_plus",)
 # The live recording: frames at 3, 4 and 5 s of a fixed 30 fps movie. The tree
 # bend (3 s period) and the grass wave (a 0.53 s period at this wind) are at
@@ -45,10 +48,9 @@ def run_viewer(renderer: str, root: pathlib.Path, report: pathlib.Path, capture:
                "--path", str(ROOT / "apps/viewer/project"), "--",
                "--eawr-map", fixture.MAP_LOGICAL_PATH, "--eawr-game-root", str(root),
                "--eawr-report", str(report), "--eawr-capture", str(capture), "--eawr-populate", *extra]
-    result = subprocess.run(command, cwd=ROOT, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True, timeout=300, check=False)
+    result = python_helpers.run_viewer(command, cwd=ROOT, timeout=300)
     assert report.is_file(), result.stdout
-    return result.returncode, json.loads(report.read_text(encoding="utf-8")), result.stdout
+    return result.returncode, python_helpers.read_json(report), result.stdout
 
 
 def write_live_camera(root: pathlib.Path, path: pathlib.Path) -> pathlib.Path:

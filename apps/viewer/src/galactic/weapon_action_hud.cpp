@@ -1,5 +1,4 @@
 #include "galactic_mode_internal.hpp"
-#include "weapon_action_hud_fixture.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/input_routing.hpp"
 #include "eawr/presentation/ui/layout.hpp"
@@ -17,8 +16,7 @@ std::string first(const data::ui::CommandBarComponent& component, data::ui::Fiel
 }
 bool GalacticMode::State::build_weapon_action_hud() {
     if (!filesystem || !hud || !hud_fonts) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_fixture(options.hud_fixture))
-        weapon_menu.fixture = galactic_view::weapon_action_fixture_snapshot(galaxy->local.player, options.hud_fixture);
+    if (options.hud_provider && !options.hud_provider->weapon_action(*this)) return false;
     weapon_menu.blocker = memnew(Control);
     hud->add_child(weapon_menu.blocker);
     weapon_menu.blocker->set_name("weapon_action_modal");

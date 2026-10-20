@@ -417,7 +417,7 @@ void frozen_galaxy_control_events(const galactic::GalacticSetup& initial) {
     expect(static_cast<bool>(feed), "child supplies a participant feed");
     if (!feed) { live->stop(); return; }
     feed->set_paused(false); live->battle_ready(entry.id);
-    live->submit(eawr::platform::LiveGameOrder{galactic::SeatId{1}, galactic::SaveRequest{0}, {}, {}});
+    live->submit(eawr::platform::LiveGameOrder{galactic::SeatId{1}, galactic::SaveRequest{0}, {}});
     live->advance_to(2);
     expect(live->wait_for(2, 10s), "session control executes during child service");
     expect(live->frame().latest->completed_tick() == frozen_tick, "galaxy tick remains frozen across session control");

@@ -72,7 +72,7 @@ def _track(first: float, last: float, colour: bool, keys=()) -> bytes:
 def _emitter(name: str, *, blend: int, texture: str, position, velocity, rgb,
              size=(2.0, 5.0), heat=False, world=False, tail=False, tail_size=0.0,
              rate=24, lifetime=1.2, birth_child=None, death_child=None,
-             start_delay=None) -> bytes:
+             start_delay=None, burst_interval=None) -> bytes:
     properties = b"".join([
         _mini(0x04, struct.pack("<I", blend)),
         _mini(0x0F, struct.pack("<f", lifetime)),
@@ -87,6 +87,10 @@ def _emitter(name: str, *, blend: int, texture: str, position, velocity, rgb,
     if start_delay is not None:
         # Legacy emitter start delay (seconds); absent unless requested.
         properties += _mini(0x24, struct.pack("<f", start_delay))
+    if burst_interval is not None:
+        properties += (_mini(0x07, b"\x01")
+                       + _mini(0x25, struct.pack("<f", burst_interval))
+                       + _mini(0x26, struct.pack("<I", rate)))
     groups = velocity + _group(0, point=(lifetime, 0.0, 0.0)) + position
     tracks = b"".join([
         _track(rgb[0], rgb[0], True), _track(rgb[1], rgb[1], True),

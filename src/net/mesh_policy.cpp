@@ -117,10 +117,10 @@ bool MeshFormation::attach(PeerIndex seat, std::uint64_t revision) {
 void MeshFormation::vacate(PeerIndex seat) {
     if (seat >= capacity_) return;
     occupied_ &= static_cast<MeshSeats>(~mesh_seat(seat));
-    links_[seat] = 0; regranted_[seat] = 0; admitted_[seat] = 0; established_[seat] = false;
+    links_[seat] = 0; retries_[seat].fill(0); admitted_[seat] = 0;
     for (PeerIndex p = 0; p < capacity_; ++p) {
         links_[p] &= static_cast<MeshSeats>(~mesh_seat(seat));
-        regranted_[p] &= static_cast<MeshSeats>(~mesh_seat(seat));
+        retries_[p][seat] = 0;
     }
     if (seat == 0) closed_ = true;
 }
@@ -129,7 +129,6 @@ bool MeshFormation::pair_open(PeerIndex a, PeerIndex b) {
         || !(occupied_ & mesh_seat(a)) || !(occupied_ & mesh_seat(b))) return false;
     links_[a] = static_cast<MeshSeats>(links_[a] | mesh_seat(b));
     links_[b] = static_cast<MeshSeats>(links_[b] | mesh_seat(a));
-    for (PeerIndex p = 0; p < capacity_; ++p) if (connected(p)) established_[p] = true;
     return true;
 }
 bool MeshFormation::connected(PeerIndex seat) const {
@@ -152,9 +151,8 @@ MeshFormationResult MeshFormation::pair_failed(PeerIndex a, PeerIndex b, MeshRel
         const PeerIndex guest = a == 0 ? b : a;
         vacate(guest); return {MeshFormationAction::refuse, guest, 0, true};
     }
-    if (established_[a] && established_[b] && !(regranted_[a] & mesh_seat(b))) {
-        regranted_[a] = static_cast<MeshSeats>(regranted_[a] | mesh_seat(b));
-        regranted_[b] = static_cast<MeshSeats>(regranted_[b] | mesh_seat(a));
+    if (retries_[a][b] < 2) {
+        ++retries_[a][b]; ++retries_[b][a];
         return {MeshFormationAction::regrant, later, other, false};
     }
     vacate(later); return {MeshFormationAction::refuse, later, other, true};

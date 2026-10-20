@@ -1,3 +1,5 @@
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "../../src/script/foc/galactic_ai_actions.hpp"
 #include "eawr/core/gc_profile.hpp"
@@ -8,19 +10,30 @@
 #include "eawr/sim/galactic/movement.hpp"
 #include "eawr/vfs/vfs.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
+#include <ios>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 Fixed f(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 gc::GalacticSetup setup() {
     gc::GalacticSetup s;
     s.players = {{1, 1, 0}, {2, 2, 0}};
@@ -155,7 +168,7 @@ void staged_arrival_recheck_contracts() {
                 eawr::gc_profile::enabled.store(profiling);
                 expect(calls == (result.finished ? 1U : 0U), "arrival recheck has one full snapshot per publishing barrier");
                 expect(current.galaxy().canonical_state_bytes() == oracle.galaxy().canonical_state_bytes()
-                    && current.galaxy().record() == oracle.galaxy().record(), "staged and restored arrival state and record bytes match the unbatched oracle");
+                    && galactic_test::record_follows(current.galaxy(), oracle.galaxy()), "staged and restored arrival state and record bytes match the unbatched oracle");
             };
             poll(game, actions); poll(restored, resumed);
             expect(take(actions.capture()).components == take(direct.capture()).components
@@ -753,15 +766,8 @@ void adapter() {
         "explicit transport binding retains its own authored travel quantities");
 }
 void installed() {
-    std::optional<std::string> root;
-#ifdef _WIN32
-    char* value = nullptr; std::size_t size = 0;
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") == 0 && value) root = value;
-    std::free(value);
-#else
-    if (const auto* value = std::getenv("EAWR_EAW_GAME_ROOT")) root = value;
-#endif
-    if (!root) { std::cout << "SKIPPED: stock movement inputs need EAWR_EAW_GAME_ROOT\n"; return; }
+    std::optional<std::string> root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock movement inputs need EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
@@ -789,7 +795,7 @@ void installed() {
     std::cout << "stock movement types=" << bindings.size() << " initialized-modifier=" << inputs.value().base_mode_modifier.raw() << '\n';
 }
 } // namespace
-int main(int argc, const char* const argv[]) {
+int case_galactic_movement_tests(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }

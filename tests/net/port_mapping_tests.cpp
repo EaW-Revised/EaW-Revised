@@ -1,17 +1,33 @@
+#include "../support/check.hpp"
 #include "eawr/net/port_mapping.hpp"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <span>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace m = eawr::net::mapping;
 using eawr::core::Result;
 std::atomic_int failures{};
-void expect(bool ok, const char* message) { if (!ok) { std::cerr << "FAIL: " << message << '\n'; ++failures; } }
+void expect(bool ok, const char* message) {
+    if (!ok) {
+        eawr::testing::Checker local;
+        local.check(false, message, std::cerr);
+        failures += local.failures;
+    }
+}
 template<class T> Result<T> unavailable() {
     eawr::core::Diagnostic d; d.code = "EAWR-NET-1107"; d.message = "Fake router timeout";
     return Result<T>::failure(std::move(d));

@@ -1,4 +1,5 @@
 #include "space_fog_units.hpp"
+#include "eawr/core/text.hpp"
 
 #include "family_textures.hpp"
 
@@ -17,10 +18,7 @@ namespace eawr::presentation::godot_backend {
 namespace {
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) {
-    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(), [](char a, char b) {
-        const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
-        return lower(a) == lower(b);
-    });
+    return core::iequals(left, right);
 }
 
 // The documented conversion (x, y, z) -> (x, z, -y) is a signed permutation,

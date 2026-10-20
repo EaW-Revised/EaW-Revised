@@ -2,8 +2,9 @@
 #include "battle_content.hpp"
 #include "ui/theme_builder.hpp"
 
-#include "eawr/core/diagnostic.hpp"
 
+#include "eawr/core/diagnostic.hpp"
+#include "eawr/core/text.hpp"
 #include <godot_cpp/classes/mesh.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/world3d.hpp>
@@ -33,9 +34,8 @@ void fragment() {
 }
 )GODOT";
 
-std::string upper(std::string text) {
-    for (char& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
-    return text;
+std::string upper(std::string_view text) {
+    return core::to_upper(text);
 }
 Vector3 point(galactic_view::Vec3 source) {
     const auto p = galactic_view::render_point(source);
@@ -246,8 +246,18 @@ bool GalacticMode::State::build_routes() {
     return true;
 }
 
+GalacticMode::State::LocalObservationIndex GalacticMode::State::local_observation_index() const {
+    LocalObservationIndex index;
+    if (!displayed_snapshot) return index;
+    const auto rows = displayed_snapshot->observations();
+    index.reserve(rows.size());
+    for (const auto& row : rows)
+        if (row.player == galaxy->local.player) index.emplace(row.planet, &row); // emplace keeps the first row, as a scan would
+    return index;
+}
+
 galactic_view::RouteOwners GalacticMode::State::route_owners(const galactic_view::PlanetView& a,
-    const galactic_view::PlanetView& b) const {
+    const galactic_view::PlanetView& b, const LocalObservationIndex* indexed) const {
     // WGUI-100: trade-route construction and line animation read each
     // endpoint's apparent owner (debug build): the live owner only when the
     // observer may see ownership, else the cached apparent owner, else none.
@@ -259,10 +269,17 @@ galactic_view::RouteOwners GalacticMode::State::route_owners(const galactic_view
         End result;
         if (stub) return End{planet.owner, planet.owner_faction};
         if (observed) {
-            const auto row = std::find_if(displayed_snapshot->observations().begin(), displayed_snapshot->observations().end(),
-                [&](const auto& item) { return item.player == galaxy->local.player && item.planet == planet.id; });
-            if (row != displayed_snapshot->observations().end() && row->discovered && row->apparent_owner
-                && *row->apparent_owner != neutral_owner) result.owner = *row->apparent_owner;
+            const sim::galactic::ObservedPlanet* row = nullptr;
+            if (indexed) {
+                const auto found = indexed->find(planet.id);
+                if (found != indexed->end()) row = found->second;
+            } else {
+                const auto found = std::find_if(displayed_snapshot->observations().begin(), displayed_snapshot->observations().end(),
+                    [&](const auto& item) { return item.player == galaxy->local.player && item.planet == planet.id; });
+                if (found != displayed_snapshot->observations().end()) row = &*found;
+            }
+            if (row && row->discovered && row->apparent_owner && *row->apparent_owner != neutral_owner)
+                result.owner = *row->apparent_owner;
         }
         const auto* appearance = content ? galactic_view::affiliation_for_owner(*content, result.owner) : nullptr;
         if (appearance) result.faction = appearance->faction;
@@ -288,6 +305,7 @@ bool GalacticMode::State::route_discovered(const galactic_view::PlanetView& a, c
 }
 
 bool GalacticMode::State::update_routes() {
+    const auto measured = measure_frame(FramePhase::routes);
     update_fleet_route_preview();
     if (!route_styles) return true;
     std::map<std::string, std::vector<RouteGeometry::Quad>> batches;

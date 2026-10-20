@@ -1,5 +1,5 @@
 #include "galactic/clock_input.hpp"
-#include "galactic/hud_clock_fixture.hpp"
+#include "../presentation/galactic/hud_clock_fixture.hpp"
 #ifdef NDEBUG
 #undef NDEBUG
 #endif

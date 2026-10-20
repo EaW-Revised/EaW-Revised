@@ -1,9 +1,17 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/tactical_adapter.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "fake_transport.hpp"
 #include "diagnostic_sink.hpp"
 #include "setup_test_support.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <ios>
+#include <span>
+
 #if defined(EAWR_TEST_GNS)
 #include "eawr/net/gns_transport.hpp"
 #include <chrono>
@@ -18,7 +26,7 @@
 #include <iterator>
 #include <memory>
 #include <optional>
-#include <stdexcept>
+#include <exception>
 #include <string>
 #include <utility>
 #include <vector>
@@ -31,12 +39,9 @@ using sim::math::Fixed;
 using Bytes = std::vector<std::uint8_t>;
 
 void expect(bool condition, const std::string& message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition) eawr::testing::require(condition, message);
 }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::require;
 Fixed units(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 
 tactical::TacticalSetup setup() {

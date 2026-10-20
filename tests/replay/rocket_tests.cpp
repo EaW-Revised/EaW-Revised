@@ -1,9 +1,12 @@
+#include "../support/check.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 #include "../../src/sim/tactical/collection.hpp"
 #include "../../src/sim/tactical/rocket_internal.hpp"
 #include "../../src/sim/tactical/motion_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <string_view>
@@ -14,7 +17,8 @@ namespace t = eawr::sim::tactical;
 namespace d = t::detail;
 namespace m = eawr::sim::math;
 using m::Fixed;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 Fixed q(const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 m::Vec3 at(const std::int64_t x, const std::int64_t y = 0, const std::int64_t z = 0) { return {q(x), q(y), q(z)}; }
 m::Vec3 plus(const m::Vec3& a, const m::Vec3& b) {
@@ -24,7 +28,7 @@ m::Vec3 minus(const m::Vec3& a, const m::Vec3& b) {
     return {m::subtract(a.x, b.x).value(), m::subtract(a.y, b.y).value(), m::subtract(a.z, b.z).value()};
 }
 void expect(const bool value, const std::string_view message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
 t::FlightProfile rocket_profile() {
     t::FlightProfile flight;

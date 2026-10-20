@@ -1,5 +1,4 @@
 #include "galactic_mode_internal.hpp"
-#include "hero_action_hud_fixture.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include <godot_cpp/classes/image_texture.hpp>
@@ -23,11 +22,7 @@ std::string two(std::size_t index) { return index < 10 ? "0" + std::to_string(in
 }
 bool GalacticMode::State::build_hero_action_hud() {
     if (!filesystem || !hud || !hud_fonts) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::hero_action_fixture(options.hud_fixture)) {
-        hero_menu.fixture = galactic_view::hero_action_fixture_snapshot(galaxy->local.player, options.hud_fixture);
-        production_names.insert({{1000,"Rebel_Trooper_Team"},{1001,"Corellian_Corvette"},
-            {1002,"Obi_Wan_Team"},{1003,"Smuggler_Team_E"},{1004,"Smuggler_Team_R"}});
-    }
+    if (options.hud_provider && !options.hud_provider->hero_action(*this)) return false;
     hero_menu.blocker = memnew(Control);
     hud->add_child(hero_menu.blocker);
     hero_menu.blocker->set_name("hero_action_modal");
@@ -127,11 +122,27 @@ void GalacticMode::State::choose_hero_action(std::size_t index) {
             game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
                 sim::galactic::ExecutePreparedAbility{*choice.live_prepared}, {}});
         }
+    } else if (hero_menu.sabotage) {
+        // WGCH-73/96: the click queues the prepared structure and price; the host resolves both again.
+        if (!facts.sabotage || index >= facts.sabotage->size() || !facts.sabotage->at(index).affordable) return;
+        hero_menu.accepted_index = facts.sabotage->at(index).prepared_index;
+        if (!hero_menu.fixture) {
+            const auto& choice = facts.sabotage->at(index);
+            if (!game || !choice.live_prepared) return;
+            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
+                sim::galactic::ExecutePreparedAbility{*choice.live_prepared}, {}});
+        }
     } else {
-        if (!hero_menu.fixture) return; // neutralization still requires its live handler
+        // WGCH-132: an invalid or unaffordable selection leaves the dialog open; accepted queues the stored option.
         if (!facts.neutralization || index >= facts.neutralization->size()
             || !facts.neutralization->at(index).affordable || !facts.neutralization->at(index).prepared.valid) return;
         hero_menu.accepted_index = facts.neutralization->at(index).prepared_index;
+        if (!hero_menu.fixture) {
+            const auto& choice = facts.neutralization->at(index);
+            if (!game || !choice.live_prepared) return;
+            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
+                sim::galactic::ExecutePreparedAbility{*choice.live_prepared}, {}});
+        }
     }
     static_cast<void>(map_input.hud_event()); ++hero_menu.choices_accepted;
     hero_menu.closed = true; hero_menu.blocker->hide();
@@ -162,9 +173,12 @@ void GalacticMode::State::update_hero_action_hud() {
     }
     const auto* facts = hero_menu.facts ? &*hero_menu.facts : nullptr;
     hero_menu.theft = facts && facts->theft.has_value();
+    hero_menu.sabotage = facts && facts->sabotage.has_value();
     const auto active = hero_menu.theft ? 0U : 1U;
-    const bool supplied = facts && (hero_menu.theft ? facts->theft.has_value() : facts->neutralization.has_value());
-    const auto offered = supplied ? (hero_menu.theft ? facts->theft->size() : facts->neutralization->size()) : 0;
+    const bool supplied = facts && (hero_menu.theft ? facts->theft.has_value()
+        : hero_menu.sabotage ? true : facts->neutralization.has_value());
+    const auto offered = supplied ? (hero_menu.theft ? facts->theft->size()
+        : hero_menu.sabotage ? facts->sabotage->size() : facts->neutralization->size()) : 0;
     // No invented scrolling or silent truncation of the prepared whole list.
     const bool available = offered > 0 && hero_menu.surfaces[active].panel
         && offered <= hero_menu.surfaces[active].choices.size();
@@ -199,13 +213,14 @@ void GalacticMode::State::update_hero_action_hud() {
         // A shared publication may contain only another ability's menu (e.g. destruction).
         // Its absent theft/neutralization list is not an empty vector to dereference.
         if (!facts || kind != active || !supplied) continue;
-        text(kind == 0 ? "bm_title" : "h_title", battle_text(kind == 0 ? "TEXT_SLICE_DIALOG_TITLE" : "TEXT_NEUTRALIZE_HERO_DIALOG_TITLE"));
+        // Sabotage has no authored dialog title of its own here: structure rows and prices stand alone (named seam).
+        if (!hero_menu.sabotage) text(kind == 0 ? "bm_title" : "h_title", battle_text(kind == 0 ? "TEXT_SLICE_DIALOG_TITLE" : "TEXT_NEUTRALIZE_HERO_DIALOG_TITLE"));
         if (kind == 0) {
             text("bm_title01",battle_text("TEXT_SLICE_DIALOG_DESCRIPTION"));
             text("bm_tech_level",std::to_string(facts->tech));
             text("bm_text_steal",battle_text("TEXT_BUTTON_SLICE"));
         }
-        const auto count = kind == 0 ? facts->theft->size() : facts->neutralization->size();
+        const auto count = kind == 0 ? facts->theft->size() : hero_menu.sabotage ? facts->sabotage->size() : facts->neutralization->size();
         for (std::size_t index=0; index<surface.choices.size(); ++index) {
             const auto& [name,button] = surface.choices[index];
             position(button,name); button->set_hit_rect({{},button->get_size()});
@@ -217,6 +232,9 @@ void GalacticMode::State::update_hero_action_hud() {
                 const auto& choice=facts->theft->at(index);
                 type=choice.live_prepared ? choice.live_prepared->theft.technology : choice.prepared.technology;
                 price=choice.live_prepared ? choice.live_prepared->price : choice.prepared.price; admitted=choice.affordable;
+            } else if (hero_menu.sabotage) {
+                const auto& choice=facts->sabotage->at(index);
+                type=choice.structure_type; price=choice.price; admitted=choice.affordable;
             } else {
                 const auto& choice=facts->neutralization->at(index);
                 type=choice.prepared.siphon ? choice.source_type : choice.current_type;
@@ -235,7 +253,9 @@ void GalacticMode::State::update_hero_action_hud() {
             } else {
                 text("h_name_"+two(index),title); text("h_price_"+two(index),"$ "+galactic_view::credit_balance(price));
             }
-            button->set_disabled(!enabled || !admitted || !hero_menu.fixture);
+            const bool live_ready = hero_menu.fixture || (hero_menu.sabotage ? facts->sabotage->at(index).live_prepared.has_value()
+                : hero_menu.theft ? facts->theft->at(index).live_prepared.has_value() : facts->neutralization->at(index).live_prepared.has_value());
+            button->set_disabled(!enabled || !admitted || !live_ready);
         }
     }
 }
@@ -283,6 +303,11 @@ void GalacticMode::State::write_hero_action_report(std::ostream& output) const {
             << ", \"target_absence_raw\": " << row.prepared.target_absence.raw()
             << ", \"affordable\": " << (row.affordable ? "true" : "false") << "}";
     }
-    output << "]}";
+    if (facts && facts->sabotage) for (std::size_t index=0;index<facts->sabotage->size();++index) {
+        const auto& row=facts->sabotage->at(index);
+        output << (index ? ", " : "") << "{\"index\": " << row.prepared_index << ", \"structure_type\": " << row.structure_type
+            << ", \"price_raw\": " << row.price.raw() << ", \"affordable\": " << (row.affordable ? "true" : "false") << "}";
+    }
+    output << "], \"sabotage\": " << (hero_menu.sabotage ? "true" : "false") << "}";
 }
 } // namespace eawr::presentation::godot_backend

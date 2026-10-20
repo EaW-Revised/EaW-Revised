@@ -39,6 +39,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "apps" / "viewer" / "tools"))
 import export_package  # noqa: E402  (the pinned Godot identity and licence bundling)
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file  # noqa: E402
+
 TOOLS = ("sim_headless", "sim_bench", "path_bench", "asset_scan", "asset_validate", "xml_scan", "scene_scan",
          "sky_scan", "unit_scan", "script_smoke", "hud_movie_prepare")
 DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md")
@@ -101,10 +104,6 @@ def preimport_project(godot: Path, project: Path, importer: Callable[[Path, Path
     missing = [name for name in PREIMPORT_FILES if not (project / name).is_file()]
     if missing:
         raise RuntimeError(f"the pre-import did not produce {', '.join(missing)}" + (f" ({output})" if output else ""))
-
-
-def sha256_file(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Optional[Path],

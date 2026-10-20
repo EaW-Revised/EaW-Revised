@@ -91,9 +91,9 @@ apt-get -y install docker.io git certbot unattended-upgrades
 systemctl enable --now docker
 dpkg-reconfigure -plow unattended-upgrades   # security updates for the OS
 adduser --system --group --uid 10001 relay   # same UID/GID as the container user
-mkdir -p /srv/eawr/config /srv/eawr/src
-git clone --depth 1 --branch server-source-2026-10-15.3 https://github.com/EaW-Revised/EaW-Revised.git /srv/eawr/src
-cd /srv/eawr/src
+mkdir -p /srv/eawr/config /srv/eawr/src-public
+git clone --depth 1 --branch server-source-2026-10-15.3 https://github.com/EaW-Revised/EaW-Revised.git /srv/eawr/src-public
+cd /srv/eawr/src-public
 docker build -f apps/relay_server/Dockerfile -t eawr-relay:server-source-2026-10-15.3 .
 ```
 
@@ -253,7 +253,7 @@ build identity must match, otherwise joins are refused with a build-mismatch mes
 [Owner] on the server:
 
 ```sh
-cd /srv/eawr/src && git fetch --depth 1 origin tag <new tag> && git checkout <new tag>
+cd /srv/eawr/src-public && git fetch --depth 1 origin tag <new tag> && git checkout <new tag>
 docker build -f apps/relay_server/Dockerfile -t eawr-relay:<new tag> .
 docker stop eawr-relay && docker rm eawr-relay
 # run the step 6 docker run command with eawr-relay:<new tag>

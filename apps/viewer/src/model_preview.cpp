@@ -1,4 +1,5 @@
 #include "model_preview.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -134,14 +135,7 @@ std::string_view to_string(const CameraPolicy policy) noexcept {
 }
 
 bool iequals(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto fold = [](const char value) {
-            return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-        };
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 std::optional<LegacySelection> legacy_selection(const std::string_view program) {

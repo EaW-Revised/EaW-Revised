@@ -1,6 +1,6 @@
 #include "dialog_script_internal.hpp"
+#include "eawr/core/text.hpp"
 
-#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <limits>
@@ -71,13 +71,7 @@ std::optional<std::int64_t> integer_literal(const std::string_view text) {
 }
 
 std::string_view trim(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) {
-        text.remove_prefix(1);
-    }
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) {
-        text.remove_suffix(1);
-    }
-    return text;
+    return core::trim_view(text, core::line_whitespace);
 }
 
 

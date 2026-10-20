@@ -1,23 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from pathlib import Path
 from typing import Any
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 
 TOOL_VERSION = "1.0.0"
 
 
 def canonical_bytes(value: Any) -> bytes:
     """Phase-0 canonical JSON: sorted keys, UTF-8, LF and one final newline."""
-    text = json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    )
-    return (text + "\n").encode("utf-8")
+    return python_helpers.json_bytes(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
 
 
 def sha256(data: bytes) -> str:
@@ -31,8 +27,8 @@ def manifest_id(payload: dict[str, Any]) -> str:
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(canonical_bytes(value))
+    python_helpers.write_json(path, value, create_parents=True, binary=True,
+                              ensure_ascii=False, allow_nan=False, sort_keys=True)
 
 
 def source_hashes(directory: Path, names: list[str]) -> list[dict[str, str]]:

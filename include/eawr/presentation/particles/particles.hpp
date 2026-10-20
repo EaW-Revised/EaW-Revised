@@ -310,6 +310,9 @@ public:
     [[nodiscard]] bool finished() const noexcept {
         return detached_ && particles_.empty() && child_instances_.empty();
     }
+    // Natural exhaustion includes finite undetached systems. Detail/visibility
+    // gates are transient and cannot prove that a root will never emit again.
+    [[nodiscard]] bool exhausted() const noexcept;
 
 private:
     struct EmitterState final {

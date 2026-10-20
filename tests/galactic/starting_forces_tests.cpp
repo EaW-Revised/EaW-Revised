@@ -5,9 +5,12 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
+#include "../../src/sim/galactic/native_actor_change_checkpoint.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <cstdlib>
+#include <tuple>
 
 namespace {
 namespace cp = eawr::campaign;
@@ -15,6 +18,35 @@ namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 using Fixed = eawr::sim::math::Fixed;
 Fixed f(std::int64_t n) { return Fixed::from_integer(n).value(); }
+void native_actor_change_rollback() {
+    using Change = gc::GalacticSession::NativeActorChange;
+    using Checkpoint = gc::session_detail::NativeActorChangeCheckpoint;
+    const Checkpoint::Changes prior{{Change::Kind::changed, 41, 0, false, {}, true},
+        {Change::Kind::created, 42, 17, {}, false, {}}, {Change::Kind::lost, 43, 0, true, true, false}};
+    const auto equal = [](const auto& left, const auto& right) {
+        return std::equal(left.begin(), left.end(), right.begin(), right.end(), [](const auto& a, const auto& b) {
+            return std::tie(a.kind, a.actor, a.source, a.dead, a.deleting, a.death_clone)
+                == std::tie(b.kind, b.actor, b.source, b.dead, b.deleting, b.death_clone);
+        });
+    };
+    for (const bool prepared : {false, true}) {
+        auto pending = prior;
+        const Checkpoint checkpoint(pending, prepared);
+        pending.erase(pending.begin() + 1); // coalescing can erase inside the saved frontier
+        const auto erased = pending;
+        checkpoint.restore();
+        expect(equal(pending, prepared ? prior : erased), "prepared rollback restores erased entries and every prior field in order");
+        pending.assign({{Change::Kind::created, 99, 0, {}, {}, {}}});
+        pending.insert(pending.end(), prior.begin(), prior.end());
+        const auto appended = pending;
+        checkpoint.restore();
+        expect(equal(pending, prepared ? prior : appended), "prepared rollback removes duplicate births after in-place replacement");
+    }
+    Checkpoint::Changes empty;
+    const Checkpoint checkpoint(empty, true);
+    empty.push_back(prior.front()); checkpoint.restore();
+    expect(empty.empty(), "prepared rollback retains an empty notification frontier");
+}
 struct Fixture {
     cp::StartingForceInputs inputs;
     cp::CampaignPlacementContext context;
@@ -943,12 +975,13 @@ void initial_geometry() {
         "missing scale or planet identity refuse");
 }
 } // namespace
-int main() {
+int case_galactic_starting_forces_tests() {
 #if defined(_MSC_VER)
     expect(_putenv_s("EAWR_VERIFY_GALACTIC_HASH", "1") == 0, "full galactic hash verifier enabled");
 #else
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "full galactic hash verifier enabled");
 #endif
+    native_actor_change_rollback();
     duplicate_authored_starbases();
     allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
     return galactic_test::failures ? 1 : 0;

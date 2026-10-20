@@ -7,34 +7,11 @@ using tactical_hud_detail::rect2;
 
 using tactical_hud_detail::colour;
 
-bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects,
-                        const std::optional<std::string>& context_name, Node& parent) {
-    State& state = *state_;
-    auto command_bar = data::ui::load_command_bar(filesystem);
-    if (!command_bar) {
-        state.failure = core::format_diagnostic(command_bar.error());
-        return false;
-    }
-    const data::ui::CommandBarCatalog& catalog = command_bar.value().catalog;
-    state.shell_model = model::tactical_shell_model(catalog);
-    auto anchors = data::ui::load_shell_anchors(filesystem, state.shell_model);
-    if (!anchors) {
-        state.failure = core::format_diagnostic(anchors.error());
-        return false;
-    }
-    for (const auto& diagnostic : anchors.value().diagnostics) state.diagnostics.push_back(diagnostic);
-    state.shell = model::hud_shell(anchors.value().shell, catalog, state.options.faction);
-    for (const auto& diagnostic : state.shell.diagnostics) state.diagnostics.push_back(diagnostic);
+namespace {
 
-    EawrTacticalHud::Setup setup;
-    setup.rules = state.options.rules;
-    setup.view = model::hud_view_model(anchors.value().shell, catalog, model::alt_variant(state.options.faction),
-                                       model::vfs_shell_masks(filesystem));
-    for (const auto& diagnostic : setup.view.diagnostics) state.diagnostics.push_back(diagnostic);
-    state.faceplates = setup.view.faceplates.size();
-
+template <typename HudState>
+void build_shell_art(HudState& state, const vfs::Vfs& filesystem, const model::StandaloneTextures& standalone, EawrTacticalHud::Setup& setup) {
     // Shell art: texture files under Data/Art/Textures, decoded once per name.
-    const model::StandaloneTextures standalone = model::vfs_standalone_textures(filesystem);
     std::map<std::string, Ref<Texture2D>> loaded;
     for (const model::HudShellMesh& mesh : state.shell.meshes) {
         auto [found, inserted] = loaded.try_emplace(mesh.texture);
@@ -62,45 +39,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         setup.meshes.push_back({mesh.blend, found->second, mesh.triangles});
     }
 
-    // The options button's state textures: the command bar's atlas, then files.
-    state.atlas_path = model::command_bar_mega_texture(catalog);
-    if (auto atlas = assets::load_mega_texture_atlas(filesystem, state.atlas_path)) {
-        state.atlas.emplace(std::move(atlas.value()));
-        state.textures = std::make_unique<UiTextures>(*state.atlas, filesystem);
-        if (!state.textures->page_failure().empty()) {
-            state.warn("EAWR-UI-0322", "atlas page: " + state.textures->page_failure(), state.atlas_path);
-        }
-    } else {
-        state.warn("EAWR-UI-0322", core::format_diagnostic(atlas.error()), state.atlas_path);
-    }
-    // A button texture at texel size, "missing" when it cannot be drawn.
-    const auto button_texture = [&](const std::string& button, const std::string& name, std::string& origin) {
-        const model::ThemeTexture slot =
-            model::resolve_ui_texture(name, state.atlas ? &state.atlas->directory : nullptr, standalone);
-        Ref<Texture2D> result = state.textures ? state.textures->texture(slot, 1.0, 1.0) : Ref<Texture2D>();
-        origin = result.is_valid() ? std::string(model::to_string(slot.origin)) : "missing";
-        if (result.is_null()) state.warn("EAWR-UI-0322", button + ": " + name + " cannot be drawn", name);
-        return result;
-    };
-    // Button art keeps its texture's size around the bone (button_quad).
-    const auto quad = [](const model::HudShellButton& button, const Ref<Texture2D>& texture) {
-        const Vector2 size = texture.is_valid() ? texture->get_size() : Vector2(button.rect.width, button.rect.height);
-        return model::button_quad(button, size.x, size.y);
-    };
-    // AB-07, TM-14, PU-70, HCB-12g: a Button draws its blank, its icon, then the hover, selected and
-    // disabled art over the icon; the selected art is added when Selected_Alpha is off. Godot's state
-    // textures replace the face, so the icon is a child control and the state art an overlay child
-    // above it; the blank is the normal texture in every state.
-    const auto layered_button = [&](EawrHudButton* control, const model::HudShellButton& button,
-                                    const Ref<Texture2D>& icon) {
-        std::string origin;
-        const auto blank = button_texture(button.name, button.blank, origin);
-        control->setup_art({.normal = blank, .disabled = blank,
-            .portrait = HudButtonArt::Portrait{icon, button.click_shift, false},
-            .overlays = HudButtonArt::Overlays{button_texture(button.name, button.mouse_over, origin),
-                button_texture(button.name, button.pressed, origin), button_texture(button.name, button.disabled, origin),
-                !button.selected_alpha}});
-    };
+}
+
+template <typename HudState, typename ButtonTexture, typename Quad, typename LayeredButton>
+void build_command_buttons(HudState& state, const vfs::Vfs& filesystem, EawrTacticalHud::Setup& setup, const ButtonTexture& button_texture, const Quad& quad, const LayeredButton& layered_button) {
     if (state.shell.options) {
         const model::HudShellButton& look = state.shell.options.value();
         state.options_button = memnew(EawrHudButton);
@@ -258,8 +200,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         setup.time_buttons.push_back({control, quad(button, icon), button.rect});
     }
 
-    // The planet name: its component font through UI-F3, the text through the map.
-    std::optional<data::ui::TextDatabase>& text_database = state.text_database;
+}
+
+template <typename HudState>
+void build_planet_label(HudState& state, const vfs::Vfs& filesystem, const data::Catalog* objects, const std::optional<std::string>& context_name, const model::StandaloneTextures& standalone, EawrTacticalHud::Setup& setup, std::optional<data::ui::TextDatabase>& text_database) {
     if (auto loaded_text = data::ui::load_language_text_database(filesystem, state.options.language)) {
         text_database.emplace(std::move(loaded_text.value()));
     } else {
@@ -287,40 +231,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         setup.planet_text = text(state.planet.text);
     }
 
-    // Canvas layer -> hit mask (UI-I2) -> drawing surface -> button.
-    auto* layer = memnew(CanvasLayer);
-    layer->set_name("EawrTacticalHudLayer");
-    state.mask = memnew(EawrUiHitMask);
-    state.mask->set_name("EawrTacticalHudMask");
-    state.hud = memnew(EawrTacticalHud);
-    state.hud->set_name("EawrTacticalHud");
-    EawrTacticalHud* hud = state.hud;
-    state.mask->set_hit_test([hud](const double x, const double y) { return hud->hit(x, y); });
-    state.mask->add_child(state.hud);
-    layer->add_child(state.mask);
-    parent.add_child(layer);
-    if (state.movie_height) {
-        auto* bands = memnew(Control);
-        bands->set_name("MovieLetterbox");
-        bands->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-        layer->add_child(bands);
-        bands->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-        for (const bool bottom : {false, true}) {
-            auto* band = memnew(ColorRect);
-            band->set_color(Color(0, 0, 0, 1));
-            band->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-            bands->add_child(band);
-            // Keep zero offsets: Control's default anchor setter preserves the
-            // initial zero-sized rectangle instead of stretching it to the anchors.
-            band->set_anchor(SIDE_RIGHT, 1.0F, true);
-            band->set_anchor(SIDE_TOP, bottom ? 1.0F - *state.movie_height : 0.0F, true);
-            band->set_anchor(SIDE_BOTTOM, bottom ? 1.0F : *state.movie_height, true);
-        }
-        bands->hide();
-        state.movie_bands = bands;
-    }
-    state.hud->setup(std::move(setup), state.options_button);
+}
 
+template <typename HudState>
+void build_unit_cards(HudState& state, const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog, EawrTacticalHud* hud) {
     // #425: the unit cards over the shell, in the slots' own face.
     if (!state.shell.card_slots.empty()) {
         if (!state.fonts) state.fonts = std::make_shared<FontProvider>(std::move(state.options.font_cache));
@@ -358,6 +272,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         state.hud->add_child(state.cards);
         state.cards->setup(std::move(cards));
     }
+}
+
+template <typename HudState>
+void build_ability_buttons(HudState& state, EawrTacticalHud* hud) {
     // #454: the ability buttons and the cards' ability marks, over the cards.
     if (!state.shell.ability_buttons.empty()) {
         EawrAbilityButtons::Setup abilities;
@@ -370,6 +288,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         state.hud->add_child(state.abilities);
         state.abilities->setup(std::move(abilities));
     }
+}
+
+template <typename HudState>
+void build_production_panel(HudState& state, const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog, EawrTacticalHud* hud, const std::optional<data::ui::TextDatabase>& text_database) {
     // #530: the build queue, the credits and the reinforcement pane (space-purchasing PU-63 to
     // PU-67), in the card slots' face.
     if (!state.shell.queue_slots.empty() || state.shell.credits || state.shell.reinforcement
@@ -437,6 +359,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
         state.hud->add_child(state.production);
         state.production->setup(std::move(production));
     }
+}
+
+template <typename HudState>
+void build_minimap(HudState& state, const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog, EawrTacticalHud* hud) {
     // #455: the minimap inside the radar mesh; its icons are command bar textures (MM-06).
     if (state.shell.minimap) {
         state.minimap_settings = model::minimap_settings(filesystem);
@@ -467,6 +393,10 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
             if (state.minimap_move) state.minimap_move(world[0], world[1], double_click);
         });
     }
+}
+
+template <typename HudState>
+void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const data::ui::CommandBarCatalog& catalog, EawrTacticalHud* hud, CanvasLayer* layer, const std::optional<data::ui::TextDatabase>& text_database) {
     // #453, #459: the battle overlay above the HUD. Texts from the text DB, looks from
     // GameConstants.xml (BE-03, TM-09) and the pause banner's component fonts.
     state.message_looks = model::battle_message_looks(filesystem);
@@ -634,6 +564,120 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     state.overlay->setup(std::move(overlay),
         [&state] { if (state.time_handlers.resume) state.time_handlers.resume(); },
         [&state] { if (state.time_handlers.quit) state.time_handlers.quit(); });
+}
+
+} // namespace
+
+bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects,
+                        const std::optional<std::string>& context_name, Node& parent) {
+    State& state = *state_;
+    auto command_bar = data::ui::load_command_bar(filesystem);
+    if (!command_bar) {
+        state.failure = core::format_diagnostic(command_bar.error());
+        return false;
+    }
+    const data::ui::CommandBarCatalog& catalog = command_bar.value().catalog;
+    state.shell_model = model::tactical_shell_model(catalog);
+    auto anchors = data::ui::load_shell_anchors(filesystem, state.shell_model);
+    if (!anchors) {
+        state.failure = core::format_diagnostic(anchors.error());
+        return false;
+    }
+    for (const auto& diagnostic : anchors.value().diagnostics) state.diagnostics.push_back(diagnostic);
+    state.shell = model::hud_shell(anchors.value().shell, catalog, state.options.faction);
+    for (const auto& diagnostic : state.shell.diagnostics) state.diagnostics.push_back(diagnostic);
+
+    EawrTacticalHud::Setup setup;
+    setup.rules = state.options.rules;
+    setup.view = model::hud_view_model(anchors.value().shell, catalog, model::alt_variant(state.options.faction),
+                                       model::vfs_shell_masks(filesystem));
+    for (const auto& diagnostic : setup.view.diagnostics) state.diagnostics.push_back(diagnostic);
+    state.faceplates = setup.view.faceplates.size();
+
+    const model::StandaloneTextures standalone = model::vfs_standalone_textures(filesystem);
+    build_shell_art(state, filesystem, standalone, setup);
+    // The options button's state textures: the command bar's atlas, then files.
+    state.atlas_path = model::command_bar_mega_texture(catalog);
+    if (auto atlas = assets::load_mega_texture_atlas(filesystem, state.atlas_path)) {
+        state.atlas.emplace(std::move(atlas.value()));
+        state.textures = std::make_unique<UiTextures>(*state.atlas, filesystem);
+        if (!state.textures->page_failure().empty()) {
+            state.warn("EAWR-UI-0322", "atlas page: " + state.textures->page_failure(), state.atlas_path);
+        }
+    } else {
+        state.warn("EAWR-UI-0322", core::format_diagnostic(atlas.error()), state.atlas_path);
+    }
+    // A button texture at texel size, "missing" when it cannot be drawn.
+    const auto button_texture = [&](const std::string& button, const std::string& name, std::string& origin) {
+        const model::ThemeTexture slot =
+            model::resolve_ui_texture(name, state.atlas ? &state.atlas->directory : nullptr, standalone);
+        Ref<Texture2D> result = state.textures ? state.textures->texture(slot, 1.0, 1.0) : Ref<Texture2D>();
+        origin = result.is_valid() ? std::string(model::to_string(slot.origin)) : "missing";
+        if (result.is_null()) state.warn("EAWR-UI-0322", button + ": " + name + " cannot be drawn", name);
+        return result;
+    };
+    // Button art keeps its texture's size around the bone (button_quad).
+    const auto quad = [](const model::HudShellButton& button, const Ref<Texture2D>& texture) {
+        const Vector2 size = texture.is_valid() ? texture->get_size() : Vector2(button.rect.width, button.rect.height);
+        return model::button_quad(button, size.x, size.y);
+    };
+    // AB-07, TM-14, PU-70, HCB-12g: a Button draws its blank, its icon, then the hover, selected and
+    // disabled art over the icon; the selected art is added when Selected_Alpha is off. Godot's state
+    // textures replace the face, so the icon is a child control and the state art an overlay child
+    // above it; the blank is the normal texture in every state.
+    const auto layered_button = [&](EawrHudButton* control, const model::HudShellButton& button,
+                                    const Ref<Texture2D>& icon) {
+        std::string origin;
+        const auto blank = button_texture(button.name, button.blank, origin);
+        control->setup_art({.normal = blank, .disabled = blank,
+            .portrait = HudButtonArt::Portrait{icon, button.click_shift, false},
+            .overlays = HudButtonArt::Overlays{button_texture(button.name, button.mouse_over, origin),
+                button_texture(button.name, button.pressed, origin), button_texture(button.name, button.disabled, origin),
+                !button.selected_alpha}});
+    };
+    build_command_buttons(state, filesystem, setup, button_texture, quad, layered_button);
+    // The planet name: its component font through UI-F3, the text through the map.
+    std::optional<data::ui::TextDatabase>& text_database = state.text_database;
+    build_planet_label(state, filesystem, objects, context_name, standalone, setup, text_database);
+    // Canvas layer -> hit mask (UI-I2) -> drawing surface -> button.
+    auto* layer = memnew(CanvasLayer);
+    layer->set_name("EawrTacticalHudLayer");
+    state.mask = memnew(EawrUiHitMask);
+    state.mask->set_name("EawrTacticalHudMask");
+    state.hud = memnew(EawrTacticalHud);
+    state.hud->set_name("EawrTacticalHud");
+    EawrTacticalHud* hud = state.hud;
+    state.mask->set_hit_test([hud](const double x, const double y) { return hud->hit(x, y); });
+    state.mask->add_child(state.hud);
+    layer->add_child(state.mask);
+    parent.add_child(layer);
+    if (state.movie_height) {
+        auto* bands = memnew(Control);
+        bands->set_name("MovieLetterbox");
+        bands->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        layer->add_child(bands);
+        bands->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+        for (const bool bottom : {false, true}) {
+            auto* band = memnew(ColorRect);
+            band->set_color(Color(0, 0, 0, 1));
+            band->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            bands->add_child(band);
+            // Keep zero offsets: Control's default anchor setter preserves the
+            // initial zero-sized rectangle instead of stretching it to the anchors.
+            band->set_anchor(SIDE_RIGHT, 1.0F, true);
+            band->set_anchor(SIDE_TOP, bottom ? 1.0F - *state.movie_height : 0.0F, true);
+            band->set_anchor(SIDE_BOTTOM, bottom ? 1.0F : *state.movie_height, true);
+        }
+        bands->hide();
+        state.movie_bands = bands;
+    }
+    state.hud->setup(std::move(setup), state.options_button);
+
+    build_unit_cards(state, filesystem, catalog, hud);
+    build_ability_buttons(state, hud);
+    build_production_panel(state, filesystem, catalog, hud, text_database);
+    build_minimap(state, filesystem, catalog, hud);
+    build_battle_overlay(state, filesystem, catalog, hud, layer, text_database);
     if (state.options.probe) state.hud->set_probe([&state] { state.run_probe(); });
     return true;
 }

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <stdexcept>
 
 namespace eawr::script::foc::ai {
@@ -122,7 +123,44 @@ Real Engine::station_base_level(tactical::PlayerId id) const {
 void ThreatGrid::clear_queries() noexcept {
     total_queries_.clear();
     force_queries_.clear();
+    contributions_ready_ = false;
+    for (std::size_t index = 0; index < contributions_.size(); ++index) {
+        auto& storage = contribution_storage_[index];
+        storage.rows.clear();
+        storage.entries.clear();
+        for (auto& owner : storage.owners) owner.clear();
+    }
     contributions_.clear();
+    contribution_owners_.clear();
+    contribution_work_.clear();
+}
+
+void ThreatGrid::prepare_slots() {
+    if (!slots_dirty_ && slots_.size() == tracked_.size() && cell_slots_.size() == cells_.size()) {
+        // A copied grid owns a different map, even when its topology is identical.
+        std::size_t slot{};
+        for (const auto& [id, tracked] : tracked_) {
+            if (slots_[slot].id != id) { slots_dirty_ = true; break; }
+            slots_[slot++].tracked = &tracked;
+        }
+        if (!slots_dirty_) return;
+    }
+    slots_dirty_ = true; // A failed rebuild must never leave reusable partial topology.
+    slots_.clear();
+    for (const auto& [id, tracked] : tracked_) slots_.push_back({id, &tracked});
+    cell_slots_.resize(cells_.size());
+    for (std::size_t cell = 0; cell < cells_.size(); ++cell) {
+        auto& output = cell_slots_[cell];
+        output.clear();
+        for (const auto& item : cells_[cell]) {
+            const auto slot = std::lower_bound(slots_.begin(), slots_.end(), item.first,
+                [](const auto& slot_row, const auto value) { return slot_row.id < value; });
+            if (slot == slots_.end() || slot->id != item.first || item.second >= slot->tracked->entries.size())
+                throw std::runtime_error("AI threat topology references an untracked entry");
+            output.push_back(static_cast<std::size_t>(slot - slots_.begin()));
+        }
+    }
+    slots_dirty_ = false;
 }
 
 ThreatGrid::Preparation::Preparation(ThreatGrid& grid, const sim::PartitionExecutor* executor,
@@ -155,40 +193,70 @@ void ThreatGrid::observe_queries(const QueryObserver observer) noexcept {
 void ThreatGrid::prepare_contributions() {
     if (!preparation_host_ || !preparation_view_) return;
     clear_queries();
-    const auto& host = *preparation_host_;
-    const auto& view = *preparation_view_;
-    for (const auto& [key, players] : requested_) pending_.try_emplace(key, players);
-    std::vector<std::tuple<Contribution*, const Tracked*, Real>> rows;
-    for (const auto& [key, players] : pending_) {
-        static_cast<void>(players);
-        auto& prepared = contributions_[key];
-        for (const auto& unit : view.units) {
-            const auto tracked = tracked_.find(unit.id);
-            const auto* company = company_type(host, unit);
-            if (tracked == tracked_.end() || !company || (company->category_bits & key.first) == 0) continue;
-            auto& contribution = prepared[unit.id];
-            contribution.unit = &unit;
-            contribution.entries.resize(tracked->second.entries.size());
-            rows.emplace_back(&contribution, &tracked->second, Real::from_repr(key.second));
+    try {
+        const auto& host = *preparation_host_;
+        const auto& view = *preparation_view_;
+        for (const auto& [key, players] : requested_) pending_.try_emplace(key, players);
+        prepare_slots();
+        for (const auto& owner : view.players) contribution_owners_.push_back(owner.id);
+        std::sort(contribution_owners_.begin(), contribution_owners_.end());
+        contribution_owners_.erase(std::unique(contribution_owners_.begin(), contribution_owners_.end()), contribution_owners_.end());
+        if (contribution_storage_.size() < pending_.size()) contribution_storage_.resize(pending_.size());
+        std::size_t key_index{};
+        for (const auto& [key, players] : pending_) {
+            static_cast<void>(players);
+            auto& prepared = contribution_storage_[key_index];
+            contributions_.emplace(key, key_index++);
+            prepared.rows.resize(slots_.size());
+            prepared.owners.resize(contribution_owners_.size());
+            std::size_t entries{};
+            for (std::size_t slot = 0; slot < slots_.size(); ++slot) {
+                const auto& identity = slots_[slot];
+                const auto* unit = view.find(identity.id);
+                const auto* company = unit ? company_type(host, *unit) : nullptr;
+                if (!company || (company->category_bits & key.first) == 0) continue;
+                auto& contribution = prepared.rows[slot];
+                contribution.unit = unit;
+                contribution.offset = entries;
+                contribution.count = identity.tracked->entries.size();
+                entries += contribution.count;
+                const auto owner = std::lower_bound(contribution_owners_.begin(), contribution_owners_.end(), unit->owner);
+                if (owner != contribution_owners_.end() && *owner == unit->owner)
+                    prepared.owners[static_cast<std::size_t>(owner - contribution_owners_.begin())].push_back(slot);
+            }
+            prepared.entries.resize(entries);
+            for (std::size_t slot = 0; slot < slots_.size(); ++slot) {
+                auto& contribution = prepared.rows[slot];
+                // Keep a zero-length span null, including defensively decoded empty entries.
+                if (contribution.unit) contribution_work_.emplace_back(&contribution, slots_[slot].tracked,
+                    Real::from_repr(key.second), contribution.count ? prepared.entries.data() + contribution.offset : nullptr);
+            }
         }
+        query_counts_.prepared_keys = contributions_.size();
+        const auto prepare = [&](const std::size_t index) {
+            // ADR-009: each partition owns disjoint row ordinals/spans, hidden until successful publication.
+            assert(!contributions_ready_);
+            auto& [output, tracked, attenuator, entries] = contribution_work_[index];
+            const auto& unit = *output->unit;
+            const Real scale = single(real(1) - attenuator * single(real(1) - unit.health));
+            output->total = single(power_metric(company_type(host, unit)) * scale);
+            for (std::size_t entry = 0; entry < tracked->entries.size(); ++entry)
+                entries[entry] = single(tracked->entries[entry].power * scale);
+        };
+        // Dispatch decisions depend only on a fixed work count, never measured time.
+        constexpr std::size_t partition_threshold = 256;
+        if (executor_ && contribution_work_.size() >= partition_threshold) {
+            prepare_rows(*executor_, "ai-threat-total", contribution_work_.size(), prepare);
+        } else {
+            for (std::size_t index = 0; index < contribution_work_.size(); ++index) prepare(index);
+        }
+        contribution_work_.clear();
+        pending_.clear();
+        contributions_ready_ = true; // Ordered publication through contributions().
+    } catch (...) {
+        clear_queries();
+        throw;
     }
-    query_counts_.prepared_keys = contributions_.size();
-    const auto prepare = [&](const std::size_t index) {
-        auto& [output, tracked, attenuator] = rows[index];
-        const auto& unit = *output->unit;
-        const Real scale = single(real(1) - attenuator * single(real(1) - unit.health));
-        output->total = single(power_metric(company_type(host, unit)) * scale);
-        for (std::size_t entry = 0; entry < tracked->entries.size(); ++entry)
-            output->entries[entry] = single(tracked->entries[entry].power * scale);
-    };
-    // Dispatch decisions depend only on a fixed work count, never measured time.
-    constexpr std::size_t partition_threshold = 256;
-    if (executor_ && rows.size() >= partition_threshold) {
-        prepare_rows(*executor_, "ai-threat-total", rows.size(), prepare);
-    } else {
-        for (std::size_t index = 0; index < rows.size(); ++index) prepare(index);
-    }
-    pending_.clear();
 }
 
 const ThreatGrid::Contributions* ThreatGrid::contributions(const std::uint64_t category,
@@ -201,16 +269,20 @@ const ThreatGrid::Contributions* ThreatGrid::contributions(const std::uint64_t c
         if (!players.contains(player)) ++query_counts_.cross_player;
     }
     players.insert(player);
+    // ADR-009: this is the sole query gateway; unpublished staging stays on the inline path.
+    if (!contributions_ready_) { ++query_counts_.cold; return nullptr; }
     const auto found = contributions_.find(key);
     if (found == contributions_.end()) { ++query_counts_.cold; return nullptr; }
     ++query_counts_.warm;
-    return &found->second;
+    return &contribution_storage_[found->second];
 }
 
 // PG-01: the grid spans the map with a cell per AI_FogCellsPerThreatCell fog cells (rounded up);
 // the smallest zone radius is half the cell diagonal.
 void ThreatGrid::partition(const AiBounds& bounds, std::int32_t x_cells, std::int32_t y_cells, const Constants& constants) {
     clear_queries();
+    slots_dirty_ = true;
+    slots_.clear();
     left_ = bounds.left;
     top_ = bounds.top;
     right_ = bounds.right;
@@ -234,6 +306,7 @@ void ThreatGrid::partition(const AiBounds& bounds, std::int32_t x_cells, std::in
 // half a cell diagonal and at most AI_SpaceThreatRangeCap. The zone spreads the entry's combat
 // power evenly: a cell holds power * cell area / (4 r^2).
 void ThreatGrid::add(const ViewUnit& unit, const Host& host, Tracked& tracked) {
+    slots_dirty_ = true;
     const AiType* type = host.type(unit.type);
     tracked.entries.clear();
     if (type != nullptr) {
@@ -290,6 +363,7 @@ void ThreatGrid::add(const ViewUnit& unit, const Host& host, Tracked& tracked) {
 }
 
 void ThreatGrid::remove(sim::EntityId object, Tracked& tracked) {
+    slots_dirty_ = true;
     for (const ThreatEntry& entry : tracked.entries) {
         if (entry.radius < Real{}) continue;
         for (std::int32_t row = entry.y0; row <= entry.y1; ++row) {
@@ -330,7 +404,9 @@ void ThreatGrid::service(const WorldView& view, const Host& host, std::int64_t f
     for (const ViewUnit& unit : view.units) {
         // PG-03/WSW-01: only ordinary UnitAI objects initialize combat tracking.
         if (!admitted(unit)) continue;
-        Tracked& tracked = tracked_[unit.id];
+        const auto [tracked_it, inserted] = tracked_.try_emplace(unit.id);
+        if (inserted) slots_dirty_ = true;
+        Tracked& tracked = tracked_it->second;
         if (frame < tracked.next_service) continue;
         if (tracked.entries.empty()) add(unit, host, tracked);
         if (tracked.has_position && tracked.last_position == unit.position) {
@@ -457,12 +533,15 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
     for (std::int64_t row = y0; row <= y1; ++row) {
         for (std::int64_t column = x0; column <= x1; ++column) {
             Real cell{};
-            for (const auto& [object, index] : cells_[static_cast<std::size_t>(row * x_cells_ + column)]) {
+            const auto cell_index = static_cast<std::size_t>(row * x_cells_ + column);
+            const auto& objects = cells_[cell_index];
+            for (std::size_t entry = 0; entry < objects.size(); ++entry) {
+                const auto& [object, index] = objects[entry];
                 const Contribution* contribution{};
                 if (prepared) {
-                    const auto found = prepared->find(object);
-                    if (found == prepared->end()) continue;
-                    contribution = &found->second;
+                    const auto slot = cell_slots_[cell_index][entry];
+                    contribution = &prepared->rows[slot];
+                    if (!contribution->unit) continue;
                 }
                 const ViewUnit* unit = contribution ? contribution->unit : view.find(object);
                 if (unit == nullptr || object == excluded) continue;
@@ -474,7 +553,8 @@ Real ThreatGrid::force(const Host& host, const WorldView& view, const Rect& rect
                 if (unit->owner == 0 || host.neutral(unit->owner)) continue;
                 if (host.allied(unit->owner, player) != friendly) continue;
                 if (contribution) {
-                    if (index < contribution->entries.size()) cell = single(cell + contribution->entries[index]);
+                    if (index < contribution->count)
+                        cell = single(cell + prepared->entries[contribution->offset + index]);
                 } else {
                     const auto found = tracked_.find(object);
                     if (found == tracked_.end() || index >= found->second.entries.size()) continue;
@@ -545,9 +625,11 @@ Real ThreatGrid::total_force(const Host& host, const WorldView& view, std::uint6
         // PG-06: keep player order, ascending entity order and every rounding step.
         for (const detail::ViewPlayer& owner : view.players) {
             if (player != 0 && (host.neutral(player) || host.allied(player, owner.id) != friendly)) continue;
-            for (const auto& [object, contribution] : *prepared) {
-                static_cast<void>(object);
-                if (contribution.unit->owner == owner.id && contribution.total)
+            const auto found = std::lower_bound(contribution_owners_.begin(), contribution_owners_.end(), owner.id);
+            const auto owner_index = static_cast<std::size_t>(found - contribution_owners_.begin());
+            for (const auto slot : prepared->owners[owner_index]) {
+                const auto& contribution = prepared->rows[slot];
+                if (contribution.total)
                     total = single(total + *contribution.total);
             }
         }
@@ -1210,15 +1292,6 @@ const Target* Engine::target(std::uint64_t id) const {
 const Target* Engine::target_of_object(sim::EntityId object) const {
     for (const auto& [id, target] : targets_) {
         if (target.object == object) return &target;
-    }
-    return nullptr;
-}
-
-const Target* Engine::region_at(Real x, Real y) const {
-    for (const auto& [id, target] : targets_) {
-        if (target.object != 0) continue;
-        const Rect& rect = target.region;
-        if (!(x < rect.x) && x < rect.x + rect.width && !(y < rect.y) && y < rect.y + rect.height) return &target;
     }
     return nullptr;
 }

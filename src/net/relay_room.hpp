@@ -157,7 +157,6 @@ private:
     void refuse_refresh(Room&, Time);
     void settle_renewal(Room&, Time);
     void leave(Room&, std::uint32_t, Time);
-    void expire_slot_states(Room&, Time);
     bool duplicate_identity(const Room&, std::uint32_t self, const std::string& identity) const;
     Bytes attached_frame(const Room&, std::uint32_t, const std::optional<GnsTurnCredentials>&, Time, Kind) const;
     Bytes roster_frame(const Room&) const;

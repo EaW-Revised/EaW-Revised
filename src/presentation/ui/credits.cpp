@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/credits.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -13,17 +14,11 @@ core::Diagnostic problem(const std::string_view code, std::string message) {
 }
 
 std::string_view trimmed(std::string_view text) {
-    constexpr std::string_view space = " \t\r\n";
-    const auto first = text.find_first_not_of(space);
-    if (first == std::string_view::npos) return {};
-    return text.substr(first, text.find_last_not_of(space) - first + 1);
+    return core::trim_view(text, core::xml_whitespace);
 }
 
 bool same_name(const std::string_view left, const std::string_view right) {
-    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(), [](char a, char b) {
-        const auto lower = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
-        return lower(a) == lower(b);
-    });
+    return core::iequals(left, right);
 }
 
 // The last declaration of a tag wins, as for the other GameConstants values.

@@ -51,18 +51,27 @@ struct UnitTables { std::vector<UnitType> units; std::string identity; };
 std::string content_identity(const UnitTables& tables) { return tables.identity; }
 }
 namespace skirmish {
-unsigned type_id(const std::string& name) { return name == "Ship" ? 10U : 20U; }
 struct LobbySlot { unsigned slot; std::string faction; unsigned team; bool human; tactical::AiLevel difficulty{}; };
 struct Colour { std::array<std::uint8_t,3> rgb; };
 struct StartPlayer { tactical::Player player; std::optional<Colour> colour; };
 struct StartUnit { tactical::UnitState state; std::string type; };
 struct SkirmishStart { std::vector<StartPlayer> players; std::vector<StartUnit> units; };
 }
+namespace battle {
+unsigned type_id(const std::string& name) { return name == "Ship" ? 10U : 20U; }
+}
 namespace assets { struct MapLobbyMetadata {
  std::optional<unsigned> capacity; std::optional<bool> new_markers;
  std::optional<std::vector<unsigned>> start_positions;
 }; }
 namespace core { struct Diagnostic { std::string code, message; };
+constexpr std::string_view xml_whitespace = " \t\r\n";
+std::string_view trim_view(std::string_view value, const std::string_view whitespace = xml_whitespace) {
+ const auto begin = value.find_first_not_of(whitespace);
+ if (begin == std::string_view::npos) return {};
+ const auto end = value.find_last_not_of(whitespace);
+ return value.substr(begin, end - begin + 1);
+}
 template<class T> struct Result { bool ok; Diagnostic diagnostic;
  static Result success() { return {true,{}}; }
  static Result failure(Diagnostic d) { return {false,std::move(d)}; }
@@ -88,7 +97,7 @@ struct SpacePopulation { struct Options { struct PlacedShip {
 struct LiveSessionView {
  struct PreparedBattle { tactical::TacticalReplay replay; int content=17, victory=19, economy=23;
  units::UnitTables tables; std::optional<skirmish::SkirmishStart> start; };
- struct Options { std::shared_ptr<const PreparedBattle> borrowed_battle; std::optional<unsigned> player; } options_;
+ struct Options { std::shared_ptr<const PreparedBattle> borrowed_battle; std::optional<unsigned> player; std::string fixture="replay"; } options_;
  std::map<unsigned,std::size_t> ship_of_entity_; std::map<unsigned,unsigned> owner_of_entity_,team_of_player_;
  std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
  unsigned player_=0; std::optional<tactical::TacticalSetup> setup_;
@@ -96,6 +105,7 @@ struct LiveSessionView {
  int content_=0,victory_=0,economy_=0; std::optional<skirmish::SkirmishStart> start_;
  bool prepare_borrowed(std::string& failure);
  bool prepare_native(const PreparedBattle& battle, std::string& failure);
+ void select_arrivals() {} // The selection itself is covered by test_live_launch_slot_roster.
  bool prepare_replay(std::string& failure) {
  __DISPATCH__
  auto refused=validate_setup_slots(std::vector<LobbySlot>{{1,"Rebel",0,true},{2,"Empire",1,false}},
@@ -134,16 +144,23 @@ class PreparedCampaignViewContracts(unittest.TestCase):
         toolchain = select_toolchain()
         if toolchain is None:
             self.skipTest('requires C++ compiler')
-        source = source_text('apps/viewer/src/live_session_prepare.cpp')
-        method = '\n\n'.join(extract_function(source, signature) for signature in (
-            'bool LiveSessionView::prepare_borrowed(',
-            'bool LiveSessionView::prepare_native(',
-        ))
-        replay = extract_function(source, 'bool LiveSessionView::prepare_replay(').split('{', 1)[1]
-        # Exercise the real early admission branch without pulling in the
-        # standalone replay loader or depending on where it loads unit tables.
-        admission = 'if (options_.borrowed_battle) return prepare_borrowed(failure);'
-        dispatch = replay[:replay.index(admission) + len(admission)]
+        native = (ROOT / 'apps/viewer/src/battle_source_replay.cpp').read_text(encoding='utf-8')
+        borrowed = (ROOT / 'apps/viewer/src/battle_source_borrowed.cpp').read_text(encoding='utf-8')
+        method = '\n\n'.join((
+            extract_function(borrowed, 'bool BattleSourceState::prepare_borrowed('),
+            extract_function(native, 'bool BattleSourceState::prepare_native('),
+        )).replace('BattleSourceState::', 'LiveSessionView::').replace(
+            'const live_session::PreparedBattle&', 'const PreparedBattle&').replace(
+            '    auto& placed_ships_ = draw_bindings_->placed_ships;\n', '')
+        # Execute the production source's borrowed admission and native binder;
+        # only the fixture's receiver/type names and draw-vector alias are adapted.
+        factory = (ROOT / 'apps/viewer/src/battle_source.cpp').read_text(encoding='utf-8')
+        selector = extract_function(factory, 'const BattleSource* battle_source(')
+        begin = selector.index('    const bool recorded =')
+        end = selector.index('    if (options.lan', begin)
+        dispatch = selector[begin:end].replace('options.', 'options_.')
+        invoke = extract_function(borrowed, 'bool BorrowedBattleSource::prepare(').split('{', 1)[1].rsplit('}', 1)[0]
+        dispatch = dispatch.replace('return &borrowed;', '{' + invoke.replace('prepared.state()', '(*this)') + '}')
         setup = (ROOT / 'src/skirmish/setup.cpp').read_text(encoding='utf-8')
         validator = extract_function(setup, 'core::Result<void> validate_setup_slots(')
         seats = (ROOT / 'include/eawr/sim/seat.hpp').read_text(encoding='utf-8').replace('#pragma once', '')

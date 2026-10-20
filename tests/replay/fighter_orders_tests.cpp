@@ -3,8 +3,21 @@
 #include "eawr/sim/tactical/abilities.hpp"
 #include "../../apps/sim_headless/squadron_trace.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <iostream>
+#include <map>
+#include <optional>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace fighter_test_support {
 

@@ -1,24 +1,30 @@
 // #494: FoC's space fog of war in the world (docs/behaviour/space-fog-presentation.md FW-01 to
 // FW-14): the constants, the grid, the per-cell fade, the border ring, the blur and the ramp.
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/fog_field.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
 #include <iostream>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 namespace space = eawr::presentation::space;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] eawr::data::XmlNode node(std::string name, std::string text) {

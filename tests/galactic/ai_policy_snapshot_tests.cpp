@@ -1,3 +1,13 @@
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "galactic_ai.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -6,7 +16,7 @@
 #include <iostream>
 #include <map>
 #include <set>
-#include <stdexcept>
+#include <exception>
 
 // Per-player policy snapshots shared by service inputs (GC AI barrier cost).
 // Contract: an unchanged policy costs zero copies per barrier; a policy write
@@ -16,10 +26,12 @@ namespace {
 using namespace eawr;
 namespace a = script::foc::galactic_ai;
 namespace auth = script::authoritative;
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
-template<class T> T must(core::Result<T> result) { if (!result) throw std::runtime_error(result.error().code + " " + result.error().message); return std::move(result).value(); }
-void must(core::Result<void> result) { if (!result) throw std::runtime_error(result.error().code + " " + result.error().message); }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
+}
+using eawr::testing::result_code_space::must;
 
 a::LifecycleSetup fixture(bool two_players = false) {
     a::LifecycleSetup setup;

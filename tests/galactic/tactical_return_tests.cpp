@@ -1,3 +1,6 @@
+#include "../support/result.hpp"
+#include "../support/env.hpp"
+#include "../support/temp_dir.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/tactical_return_live.hpp"
@@ -7,13 +10,22 @@
 #include "eawr/sim/tactical/admission.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 
-#include <stdexcept>
-#include <cstdlib>
-#include <filesystem>
+#include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <filesystem>
 #include <fstream>
+#include <iostream>
+#include <optional>
 #include <set>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -23,10 +35,11 @@ using galactic_test::expect;
 using eawr::sim::math::Fixed;
 Fixed f(const std::int64_t n) { return Fixed::from_integer(n).value(); }
 template<class T> T checked(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
+    return eawr::testing::take(std::move(result));
 }
-void okay(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+void okay(eawr::core::Result<void> result) {
+    eawr::testing::must(std::move(result));
+}
 
 gc::GalacticSetup galaxy() {
     gc::GalacticSetup s; s.seed = 71;
@@ -110,6 +123,23 @@ void pure_policy() {
     expect(tactical::request_retreat(rules, state, 1, tactical::RetreatAction::start, 0, {true}, actors) == tactical::RetreatRefusal::prevention,
         "active prevention blocks a request");
     expect(tactical::request_retreat(rules, state, 1, tactical::RetreatAction::start, 0, {}, actors) == tactical::RetreatRefusal::none, "countdown starts");
+    {
+        // WGM-64/WGM-79 (GCMP-24): the refusal is the standalone tactical multiplayer test, not the galactic game's
+        // multiplayer flag. The campaign never sets it, so a battle in a multiplayer GC retreats and respawns as in solo.
+        auto standalone = rules; standalone.multiplayer_tactical = true;
+        tactical::RetreatState fresh;
+        expect(tactical::request_retreat(standalone, fresh, 1, tactical::RetreatAction::start, 0, {}, actors) == tactical::RetreatRefusal::wrong_mode,
+            "standalone multiplayer tactical refuses retreat");
+        expect(tactical::request_retreat(rules, fresh, 1, tactical::RetreatAction::start, 0, {}, actors) == tactical::RetreatRefusal::none,
+            "campaign battle retreat is admitted whatever the galactic multiplayer flag");
+        std::vector<gc::HeroReturnRecord> records; gc::HeroDefeat defeat; defeat.id = 21; defeat.type = defeat.respawn_type = 3;
+        defeat.owner = 1; defeat.planet = 2; defeat.named = true; defeat.default_seconds = f(1);
+        const auto board = galaxy().planets;
+        defeat.multiplayer_tactical = true;
+        expect(!checked(gc::schedule_hero_return(records, defeat, 5, board)).scheduled && records.empty(), "standalone multiplayer tactical refuses respawn");
+        defeat.multiplayer_tactical = false;
+        expect(checked(gc::schedule_hero_return(records, defeat, 5, board)).scheduled, "campaign battle respawn is admitted whatever the galactic multiplayer flag");
+    }
     actors[1].engines_disabled = true;
     tactical::service_retreat(rules, state, 2, {}, actors);
     expect(state.actors == std::vector<eawr::sim::EntityId>{20}, "expiry prunes currently disabled engines");
@@ -818,7 +848,7 @@ void stock_interdiction() {
     struct XmlTree {
         std::filesystem::path root = std::filesystem::temp_directory_path() /
             ("eawr-retreat-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        ~XmlTree() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
+        ~XmlTree() { eawr::testing::remove_temp_directory(root); }
     } tree;
     std::filesystem::create_directories(tree.root / "XML");
     const auto write = [&](const std::string& file, const std::string_view text) {
@@ -938,19 +968,11 @@ void stock_interdiction() {
     }
 }
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value{}; std::size_t length{};
-    if (_dupenv_s(&value, &length, "EAWR_EAW_GAME_ROOT") || !value) return {};
-    std::string result(value); std::free(value);
-    return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>{value} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void installed() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: installed return bindings need game data\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: installed return bindings need game data\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto* folder : {"corruption", "GameData"}) mounts.push_back(checked(eawr::vfs::resolve_manifest_mount(folder, std::filesystem::path(*root) / folder / "Data")).mount);
     const auto filesystem = checked(eawr::vfs::Vfs::mount(mounts));
@@ -987,7 +1009,7 @@ void installed() {
     squadron_return(&services, eawr::assets::object_type_crc("Rebel_X-Wing_Squadron"), eawr::assets::object_type_crc("Nebulon_B_Frigate"));
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_tactical_return_tests(int argc, char** argv) {
     try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_interdiction(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

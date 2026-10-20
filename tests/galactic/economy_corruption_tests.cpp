@@ -1,3 +1,14 @@
+#include <algorithm>
+#include <cstdint>
+#include <exception>
+#include <span>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"
 #include "eawr/sim/galactic/income.hpp"
@@ -7,18 +18,18 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::take;
 
 namespace {
 namespace gc = eawr::sim::galactic;
 namespace cf = gc::corruption_fixture;
 using eawr::sim::math::Fixed;
 using galactic_test::expect;
-template<class T> T take(eawr::core::Result<T> r) { if (!r) throw std::runtime_error(r.error().message); return std::move(r).value(); }
-void take(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 Fixed d(std::string_view n) { return take(Fixed::from_decimal(n)); }
 void technology_price_math() {
@@ -308,13 +319,7 @@ void replay_and_checkpoint() {
     }
 }
 std::string game_root() {
-#if defined(_MSC_VER)
-    char* value{}; std::size_t size{}; std::string result;
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") == 0 && value) result = value;
-    std::free(value); return result;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT"); return value ? value : "";
-#endif
+    return eawr::testing::game_root(eawr::testing::EmptyEnvironment::present).value_or("");
 }
 void installed() {
     const auto root = game_root(); if (root.empty()) throw std::runtime_error("installed economy check requires game root");
@@ -345,6 +350,16 @@ void installed() {
     s.planets[0].owner = empire;
     s.economy_corruption = take(eawr::campaign::prepare_corruption_economy(filesystem, loaded.catalog, plan, s));
     expect(consortium && empire && s.economy_corruption->income_factors[4] == d("4.5"), "installed Consortium and racketeering authoring");
+    {
+        // GCMP-24: the corruption economy (WGEP-100, and WGCH-08 through the ability host) takes the setup mode, not
+        // the campaign's Is_Multiplayer menu tag: the same solo-authored campaign planned as multiplayer flips it.
+        auto multiplayer_options = options; multiplayer_options.mode = eawr::campaign::CampaignSetupMode::multiplayer;
+        const auto multiplayer_plan = take(eawr::campaign::plan_live_campaign_setup(filesystem, data, types,
+            "Sandbox_Equal_Footing_Underworld", multiplayer_options, "Normal_Default"));
+        expect(!s.economy_corruption->multiplayer
+            && take(eawr::campaign::prepare_corruption_economy(filesystem, loaded.catalog, multiplayer_plan, s)).multiplayer,
+            "corruption economy multiplayer flag follows the setup mode");
+    }
     auto& market = *s.economy_corruption;
     market.planets[0].corruption = cf::Type::racketeering;
     eawr::sim::InlineExecutor pool;

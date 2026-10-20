@@ -1,4 +1,5 @@
 #include "frame_timer.hpp"
+#include "eawr/core/text.hpp"
 #include "startup_trace.hpp"
 #include "battle_content.hpp"
 #include "map_mode.hpp"
@@ -26,14 +27,7 @@ namespace {
 namespace map_mode_detail {
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto fold = [](const char value) {
-            return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-        };
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] std::string hash_bytes(const std::span<const std::byte> bytes) {

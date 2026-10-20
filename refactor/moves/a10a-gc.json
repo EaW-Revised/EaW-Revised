@@ -1,0 +1,6 @@
+[
+  {
+    "old": "src/sim/galactic/session.cpp#GalacticSession::step",
+    "new": "src/sim/galactic/session.cpp#service_tick_fiscal"
+  }
+]

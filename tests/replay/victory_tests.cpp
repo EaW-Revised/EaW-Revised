@@ -1,3 +1,10 @@
+// P2-14 (#77): fixed-force victory and defeat (docs/behaviour/space-victory.md). The rule cases
+// run the pure evaluation on small line-ups; the session fixtures destroy star bases with scripted
+// damage and must decide the same outcome, with the same hashes, at 1, 2 and 4 workers, with
+// scrambled storage and through a written-and-parsed replay. Their final hashes are pinned in
+// tactical-victory.hashes.csv: `victory_tests <fixtures> --update` rewrites it.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -10,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -17,24 +25,17 @@
 #include <utility>
 #include <vector>
 
-// P2-14 (#77): fixed-force victory and defeat (docs/behaviour/space-victory.md). The rule cases
-// run the pure evaluation on small line-ups; the session fixtures destroy star bases with scripted
-// damage and must decide the same outcome, with the same hashes, at 1, 2 and 4 workers, with
-// scrambled storage and through a written-and-parsed replay. Their final hashes are pinned in
-// tactical-victory.hashes.csv: `victory_tests <fixtures> --update` rewrites it.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

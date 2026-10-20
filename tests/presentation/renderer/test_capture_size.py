@@ -163,8 +163,14 @@ class CaptureSizeStructure(unittest.TestCase):
         start = physical.index("void ViewerHost::_ready()")
         ready = physical[start:physical.index("\n}\n", start)]
         pin = ready.index("pin_capture_viewport(")
+        self.assertLess(pin, ready.index("ready_battle_setup();"))
+        self.assertLess(pin, ready.index("ready_requested_mode()"))
+        dispatch_start = physical.index("bool ViewerHost::ready_requested_mode()")
+        dispatch = physical[dispatch_start:physical.index("\n}\n", dispatch_start)]
         for mode in ("UnitMode::requested()", "EffectMode::requested()", "map_mode_ = std::make_unique<MapMode>"):
-            self.assertLess(pin, ready.index(mode), mode)
+            self.assertIn(mode, dispatch, mode)
+            for occurrence in re.finditer(re.escape(mode), ready):
+                self.assertGreater(occurrence.start(), pin, mode)
         cli = (ROOT / "apps/viewer/src/viewer_host_config.cpp").read_text(encoding="utf-8")
         self.assertIn('"--eawr-window-resize-test"', cli)
 

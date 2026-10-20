@@ -1,11 +1,19 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/gns_signalling.hpp"
 
-#include <atomic>
 #include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
-#include <stdexcept>
-#include <thread>
+#include <memory>
 #include <set>
+#include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
@@ -13,11 +21,10 @@ using namespace std::chrono_literals;
 using Bytes = std::vector<std::uint8_t>;
 InProcessGnsIntroduction::Clock::time_point time_now{};
 InProcessGnsIntroduction::Clock::time_point now() { return time_now; }
-void expect(bool value, const char* reason) { if (!value) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool value, const char* reason) {
+    if (!value) eawr::testing::require(value, reason);
 }
+using eawr::testing::result_code_colon::require;
 void protocol() {
     time_now = {};
     InProcessGnsIntroduction service(now, 8, 2);

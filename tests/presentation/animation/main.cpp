@@ -1,9 +1,14 @@
+#include "../../support/check.hpp"
+#include "../../support/self_test.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -13,9 +18,10 @@ using namespace eawr;
 namespace playback = eawr::presentation::animation;
 using playback::Matrix;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 bool close(const float left, const float right) { return std::abs(left - right) < 0.0001F; }
 
@@ -649,6 +655,10 @@ void test_sample_position() {
 } // namespace
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     test_sample_position();
     test_rigid_vertex_to_bind();
     test_rigid_instance_routes();

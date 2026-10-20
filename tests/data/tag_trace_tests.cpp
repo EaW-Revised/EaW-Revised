@@ -1,18 +1,22 @@
-#include "data_test_support.hpp"
+// #628: the load-time tag trace (docs/tag-coverage.md).
 
+#include "../support/temp_dir.hpp"
+#include "data_test_support.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <string>
 #include <string_view>
 #include <vector>
 
-// #628: the load-time tag trace (docs/tag-coverage.md).
 namespace eawr::tests::data_contracts {
 namespace {
 
@@ -23,8 +27,7 @@ struct TraceTree {
         ("eawr-tag-trace-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     TraceTree() { std::filesystem::create_directories(root); }
     ~TraceTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
 };
 

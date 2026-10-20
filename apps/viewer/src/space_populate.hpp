@@ -31,8 +31,9 @@
 namespace eawr::presentation::godot_backend {
 
 // `--eawr-populate` on a kind-2 (space) map (P1-11 #32). The static scene
-// builder reads the map (Space_Model_Name chain), scene::classify_space_placements
-// decides what is drawn, and every drawn surface is uploaded through its legacy
+// builder reads the map (Space_Model_Name chain); scene::classify_space_placements
+// classifies map props and scene::classify_live_unit classifies composed units.
+// Every drawn surface is uploaded through its legacy
 // selector with its authored material values: one renderer asset per (model,
 // surface and team colour), shared by placements, posed at bind. With a
 // lighting policy the scene light is set before those uploads, so with shadows
@@ -124,6 +125,8 @@ public:
     };
 
     explicit SpacePopulation(Options options);
+    SpacePopulation(const SpacePopulation&) = delete;
+    SpacePopulation& operator=(const SpacePopulation&) = delete;
 
     // The lighting environment for `--eawr-environment default|map`, as the
     // land path reads it: alo-viewer's default, or the map's environment 0
@@ -136,6 +139,9 @@ public:
     [[nodiscard]] bool compose(GodotRenderer& renderer, const assets::Map& map, const vfs::Vfs& filesystem,
                                const FixedCamera& camera, std::span<const std::uint32_t> environment_records,
                                sim::AssetId first_asset, sim::EntityId first_entity);
+    // Append newly demanded slots without replacing any existing ship, piece or playback state.
+    [[nodiscard]] bool append_live_ships(GodotRenderer& renderer, const vfs::Vfs& filesystem,
+                                        std::span<const Options::PlacedShip> ships);
     void pose_units(GodotRenderer& renderer, std::uint32_t sample);
     // Live frames first capture a disappearing model's last submitted palette,
     // then consume this same idle sample once before current live posing.
@@ -194,13 +200,23 @@ public:
         float blend_from{};
         bool alternate{}; // PlacedShip::alternate_clip (#76)
     };
-    [[nodiscard]] bool pose_live_clips(GodotRenderer& renderer, std::span<const LiveClipPose> poses);
+    [[nodiscard]] bool pose_live_clips(GodotRenderer& renderer, std::span<const LiveClipPose> poses,
+        const particles::StepExecutor* workers = nullptr);
+    [[nodiscard]] bool live_clip_terminal_hidden(std::size_t ship) const noexcept;
+    [[nodiscard]] std::span<const animation::BonePose> terminal_clip_bones(std::size_t ship) const noexcept;
+    [[nodiscard]] std::span<const animation::BonePose> held_clip_bones(std::size_t ship,
+        animation::ClipPosition position, float blend_from) const noexcept;
     [[nodiscard]] bool pose_live_turrets(GodotRenderer& renderer, std::span<const LivePose> poses,
         std::span<const LiveClipPose> clips);
     // #81: a live ship that is gone for good (a death clone removed or faded
-    // out): drops its pieces, skin poses and clip, and releases the uploads no
-    // other piece draws. It is never drawn again.
-    void retire_live_ship(GodotRenderer& renderer, std::size_t ship);
+    // out): drops its pieces and instance poses. Reusable launch clones keep
+    // immutable compose templates and shared uploads until restored for a new owner.
+    void retire_live_ship(GodotRenderer& renderer, std::size_t ship, bool reusable = false);
+    void restore_live_ship(GodotRenderer& renderer, std::size_t ship);
+    // #4218: the unit now on `ship` takes its particle seeds (the placement ordinals) and its idle start from
+    // `identity_ship`, the slot the session's reservation policy bound it to; the same ship is the identity of an
+    // unreused slot. Integer state only: no instance or allocation per frame.
+    void bind_live_identity(std::size_t ship, std::size_t identity_ship);
     // The placed ships that compose drew; the others are listed with a reason
     // in the report.
     [[nodiscard]] bool live_ship_drawn(std::size_t ship) const noexcept;
@@ -236,6 +252,9 @@ public:
         // #456: a model projectile's slot; its pose between samples comes from the projectile.
         bool projectile{};
         sim::EntityId entity{};
+        // #4218: the placement whose ordinals seed this unit's emitters (the ship's own unless a reused slot
+        // carries the identity of the slot the reservation policy would have given the unit).
+        const scene::Placement* identity{};
     };
     // #421: the model transform pose_live() gives a drawn live ship at `pose`; nullopt when the
     // ship is not drawn or retired, or the transform leaves the Q24 range.
@@ -265,7 +284,10 @@ public:
     // palettes. These copies never enter picking, bars or emitter providers.
     [[nodiscard]] bool remember_fog_model(GodotRenderer& renderer, sim::EntityId entity, std::size_t ship,
         std::span<const animation::BonePose> neutral_pose = {},
-        std::optional<std::array<float, 3>> neutral_colour = {});
+        std::optional<std::array<float, 3>> neutral_colour = {},
+        // FW-25: first knowledge uses the immutable composed start placement,
+        // including intact art, before the object has ever been submitted.
+        bool initial = false);
     void draw_fog_models(GodotRenderer& renderer, const space::FogGhosts& memory,
                          std::vector<sim::RenderInstance>& output);
     [[nodiscard]] std::size_t fog_model_pieces(sim::EntityId entity) const noexcept;
@@ -321,7 +343,44 @@ public:
     void write_report(std::ostream& output) const;
 
 private:
+    struct ComposeContext;
+    struct ComposeBatch;
     struct SurfaceUpload;
+    void prepare_compose_slots(bool appending);
+    bool classify_arrivals(ComposeContext& context, std::size_t first_ship, std::size_t first_decision);
+    std::optional<std::size_t> bind_composed_idle(ComposeContext& context, ComposeBatch& batch,
+        const scene::Placement& placement, const assets::Model& model);
+    std::optional<std::size_t> bind_composed_clip(ComposeContext& context, const scene::Placement& placement,
+        const assets::Model& model, const std::string& path);
+    const SurfaceUpload* upload_composed_surface(ComposeContext& context, ComposeBatch& batch, const std::string& path,
+        const assets::Model& model, std::uint32_t mesh_index, std::uint32_t submesh_index,
+        const scene::LegacySelector& selector, const std::string& texture_path);
+    IdlePlacement composed_idle_placement(ComposeContext& context, const scene::Placement& placement, std::size_t clip);
+    void compose_hull_pieces(ComposeContext& context, ComposeBatch& batch, scene::SpacePlacementDecision& decision,
+        std::size_t decision_index, const scene::Placement& placement, const assets::Model* model,
+        const std::optional<std::size_t>& live_ship, const std::optional<std::array<std::uint8_t, 3>>& colour,
+        bool cloak_ship);
+    void compose_shell_pieces(ComposeContext& context, ComposeBatch& batch, scene::SpacePlacementDecision& decision,
+        const scene::Placement& placement, const assets::Model* model, const std::optional<std::size_t>& live_ship,
+        bool cloak_ship);
+    void compose_piece_animation(ComposeContext& context, ComposeBatch& batch, const scene::Placement& placement,
+        const assets::Model* model, const std::optional<std::size_t>& live_ship, std::size_t first_piece);
+    void compose_hardpoint_pieces(ComposeContext& context, ComposeBatch& batch,
+        scene::SpacePlacementDecision& decision, std::size_t decision_index, const scene::Placement& placement,
+        const assets::Model* model, const std::optional<std::size_t>& live_ship,
+        const std::optional<std::array<std::uint8_t, 3>>& colour, bool cloak_ship);
+    void compose_draw_pieces(ComposeContext& context, ComposeBatch& batch, std::size_t first_decision, bool appending);
+    float commit_composed_pieces(ComposeContext& context, ComposeBatch& batch, sim::EntityId& next_entity);
+    bool finish_composed_range(ComposeContext& context, bool appending, sim::AssetId next_asset,
+        sim::EntityId next_entity, std::size_t receiving_before, std::size_t variant_failures_before,
+        float debug_farthest);
+    [[nodiscard]] bool compose_range(ComposeContext&, std::size_t first_ship, std::size_t first_decision,
+                                    sim::AssetId first_asset, sim::EntityId first_entity);
+    void schedule_arrival_sample() noexcept;
+    assets::Source compose_source_;
+    FixedCamera compose_camera_{};
+    sim::AssetId next_arrival_asset_{std::numeric_limits<sim::AssetId>::max() / 32U};
+    sim::EntityId next_arrival_piece_{std::numeric_limits<sim::EntityId>::max() / 32U};
     [[nodiscard]] std::optional<SurfaceUpload> upload_surface(
         GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
         std::map<std::string, assets::Texture>& textures, sim::AssetId& next_asset,
@@ -354,6 +413,7 @@ private:
         bool cloak{};
         bool cloak_hidden{};
         std::optional<bool> blast_charged{}; // BP-74: false=buildup, true=charged
+        std::optional<std::array<std::uint8_t, 3>> colour; // immutable compose tint, restored on slot reuse
     };
     void rebuild_piece_index();
     void refresh_instances();
@@ -384,6 +444,7 @@ private:
     std::map<sim::EntityId, std::vector<FogPiece>> fog_models_;
     std::vector<sim::EntityId> fog_drawn_entities_;
     std::optional<std::uint32_t> pending_unit_sample_;
+    std::optional<std::uint32_t> last_unit_sample_;
     sim::EntityId next_fog_piece_{std::numeric_limits<sim::EntityId>::max() / 16U};
     // Aligned with decisions_, then with each decision's hardpoints.
     std::vector<std::vector<scene::HardpointState>> hardpoint_states_;
@@ -465,10 +526,37 @@ private:
     std::vector<std::optional<std::size_t>> live_clips_;
     std::vector<std::optional<std::size_t>> live_alternate_clips_; // #76
     std::vector<LiveClipInstance> live_clip_instances_;
+    struct HeldClip {
+        animation::ClipPosition position;
+        std::vector<animation::BonePose> bones;
+        bool hidden{};
+    };
+    std::map<std::size_t, HeldClip> held_clips_;
+    struct PreparedLiveClip {
+        const animation::Player* player{};
+        bool terminal{}, cached{}, hidden{};
+        std::vector<std::vector<std::uint8_t>> geometry;
+        std::optional<animation::Pose> pose;
+        std::string failure;
+    };
+    std::vector<PreparedLiveClip> prepared_clips_;
+    std::span<const LiveClipPose> pending_clip_poses_;
+    void prepare_live_clip(std::size_t index);
+    const std::function<void(std::size_t)> live_clip_task_{[this](const std::size_t index) { prepare_live_clip(index); }};
+    // Immutable compose templates for reusable launch-clone slots. No per-instance
+    // renderer state or pose survives parking; shared mesh uploads stay warm.
+    struct ParkedShip {
+        std::vector<GatedInstance> pieces;
+        std::vector<LiveClipInstance> clips;
+        std::vector<AnimatedInstance> animated;
+    };
+    std::map<std::size_t, ParkedShip> parked_ships_;
     std::map<std::string, std::string> live_clip_status_;
     std::uint64_t live_clip_poses_{};
     std::uint64_t live_clip_hidden_bones_{};
     std::vector<bool> live_retired_;
+    std::vector<std::size_t> live_identity_;  // by live ship; a short vector or the ship's own index = its own slot
+    [[nodiscard]] const scene::Placement* live_placement(std::size_t ship) const noexcept;
     std::size_t live_released_assets_{};
     std::size_t session_records_skipped_{};
     std::vector<std::uint32_t> skipped_session_records_;

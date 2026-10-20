@@ -143,6 +143,8 @@ inline constexpr std::string_view options = "EAWR-NET-1200", malformed = "EAWR-N
     timeout = "EAWR-NET-1205", overlap = "EAWR-NET-1206", unavailable = "EAWR-NET-1207";
 }
 
+enum class UnconfirmedDeparture : std::uint8_t { connection_loss, continue_alone };
+
 struct SessionOptions {
     // Fixed LAN MVP policy: MP-03 retail lead/rounding gives initial targets 4/6/15,
     // not simply D. D=3 is the qualified loopback default, not a retail latency claim.
@@ -172,6 +174,10 @@ struct SessionOptions {
     // seats go through the single-decider agreement instead of the closed-link scan, and the host's adaptive timing reads
     // the per-pair minimum of the seats' reports.
     std::optional<MeshIncidentOptions> mesh;
+    // GCMP-09 / D5 opts into the agreed cutoff when no other survivor can vote. Multiple survivors still
+    // require the existing agreement. A two-peer split may continue as two separate campaigns, each with
+    // the other's configured AI fallback; D8 forbids rejoin/reconciliation. Tactical sessions keep the default.
+    UnconfirmedDeparture unconfirmed_departure{UnconfirmedDeparture::connection_loss};
 };
 
 struct WaitingFor {

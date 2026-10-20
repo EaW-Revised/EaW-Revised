@@ -230,7 +230,8 @@ def main() -> int:
         checker = Path(__file__).resolve()
         identity = {"checker": "lua_numeric_boundary", "root": os.path.normcase(str(root)),
                     "sources": [hashlib.sha256(source.read_bytes()).hexdigest()
-                                for source in (checker, checker.with_name("boundary_cache.py"))],
+                                for source in (checker, checker.with_name("boundary_cache.py"),
+                                               checker.parent / "common/eawr_python_helpers.py")],
                     # A unit's verdict depends on which files count as authored.
                     "authored": sorted(authored), **BoundaryCache.clang_identity(args.clang)}
         cache = BoundaryCache(args.cache_dir, root, identity, include_dirs=[root / d for d in INCLUDE_DIRS])

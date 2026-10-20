@@ -39,10 +39,23 @@ void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const s
 }
 
 void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
-    clear_skin_pose(entity_id);
+    // Retirement is explicit, unlike absence from a submitted snapshot. Drop the
+    // instance and skeleton now, including when another entity retains its mesh.
+    const auto instance = instances_.find(entity_id);
+    if (instance != instances_.end()) static_cast<void>(remove_instance(RenderingServer::get_singleton(), instance));
+    skin_poses_.erase(entity_id);
     light_scales_.erase(entity_id);
     colorizations_.erase(entity_id);
     opacities_.erase(entity_id);
+}
+
+std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(const sim::AssetId asset_id) const {
+    const auto resource = resources_.find(asset_id);
+    if (resource == resources_.end() || !resource->second.skinned
+        || !resource->second.hidden_geometry_collapses
+        || resource->second.description.route == MaterialRoute::modern_spatial
+        || legacy::reads_wind(resource->second.description)) return {};
+    return resource->second.skin_used_bones;
 }
 
 [[nodiscard]] core::Result<void> GodotRenderer::Impl::set_skin_pose(

@@ -1,3 +1,15 @@
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "../../apps/viewer/src/galactic/campaign_capture_metrics.hpp"
 #include "eawr/sim/galactic/observer.hpp"
@@ -6,17 +18,18 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <limits>
-#include <stdexcept>
+#include <exception>
 #include <set>
+using eawr::testing::require;
+using eawr::testing::take;
 
+bool galactic_support_self_test();
+
+namespace {
 namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 using Fixed = eawr::sim::math::Fixed;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
-void require(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+
 Fixed f(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 gc::GalacticSetup setup() {
     gc::GalacticSetup s;
@@ -746,7 +759,10 @@ void capture_metrics_contract() {
         expect(samples() == 2, "the next checkpoint waits for the next 60 s boundary");
     }
 }
-int main() {
+} // namespace
+
+int case_galactic_observer_tests() {
+    if (!galactic_support_self_test()) return 1;
     black_market_publication();
     discovery_audio_publication();
     try { capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }

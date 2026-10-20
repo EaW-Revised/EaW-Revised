@@ -233,14 +233,6 @@
       },
       {
         "path": "apps/viewer/src/live_session_prepare.cpp",
-        "sha256": "7b6afb902adc43a7bb34dff260de9cbff2d0b1fea5b15a8f9bf0504fb36d54e1",
-        "patterns": [
-          "lan-host"
-        ],
-        "reason": "Reviewed lan-host false positive: options_.lan is a local field guard for shared staging/live preparation, with no host or address value; exact full line only."
-      },
-      {
-        "path": "apps/viewer/src/live_session_prepare.cpp",
         "sha256": "77d6c6faee587c4db26cdee17a458c1a548a9927c2b697ae2435739d1b560f9b",
         "patterns": [
           "lan-host"
@@ -576,6 +568,86 @@
         "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
       },
       {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "d0b4b45890e50b2da586d361d3f96f9c325a080c2c878fce2e4abac42fa1843c",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "13a4e6fde8f524a3595fd9fc3e1bcad72e4e0569b33c1d9ed27dea3bcf9717be",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "cc129183020d63be8db2dbff985036825b472a580069c53385d42da61747d501",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "fa27c552dbfc93f7edb506a08db1918169efe1f46663124b78fd385db47d278a",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "7f8052ae53f59e7eb801d035c5bb794022b30ec8e51d53a50a96af6cbc681b2b",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "a2b8314b2928c9fad40a99a97489b8d9b2add796c2381d1497af8b313ce74c65",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "59f15221d42ad6fbff87464d80953f005a034162629ec4a5fb94e5d9db8df03c",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "fc1306d734c7d91b374ace23e63ca0c1b3e42edf485366c247df92cc2ad5bbeb",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "5fa0ad117a756ba866026d01fb32a95939525cc1af372e0af65a3b50ad918bb4",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "tests/net/lan_directory_tests.cpp",
+        "sha256": "adf7013912f1a15dbd6eec1c5d24953bc37e3200dc020c415e2776a91d5a266a",
+        "patterns": [
+          "private-ipv4"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
         "path": "tests/net/port_mapping_tests.cpp",
         "sha256": "72dcf2245906477c1d26ab238a1f4764c52d65b3ee2ca6cf95e3d4aba0136daa",
         "patterns": [
@@ -825,11 +897,11 @@
       },
       {
         "path": "apps/viewer/src/live_session_frame.cpp",
-        "sha256": "f6579b7871d9d78a2a270d86db387e72eff31e6e37ede1a9ee622696fce70170",
+        "sha256": "6697a1440b326060663ebd2ce179b7a78affb94601c9938f2ec2b83d20b30cb0",
         "patterns": [
           "lan-host"
         ],
-        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+        "reason": "Reviewed existing LAN failure print re-indented into frame_failure; exact full line only."
       },
       {
         "path": "apps/viewer/src/live_session_report.cpp",
@@ -862,6 +934,38 @@
           "lan-host"
         ],
         "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/battle_source_local.cpp",
+        "sha256": "7b6afb902adc43a7bb34dff260de9cbff2d0b1fea5b15a8f9bf0504fb36d54e1",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed lan-host false positive: options_.lan is a local field guard for shared staging/live preparation, with no host or address value; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/battle_source.cpp",
+        "sha256": "19496bfa5752bb8b3805f8117e72a3a8fc000d4f15f4b4510ec91ff9b98841a9",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN field guard choosing the agreed battle source; no host or address value, exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/battle_source.cpp",
+        "sha256": "b5563c3d70afbc87334029e09555ac24156c0aabe1568ebebf68b17a5e9ac2fd",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed local LAN field guard choosing the agreed battle source; no host or address value, exact full line only."
+      },
+      {
+        "path": "tests/presentation/renderer/prepared_campaign_view_cases.py",
+        "sha256": "b860816463954f46a95a0d7bfed30c0b3859504fc9d2508d23f6bc4271456b4b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed source-routing lookup in a test fixture; the matched text is a local field name with no host value, exact full line only."
       }
     ]
   },

@@ -517,6 +517,11 @@ struct GoalStateCodec {
         destination.perception_executor_ = nullptr; destination.scripts_ = nullptr;
     }
     static void grid(Archive& ar, ThreatGrid& g) {
+        if (ar.reading) {
+            g.clear_queries();
+            g.slots_dirty_ = true;
+            g.slots_.clear();
+        }
         ar.fields(g.left_, g.top_, g.right_, g.bottom_, g.cell_width_, g.cell_height_, g.min_radius_,
             g.x_cells_, g.y_cells_, g.constants_, g.cells_, g.setup_scanned_, g.setup_limit_);
         const auto size = ar.count(g.tracked_.size());
@@ -546,7 +551,6 @@ struct GoalStateCodec {
         ar.check(g.x_cells_ == 0 || (Real{} < g.cell_width_ && Real{} < g.cell_height_));
         for (const auto& cell : g.cells_) for (const auto& [id, index] : cell)
             ar.check(g.tracked_.contains(id) && index < g.tracked_.at(id).entries.size());
-        if (ar.reading) g.clear_queries();
     }
     static void positioning(Archive& ar, Engine& v) {
         // A row's storage shard is derived, never a service-order or decision input.

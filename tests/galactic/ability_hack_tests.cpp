@@ -149,7 +149,7 @@ void spy_transfer(const eawr::sim::PartitionExecutor& pool, std::vector<std::str
     }
 }
 } // namespace
-int main() {
+int case_galactic_ability_hack_tests() {
     try {
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);
         paid(one, baseline); refusals(one, baseline); ai_route(one, baseline); spy_transfer(one, baseline);

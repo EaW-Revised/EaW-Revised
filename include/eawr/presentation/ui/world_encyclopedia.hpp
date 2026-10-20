@@ -1,8 +1,9 @@
 #pragma once
 
+#include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 
-#include <algorithm>
+#include <initializer_list>
 #include <string_view>
 
 namespace eawr::presentation::ui {
@@ -14,10 +15,7 @@ namespace eawr::presentation::ui {
     const auto resolved = objects->resolve(type, data::Category::game_object);
     if (!resolved) return false;
     const auto matches = [](const std::string_view token, const std::string_view wanted) {
-        return token.size() == wanted.size() && std::equal(token.begin(), token.end(), wanted.begin(),
-            [](const char a, const char b) {
-                return (a >= 'a' && a <= 'z' ? static_cast<char>(a - 'a' + 'A') : a) == b;
-            });
+        return core::iequals(token, wanted);
     };
     for (const auto tag : {std::string_view{"Behavior"}, std::string_view{"SpaceBehavior"}}) {
         const auto* field = resolved.value().value(tag);

@@ -61,6 +61,13 @@ struct RelayServerOptions {
     // service also warns both peers then (the effective window is at most half of session_lifetime).
     std::chrono::milliseconds max_session_lifetime{86400000};
     std::chrono::milliseconds renewal_window{600000};
+    // Menu channel (#3758): the room-less presence list and chat of the online room browser. A prefix may carry up to
+    // connections_per_ip menu connections (players behind one NAT); 30 polls a minute per client leave room for chat.
+    std::size_t menu_operations_per_minute{1024};
+    std::size_t menu_bytes_per_minute{4 * 1024 * 1024};
+    std::size_t menu_max_members{256};
+    std::size_t menu_recent_lines{50};
+    std::chrono::milliseconds menu_line_lifetime{600000};
     // N-peer rooms (slice N3). Room members have budgets of their own, apart from the legacy per-session and
     // per-prefix ones (players share a NAT): a member, a whole room (capacity x member) and a prefix
     // (connections_per_ip x member). Provisional until the introduced-path test measures the signal volume.

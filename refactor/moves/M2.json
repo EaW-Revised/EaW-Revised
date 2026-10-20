@@ -1,0 +1,146 @@
+[
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* connections = EAWR_CONTROL(EawrUiButton, \"EAWR_ONLINE_CONNECTIONS\")) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging_connections"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* options = EAWR_CONTROL(EawrUiButton, \"IDC_SELECT_OPTIONS\"))",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging_status"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (room) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::build_staging_rows"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* name = EAWR_CONTROL(EawrUiLabel, \"EAWR_JOINER_MAP_NAME\")) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging_options"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#std::string signature = std::string(impl.host ? \"H\" : \"J\") + std::to_string(impl.map_index) + \"|\"",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging_roster"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* start = EAWR_CONTROL(EawrUiButton, \"IDC_LAN_START_GAME_BUTTON\")) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::refresh_staging_start"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* list = EAWR_CONTROL(EawrUiList, \"IDC_LAN_CHAT_LIST\")) draw_chat(*list, impl.staging_chat);",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::finish_staging_refresh"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (page_ != Page::staging || !EAWR_CONTROL(EawrUiList, \"EAWR_ONLINE_CONNECTIONS_LIST\")) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_connections"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (page_ != Page::lobby || (argument != \"lan\" && argument != \"online\")) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_source"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#handle_button(cancel_join_button);",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_cancel_join"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* edit = EAWR_CONTROL(EawrUiEdit, \"IDC_LAN_NAME_EDIT\")) edit->set_text(text(argument));",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_name"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#std::uint32_t value{};",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_colour"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (page_ != Page::lobby && page_ != Page::staging) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_chat"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#static const std::map<std::string, model::LobbySort> columns{{\"name\", model::LobbySort::game_name},",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_sort"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (argument == \"clear\") {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_filter"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (!number(argument, count)) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_humans"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (argument != \"humans\") return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_host_dropdown"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#const auto field_separator = argument.find(':');",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_staging_dropdown"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (online && !impl.online_rooms) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_host"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#refresh_lobby();",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_join"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* edit = EAWR_CONTROL(EawrUiEdit, prompt_edit)) edit->set_text(text(argument));",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_password"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#handle_button(prompt_cancel_button);",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_prompt_cancel"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#refresh_online_rooms();",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_refresh"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#|| (argument != \"next\" && argument != \"prev\")) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_rooms"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (auto* edit = EAWR_CONTROL(EawrUiEdit, invitation_edit)) edit->set_text(text(argument));",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_code"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (impl.join_selection.source() != model::LobbySourceKind::lan) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_direct"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#handle_button(page_ == Page::host_options || page_ == Page::direct_connect || page_ == Page::filter",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_cancel"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#leave_staging();",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_leave"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#for (std::size_t item = 0; item < impl.listed.size(); ++item) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_map"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (!number(argument, row) || row < 2) return false;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_ai"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#const auto equals = argument.find_first_of(\":=\");",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_team"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#const bool result = match_->lobby_ready(verb == \"ready\"); refresh_staging(); return result;",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_ready"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#std::uint32_t peer{}; return number(argument, peer) && match_->lobby_kick(peer);",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_kick"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#const auto room = *match_->lobby_state();",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_staging_selection"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#const auto humans = room ? room->snapshot.seats.size() : impl.human_owners.size();",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_start"
+  },
+  {
+    "old": "apps/viewer/src/lan_lobby_screen_refresh.cpp#if (const auto room = match_->lobby_state()) {",
+    "new": "apps/viewer/src/lan_lobby_screen_refresh.cpp#EawrLanLobby::action_accept"
+  }
+]

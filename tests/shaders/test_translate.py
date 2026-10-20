@@ -334,6 +334,8 @@ class ToolchainIntegrationTests(unittest.TestCase):
                             "translate_compile.py")
             expected_sources = {name: hashlib.sha256((ROOT / "tools" / "shaders" / name).read_bytes()).hexdigest()
                                 for name in source_names}
+            expected_sources["eawr_python_helpers.py"] = hashlib.sha256(
+                (ROOT / "tools/common/eawr_python_helpers.py").read_bytes()).hexdigest()
             self.assertEqual(expected_sources, manifest_a["translator"]["source_sha256"])
             hashes_a = sorted(item["spirv_sha256"] for artifact in manifest_a["artifacts"]
                               for item in artifact.get("stages", []))

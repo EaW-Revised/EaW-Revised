@@ -1,8 +1,15 @@
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <span>
+#include <utility>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/hero_actions.hpp"
 
 #include <algorithm>
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 
 namespace h = eawr::sim::galactic::hero_actions;
 using h::Fixed;
@@ -10,7 +17,9 @@ using h::Id;
 using h::Effect;
 using h::Refusal;
 namespace {
-void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void check(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 Fixed f(const char* value) { return Fixed::from_decimal(value).value(); }
 bool near(Fixed a, Fixed b) {
     const auto d = eawr::sim::math::subtract(a, b).value().raw();
@@ -333,7 +342,7 @@ void hacking_and_destruction() {
     check(!h::political_protection(w, 10, 30, true, 702, false).success, "host appropriation refusal");
 }
 } // namespace
-int main() {
+int case_galactic_hero_actions_tests() {
     try {
         neutralization(); sabotage(); theft(); siphon_and_spy(); hacking_and_destruction();
         std::cout << "galactic hero action contracts passed (stock-derived WGCH fixtures)\n";

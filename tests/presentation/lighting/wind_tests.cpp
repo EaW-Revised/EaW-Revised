@@ -3,6 +3,8 @@
 // evaluated independently in float64 from the rules, not from this
 // implementation's output.
 
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/lighting/wind.hpp"
 
 #include <array>
@@ -20,13 +22,11 @@ namespace {
 namespace wind = eawr::presentation::lighting::wind;
 namespace assets = eawr::assets;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 bool near(const float left, const double right, const double tolerance = 2e-5) {

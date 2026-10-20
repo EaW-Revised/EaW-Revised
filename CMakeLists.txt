@@ -38,6 +38,8 @@ include(EawrWarnings)
 include(EawrMsvcMp)
 # The owner's reserve switch: no local configure, build (of any target) or CTest while it is on.
 include(EawrReserveGuard)
+# An MSVC that drops the guard in front of a shift crashes the first Lua state (legacy #3930, #1287).
+include(EawrMsvcGuard)
 
 if(EAWR_DEBUG_SYMBOLS AND MSVC)
     add_compile_options(/Z7)
@@ -60,6 +62,7 @@ add_subdirectory(src/scene)
 add_subdirectory(src/units)
 add_subdirectory(src/battle)
 add_subdirectory(src/skirmish)
+add_subdirectory(src/platform/net)
 add_subdirectory(src/checkpoint)
 add_subdirectory(src/campaign)
 add_subdirectory(apps/sim_headless)

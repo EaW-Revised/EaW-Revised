@@ -9,3 +9,10 @@ target_link_libraries(eawr_net PUBLIC eawr::relay)
 target_link_libraries(eawr_net PRIVATE ${EAWR_NET_PLATFORM_LIBRARIES} pugixml::pugixml)
 target_compile_features(eawr_net PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_net)
+
+# The galaxy-layer lockstep adapter (#3769) needs the campaign owner; eawr_net itself stays free of it.
+add_library(eawr_net_galactic STATIC "${CMAKE_CURRENT_LIST_DIR}/galactic_adapter.cpp")
+add_library(eawr::net_galactic ALIAS eawr_net_galactic)
+target_link_libraries(eawr_net_galactic PUBLIC eawr::net eawr::campaign)
+target_compile_features(eawr_net_galactic PUBLIC cxx_std_20)
+eawr_target_project_warnings(eawr_net_galactic)

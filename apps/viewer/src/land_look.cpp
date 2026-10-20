@@ -1,4 +1,5 @@
 #include "land_look.hpp"
+#include "eawr/core/text.hpp"
 #include "land_look_shaders.hpp"
 
 #include "eawr/presentation/camera/constants_source.hpp"
@@ -26,14 +27,7 @@ namespace {
 }
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        const auto fold = [](const char value) {
-            return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-        };
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] sim::math::Mat3x4 identity() {

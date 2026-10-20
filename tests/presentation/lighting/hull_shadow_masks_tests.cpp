@@ -7,6 +7,8 @@
 // directions (equivalent to 40 ship orientations); `--list-meshes` prints the
 // whole model's meshes; `--light-variants <dir>` writes unfiltered two-Hull
 // classifications for the sun rotated +-20 degrees (diagnostic only).
+
+#include "../../support/check.hpp"
 #include "hull_asset_fixture.hpp"
 #include "hull_shadow_masks.hpp"
 
@@ -16,6 +18,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -24,13 +27,11 @@ namespace {
 
 using namespace eawr::lighting_probe;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void check(bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 void add_quad(std::vector<Triangle>& out, Vec3 a, Vec3 b, Vec3 c, Vec3 d, Vec3 normal,

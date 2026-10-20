@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cstring>
 #include <map>
 #include <span>
 #include <stdexcept>
@@ -68,9 +70,10 @@ public:
         return sha256_hex(bytes);
     }
     static void append(Bytes& bytes, std::uint64_t value) {
-        std::array<std::uint8_t, 8> word;
-        for (unsigned i = 0; i < 8; ++i) word[i] = static_cast<std::uint8_t>(value >> (8U * i));
-        bytes.insert(bytes.end(), word.begin(), word.end());
+        const auto at = bytes.size();
+        bytes.resize(at + 8);
+        if constexpr (std::endian::native == std::endian::little) std::memcpy(bytes.data() + at, &value, 8);
+        else for (unsigned i = 0; i < 8; ++i) bytes[at + i] = static_cast<std::uint8_t>(value >> (8U * i));
     }
 private:
     struct Entry { Sum sum; std::size_t bytes{}; };

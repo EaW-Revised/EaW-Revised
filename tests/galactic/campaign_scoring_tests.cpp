@@ -1,3 +1,13 @@
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <iostream>
+#include <string_view>
+#include <vector>
+#include "../support/temp_dir.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 
 #include "eawr/campaign/game_session.hpp"
@@ -13,7 +23,6 @@
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -21,6 +30,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 
 // GHUD-S61 / WGP-97..103: the campaign scoring ledger (saved sim counters) and the provider that
 // mounts the authored scoring module at the campaign end.
@@ -30,18 +40,15 @@ namespace platform = eawr::platform;
 namespace fs = std::filesystem;
 using eawr::sim::math::Fixed;
 
-template <class T> T take(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().code + ": " + value.error().message);
-    return std::move(value).value();
-}
-void take(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+using eawr::testing::result_code_colon_value::take;
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 
 struct Tree {
     fs::path root = fs::temp_directory_path()
         / ("eawr-scoring-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Tree() { fs::create_directories(root); }
-    ~Tree() { std::error_code ignored; fs::remove_all(root, ignored); }
+    ~Tree() { eawr::testing::remove_temp_directory(root); }
 };
 void write(const fs::path& path, const std::string_view value) {
     fs::create_directories(path.parent_path());
@@ -411,15 +418,8 @@ void production_provider() {
 // The installed module (--installed, game-data label): the authored equations (WGP-100..103) are
 // computed by the real GameScoring module and cross-checked against the documented formula.
 std::optional<fs::path> game_root() {
-#ifdef _MSC_VER
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) return std::nullopt;
-    fs::path root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) return std::nullopt;
-    return fs::path(value);
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    return root ? std::optional<fs::path>{std::move(*root)} : std::nullopt;
 }
 void installed_module() {
     const auto root = game_root();

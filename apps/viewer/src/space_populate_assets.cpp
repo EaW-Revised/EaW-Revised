@@ -1,16 +1,13 @@
 #include "space_populate_internal.hpp"
+#include "eawr/core/text.hpp"
 
-#include <algorithm>
 #include <cstddef>
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) {
-    return left.size() == right.size() && std::equal(left.begin(), left.end(), right.begin(), [](char a, char b) {
-        const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; };
-        return lower(a) == lower(b);
-    });
+    return core::iequals(left, right);
 }
 
 // The scene builder's reference probe (the trimmed authored name as written,

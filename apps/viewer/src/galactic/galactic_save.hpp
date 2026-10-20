@@ -49,6 +49,7 @@ private:
     void dismiss_modal(bool yes = false);
     void begin_progress(bool save, std::string name, bool overwrite = false, bool quick = false);
     void publish_save();
+    void begin_quit();
     void populate_slots();
     void position_dates();
     void observe_world_selection();
@@ -65,7 +66,8 @@ private:
     Screen screen_{Screen::escape};
     Modal modal_{Modal::none};
     std::string pending_name_;
-    bool pending_overwrite_{}, pending_quick_{}, quick_route_{};
+    bool pending_overwrite_{}, pending_quick_{}, quick_route_{}, pending_autosave_quit_{};
+    std::optional<platform::LiveSavePhase> quit_autosave_phase_; // reported, never gating
     std::int64_t selected_index_{-1};
     std::vector<std::size_t> rows_;
     std::vector<std::pair<std::int32_t, EawrUiLabel*>> dates_;

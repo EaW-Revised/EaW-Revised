@@ -2,6 +2,7 @@
 #include "renderer_upload_internal.hpp"
 #include "texture_budget.hpp"
 #include "mesh_rest_pose.hpp"
+#include "mesh_hidden_geometry.hpp"
 #include <godot_cpp/classes/engine.hpp>
 // Last: it may include <windows.h>.
 #include "vram_probe.hpp"
@@ -256,6 +257,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     target.bone_count = source.bones.size();
     target.skin_used_bones.assign(source.bones.size(), 0);
     target.skinned = false;
+    target.hidden_geometry_collapses = detail::hidden_skin_geometry_collapses(source);
     target.billboard_modes.clear();
     target.bone_parents.clear();
     target.bind_models.clear();

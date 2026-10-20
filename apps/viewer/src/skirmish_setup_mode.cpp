@@ -1,5 +1,8 @@
+#include "eawr/battle/start.hpp"
+#include "eawr/core/text.hpp"
 #include "skirmish_setup_mode.hpp"
 #include "lan_lobby_screen.hpp"
+#include "lan_broadcast_source.hpp"
 #include "battle_content.hpp"
 #include "lan_match.hpp"
 #include "eawr/scene/scene.hpp"
@@ -49,7 +52,7 @@ namespace eawr::presentation::godot_backend {
 using namespace godot;
 namespace model = presentation::ui;
 namespace {
-// The LAN panel's address field starts on the port a hosted match listens on (apps/viewer/src/lan_match.hpp).
+// The LAN panel's address field starts on the port a hosted match listens on (src/platform/net/lan_match.hpp).
 constexpr std::string_view default_lan_endpoint = "127.0.0.1:47624";
 constexpr std::uint16_t default_lan_port = 47624;
 
@@ -143,7 +146,7 @@ struct SkirmishSetupMode::State final {
     model::PlayerProfile player_profile;
     bool profile_live{};
     bool cancel_requested{}, cancel_routed{};
-    skirmish::MatchOptions defaults;
+    battle::MatchOptions defaults;
     std::optional<skirmish::SetupOptionsEdit> editing;
     // The rows' controls: the name combo (Open or AI; the host's own name in row one), faction, team, colour.
     std::array<EawrUiCombo*, skirmish::local_setup_rows> faction{}, team{}, controller{}, colour{};
@@ -161,7 +164,7 @@ struct SkirmishSetupMode::State final {
     bool options_escape_was_down{}, win_list_was_open{};
     std::vector<skirmish::SetupMap> maps;
     skirmish::SetupMapCache all_maps;
-    std::vector<skirmish::LobbyColour> palette;
+    std::vector<battle::LobbyColour> palette;
     bool custom_maps{};
     skirmish::SetupSelection selection;
     std::optional<skirmish::FixtureOptions> pending;
@@ -254,9 +257,7 @@ void SkirmishSetupMode::State::resolve_factions() {
         if (auto resolved = catalog->resolve(entry.second, data::Category::faction)) {
             if (const auto* id = resolved.value().value("Text_ID")) {
                 std::string key = id->value.raw_text;
-                const auto first = key.find_first_not_of(" \t\r\n");
-                const auto last = key.find_last_not_of(" \t\r\n");
-                key = first == std::string::npos ? std::string() : key.substr(first, last - first + 1);
+                key = core::trim(key, core::xml_whitespace);
                 if (!key.empty()) shown = lookup(key);
             }
         }
@@ -1606,6 +1607,11 @@ void SkirmishSetupMode::enter_online(model::NetworkSettings settings) {
     EawrLanLobby::Options options; options.content = state.content;
     options.game_root = state.options.game_root; options.mod_root = state.options.mod_root; options.profile = state.options.profile;
     options.online_settings = std::move(settings);
+    options.lan_source_factory = [](std::string& failure) {
+        BroadcastLobbySource::Options discovery;
+        discovery.menu_chat_limits = true;
+        return BroadcastLobbySource::open(std::move(discovery), failure);
+    };
     options.player_name = model::effective_network_name(state.player_profile, state.platform_name);
     options.player_colour = static_cast<std::uint32_t>(std::max(0, state.player_profile.lobby_colour));
     if (!state.online_screen->build(std::move(options), &state.all_maps)) {

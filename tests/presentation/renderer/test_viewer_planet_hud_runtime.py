@@ -14,11 +14,11 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires GPU viewer and installed FoC")
 class PlanetHudRuntime(unittest.TestCase):
-    def capture(self, campaign, *extra):
+    def capture(self, campaign, *extra, engine_args=()):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-hud-"))
         report, capture = directory / "report.json", directory / "capture.png"
         result = subprocess.run([
-            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", *engine_args,
             "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-galactic", campaign,
             "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
             "--eawr-report", str(report), "--eawr-capture", str(capture), *extra],
@@ -58,11 +58,12 @@ class PlanetHudRuntime(unittest.TestCase):
         self.assertEqual(set(facts), planets)
         self.assertEqual(data["map_input"]["discovery_source"], "published-local-faction-observer")
         discovered = {planet for planet, fact in facts.items() if fact["discovered"]}
-        # observer_layout_starting_ownership (#1149): placement/control are not
-        # installed here. WGUI-01/04/107 expand from an allied home even paused,
-        # but a discovered Neutral home alone is not an eligible seed. This is
-        # a preview seam assertion, not a retail campaign first-frame rule.
-        self.assertEqual(discovered, {hud["selected"]}, "neutral-layout ownership seam leaves only the selected authored home discovered")
+        # WGUI-01/04/107: installed starting owners expand discovery even paused.
+        # Retail Equal Footing day-1 captures (GC-DISC-01; out/gc-4164/retail.md) show
+        # full nearby planets and grid shells together, with known owner colours.
+        self.assertIn(hud["selected"], discovered)
+        self.assertGreater(len(discovered), 1)
+        self.assertLess(len(discovered), len(planets), "discovery must retain the unscouted systems")
         self.assertNotEqual(hud["selected"], 0)
         # WGUI-38: every named planet keeps its name; undiscovered ones in the neutral colour.
         named_world = {planet["id"] for planet in data["planets"] if planet["layer"] == "world" and planet["show_name"]}
@@ -81,11 +82,35 @@ class PlanetHudRuntime(unittest.TestCase):
         self.assertTrue(discovered <= named, "admitted normal planets must retain their names")
         self.assertNotIn(hidden[0]["id"], {label["planet"] for label in hud["labels"]},
                          "unnamed art must have neither a label nor its native hover control")
+        colours = {planet["id"]: planet["colour"] for planet in data["planets"]}
         for label in hud["labels"]:
             self.assertEqual(label["text"], label["text"].upper())
             self.assertNotIn("GALAXY_CORE_ART", label["text"])
-            self.assertEqual(label["colour"], [100, 100, 100], "neutral layout names must use Neutral")
+            fact = facts[label["planet"]]
+            expected = colours[label["planet"]] if fact["discovered"] and fact["owner"] is not None else [100, 100, 100]
+            self.assertEqual(label["colour"], expected, "name tint requires discovery and published ownership")
         self.check_label_pixels(data, capture, expected_minimum=1)
+
+        # GC-DISC-01 (out/gc-4164/retail.md) is a Rebel capture. Keep the
+        # original Underworld case above, and pin the matching retail setup:
+        # Bespin/Mustafar are textured and red; Corulag remains a grey shell.
+        retail, _ = self.capture("Sandbox_Equal_Footing_Rebel")
+        retail_planets = {planet["name"]: planet for planet in retail["planets"]}
+        retail_facts = {row["planet"]: row for row in retail["hud"]["intelligence"]}
+        retail_labels = {row["planet"]: row for row in retail["hud"]["labels"]}
+        for name, known in (("Bespin", True), ("Mustafar", True), ("Corulag", False)):
+            with self.subTest(retail_planet=name):
+                planet = retail_planets[name]
+                identity = planet["id"]
+                self.assertEqual(retail_facts[identity]["discovered"], known)
+                self.assertEqual(planet["drawn"], "model")
+                self.assertIn(identity, retail["shell_models"])
+                self.assertEqual(identity in retail["alternate2_planets"], not known)
+                self.assertEqual(identity in retail["shell_drawn_planets"], not known)
+                self.assertEqual(retail_labels[identity]["colour"], planet["colour"] if known else [100, 100, 100])
+                if known:
+                    self.assertEqual(planet["faction"], "Rebel")
+                    self.assertEqual(retail_facts[identity]["owner"], planet["owner"])
 
     def test_name_sits_right_of_the_planet_on_its_centre_row(self):
         # GHUDL-15 / WGUI-96: the name is left justified at one authored X

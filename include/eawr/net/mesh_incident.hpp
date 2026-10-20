@@ -119,8 +119,6 @@ public:
     [[nodiscard]] std::optional<MeshIncidentResult> take_result();
     // The session finished every agreed departure of the last departure result.
     void settled();
-    // A pair between two seats of the confirmed survivor set closed while the departures settle: fail closed.
-    void survivor_lost(PeerIndex a, PeerIndex b);
     // The active set changed through an ordinary departure (a quit whose batch arrived, a timeout or held agreement; growth when
     // such an agreement is abandoned). Quiet: taken at once. Running with nothing proposed or pledged yet: the policy restarts
     // over the new set (same incident ID, time base and a monotonic report revision). Otherwise ignored: the incident fails

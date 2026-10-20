@@ -1,3 +1,14 @@
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <ios>
+#include <ostream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <vector>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 // #3189: an invasion won by auto-resolve must hand the planet to the invader.
 //
 // Drives the installed Sandbox_Equal_Footing_Underworld campaign through the ordinary live path (real
@@ -14,7 +25,6 @@
 #include "eawr/sim/galactic/production.hpp"
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -25,25 +35,16 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 
-template<class T> T take(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(eawr::core::format_diagnostic(value.error()));
-    return std::move(value).value();
-}
+using eawr::testing::result_diagnostic::take;
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text); return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    return text && *text ? std::optional<std::string>{text} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 
 struct Candidate {
@@ -415,7 +416,7 @@ Trace run(cp::CampaignRoot& root, const Candidate& pick, gc::PlayerId attacker, 
 
 void installed(std::string_view attacker_name = "Empire", bool build_list_only = false) {
     const auto root_dir = game_root();
-    if (!root_dir) { std::cout << "SKIPPED: stock capture return needs EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root_dir) { eawr::testing::skip_installed("SKIPPED: stock capture return needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
         mounts.push_back(take(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root_dir) / folder / "Data")).mount);
@@ -605,7 +606,7 @@ void installed(std::string_view attacker_name = "Empire", bool build_list_only =
 }
 } // namespace
 
-int main(int argc, const char* const argv[]) {
+int case_galactic_capture_return_tests(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--build-list") installed(argv[2], true);
         else installed();

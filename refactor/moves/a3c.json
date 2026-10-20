@@ -1,0 +1,58 @@
+[
+  {
+    "old": "apps/asset_scan/main.cpp#lower_ascii",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "apps/asset_scan/main.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/asset_validate/main.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/script_smoke/main.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/xml_scan/main.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/sky_scan/sky_scan.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "apps/sky_scan/sky_scan.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/sky_scan/sky_scan.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "apps/relay_server/main.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "tests/skirmish/foc_tag_perturb_install.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "tests/skirmish/foc_tag_perturb_install.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "tests/skirmish/foc_tag_perturb_install.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "tests/presentation/lighting/constants_scan.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "tests/presentation/animation/corpus_declarations_other.hpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim"
+  }
+]

@@ -1,0 +1,4 @@
+[
+  {"old": "apps/viewer/src/live_session_prepare.cpp#prepare_borrowed", "new": "apps/viewer/src/battle_source_borrowed.cpp#prepare_borrowed"},
+  {"old": "apps/viewer/src/live_session_prepare.cpp#prepare_native", "new": "apps/viewer/src/battle_source_replay.cpp#prepare_native"}
+]

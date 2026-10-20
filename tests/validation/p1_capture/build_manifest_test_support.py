@@ -35,6 +35,9 @@ if str(TOOL_DIRECTORY) not in sys.path:
 
 import build_manifest  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 
 REVISION = "0123456789abcdef0123456789abcdef01234567"
 VENDOR = "ATI Technologies Inc."
@@ -48,7 +51,7 @@ def sha256(data):
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    python_helpers.write_json(path, value)
     return path
 
 

@@ -14,6 +14,10 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file as sha256  # noqa: E402
 
 VERSION = 2
 PROFILES = ("eaw", "foc", "remake")
@@ -38,10 +42,6 @@ HEX = set("0123456789abcdef")
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def source_digest(source_id: str) -> str:

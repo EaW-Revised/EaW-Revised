@@ -1,3 +1,4 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic/live_battle_dialog_view.hpp"
 #include "galactic/galactic_save_hints.hpp"
@@ -9,12 +10,24 @@
 #include "eawr/checkpoint/game.hpp"
 
 #include <algorithm>
-#include <utility>
-#include <vector>
-#include <stdexcept>
+#include <array>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iostream>
+#include <iterator>
+#include <memory>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -22,8 +35,7 @@ namespace cp = eawr::campaign;
 namespace view = eawr::viewer::galactic;
 using galactic_test::expect;
 template<class T> T checked(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+    return eawr::testing::result_code_colon::take(std::move(result));
 }
 // A retained land defeat and a later returned space victory must both drain.
 void retained_results_drain() {
@@ -689,7 +701,7 @@ void uninvolved_conflict_lifecycle() {
     expect(sample(2) == view::BattleDialogPhase::summary && changes == 3, "a party seat still gets one summary");
 }
 }
-int main() {
+int case_galactic_live_battle_dialog_tests() {
     try { retained_results_drain(); saved_auto_summary_roundtrip(); live_retained_results_drain(); campaign_seats(); bounty_mapping(); publication(); uninvolved_conflict_lifecycle(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

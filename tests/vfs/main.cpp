@@ -1,3 +1,6 @@
+#include "../support/temp_dir.hpp"
+#include "../support/self_test.hpp"
+#include "../support/check.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
@@ -7,9 +10,13 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <span>
 #include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
 #include <vector>
 
 #ifdef _WIN32
@@ -20,13 +27,11 @@
 
 namespace {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 void append_u16(std::vector<std::byte>& out, const std::uint16_t value) {
@@ -87,8 +92,7 @@ struct TempTree {
         std::filesystem::create_directories(root);
     }
     ~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
 };
 
@@ -150,6 +154,10 @@ void vfs_mod_chain() {
 } // namespace
 
 int main(const int argc, char** argv) {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     using namespace eawr::vfs;
 
     if (argc == 4 && std::string_view(argv[1]) == "--inspect-meg") {

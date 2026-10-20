@@ -23,6 +23,8 @@ if(NOT WIN32)
 endif()
 # The owner's reserve switch: no local configure or build (of any target, godot-cpp too) while it is on.
 include("${EAWR_ROOT}/cmake/EawrReserveGuard.cmake")
+# An MSVC that drops the guard in front of a shift crashes the first Lua state (legacy #3930).
+include("${EAWR_ROOT}/cmake/EawrMsvcGuard.cmake")
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -122,6 +124,7 @@ include("${EAWR_ROOT}/src/units/sources.cmake")
 include("${EAWR_ROOT}/src/battle/sources.cmake")
 include("${EAWR_ROOT}/src/skirmish/sources.cmake")
 include("${EAWR_ROOT}/src/platform/sources.cmake")
+include("${EAWR_ROOT}/src/platform/net/sources.cmake")
 include("${EAWR_ROOT}/src/platform/galactic/sources.cmake")
 include("${EAWR_ROOT}/src/sim/galactic/sources.cmake")
 include("${EAWR_ROOT}/src/campaign/sources.cmake")
@@ -153,6 +156,8 @@ target_compile_features(eawr_viewer_script PUBLIC cxx_std_20)
 if(NOT MSVC)
     target_compile_options(eawr_viewer_script PRIVATE -fno-strict-aliasing)
 endif()
+# An MSVC that drops the guard before a shift (legacy #3930, #1287) compiles the table sizing at /Od.
+eawr_msvc_guard_apply(eawr_viewer_script "${EAWR_ROOT}/src/script/sflua/upstream/ltable.cpp")
 
 add_library(eawr_viewer_core STATIC
     ${EAWR_CORE_SOURCES}
@@ -169,6 +174,7 @@ add_library(eawr_viewer_core STATIC
     ${EAWR_UNITS_SOURCES}
     ${EAWR_BATTLE_SOURCES}
     ${EAWR_SKIRMISH_SOURCES}
+    ${EAWR_PLATFORM_NET_SOURCES}
     ${EAWR_PLATFORM_SOURCES}
     ${EAWR_PLATFORM_GALACTIC_SOURCES}
     ${EAWR_SIM_GALACTIC_SOURCES}
@@ -180,6 +186,7 @@ add_library(eawr_viewer_core STATIC
     "${EAWR_VIEWER_XML_SCHEMA_INC}"
 )
 target_include_directories(eawr_viewer_core PUBLIC
+    "${EAWR_ROOT}/src/platform/net"
     "${EAWR_ROOT}/include"
     "${EAWR_ROOT}/third_party/pugixml/src"
     "${EAWR_ROOT}/third_party/entt/single_include"
@@ -201,6 +208,7 @@ add_library(eawr_viewer SHARED
 )
 target_include_directories(eawr_viewer PRIVATE
     src
+    "${EAWR_ROOT}/src/platform/net"
     "${EAWR_ROOT}/include"
     "${EAWR_ROOT}/src/presentation/godot"
 )

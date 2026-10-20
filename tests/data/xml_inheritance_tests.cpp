@@ -1,14 +1,11 @@
 #include "data_test_support.hpp"
-
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>
 #include <array>
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <vector>

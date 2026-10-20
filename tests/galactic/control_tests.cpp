@@ -1,3 +1,5 @@
+#include "../support/result.hpp"
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/control.hpp"
 #include "eawr/campaign/auto_resolve_outcome.hpp"
@@ -9,11 +11,25 @@
 #include "eawr/vfs/vfs.hpp"
 #include "galactic/planet_hud.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
-#include <cstdlib>
+#include <ios>
+#include <iostream>
 #include <limits>
+#include <optional>
+#include <ostream>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -986,8 +1002,7 @@ void landfleet_observer_roster() {
 }
 // #3189: a planet that changes hands reaches the observer's planet facts and the local player's observation.
 template<class T> T capture_checked(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
+    return eawr::testing::result_diagnostic::take(std::move(result));
 }
 void capture_build_and_ground_views() {
     namespace campaign = eawr::campaign;
@@ -1679,15 +1694,8 @@ void generate(const std::filesystem::path& directory) {
     if (!out || !hashes) throw std::runtime_error("control corpus write failed");
 }
 void installed() {
-    std::optional<std::string> root;
-#ifdef _WIN32
-    char* value = nullptr; std::size_t size = 0;
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") == 0 && value) root = value;
-    std::free(value);
-#else
-    if (const auto* value = std::getenv("EAWR_EAW_GAME_ROOT")) root = value;
-#endif
-    if (!root) { std::cout << "SKIPPED: stock control needs EAWR_EAW_GAME_ROOT\n"; return; }
+    std::optional<std::string> root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock control needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");

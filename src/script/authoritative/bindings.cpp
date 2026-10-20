@@ -883,8 +883,4 @@ void end_slot(Instance& instance, ::std::size_t index) {
     }
 }
 
-bool queue_limit_reached(const Instance& instance) noexcept {
-    return instance.queued_events >= instance.shared->config.quotas.queued_events;
-}
-
 } // namespace eawr::script::authoritative::detail

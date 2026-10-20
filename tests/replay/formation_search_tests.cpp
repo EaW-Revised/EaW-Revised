@@ -1,7 +1,18 @@
 #include "formation_support.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace formation_test_support {
 

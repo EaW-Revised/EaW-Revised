@@ -1,25 +1,32 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/gns_room.hpp"
 #include "eawr/net/mesh_policy.hpp"
 
-#include <algorithm>
+#include <array>
 #include <atomic>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
-#include <stdexcept>
+#include <memory>
+#include <optional>
+#include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using namespace std::chrono_literals;
 using Pair = std::pair<PeerIndex, PeerIndex>;
 using Reports = std::array<MeshLinkReport, max_match_seats>;
-void expect(bool condition, const char* reason) { if (!condition) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
+void expect(bool condition, const char* reason) {
+    if (!condition) eawr::testing::require(condition, reason);
 }
-void require(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-}
+using eawr::testing::result_code_colon::require;
+
 MeshSeats seats(std::uint32_t count) { return static_cast<MeshSeats>((1U << count) - 1U); }
 Reports make_reports(std::uint32_t count, const std::vector<Pair>& lost, bool relay_failed = true) {
     Reports result{};
@@ -542,8 +549,9 @@ void formation() {
         expect(mesh.pair_failed(1, 2, {false, false}).action == MeshFormationAction::none && !mesh.complete(), "Direct-only loss clears readiness without regrant");
         expect(mesh.pair_failed(1, 2, {true, false}).action == MeshFormationAction::none, "One relay endpoint cannot regrant");
         const auto retry = mesh.pair_failed(1, 2, {true, true});
-        expect(retry.action == MeshFormationAction::regrant && retry.seat == 2, "One regrant for admitted guest pair");
+        expect(retry.action == MeshFormationAction::regrant && retry.seat == 2, "First regrant for admitted guest pair");
         expect(!mesh.complete(), "Loss clears ready");
+        expect(mesh.pair_failed(1, 2, {true, true}).action == MeshFormationAction::regrant, "Second regrant for admitted pair");
         const auto refused = mesh.pair_failed(1, 2, {true, true});
         expect(refused.action == MeshFormationAction::refuse && refused.seat == 2 && refused.unreachable == 1, "Later admission refused on regrant failure");
         expect(mesh.attach(2, 100), "Released slot refilled");
@@ -565,15 +573,33 @@ void formation() {
                 && (partial.occupied() & mesh_seat(k)), "Direct-only newcomer failure retains the seat");
             expect(partial.pair_failed(k, j, {true, false}).action == MeshFormationAction::none
                 && (partial.occupied() & mesh_seat(k)), "One-sided relay failure cannot refuse newcomer");
+            if (j != 0) for (unsigned attempt = 0; attempt < 2; ++attempt)
+                expect(partial.pair_failed(k, j, {true, true}).action == MeshFormationAction::regrant, "Newcomer retries precede refusal");
             const auto failure = partial.pair_failed(k, j, {true, true});
             expect(failure.action == MeshFormationAction::refuse && failure.seat == k && failure.unreachable == j
                 && !(partial.occupied() & mesh_seat(k)), "Every failing newcomer pair refuses only newcomer");
         }
     }
+    // A never-complete newcomer gets the same fixed two retries as an established pair.
+    for (const bool reversed : {false, true}) {
+        MeshFormation newcomer(3);
+        expect(newcomer.attach(0, 1) && newcomer.attach(1, 2) && newcomer.attach(2, 3), "Newcomer roster");
+        expect(newcomer.pair_open(0, 1) && newcomer.pair_open(0, 2), "Only host pairs have opened");
+        const PeerIndex a = reversed ? 2U : 1U, b = reversed ? 1U : 2U;
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            const auto retry = newcomer.pair_failed(a, b, {true, true});
+            expect(retry.action == MeshFormationAction::regrant && retry.seat == 2 && retry.unreachable == 1
+                && newcomer.occupied() == seats(3), "Initial ICE failure retries without releasing either seat");
+        }
+        const auto refused = newcomer.pair_failed(a, b, {true, true});
+        expect(refused.action == MeshFormationAction::refuse && refused.seat == 2 && refused.unreachable == 1
+            && newcomer.occupied() == (mesh_seat(0) | mesh_seat(1)), "Bounded retries end with the named pair and intact host room");
+    }
     MeshFormation admission_order(3);
     expect(admission_order.attach(0, 1) && admission_order.attach(2, 2) && admission_order.attach(1, 3), "Admission order differs from slot order");
     expect(admission_order.pair_open(0, 1) && admission_order.pair_open(0, 2) && admission_order.pair_open(1, 2), "Out-of-order mesh complete");
     expect(admission_order.pair_failed(1, 2, {true, true}).action == MeshFormationAction::regrant, "Out-of-order pair regrant");
+    expect(admission_order.pair_failed(1, 2, {true, true}).action == MeshFormationAction::regrant, "Out-of-order second regrant");
     expect(admission_order.pair_failed(1, 2, {true, true}).seat == 1, "Pre-Start refusal uses later admission, not higher slot");
     expect(mesh_newcomer_refusal_text("Player Blue").find("Player Blue") != std::string::npos, "Curated refusal names unreachable player");
     expect(!MeshFormation(10).attach(0, 1), "Capacity bound enforced");
@@ -592,6 +618,7 @@ void formation() {
     expect(silence.pair_open(0, 1) && silence.pair_open(0, 2) && silence.pair_open(1, 2), "Silence formation complete");
     expect(silence.pair_failed(1, 2, silent({true, false}, 1s)).action == MeshFormationAction::none, "One report inside the grace waits");
     expect(silence.pair_failed(1, 2, silent({true, false}, 6s)).action == MeshFormationAction::regrant, "A silent end after the grace regrants once");
+    expect(silence.pair_failed(1, 2, silent({true, false}, 6s)).action == MeshFormationAction::regrant, "Silent pair gets a second regrant");
     expect(silence.pair_failed(1, 2, silent({true, false}, 6s)).action == MeshFormationAction::refuse, "Then the silent pair refuses the newcomer");
 }
 InProcessGnsRoom::Clock::time_point time_now{};

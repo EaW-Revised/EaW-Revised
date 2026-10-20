@@ -1,4 +1,5 @@
 #include "eawr/presentation/space/space.hpp"
+#include "eawr/core/text.hpp"
 
 #include "space_internal.hpp"
 
@@ -13,10 +14,6 @@
 
 namespace eawr::presentation::space {
 namespace {
-
-[[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
 
 constexpr Rigid identity_rigid{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
 
@@ -51,11 +48,7 @@ constexpr Rigid identity_rigid{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
 } // namespace
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] bool declared(const std::optional<std::string>& value) noexcept {

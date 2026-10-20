@@ -19,7 +19,7 @@ struct ObservedInvasionOffer {
 
 [[nodiscard]] inline ObservedInvasionOffer observe_invasion_offer(const BattleResult& result,
     const ConflictRecord& conflict, const sim::galactic::GalacticSnapshot& snapshot,
-    sim::galactic::PlayerId observer, bool native_available) {
+    sim::galactic::PlayerId observer, bool native_available, bool summary_pause = false) {
     ObservedInvasionOffer out;
     if (!observer || !result.winner || result.conflict != conflict.id
         || conflict.layer != BattleLayer::space || !snapshot.control() || !snapshot.movement()
@@ -55,7 +55,7 @@ struct ObservedInvasionOffer {
     }
     // Allied preparation is sourced; permission to command another player's
     // retained transports remains with the command owner, never this projection.
-    out.accept_permitted = result.winner == observer && native_available && !out.candidates.empty() && !snapshot.clock().pause_depth;
+    out.accept_permitted = result.winner == observer && native_available && !out.candidates.empty() && snapshot.clock().pause_depth == (summary_pause ? 1U : 0U);
     return out;
 }
 
@@ -66,7 +66,7 @@ class InvasionOfferPublication {
 public:
     [[nodiscard]] std::shared_ptr<const ObservedInvasionOffer> publish(const BattleResult* result,
         const ConflictRecord* conflict, const sim::galactic::GalacticSnapshot& snapshot,
-        sim::galactic::PlayerId observer, bool native_available, std::uint64_t selection_revision) {
+        sim::galactic::PlayerId observer, bool native_available, std::uint64_t selection_revision, bool summary_pause = false) {
         if (!result || !conflict) { publication_.reset(); valid_ = false; return {}; }
         const auto planet = std::lower_bound(snapshot.planets().begin(), snapshot.planets().end(), conflict->planet,
             [](const auto& row, const auto id) { return row.id < id; });
@@ -87,12 +87,12 @@ public:
         const Key key{selection_revision, result->conflict, conflict->id, result->winner, conflict->planet, conflict->layer,
             snapshot.observer_input_generation(), snapshot.movement(), observer, native_available, snapshot.clock().pause_depth,
             planet_present, planet_present ? planet->owner : 0, surface_present, accessible, destroyed, allied_winner,
-            snapshot.fleet_control().has_value()};
+            snapshot.fleet_control().has_value(), summary_pause};
         if (valid_ && key == key_) return publication_;
         key_ = key; valid_ = true;
         ++gathers_;
         publication_ = std::make_shared<const ObservedInvasionOffer>(
-            observe_invasion_offer(*result, *conflict, snapshot, observer, native_available));
+            observe_invasion_offer(*result, *conflict, snapshot, observer, native_available, summary_pause));
         return publication_;
     }
     [[nodiscard]] std::uint64_t gathers() const noexcept { return gathers_; }
@@ -109,7 +109,7 @@ private:
         std::uint32_t pause_depth{};
         bool planet_present{};
         sim::galactic::PlayerId owner{};
-        bool surface_present{}, accessible{}, destroyed{}, allied_winner{}, fleet_traits{};
+        bool surface_present{}, accessible{}, destroyed{}, allied_winner{}, fleet_traits{}, summary_pause{};
         friend bool operator==(const Key&, const Key&) = default;
     };
     Key key_;

@@ -270,11 +270,11 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
         if (!query.freestore_selection) query.freestore_selection = [](auto pool, auto world, auto engine, auto snapshot) {
             static_cast<void>(snapshot);
             const auto owner = std::weak_ptr<const GalacticAiRuntimeProviders::Engine>(engine);
-            auto selected = ga::qualified_freestore_selection(std::move(pool), std::move(world), std::move(engine),
-                [owner](auto player, auto target, auto actor, const auto& plan) {
+            auto selected = ga::qualified_freestore_batch_selection(std::move(pool), std::move(world), std::move(engine),
+                [owner](auto player, auto target, const auto& plan) -> ga::FreestoreActorSelection {
                     const auto engine = owner.lock();
-                    return engine ? engine->galactic_freestore_selection_facts(player, target, actor, plan)
-                        : absent<std::pair<script::foc::ai::Real, bool>>("retained stage selection owner");
+                    if (!engine) return [](sim::EntityId) { return absent<std::pair<script::foc::ai::Real, bool>>("retained stage selection owner"); };
+                    return [engine, read = engine->galactic_freestore_selection_batch(player, target, plan)](sim::EntityId actor) { return read(actor); };
                 });
             return core::Result<script::foc::ai::GalacticFreestoreSelectionProvider>::success(std::move(selected));
         };

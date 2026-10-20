@@ -1,5 +1,8 @@
 #include "corpus_associations_test_support.hpp"
 
+#include <cstdlib>
+#include <iostream>
+
 using namespace association_contracts;
 
 int main() {

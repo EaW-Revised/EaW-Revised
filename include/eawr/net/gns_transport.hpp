@@ -16,9 +16,10 @@ enum class GnsRoute { unknown, direct, relayed };
 // belongs to one pair, and the text. Addresses are replaced by "<addr>"; no credentials or payloads.
 using GnsLogSink = std::function<void(std::string_view)>;
 // GNS hello layout revision (the TCP/LAN protocol stays at 1). 2 added the sender's roster slot and the roster size to the
-// hello (N-peer slice N2). The decoder reads magic and version before the rest, so a peer on another revision gets the
+// hello (N-peer slice N2); 3 binds mesh signalling and failure reports to their grant secret.
+// The decoder reads magic and version before the rest, so a peer on another revision gets the
 // typed EAWR-NET-1502 and never a malformed-hello error.
-inline constexpr std::uint32_t gns_protocol_version = 2;
+inline constexpr std::uint32_t gns_protocol_version = 3;
 struct GnsOptions : TcpOptions {
     GnsOptions() { protocol_version = gns_protocol_version; }
     // Qualification/deployment policy: require TURN instead of direct ICE.
@@ -88,9 +89,6 @@ struct GnsMeshEvent {
 class GnsTransport final : public MessageTransport {
 public:
     static bool available();
-    // Route of the most recent open GNS connection in this process, sampled by poll at
-    // a one-second cadence. Safe to read from any thread; carries no address.
-    static GnsRoute observed_route();
     // Process-wide diagnostics (#4021): GNS warnings and the ICE/TURN lines (allocation and permission replies with their
     // error codes, nonce repeats, refresh timeouts), plus the reason every link stops (EAWR-NET-1507 included). Quiet in
     // a healthy match: a few lines per TURN refresh, never one per packet. Lines are queued from any thread and `poll`

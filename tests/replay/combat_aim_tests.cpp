@@ -1,7 +1,18 @@
 #include "combat_support.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace combat_test_support {
 

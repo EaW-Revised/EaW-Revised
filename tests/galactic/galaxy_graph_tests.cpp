@@ -1,3 +1,11 @@
+#include <algorithm>
+#include <cstdint>
+#include <ios>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 
 #include "eawr/campaign/galaxy.hpp"
@@ -5,12 +13,12 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <set>
 #include <string>
+#include <utility>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -343,15 +351,7 @@ void partitioned_parity() {
     }
 }
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") != 0 || !value) return std::nullopt;
-    std::string result(value); std::free(value);
-    return result.empty() ? std::nullopt : std::optional<std::string>(result);
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>(value) : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void installed_remake(const std::filesystem::path& mod_root) {
     const auto root = game_root();
@@ -396,7 +396,7 @@ void installed_remake(const std::filesystem::path& mod_root) {
 }
 void installed() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: stock galaxy graphs need EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock galaxy graphs need EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
@@ -472,7 +472,7 @@ void installed() {
     expect(background_rows >= 30, "stock background classification coverage across campaign families");
 }
 } // namespace
-int main(const int argc, const char* const argv[]) {
+int case_galactic_galaxy_graph_tests(const int argc, const char* const argv[]) {
     if (argc == 3 && std::string_view(argv[1]) == "--generate") {
         const std::filesystem::path directory(argv[2]); std::filesystem::create_directories(directory);
         const auto value = setup(); auto session = eawr::campaign::GameSession::create(value).value();

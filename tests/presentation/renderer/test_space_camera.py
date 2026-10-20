@@ -34,6 +34,9 @@ import camera_fixture  # noqa: E402
 import space_environment_fixture as fixture  # noqa: E402
 from viewer_mode_sources import mode_source  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 CONFIG_DIR = ROOT / "apps/viewer/project/config"
 CONFIG = CONFIG_DIR / "space-map-camera.xml"
 BINDINGS = CONFIG_DIR / "space-map-camera-bindings.json"
@@ -101,8 +104,7 @@ def run_viewer(root: pathlib.Path, name: str, extra=(), capture=False, unlocked_
     command += list(extra)
     if harness:
         command += ["--eawr-space-control", "none"]
-    completed = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, timeout=180, check=False)
+    completed = python_helpers.run_viewer(command, cwd=ROOT, timeout=180)
     if not report.exists():
         raise AssertionError(completed.stdout)
     return completed, strict_json(report.read_text(encoding="utf-8")), png

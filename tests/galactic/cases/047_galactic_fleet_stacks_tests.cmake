@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_hud_models
+    NO_ARGS
+
     NAME galactic_fleet_stacks_tests
     SOURCES fleet_stacks_tests.cpp
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/apps/viewer/src"

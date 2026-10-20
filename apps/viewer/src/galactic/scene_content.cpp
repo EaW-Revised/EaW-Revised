@@ -1,4 +1,5 @@
 #include "scene_content.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/data/retail_values.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
@@ -14,15 +15,11 @@ namespace eawr::viewer::galactic {
 namespace {
 
 [[nodiscard]] std::string folded(std::string_view value) {
-    std::string result(value);
-    for (char& c : result) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
-    return result;
+    return core::to_lower(value);
 }
 
 [[nodiscard]] std::string trimmed(std::string_view value) {
-    const auto begin = value.find_first_not_of(" \t\r\n");
-    if (begin == std::string_view::npos) return {};
-    return std::string(value.substr(begin, value.find_last_not_of(" \t\r\n") - begin + 1));
+    return core::trim(value, core::xml_whitespace);
 }
 
 [[nodiscard]] float scalar(sim::math::Fixed value) {

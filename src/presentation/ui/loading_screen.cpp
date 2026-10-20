@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/loading_screen.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -6,17 +7,12 @@
 namespace eawr::presentation::ui {
 namespace {
 
-char lower(const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; }
-
 bool equal_name(const std::string_view a, const std::string_view b) {
-    return a.size() == b.size()
-        && std::equal(a.begin(), a.end(), b.begin(), [](const char x, const char y) { return lower(x) == lower(y); });
+    return core::iequals(a, b);
 }
 
 std::string trimmed(const std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return first == std::string_view::npos ? std::string() : std::string(value.substr(first, last - first + 1U));
+    return core::trim(value, core::xml_whitespace);
 }
 
 core::Diagnostic warning(const std::string_view code, std::string message) {
@@ -46,8 +42,7 @@ std::string loading_map_icon_path(const std::string_view map_path) {
 }
 
 std::string loading_mission_text_key(const std::string_view prefix, const std::string_view dialog_map) {
-    std::string map(dialog_map);
-    for (auto& c : map) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+    std::string map = core::to_upper(dialog_map);
     if (const auto extension = map.find(".TED"); extension != std::string::npos) map.resize(extension);
     return std::string(prefix) + map;
 }

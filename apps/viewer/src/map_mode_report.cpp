@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
 #include "startup_trace.hpp"
@@ -8,26 +9,7 @@ namespace eawr::presentation::godot_backend {
 namespace map_mode_detail {
 
 [[nodiscard]] std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20U) {
-                output << "\\u00" << hex[character >> 4U] << hex[character & 15U];
-            } else {
-                output << static_cast<char>(character);
-            }
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote(value);
 }
 
 } // namespace map_mode_detail

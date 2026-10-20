@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/data/galactic/galactic_data.hpp"
@@ -17,7 +19,6 @@
 #include <memory>
 #include <optional>
 #include <span>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -75,13 +76,8 @@ std::string utf8(const std::filesystem::path& path) {
     return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
-std::string lower(std::string value) {
-    for (char& ch : value) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + ('a' - 'A'));
-    return value;
-}
-
 bool iequals(const std::string_view left, const std::string_view right) {
-    return lower(std::string(left)) == lower(std::string(right));
+    return eawr::core::iequals(left, right);
 }
 
 std::filesystem::path data_root(const std::filesystem::path& value) {
@@ -108,23 +104,7 @@ std::optional<std::vector<std::pair<std::string, std::filesystem::path>>> roots(
 }
 
 std::string json(const std::string_view value) {
-    std::ostringstream out;
-    out << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char ch : value) {
-        switch (ch) {
-        case '"': out << "\\\""; break;
-        case '\\': out << "\\\\"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
-        default:
-            if (ch < 0x20U) out << "\\u00" << hex[ch >> 4U] << hex[ch & 15U];
-            else out << static_cast<char>(ch);
-        }
-    }
-    out << '"';
-    return out.str();
+    return eawr::core::json_quote(value);
 }
 
 constexpr std::string_view schema_revision = "3e1b825a124fbc13b2293665f34a36dd4d4be80f";

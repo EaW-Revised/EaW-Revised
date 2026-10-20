@@ -1,0 +1,430 @@
+[
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_diagnostic_logger",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::set_diagnostic_logger"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_recovery_policy",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::set_recovery_policy"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::rejoin",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::rejoin"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::request_speed",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::request_speed"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::TcpLanMatch",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::TcpLanMatch"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_enabled",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_enabled"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::configure_lobby",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::configure_lobby"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_select",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_select"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_assign",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_assign"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_game",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_game"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_ready",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_ready"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_chat",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_chat"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_kick",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_kick"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_leave",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_leave"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_state",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_state"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_mutable",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_mutable"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::flush_lobby_closes",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::flush_lobby_closes"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_feedback",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_feedback"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::validate_lobby",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::validate_lobby"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::clear_mesh_repair_material",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::clear_mesh_repair_material"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::current_mesh_credentials",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::current_mesh_credentials"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::provision_mesh_repair",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::provision_mesh_repair"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::lobby_hooks",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::lobby_hooks"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::reset_lobby",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::reset_lobby"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::start_lobby",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::start_lobby"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pump_lobby",
+    "new": "src/platform/net/lan_match_lobby.cpp#TcpLanMatch::pump_lobby"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_public_invitation",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::set_public_invitation"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::configure_online",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::configure_online"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::seat_name",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::seat_name"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::arm_mesh_repair",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::arm_mesh_repair"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::retire_mesh_seat",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::retire_mesh_seat"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::mesh_repair_message",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::mesh_repair_message"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::removed_seat_text",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::removed_seat_text"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::append_mesh_notice",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::append_mesh_notice"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::retire_room",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::retire_room"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::room_edge",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::room_edge"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::sample_online_route",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::sample_online_route"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::admission_identity",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::admission_identity"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::drain_mesh_events",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::drain_mesh_events"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::begin_online",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::begin_online"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pump_online",
+    "new": "src/platform/net/lan_match_online.cpp#TcpLanMatch::pump_online"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::configure_factions",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::configure_factions"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::configure_seats",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::configure_seats"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::~TcpLanMatch",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::~TcpLanMatch"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_port_mapping",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::set_port_mapping"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::host",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::host"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::join_admitted",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::join_admitted"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::join",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::join"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::log_gns_sink",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::log_gns_sink"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::install_gns_log",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::install_gns_log"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::release_gns_log",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::release_gns_log"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::cancel",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::cancel"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::request_abort",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::request_abort"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::complete_abort",
+    "new": "src/platform/net/lan_match_lifecycle.cpp#TcpLanMatch::complete_abort"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::save_diagnostic_details",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::save_diagnostic_details"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::acknowledge_recovery",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::acknowledge_recovery"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::acknowledge_input_feedback",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::acknowledge_input_feedback"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_discard_observer",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::set_discard_observer"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::discard_command",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::discard_command"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::discard_recovery_commands",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::discard_recovery_commands"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::capture_diagnostic",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::capture_diagnostic"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pump_setup",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::pump_setup"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pump_setup_impl",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::pump_setup_impl"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::accept",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::accept"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::start",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::start"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::take_start",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::take_start"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::offered_setup",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::offered_setup"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::view",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::view"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::local_player",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::local_player"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::note_input",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::note_input"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::note_native_input",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::note_native_input"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::note_issue",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::note_issue"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_submission_observer",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::set_submission_observer"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_input_epoch_provider",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::set_input_epoch_provider"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::driver",
+    "new": "src/platform/net/lan_match_launch.cpp#TcpLanMatch::driver"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::erase_credentials",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::erase_credentials"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::refuse_credentials",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::refuse_credentials"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::service_recovery_io",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::service_recovery_io"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::tcp_rejoin_auth",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::tcp_rejoin_auth"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::setup_result",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::setup_result"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::core_session",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::core_session"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::diagnostic_peer",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::diagnostic_peer"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::attach_stage_observer",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::attach_stage_observer"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::repair_diagnostic",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::repair_diagnostic"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::activate_adapter",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::activate_adapter"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::update_desync",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::update_desync"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pump_close",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::pump_close"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::progress",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::progress"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::input_progress",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::input_progress"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::set_failure",
+    "new": "src/platform/net/lan_match_diagnostics.cpp#TcpLanMatch::set_failure"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::drive",
+    "new": "src/platform/net/lan_match_drive.cpp#TcpLanMatch::drive"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::local_player_unlocked",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::local_player_unlocked"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch::pending_input_epoch",
+    "new": "src/platform/net/lan_match_recovery.cpp#TcpLanMatch::pending_input_epoch"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#command_kind",
+    "new": "src/platform/net/lan_match_support.cpp#command_kind"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#input_time",
+    "new": "src/platform/net/lan_match_support.cpp#input_time"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#diagnostic",
+    "new": "src/platform/net/lan_match_support.cpp#diagnostic"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#fixture_options",
+    "new": "src/platform/net/lan_match_support.cpp#fixture_options"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#drain_workers",
+    "new": "src/platform/net/lan_match_support.cpp#drain_workers"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#finish_io",
+    "new": "src/platform/net/lan_match_support.cpp#finish_io"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#InputTime",
+    "new": "src/platform/net/lan_match_internal.hpp#InputTime"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#LanTrace",
+    "new": "src/platform/net/lan_match_internal.hpp#LanTrace"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#BufferedTransport",
+    "new": "src/platform/net/lan_match_internal.hpp#BufferedTransport"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TerminalIo",
+    "new": "src/platform/net/lan_match_internal.hpp#TerminalIo"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#DrainWorkers",
+    "new": "src/platform/net/lan_match_internal.hpp#DrainWorkers"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#GatedMonitor",
+    "new": "src/platform/net/lan_match_internal.hpp#GatedMonitor"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#LiveAdapter",
+    "new": "src/platform/net/lan_match_internal.hpp#LiveAdapter"
+  },
+  {
+    "old": "src/platform/net/lan_match.cpp#TcpLanMatch",
+    "new": "src/platform/net/lan_match_internal.hpp#TcpLanMatch"
+  }
+]

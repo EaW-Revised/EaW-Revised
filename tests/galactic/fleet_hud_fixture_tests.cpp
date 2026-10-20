@@ -1,8 +1,8 @@
 #include "galactic_support.hpp"
-#include "galactic/fleet_hud_fixture.hpp"
-#include "galactic/ground_hud_fixture.hpp"
+#include "../presentation/galactic/fleet_hud_fixture.hpp"
+#include "../presentation/galactic/ground_hud_fixture.hpp"
 #include "galactic/ground_roster.hpp"
-#include "galactic/hud_clock_fixture.hpp"
+#include "../presentation/galactic/hud_clock_fixture.hpp"
 #include "galactic/galaxy_view.hpp"
 #include "eawr/platform/sim_workers.hpp"
 

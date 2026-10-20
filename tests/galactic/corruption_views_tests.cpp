@@ -1,12 +1,21 @@
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <optional>
+#include <utility>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
 
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 
 namespace g = eawr::sim::galactic;
 namespace c = g::corruption_actions;
 namespace {
-void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void check(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 c::Fixed fixed(int value) { return c::Fixed::from_integer(value).value(); }
 c::Fixture fixture() {
     c::Fixture world;
@@ -85,7 +94,7 @@ void contracts() {
     check(world.accounts[0].player.credits == fixed(50) && world.actors[0].present, "publication never executes");
 }
 }
-int main() {
+int case_galactic_corruption_views_tests() {
     try { contracts(); std::cout << "corruption view contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

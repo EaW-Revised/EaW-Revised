@@ -880,7 +880,7 @@ struct EconomyCorruptionState {
 
 // GFS-C-01/WGCH-70: live content is immutable; actors remain in the canonical census.
 enum class AbilityKind : std::uint8_t { black_market = 1, technology_theft = 2, corruption = 3,
-    superweapon_hack = 4, planet_destruction = 5 }; // 4/5: coordinator-reserved host-local values
+    superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7 }; // 4..7: coordinator-reserved host-local values
 struct CorruptionChoice {
     corruption_fixture::Type type{}, required_mission_type{};
     math::Fixed price, credit_reward, unlock_build_cost;
@@ -964,6 +964,36 @@ struct PlanetAbilityEntitlements {
     friend bool operator==(const PlanetAbilityEntitlements&, const PlanetAbilityEntitlements&) = default;
 };
 using AbilityCurvePoint = IncomeCurvePoint;
+// WGCH-27/28/97: the authored sabotage ability; the escalation factor defaults to two when absent (WGCH-28).
+struct SabotageAbilityProfile {
+    std::string name;
+    bool initially_enabled{true};
+    math::Fixed cost_factor{math::Fixed::from_integer(2).value()};
+    friend bool operator==(const SabotageAbilityProfile&, const SabotageAbilityProfile&) = default;
+};
+// WGCH-20..24: the authored neutralization ability (curves, cost modifiers, absence ranges, permissions).
+struct NeutralizeAbilityProfile {
+    std::string name;
+    bool initially_enabled{true};
+    std::vector<AbilityCurvePoint> base_curve, history_curve, corruption_curve;
+    math::Fixed minor_modifier{math::Fixed::from_integer(1).value()}, major_modifier{math::Fixed::from_integer(1).value()};
+    math::Fixed actor_absence_min, actor_absence_max, target_absence_min, target_absence_max;
+    bool can_minor{}, can_major{};
+    friend bool operator==(const NeutralizeAbilityProfile&, const NeutralizeAbilityProfile&) = default;
+};
+// WGCH-27/97: authored per-structure-type sabotage prices (type order); below one is not a target.
+struct SabotageStructureCost {
+    TypeId type{};
+    math::Fixed cost;
+    friend bool operator==(const SabotageStructureCost&, const SabotageStructureCost&) = default;
+};
+// WGCH-20/22/52: authored per-hero-type neutralization cost and permissions (type order).
+struct NeutralizationTarget {
+    TypeId type{};
+    math::Fixed cost;
+    bool major_allowed{true}, minor_allowed{true};
+    friend bool operator==(const NeutralizationTarget&, const NeutralizationTarget&) = default;
+};
 struct TheftAbilityProfile {
     std::vector<AbilityCurvePoint> availability, ground, space, difficulty;
     math::Fixed affinity_price, affinity_chance;
@@ -1008,6 +1038,8 @@ struct GalacticAbilityProfile {
     bool lifecycle_only{}; // named prerequisite scheduling metadata, no activation
     std::optional<HackAbilityProfile> hack{};
     std::optional<DestructionAbilityProfile> destruction{};
+    std::optional<SabotageAbilityProfile> sabotage{};
+    std::optional<NeutralizeAbilityProfile> neutralize{};
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
 struct GalacticAbilitySetup {
@@ -1026,6 +1058,9 @@ struct GalacticAbilitySetup {
     math::Fixed hack_cost;
     std::vector<std::string> activated_hack_abilities{}; // authored routing order
     std::vector<std::string> activated_destruction_abilities{}; // WGCH-137/157 authored routing order
+    std::vector<std::string> activated_sabotage_abilities{}, activated_neutralize_abilities{}; // WGCH-97 authored routing order
+    std::vector<SabotageStructureCost> sabotage_costs{}; // ascending type
+    std::vector<NeutralizationTarget> neutralization_targets{}; // ascending type
     bool multiplayer{}, fast_corruption{}, tutorial_corruption_allowed{true};
     friend bool operator==(const GalacticAbilitySetup&, const GalacticAbilitySetup&) = default;
 };
@@ -1039,6 +1074,11 @@ struct PreparedAbility {
     bool owned{};
     PreparedTheft theft;
     PreparedCorruption corruption{};
+    // WGCH-96/92: sabotage structure identity, or neutralization victim, company type and prepared target absence.
+    EntityId target{};
+    TypeId company{};
+    math::Fixed target_absence;
+    bool valid{true};
     friend bool operator==(const PreparedAbility&, const PreparedAbility&) = default;
 };
 enum class AbilityOutcome : std::uint8_t { purchased = 1, refused, cancelled };
@@ -1053,6 +1093,13 @@ struct AbilityResult {
     TypeId technology{};
     friend bool operator==(const AbilityResult&, const AbilityResult&) = default;
 };
+struct PreparedTarget {
+    EntityId target{};
+    TypeId company{};
+    math::Fixed price, absence, target_absence;
+    bool valid{true};
+    friend bool operator==(const PreparedTarget&, const PreparedTarget&) = default;
+};
 struct AbilityPreparation {
     std::uint64_t id{};
     EntityId actor{};
@@ -1063,6 +1110,7 @@ struct AbilityPreparation {
     AbilityKind kind{AbilityKind::black_market};
     std::vector<PreparedTheft> theft_choices;
     std::vector<PreparedCorruption> corruption_choices{};
+    std::vector<PreparedTarget> target_choices{}; // sabotage structures or neutralization victims, prepared order
     friend bool operator==(const AbilityPreparation&, const AbilityPreparation&) = default;
 };
 struct AbilityActorState {
@@ -1073,8 +1121,21 @@ struct AbilityActorState {
     bool corruption_enabled{}, corruption_cancelled{};
     bool hack_enabled{}, hack_cancelled{};
     bool destruction_enabled{}, destruction_cancelled{};
+    bool sabotage_enabled{}, sabotage_cancelled{}, neutralize_enabled{}, neutralize_cancelled{};
     bool contested_check_disabled{}; // WGCH-58/160: false (the default) keeps the contested-orbit refusal armed
     friend bool operator==(const AbilityActorState&, const AbilityActorState&) = default;
+};
+struct SabotageHistory {
+    PlanetId planet{};
+    std::uint32_t count{};
+    friend bool operator==(const SabotageHistory&, const SabotageHistory&) = default;
+};
+// WGCH-23/94: keyed by victim company type and the attacking player.
+struct NeutralizationHistory {
+    TypeId company{};
+    PlayerId attacker{};
+    std::uint32_t count{};
+    friend bool operator==(const NeutralizationHistory&, const NeutralizationHistory&) = default;
 };
 struct GalacticAbilityState {
     std::uint64_t next_request{1};
@@ -1086,11 +1147,15 @@ struct GalacticAbilityState {
     std::vector<LiveCorruptionMission> missions{}; // request order; bounded retained receipts
     std::vector<CorruptionUsage> corruption_usage{};
     std::vector<PlanetAbilityEntitlements> planet_entitlements{}; // planet, then player
+    std::vector<SabotageHistory> sabotage_history{}; // planet order, WGCH-28/30
+    std::vector<NeutralizationHistory> neutralization_history{}; // (company, attacker) order, WGCH-94
     friend bool operator==(const GalacticAbilityState&, const GalacticAbilityState&) = default;
 };
 
 struct GalacticSetup {
     std::uint64_t seed{};
+    // WGP-81/89: recorded opt-in for a solo presentation observer (zero: headless).
+    SeatId interactive_seat{};
     std::array<std::uint8_t, 32> content_identity{};
     std::array<std::uint8_t, 32> campaign_identity{};
     std::vector<GalacticPlayer> players;
@@ -1123,7 +1188,9 @@ inline constexpr std::uint64_t galactic_max_ticks = 100'000'000;
 inline constexpr std::size_t galactic_max_objects = 1'000'000;
 inline constexpr std::size_t galactic_max_players = 64;
 inline constexpr std::size_t galactic_max_seats = 256;
+// Galactic admission has its own human-seat limit within the shared match capacity.
 inline constexpr std::size_t galactic_max_human_seats = 8;
+static_assert(galactic_max_human_seats <= sim::max_match_seats);
 inline constexpr std::uint64_t galactic_max_commands = 10'000'000;
 
 // Rejects, with a named EAWR-SIM-05xx diagnostic, any setup that breaks the rules above.

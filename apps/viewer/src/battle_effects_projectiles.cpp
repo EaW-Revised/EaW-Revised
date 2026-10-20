@@ -379,19 +379,8 @@ BattleEffects::Batch* BattleEffects::batch(const Render render) {
     return &target;
 }
 
-bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous, const tactical::TacticalSnapshot& latest,
-                                     const double alpha, const UnitLookup& units, const FixedCamera& camera) {
-    FrameTimer timer(measure_preparation_ ? &projectile_prepare_ms_ : nullptr, true);
-    const View view = view_of(camera);
-    // WSH-08 lightning-look seam: authored repair bolts, bounded additive ribbons.
-    // Geometry is an inferred presentation adapter until the lightning effect walk settles it.
-    for (auto& [name, look] : healing_lightning_) {
-        static_cast<void>(name); look.batch.stream.clear();
-    }
-    const auto random = [](std::uint64_t key) {
-        key ^= key >> 30; key *= 0xbf58476d1ce4e5b9ULL; key ^= key >> 27; key *= 0x94d049bb133111ebULL;
-        return static_cast<float>((key ^ (key >> 31)) & 65535U) / 65535.0F;
-    };
+template <typename ViewFrame, typename Random>
+bool BattleEffects::draw_healing_lightning(const UnitLookup& units, const ViewFrame& view, Random& random) {
     std::erase_if(healing_bolts_, [&](const auto& bolt) {
         const auto look = healing_lightning_.find(bolt.effect);
         return look == healing_lightning_.end() || !units(bolt.source) || !units(bolt.target)
@@ -455,6 +444,11 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         static_cast<void>(name);
         if (look.batch.resource != 0) backend_->update_emitter(look.batch.resource, look.batch.stream);
     }
+    return true;
+}
+
+template <typename ViewFrame>
+bool BattleEffects::draw_flying_projectiles(const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest, const double alpha, const ViewFrame& view) {
     kites_.stream.clear();
     beams_.stream.clear();
     const auto earlier = previous.projectiles();
@@ -583,6 +577,10 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         if (ability_projectiles_.contains(projectile.id) || barrage_projectiles_.contains(projectile.id)) ++ability_shots_drawn_[look->projectile];
     }
     projectile_shooters_ = std::move(shooters);
+    return true;
+}
+
+bool BattleEffects::update_weaken_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units) {
     std::set<std::pair<std::uint64_t, sim::EntityId>> active_weaken;
     for (const auto& spawn_state : latest.ability_spawns()) {
         const auto particle = weaken_particles_.find(spawn_state.type);
@@ -612,6 +610,68 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         for (auto& effect : effects_) if (effect.handle == active->second) effect.lifetime = effect.age;
         active = weaken_effects_.erase(active);
     }
+    return true;
+}
+
+template <typename ViewFrame>
+bool BattleEffects::draw_defence_beams(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const ViewFrame& view) {
+    // WLD-12: a point-defence zap draws its beam from the Crusader's bone nearest the shot to the shot's
+    // position at the zap, for the handler's Laser_Beam_Frames logical frames.
+    for (auto& entry : defence_batches_) entry.second.stream.clear();
+    std::erase_if(defence_zaps_, [&](const DefenceZap& zap) {
+        const auto type = types_.find(zap.type);
+        const std::uint64_t frames = type == types_.end() ? 0U : type->second.defence.frames;
+        return latest.completed_tick() >= zap.tick + frames;
+    });
+    for (const DefenceZap& zap : defence_zaps_) {
+        const auto source = units(zap.shooter);
+        const auto type = types_.find(zap.type);
+        if (!source || type == types_.end()) continue;
+        const auto& look = type->second.defence;
+        if (look.texture.empty() || look.width <= 0.0F || look.bones.empty()) continue;
+        const V b{static_cast<float>(zap.aim[0]), static_cast<float>(zap.aim[1]), static_cast<float>(zap.aim[2])};
+        // WLD-12: Get_Best_Laser_Bone, the authored bone nearest the shot.
+        std::optional<V> origin;
+        float nearest = 0.0F;
+        for (const auto& bone : look.bones) {
+            const V point = vec(space::live_model_point(bone, source->position, source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees));
+            const V gap = sub(b, point);
+            const float distance = dot(gap, gap);
+            if (!origin || distance < nearest) { origin = point; nearest = distance; }
+        }
+        auto& batch = defence_batches_[look.texture];
+        if (batch.resource == 0) {
+            particles::EmitterRenderPlan plan;
+            plan.family = particles::RenderFamily::billboard;
+            plan.blend_selector = 1; plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1";
+            plan.blend = particles::Blend::additive; plan.phase = particles::DrawPhase::transparent;
+            plan.depth_test = true; plan.depth_write = false; plan.drawable = true; plan.texture = look.texture;
+            batch.resource = backend_->create_emitter(plan);
+            if (batch.resource == 0) { failure_ = "laser defence beam " + look.texture + ": " + backend_->failure_cause(); return false; }
+        }
+        const V a = *origin;
+        const auto direction = normalized(sub(b, a));
+        if (!direction) continue;
+        const auto axes = screen_axes(view, scale(add(a, b), 0.5F), *direction);
+        const V side = scale(axes.side, look.width * 0.5F);
+        auto& stream = batch.stream;
+        const auto base = static_cast<std::uint32_t>(stream.vertices.size());
+        push(stream, add(a, side), look.colour, 0.0F, 1.0F);
+        push(stream, sub(a, side), look.colour, 1.0F, 1.0F);
+        push(stream, add(b, side), look.colour, 0.0F, 0.0F);
+        push(stream, sub(b, side), look.colour, 1.0F, 0.0F);
+        for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
+        ++stream.quads;
+        ++defence_beams_drawn_;
+    }
+    for (auto& entry : defence_batches_) {
+        if (entry.second.resource != 0) backend_->update_emitter(entry.second.resource, entry.second.stream);
+    }
+    return true;
+}
+
+template <typename ViewFrame, typename Random>
+bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const ViewFrame& view, Random& random) {
     std::set<sim::EntityId> active_energy;
     std::set<sim::EntityId> active_tractors;
     std::set<sim::EntityId> active_leeches;
@@ -868,58 +928,7 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
             }
         }
     }
-    // WLD-12: a point-defence zap draws its beam from the Crusader's bone nearest the shot to the shot's
-    // position at the zap, for the handler's Laser_Beam_Frames logical frames.
-    for (auto& entry : defence_batches_) entry.second.stream.clear();
-    std::erase_if(defence_zaps_, [&](const DefenceZap& zap) {
-        const auto type = types_.find(zap.type);
-        const std::uint64_t frames = type == types_.end() ? 0U : type->second.defence.frames;
-        return latest.completed_tick() >= zap.tick + frames;
-    });
-    for (const DefenceZap& zap : defence_zaps_) {
-        const auto source = units(zap.shooter);
-        const auto type = types_.find(zap.type);
-        if (!source || type == types_.end()) continue;
-        const auto& look = type->second.defence;
-        if (look.texture.empty() || look.width <= 0.0F || look.bones.empty()) continue;
-        const V b{static_cast<float>(zap.aim[0]), static_cast<float>(zap.aim[1]), static_cast<float>(zap.aim[2])};
-        // WLD-12: Get_Best_Laser_Bone, the authored bone nearest the shot.
-        std::optional<V> origin;
-        float nearest = 0.0F;
-        for (const auto& bone : look.bones) {
-            const V point = vec(space::live_model_point(bone, source->position, source->yaw_degrees, source->roll_degrees, 1.0, source->pitch_degrees));
-            const V gap = sub(b, point);
-            const float distance = dot(gap, gap);
-            if (!origin || distance < nearest) { origin = point; nearest = distance; }
-        }
-        auto& batch = defence_batches_[look.texture];
-        if (batch.resource == 0) {
-            particles::EmitterRenderPlan plan;
-            plan.family = particles::RenderFamily::billboard;
-            plan.blend_selector = 1; plan.program = "Engine/PrimAdditive.fx"; plan.technique = "t1";
-            plan.blend = particles::Blend::additive; plan.phase = particles::DrawPhase::transparent;
-            plan.depth_test = true; plan.depth_write = false; plan.drawable = true; plan.texture = look.texture;
-            batch.resource = backend_->create_emitter(plan);
-            if (batch.resource == 0) { failure_ = "laser defence beam " + look.texture + ": " + backend_->failure_cause(); return false; }
-        }
-        const V a = *origin;
-        const auto direction = normalized(sub(b, a));
-        if (!direction) continue;
-        const auto axes = screen_axes(view, scale(add(a, b), 0.5F), *direction);
-        const V side = scale(axes.side, look.width * 0.5F);
-        auto& stream = batch.stream;
-        const auto base = static_cast<std::uint32_t>(stream.vertices.size());
-        push(stream, add(a, side), look.colour, 0.0F, 1.0F);
-        push(stream, sub(a, side), look.colour, 1.0F, 1.0F);
-        push(stream, add(b, side), look.colour, 0.0F, 0.0F);
-        push(stream, sub(b, side), look.colour, 1.0F, 0.0F);
-        for (const auto index : {0U, 1U, 2U, 1U, 3U, 2U}) stream.indices.push_back(base + index);
-        ++stream.quads;
-        ++defence_beams_drawn_;
-    }
-    for (auto& entry : defence_batches_) {
-        if (entry.second.resource != 0) backend_->update_emitter(entry.second.resource, entry.second.stream);
-    }
+    if (!draw_defence_beams(latest, units, view)) return false;
     for (auto active = energy_owner_effects_.begin(); active != energy_owner_effects_.end();) {
         if (active_energy.contains(active->first)) { ++active; continue; }
         for (auto& effect : effects_) if (effect.handle == active->second) effect.lifetime = effect.age;
@@ -945,6 +954,26 @@ bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous,
         std::erase_if(look.lightning.sources, [&](const auto& entry) { return !active_tractors.contains(entry.first); });
         if (look.lightning.batch.resource != 0) backend_->update_emitter(look.lightning.batch.resource, look.lightning.batch.stream);
     }
+    return true;
+}
+
+bool BattleEffects::draw_projectiles(const tactical::TacticalSnapshot& previous, const tactical::TacticalSnapshot& latest,
+                                     const double alpha, const UnitLookup& units, const FixedCamera& camera) {
+    FrameTimer timer(measure_preparation_ ? &projectile_prepare_ms_ : nullptr, true);
+    const View view = view_of(camera);
+    // WSH-08 lightning-look seam: authored repair bolts, bounded additive ribbons.
+    // Geometry is an inferred presentation adapter until the lightning effect walk settles it.
+    for (auto& [name, look] : healing_lightning_) {
+        static_cast<void>(name); look.batch.stream.clear();
+    }
+    const auto random = [](std::uint64_t key) {
+        key ^= key >> 30; key *= 0xbf58476d1ce4e5b9ULL; key ^= key >> 27; key *= 0x94d049bb133111ebULL;
+        return static_cast<float>((key ^ (key >> 31)) & 65535U) / 65535.0F;
+    };
+    if (!draw_healing_lightning(units, view, random)) return false;
+    if (!draw_flying_projectiles(previous, latest, alpha, view)) return false;
+    if (!update_weaken_effects(latest, units)) return false;
+    if (!draw_ability_beams(latest, units, view, random)) return false;
     max_kites_ = std::max<std::uint64_t>(max_kites_, kites_.stream.quads);
     max_beams_ = std::max<std::uint64_t>(max_beams_, beams_.stream.quads);
     timer.finish();

@@ -39,6 +39,9 @@ struct CampaignSetupOptions {
     // WGEP-03/16: caller sources eligibility and AI Credit_Multiplier; no default.
     std::optional<std::vector<sim::galactic::FiscalPlayer>> fiscal_players;
     std::optional<CampaignCustomOptions> custom;
+    // #3768: multiplayer human sides, their leads and every faction's controller (AI configuration bytes). Copied
+    // into the galaxy setup and sealed into the campaign identity; absent for single player, whose identity is unchanged.
+    std::optional<sim::galactic::SeatControlSetup> seat_control;
 };
 struct CampaignLocation {
     std::string original_type;

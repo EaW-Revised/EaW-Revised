@@ -1,0 +1,82 @@
+[
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_member_service_prefix",
+    "new": "tests/replay/fighter_scans_targeting_tests.cpp#test_member_service_prefix"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_team_target_loss",
+    "new": "tests/replay/fighter_scans_targeting_tests.cpp#test_team_target_loss"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_same_target_share_cell",
+    "new": "tests/replay/fighter_scans_targeting_tests.cpp#test_same_target_share_cell"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_direct_attack_approach",
+    "new": "tests/replay/fighter_scans_targeting_tests.cpp#test_direct_attack_approach"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_serial_attack_point_retarget",
+    "new": "tests/replay/fighter_scans_targeting_tests.cpp#test_serial_attack_point_retarget"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_attack_order_target_loss_hold",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_attack_order_target_loss_hold"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_lost_launch_combat_completion",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_lost_launch_combat_completion"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_launch_completion",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_launch_completion"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_player_escort_completion",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_player_escort_completion"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_base_destination_adoption",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_base_destination_adoption"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_base_destination_lifecycle",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_base_destination_lifecycle"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_base_destination_release",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_base_destination_release"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_base_destination_range_entry_and_retention",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_base_destination_range_entry_and_retention"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_base_destination_buzz_replacement",
+    "new": "tests/replay/fighter_scans_destination_tests.cpp#test_base_destination_buzz_replacement"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_map_box_grids",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_map_box_grids"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_idle_cell_claim",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_idle_cell_claim"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_idle_grid",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_idle_grid"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_team_attack",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_team_attack"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_placed_idle_hold",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_placed_idle_hold"
+  },
+  {
+    "old": "tests/replay/fighter_scans_tests.cpp#test_team_retarget",
+    "new": "tests/replay/fighter_scans_grid_tests.cpp#test_team_retarget"
+  }
+]

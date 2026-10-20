@@ -31,6 +31,15 @@ constexpr std::size_t fallback_capacity = 256;
 // The plan's seed: every ship's emitters draw from their own record seed.
 constexpr std::uint64_t plan_seed = 394;
 
+// #4218: a reused source slot seeds its emitters from the slot the session's reservation policy bound the unit to
+// (view.identity is the ship's own placement unless the slot was reused early). Attached models keep their own
+// record ordinal; only the scene ordinal they inherit from the ship follows the identity.
+void apply_seed_identity(scene::Placement& local, const SpacePopulation::LiveShipEmitterView& view, const bool root) {
+    if (view.identity == nullptr) return;
+    local.scene_ordinal = view.identity->scene_ordinal;
+    if (root) local.record_ordinal = view.identity->record_ordinal;
+}
+
 // The model's emitter types are proxy-name prefixes, compared case-insensitively over the
 // prefix's length (BP-42, BP-43).
 [[nodiscard]] bool has_prefix(const std::string_view name, const std::string_view prefix) {
@@ -322,6 +331,7 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
     // Planned in the ship's model space: the identity placement makes each record's frame the
     // proxy bone's bind frame; the ship's pose is composed with it every sample.
     scene::Placement local = placement;
+    apply_seed_identity(local, view, &placement == view.placement);
     local.transform = scene::Transform{};
     local.transform->matrix = attachment;
     local.scale_raw = sim::math::Fixed::scale;

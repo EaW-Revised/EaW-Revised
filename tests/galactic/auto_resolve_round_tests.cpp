@@ -1,3 +1,4 @@
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/auto_resolve_live.hpp"
 #include "eawr/campaign/auto_resolve_round.hpp"
@@ -8,9 +9,17 @@
 #include "eawr/vfs/vfs.hpp"
 #include "../../src/script/foc/host.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <iostream>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 using namespace eawr::campaign;
@@ -298,18 +307,8 @@ void fh30() {
     expect(hit && hit.value()[1][1] == f(30), "FH-30 exact type overrides category average");
 }
 void stock() {
-    std::string root;
-#ifdef _MSC_VER
-    std::size_t required{};
-    if (getenv_s(&required, nullptr, 0, "EAWR_EAW_GAME_ROOT") == 0 && required > 1) {
-        root.resize(required);
-        if (getenv_s(&required, root.data(), root.size(), "EAWR_EAW_GAME_ROOT") == 0) root.resize(required - 1);
-        else root.clear();
-    }
-#else
-    if (const auto* value = std::getenv("EAWR_EAW_GAME_ROOT")) root = value;
-#endif
-    if (root.empty()) { std::cout << "SKIPPED: stock round needs EAWR_EAW_GAME_ROOT\n"; return; }
+    std::string root = eawr::testing::game_root().value_or("");
+    if (root.empty()) { eawr::testing::skip_installed("SKIPPED: stock round needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto* folder : {"corruption", "GameData"}) {
         const auto manifest = eawr::vfs::resolve_manifest_mount(folder, std::filesystem::path(root) / folder / "Data");

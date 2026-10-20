@@ -3,6 +3,8 @@
 // Synthetic two-player galactic AI owner shared by the S9-early contracts (per-player streams and
 // identity ranges, partition-order tripwire). Player IDs, faction names and the player type name are
 // parameters, so nothing here depends on FoC's authored names.
+
+#include "../support/result.hpp"
 #include "ai_engine.hpp"
 #include "galactic_ai.hpp"
 #include "galactic_ai_goal_state.hpp"
@@ -11,10 +13,12 @@
 #include "eawr/sim/galactic/types.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
-#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace s9_fixture {
@@ -25,11 +29,7 @@ namespace gc = eawr::sim::galactic;
 namespace auth = eawr::script::authoritative;
 namespace lifecycle = foc::galactic_ai;
 
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
-inline void must(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+using eawr::testing::must;
 
 inline std::string identity() { return eawr::core::sha256_hex(std::span<const std::uint8_t>{}); }
 

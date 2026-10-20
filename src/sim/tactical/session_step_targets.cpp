@@ -145,12 +145,10 @@ core::Result<void> session_detail::Tick::prepare_targets() {
     return core::Result<void>::success();
 }
 
-core::Result<void> session_detail::Tick::targets() {
-    auto& moving = gather_->moving.value();
-    auto& minds = craft_prep_->minds.value();
-    auto& squadron_frames = craft_prep_->squadron_frames.value();
-    const auto& craft_squadron = craft_prep_->craft_squadron.value();
-    const auto& arrivals = staging_->arrivals.value();
+
+core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit>& moving,
+        detail::MapStage<SquadronState>& minds, std::map<EntityId, SquadronFrame>& squadron_frames,
+        const std::map<EntityId, ArrivalState>& arrivals) {
     if (std::any_of(moving.begin(), moving.end(), [](const LiveUnit& unit) {
         return unit.abilities && unit.abilities->pending_buzz_position;
     })) {
@@ -205,6 +203,12 @@ core::Result<void> session_detail::Tick::targets() {
         }
         moving.insert(moving.end(), std::make_move_iterator(droids.begin()), std::make_move_iterator(droids.end()));
     }
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::refresh_target_inputs(std::vector<LiveUnit>& moving,
+        const std::map<EntityId, EntityId>& craft_squadron) {
     // WCC-25: rebuild immutable combat inputs after the existing-projectile commit.
     // Preserve prepared geometry and tree history; only health/ability inputs changed.
     auto refreshed = impl_->combat_world(moving, gather_->starts.value(), tick, executor);
@@ -227,188 +231,112 @@ core::Result<void> session_detail::Tick::targets() {
     world.value().craft_containers = &craft_squadron;
     world.value().collection = &targets_->collection.value();
     world.value().projectile_collection = &targets_->projectile_collection.value();
-    const auto& view = world.value();
+    return core::Result<void>::success();
+}
 
-    // FS-18..20/FD-69: scans have disjoint member outputs. Sharing and tails
-    // commit in ordinary launch service rank (last-created member first).
-    // Registration changes/restored rank producers remain UFS-14/36.
-    struct MemberScan {
-        bool present{};
-        bool enabled{};
-        CombatState before;
-        CombatState scanned;
-        EntityId destination{};
-        detail::FormationAttackContext formation;
-        math::Fixed divert{};
-        math::Vec3 anchor{};
-    };
-    std::vector<MemberScan> scans(moving.size());
-    std::vector<std::optional<CombatState>> weapon_inputs(moving.size());
-    std::vector<bool> weapon_idle(moving.size());
-    std::map<EntityId, std::pair<std::size_t, EntityId>> acquired;
-    auto scan_view = view;
-    scan_view.frame = tick;
-    std::map<EntityId, std::vector<CombatState*>> member_states;
-    std::map<EntityId, std::vector<std::size_t>> member_indices;
-    std::vector<std::size_t> scan_indices;
-    for (const auto& [container, frame] : squadron_frames) {
-        auto& states = member_states[container];
-        for (const auto id : frame.live_roster) {
-            if (auto* member = live_unit(moving, id); member != nullptr && member->combat) {
-                states.push_back(&*member->combat);
-                const auto index = static_cast<std::size_t>(member - moving.data());
-                member_indices[container].push_back(index);
-                scan_indices.push_back(index);
+
+void session_detail::Tick::scan_member_targets_partition(const std::size_t& partition,
+        std::vector<std::size_t>& scan_indices, const std::map<EntityId, EntityId>& craft_squadron,
+        std::vector<LiveUnit>& moving, const std::map<EntityId, ArrivalState>& arrivals,
+        std::map<EntityId, SquadronFrame>& squadron_frames, detail::MapStage<SquadronState>& minds, auto& scans,
+        const detail::CombatWorld& view, detail::CombatWorld& scan_view) {
+    const auto range = partition_range(partition, scan_indices.size());
+    for (auto slot = range.begin; slot < range.end; ++slot) {
+        const auto index = scan_indices[slot];
+        const auto own = craft_squadron.find(moving[index].state.entity_id);
+        if (own == craft_squadron.end() || !moving[index].combat || arrivals.contains(own->second)) continue;
+        const auto team = squadron_frames.find(own->second);
+        if (team == squadron_frames.end() || team->second.profile == nullptr) continue;
+        const auto& frame = team->second;
+        const auto& state = minds.read(own->second);
+        auto& output = scans[index];
+        output.formation = {};
+        output.present = true;
+        output.before = *moving[index].combat;
+        output.formation.present = state.formation.has_value();
+        output.formation.leader = view.find(frame.leader);
+        output.divert = frame.profile->idle_chase_range;
+        if (state.diversion == SquadronDiversion::attack_move)
+            output.divert = frame.profile->attack_move_response_range;
+        else if (state.mode == SquadronMode::escort || state.diversion == SquadronDiversion::guard)
+            output.divert = frame.profile->guard_chase_range;
+        output.anchor = frame.hold;
+        const auto* container = live_unit(moving, own->second);
+        if (state.formation) {
+            const auto& held = *state.formation;
+            // WSQ-41/FO-03: read the retained base kind, including after a face.
+            // Object attack-move uses escort mode in this model, but its diversion
+            // kind distinguishes the native attack-on-path destination from guard.
+            const bool attack_move_base = state.diversion == SquadronDiversion::attack_move;
+            if (state.diversion != SquadronDiversion::guard
+                && (state.mode != SquadronMode::escort || attack_move_base)) {
+                output.formation.base_attack_target = held.base_target;
+                if (!attack_move_base && held.attack_target == held.base_target)
+                    output.formation.base_attack_hardpoint = held.attack_hardpoint;
             }
+            output.anchor = held.base_position;
+            if (const auto* destination = view.find(held.base_target)) output.anchor = destination->position;
+            const bool escort = state.mode == SquadronMode::escort;
+            output.formation.unbounded = !held.complete && state.diversion == SquadronDiversion::attack_move;
+            const auto position = container != nullptr ? container->state.position : output.anchor;
+            output.formation.allows_divert = output.formation.unbounded || ((held.has_reached_done || escort)
+                && (held.base_target == invalid_entity_id || escort)
+                && (held.complete || within_range(position, output.anchor, output.divert, RangeMetric::planar)));
         }
-    }
-    // WSQ-42/43: no squadron or no combat table leaves no member scan or phase (as before the
-    // ordered commit), so the phase map of a squadron-free session is unchanged.
-    std::size_t cursor = squadron_frames.empty() || impl_->combat.profiles.empty() ? 0 : moving.size();
-    while (cursor != 0) {
-        const auto scanned = executor.execute_phase("squadron-targets", tick_partition_count, [&](const std::size_t partition) {
-            const auto range = partition_range(partition, scan_indices.size());
-            for (auto slot = range.begin; slot < range.end; ++slot) {
-                const auto index = scan_indices[slot];
-                const auto own = craft_squadron.find(moving[index].state.entity_id);
-                if (own == craft_squadron.end() || !moving[index].combat || arrivals.contains(own->second)) continue;
-                const auto team = squadron_frames.find(own->second);
-                if (team == squadron_frames.end() || team->second.profile == nullptr) continue;
-                const auto& frame = team->second;
-                const auto& state = minds.read(own->second);
-                auto& output = scans[index];
-                output.formation = {};
-                output.present = true;
-                output.before = *moving[index].combat;
-                output.formation.present = state.formation.has_value();
-                output.formation.leader = view.find(frame.leader);
-                output.divert = frame.profile->idle_chase_range;
-                if (state.diversion == SquadronDiversion::attack_move)
-                    output.divert = frame.profile->attack_move_response_range;
-                else if (state.mode == SquadronMode::escort || state.diversion == SquadronDiversion::guard)
-                    output.divert = frame.profile->guard_chase_range;
-                output.anchor = frame.hold;
-                const auto* container = live_unit(moving, own->second);
-                if (state.formation) {
-                    const auto& held = *state.formation;
-                    // WSQ-41/FO-03: read the retained base kind, including after a face.
-                    // Object attack-move uses escort mode in this model, but its diversion
-                    // kind distinguishes the native attack-on-path destination from guard.
-                    const bool attack_move_base = state.diversion == SquadronDiversion::attack_move;
-                    if (state.diversion != SquadronDiversion::guard
-                        && (state.mode != SquadronMode::escort || attack_move_base)) {
-                        output.formation.base_attack_target = held.base_target;
-                        if (!attack_move_base && held.attack_target == held.base_target)
-                            output.formation.base_attack_hardpoint = held.attack_hardpoint;
-                    }
-                    output.anchor = held.base_position;
-                    if (const auto* destination = view.find(held.base_target)) output.anchor = destination->position;
-                    const bool escort = state.mode == SquadronMode::escort;
-                    output.formation.unbounded = !held.complete && state.diversion == SquadronDiversion::attack_move;
-                    const auto position = container != nullptr ? container->state.position : output.anchor;
-                    output.formation.allows_divert = output.formation.unbounded || ((held.has_reached_done || escort)
-                        && (held.base_target == invalid_entity_id || escort)
-                        && (held.complete || within_range(position, output.anchor, output.divert, RangeMetric::planar)));
-                }
-                // WSQ-41/47: only the team's own attack order shares as the player's: the order's
-                // target (or its team container) must be the target the team holds, so an autonomous
-                // find after the base target is lost is not taken for it. FT-06: a launched
-                // squadron takes no target for its first second, a player's too.
-                bool player_attack = false;
-                if (view.frame >= state.next_scan_frame && container != nullptr
-                    && container->state.order.kind == OrderKind::attack && state.target != invalid_entity_id) {
-                    const auto order_target = container->state.order.target;
-                    const auto order_parent = view.container_of(order_target);
-                    player_attack = (order_parent != invalid_entity_id ? order_parent : order_target) == state.target;
-                }
-                auto input = output.before;
-                const auto* previous = view.find(input.attack_target);
-                if (input.direct && output.formation.present
-                    && input.attack_target != output.formation.base_attack_target
-                    && previous != nullptr && (!previous->durability || previous->durability->hull.raw() > 0)) {
-                    // FO-03/05: a replacement base must not re-share its predecessor's
-                    // adopted direct target. Clear in each member's private input even
-                    // when this order admits no scan. Dead holders retain FS-09's turn.
-                    input.attack_target = invalid_entity_id;
-                    input.attack_hardpoint = no_hardpoint;
-                    input.direct = false;
-                }
-                // WCC-25: the team holds any valid-type object, but a member takes it only through the
-                // ship-level type admission (a pad without living-projectile contact stays the team's,
-                // #3922). This gate is the only defence: a prepared member fires whatever it holds. A
-                // target missing from the view is left to the existing dead-target handling.
-                if (player_attack) {
-                    const auto* shared = view.find(state.target);
-                    player_attack = shared == nullptr || detail::target_type_admissible(view, *shared);
-                }
-                if (player_attack) {
-                    input.attack_target = state.target;
-                    input.attack_hardpoint = state.target_hardpoint;
-                    input.direct = true;
-                }
-                auto unit = view.units[index];
-                unit.combat = &input;
-                unit.squadron_idle = false;
-                output.enabled = frame.scans && view.frame >= state.next_scan_frame;
-                const auto target = state.formation ? state.formation->attack_target : invalid_entity_id;
-                output.destination = target;
-                output.scanned = output.enabled ? detail::target_combat(scan_view, unit, output.divert,
-                    target, output.anchor, &output.formation) : input;
-            }
-        });
-        if (!scanned) return core::Result<void>::failure(scanned.error());
-        // Only ordered notification/tail commits run here; spatial scans and weapon
-        // work stay partitioned. A completed prefix never gets a second object turn.
-        while (cursor != 0) {
-            const auto index = --cursor;
-            const auto& scan = scans[index];
-            if (!scan.present) continue;
-            const auto container = craft_squadron.at(moving[index].state.entity_id);
-            auto& state = minds.at(container);
-            auto& member = *moving[index].combat;
-            // A share invalidates only unserviced inputs. Refresh that suffix
-            // in the partitioned phase; completed members keep one weapon input.
-            if (member.attack_target != scan.before.attack_target || member.direct != scan.before.direct
-                || member.attack_hardpoint != scan.before.attack_hardpoint
-                || scan.destination != (state.formation ? state.formation->attack_target : invalid_entity_id)) {
-                ++cursor;
-                // Restage only this team's unserviced members. Unrelated teams
-                // retain their immutable outputs, so shares do not rescan a world.
-                scan_indices.clear();
-                for (const auto pending : member_indices.at(container))
-                    if (pending < cursor) scan_indices.push_back(pending);
-                break;
-            }
-            const auto old_team_target = state.target;
-            auto& roster = member_states.at(container);
-            const auto selected_parent = view.container_of(scan.scanned.attack_target);
-            const auto selected = selected_parent != invalid_entity_id ? selected_parent : scan.scanned.attack_target;
-            const auto other = minds.find(selected);
-            const bool same_cell = state.cell && other != minds.end() && other->second.cell
-                && state.cell == other->second.cell;
-            const auto* parent = view.find(container);
-            auto committed = detail::commit_squadron_target(view, view.units[index], scan.scanned,
-                member, roster, state, parent != nullptr ? parent->position : scan.anchor,
-                scan.divert, scan.anchor, scan.formation, same_cell, scan.enabled);
-            if (!committed) return core::Result<void>::failure(committed.error());
-            if (committed.value().lost)
-                end_combat(container, state, craft_view(squadron_frames.at(container).leader));
-            else if (committed.value().shared && old_team_target != invalid_entity_id) {
-                // WSQ-64: sharing a live target is not idle reversion. Leave the old
-                // combat cell (WSQ-43/49), but keep the held idle destination.
-                state.cell.reset();
-                state.joined = false;
-            }
-            if (committed.value().notified && squadron_frames.contains(selected) && !acquired.contains(container))
-                acquired.emplace(container, std::pair{acquired.size(), selected});
-            const auto destination = state.formation ? state.formation->attack_target : invalid_entity_id;
-            weapon_inputs[index] = member;
-            weapon_idle[index] = (state.mode == SquadronMode::move && state.diversion == SquadronDiversion::idle)
-                || (destination == invalid_entity_id && member.attack_target == invalid_entity_id);
+        // WSQ-41/47: only the team's own attack order shares as the player's: the order's
+        // target (or its team container) must be the target the team holds, so an autonomous
+        // find after the base target is lost is not taken for it. FT-06: a launched
+        // squadron takes no target for its first second, a player's too.
+        bool player_attack = false;
+        if (view.frame >= state.next_scan_frame && container != nullptr
+            && container->state.order.kind == OrderKind::attack && state.target != invalid_entity_id) {
+            const auto order_target = container->state.order.target;
+            const auto order_parent = view.container_of(order_target);
+            player_attack = (order_parent != invalid_entity_id ? order_parent : order_target) == state.target;
         }
+        auto input = output.before;
+        const auto* previous = view.find(input.attack_target);
+        if (input.direct && output.formation.present
+            && input.attack_target != output.formation.base_attack_target
+            && previous != nullptr && (!previous->durability || previous->durability->hull.raw() > 0)) {
+            // FO-03/05: a replacement base must not re-share its predecessor's
+            // adopted direct target. Clear in each member's private input even
+            // when this order admits no scan. Dead holders retain FS-09's turn.
+            input.attack_target = invalid_entity_id;
+            input.attack_hardpoint = no_hardpoint;
+            input.direct = false;
+        }
+        // WCC-25: the team holds any valid-type object, but a member takes it only through the
+        // ship-level type admission (a pad without living-projectile contact stays the team's,
+        // #3922). This gate is the only defence: a prepared member fires whatever it holds. A
+        // target missing from the view is left to the existing dead-target handling.
+        if (player_attack) {
+            const auto* shared = view.find(state.target);
+            player_attack = shared == nullptr || detail::target_type_admissible(view, *shared);
+        }
+        if (player_attack) {
+            input.attack_target = state.target;
+            input.attack_hardpoint = state.target_hardpoint;
+            input.direct = true;
+        }
+        auto unit = view.units[index];
+        unit.combat = &input;
+        unit.squadron_idle = false;
+        output.enabled = frame.scans && view.frame >= state.next_scan_frame;
+        const auto target = state.formation ? state.formation->attack_target : invalid_entity_id;
+        output.destination = target;
+        output.scanned = output.enabled ? detail::target_combat(scan_view, unit, output.divert,
+            target, output.anchor, &output.formation) : input;
     }
-    std::vector<std::optional<detail::CombatStep>> combat_steps(moving.size());
-    std::vector<std::optional<core::Diagnostic>> combat_errors(moving.size());
+}
+
+
+core::Result<void> session_detail::Tick::prepare_weapon_targets(std::vector<LiveUnit>& moving,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, EntityId>& craft_squadron,
+        std::vector<std::optional<CombatState>>& weapon_inputs, std::vector<bool>& weapon_idle,
+        std::map<EntityId, std::pair<std::size_t, EntityId>>& acquired, detail::MapStage<SquadronState>& minds,
+        const detail::CombatWorld& view, std::vector<std::optional<detail::CombatStep>>& combat_steps,
+        std::vector<std::optional<core::Diagnostic>>& combat_errors) {
     struct Pairing {
         std::size_t notification{}, roster_slot{};
         EntityId self{};
@@ -485,6 +413,13 @@ core::Result<void> session_detail::Tick::targets() {
             return core::Result<void>::failure(std::move(*error));
         }
     }
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::commit_weapon_targets(std::vector<LiveUnit>& moving,
+        std::vector<std::optional<detail::CombatStep>>& combat_steps,
+        std::vector<std::optional<CombatState>>& weapon_inputs) {
     auto& combat_events = targets_.value().combat_events.value();
     auto& aim_offsets = targets_.value().aim_offsets.value();
     // A-04 to A-07: the turns toward ordered targets, in ascending unit ID; planned below.
@@ -539,6 +474,115 @@ core::Result<void> session_detail::Tick::targets() {
         aim_offsets.insert(aim_offsets.end(), offsets.begin(), offsets.end());
     }
 
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::targets() {
+    auto& moving = gather_->moving.value();
+    auto& minds = craft_prep_->minds.value();
+    auto& squadron_frames = craft_prep_->squadron_frames.value();
+    const auto& craft_squadron = craft_prep_->craft_squadron.value();
+    const auto& arrivals = staging_->arrivals.value();
+    if (auto result = retry_buzz_targets(moving, minds, squadron_frames, arrivals); !result) return result;
+    if (auto result = refresh_target_inputs(moving, craft_squadron); !result) return result;
+    auto& world = targets_->world.value();
+    const auto& view = world.value();
+
+    // FS-18..20/FD-69: scans have disjoint member outputs. Sharing and tails
+    // commit in ordinary launch service rank (last-created member first).
+    // Registration changes/restored rank producers remain UFS-14/36.
+    struct MemberScan {
+        bool present{};
+        bool enabled{};
+        CombatState before;
+        CombatState scanned;
+        EntityId destination{};
+        detail::FormationAttackContext formation;
+        math::Fixed divert{};
+        math::Vec3 anchor{};
+    };
+    std::vector<MemberScan> scans(moving.size());
+    std::vector<std::optional<CombatState>> weapon_inputs(moving.size());
+    std::vector<bool> weapon_idle(moving.size());
+    std::map<EntityId, std::pair<std::size_t, EntityId>> acquired;
+    auto scan_view = view;
+    scan_view.frame = tick;
+    std::map<EntityId, std::vector<CombatState*>> member_states;
+    std::map<EntityId, std::vector<std::size_t>> member_indices;
+    std::vector<std::size_t> scan_indices;
+    for (const auto& [container, frame] : squadron_frames) {
+        auto& states = member_states[container];
+        for (const auto id : frame.live_roster) {
+            if (auto* member = live_unit(moving, id); member != nullptr && member->combat) {
+                states.push_back(&*member->combat);
+                const auto index = static_cast<std::size_t>(member - moving.data());
+                member_indices[container].push_back(index);
+                scan_indices.push_back(index);
+            }
+        }
+    }
+    // WSQ-42/43: no squadron or no combat table leaves no member scan or phase (as before the
+    // ordered commit), so the phase map of a squadron-free session is unchanged.
+    std::size_t cursor = squadron_frames.empty() || impl_->combat.profiles.empty() ? 0 : moving.size();
+    while (cursor != 0) {
+        const auto scanned = executor.execute_phase("squadron-targets", tick_partition_count, [&](const std::size_t partition) {
+            scan_member_targets_partition(partition, scan_indices, craft_squadron, moving, arrivals, squadron_frames, minds, scans, view, scan_view);
+        });
+        if (!scanned) return core::Result<void>::failure(scanned.error());
+        // Only ordered notification/tail commits run here; spatial scans and weapon
+        // work stay partitioned. A completed prefix never gets a second object turn.
+        while (cursor != 0) {
+            const auto index = --cursor;
+            const auto& scan = scans[index];
+            if (!scan.present) continue;
+            const auto container = craft_squadron.at(moving[index].state.entity_id);
+            auto& state = minds.at(container);
+            auto& member = *moving[index].combat;
+            // A share invalidates only unserviced inputs. Refresh that suffix
+            // in the partitioned phase; completed members keep one weapon input.
+            if (member.attack_target != scan.before.attack_target || member.direct != scan.before.direct
+                || member.attack_hardpoint != scan.before.attack_hardpoint
+                || scan.destination != (state.formation ? state.formation->attack_target : invalid_entity_id)) {
+                ++cursor;
+                // Restage only this team's unserviced members. Unrelated teams
+                // retain their immutable outputs, so shares do not rescan a world.
+                scan_indices.clear();
+                for (const auto pending : member_indices.at(container))
+                    if (pending < cursor) scan_indices.push_back(pending);
+                break;
+            }
+            const auto old_team_target = state.target;
+            auto& roster = member_states.at(container);
+            const auto selected_parent = view.container_of(scan.scanned.attack_target);
+            const auto selected = selected_parent != invalid_entity_id ? selected_parent : scan.scanned.attack_target;
+            const auto other = minds.find(selected);
+            const bool same_cell = state.cell && other != minds.end() && other->second.cell
+                && state.cell == other->second.cell;
+            const auto* parent = view.find(container);
+            auto committed = detail::commit_squadron_target(view, view.units[index], scan.scanned,
+                member, roster, state, parent != nullptr ? parent->position : scan.anchor,
+                scan.divert, scan.anchor, scan.formation, same_cell, scan.enabled);
+            if (!committed) return core::Result<void>::failure(committed.error());
+            if (committed.value().lost)
+                end_combat(container, state, craft_view(squadron_frames.at(container).leader));
+            else if (committed.value().shared && old_team_target != invalid_entity_id) {
+                // WSQ-64: sharing a live target is not idle reversion. Leave the old
+                // combat cell (WSQ-43/49), but keep the held idle destination.
+                state.cell.reset();
+                state.joined = false;
+            }
+            if (committed.value().notified && squadron_frames.contains(selected) && !acquired.contains(container))
+                acquired.emplace(container, std::pair{acquired.size(), selected});
+            const auto destination = state.formation ? state.formation->attack_target : invalid_entity_id;
+            weapon_inputs[index] = member;
+            weapon_idle[index] = (state.mode == SquadronMode::move && state.diversion == SquadronDiversion::idle)
+                || (destination == invalid_entity_id && member.attack_target == invalid_entity_id);
+        }
+    }
+    std::vector<std::optional<detail::CombatStep>> combat_steps(moving.size());
+    std::vector<std::optional<core::Diagnostic>> combat_errors(moving.size());
+    if (auto result = prepare_weapon_targets(moving, arrivals, craft_squadron, weapon_inputs, weapon_idle, acquired, minds, view, combat_steps, combat_errors); !result) return result;
+    if (auto result = commit_weapon_targets(moving, combat_steps, weapon_inputs); !result) return result;
     return core::Result<void>::success();
 }
 

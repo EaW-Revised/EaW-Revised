@@ -75,9 +75,9 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 14 | galactic-ai | completed boundary and versioned native AI components, including retained funding | v1 |
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
-| 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues and child owners | galaxy v33 |
+| 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state | galaxy v35 |
 | 0x8000 | presentation-hints | camera and selection per seat; never hashed | player saves |
-| 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v1 |
+| 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v3 |
 | 0x8002 | campaign-identity | authored campaign/set/difficulty, saving seat/faction and optional custom startup economy/hero values (WGP-190) | player saves of authored campaigns, v2 |
 
 ### Seats (ID 2, version 1)
@@ -221,10 +221,10 @@ in the canonical galaxy session blob, so the tactical seats format does not chan
 
 Session holds completed tick u64, combined game digest (32 bytes), strategic and tactical
 Q24 speeds (two u64 raw values), then u64-length-prefixed canonical galaxy session bytes
-and a canonical galactic replay. The replay includes every accepted future command; its
-final tick is the completed tick or one after the last accepted command/conflict entry,
-whichever is later. Its last command supplies the header frontier, and SHA-256 of the
-replay supplies the frontier input digest. Section 17 restores per-seat submission
+and a canonical galactic replay. The replay holds the history window since the history base (below), including every accepted future
+command; its final tick is the completed tick or one after the last accepted command/conflict entry,
+whichever is later. The header frontier key is the later of the base's last sealed command and the
+window's last command, and the frontier input digest is the chain described under "Bounded history". Section 17 restores per-seat submission
 cursors and the pending input queue directly. Finally, a u32 count precedes internal load
 prologues, each with tick u64, seat u32, sequence u64 and a u64-length-prefixed payload
 of the typed post-load command. These prologues execute at the barrier before player input
@@ -300,6 +300,45 @@ have independent routing cursors. Direct import validates setup players and boun
 of parent cursors by executed envelopes addressed to the saved conflict. This is a deliberate
 weaker bound than historical replay equality, since current battle-seat roles cannot identify
 all historical issuers. It never derives these cursors from tactical-log maxima.
+
+### Bounded history (galaxy v34)
+
+A save keeps the history since the previous save or load, not since the campaign started. The session section
+carries, right after the replay bytes, the **history base**: the boundary tick u64, the chained input digest
+(32 bytes), a presence byte and the key (tick u64, seat u32, sequence u64) of the last command sealed through the
+boundary, the count of session-level commands and of native journal entries dropped before it (u64 each), and a
+u64-counted, ascending list of (conflict u64, dropped tactical envelopes u64) for conflicts still unfinished at the
+boundary. The galaxy owner archives the same base, and the world archives its own dropped counts. Counts keep
+the command limits and the absolute native sequence exactly as in an unbounded session; the replay bytes number the
+window's journal from 1, so the replay format and the live replay file are unchanged.
+
+The window is the executed and pending commands, the applied native journal, load prologues and unfinished
+conflict/admission entries from the boundary on. The frontier digest is `sha256(previous digest || replay window
+bytes)`, starting from 32 zero bytes at a new game. It is never a digest of the window alone, so two histories that
+differ anywhere earlier cannot end on one frontier. The key keeps the header's flag semantics: the frontier is present
+once any command was sealed.
+
+A boundary is created by every accepted SaveRequest (on every peer, whether or not it writes the file) and by every
+load. The base moves at the start of the next step, so a capture or recapture right after either still sees the window
+the save was written with, and a load recaptures its own bytes. A save that is not at a SaveRequest barrier does not
+move the base. When the base moves, the session drops its executed commands and applied journal, load prologues and
+the selections of finished conflicts before the boundary. An auto-resolve return still reads its admission until applied,
+so those entries stay until then.
+
+### Story plot state (galaxy v35)
+
+The campaign owner blob is format 3. After the auto-resolve resolver bytes it ends with an optional story state
+(presence byte, then): the started flag, the story clock (Q24), the trigger sequence (u64), the sub-plots in table order
+(name, owning player, active flag, then every event by name with its triggered, active and disabled flags, start time,
+elapsed accumulator and last-seen time, tech-level primed flag and inactivity stamp) and the flag table (name to i64, names
+upper-case, ascending). The plot definitions are never saved: a load installs the same plots from the campaign data first and
+the saved state must match them name for name (a renamed sub-plot or event, or a save with plots loaded into a session without
+them, is refused). WST-60..62.
+
+Old galaxy section versions are refused with `EAWR-CKP-0102`, naming the found and expected version.
+
+The development replay oracle takes the save that the window starts at as its base: it imports that save's world and
+owner state, then replays only the window on top of it. A save from a new game needs no base.
 
 The current-format replay loader is exposed only as a development equality oracle. The
 checkpoint contracts compare its hash and canonical world components with independent direct
@@ -449,7 +488,7 @@ or Lua. The initiated slot alone is written by the local disk worker; requested,
 completed, rejected and failed are separate outcomes. Completed means the staged file was closed
 and published successfully. The player menu reports success only for that outcome.
 
-Optional section 0x8001 uses version 1 and carries two u32-length-framed galactic replay blobs:
+Optional section 0x8001 uses version 3 and carries two u32-length-framed galactic replay blobs:
 deferred live orders and exact future envelopes. Untimed orders are pinned to the saved frontier;
 their submission sequences are allocated only when admitted. The order blob's sequence is its
 original queue index plus one. Envelope keys remain exact. Both blobs must share the checkpoint's

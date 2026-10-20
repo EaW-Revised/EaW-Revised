@@ -5,7 +5,7 @@
 #include "galactic/galaxy_snapshot_stub.hpp"
 #include "galactic/galaxy_view.hpp"
 #include "galactic/corruption_visuals.hpp"
-#include "galactic/fleet_hud_fixture.hpp"
+#include "../presentation/galactic/fleet_hud_fixture.hpp"
 #include "galactic/galactic_reveal.hpp"
 #include "galactic/map_input.hpp"
 #include "galactic/native_ai_flag.hpp"

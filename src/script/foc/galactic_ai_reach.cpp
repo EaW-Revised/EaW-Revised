@@ -124,14 +124,41 @@ const GalacticExecutionRoute* GalacticWorld::execution_route(tactical::PlayerId 
 std::optional<bool> GalacticWorld::goal_reachable(tactical::PlayerId owner,
     galactic::PlanetId source, galactic::PlanetId candidate, std::string_view policy) const {
     if (!planet(source) || !planet(candidate) || !player(owner)) return false;
-    const auto canonical = upper_case(trimmed(policy));
-    static const std::set<std::string> accepted{"FRIENDLY_ONLY", "FRIENDLY_IGNORE_THREAT", "ENEMY_DESTINATION",
-        "ENEMY_UNDEFENDED", "SINGLE_HOP_DISCONNECTED", "ANY"};
-    if (!accepted.contains(canonical)) return false;
+    const auto canonical = goal_reach_policy(upper_case(trimmed(policy)));
+    if (!canonical) return false;
     if (source == candidate) return true; // WGA-18
-    for (const auto& relation : connectivity_->goal_reach)
-        if (relation.player == owner && relation.source == source && upper_case(relation.policy) == canonical)
-            return std::find(relation.production_sites.begin(), relation.production_sites.end(), candidate) != relation.production_sites.end();
+    if (const auto* found = goal_reach_index_->find(owner, source, *canonical)) {
+        const auto& sites = connectivity_->goal_reach[found->row].production_sites;
+        return std::find(sites.begin(), sites.end(), candidate) != sites.end();
+    }
     return {}; // named production-site producer dependency, never an execution-cost substitute
+}
+std::optional<GoalReachPolicy> goal_reach_policy(std::string_view upper_cased) {
+    static constexpr std::pair<std::string_view, GoalReachPolicy> names[] = {
+        {"FRIENDLY_ONLY", GoalReachPolicy::friendly_only}, {"FRIENDLY_IGNORE_THREAT", GoalReachPolicy::friendly_ignore_threat},
+        {"ENEMY_DESTINATION", GoalReachPolicy::enemy_destination}, {"ENEMY_UNDEFENDED", GoalReachPolicy::enemy_undefended},
+        {"SINGLE_HOP_DISCONNECTED", GoalReachPolicy::single_hop_disconnected}, {"ANY", GoalReachPolicy::any}};
+    for (const auto& [name, id] : names)
+        if (upper_cased == name) return id;
+    return std::nullopt;
+}
+GalacticGoalReachIndex GalacticGoalReachIndex::build(const std::vector<GalacticGoalReach>& rows) {
+    GalacticGoalReachIndex index;
+    index.entries.reserve(rows.size());
+    for (std::size_t row = 0; row < rows.size(); ++row)
+        // A row whose policy is not one of the accepted names can never match a query.
+        if (const auto policy = goal_reach_policy(upper_case(rows[row].policy)))
+            index.entries.push_back({rows[row].player, rows[row].source, *policy, static_cast<std::uint32_t>(row)});
+    const auto key = [](const Entry& entry) { return std::tuple{entry.player, entry.source, entry.policy, entry.row}; };
+    std::sort(index.entries.begin(), index.entries.end(), [&](const Entry& a, const Entry& b) { return key(a) < key(b); });
+    return index;
+}
+const GalacticGoalReachIndex::Entry* GalacticGoalReachIndex::find(tactical::PlayerId player, galactic::PlanetId source,
+    GoalReachPolicy policy) const {
+    const auto wanted = std::tuple{player, source, policy};
+    const auto found = std::lower_bound(entries.begin(), entries.end(), wanted, [](const Entry& entry, const auto& value) {
+        return std::tuple{entry.player, entry.source, entry.policy} < value;
+    });
+    return found != entries.end() && std::tuple{found->player, found->source, found->policy} == wanted ? &*found : nullptr;
 }
 } // namespace eawr::script::foc::ai

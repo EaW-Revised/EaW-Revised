@@ -1,12 +1,21 @@
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/corruption_model.hpp"
 
 #include <iostream>
 #include <limits>
-#include <stdexcept>
+#include <exception>
 
 using namespace eawr::sim::galactic::corruption_fixture;
 namespace {
-void check(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void check(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 Fixed f(const char* value) { return Fixed::from_decimal(value).value(); }
 void transitions() {
     for (unsigned i = 1; i <= 8; ++i) {
@@ -149,6 +158,13 @@ void black_market() {
     check(offers(context, items, std::span(players).first(1), {}).value()[0].price == f("1815"), "MP no other player uses maximum minus one");
     context.tutorial = true;
     check(offers(context, items, players, {}).value()[0].price == f("7"), "tutorial tech/cost skip ordinary factors");
+    // WGEP-109: the header reads the item faction's player, or in multiplayer the highest other displayed tech.
+    players = {{1, 30, 1}, {2, 10, 2}, {3, 20, 4}};
+    check(menu_header_tech(false, 10, players) == 2, "solo header reads the item faction player");
+    check(menu_header_tech(true, 10, players) == 4, "multiplayer header takes the highest other player");
+    check(menu_header_tech(true, 20, players) == 2, "multiplayer header excludes the faction player itself");
+    check(menu_header_tech(true, 10, std::span(players).subspan(1, 1)) == 2, "no other player keeps the faction value");
+    check(!menu_header_tech(false, 99, players) && !menu_header_tech(true, 99, players), "unknown faction has no header");
     context.multiplayer = false; context.tutorial = false; context.planet_modifier = f("-1000");
     check(offers(context, items, players, {}).value()[0].price == Fixed{}, "negative price floored");
     context.opposing_planet = false; check(offers(context, items, players, {}).value().empty(), "target admission");
@@ -172,8 +188,9 @@ void black_market() {
     check(!absence(1, low, high, f("2")), "invalid synchronized draw rejected");
 }
 } // namespace
-int main() {
+int case_galactic_corruption_model_tests() {
     try { transitions(); revolt_and_errors(); recurring_income(); black_market(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     std::cout << "corruption fixture contracts passed\n";
+    return 0;
 }

@@ -1,9 +1,18 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "game_session_loopback.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <stdexcept>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace {
 using namespace galactic_test;
@@ -12,11 +21,8 @@ namespace tactical = eawr::sim::tactical;
 namespace cp = eawr::checkpoint;
 namespace lockstep = eawr::testing::lockstep;
 namespace math = eawr::sim::math;
-template <class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
-void check(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+using eawr::testing::result_code_colon::take;
+void check(eawr::core::Result<void> result) { eawr::testing::must(std::move(result)); }
 
 galactic::GalacticSetup setup(bool coop = false) {
     galactic::SyntheticGalaxyOptions options; options.planets = 8; options.players = 4;
@@ -404,7 +410,7 @@ void rejoin_ends_fast_forward() {
         "the reset replays to the same state hash");
 }
 } // namespace
-int main() {
+int case_galactic_seat_roles_tests() {
     try { roster_and_dropout(); roles_and_checkpoint(); battle_start_events(); unrelated_ai_activity(); readiness_departure_and_return(); all_peers_lockstep(); generated_controller_orders(); rejoin_ends_fast_forward(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;

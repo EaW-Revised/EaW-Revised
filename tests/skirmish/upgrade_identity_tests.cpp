@@ -1,16 +1,27 @@
+#include "../support/temp_dir.hpp"
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/sim/tactical/session.hpp"
-#include <algorithm>
 #include "eawr/vfs/vfs.hpp"
+
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <cstdlib>
+#include <iterator>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
-#include <chrono>
+
 using eawr::sim::math::Fixed;
 static void write(const std::filesystem::path& p, const std::string& s) {
     std::filesystem::create_directories(p.parent_path()); std::ofstream(p)<<s;
@@ -56,7 +67,7 @@ static int paired(bool shadow) {
         <<" available="<<(option&&option->available)<<" upgrade_profile="<<(profile!=nullptr)
         <<" bonuses="<<(profile?profile->bonuses.size():0)<<'\n';
     const auto legacy_again=catalog.resolve(upgrade);
-    std::error_code ignored; std::filesystem::remove_all(dir,ignored);
+    eawr::testing::remove_temp_directory(dir);
     return !(legacy_again&&legacy_again.value().type_name==legacy.value().type_name&&unit&&unit->xml_type=="UpgradeObject"&&unit->production.upgrade_object&&option&&option->available
         &&option->price.raw()==950*Fixed::scale&&option->build_frames==690&&profile&&!profile->bonuses.empty());
 }
@@ -111,14 +122,15 @@ static int cloaking() {
     for(auto& unit:variant.units) if(unit.id=="Probe_Cloak") unit.production.stealth_duration_bonuses[0].multiplier=Fixed::from_raw(Fixed::scale*2);
     ok=ok&&eawr::units::content_identity(variant)!=identity;
     std::cout<<"cloaking modifiers "<<(ok?"ok":"FAILED")<<'\n';
-    std::error_code ignored; std::filesystem::remove_all(dir,ignored);
+    eawr::testing::remove_temp_directory(dir);
     return ok?0:1;
 }
 
 namespace {
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool condition, const std::string& message) {
-    if(!condition) { ++failures; std::cerr<<"FAIL: "<<message<<'\n'; }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 struct StockUpgrade { const char* name; int price; int seconds; int first_station; };
 constexpr StockUpgrade stock[]{
@@ -135,13 +147,7 @@ constexpr StockUpgrade stock[]{
     {"UL_Extort_Cash_L2_Upgrade",700,30,0},
 };
 std::string game_root() {
-#ifdef _WIN32
-    char* value=nullptr; std::size_t size{};
-    if(_dupenv_s(&value,&size,"EAWR_EAW_GAME_ROOT")!=0||!value) return {};
-    std::string result(value); std::free(value); return result;
-#else
-    const auto* value=std::getenv("EAWR_EAW_GAME_ROOT"); return value?value:"";
-#endif
+    return eawr::testing::game_root().value_or("");
 }
 int stock_contract() {
     const auto root=game_root();

@@ -14,6 +14,8 @@
 
 #include <atomic>
 #include <deque>
+#include <initializer_list>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <utility>
@@ -132,17 +134,91 @@ struct GalacticExecutionRoute {
     bool empty{};
     Real distance{}, threat{}, prefix_threat{};
 };
+// An immutable ordered planet list that the rows holding it share. Copying a row copies a pointer, not the ids; an empty
+// list holds no storage. Read-only, so a list is never edited in place after another row has seen it.
+class SharedPlanetList {
+public:
+    using Ids = std::vector<galactic::PlanetId>;
+    SharedPlanetList() = default;
+    SharedPlanetList(Ids ids) : ids_(ids.empty() ? nullptr : std::make_shared<const Ids>(std::move(ids))) {}
+    SharedPlanetList(std::initializer_list<galactic::PlanetId> ids) : SharedPlanetList(Ids(ids)) {}
+    explicit SharedPlanetList(std::shared_ptr<const Ids> ids) : ids_(ids && !ids->empty() ? std::move(ids) : nullptr) {}
+    [[nodiscard]] const Ids& get() const noexcept { return ids_ ? *ids_ : none(); }
+    operator const Ids&() const noexcept { return get(); } // NOLINT(google-explicit-constructor): reads like the vector it replaces
+    [[nodiscard]] auto begin() const noexcept { return get().begin(); }
+    [[nodiscard]] auto end() const noexcept { return get().end(); }
+    [[nodiscard]] std::size_t size() const noexcept { return ids_ ? ids_->size() : 0; }
+    [[nodiscard]] bool empty() const noexcept { return !ids_; }
+    [[nodiscard]] galactic::PlanetId front() const { return get().front(); }
+    void clear() noexcept { ids_.reset(); }
+    friend bool operator==(const SharedPlanetList& a, const SharedPlanetList& b) noexcept {
+        return a.ids_ == b.ids_ || a.get() == b.get();
+    }
+private:
+    static const Ids& none() noexcept { static const Ids empty; return empty; }
+    std::shared_ptr<const Ids> ids_;
+};
 struct GalacticGoalReach {
     tactical::PlayerId player{};
     galactic::PlanetId source{};
     std::string policy;
-    std::vector<galactic::PlanetId> production_sites;
+    SharedPlanetList production_sites;
+    friend bool operator==(const GalacticGoalReach&, const GalacticGoalReach&) = default;
+};
+// Derived lookup over GalacticConnectivity::goal_reach, rebuilt when the rows change. Policies are
+// canonicalised once here (trimmed query / upper-cased row spelling) so a query is a binary search.
+enum class GoalReachPolicy : std::uint8_t { friendly_only, friendly_ignore_threat, enemy_destination,
+    enemy_undefended, single_hop_disconnected, any };
+[[nodiscard]] std::optional<GoalReachPolicy> goal_reach_policy(std::string_view upper_cased);
+struct GalacticGoalReachIndex {
+    struct Entry {
+        tactical::PlayerId player{};
+        galactic::PlanetId source{};
+        GoalReachPolicy policy{};
+        std::uint32_t row{}; // index into goal_reach; the lowest row of a duplicated key wins
+    };
+    std::vector<Entry> entries; // sorted by (player, source, policy, row)
+    [[nodiscard]] static GalacticGoalReachIndex build(const std::vector<GalacticGoalReach>& rows);
+    [[nodiscard]] const Entry* find(tactical::PlayerId, galactic::PlanetId, GoalReachPolicy) const;
+};
+// Rows that copies of a publication share until one copy is edited. Copying holds a pointer, not the rows; reads see a
+// const vector, and every edit first detaches a shared copy, so one publication never changes under another.
+template<class Row> class SharedRows {
+public:
+    using Rows = std::vector<Row>;
+    SharedRows() = default;
+    SharedRows(Rows rows) : rows_(rows.empty() ? nullptr : std::make_shared<Rows>(std::move(rows))) {} // NOLINT(google-explicit-constructor)
+    SharedRows(std::initializer_list<Row> rows) : SharedRows(Rows(rows)) {}
+    [[nodiscard]] const Rows& get() const noexcept { return rows_ ? *rows_ : none(); }
+    operator const Rows&() const noexcept { return get(); } // NOLINT(google-explicit-constructor): reads like the vector it replaces
+    [[nodiscard]] auto begin() const noexcept { return get().begin(); }
+    [[nodiscard]] auto end() const noexcept { return get().end(); }
+    [[nodiscard]] std::size_t size() const noexcept { return rows_ ? rows_->size() : 0; }
+    [[nodiscard]] bool empty() const noexcept { return !rows_ || rows_->empty(); }
+    [[nodiscard]] const Row& operator[](std::size_t index) const { return get()[index]; }
+    [[nodiscard]] Row& front() { return edit().front(); }
+    void push_back(Row row) { edit().push_back(std::move(row)); }
+    template<class It> void append(It first, It last) { auto& rows = edit(); rows.insert(rows.end(), first, last); }
+    void clear() noexcept { rows_.reset(); }
+    // True when both publications hold the very same rows (no walk needed).
+    [[nodiscard]] bool shares(const SharedRows& other) const noexcept { return rows_ == other.rows_; }
+    friend bool operator==(const SharedRows& a, const SharedRows& b) {
+        return a.rows_ == b.rows_ || a.get() == b.get();
+    }
+private:
+    Rows& edit() {
+        if (!rows_) rows_ = std::make_shared<Rows>();
+        else if (rows_.use_count() > 1) rows_ = std::make_shared<Rows>(*rows_);
+        return *rows_;
+    }
+    static const Rows& none() noexcept { static const Rows empty; return empty; }
+    std::shared_ptr<Rows> rows_;
 };
 struct GalacticConnectivity {
     std::uint64_t revision{};
     bool execution_available{}; // E has published a complete route generation
     std::vector<GalacticExecutionRoute> execution_routes;
-    std::vector<GalacticGoalReach> goal_reach;
+    SharedRows<GalacticGoalReach> goal_reach;
     // WGA-194: producer-owned potential island paths, separate from execution costs.
     struct Island { tactical::PlayerId player{}; galactic::PlanetId planet{}; bool least_force{}, largest{}; };
     std::vector<Island> island_paths;
@@ -495,7 +571,6 @@ private:
         bool retained_nearby = false) const;
     void bind_connectivity(std::shared_ptr<const GalacticConnectivity>);
     [[nodiscard]] GalacticInternedValue* cached_value(const GalacticInternedKey&) const;
-    [[nodiscard]] GalacticInternedKey intern_key(const GalacticCacheKey&) const;
     // A restored key is interned while the world is serial, so its tokens enter the shared table.
     [[nodiscard]] GalacticInternedKey intern_restored_key(const GalacticCacheKey&) const;
     [[nodiscard]] GalacticInternedKey memo_key(const GalacticQueryKey& key) const {
@@ -566,6 +641,8 @@ private:
     tactical::EconomyRules economy_;
     std::map<sim::EntityId, tactical::PadState> pads_;
     std::shared_ptr<const GalacticConnectivity> connectivity_{std::make_shared<const GalacticConnectivity>()};
+    // Always describes connectivity_->goal_reach; republishing routes copies the same rows, so only bind_connectivity rebuilds it.
+    std::shared_ptr<const GalacticGoalReachIndex> goal_reach_index_{std::make_shared<const GalacticGoalReachIndex>()};
     GalacticPerceptionWork work_;
     struct EconomyPlanet {
         galactic::PlanetId planet{};

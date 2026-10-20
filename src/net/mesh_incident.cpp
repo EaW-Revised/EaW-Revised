@@ -489,10 +489,6 @@ std::optional<MeshIncidentResult> MeshIncident::take_result() {
     return result;
 }
 
-void MeshIncident::survivor_lost(PeerIndex a, PeerIndex b) {
-    if (policy_ && phase_ == Phase::settling) policy_->pair_lost(a, b);
-}
-
 void MeshIncident::settled() {
     if (phase_ != Phase::settling || !policy_) return;
     policy_->settled();

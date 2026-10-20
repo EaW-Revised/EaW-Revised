@@ -27,17 +27,7 @@ Ref<Texture2D> first_texture(GalacticMode::State& state, const data::ui::Command
 
 bool GalacticMode::State::build_orbit_hud() {
     if (!fleet_organize) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "orbit-extra") {
-        // Explicit synthetic authored-component fixture: a third mesh/component pair.
-        const auto* anchor = fleet_anchors.find("space_Pad_02");
-        const auto* component = command_catalog.find("space_Pad_02");
-        if (anchor && component) {
-            auto extra = *anchor; extra.name = "space_Pad_03"; extra.rect.x -= extra.rect.width;
-            fleet_anchors.add(std::move(extra));
-            auto extra_component = *component; extra_component.name = "space_Pad_03";
-            static_cast<void>(command_catalog.add(std::move(extra_component)));
-        }
-    }
+    if (options.hud_provider && !options.hud_provider->orbit(*this)) return false;
     // GHUD-S79: enumerate the authored components, never a fixed two-slot table.
     for (const auto& anchor : fleet_anchors.anchors()) {
         const auto index = slot_index(anchor.name);

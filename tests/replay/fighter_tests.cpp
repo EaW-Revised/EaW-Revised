@@ -1,3 +1,8 @@
+// #75 fighter squadrons (docs/behaviour/space-fighters.md, cases C-01 to C-06): the hangar
+// (FL-01 to FL-08) on a synthetic spawner, a launch from a bay, the squadron's priority-set
+// scan (FT-02, FT-03) and worker-count hash equality of a launch-and-attack session.
+
+#include "../support/check.hpp"
 #include "fighter_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
@@ -5,33 +10,20 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
-#include <algorithm>
-#include <cmath>
-#include <cstddef>
 #include <cstdint>
-#include <initializer_list>
 #include <iostream>
-#include <limits>
-#include <map>
 #include <optional>
-#include <string>
 #include <string_view>
-#include <utility>
 #include <vector>
 
-// #75 fighter squadrons (docs/behaviour/space-fighters.md, cases C-01 to C-06): the hangar
-// (FL-01 to FL-08) on a synthetic spawner, a launch from a bay, the squadron's priority-set
-// scan (FT-02, FT-03) and worker-count hash equality of a launch-and-attack session.
 namespace fighter_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 

@@ -12,22 +12,12 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
-#include <algorithm>
-#include <array>
-#include <cmath>
+
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <iterator>
-#include <map>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <utility>
 #include <vector>
 
 namespace skirmish_start_test_support {
@@ -38,7 +28,7 @@ using eawr::units::Fixed;
 using eawr::units::UnitKind;
 using eawr::units::Vec3;
 
-extern int failures;
+extern int& failures;
 
 
 

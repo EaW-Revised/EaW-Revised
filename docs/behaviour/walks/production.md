@@ -9,7 +9,8 @@
     dies or levels up;
   - the population cap;
   - the reinforcement pool and a unit's arrival;
-  - the station's upgrades and level-up.
+  - the station's upgrades and level-up;
+  - the tactical upgrade dock, which reports this research to the local player.
 - **Objects:** the players, each player's build queues and pool, the stations (M2: the level-1
   `Skirmish_Rebel_Star_Base_1` and `Skirmish_Empire_Star_Base_1`, SK-20), their income streams,
   the upgrade objects a station builds, and the units that arrive.
@@ -383,3 +384,24 @@ ability subset. This does not disable its ordinary weapons or upgrade bonuses.
 |---|---|---|
 | WPR-53 | Station replacement lifetime of attack targets and other non-held references. Still unverified: Station upgrade explicitly transfers held upgrades and hardpoint state before destroying the old station. Arbitrary non-held attack/reference observers depend on later detach callbacks, which are not exhaustively traced by that replacement body. | EUS-25 |
 | WPR-57 | Arbitrary non-death holder deletion and holder-search order (mod/campaign boundary). Still unverified: The stock no-eligible-holder branch is already sourced. Arbitrary non-death deletion and alternate-holder search ordering require their deletion/search callers; these mod/campaign boundaries remain deferred outside stock M2. | EUS-25 |
+
+## Tactical upgrade dock: retail observations
+
+This dock belongs with the shared research and station replacement rules above;
+it is separate from the hero trays. The observations below use the retail debug
+build, with fog on, in Empire-versus-Rebellion skirmishes: Coruscant space at
+1280x720 and 1280x960, and Naboo land at 1280x720. The team match has one human
+and an allied AI against two AIs; both battle types also have a 1v1 comparison.
+Measurements are approximate client pixels, excluding the window border.
+Captures remain private.
+
+| Rule | Observed behaviour | Evidence and limits |
+|---|---|---|
+| WPR-70 | The dock shows research from the local team: an allied AI's station level-up appears before the local player buys anything; the local player's different ordinary research appears in the same column. No entry is drawn in the initial, unresearched state. Entries carry the upgrade icon, without a player-name label. | Retail capture, 2026-10-20, 2v2, 1280x720. Ordinary completed research owned by the allied AI is not yet independently observed. |
+| WPR-71 | The column is flush with the right client edge near the top, independent of the lower command bar. At 1280x720 the first framed icon is approximately 34–36 px wide, starting near x 1245 and y 58; the next entry starts about 36 px lower. At 1280x960 it is approximately 46–48 px wide, starting near x 1233 and y 78. Icon size and top offset scale with screen height in this pair. | Retail capture, 2026-10-20, same completed research at both resolutions. Other aspect ratios, capacities and wrapping are unverified. |
+| WPR-72 | An in-progress entry has a gold/orange progress treatment on its icon and a **percent-complete** label beneath it. Observed labels include 0%, 24% and 63%. The dock entry advances alongside the starter's active queue entry. | Retail capture, 2026-10-20, allied level-2 station upgrade, local armor research and local level-3 station upgrade. No separate horizontal progress bar was observed; the precise icon-fill direction remains unverified. |
+| WPR-73 | Completed ordinary research remains as a plain icon, with no percentage label. A completed station level-up leaves the dock: after the allied level-up finishes, the station is level 2 and both allied accounts have tech level 2, but no persistent station-level badge is shown. Thus the observed station entry represents the pending level-up purchase, rather than the team's current numeric tech level. | Retail capture and Lua debugger state, 2026-10-20; WPR-52 owns the replacement and shared tech change. Local Reinforced Armor Level 1 persists after completion. |
+| WPR-74 | Cancelling the local level-up through its active upgrade-queue slot removes its dock entry and refunds the starter. The completed ordinary-research icon remains, and the station stays at its previous level. | Retail capture, 2026-10-20, level-3 purchase cancelled while the station remains level 2. This does not establish a cancel action on the dock itself. |
+| WPR-75 | In the observed sequence the allied pending level-up is first and the later local research is below it. Once the level-up completes, the surviving ordinary-research icon closes up to the first row. A later local level-up appears below that completed icon and disappears again on cancel. In 1v1, armor researched before reactors remains above reactors after both complete, despite reactors preceding armor in the station's authored menu. | Retail capture, 2026-10-20. These cases follow acquisition order, but do not establish the full sorting rule for arbitrary upgrade types or mixed owners. |
+| WPR-76 | Hovering the completed armor icon opens the normal encyclopedia panel near the lower-left HUD, with the upgrade name, class and bonus description. A single left click and a single right click on that icon, after panning away from the selected station, leave the camera and selected station unchanged. | Retail capture, 2026-10-20. Double click and clicks on an in-progress entry remain unverified. |
+| WPR-77 | The dock is present in space 1v1 as well as 2v2, so a teammate is not required for it to appear. It is also present in land 1v1: Survival Training bought normally at the barracks appears at the same right-edge anchor with a 6% label, then remains without that label on completion. | Retail capture, 2026-10-20, space Coruscant and land Naboo, local Empire. Land 2v2 and other factions were not separately captured. |

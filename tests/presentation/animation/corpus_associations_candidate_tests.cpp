@@ -1,5 +1,14 @@
 #include "corpus_associations_test_support.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <random>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace association_contracts {
 void test_shorter_prefix_passes_but_is_not_promoted() {
     Fixture fixture;

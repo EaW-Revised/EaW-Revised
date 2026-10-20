@@ -22,7 +22,7 @@ Number decoded_distance(std::uint32_t cost) { return ai::to_single(Number(cost &
 Number decoded_threat(std::uint32_t cost) { return ai::to_single(Number((cost >> 16U) * 100U)); }
 }
 core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInput& input,
-    const sim::PartitionExecutor& executor) {
+    const sim::PartitionExecutor& executor, const std::shared_ptr<const ExecutionBuildMemo>& memo) {
     using Result = core::Result<ExecutionRouteBuild>;
     const auto n = input.planets.size();
     if (!input.player || !finite(input.maximum_distance) || input.maximum_distance < Number(0)
@@ -42,81 +42,164 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
     std::vector<std::uint32_t> costs(n * n, missing_cost);
     std::vector<std::size_t> previous(n * n, n);
     std::vector<std::uint8_t> invalid_rows(n);
+    // The pairwise packed distances depend on positions, layer adjustments, usability, trade lanes and the limit but
+    // not on force, so a build whose geometry facts match the previous one reuses them and restages only force.
+    std::shared_ptr<const ExecutionGeometry> geometry;
+    {
+        auto fresh = std::make_shared<ExecutionGeometry>();
+        for (const auto& planet : input.planets)
+            fresh->facts.push_back({planet.planet, planet.position, planet.layer_z_adjust.repr, planet.usable});
+        for (const auto& [ends, speed] : trades) fresh->trades.push_back({ends.first, ends.second, speed.repr});
+        fresh->maximum_distance = input.maximum_distance.repr;
+        if (memo && memo->geometry && memo->geometry->facts == fresh->facts && memo->geometry->trades == fresh->trades
+            && memo->geometry->maximum_distance == fresh->maximum_distance) geometry = memo->geometry;
+        else {
+            fresh->distance.assign(n * n, ExecutionGeometry::no_edge);
+            auto measured = executor.execute_phase("galactic-ai-execution-geometry", sim::tick_partition_count, [&](std::size_t part) {
+                const auto range = sim::partition_range(part, n);
+                for (auto source = range.begin; source < range.end; ++source) for (std::size_t dest = 0; dest < n; ++dest) {
+                    if (source == dest) continue;
+                    const auto& a = input.planets[source]; const auto& b = input.planets[dest];
+                    if (!a.usable || !b.usable) continue;
+                    const auto dx = ai::to_single(ai::to_single(numeric::from_fixed(b.position.x)) - ai::to_single(numeric::from_fixed(a.position.x)));
+                    const auto dy = ai::to_single(ai::to_single(numeric::from_fixed(b.position.y)) - ai::to_single(numeric::from_fixed(a.position.y)));
+                    const auto dz = ai::to_single(single_add(ai::to_single(numeric::from_fixed(b.position.z)), ai::to_single(a.layer_z_adjust))
+                        - ai::to_single(numeric::from_fixed(a.position.z)));
+                    auto distance = ai::to_single(ai::square_root(single_add(single_add(ai::to_single(dx * dx), ai::to_single(dy * dy)), ai::to_single(dz * dz))));
+                    const auto trade = trades.find({a.planet, b.planet});
+                    if (trade != trades.end()) distance = ai::to_single(distance / trade->second);
+                    else if (distance > ai::to_single(input.maximum_distance)) continue;
+                    const auto scaled_distance = ai::to_single(distance * Number(10));
+                    const auto integer_distance = ai::truncate(scaled_distance);
+                    fresh->distance[source * n + dest] = integer_distance < 0 || integer_distance >= 65535
+                        ? ExecutionGeometry::out_of_range : static_cast<std::int32_t>(integer_distance);
+                }
+            });
+            if (!measured) return Result::failure(measured.error());
+            geometry = std::move(fresh);
+        }
+    }
+    // Force belongs to the entered planet alone. Debug-build assertions do not define a normal-game recovery:
+    // refuse invalid inputs instead of advertising clamping as parity.
+    std::vector<std::uint32_t> entered_threat(n); std::vector<std::uint8_t> entered_valid(n);
+    for (std::size_t dest = 0; dest < n; ++dest) {
+        const auto& b = input.planets[dest];
+        const auto force = b.enemy_space_power + b.nonallied_starbase_power;
+        const auto integer_force = ai::truncate(force);
+        entered_valid[dest] = finite(force) && !(integer_force < 0 || static_cast<std::uint64_t>(integer_force) / 100 >= 65535);
+        if (entered_valid[dest]) entered_threat[dest] = static_cast<std::uint32_t>(integer_force) / 100U << 16U;
+    }
     auto staged = executor.execute_phase("galactic-ai-execution-edges", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, n);
+        const auto* distances = geometry->distance.data();
         for (auto source = range.begin; source < range.end; ++source) for (std::size_t dest = 0; dest < n; ++dest) {
             const auto index = source * n + dest;
             if (source == dest) { costs[index] = 0; continue; }
-            const auto& a = input.planets[source]; const auto& b = input.planets[dest];
-            if (!a.usable || !b.usable) continue;
-            const auto dx = ai::to_single(ai::to_single(numeric::from_fixed(b.position.x)) - ai::to_single(numeric::from_fixed(a.position.x)));
-            const auto dy = ai::to_single(ai::to_single(numeric::from_fixed(b.position.y)) - ai::to_single(numeric::from_fixed(a.position.y)));
-            const auto dz = ai::to_single(single_add(ai::to_single(numeric::from_fixed(b.position.z)), ai::to_single(a.layer_z_adjust))
-                - ai::to_single(numeric::from_fixed(a.position.z)));
-            auto distance = ai::to_single(ai::square_root(single_add(single_add(ai::to_single(dx * dx), ai::to_single(dy * dy)), ai::to_single(dz * dz))));
-            const auto trade = trades.find({a.planet, b.planet});
-            if (trade != trades.end()) distance = ai::to_single(distance / trade->second);
-            else if (distance > ai::to_single(input.maximum_distance)) continue;
-            const auto force = b.enemy_space_power + b.nonallied_starbase_power;
-            const auto scaled_distance = ai::to_single(distance * Number(10));
-            const auto integer_distance = ai::truncate(scaled_distance);
-            const auto integer_force = ai::truncate(force);
-            // Debug-build assertions do not define a normal-game recovery.
-            // Refuse invalid inputs instead of advertising clamping as parity.
-            if (!finite(force) || integer_distance < 0 || integer_distance >= 65535
-                || integer_force < 0 || static_cast<std::uint64_t>(integer_force) / 100 >= 65535) { invalid_rows[source] = 1; continue; }
-            costs[index] = (static_cast<std::uint32_t>(integer_force) / 100U << 16U) | static_cast<std::uint32_t>(integer_distance);
+            const auto distance = distances[index];
+            if (distance == ExecutionGeometry::no_edge) continue;
+            if (distance == ExecutionGeometry::out_of_range || !entered_valid[dest]) { invalid_rows[source] = 1; continue; }
+            costs[index] = entered_threat[dest] | static_cast<std::uint32_t>(distance);
             previous[index] = source;
         }
     });
     if (!staged) return Result::failure(staged.error());
     if (std::any_of(invalid_rows.begin(), invalid_rows.end(), [](auto value) { return value != 0; }))
         return Result::failure(invalid("execution packed edge exceeds the qualified numeric domain"));
+    const auto same_input = [&](const ExecutionBuildMemo& old) {
+        return old.player == input.player && old.nodes.size() == n && old.edges == costs
+            && std::equal(old.nodes.begin(), old.nodes.end(), input.planets.begin(), [](auto id, const auto& planet) { return id == planet.planet; });
+    };
+    // An identical node order and staged edge matrix is the same deterministic input: reuse its rows and matrix.
+    if (memo && same_input(*memo)) {
+        ExecutionRouteBuild out; out.rows = memo->rows; out.paths = memo->paths; out.memo = memo; out.reused = true;
+        out.edges_tested = static_cast<std::uint64_t>(n) * n; out.relaxations_tested = static_cast<std::uint64_t>(n) * n * n;
+        return Result::success(std::move(out));
+    }
+    auto edges = costs;
     // Each intermediate stage freezes its row and column before partitioning
     // sources. Nonnegative qualified costs leave the intermediate diagonal zero.
     // Strict improvements therefore match ordered intermediate/source/destination
-    // relaxation while writes remain disjoint (ADR-009).
+    // relaxation while writes remain disjoint (ADR-009). Only pairs whose row and
+    // column entries are both finite can improve, and some pair overflows a half of
+    // the packed cost exactly when the largest finite row entry plus the largest
+    // finite column entry does, so the domain check is linear per stage.
+    std::vector<std::uint32_t> into(n), from(n);
+    std::vector<std::size_t> predecessor(n), reachable;
     for (std::size_t intermediate = 0; intermediate < n; ++intermediate) {
-        std::vector<std::uint32_t> into(n), from(n);
-        std::vector<std::size_t> predecessor(n);
+        std::uint32_t into_low = 0, into_high = 0, from_low = 0, from_high = 0;
+        std::size_t into_others = 0;
+        reachable.clear();
         for (std::size_t i = 0; i < n; ++i) {
             into[i] = costs[i * n + intermediate]; from[i] = costs[intermediate * n + i]; predecessor[i] = previous[intermediate * n + i];
+            if (into[i] != missing_cost) {
+                into_low = std::max(into_low, into[i] & 65535U); into_high = std::max(into_high, into[i] >> 16U);
+                if (i != intermediate) ++into_others;
+            }
+            if (from[i] != missing_cost) {
+                from_low = std::max(from_low, from[i] & 65535U); from_high = std::max(from_high, from[i] >> 16U);
+                if (i != intermediate) reachable.push_back(i);
+            }
         }
+        if (into_low + from_low >= 65535U || into_high + from_high >= 65535U)
+            return Result::failure(invalid("execution packed relaxation exceeds the qualified numeric domain"));
+        // The intermediate's own row and column never improve (zero diagonal), so one without others is a no-op.
+        if (!into_others || reachable.empty()) continue;
+        const bool dense = reachable.size() * 4 >= n;
         staged = executor.execute_phase("galactic-ai-execution-relax", sim::tick_partition_count, [&](std::size_t part) {
             const auto range = sim::partition_range(part, n);
-            for (auto source = range.begin; source < range.end; ++source) for (std::size_t dest = 0; dest < n; ++dest) {
-                if (into[source] == missing_cost || from[dest] == missing_cost) continue;
-                if (!safe_sum(into[source], from[dest])) { invalid_rows[source] = 1; continue; }
-                const auto candidate = into[source] + from[dest];
-                if (candidate < costs[source * n + dest]) { costs[source * n + dest] = candidate; previous[source * n + dest] = predecessor[dest]; }
+            for (auto source = range.begin; source < range.end; ++source) {
+                if (source == intermediate || into[source] == missing_cost) continue;
+                const std::uint64_t base = into[source];
+                auto* cost_row = costs.data() + source * n; auto* previous_row = previous.data() + source * n;
+                if (dense) {
+                    // A missing column entry makes the 64-bit sum at least 2^32 - 1, which never beats a stored cost.
+                    for (std::size_t dest = 0; dest < n; ++dest) {
+                        const auto candidate = base + from[dest];
+                        if (candidate < cost_row[dest]) { cost_row[dest] = static_cast<std::uint32_t>(candidate); previous_row[dest] = predecessor[dest]; }
+                    }
+                } else for (const auto dest : reachable) {
+                    const auto candidate = static_cast<std::uint32_t>(base + from[dest]);
+                    if (candidate < cost_row[dest]) { cost_row[dest] = candidate; previous_row[dest] = predecessor[dest]; }
+                }
             }
         });
         if (!staged) return Result::failure(staged.error());
     }
-    if (std::any_of(invalid_rows.begin(), invalid_rows.end(), [](auto value) { return value != 0; }))
-        return Result::failure(invalid("execution packed relaxation exceeds the qualified numeric domain"));
     ExecutionRouteBuild out; out.rows.resize(n * n);
+    // Each source's paths grow along its predecessor tree: a destination's full cost is its parent's full cost plus
+    // the entering edge, and the prefix (everything but the entering edge) is the parent's full cost. Any broken
+    // chain, missing edge, cycle or half overflow refuses the generation, as walking every chain would.
     staged = executor.execute_phase("galactic-ai-execution-decode", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, n);
-        for (auto source = range.begin; source < range.end; ++source) for (std::size_t dest = 0; dest < n; ++dest) {
-            auto& row = out.rows[source * n + dest]; row.player = input.player; row.source = input.planets[source].planet; row.candidate = input.planets[dest].planet;
-            std::uint32_t full = 0, prefix = 0;
-            if (source != dest) {
-                if (previous[source * n + dest] == n) { row.empty = true; full = prefix = missing_cost; }
-                else {
-                    auto current = dest; std::size_t steps = 0;
-                    while (current != source && steps < n) {
-                        const auto before = previous[source * n + current];
-                        if (before == n) { invalid_rows[source] = 1; break; }
-                        const auto edge = costs[before * n + current];
-                        if (edge == missing_cost || !safe_sum(full, edge)) { invalid_rows[source] = 1; break; }
-                        full += edge; if (steps) prefix += edge;
-                        current = before; ++steps;
+        enum : std::uint8_t { unknown, walking, done };
+        std::vector<std::uint32_t> full(n); std::vector<std::uint8_t> state(n); std::vector<std::size_t> chain;
+        for (auto source = range.begin; source < range.end; ++source) {
+            std::fill(state.begin(), state.end(), std::uint8_t{unknown}); state[source] = done; full[source] = 0;
+            const auto* parent = previous.data() + source * n;
+            for (std::size_t dest = 0; dest < n; ++dest) {
+                auto& row = out.rows[source * n + dest]; row.player = input.player; row.source = input.planets[source].planet; row.candidate = input.planets[dest].planet;
+                std::uint32_t total = 0, prefix = 0;
+                if (source != dest) {
+                    if (parent[dest] == n) { row.empty = true; total = prefix = missing_cost; }
+                    else {
+                        chain.clear();
+                        auto current = dest; bool broken = false;
+                        while (state[current] != done) {
+                            if (state[current] == walking || parent[current] == n) { broken = true; break; }
+                            state[current] = walking; chain.push_back(current); current = parent[current];
+                        }
+                        while (!broken && !chain.empty()) {
+                            const auto node = chain.back(); chain.pop_back();
+                            const auto before = parent[node]; const auto edge = costs[before * n + node];
+                            if (edge == missing_cost || !safe_sum(full[before], edge)) { broken = true; break; }
+                            full[node] = full[before] + edge; state[node] = done;
+                        }
+                        if (broken) { invalid_rows[source] = 1; break; }
+                        total = full[dest]; prefix = full[parent[dest]];
                     }
-                    if (current != source) invalid_rows[source] = 1;
                 }
+                row.distance = decoded_distance(total); row.threat = decoded_threat(total); row.prefix_threat = decoded_threat(prefix);
             }
-            row.distance = decoded_distance(full); row.threat = decoded_threat(full); row.prefix_threat = decoded_threat(prefix);
         }
     });
     if (!staged) return Result::failure(staged.error());
@@ -126,6 +209,8 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
     auto paths = std::make_shared<ExecutionPathMatrix>(); paths->player = input.player;
     for (const auto& planet : input.planets) paths->nodes.push_back(planet.planet);
     paths->costs = std::move(costs); paths->previous = std::move(previous); out.paths = std::move(paths);
+    auto kept = std::make_shared<ExecutionBuildMemo>(); kept->player = input.player; kept->nodes = out.paths->nodes;
+    kept->geometry = geometry; kept->edges = std::move(edges); kept->rows = out.rows; kept->paths = out.paths; out.memo = std::move(kept);
     return Result::success(std::move(out));
 }
 core::Result<bool> refresh_execution_routes(ExecutionRoutes& state, const std::uint64_t mode_frame,
@@ -187,31 +272,31 @@ core::Result<ExecutionPath> cached_execution_path(const ExecutionRoutes& state, 
 core::Result<bool> publish_execution_routes(ExecutionRoutes& state, std::uint64_t frame, bool due,
     const sim::PartitionExecutor& executor, const ExecutionMatrixProducer& producer) {
     if (!due || frame < state.next_refresh) return core::Result<bool>::success(false);
-    auto staged = state; std::shared_ptr<const ExecutionPathMatrix> paths;
+    auto staged = state; std::shared_ptr<const ExecutionPathMatrix> paths; std::shared_ptr<const ExecutionBuildMemo> memo;
     auto refreshed = refresh_execution_routes(staged, frame, due, executor, [&](const auto& workers) {
         using Result = core::Result<std::optional<std::vector<ai::GalacticExecutionRoute>>>;
         auto built = producer ? producer(workers) : core::Result<std::optional<ExecutionRouteBuild>>::success(std::nullopt);
         if (!built) return Result::failure(built.error());
         if (!built.value()) return Result::success(std::nullopt);
         if (!built.value()->paths) return Result::failure(invalid("full execution publication requires its packed predecessor matrix"));
-        paths = built.value()->paths; return Result::success(std::move(built.value()->rows));
+        paths = built.value()->paths; memo = built.value()->memo; return Result::success(std::move(built.value()->rows));
     });
     if (!refreshed || !refreshed.value()) return refreshed;
-    staged.paths = std::move(paths); state = std::move(staged); return refreshed;
+    staged.paths = std::move(paths); staged.memo = std::move(memo); state = std::move(staged); return refreshed;
 }
 core::Result<void> initialize_execution_matrix(ExecutionRoutes& state, std::uint64_t frame,
     std::uint32_t count, std::uint32_t index, const sim::PartitionExecutor& executor, const ExecutionMatrixProducer& producer) {
-    auto staged = state; std::shared_ptr<const ExecutionPathMatrix> paths;
+    auto staged = state; std::shared_ptr<const ExecutionPathMatrix> paths; std::shared_ptr<const ExecutionBuildMemo> memo;
     auto initialized = initialize_execution_routes(staged, frame, count, index, executor, [&](const auto& workers) {
         using Result = core::Result<std::optional<std::vector<ai::GalacticExecutionRoute>>>;
         auto built = producer ? producer(workers) : core::Result<std::optional<ExecutionRouteBuild>>::success(std::nullopt);
         if (!built) return Result::failure(built.error());
         if (!built.value()) return Result::success(std::nullopt);
         if (!built.value()->paths) return Result::failure(invalid("execution initialization requires its packed predecessor matrix"));
-        paths = built.value()->paths; return Result::success(std::move(built.value()->rows));
+        paths = built.value()->paths; memo = built.value()->memo; return Result::success(std::move(built.value()->rows));
     });
     if (!initialized) return initialized;
-    staged.paths = std::move(paths); state = std::move(staged); return initialized;
+    staged.paths = std::move(paths); staged.memo = std::move(memo); state = std::move(staged); return initialized;
 }
 ai::GalacticConnectivity execution_connectivity(const ExecutionRoutes& state) {
     ai::GalacticConnectivity out;

@@ -1,3 +1,5 @@
+#include <ios>
+#include "../support/check.hpp"
 // gc_lockstep_loopback (M3 foundation FT-06, ADR-015): the lockstep loopback gate over the
 // committed tactical replay corpus with two and eight peers, and negative cases that inject
 // a divergence and check the gate names the right tick and peer. Arguments: the directories that
@@ -33,13 +35,11 @@ namespace tactical = eawr::sim::tactical;
 using Peer = lockstep::Peer<lockstep::TacticalAdapter>;
 using Executors = std::vector<const eawr::sim::PartitionExecutor*>;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 struct CorpusReplay {

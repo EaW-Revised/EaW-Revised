@@ -34,6 +34,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -66,6 +67,9 @@ public:
         // Where the game list, the players and the chat come from, and where the lobby's own presence
         // and chat go. Null: the list stays empty and a typed address (direct connect) still joins.
         std::shared_ptr<presentation::ui::LobbyGameSource> source;
+        // Production multiplayer browser: open discovery only when LAN is selected. Injected
+        // fixture sources keep their existing lifetime; the skirmish LAN setup does not use this.
+        std::function<std::shared_ptr<presentation::ui::LobbyGameSource>(std::string&)> lan_source_factory;
         // The online room source behind the Online half of the same screen (public and password
         // rooms, refresh, the password join and the hosting state). Null: Online stays unavailable.
         std::shared_ptr<net::OnlineRoomSource> online_rooms;
@@ -208,6 +212,53 @@ private:
     void draw_chat(class EawrUiList& list, const presentation::ui::ChatLog& log);
     void commit_name_from_edit();
     void refresh_staging();
+    void refresh_staging_connections(Impl& impl, const LanView& view, bool online);
+    void refresh_staging_status(Impl& impl, PageState& state, Resources& resources, const LanView& view,
+                                bool online, const std::optional<LanLobbyState>& room);
+    void build_staging_rows(Impl& impl, Resources& resources, const LanView& view,
+                            const std::optional<LanLobbyState>& room, std::size_t dialog_rows,
+                            std::vector<presentation::ui::StagingRow>& rows, const skirmish::SetupMap*& map,
+                            std::size_t& visible, bool connected);
+    void refresh_staging_options(Impl& impl, Resources& resources, const skirmish::SetupMap* map);
+    void refresh_staging_roster(Impl& impl, PageState& state, Resources& resources,
+                                const std::optional<LanLobbyState>& room,
+                                const std::vector<presentation::ui::StagingRow>& rows, const skirmish::SetupMap* map,
+                                std::size_t visible, bool connected, std::size_t dialog_rows);
+    void refresh_staging_start(Impl& impl, Resources& resources, const LanView& view,
+                               const std::optional<LanLobbyState>& room,
+                               const std::vector<presentation::ui::StagingRow>& rows, bool online);
+    void finish_staging_refresh(Impl& impl, const LanView& view, const std::optional<LanLobbyState>& room);
+    bool action_connections();
+    bool action_source(const std::string& argument);
+    bool action_cancel_join();
+    bool action_name(const std::string& argument);
+    bool action_colour(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_chat(const std::string& argument);
+    bool action_sort(Impl& impl, const std::string& argument);
+    bool action_filter(Impl& impl, const std::string& argument,
+                       bool (*number)(const std::string&, std::uint32_t&));
+    bool action_humans(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_host_dropdown(const std::string& argument);
+    bool action_staging_dropdown(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_host(Impl& impl, const std::string& argument);
+    bool action_join(Impl& impl, const std::string& argument);
+    bool action_password(Impl& impl, const std::string& argument);
+    bool action_prompt_cancel(Impl& impl);
+    bool action_refresh(Impl& impl);
+    bool action_rooms(Impl& impl, const std::string& argument);
+    bool action_code(Impl& impl, const std::string& argument);
+    bool action_direct(Impl& impl, const std::string& argument);
+    bool action_cancel();
+    bool action_leave();
+    bool action_map(Impl& impl, const std::string& argument);
+    bool action_ai(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_team(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_ready(const std::string& verb);
+    bool action_kick(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
+    bool action_staging_selection(const std::string& verb, const std::string& argument,
+                                  bool (*number)(const std::string&, std::uint32_t&));
+    bool action_start(Impl& impl);
+    bool action_accept(Impl& impl);
     // MNU-22: the host's advanced options dialog over the staging (#4041); guests read the summary list.
     void build_options_overlay();
     void open_options();
@@ -220,6 +271,7 @@ private:
     void join_selected();
     void join_address(const std::string& address, const std::string& game);
     void select_source(presentation::ui::LobbySourceKind source);
+    std::shared_ptr<presentation::ui::LobbyGameSource> lan_source();
     bool configure_online_match();
     void cancel_join();
     void join_code(const std::string& code);
@@ -243,6 +295,7 @@ private:
     std::unique_ptr<PageState> state_;
     std::unique_ptr<Impl> impl_;
     Options options_;
+    std::shared_ptr<presentation::ui::LobbyGameSource> owned_lan_source_;
     std::shared_ptr<LanMatch> match_;
     std::shared_ptr<LanMatch> lan_match_;
     std::shared_ptr<LanMatch> online_match_;

@@ -1,3 +1,9 @@
+#include <cstddef>
+#include <ios>
+#include <iostream>
+#include <string_view>
+#include <utility>
+#include "../support/temp_dir.hpp"
 #include "galactic_support.hpp"
 #include "galactic/campaign_score_model.hpp"
 
@@ -33,7 +39,7 @@ struct Tree {
     fs::path root = fs::temp_directory_path()
         / ("eawr-score-tests-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
     Tree() { fs::create_directories(root); }
-    ~Tree() { std::error_code ignored; fs::remove_all(root, ignored); }
+    ~Tree() { eawr::testing::remove_temp_directory(root); }
 };
 void write(const fs::path& path, const std::string_view value) {
     fs::create_directories(path.parent_path());

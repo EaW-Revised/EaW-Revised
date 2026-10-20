@@ -1,8 +1,12 @@
 // #456: model projectiles and the hit particle pick (presentation::space projectiles,
 // docs/behaviour/battle-presentation.md BP-60 to BP-65).
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/projectiles.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <set>
@@ -16,13 +20,11 @@ namespace tactical = eawr::sim::tactical;
 using eawr::sim::math::Fixed;
 using eawr::sim::math::Vec3;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const double a, const double b, const double tolerance = 1.0e-6) { return std::abs(a - b) <= tolerance; }

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/particles/attachment_lifecycle.hpp"
 #include "eawr/presentation/particles/particles.hpp"
@@ -28,9 +30,10 @@ namespace playback = eawr::presentation::animation;
 
 namespace particle_render_contracts {
 
-inline int failures{};
+inline eawr::testing::Checker local_checker;
+inline int& failures = local_checker.failures;
 inline void expect(const bool condition, const char* message) {
-    if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
+    local_checker.check(condition, message, std::cerr);
 }
 inline bool finite(const particles::Vec3 value) {
     return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
@@ -179,6 +182,7 @@ public:
         live[id] = plan.emitter_index; ++created; return id;
     }
     void prepare_emitter(const std::uint64_t resource, const particles::VertexStream& stream) override {
+        expect(!stream.indices.empty(), "empty streams skip worker packing");
         // Slots are created before dispatch; concurrent tasks only write disjoint slots.
         auto& slot = prepared.at(resource);
         slot.hash = particles::stream_hash(stream);
@@ -189,12 +193,17 @@ public:
         if (!live.contains(resource)) { ++invalid_updates; return; }
         expect(finite_stream(stream), "backend uploads only finite vertices and bounds");
         auto& slot = prepared.at(resource);
-        expect(slot.ready && slot.hash == particles::stream_hash(stream),
+        expect(stream.vertices.empty() || (slot.ready && slot.hash == particles::stream_hash(stream)),
             "worker preparation matches the stream committed on the caller thread");
         slot.ready = false;
         record.push_back(particles::stream_hash(stream));
         last[resource]=stream;
         vertices += stream.vertices.size();
+    }
+    void empty_emitter(const std::uint64_t resource, const bool terminal) override {
+        if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
+        empty_notifications.emplace_back(resource, terminal);
+        particles::RenderBackend::empty_emitter(resource, terminal);
     }
     void destroy_emitter(const std::uint64_t resource) override {
         if (std::this_thread::get_id() != caller_) { ++wrong_thread; return; }
@@ -206,6 +215,7 @@ public:
     std::map<std::uint64_t, std::size_t> live;
     std::map<std::uint64_t, particles::VertexStream> last;
     std::vector<std::uint64_t> record;
+    std::vector<std::pair<std::uint64_t, bool>> empty_notifications;
     std::size_t created{}, destroyed{}, invalid_updates{}, invalid_destroys{}, vertices{};
     std::optional<std::size_t> refuse_emitter;
     std::atomic<std::size_t> wrong_thread{};
@@ -217,6 +227,7 @@ private:
 inline particles::CameraFrame test_camera() { return particles::camera_frame_from_render({0, 20, 60}, {0, 0, 0}, {0, 1, 0}); }
 
 void test_offscreen_updates_and_bounds();
+void test_empty_stream_residency();
 
 inline std::vector<std::uint64_t> run(RecordingBackend& backend, const std::uint32_t seed, const int frames) {
     particles::EffectRegistry registry(backend);

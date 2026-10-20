@@ -1,4 +1,5 @@
 #include "eawr/data/ui/movie.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"
 
@@ -21,10 +22,7 @@ core::Result<HudMovie> failure(const std::string_view code, std::string message,
 }
 
 std::string trimmed(const std::string_view text) {
-    constexpr std::string_view space = " \t\r\n";
-    const auto first = text.find_first_not_of(space);
-    if (first == std::string_view::npos) return {};
-    return std::string(text.substr(first, text.find_last_not_of(space) - first + 1));
+    return core::trim(text, core::xml_whitespace);
 }
 
 // Trimmed character data of the first child element `name`, if any.

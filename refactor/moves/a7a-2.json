@@ -1,0 +1,102 @@
+[
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_no_upgrade_layout",
+    "new": "tests/replay/station_garrison_tests.cpp#test_no_upgrade_layout"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_replacement_attack",
+    "new": "tests/replay/station_garrison_tests.cpp#test_replacement_attack"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_order_after_reinforcement",
+    "new": "tests/replay/station_garrison_tests.cpp#test_order_after_reinforcement"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_destroyed_station",
+    "new": "tests/replay/station_garrison_tests.cpp#test_destroyed_station"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_replacement_projectiles",
+    "new": "tests/replay/station_garrison_tests.cpp#test_replacement_projectiles"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_hangar_replacement",
+    "new": "tests/replay/station_garrison_tests.cpp#test_hangar_replacement"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_garrison_marked_station_upgrade",
+    "new": "tests/replay/station_garrison_tests.cpp#test_garrison_marked_station_upgrade"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_free_garrison_replenishment",
+    "new": "tests/replay/station_garrison_tests.cpp#test_free_garrison_replenishment"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_free_garrison_timer_order",
+    "new": "tests/replay/station_garrison_tests.cpp#test_free_garrison_timer_order"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_free_garrison_pending_and_generic",
+    "new": "tests/replay/station_garrison_tests.cpp#test_free_garrison_pending_and_generic"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_free_garrison_bays_and_claims",
+    "new": "tests/replay/station_garrison_tests.cpp#test_free_garrison_bays_and_claims"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_disabled_authored_bay",
+    "new": "tests/replay/station_garrison_tests.cpp#test_disabled_authored_bay"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_free_garrison_replay",
+    "new": "tests/replay/station_garrison_tests.cpp#test_free_garrison_replay"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_garrison_replay_extension",
+    "new": "tests/replay/station_garrison_tests.cpp#test_garrison_replay_extension"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_staged_source_removal",
+    "new": "tests/replay/station_production_tests.cpp#test_staged_source_removal"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_upgrade_holder_loss",
+    "new": "tests/replay/station_production_tests.cpp#test_upgrade_holder_loss"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_respawn_inherits_upgrade",
+    "new": "tests/replay/station_production_tests.cpp#test_respawn_inherits_upgrade"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_census_recount",
+    "new": "tests/replay/station_production_tests.cpp#test_census_recount"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_production_work",
+    "new": "tests/replay/station_production_tests.cpp#test_production_work"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_hero_command_ledger",
+    "new": "tests/replay/station_production_tests.cpp#test_hero_command_ledger"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_hero_worker_determinism",
+    "new": "tests/replay/station_production_tests.cpp#test_hero_worker_determinism"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_signed_command_reduction",
+    "new": "tests/replay/station_production_tests.cpp#test_signed_command_reduction"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_bound_production_relationships",
+    "new": "tests/replay/station_production_tests.cpp#test_bound_production_relationships"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_live_station_repair",
+    "new": "tests/replay/station_production_tests.cpp#test_live_station_repair"
+  },
+  {
+    "old": "tests/replay/station_upgrade_tests.cpp#test_human_pad_radar_creation",
+    "new": "tests/replay/station_production_tests.cpp#test_human_pad_radar_creation"
+  }
+]

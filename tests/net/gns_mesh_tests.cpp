@@ -1,33 +1,47 @@
+// N-peer GNS mesh (slice N2 of docs/net-online-npeer.md). One broker process owns an InProcessGnsRoom and relays the
+// room's opaque signals over loopback UDP; every member is its own process with its own GNS identity and a real ICE
+// data path. Test-only IPC carries room operations and signals, never game frames.
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/gns_transport.hpp"
 #include "eawr/net/tactical_adapter.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/net/platform_socket.hpp"
 #include "../../src/net/gns_deferred_signals.hpp"
+#include "../../src/net/gns_room_signal.hpp"
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <deque>
+#include <exception>
 #include <iostream>
+#include <iterator>
 #include <map>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
-#include <stdexcept>
+#include <span>
+#include <string>
+#include <string_view>
 #include <thread>
+#include <utility>
+#include <vector>
 
-// N-peer GNS mesh (slice N2 of docs/net-online-npeer.md). One broker process owns an InProcessGnsRoom and relays the
-// room's opaque signals over loopback UDP; every member is its own process with its own GNS identity and a real ICE
-// data path. Test-only IPC carries room operations and signals, never game frames.
 namespace {
 using namespace eawr::net;
 using namespace std::chrono_literals;
 using Bytes = std::vector<std::uint8_t>;
 using Clock = std::chrono::steady_clock;
 
-void expect(bool ok, const std::string& reason) { if (!ok) throw std::runtime_error(reason); }
+void expect(bool ok, const std::string& reason) {
+    if (!ok) eawr::testing::require(ok, reason);
+}
 void deferred_signal_limits() {
     std::deque<GnsRoomSignal> pending;
     GnsRoomSignal noisy; noisy.from_slot = 1; noisy.from_identity = "noisy"; noisy.bytes = {1};
@@ -40,10 +54,7 @@ void deferred_signal_limits() {
     expect(!retain_deferred_signal(pending, noisy), "Only the overflowing sender is refused its next deferred request");
     expect(pending.back().from_slot == 2, "A refused sender cannot evict an honest pending request");
 }
-template<class T> T require(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().code + ": " + value.error().message);
-    return std::move(value).value();
-}
+using eawr::testing::result_code_colon::require;
 
 struct Udp {
     socket::Open binding{eawr::net::socket::udp_open("127.0.0.1", 0, false)};
@@ -84,9 +95,9 @@ std::uint64_t take_u64(std::span<const std::uint8_t>& bytes) {
 // roster, forwarded signal, barrier release.
 enum Tag : std::uint8_t { tag_attach = 0, tag_signal = 1, tag_operation = 2, tag_arrive = 3, tag_done = 4,
     tag_attached = 10, tag_roster = 11, tag_forwarded = 12, tag_released = 13, tag_repaired = 14 };
-enum Operation : std::uint8_t { op_leave = 0, op_release = 1, op_kick = 2, op_lock = 3, op_repair = 4 };
+enum Operation : std::uint8_t { op_leave = 0, op_release = 1, op_kick = 2, op_lock = 3, op_repair = 4, op_first_failure = 5, op_stale_probe = 6, op_probe_release = 7 };
 
-void broker(std::size_t participants, std::size_t children, const std::string& drop_from, const std::string& drop_to) {
+void broker(std::size_t participants, std::size_t children, const std::string& drop_from, const std::string& drop_to, bool first_attempt_only) {
     Udp udp;
     InProcessGnsRoom room(static_cast<std::uint32_t>(participants));
     std::array<std::shared_ptr<GnsRoomEndpoint>, max_match_seats> endpoints;
@@ -96,11 +107,15 @@ void broker(std::size_t participants, std::size_t children, const std::string& d
     std::set<unsigned> released_stages;
     std::size_t finished = 0, forwarded_blobs = 0, dropped_blobs = 0;
     std::uint64_t last_revision = ~0ULL;
+    std::set<PeerIndex> first_failures;
+    bool unblocked = false, probe_injected = false, probe_released = false;
+    std::optional<Bytes> original_request;
+    std::deque<std::pair<PeerIndex, Bytes>> replacement_signals;
     auto next_push = Clock::now();
     std::cout << udp.binding.port << '\n' << std::flush;
     const auto deadline = Clock::now() + 150s;
     const auto filtered = [&](PeerIndex a, PeerIndex b) {
-        return !drop_from.empty() && ((identities[a] == drop_from && identities[b] == drop_to)
+        return (!first_attempt_only || !probe_released) && !drop_from.empty() && ((identities[a] == drop_from && identities[b] == drop_to)
             || (identities[a] == drop_to && identities[b] == drop_from));
     };
     const auto push_roster = [&] {
@@ -137,7 +152,18 @@ void broker(std::size_t participants, std::size_t children, const std::string& d
                 expect(rest.size() >= 2, "IPC signal");
                 const PeerIndex to = rest[0]; rest = rest.subspan(1);
                 if (!endpoints[slot] || to >= max_match_seats) continue;
-                if (filtered(slot, to)) { ++dropped_blobs; continue; }
+                if (filtered(slot, to)) {
+                    if (first_attempt_only) {
+                        if (slot == 2 && to == 1 && !original_request) original_request = Bytes(rest.begin(), rest.end());
+                        const auto candidate = decode_room_signal(rest);
+                        const auto original = original_request ? decode_room_signal(*original_request) : std::nullopt;
+                        if (unblocked && candidate && original && candidate->grant != original->grant) {
+                            expect(replacement_signals.size() < 64, "Bounded replacement signalling hold");
+                            replacement_signals.emplace_back(slot, Bytes(rest.begin(), rest.end()));
+                        }
+                    }
+                    ++dropped_blobs; continue;
+                }
                 static_cast<void>(endpoints[slot]->send(to, rest));
             } else if (tag == tag_operation) {
                 expect(rest.size() == 2 && endpoints[slot], "IPC operation");
@@ -146,7 +172,22 @@ void broker(std::size_t participants, std::size_t children, const std::string& d
                 else if (op == op_kick) static_cast<void>(endpoints[slot]->kick(arg));
                 else if (op == op_lock) static_cast<void>(endpoints[slot]->lock());
                 else if (op == op_leave) static_cast<void>(endpoints[slot]->leave());
-                else if (op == op_repair) {
+                else if (op == op_first_failure) {
+                    expect(first_attempt_only && filtered(slot, arg), "Only the blackholed pair reports its first failure");
+                    first_failures.insert(slot);
+                    if (first_failures.size() == 2) unblocked = true;
+                } else if (op == op_stale_probe) {
+                    expect(first_attempt_only && unblocked && slot == 1 && arg == 2 && original_request && !probe_injected,
+                        "Superseded request replay follows the first failures and a new acceptor grant");
+                    require(endpoints[2]->send(1, *original_request)); probe_injected = true;
+                } else if (op == op_probe_release) {
+                    expect(first_attempt_only && probe_injected && slot == 1 && arg == 2 && !probe_released,
+                        "Current signals wait until the acceptor proves stale-request rejection");
+                    probe_released = true;
+                    for (const auto& [sender, bytes] : replacement_signals)
+                        require(endpoints[sender]->send(sender == 1 ? 2U : 1U, bytes));
+                    replacement_signals.clear();
+                } else if (op == op_repair) {
                     const auto result = endpoints[slot]->repair_attachment(arg);
                     udp.send(ports[slot], Bytes{tag_repaired, static_cast<std::uint8_t>(arg), static_cast<std::uint8_t>(result && result.value())});
                 }
@@ -177,6 +218,7 @@ void broker(std::size_t participants, std::size_t children, const std::string& d
         std::this_thread::sleep_for(1ms);
     }
     static_cast<void>(last_revision);
+    if (first_attempt_only) expect(unblocked && probe_injected && probe_released && dropped_blobs > 0, "First ICE attempt was blackholed at both ends before retry");
     std::cout << "Mesh broker forwarded " << forwarded_blobs << " signals, dropped " << dropped_blobs << '\n';
 }
 
@@ -211,6 +253,7 @@ public:
         wire.insert(wire.end(), blob.begin(), blob.end());
         if (wire.size() > 60000 || !udp_.send(broker_, wire)) return failure("EAWR-NET-1761", "IPC signal send failed");
         last_signals_[to].assign(blob.begin(), blob.end());
+        first_signals_.try_emplace(to, blob.begin(), blob.end());
         return eawr::core::Result<void>::success();
     }
     // Repeat a real opaque signal for the existing native connection. This
@@ -222,6 +265,14 @@ public:
         { std::lock_guard guard(mutex_); signal = last_signals_.at(to); }
         require(send(to, signal));
     }
+    void repeat_first_signal(PeerIndex to) {
+        Bytes first, latest;
+        { std::lock_guard guard(mutex_); first = first_signals_.at(to); latest = last_signals_.at(to); }
+        const auto old = decode_room_signal(first), current = decode_room_signal(latest);
+        expect(old && current && old->grant != current->grant,
+            "Replay is a captured native request from the superseded grant");
+        require(send(to, first));
+    }
     eawr::core::Result<std::optional<GnsRoomSignal>> poll() override {
         std::lock_guard guard(mutex_);
         drain();
@@ -229,13 +280,17 @@ public:
         auto value = std::move(inbox_.front()); inbox_.pop_front();
         return eawr::core::Result<std::optional<GnsRoomSignal>>::success(std::move(value));
     }
-    std::optional<GnsTurnCredentials> turn_credentials() const override { return {}; }
+    std::optional<GnsTurnCredentials> turn_credentials() const override { std::lock_guard guard(mutex_); ++credential_reads_; return {}; }
+    unsigned credential_reads() const { std::lock_guard guard(mutex_); return credential_reads_; }
     GnsRoomLease lease() const override { return {Clock::now() + 24h}; }
     eawr::core::Result<void> status() const override { return eawr::core::Result<void>::success(); }
     eawr::core::Result<void> leave() override { return operate(op_leave, 0); }
     eawr::core::Result<void> release(PeerIndex slot) override { return operate(op_release, slot); }
     eawr::core::Result<void> kick(PeerIndex slot) override { return operate(op_kick, slot); }
     eawr::core::Result<void> lock() override { return operate(op_lock, 0); }
+    void first_failure(PeerIndex peer) { require(operate(op_first_failure, peer)); }
+    void stale_probe() { require(operate(op_stale_probe, 2)); }
+    void release_probe() { require(operate(op_probe_release, 2)); }
     bool refuse_repair{};
     std::chrono::milliseconds refresh_delay{};
     bool repair_requested() const { std::lock_guard guard(mutex_); return requested_epoch_ != 0; }
@@ -302,9 +357,10 @@ private:
     std::uint16_t broker_;
     mutable std::mutex mutex_;
     mutable Udp udp_;
+    mutable unsigned credential_reads_{};
     mutable GnsRoomRoster roster_;
     mutable std::deque<GnsRoomSignal> inbox_;
-    std::map<PeerIndex, Bytes> last_signals_;
+    std::map<PeerIndex, Bytes> last_signals_, first_signals_;
     mutable std::optional<bool> attach_result_;
     mutable std::set<unsigned> released_;
     mutable std::uint64_t requested_epoch_{}, repaired_epoch_{};
@@ -343,16 +399,45 @@ public:
         config.build_identity = options_.build; config.peers = options_.seats;
         config.keepalive = 100ms; config.timeout = 8s;
         config.pair_timeout = options_.pair_timeout_short ? 5s : options_.scenario == "repair_lower" ? 20s : 25s;
+        if (options_.scenario == "lobby_retry" && options_.slot == 1) {
+            log_generation_ = GnsTransport::set_log_sink([this](std::string_view line) {
+                if (line.find("ignored superseded room signal") == std::string_view::npos) return;
+                ++stale_rejections_;
+                if (transport_ && !transport_->room_locked() && transport_->link(2) == LinkState::connecting
+                    && transport_->edge_identity(2) == 0) rejected_while_connecting_ = true;
+            });
+        }
         transport_ = require(options_.slot == 0 ? GnsTransport::host_room(room_, config) : GnsTransport::join_room(room_, config));
         expect(transport_->mesh() && transport_->self() == options_.slot && transport_->peer_count() == options_.seats, "Mesh shape");
     }
+    ~Member() { GnsTransport::clear_log_sink(log_generation_); }
     // Pump the mesh once; returns whether anything useful happened. Frames are filed by sender.
     void pump() {
         while (auto frame = transport_->poll()) received_[frame->from].push_back(std::move(frame->frame));
         while (auto event = transport_->take_event()) {
             events_.push_back(*event);
+            if (options_.scenario == "lobby_retry" && event->kind == GnsMeshEventKind::pair_failed && event->code == 1762
+                && first_failures_.insert(event->seat).second) {
+                first_failure_credentials_ = room_->credential_reads();
+                room_->first_failure(event->seat);
+            }
             std::cout << "EVENT slot=" << options_.slot << " kind=" << static_cast<unsigned>(event->kind) << " seat=" << event->seat
                 << " other=" << event->other << " code=" << event->code << std::endl;
+        }
+        if (options_.scenario == "lobby_retry" && options_.slot == 1 && first_failures_.contains(2)) {
+            if (!stale_probe_requested_ && transport_->link(2) == LinkState::connecting
+                && transport_->pair(2).phase == GnsPairPhase::absent) {
+                expect(transport_->edge_identity(2) == 0 && !transport_->room_locked(), "Replay runs while N+1 is still connecting");
+                stale_probe_requested_ = true; probe_requested_at_ = Clock::now(); room_->stale_probe();
+            }
+            if (stale_probe_requested_ && !stale_probe_released_) {
+                expect(rejected_while_connecting_ || Clock::now() < probe_requested_at_ + 2s,
+                    "Superseded signal was not rejected while replacement was connecting");
+                if (rejected_while_connecting_) {
+                    std::cout << "STALE-REQUEST rejected while replacement connecting, generation=0" << std::endl;
+                    stale_probe_released_ = true; room_->release_probe();
+                }
+            }
         }
         flush_sends();
         std::this_thread::sleep_for(1ms);
@@ -396,7 +481,8 @@ public:
     void form(std::chrono::seconds timeout) {
         until([&] {
             if (options_.slot == 0 && transport_->mesh_complete() && !locked_) {
-                require(transport_->lock_room()); locked_ = true;
+                if (options_.scenario != "lobby_retry") require(transport_->lock_room());
+                locked_ = true;
             }
             if (options_.slot == 0) return locked_;
             return transport_->mesh_complete();
@@ -454,6 +540,11 @@ public:
     }
     GnsTransport& transport() { return *transport_; }
     ProxyRoom& room() { return *room_; }
+    bool credentials_reread_after_failure() const {
+        return first_failure_credentials_ && room_->credential_reads() > *first_failure_credentials_;
+    }
+    bool rejected_while_connecting() const { return rejected_while_connecting_; }
+    std::size_t stale_rejections() const { return stale_rejections_; }
     const Options& options() const { return options_; }
     const std::vector<GnsMeshEvent>& events() const { return events_; }
 private:
@@ -463,6 +554,12 @@ private:
     std::map<PeerIndex, std::vector<Bytes>> received_;
     std::map<PeerIndex, std::deque<Bytes>> pending_;
     std::vector<GnsMeshEvent> events_;
+    std::set<PeerIndex> first_failures_;
+    std::optional<unsigned> first_failure_credentials_;
+    std::uint64_t log_generation_{};
+    std::size_t stale_rejections_{};
+    bool rejected_while_connecting_{}, stale_probe_requested_{}, stale_probe_released_{};
+    Clock::time_point probe_requested_at_{};
     bool locked_{};
 };
 
@@ -687,6 +784,34 @@ int run_member(Options options) {
         expect(member.seen(GnsMeshEventKind::seat_refused, options.want_refused_seat, options.want_refused_other, 1762), "Host reports the refused newcomer");
     if (options.want_vacated >= 0)
         expect(member.seen(GnsMeshEventKind::seat_vacated, options.want_vacated), "Members hear about the vacated seat");
+    if (options.scenario == "lobby_retry") {
+        expect(!member.transport().diagnostic() && !member.seen(GnsMeshEventKind::seat_refused)
+            && !member.seen(GnsMeshEventKind::left_room), "First ICE failure keeps the room and every seat alive");
+        if (options.slot == 0) expect(member.seen(GnsMeshEventKind::pair_failed, 2, 1, 0), "Host regrants the failed newcomer pair");
+        else expect(member.seen(GnsMeshEventKind::pair_failed, options.slot == 1 ? 2 : 1, -1, 1762), "Both endpoints saw the initial ICE failure");
+        for (PeerIndex p = 0; p < options.seats; ++p) if (p != options.slot)
+            expect(member.transport().edge_identity(p) == 1, "Healthy pairs keep their original generation");
+        if (options.slot != 0) expect(member.credentials_reread_after_failure(), "A replacement rereads the latest room-issued credentials");
+        expect(!member.room().repair_requested(), "Lobby retry never reattaches or arms battle repair");
+        member.barrier(24, options.participants);
+        expect(!member.transport().room_locked(), "Stale-attempt rejection precedes Start");
+        if (options.slot == 1) expect(member.rejected_while_connecting(), "Attempt N was rejected before N+1 could connect");
+        if (options.slot == 0) require(member.transport().lock_room());
+        member.barrier(25, options.participants);
+        const auto before = member.stale_rejections();
+        if (options.slot == 2) member.room().repeat_first_signal(1);
+        if (options.slot == 1) member.until([&] { return member.stale_rejections() > before; }, 5s, "locked stale-request rejection");
+        member.barrier(26, options.participants);
+        for (PeerIndex p = 0; p < options.seats; ++p) if (p != options.slot)
+            expect(member.transport().link(p) == LinkState::open && member.transport().edge_identity(p) == 1,
+                "Stale requests preserve every proved native pair before and after Lock");
+    }
+    if (options.want_refused_seat >= 0) {
+        const auto retries = std::count_if(member.events().begin(), member.events().end(), [](const auto& e) {
+            return e.kind == GnsMeshEventKind::pair_failed && e.seat == 2 && e.other == 1 && e.code == 0;
+        });
+        expect(retries == 2, "Permanent newcomer blackhole exhausts exactly two regrants before named refusal");
+    }
     expect(member.transport().connected_seats() == (1U << options.seats) - 1U, "Every seat is connected");
     if (options.scenario == "maintenance") {
         require(member.transport().commit_room());
@@ -779,7 +904,7 @@ int main(int argc, char** argv) {
         if (mode == "broker") {
             // broker <participants> <children> [drop identity A] [drop identity B]
             expect(argc >= 4, "broker arguments");
-            broker(std::stoul(argv[2]), std::stoul(argv[3]), argc > 5 ? argv[4] : "", argc > 5 ? argv[5] : "");
+            broker(std::stoul(argv[2]), std::stoul(argv[3]), argc > 5 ? argv[4] : "", argc > 5 ? argv[5] : "", argc > 6 && std::string(argv[6]) == "first");
             return 0;
         }
         if (mode == "member") return run_member(parse(argc, argv));

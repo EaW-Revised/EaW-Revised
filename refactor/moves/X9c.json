@@ -1,0 +1,434 @@
+[
+  {
+    "old": "src/net/gns_transport.cpp#Signal::Signal",
+    "new": "src/net/gns_transport_signalling.cpp#Signal::Signal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#Signal::SendSignal",
+    "new": "src/net/gns_transport_signalling.cpp#Signal::SendSignal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#Signal::Release",
+    "new": "src/net/gns_transport_signalling.cpp#Signal::Release"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#error",
+    "new": "src/net/gns_transport_signalling.cpp#error"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#observed_route_cell",
+    "new": "src/net/gns_transport_signalling.cpp#observed_route_cell"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_log",
+    "new": "src/net/gns_transport_signalling.cpp#gns_log"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_log_line",
+    "new": "src/net/gns_transport_signalling.cpp#gns_log_line"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_log_push",
+    "new": "src/net/gns_transport_signalling.cpp#gns_log_push"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_log_flush",
+    "new": "src/net/gns_transport_signalling.cpp#gns_log_flush"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_spew",
+    "new": "src/net/gns_transport_signalling.cpp#gns_spew"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#u32",
+    "new": "src/net/gns_transport_signalling.cpp#u32"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#turn_uri_list",
+    "new": "src/net/gns_transport_signalling.cpp#turn_uri_list"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#stun_uri_list",
+    "new": "src/net/gns_transport_signalling.cpp#stun_uri_list"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#valid",
+    "new": "src/net/gns_transport_signalling.cpp#valid"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#turn_invalid_check",
+    "new": "src/net/gns_transport_signalling.cpp#turn_invalid_check"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#turn_valid",
+    "new": "src/net/gns_transport_signalling.cpp#turn_valid"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#log_turn_refused",
+    "new": "src/net/gns_transport_signalling.cpp#log_turn_refused"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::Runtime::Runtime",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::Runtime::Runtime"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::Runtime::~Runtime",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::Runtime::~Runtime"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::Runtime::get",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::Runtime::get"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::Runtime::changed",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::Runtime::changed"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::ReceiveSignal::ReceiveSignal",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::ReceiveSignal::ReceiveSignal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::ReceiveSignal::OnConnectRequest",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::ReceiveSignal::OnConnectRequest"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::ReceiveSignal::SendRejectionSignal",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::ReceiveSignal::SendRejectionSignal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::Impl",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::Impl"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::remote",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::remote"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::authenticated",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::authenticated"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::sockets",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::sockets"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::~Impl",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::~Impl"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::release_listener",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::release_listener"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::config",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::config"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::adopt",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::adopt"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::stop",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::stop"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::forget_route",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::forget_route"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::control",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::control"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::pair_message",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::pair_message"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::queue_proof",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::queue_proof"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::hello",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::hello"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::message",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::message"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::receive",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::receive"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::flush",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::flush"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::pump_signals",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::pump_signals"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::settle_service_closure",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::settle_service_closure"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::pump",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::pump"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::send_frame",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::send_frame"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::close_link",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::close_link"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::cancel_link",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::cancel_link"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl::dead",
+    "new": "src/net/gns_transport_impl.cpp#GnsTransport::Impl::dead"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::Receive::Receive",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::Receive::Receive"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::Receive::OnConnectRequest",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::Receive::OnConnectRequest"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::Receive::SendRejectionSignal",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::Receive::SendRejectionSignal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::sockets",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::sockets"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::host",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::host"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::diagnostic",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::diagnostic"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::add",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::add"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::emit",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::emit"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::fatal",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::fatal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::make_link",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::make_link"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::retire_signals",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::retire_signals"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::dial",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::dial"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::note",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::note"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::drop_link",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::drop_link"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::parked",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::parked"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::parked_count",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::parked_count"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::put",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::put"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::queue_control",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::queue_control"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::random_secret",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::random_secret"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::send_grant",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::send_grant"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::send_vacated",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::send_vacated"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::later",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::later"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::grant_pair",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::grant_pair"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::fail_pair",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::fail_pair"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::on_attached",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::on_attached"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::vacated",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::vacated"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::sync_roster",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::sync_roster"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::accept_request",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::accept_request"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::pump_room",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::pump_room"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::member_control",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::member_control"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::evaluate_pair",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::evaluate_pair"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::host_control",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::host_control"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::harvest",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::harvest"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::redial_repair",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::redial_repair"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::member_tick",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::member_tick"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::host_tick",
+    "new": "src/net/gns_transport_formation.cpp#GnsTransport::Mesh::host_tick"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::poll",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::poll"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::refresh_attachment",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::refresh_attachment"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::repair_tick",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::repair_tick"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::release_listener",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::release_listener"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::close",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::close"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::cancel",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::cancel"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::closed",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::closed"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::~Mesh",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::~Mesh"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::link",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::link"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::pair",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::pair"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::counts",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::counts"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::connected_seats",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::connected_seats"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::complete",
+    "new": "src/net/gns_transport_mesh.cpp#GnsTransport::Mesh::complete"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Impl",
+    "new": "src/net/gns_transport_impl.hpp#GnsTransport::Impl"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh",
+    "new": "src/net/gns_transport_mesh.hpp#GnsTransport::Mesh"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsLogState",
+    "new": "src/net/gns_transport_signalling.hpp#GnsLogState"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#SignallingState",
+    "new": "src/net/gns_transport_signalling.hpp#SignallingState"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#Signal",
+    "new": "src/net/gns_transport_signalling.hpp#Signal"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#Bytes",
+    "new": "src/net/gns_transport_signalling.hpp#Bytes"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#Clock",
+    "new": "src/net/gns_transport_signalling.hpp#Clock"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_repair_dial_limit",
+    "new": "src/net/gns_transport_mesh.cpp#gns_repair_dial_limit"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_repair_redial_pause",
+    "new": "src/net/gns_transport_mesh.cpp#gns_repair_redial_pause"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#gns_log_max_pending",
+    "new": "src/net/gns_transport_signalling.cpp#gns_log_max_pending"
+  },
+  {
+    "old": "src/net/gns_transport.cpp#GnsTransport::Mesh::bit",
+    "new": "src/net/gns_transport_mesh.hpp#GnsTransport::Mesh::bit"
+  }
+]

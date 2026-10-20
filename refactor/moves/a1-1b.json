@@ -1,0 +1,158 @@
+[
+  {
+    "old": "tests/galactic/ai_access_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_contracts.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_space_value::must"
+  },
+  {
+    "old": "tests/galactic/ai_checkpoint_stock_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon_value::take"
+  },
+  {
+    "old": "tests/galactic/ai_freestore_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/ai_frontier_runtime_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_frontier_runtime_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_frontier_runtime_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_space_value::must"
+  },
+  {
+    "old": "tests/galactic/ai_funding_stock_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/ai_funding_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_funding_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::must"
+  },
+  {
+    "old": "tests/galactic/ai_lifecycle_stock_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_lifecycle_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_lifecycle_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_space::must"
+  },
+  {
+    "old": "tests/galactic/ai_markup_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_markup_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  },
+  {
+    "old": "tests/galactic/ai_markup_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  },
+  {
+    "old": "tests/galactic/ai_policy_snapshot_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/galactic/ai_policy_snapshot_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_space::must"
+  },
+  {
+    "old": "tests/galactic/ai_usability_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_usability_stock_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/ai_usability_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/campaign_scoring_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/campaign_scoring_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon_value::take"
+  },
+  {
+    "old": "tests/galactic/capture_return_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/capture_return_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/fiscal_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/invasion_publication_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/live_battle_ai_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/live_battle_ai_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/live_save_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/movement_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/production_queue.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/production_state.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/s2_loop_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/s2_loop_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/seat_roles_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/surface_launch_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/uninvolved_conflict_ui_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/uninvolved_conflict_ui_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  }
+]

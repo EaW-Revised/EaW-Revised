@@ -14,6 +14,9 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageFilter
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 IDENTITY_KEYS = {
     "vfs_profile", "scene", "inputs", "viewport", "camera", "simulation_tick",
@@ -445,8 +448,7 @@ def compare_images(contract: dict[str, Any], baseline: dict[str, Any],
 
 def write_json(path: pathlib.Path, value: dict[str, Any]) -> None:
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        python_helpers.write_json(path, value, create_parents=True, sort_keys=True)
     except OSError as error:
         raise HarnessError(f"cannot write report {path}: {error}") from error
 

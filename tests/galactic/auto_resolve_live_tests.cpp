@@ -1,3 +1,16 @@
+#include <algorithm>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <span>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/campaign/auto_resolve_live.hpp"
@@ -5,10 +18,10 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "../../src/campaign/checkpoint_fields_internal.hpp"
-#include <cstdlib>
 #include <filesystem>
-#include <map>
 #include <stdexcept>
+#include <utility>
+using eawr::testing::take;
 
 namespace {
 namespace cp = eawr::campaign;
@@ -17,8 +30,8 @@ namespace dg = eawr::data::galactic;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 Fixed f(std::int64_t value) { return Fixed::from_integer(value).value(); }
-template<class T> T take(eawr::core::Result<T> value) { if (!value) throw std::runtime_error(value.error().message); return std::move(value).value(); }
-void check(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+
+void check(eawr::core::Result<void> value) { eawr::testing::must(std::move(value)); }
 void persist_progress(cp::GameSession& game, cp::AutoResolveProgress& progress) {
     game.set_auto_resolve_checkpoint_services([&progress] {
         gc::checkpoint_detail::Writer out; out(progress);
@@ -140,12 +153,7 @@ void retreat_return() {
     }
 }
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{}; if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string out(text); std::free(text); return out.empty() ? std::nullopt : std::optional<std::string>{out};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT"); return text && *text ? std::optional<std::string>{text} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 struct Fixture { gc::GalacticSetup setup; cp::ConflictRecord conflict; std::vector<gc::CensusObject> originals; };
 Fixture battle_fixture(const cp::CampaignSetupPlan& plan, const eawr::units::GalacticTypeTable& types, bool land, bool conquest = false) {
@@ -226,7 +234,7 @@ void damage_handler_qualification() {
         "WAR-U04 a gated kind does not qualify an ungated sibling");
 }
 void installed() {
-    const auto root = game_root(); if (!root) { std::cout << "SKIPPED: stock adapters need EAWR_EAW_GAME_ROOT\n"; return; }
+    const auto root = game_root(); if (!root) { eawr::testing::skip_installed("SKIPPED: stock adapters need EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto* folder : {"corruption", "GameData"}) mounts.push_back(take(eawr::vfs::resolve_manifest_mount(folder, std::filesystem::path(*root) / folder / "Data")).mount);
     auto filesystem = take(eawr::vfs::Vfs::mount(mounts)); const auto catalog = take(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
@@ -304,6 +312,45 @@ void installed() {
             for (const auto& side : gathered.sides) for (const auto& combatant : side.combatants)
                 surface_gathered = surface_gathered || combatant.id == 300;
             expect(surface_gathered == land, "ordered gathering agrees with the layer-specific admission manifest");
+        }
+    }
+    // Presence facts are shared by observers, but hostility and station ownership
+    // remain observer-specific. Rebuild after each live input change.
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        auto fixture = battle_fixture(plan, types, scenario >= 4);
+        auto& setup = fixture.setup;
+        const auto destination = fixture.conflict.planet;
+        const auto other = setup.planets[1].id;
+        for (auto& type : setup.movement->types) type.skips_combat = scenario != 0;
+        if (scenario == 2) {
+            // A nonstealth descendant defeats the fleet's aggregate stealth.
+            const auto child = setup.movement->contents.front().children.front().type;
+            for (auto& type : setup.movement->types) if (type.type == child) type.skips_combat = false;
+        }
+        if (scenario == 3) {
+            for (auto& fleet : setup.fleets) fleet.orbit = other;
+            setup.control->planets.front().starbase = {2, 1};
+        }
+        if (scenario == 5) {
+            const auto carrier = setup.fleets.front().members.front().id;
+            for (auto& contents : setup.movement->contents) if (contents.container == carrier) contents.children.clear();
+        }
+        auto galaxy = take(gc::GalacticSession::create(setup));
+        auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, fixture.originals));
+        std::optional<std::vector<gc::MovementAccess>> reference;
+        for (const std::size_t count : {1U, 2U, 4U, 8U}) {
+            eawr::platform::ThreadWorkerAdapter executor(count);
+            const auto rows = take(adapters.access(*galaxy.snapshot(), executor));
+            for (const auto& row : rows) {
+                const bool expected = row.planet == destination &&
+                    ((scenario == 0 && (row.player == 1 || row.player == 2))
+                        || ((scenario == 2 || scenario == 5) && row.player == 2) || (scenario == 3 && row.player == 1));
+                expect(row.potential_conflict == expected,
+                    "presence index keeps observer hostility, recursive stealth, empty orbits and hostile stations");
+                expect(row.accessible, "presence refresh preserves access admission");
+            }
+            if (!reference) reference = rows;
+            else expect(*reference == rows, "presence rows agree on 1/2/4/8 workers");
         }
     }
     // An initially empty destination becomes defended through ordinary arrival.
@@ -568,6 +615,7 @@ void withdrawal_command() {
             "session publication keeps first-request admission closed even when a resolver refresh advertises it again");
         const auto identities = eawr::checkpoint::game_identities(setup);
         const auto saved = take(eawr::checkpoint::save_game_checkpoint(game, identities));
+        galactic_test::mark_saved(game);
         cp::AutoResolveProgress restored_progress; restored_progress.conflict = 100;
         eawr::checkpoint::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none; load.content = unused_tactical_content();
         load.configure_session = [&](cp::GameSession& session) {
@@ -611,7 +659,7 @@ void withdrawal_command() {
 }
 
 }
-int main(int argc, char**) {
+int case_galactic_auto_resolve_live_tests(int argc, char**) {
     try { if (argc > 1) installed(); else { roster_publication(); withdrawal_command(); raid_manifest(); journal_selection(); retreat_return(); damage_handler_qualification(); } }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

@@ -1,0 +1,98 @@
+[
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#expect",
+    "new": "tests/skirmish/foc_ai_content_tests.cpp#expect"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#environment",
+    "new": "tests/skirmish/foc_ai_content_tests.cpp#environment"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#load",
+    "new": "tests/skirmish/foc_ai_content_tests.cpp#load"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#argument_text",
+    "new": "tests/skirmish/foc_ai_runner_tests.cpp#argument_text"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#command_text",
+    "new": "tests/skirmish/foc_ai_runner_tests.cpp#command_text"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#ability_trace",
+    "new": "tests/skirmish/foc_ai_runner_tests.cpp#ability_trace"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#run",
+    "new": "tests/skirmish/foc_ai_runner_tests.cpp#run"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#progressive_random_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#progressive_random_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#combat_engagement_witness",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#combat_engagement_witness"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#attack_activity",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#attack_activity"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#check_combat_engagement",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#check_combat_engagement"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#passive_contact_control",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#passive_contact_control"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#stock_economy_witness",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#stock_economy_witness"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#hutt_nearest_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#hutt_nearest_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#ability_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#ability_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#vengeance_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#vengeance_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#cloaked_enemy_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#cloaked_enemy_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#crusader_probe",
+    "new": "tests/skirmish/foc_ai_probe_tests.cpp#crusader_probe"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#count_effects",
+    "new": "tests/skirmish/foc_ai_profile_tests.cpp#count_effects"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#report_effects",
+    "new": "tests/skirmish/foc_ai_profile_tests.cpp#report_effects"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#player_stream_profile",
+    "new": "tests/skirmish/foc_ai_profile_tests.cpp#player_stream_profile"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#serial_profile",
+    "new": "tests/skirmish/foc_ai_profile_tests.cpp#serial_profile"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#Run",
+    "new": "tests/skirmish/foc_ai_fixtures.hpp#Run"
+  },
+  {
+    "old": "tests/skirmish/foc_ai_tests.cpp#Content",
+    "new": "tests/skirmish/foc_ai_fixtures.hpp#Content"
+  }
+]

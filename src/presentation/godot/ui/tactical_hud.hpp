@@ -240,7 +240,6 @@ public:
     void set_beacon_handler(std::function<void()> handler);
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on);
-    [[nodiscard]] bool movie_mode() const;
     void set_order_mode(std::string_view active);
     void set_special_weapon_handler(std::function<void()> handler);
     void set_special_weapon(const presentation::ui::SpecialWeaponButton& view);

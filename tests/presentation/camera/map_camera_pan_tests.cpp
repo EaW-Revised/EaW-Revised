@@ -1,5 +1,15 @@
 #include "map_camera_movement_support.hpp"
 
+#include <cmath>
+#include <cstddef>
+#include <limits>
+#include <numbers>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+
 namespace eawr_map_camera_test {
 
 void test_pan_basis_and_clamp() {

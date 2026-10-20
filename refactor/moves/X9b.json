@@ -1,0 +1,246 @@
+[
+  {
+    "old": "src/net/lockstep_session.cpp#validate_batch",
+    "new": "src/net/lockstep_session_input.cpp#validate_batch"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#encode_batch",
+    "new": "src/net/lockstep_session_input.cpp#encode_batch"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#decode_batch",
+    "new": "src/net/lockstep_session_input.cpp#decode_batch"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::submit",
+    "new": "src/net/lockstep_session_input.cpp#LockstepSession::submit"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::seal",
+    "new": "src/net/lockstep_session_input.cpp#LockstepSession::seal"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::receive",
+    "new": "src/net/lockstep_session_input.cpp#LockstepSession::receive"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#adaptive_input_delay",
+    "new": "src/net/lockstep_session_timing.cpp#adaptive_input_delay"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::input_horizon",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::input_horizon"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::notify_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::notify_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::replay_timing_control",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::replay_timing_control"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::timing_voter",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::timing_voter"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::timing_frozen",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::timing_frozen"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::restore_future_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::restore_future_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::broadcast_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::broadcast_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::receive_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::receive_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::acknowledge_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::acknowledge_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::advance_timing",
+    "new": "src/net/lockstep_session_timing.cpp#LockstepSession::advance_timing"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::broadcast_departure",
+    "new": "src/net/lockstep_session_departure.cpp#LockstepSession::broadcast_departure"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::begin_departure",
+    "new": "src/net/lockstep_session_departure.cpp#LockstepSession::begin_departure"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::receive_departure",
+    "new": "src/net/lockstep_session_departure.cpp#LockstepSession::receive_departure"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::advance_departure",
+    "new": "src/net/lockstep_session_departure.cpp#LockstepSession::advance_departure"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::service_departures",
+    "new": "src/net/lockstep_session_departure.cpp#LockstepSession::service_departures"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::mesh_voters",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::mesh_voters"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::mesh_active",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::mesh_active"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::queue_mesh_departure",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::queue_mesh_departure"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::send_mesh_control",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::send_mesh_control"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::restore_mesh_controls",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::restore_mesh_controls"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::service_mesh",
+    "new": "src/net/lockstep_session_mesh.cpp#LockstepSession::service_mesh"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#fresh_nonce",
+    "new": "src/net/lockstep_session_reconnect.cpp#fresh_nonce"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#constant_equal",
+    "new": "src/net/lockstep_session_reconnect.cpp#constant_equal"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#hello_frame",
+    "new": "src/net/lockstep_session_reconnect.cpp#hello_frame"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#make_rejoin_nonce",
+    "new": "src/net/lockstep_session_reconnect.cpp#make_rejoin_nonce"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::can_replay_control",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::can_replay_control"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::apply_reconnect_control",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::apply_reconnect_control"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::reconnect_status",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::reconnect_status"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::reconnect_grace_remaining_ms",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::reconnect_grace_remaining_ms"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::retain_reconnect_control",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::retain_reconnect_control"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::reconnect_notice",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::reconnect_notice"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::disable_reconnect",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::disable_reconnect"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::report_replay_progress",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::report_replay_progress"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::check_held_survivors",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::check_held_survivors"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::reconnect_broadcast",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::reconnect_broadcast"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::reconnect_package",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::reconnect_package"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::install_reconnect_package",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::install_reconnect_package"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::offer_reconnect",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::offer_reconnect"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::receive_reconnect",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::receive_reconnect"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::finish_reconnect",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::finish_reconnect"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::service_reconnect",
+    "new": "src/net/lockstep_session_reconnect.cpp#LockstepSession::service_reconnect"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::resync_broadcast",
+    "new": "src/net/lockstep_session_resync.cpp#LockstepSession::resync_broadcast"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::start_resync",
+    "new": "src/net/lockstep_session_resync.cpp#LockstepSession::start_resync"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::receive_resync",
+    "new": "src/net/lockstep_session_resync.cpp#LockstepSession::receive_resync"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::stage_resync",
+    "new": "src/net/lockstep_session_resync.cpp#LockstepSession::stage_resync"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::service_resync",
+    "new": "src/net/lockstep_session_resync.cpp#LockstepSession::service_resync"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#rejoin_authenticator",
+    "new": "src/net/lockstep_session_digest.cpp#rejoin_authenticator"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#LockstepSession::resync_log_hash",
+    "new": "src/net/lockstep_session_digest.cpp#LockstepSession::resync_log_hash"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#Bytes",
+    "new": "src/net/lockstep_session_internal.hpp#Bytes"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#resync_codes",
+    "new": "src/net/lockstep_session_internal.hpp#resync_codes"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#diagnostic",
+    "new": "src/net/lockstep_session_internal.hpp#diagnostic"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#refused",
+    "new": "src/net/lockstep_session_internal.hpp#refused"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#append",
+    "new": "src/net/lockstep_session_internal.hpp#append"
+  },
+  {
+    "old": "src/net/lockstep_session.cpp#read",
+    "new": "src/net/lockstep_session_internal.hpp#read"
+  }
+]

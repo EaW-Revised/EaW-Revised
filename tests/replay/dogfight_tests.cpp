@@ -1,3 +1,8 @@
+// #457 squadron dogfights (docs/behaviour/space-fighters.md FD-01 to FD-12, cases C-22 to C-28):
+// the combat cell and retaliation, chase pairing and its ten-second timers, following, the end of
+// a fight, and ship avoidance, each hashing alike with 1, 2, 4 and 8 workers.
+
+#include "../support/check.hpp"
 #include "dogfight_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
@@ -10,31 +15,24 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <optional>
-#include <set>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <vector>
 
-// #457 squadron dogfights (docs/behaviour/space-fighters.md FD-01 to FD-12, cases C-22 to C-28):
-// the combat cell and retaliation, chase pairing and its ten-second timers, following, the end of
-// a fight, and ship avoidance, each hashing alike with 1, 2, 4 and 8 workers.
 namespace dogfight_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 

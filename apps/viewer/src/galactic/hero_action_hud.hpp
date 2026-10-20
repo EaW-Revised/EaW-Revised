@@ -24,7 +24,7 @@ struct HeroActionHudState {
     std::shared_ptr<const sim::galactic::GalacticSnapshot> fixture, publication;
     std::optional<sim::galactic::HeroActionMenus> facts;
     std::uint32_t width{}, height{};
-    bool closed{}, theft{}, enabled{};
+    bool closed{}, theft{}, sabotage{}, enabled{};
     std::uint64_t rebuilds{}, choices_accepted{}, closes{};
     std::optional<std::size_t> accepted_index;
 };

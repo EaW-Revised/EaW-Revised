@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "unit_emitters.hpp"
 
 #include "eawr/presentation/animation/animation.hpp"
@@ -23,18 +24,7 @@ using namespace unit_emitters_detail;
 namespace {
 
 [[nodiscard]] std::string json(const std::string_view text) {
-    std::string result{"\""};
-    for (const char character : text) {
-        if (character == '"' || character == '\\') {
-            result += '\\';
-            result += character;
-        } else if (static_cast<unsigned char>(character) < 0x20U) {
-            result += ' ';
-        } else {
-            result += character;
-        }
-    }
-    return result + "\"";
+    return eawr::core::json_quote_space_controls(text);
 }
 
 void counts(std::ostream& output, const char* name, const std::map<std::string, std::uint64_t>& values,

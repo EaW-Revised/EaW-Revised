@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/battle/arrival_plan.hpp"
+
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/victory.hpp"
@@ -167,6 +169,7 @@ struct BattleStart final {
     sim::tactical::TacticalSetup setup;
     sim::tactical::VictoryCondition victory_condition{sim::tactical::VictoryCondition::enemy_starbase_destroyed};
     MatchOptions match{}; // applied flags bind replays; other copied options remain content.
+    ArrivalPlan arrivals{}; // presentation capacity only; deliberately outside setup/replay state
 };
 
 // Type and faction IDs are the CRC-32 of the ASCII-upper-cased name, the hash

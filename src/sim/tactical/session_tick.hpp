@@ -23,6 +23,20 @@ public:
 private:
     core::Result<void> gather();
     core::Result<void> prepare_craft();
+    core::Result<void> prepare_chase_pairs(std::vector<CraftView>& craft_views, std::map<EntityId, EntityId>& craft_squadron,
+        std::map<EntityId, SquadronFrame>& squadron_frames, detail::MapStage<SquadronState>& minds,
+        auto& team_of, auto& hostile_units);
+    core::Result<void> prepare_dogfight_cells(std::map<EntityId, SquadronFrame>& squadron_frames,
+        detail::MapStage<SquadronState>& minds, std::vector<LiveUnit>& moving,
+        const SquadronTable& squadron_table, auto& hostile_units, auto& squadron_of,
+        auto& resolve_attack_point, auto& target_soft_radius, auto& search_cell);
+    core::Result<void> prepare_attack_attachments(std::map<EntityId, SquadronFrame>& squadron_frames, std::vector<LiveUnit>& moving,
+        auto& resolve_attack_point);
+    core::Result<void> prepare_formation_lanes(std::vector<LiveUnit>& moving, std::map<EntityId, SquadronFrame>& squadron_frames,
+        const SquadronTable& squadron_table);
+    core::Result<void> prepare_squadron_frames(detail::MapStage<SquadronState>& minds,
+        std::map<EntityId, SquadronFrame>& squadron_frames, std::map<EntityId, EntityId>& craft_squadron,
+        const SquadronTable& squadron_table, std::vector<LiveUnit>& moving, const math::Fixed& idle_reach);
     core::Result<void> movement();
     core::Result<void> open_staging();
     core::Result<void> commit_moves();
@@ -30,6 +44,24 @@ private:
     core::Result<void> prepare_targets();
     core::Result<void> hull_service();
     core::Result<void> targets();
+    core::Result<void> commit_weapon_targets(std::vector<LiveUnit>& moving,
+        std::vector<std::optional<detail::CombatStep>>& combat_steps,
+        std::vector<std::optional<CombatState>>& weapon_inputs);
+    core::Result<void> prepare_weapon_targets(std::vector<LiveUnit>& moving,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, EntityId>& craft_squadron,
+        std::vector<std::optional<CombatState>>& weapon_inputs, std::vector<bool>& weapon_idle,
+        std::map<EntityId, std::pair<std::size_t, EntityId>>& acquired, detail::MapStage<SquadronState>& minds,
+        const detail::CombatWorld& view, std::vector<std::optional<detail::CombatStep>>& combat_steps,
+        std::vector<std::optional<core::Diagnostic>>& combat_errors);
+    void scan_member_targets_partition(const std::size_t& partition, std::vector<std::size_t>& scan_indices,
+        const std::map<EntityId, EntityId>& craft_squadron, std::vector<LiveUnit>& moving,
+        const std::map<EntityId, ArrivalState>& arrivals, std::map<EntityId, SquadronFrame>& squadron_frames,
+        detail::MapStage<SquadronState>& minds, auto& scans, const detail::CombatWorld& view,
+        detail::CombatWorld& scan_view);
+    core::Result<void> refresh_target_inputs(std::vector<LiveUnit>& moving,
+        const std::map<EntityId, EntityId>& craft_squadron);
+    core::Result<void> retry_buzz_targets(std::vector<LiveUnit>& moving, detail::MapStage<SquadronState>& minds,
+        std::map<EntityId, SquadronFrame>& squadron_frames, const std::map<EntityId, ArrivalState>& arrivals);
     core::Result<void> ion_team();
     core::Result<void> orders();
     core::Result<void> projectile_inputs();
@@ -39,6 +71,37 @@ private:
     core::Result<RejectReason> apply_object_turn_use(const ObjectTurnUse& use, std::vector<EntityId>& replans);
     void commit_object_turn();
     core::Result<void> impacts();
+    core::Result<void> commit_projectile_flight(std::size_t& flight_index,
+        std::vector<std::optional<detail::ProjectileStep>>& flights, UnitStage& staged,
+        std::vector<Projectile>& projectiles, std::vector<CombatEvent>& combat_events, auto& deliver_blast,
+        const std::map<EntityId, ArrivalState>& arrivals, const std::map<EntityId, math::Fixed>& craft_defense,
+        const DamageRules* const& damage_rules, std::vector<Projectile>& launched, auto& deliver_redirected,
+        auto& queue_damage, std::vector<Event>& events, std::vector<UnitState>& killed);
+    // True means this flight was deflected; the caller skips its remaining impact work.
+    core::Result<bool> redirect_projectile_impact(const UnitStage::iterator& source, UnitStage& staged,
+        const UnitStage::iterator& target, const Projectile& projectile,
+        std::optional<detail::ProjectileStep>& flight, std::vector<Projectile>& launched,
+        std::vector<CombatEvent>& combat_events, std::uint32_t& hardpoint, auto& deliver_blast,
+        std::size_t& flight_index);
+    core::Result<void> apply_direct_impact(const UnitStage::iterator& target,
+        const DamageRules* const& damage_rules, const DurabilityProfile& profile, const Projectile& projectile,
+        Hit& hit, std::uint32_t& hardpoint, std::optional<detail::ProjectileStep>& flight,
+        std::vector<CombatEvent>& combat_events, std::vector<Event>& events, std::vector<UnitState>& killed,
+        UnitStage& staged, auto& deliver_blast, std::size_t& flight_index);
+    core::Result<void> deliver_blast_impact(const std::size_t& index,
+        const std::vector<std::optional<detail::BlastStep>>& blasts,
+        std::vector<std::optional<detail::BlastStep>>& blasts_without_source, UnitStage& staged,
+        std::vector<std::optional<detail::ProjectileStep>>& flights, auto& deliver_area, auto& queue_damage);
+    void queue_delayed_impact(const Projectile& source, const detail::BlastRecipient& recipient,
+        UnitStage& staged, std::vector<Impl::PendingBlastDamage>& pending_blast_damage);
+    core::Result<void> deliver_area_impact(const Projectile& projectile, const detail::BlastRecipient& recipient,
+        UnitStage& staged, const std::map<EntityId, ArrivalState>& arrivals,
+        const std::map<EntityId, math::Fixed>& craft_defense, const DamageRules* const& damage_rules,
+        auto& deliver_redirected, std::vector<Event>& events, std::vector<UnitState>& killed);
+    core::Result<void> deliver_redirected_impact(const EntityId& id, Hit& hit, const PlayerId& killer,
+        const EntityId& attacker, UnitStage& staged, const std::map<EntityId, ArrivalState>& arrivals,
+        const std::map<EntityId, math::Fixed>& craft_defense, const DamageRules* const& damage_rules,
+        std::vector<Event>& events, std::vector<UnitState>& killed);
     core::Result<void> late_impacts();
     core::Result<void> retaliation();
     void notify_retaliation(const LiveUnit& unit, EntityId attacker, math::Fixed amount);
@@ -55,14 +118,81 @@ private:
     core::Result<void> retreat_service();
     core::Result<void> special_weapons();
     core::Result<void> systems();
+    void service_asteroid_contact(LiveUnit& unit, std::size_t& index, const std::size_t& partition,
+        const std::map<EntityId, ArrivalState>& arrivals, const DamageRules* const& damage_rules,
+        std::vector<std::uint64_t>& asteroid_queries, AsteroidScratch& asteroid_scratch,
+        SpaceIndex& field_index, math::Fixed& field_reach, std::vector<AsteroidFieldInput>& fields,
+        std::vector<std::uint64_t>& asteroid_candidates, std::vector<std::optional<core::Diagnostic>>& errors);
+    void service_systems_partition(const std::size_t& partition, std::vector<LiveUnit>& inputs,
+        std::vector<std::uint8_t>& proxy_live, std::vector<ServiceOutcome>& serviced,
+        std::vector<CaptureJob>& capture_jobs, std::vector<CombatBonuses>& transfer_categories,
+        std::map<EntityId, TypeId>& transfer_containers,
+        const std::map<EntityId, ConstructionState>& construction, const DamageRules* const& damage_rules,
+        std::vector<std::optional<core::Diagnostic>>& errors, const std::map<EntityId, ArrivalState>& arrivals,
+        std::vector<std::uint64_t>& asteroid_queries, AsteroidScratch& asteroid_scratch,
+        SpaceIndex& field_index, math::Fixed& field_reach, std::vector<AsteroidFieldInput>& fields,
+        std::vector<std::uint64_t>& asteroid_candidates,
+        std::array<std::vector<std::size_t>, tick_partition_count>& repair_units,
+        std::vector<TacticalInstance>& instances, const detail::MapStage<CraftState>& craft_states,
+        const detail::MapStage<SquadronState>& squadron_states);
+    core::Result<void> service_hardpoint_repairs(std::vector<LiveUnit>& inputs, std::vector<ServiceOutcome>& serviced,
+        std::array<std::vector<std::size_t>, tick_partition_count>& repair_units,
+        std::vector<TacticalInstance>& instances, std::vector<std::optional<core::Diagnostic>>& errors);
+    core::Result<void> commit_environmental_hits(std::vector<LiveUnit>& inputs, std::vector<ServiceOutcome>& serviced,
+        const DamageRules* const& damage_rules, std::vector<std::vector<AsteroidImpact>>& asteroid_impacts,
+        AsteroidScratch& asteroid_scratch, std::vector<TacticalInstance>& instances);
+    core::Result<void> prepare_capture_jobs(std::vector<CaptureJob>& capture_jobs, std::vector<CaptureCandidate>& capture_inputs,
+        std::map<EntityId, PadState>& pads, std::vector<LiveUnit>& inputs,
+        const std::map<EntityId, ArrivalState>& arrivals, const core::Result<detail::CombatWorld>& world);
+    core::Result<void> prepare_asteroid_fields(std::vector<LiveUnit>& inputs, const DamageRules* const& damage_rules,
+        const std::map<EntityId, ArrivalState>& arrivals,
+        std::vector<std::optional<AsteroidFieldInput>>& field_slots, AsteroidScratch& asteroid_scratch,
+        std::vector<AsteroidFieldInput>& fields, math::Fixed& field_reach, SpaceIndex& field_index,
+        std::vector<std::vector<AsteroidImpact>>& asteroid_impacts);
     core::Result<void> commit_survivors();
     core::Result<void> pad_lifecycle();
     core::Result<void> fighters();
+    core::Result<void> retire_fighter_state(detail::MapStage<SquadronState>& minds, detail::MapStage<CraftState>& crafts,
+        const SquadronTable& squadron_table, const std::uint64_t& frame, std::vector<Squadron>& squadrons);
+    core::Result<void> prepare_squadron_outcomes(detail::MapStage<SquadronState>& minds, std::vector<LiveUnit>& survivors,
+        const std::vector<Squadron>& arrived_squadrons, detail::MapStage<CraftState>& crafts,
+        const SquadronTable& squadron_table,
+        const std::vector<std::pair<EntityId, math::Vec3>>& movement_starts,
+        const std::vector<std::optional<CraftStep>>& movement_steps, const detail::CombatWorld& combat_world,
+        const std::uint64_t& frame, std::vector<TacticalInstance>& instances);
+    core::Result<void> commit_squadron_outcomes(std::vector<const Squadron*>& squadron_inputs, std::vector<SquadronOutcome>& outcomes,
+        detail::MapStage<SquadronState>& minds, auto& find,
+        std::vector<std::pair<std::size_t, PlayerId>>& final_killers,
+        std::vector<std::uint8_t>& completed_bases, std::vector<LiveUnit>& survivors,
+        std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadrons);
+    core::Result<void> service_death_projectiles_and_spins(const std::vector<UnitState>& killed, const SquadronTable& squadron_table,
+        const std::uint64_t& frame, detail::MapStage<CraftState>& crafts, std::vector<Event>& events);
+    void prepare_squadron_outcomes_partition(const std::size_t& partition,
+        std::vector<const Squadron*>& squadron_inputs, std::vector<SquadronOutcome>& outcomes, auto& find,
+        detail::MapStage<SquadronState>& minds, std::vector<std::pair<std::size_t, PlayerId>>& final_killers,
+        const SquadronTable& squadron_table, std::vector<std::uint8_t>& completed_bases,
+        const std::vector<std::pair<EntityId, math::Vec3>>& movement_starts,
+        const std::vector<std::optional<CraftStep>>& movement_steps, const detail::CombatWorld& combat_world,
+        std::vector<const LiveUnit*>& attack_leaders, detail::MapStage<CraftState>& crafts,
+        const std::uint64_t& frame);
+    bool squadron_refresh_skips(const LiveUnit*& target, const CraftProfile*& craft, const SquadronState& state,
+        detail::MapStage<SquadronState>& minds, SquadronOutcome& outcome, const EntityId& target_id,
+        const std::uint64_t& frame, const LiveUnit*& leader, const detail::CombatWorld& combat_world,
+        std::vector<const LiveUnit*>& attack_leaders, std::size_t& index, const LiveUnit*& container,
+        detail::MapStage<CraftState>& crafts, auto& finish_base);
     core::Result<void> station_upgrades();
     core::Result<void> economy();
     core::Result<void> hangars();
     core::Result<void> bonuses();
     core::Result<void> finalize();
+    core::Result<void> finalize_departures();
+    core::Result<void> finalize_defences();
+    core::Result<void> finalize_fog(const std::vector<UnitState>& positions, const SensorField& sensing,
+        const std::vector<Impl::HeldReveal>& held_reveals, const std::vector<CombatEvent>& combat_events,
+        const detail::CombatWorld& view);
+    core::Result<void> finalize_visibility(const std::vector<UnitState>& positions, const SensorField& sensing,
+        const std::vector<EntityId>& disabled_revealers);
+    core::Result<void> finalize_outcomes();
     core::Result<void> commit();
     core::Result<TacticalTick> finish();
     void mark(std::string_view section, bool begin) const;

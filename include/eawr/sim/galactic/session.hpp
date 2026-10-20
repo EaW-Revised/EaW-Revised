@@ -122,6 +122,12 @@ public:
     [[nodiscard]] core::Result<void> dispatch_native_invasion(std::uint64_t request, EntityId conflict);
     [[nodiscard]] core::Result<void> finish_native_invasion(EntityId conflict, PlayerId actual_winner);
     [[nodiscard]] core::Result<void> retire_native_invasion(std::uint64_t request);
+    // GCMP-04: the typed InvasionAccept session command is itself the journal entry, so these two run
+    // the same admission and release without appending a native effect. Replaying the command stream then
+    // reproduces them on every peer; a replayed native effect would apply the admission twice.
+    [[nodiscard]] core::Result<NativeInvasionReceipt> admit_native_invasion_by_command(PlayerId, FleetId,
+        std::span<const EntityId> retained_transports);
+    [[nodiscard]] core::Result<void> retire_native_invasion_by_command(std::uint64_t request);
     [[nodiscard]] core::Result<void> replay_native_invasion_service();
     [[nodiscard]] const EconomyCorruptionState* economy_corruption() const noexcept;
     [[nodiscard]] const GalacticAbilityState* ability_state() const noexcept;
@@ -173,6 +179,11 @@ public:
     // commands ran; the session then refuses every further step (EAWR-SIM-0508).
     [[nodiscard]] core::Result<GalacticTick> step(const PartitionExecutor& executor,
         bool pending_local_conflict = false);
+    // WGS-99/142: the conflict owner opens this window for the ticks in which a pending, not yet
+    // entered tactical conflict waits for its choice. Only then is a prebattle autosave admitted
+    // (the galaxy is held by the conflict's own pause at that point). Derived by the owner each
+    // step; never part of the saved state.
+    void set_prebattle_autosave_window(bool open) noexcept;
     // With a hasher, step() leaves the SHA-256 work to it, off the stepping thread; the digest is
     // the one the synchronous path returns. The hasher is not state.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
@@ -258,6 +269,13 @@ public:
     using NativeEffectReplayer = std::function<core::Result<void>(GalacticSession&, const NativeEffect&, const PartitionExecutor&)>;
     void set_native_effect_replayer(NativeEffectKind, NativeEffectReplayer);
     [[nodiscard]] core::Result<void> stage_native_replay(std::span<const NativeEffect>, std::uint64_t final_tick);
+    // #4058: the effects are a recording window numbered from 1; the journal before it (sequence_base entries) was dropped.
+    [[nodiscard]] core::Result<void> stage_native_replay(std::span<const NativeEffect>, std::uint64_t final_tick, std::uint64_t sequence_base);
+    // #4058 save/load boundary: forget the executed commands and the applied native journal (their counts stay in
+    // executed_dropped/native_dropped so command limits and native sequences are unchanged). Pending input is kept.
+    void rebase_history() noexcept;
+    [[nodiscard]] std::uint64_t executed_dropped() const noexcept;
+    [[nodiscard]] std::uint64_t native_dropped() const noexcept;
     [[nodiscard]] core::Result<void> replay_native_barrier(const PartitionExecutor&);
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> consume_native_effect(NativeEffectKind);
     [[nodiscard]] core::Result<void> finish_native_replay();
@@ -284,15 +302,31 @@ public:
     void set_technology_notice_handler(TechnologyNoticeHandler);
     using FeedbackNoticeHandler = std::function<void(const GalacticFeedbackNotice&)>;
     void set_feedback_notice_handler(FeedbackNoticeHandler);
+    // WST-41: how a story write moves the account's maximum. `raise_to_target` is SET_TECH_LEVEL (the maximum
+    // rises first when the target is above it); `set_only` is SET_MAX_TECH_LEVEL (the maximum alone, target = the
+    // new maximum, never below the current level). Journaled only when not `keep`.
+    enum class TechnologyMaximum : std::uint8_t { keep, raise_to_target, set_only };
     struct TechnologyWrite {
         PlayerId player{};
         std::int64_t target{};
         bool process_unlocks{true}, request_sound{true};
+        TechnologyMaximum maximum{TechnologyMaximum::keep};
     };
     // Ordered trusted writers, journaled independently of ordinary production.
     // Assignment preserves maximum; increment at/above maximum skips the setter.
     [[nodiscard]] core::Result<std::int64_t> set_technology(const TechnologyWrite&);
     [[nodiscard]] core::Result<std::int64_t> increment_technology(PlayerId);
+    // WST-64: one journaled production-lock write (native effect kind 19). Unlock first (the build lock is removed
+    // and the type joins the unlocked list), then lock (the type joins the locked list); a zero type skips its
+    // half. `slicer_check` runs the faction's post-check: when no affiliated, initially locked, slicer-unlockable
+    // type at or below the current level is left off the unlocked list, the level goes up by one (unlocks run).
+    struct ProductionLockWrite {
+        PlayerId player{};
+        TypeId unlock{}, lock{};
+        bool slicer_check{};
+    };
+    struct ProductionLockReceipt { bool tech_incremented{}; };
+    [[nodiscard]] core::Result<ProductionLockReceipt> apply_production_lock(const ProductionLockWrite&);
     // WGA-13..15/85: actual post-multiplier/cap deltas, delivered at the credit
     // commit boundary before the outer player AI turn. Only initialized AI
     // ledgers consume them. Runtime dependency, never checkpoint state.
@@ -519,6 +553,9 @@ public:
     // During a native barrier only snapshot() and the routed native queries
     // expose staged reads. victory() and the other owner getters remain live.
     [[nodiscard]] const std::optional<VictoryState>& victory() const noexcept;
+    // GCMP-24: the one multiplayer flag of this session. Setup copies it from the campaign setup mode into the
+    // saved victory context and corruption economy; this reads the saved copy, never a seat-count proxy.
+    [[nodiscard]] bool multiplayer() const noexcept;
     // WGS-172..174: trusted reward calls after the plot's Lua trigger callback.
     [[nodiscard]] core::Result<bool> apply_story_victory(PlayerId, bool suppress_text, const PartitionExecutor&);
     [[nodiscard]] core::Result<bool> apply_story_victory_wait(bool enable, const PartitionExecutor&);

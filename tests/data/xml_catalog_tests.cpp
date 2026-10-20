@@ -1,5 +1,5 @@
+#include "../support/temp_dir.hpp"
 #include "data_test_support.hpp"
-
 #include "eawr/data/xml.hpp"
 
 #include <algorithm>
@@ -8,6 +8,7 @@
 #include <clocale>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -22,9 +23,8 @@ struct TempTree {
     std::filesystem::path mod_root = root.string() + "-mod";
     TempTree() { std::filesystem::create_directories(root); std::filesystem::create_directories(mod_root); }
     ~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
-        std::filesystem::remove_all(mod_root, ignored);
+        eawr::testing::remove_temp_directory(root);
+        eawr::testing::remove_temp_directory(mod_root);
     }
 };
 

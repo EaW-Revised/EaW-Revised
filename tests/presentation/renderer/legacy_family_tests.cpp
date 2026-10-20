@@ -1,36 +1,29 @@
-#include "legacy_family_support.hpp"
 // CPU contracts for the legacy/ family adapters (WP-43): exact selectors,
 // fail-closed diagnostics, binding validation and defaults, derived uniforms,
 // adapter source render states and the engine-free reference arithmetic.
-#include "eawr/presentation/renderer.hpp"
 
+#include "../../support/check.hpp"
+#include "legacy_family_support.hpp"
+#include "eawr/presentation/renderer.hpp"
 #include "legacy/registry.hpp"
 #include "shader_adapter.hpp"
 #include "../../../apps/viewer/src/family_textures.hpp"
 
-#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
-#include <limits>
-#include <regex>
 #include <string>
 #include <string_view>
-#include <tuple>
-#include <utility>
-#include <variant>
 #include <vector>
 
 namespace legacy_family_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void check(const bool condition, const std::string_view message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAILED: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAILED: ");
 }
 
 [[nodiscard]] bool near(const float left, const float right, const float tolerance) {

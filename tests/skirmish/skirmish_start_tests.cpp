@@ -1,4 +1,3 @@
-#include "skirmish_start_support.hpp"
 // P2-04 (#67) tick-zero contracts. The synthetic placements, factions and unit
 // tables are invented here. The committed m2-start replay is checked without
 // the game: its header and setup alone give the pinned tick-zero hash. With
@@ -6,12 +5,14 @@
 // the installation and must reproduce that replay byte for byte; nothing from
 // the installation is written.
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
+#include "skirmish_start_support.hpp"
 #include "eawr/skirmish/placement.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/setup.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "eawr/skirmish/ai.hpp"
-
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -20,21 +21,16 @@
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
-#include <map>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -46,29 +42,15 @@ constexpr std::string_view m2_tick_zero_state = "38a8d8870dc82ea2e435b7ca5d6a568
 // docs/unit-data.md: the FoC fleet's unit-table identity, the replay's content identity.
 constexpr std::string_view m2_content_identity = "b0cbd796a46c6ae654ebcb18453feea16b9859fa1467e596295883f021549d74";
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 Fixed whole(const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }

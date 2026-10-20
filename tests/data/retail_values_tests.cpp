@@ -1,10 +1,10 @@
 #include "data_test_support.hpp"
-
 #include "eawr/data/retail_values.hpp"
 
 #include <array>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 

@@ -1,5 +1,13 @@
 #include "formation_support.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <fstream>
+#include <ios>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace formation_test_support {
 
 // FM-04: hard radius * 1.2 + turn radius * 0.2 (by hand: the corvette's hard radius

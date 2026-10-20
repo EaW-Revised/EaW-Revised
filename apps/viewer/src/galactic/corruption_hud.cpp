@@ -1,5 +1,4 @@
 #include "galactic_mode_internal.hpp"
-#include "corruption_hud_fixture.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "eawr/presentation/ui/layout.hpp"
 #include "eawr/presentation/animation/animation.hpp"
@@ -38,13 +37,7 @@ std::string suffix(unsigned slot) { return std::string(1, static_cast<char>('a' 
 }
 bool GalacticMode::State::build_corruption_hud() {
     if (!filesystem || !hud || !hud_fonts) return true;
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::corruption_fixture(options.hud_fixture)) {
-        corruption_menu.fixture = galactic_view::corruption_fixture_snapshot(galaxy->local.player, options.hud_fixture);
-        production_names.insert({{1000,"Rebel_Trooper_Team"},{1001,"Corellian_Corvette"},
-            {2000,"Coruscant"},{2001,"Naboo"}});
-        corruption_menu.briefing_keys = {{90,"TEXT_CORRUPTION_CORUSCANT_STORY_BRIBERY"},
-            {91,"TEXT_CORRUPTION_CORUSCANT_STORY_BLACKMARKET"}};
-    }
+    if (options.hud_provider && !options.hud_provider->corruption(*this)) return false;
     const auto* shell = command_catalog.find("corruption_shell");
     if (!shell) return true;
     const auto bytes = filesystem->open("data/xml/gameconstants.xml");

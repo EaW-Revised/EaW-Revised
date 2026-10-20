@@ -14,6 +14,22 @@ void EawrLanLobby::refresh_staging() {
     match_->pump_setup(built ? *built : skirmish::FixtureOptions{});
     const LanView view = match_->view();
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
+    refresh_staging_connections(impl, view, online);
+    const auto room = match_->lobby_state();
+    refresh_staging_status(impl, state, resources, view, online, room);
+
+    std::vector<model::StagingRow> rows(dialog_rows);
+    const skirmish::SetupMap* map = nullptr;
+    std::size_t visible = 0;
+    const bool connected = view.connected && view.phase != LanPhase::ended;
+    build_staging_rows(impl, resources, view, room, dialog_rows, rows, map, visible, connected);
+    refresh_staging_options(impl, resources, map);
+    refresh_staging_roster(impl, state, resources, room, rows, map, visible, connected, dialog_rows);
+    refresh_staging_start(impl, resources, view, room, rows, online);
+    finish_staging_refresh(impl, view, room);
+}
+
+void EawrLanLobby::refresh_staging_connections(Impl& impl, const LanView& view, bool online) {
     if (auto* connections = EAWR_CONTROL(EawrUiButton, "EAWR_ONLINE_CONNECTIONS")) {
         const String caption = text(view.online_capacity == 0 ? std::string("My connections")
             : "My connections (" + std::to_string(view.online_connected > 0 ? view.online_connected - 1 : 0) + "/"
@@ -46,9 +62,12 @@ void EawrLanLobby::refresh_staging() {
             }
         }
     }
+}
 
+void EawrLanLobby::refresh_staging_status(Impl& impl, PageState& state, Resources& resources,
+                                          const LanView& view, bool online,
+                                          const std::optional<LanLobbyState>& room) {
     // The status line is one notice per change, like a chat line.
-    const auto room = match_->lobby_state();
     if (auto* options = EAWR_CONTROL(EawrUiButton, "IDC_SELECT_OPTIONS"))
         options->set_disabled(!impl.host || state.options_panel == nullptr
                               || (room && room->snapshot.phase != net::LobbyPhase::staging));
@@ -67,11 +86,12 @@ void EawrLanLobby::refresh_staging() {
         impl.status = status;
         note_chat(model::ChatKind::notice, status);
     }
+}
 
-    std::vector<model::StagingRow> rows(dialog_rows);
-    const skirmish::SetupMap* map = nullptr;
-    std::size_t visible = 0;
-    const bool connected = view.connected && view.phase != LanPhase::ended;
+void EawrLanLobby::build_staging_rows(Impl& impl, Resources& resources, const LanView& view,
+                                      const std::optional<LanLobbyState>& room, std::size_t dialog_rows,
+                                      std::vector<model::StagingRow>& rows, const skirmish::SetupMap*& map,
+                                      std::size_t& visible, bool connected) {
     if (room) {
         impl.linked = room->snapshot.seats.size() > 1;
         auto authoritative = decode_lan_lobby_game(room->snapshot);
@@ -212,7 +232,9 @@ void EawrLanLobby::refresh_staging() {
     }
     impl.rows = rows;
     impl.visible_rows = visible;
+}
 
+void EawrLanLobby::refresh_staging_options(Impl& impl, Resources& resources, const skirmish::SetupMap* map) {
     if (!impl.host && impl.offered && impl.offered->map) {
         if (auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) {
             name->set_text(text(map ? map->name : *impl.offered->map));
@@ -248,7 +270,13 @@ void EawrLanLobby::refresh_staging() {
             }
         }
     }
+}
 
+void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resources& resources,
+                                          const std::optional<LanLobbyState>& room,
+                                          const std::vector<model::StagingRow>& rows,
+                                          const skirmish::SetupMap* map, std::size_t visible, bool connected,
+                                          std::size_t dialog_rows) {
     // Refill the combos only when what they show changed: a refill closes an open drop-down.
     std::string signature = std::string(impl.host ? "H" : "J") + std::to_string(impl.map_index) + "|"
         + std::to_string(visible) + "|" + (connected ? "c" : "-");
@@ -442,7 +470,11 @@ void EawrLanLobby::refresh_staging() {
         }
         state.loading = false;
     }
+}
 
+void EawrLanLobby::refresh_staging_start(Impl& impl, Resources& resources, const LanView& view,
+                                         const std::optional<LanLobbyState>& room,
+                                         const std::vector<model::StagingRow>& rows, bool online) {
     // The start (host) or accept (joiner) button.
     if (auto* start = EAWR_CONTROL(EawrUiButton, "IDC_LAN_START_GAME_BUTTON")) {
         const bool enabled = room ? (impl.host ? room->start_enabled : room->ready_enabled)
@@ -454,6 +486,10 @@ void EawrLanLobby::refresh_staging() {
         impl.start_enabled = enabled;
         impl.start_caption = utf8(start->get_text());
     }
+}
+
+void EawrLanLobby::finish_staging_refresh(Impl& impl, const LanView& view,
+                                          const std::optional<LanLobbyState>& room) {
     // The chat list.
     if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_LAN_CHAT_LIST")) draw_chat(*list, impl.staging_chat);
     announce();
@@ -480,10 +516,7 @@ void EawrLanLobby::refresh_staging() {
 
 bool EawrLanLobby::run_action(const std::string& action) {
     if (!shown_ || !state_) return false;
-    if (action == "connections") {
-        if (page_ != Page::staging || !EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) return false;
-        handle_button("EAWR_ONLINE_CONNECTIONS"); return true;
-    }
+    if (action == "connections") return action_connections();
     Impl& impl = *impl_;
     if (!shown_) return false;
     const auto colon = action.find(':');
@@ -492,275 +525,341 @@ bool EawrLanLobby::run_action(const std::string& action) {
     const auto number = [](const std::string& value, std::uint32_t& out) {
         return !value.empty() && std::from_chars(value.data(), value.data() + value.size(), out).ec == std::errc{};
     };
-    if (verb == "source") {
-        if (page_ != Page::lobby || (argument != "lan" && argument != "online")) return false;
-        select_source(argument == "lan" ? model::LobbySourceKind::lan : model::LobbySourceKind::online);
-        return true;
-    }
-    if (verb == "cancel_join") {
-        if (page_ != Page::lobby) return false;
-        handle_button(cancel_join_button);
-        return true;
-    }
-    if (verb == "name" && page_ != Page::staging) {
-        if (page_ != Page::lobby) return false;
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_NAME_EDIT")) edit->set_text(text(argument));
-        commit_name(argument);
-        return true;
-    }
-    if (verb == "colour" && page_ != Page::staging) {
-        std::uint32_t value{};
-        if (page_ != Page::lobby || !number(argument, value) || value >= resources_->palette.size()) return false;
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_LAN_COLOR_SELECT")) combo->select(static_cast<int>(value));
-        commit_colour(value);
-        return true;
-    }
-    if (verb == "chat") {
-        if (page_ != Page::lobby && page_ != Page::staging) return false;
-        send_chat(argument);
-        return true;
-    }
-    if (verb == "sort") {
-        static const std::map<std::string, model::LobbySort> columns{{"name", model::LobbySort::game_name},
-            {"type", model::LobbySort::game_type}, {"players", model::LobbySort::players},
-            {"map", model::LobbySort::map_name}, {"ping", model::LobbySort::ping}, {"host", model::LobbySort::host}};
-        const auto found = columns.find(argument);
-        if (found == columns.end()) return false;
-        impl.sort = found->second;
-        impl.dirty = true;
-        return true;
-    }
-    if (verb == "filter") {
-        // filter:clear, or filter:type=<key>, min=<n>, max=<n>, ping=<ms>
-        if (argument == "clear") {
-            impl.filter.clear();
-        } else {
-            const auto equals = argument.find('=');
-            if (equals == std::string::npos) return false;
-            const std::string field = argument.substr(0, equals);
-            const std::string value = argument.substr(equals + 1);
-            std::uint32_t parsed{};
-            const bool numeric = number(value, parsed);
-            if (field == "type") impl.filter.game_type = value;
-            else if (field == "min" && numeric) impl.filter.min_players = parsed;
-            else if (field == "max" && numeric) impl.filter.max_players = parsed;
-            else if (field == "ping" && numeric) impl.filter.max_ping_ms = parsed;
-            else return false;
-        }
-        impl.dirty = true;
-        return true;
-    }
-    if (verb == "humans" && (page_ == Page::lobby || page_ == Page::host_options)) {
-        if (page_ == Page::lobby) open_host_options();
-        std::uint32_t count{};
-        if (!number(argument, count)) return false;
-        auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO");
-        if (!combo) return false;
-        for (int item = 0; item < combo->get_item_count(); ++item) if (combo->get_item_id(item) == static_cast<int>(count)) {
-            combo->select(item); on_item_selected(item, "IDC_INTERNET_HOST_CLAN_COMBO"); return true;
-        }
-        return false;
-    }
-    if (verb == "host_dropdown" && page_ == Page::host_options) {
-        if (argument != "humans") return false;
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO")) {
-            combo->show_popup(); return true;
-        }
-        return false;
-    }
+    if (verb == "source") return action_source(argument);
+    if (verb == "cancel_join") return action_cancel_join();
+    if (verb == "name" && page_ != Page::staging) return action_name(argument);
+    if (verb == "colour" && page_ != Page::staging) return action_colour(argument, number);
+    if (verb == "chat") return action_chat(argument);
+    if (verb == "sort") return action_sort(impl, argument);
+    if (verb == "filter") return action_filter(impl, argument, number);
+    if (verb == "humans" && (page_ == Page::lobby || page_ == Page::host_options)) return action_humans(argument, number);
+    if (verb == "host_dropdown" && page_ == Page::host_options) return action_host_dropdown(argument);
 
-    if (verb == "staging_dropdown" && page_ == Page::staging) {
-        const auto field_separator = argument.find(':');
-        if (field_separator == std::string::npos) return false;
-        const std::string field = argument.substr(0, field_separator);
-        if (field != "COLOR" && field != "FACTION" && field != "TEAM") return false;
-        std::uint32_t row{};
-        if (!number(argument.substr(field_separator + 1), row) || row >= state_->dialog_rows) return false;
-        for (const auto& entry : state_->controls) {
-            if (auto* combo = cast<EawrUiCombo>(entry.second)) combo->get_popup()->hide();
-        }
-        if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_" + field + "_" + std::to_string(row));
-            combo != nullptr && combo->is_visible() && !combo->is_disabled()) {
-            combo->show_popup();
-            return true;
-        }
-        return false;
-    }
+    if (verb == "staging_dropdown" && page_ == Page::staging) return action_staging_dropdown(argument, number);
 
-    if (verb == "host") {
-        const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
-        if (online && !impl.online_rooms) return false;
-        if (page_ != Page::lobby && page_ != Page::host_options) return false;
-        if (page_ == Page::lobby) open_host_options();
-        if (page_ != Page::host_options) return false;
-        // Online: host:<name>|<password> makes a private room, host:<name> a public one.
-        std::string name = argument, room_password;
-        if (online) {
-            if (const auto bar = argument.find('|'); bar != std::string::npos) {
-                name = argument.substr(0, bar);
-                room_password = argument.substr(bar + 1);
-            }
-        }
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_NAME_EDIT")) edit->set_text(text(name));
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_PASSWORD_EDIT"); edit != nullptr && online) edit->set_text(text(room_password));
-        begin_hosting();
-        return page_ == Page::staging;
-    }
-    if (verb == "join") {
-        if (page_ != Page::lobby) return false;
-        refresh_lobby();
-        for (const model::LobbyGame& game : impl.shown) {
-            if (game.name == argument) {
-                impl.selected_key = game.name + "|" + game.address;
-                if (impl.join_selection.source() == model::LobbySourceKind::online) {
-                    join_online_selected();
-                    return impl.prompt.has_value() || impl.join_selection.attempt().has_value() || page_ == Page::staging;
-                }
-                join_selected();
-                return page_ == Page::staging;
-            }
-        }
-        return false;
-    }
-    if (verb == "password") {
-        if (page_ != Page::lobby || !impl.prompt) return false;
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, prompt_edit)) edit->set_text(text(argument));
-        submit_password(argument);
-        return impl.prompt.has_value() ? impl.prompt->waiting : page_ == Page::staging;
-    }
-    if (verb == "prompt_cancel") {
-        if (page_ != Page::lobby || !impl.prompt) return false;
-        handle_button(prompt_cancel_button);
-        return true;
-    }
-    if (verb == "refresh") {
-        if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online) return false;
-        refresh_online_rooms();
-        return true;
-    }
-    if (verb == "rooms") {
-        if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online
-            || (argument != "next" && argument != "prev")) return false;
-        handle_button(argument == "next" ? next_button : prev_button);
-        return true;
-    }
-    if (verb == "code") {
-        if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online) return false;
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, invitation_edit)) edit->set_text(text(argument));
-        join_code(argument);
-        return true;
-    }
-    if (verb == "direct") {
-        if (impl.join_selection.source() != model::LobbySourceKind::lan) return false;
-        if (page_ != Page::lobby) return false;
-        open_direct_connect();
-        if (page_ != Page::direct_connect) return false;
-        if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_EDIT_IP")) edit->set_text(text(argument));
-        handle_button("IDC_IP_CONNECT_BUTTON");
-        return page_ == Page::staging;
-    }
-    if (verb == "cancel") {
-        handle_button(page_ == Page::host_options || page_ == Page::direct_connect || page_ == Page::filter
-            ? "IDC_CANCEL_BUTTON" : "IDC_LAN_CANCEL_BUTTON");
-        return true;
-    }
-    if (verb == "leave") {
-        if (page_ != Page::staging) return false;
-        leave_staging();
-        return true;
-    }
+    if (verb == "host") return action_host(impl, argument);
+    if (verb == "join") return action_join(impl, argument);
+    if (verb == "password") return action_password(impl, argument);
+    if (verb == "prompt_cancel") return action_prompt_cancel(impl);
+    if (verb == "refresh") return action_refresh(impl);
+    if (verb == "rooms") return action_rooms(impl, argument);
+    if (verb == "code") return action_code(impl, argument);
+    if (verb == "direct") return action_direct(impl, argument);
+    if (verb == "cancel") return action_cancel();
+    if (verb == "leave") return action_leave();
     if (page_ != Page::staging) return false;
-    if (verb == "map" && impl.host) {
-        for (std::size_t item = 0; item < impl.listed.size(); ++item) {
-            if (resources_->maps[impl.listed[item]].name == argument || resources_->maps[impl.listed[item]].path == argument) {
-                if (network_row_count(resources_->maps[impl.listed[item]]) < impl.human_owners.size()) return false;
-                if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) list->select(static_cast<int>(item));
-                on_item_selected(static_cast<int64_t>(item), "IDC_STAGING_MAP_LIST");
-                return true;
-            }
-        }
-        return false;
-    }
-    if (verb == "ai" && impl.host) {
-        std::uint32_t row{};
-        if (!number(argument, row) || row < 2) return false;
-        const std::string id = "IDC_PLAYER_NAME_" + std::to_string(row);
-        auto* combo = EAWR_CONTROL(EawrUiCombo, id);
-        if (combo == nullptr || combo->get_item_count() < 4) return false;
-        combo->select(3);
-        on_item_selected(3, text(id));
-        return true;
-    }
-    if (verb == "team" && page_ == Page::staging) {
-        const auto equals = argument.find_first_of(":=");
+    if (verb == "map" && impl.host) return action_map(impl, argument);
+    if (verb == "ai" && impl.host) return action_ai(argument, number);
+    if (verb == "team" && page_ == Page::staging) return action_team(argument, number);
+    if ((verb == "ready" || verb == "unready") && page_ == Page::staging && match_->lobby_state()) return action_ready(verb);
+    if (verb == "kick" && impl.host && page_ == Page::staging) return action_kick(argument, number);
+    if (page_ == Page::staging && match_->lobby_state() && (verb == "slot" || verb == "faction" || verb == "name" || verb == "colour")) return action_staging_selection(verb, argument, number);
+    if (verb == "start" && impl.host) return action_start(impl);
+    if (verb == "accept" && !impl.host) return action_accept(impl);
+    return false;
+}
+
+bool EawrLanLobby::action_connections() {
+    if (page_ != Page::staging || !EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) return false;
+    handle_button("EAWR_ONLINE_CONNECTIONS"); return true;
+}
+
+bool EawrLanLobby::action_source(const std::string& argument) {
+    if (page_ != Page::lobby || (argument != "lan" && argument != "online")) return false;
+    select_source(argument == "lan" ? model::LobbySourceKind::lan : model::LobbySourceKind::online);
+    return true;
+}
+
+bool EawrLanLobby::action_cancel_join() {
+    if (page_ != Page::lobby) return false;
+    handle_button(cancel_join_button);
+    return true;
+}
+
+bool EawrLanLobby::action_name(const std::string& argument) {
+    if (page_ != Page::lobby) return false;
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_NAME_EDIT")) edit->set_text(text(argument));
+    commit_name(argument);
+    return true;
+}
+
+bool EawrLanLobby::action_colour(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    std::uint32_t value{};
+    if (page_ != Page::lobby || !number(argument, value) || value >= resources_->palette.size()) return false;
+    if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_LAN_COLOR_SELECT")) combo->select(static_cast<int>(value));
+    commit_colour(value);
+    return true;
+}
+
+bool EawrLanLobby::action_chat(const std::string& argument) {
+    if (page_ != Page::lobby && page_ != Page::staging) return false;
+    send_chat(argument);
+    return true;
+}
+
+bool EawrLanLobby::action_sort(Impl& impl, const std::string& argument) {
+    static const std::map<std::string, model::LobbySort> columns{{"name", model::LobbySort::game_name},
+        {"type", model::LobbySort::game_type}, {"players", model::LobbySort::players},
+        {"map", model::LobbySort::map_name}, {"ping", model::LobbySort::ping}, {"host", model::LobbySort::host}};
+    const auto found = columns.find(argument);
+    if (found == columns.end()) return false;
+    impl.sort = found->second;
+    impl.dirty = true;
+    return true;
+}
+
+bool EawrLanLobby::action_filter(Impl& impl, const std::string& argument,
+                                 bool (*number)(const std::string&, std::uint32_t&)) {
+    // filter:clear, or filter:type=<key>, min=<n>, max=<n>, ping=<ms>
+    if (argument == "clear") {
+        impl.filter.clear();
+    } else {
+        const auto equals = argument.find('=');
         if (equals == std::string::npos) return false;
-        std::uint32_t row{}, team{};
-        if (!number(argument.substr(0, equals), row) || !number(argument.substr(equals + 1), team) || team == 0) return false;
-        const std::string id = "IDC_PLAYER_TEAM_" + std::to_string(row);
-        auto* combo = EAWR_CONTROL(EawrUiCombo, id);
-        if (combo == nullptr || !combo->is_visible() || combo->is_disabled()) return false;
-        for (int item = 0; item < combo->get_item_count(); ++item) {
-            if (combo->get_item_id(item) == static_cast<int>(team) - 1) {
-                combo->select(item);
-                on_item_selected(item, text(id));
-                return true;
-            }
-        }
-        return false;
+        const std::string field = argument.substr(0, equals);
+        const std::string value = argument.substr(equals + 1);
+        std::uint32_t parsed{};
+        const bool numeric = number(value, parsed);
+        if (field == "type") impl.filter.game_type = value;
+        else if (field == "min" && numeric) impl.filter.min_players = parsed;
+        else if (field == "max" && numeric) impl.filter.max_players = parsed;
+        else if (field == "ping" && numeric) impl.filter.max_ping_ms = parsed;
+        else return false;
     }
-    if ((verb == "ready" || verb == "unready") && page_ == Page::staging && match_->lobby_state()) {
-        const bool result = match_->lobby_ready(verb == "ready"); refresh_staging(); return result;
+    impl.dirty = true;
+    return true;
+}
+
+bool EawrLanLobby::action_humans(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    if (page_ == Page::lobby) open_host_options();
+    std::uint32_t count{};
+    if (!number(argument, count)) return false;
+    auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO");
+    if (!combo) return false;
+    for (int item = 0; item < combo->get_item_count(); ++item) if (combo->get_item_id(item) == static_cast<int>(count)) {
+        combo->select(item); on_item_selected(item, "IDC_INTERNET_HOST_CLAN_COMBO"); return true;
     }
-    if (verb == "kick" && impl.host && page_ == Page::staging) { std::uint32_t peer{}; return number(argument, peer) && match_->lobby_kick(peer); }
-    if (page_ == Page::staging && match_->lobby_state() && (verb == "slot" || verb == "faction" || verb == "name" || verb == "colour")) {
-        const auto room = *match_->lobby_state();
-        const auto local = std::find_if(room.snapshot.seats.begin(), room.snapshot.seats.end(), [&](const auto& seat) { return seat.peer == match_->view().seat; });
-        if (local == room.snapshot.seats.end()) return false;
-        auto choice = local->selection;
-        if (verb == "name") choice.name = model::clamp_player_name(argument);
-        else if (verb == "faction") choice.faction = argument;
-        else if (verb == "slot") { if (!number(argument, choice.slot)) return false; }
-        else if (!number(argument, choice.colour)) return false;
-        return match_->lobby_select(std::move(choice));
+    return false;
+}
+
+bool EawrLanLobby::action_host_dropdown(const std::string& argument) {
+    if (argument != "humans") return false;
+    if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO")) {
+        combo->show_popup(); return true;
     }
-    if (verb == "start" && impl.host) {
-        refresh_staging();
-        const auto room = match_->lobby_state();
-        const auto humans = room ? room->snapshot.seats.size() : impl.human_owners.size();
-        const model::StartVerdict verdict = model::check_host_start(impl.rows, impl.map_index >= 0, humans);
-        if (!verdict.ok()) {
-            if (!verdict.key.empty()) note_chat(model::ChatKind::error, verdict.key);
-            return false;
-        }
-        auto options = validated_lan_options(impl.selection, resources_->maps);
-        if (!options) {
-            note_chat(model::ChatKind::error, options.error().message);
-            return false;
-        }
-        match_->start(options.value());
-        refresh_staging();
-        return impl.launch.has_value();
+    return false;
+}
+
+bool EawrLanLobby::action_staging_dropdown(const std::string& argument,
+                                           bool (*number)(const std::string&, std::uint32_t&)) {
+    const auto field_separator = argument.find(':');
+    if (field_separator == std::string::npos) return false;
+    const std::string field = argument.substr(0, field_separator);
+    if (field != "COLOR" && field != "FACTION" && field != "TEAM") return false;
+    std::uint32_t row{};
+    if (!number(argument.substr(field_separator + 1), row) || row >= state_->dialog_rows) return false;
+    for (const auto& entry : state_->controls) {
+        if (auto* combo = cast<EawrUiCombo>(entry.second)) combo->get_popup()->hide();
     }
-    if (verb == "accept" && !impl.host) {
-        if (const auto room = match_->lobby_state()) {
-            const bool result = match_->lobby_ready(!room->local_ready); refresh_staging(); return result;
-        }
-        bool available = false;
-        if (impl.offered && impl.offered->map) {
-            for (const skirmish::SetupMap& candidate : resources_->maps) {
-                if (candidate.path == *impl.offered->map && candidate.unavailable.empty()) available = true;
-            }
-        }
-        const model::StartVerdict verdict = model::check_client_accept(impl.rows, available);
-        if (!verdict.ok()) {
-            note_chat(model::ChatKind::error, verdict.key);
-            return false;
-        }
-        match_->accept();
-        refresh_staging();
+    if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_" + field + "_" + std::to_string(row));
+        combo != nullptr && combo->is_visible() && !combo->is_disabled()) {
+        combo->show_popup();
         return true;
     }
     return false;
+}
+
+bool EawrLanLobby::action_host(Impl& impl, const std::string& argument) {
+    const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
+    if (online && !impl.online_rooms) return false;
+    if (page_ != Page::lobby && page_ != Page::host_options) return false;
+    if (page_ == Page::lobby) open_host_options();
+    if (page_ != Page::host_options) return false;
+    // Online: host:<name>|<password> makes a private room, host:<name> a public one.
+    std::string name = argument, room_password;
+    if (online) {
+        if (const auto bar = argument.find('|'); bar != std::string::npos) {
+            name = argument.substr(0, bar);
+            room_password = argument.substr(bar + 1);
+        }
+    }
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_NAME_EDIT")) edit->set_text(text(name));
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_INTERNET_GAME_PASSWORD_EDIT"); edit != nullptr && online) edit->set_text(text(room_password));
+    begin_hosting();
+    return page_ == Page::staging;
+}
+
+bool EawrLanLobby::action_join(Impl& impl, const std::string& argument) {
+    if (page_ != Page::lobby) return false;
+    refresh_lobby();
+    for (const model::LobbyGame& game : impl.shown) {
+        if (game.name == argument) {
+            impl.selected_key = game.name + "|" + game.address;
+            if (impl.join_selection.source() == model::LobbySourceKind::online) {
+                join_online_selected();
+                return impl.prompt.has_value() || impl.join_selection.attempt().has_value() || page_ == Page::staging;
+            }
+            join_selected();
+            return page_ == Page::staging;
+        }
+    }
+    return false;
+}
+
+bool EawrLanLobby::action_password(Impl& impl, const std::string& argument) {
+    if (page_ != Page::lobby || !impl.prompt) return false;
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, prompt_edit)) edit->set_text(text(argument));
+    submit_password(argument);
+    return impl.prompt.has_value() ? impl.prompt->waiting : page_ == Page::staging;
+}
+
+bool EawrLanLobby::action_prompt_cancel(Impl& impl) {
+    if (page_ != Page::lobby || !impl.prompt) return false;
+    handle_button(prompt_cancel_button);
+    return true;
+}
+
+bool EawrLanLobby::action_refresh(Impl& impl) {
+    if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online) return false;
+    refresh_online_rooms();
+    return true;
+}
+
+bool EawrLanLobby::action_rooms(Impl& impl, const std::string& argument) {
+    if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online
+        || (argument != "next" && argument != "prev")) return false;
+    handle_button(argument == "next" ? next_button : prev_button);
+    return true;
+}
+
+bool EawrLanLobby::action_code(Impl& impl, const std::string& argument) {
+    if (page_ != Page::lobby || impl.join_selection.source() != model::LobbySourceKind::online) return false;
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, invitation_edit)) edit->set_text(text(argument));
+    join_code(argument);
+    return true;
+}
+
+bool EawrLanLobby::action_direct(Impl& impl, const std::string& argument) {
+    if (impl.join_selection.source() != model::LobbySourceKind::lan) return false;
+    if (page_ != Page::lobby) return false;
+    open_direct_connect();
+    if (page_ != Page::direct_connect) return false;
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_EDIT_IP")) edit->set_text(text(argument));
+    handle_button("IDC_IP_CONNECT_BUTTON");
+    return page_ == Page::staging;
+}
+
+bool EawrLanLobby::action_cancel() {
+    handle_button(page_ == Page::host_options || page_ == Page::direct_connect || page_ == Page::filter
+        ? "IDC_CANCEL_BUTTON" : "IDC_LAN_CANCEL_BUTTON");
+    return true;
+}
+
+bool EawrLanLobby::action_leave() {
+    if (page_ != Page::staging) return false;
+    leave_staging();
+    return true;
+}
+
+bool EawrLanLobby::action_map(Impl& impl, const std::string& argument) {
+    for (std::size_t item = 0; item < impl.listed.size(); ++item) {
+        if (resources_->maps[impl.listed[item]].name == argument || resources_->maps[impl.listed[item]].path == argument) {
+            if (network_row_count(resources_->maps[impl.listed[item]]) < impl.human_owners.size()) return false;
+            if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) list->select(static_cast<int>(item));
+            on_item_selected(static_cast<int64_t>(item), "IDC_STAGING_MAP_LIST");
+            return true;
+        }
+    }
+    return false;
+}
+
+bool EawrLanLobby::action_ai(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    std::uint32_t row{};
+    if (!number(argument, row) || row < 2) return false;
+    const std::string id = "IDC_PLAYER_NAME_" + std::to_string(row);
+    auto* combo = EAWR_CONTROL(EawrUiCombo, id);
+    if (combo == nullptr || combo->get_item_count() < 4) return false;
+    combo->select(3);
+    on_item_selected(3, text(id));
+    return true;
+}
+
+bool EawrLanLobby::action_team(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    const auto equals = argument.find_first_of(":=");
+    if (equals == std::string::npos) return false;
+    std::uint32_t row{}, team{};
+    if (!number(argument.substr(0, equals), row) || !number(argument.substr(equals + 1), team) || team == 0) return false;
+    const std::string id = "IDC_PLAYER_TEAM_" + std::to_string(row);
+    auto* combo = EAWR_CONTROL(EawrUiCombo, id);
+    if (combo == nullptr || !combo->is_visible() || combo->is_disabled()) return false;
+    for (int item = 0; item < combo->get_item_count(); ++item) {
+        if (combo->get_item_id(item) == static_cast<int>(team) - 1) {
+            combo->select(item);
+            on_item_selected(item, text(id));
+            return true;
+        }
+    }
+    return false;
+}
+
+bool EawrLanLobby::action_ready(const std::string& verb) {
+    const bool result = match_->lobby_ready(verb == "ready"); refresh_staging(); return result;
+}
+
+bool EawrLanLobby::action_kick(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    std::uint32_t peer{}; return number(argument, peer) && match_->lobby_kick(peer);
+}
+
+bool EawrLanLobby::action_staging_selection(const std::string& verb, const std::string& argument,
+                                            bool (*number)(const std::string&, std::uint32_t&)) {
+    const auto room = *match_->lobby_state();
+    const auto local = std::find_if(room.snapshot.seats.begin(), room.snapshot.seats.end(), [&](const auto& seat) { return seat.peer == match_->view().seat; });
+    if (local == room.snapshot.seats.end()) return false;
+    auto choice = local->selection;
+    if (verb == "name") choice.name = model::clamp_player_name(argument);
+    else if (verb == "faction") choice.faction = argument;
+    else if (verb == "slot") { if (!number(argument, choice.slot)) return false; }
+    else if (!number(argument, choice.colour)) return false;
+    return match_->lobby_select(std::move(choice));
+}
+
+bool EawrLanLobby::action_start(Impl& impl) {
+    refresh_staging();
+    const auto room = match_->lobby_state();
+    const auto humans = room ? room->snapshot.seats.size() : impl.human_owners.size();
+    const model::StartVerdict verdict = model::check_host_start(impl.rows, impl.map_index >= 0, humans);
+    if (!verdict.ok()) {
+        if (!verdict.key.empty()) note_chat(model::ChatKind::error, verdict.key);
+        return false;
+    }
+    auto options = validated_lan_options(impl.selection, resources_->maps);
+    if (!options) {
+        note_chat(model::ChatKind::error, options.error().message);
+        return false;
+    }
+    match_->start(options.value());
+    refresh_staging();
+    return impl.launch.has_value();
+}
+
+bool EawrLanLobby::action_accept(Impl& impl) {
+    if (const auto room = match_->lobby_state()) {
+        const bool result = match_->lobby_ready(!room->local_ready); refresh_staging(); return result;
+    }
+    bool available = false;
+    if (impl.offered && impl.offered->map) {
+        for (const skirmish::SetupMap& candidate : resources_->maps) {
+            if (candidate.path == *impl.offered->map && candidate.unavailable.empty()) available = true;
+        }
+    }
+    const model::StartVerdict verdict = model::check_client_accept(impl.rows, available);
+    if (!verdict.ok()) {
+        note_chat(model::ChatKind::error, verdict.key);
+        return false;
+    }
+    match_->accept();
+    refresh_staging();
+    return true;
 }
 
 bool EawrLanLobby::condition(const std::string& wanted) const {

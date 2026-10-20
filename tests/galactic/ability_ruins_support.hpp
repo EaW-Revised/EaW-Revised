@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../support/result.hpp"
+
 #include "ability_fixture.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
@@ -8,7 +10,6 @@
 #include "eawr/sim/galactic/income.hpp"
 
 #include <algorithm>
-#include <stdexcept>
 #include <utility>
 
 // Ruins scenario for the ruins, hacking and destruction contracts, on the shared ability fixture.
@@ -17,11 +18,8 @@ namespace gc = eawr::sim::galactic;
 namespace cp = eawr::checkpoint;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
-template<class T> inline T take(eawr::core::Result<T> r) {
-    if (!r) throw std::runtime_error(r.error().message);
-    return std::move(r).value();
-}
-inline void take(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
+using eawr::testing::take;
+
 inline Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
 constexpr eawr::sim::EntityId transport = 60000, hero = 60001, companion = 60002, ground_structure = 60003, orbital_structure = 60004;
 constexpr gc::TypeId transport_type = 2000, companion_type = 3001, ground_type = 3100, orbital_type = 3101;

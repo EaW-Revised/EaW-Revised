@@ -1,13 +1,14 @@
-#include "unit_tables_support.hpp"
 // P2-02 (#65) unit-table contracts. The synthetic catalog, priority sets,
 // constants and bone hierarchies are invented here. With EAWR_EAW_GAME_ROOT
 // set, the pinned FoC fleet is also loaded read-only from the installation and
 // its counts, references and content identity are pinned; nothing from the
 // installation is written.
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
+#include "unit_tables_support.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/units/unit_tables.hpp"
-
 #include "eawr/data/xml.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -25,55 +26,34 @@
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
-
 #include "../../src/units/unit_internal.hpp"
 
-#include <array>
 #include <algorithm>
+#include <array>
 #include <chrono>
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <map>
-#include <optional>
+#include <memory>
 #include <set>
-#include <span>
-#include <utility>
 #include <string>
 #include <string_view>
-#include <tuple>
+#include <utility>
+#include <variant>
 #include <vector>
 
 namespace unit_tables_test_support {
 
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
-}
-
-std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 std::int64_t raw(const std::int64_t whole) { return whole * Fixed::scale; }
@@ -344,7 +324,7 @@ int main(const int argc, char** argv) {
     }
     if (argc == 2 && (std::string_view(argv[1]) == "--installed"
         || std::string_view(argv[1]) == "--formation-deceleration-installed")) {
-        const auto root = environment("EAWR_EAW_GAME_ROOT");
+        const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
         if (!root || root->empty()) return 77;
         foc_fleet(std::string_view(argv[1]) == "--formation-deceleration-installed");
         return failures == 0 ? 0 : 1;

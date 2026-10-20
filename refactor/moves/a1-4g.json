@@ -1,0 +1,22 @@
+[
+  {
+    "old": "tests/data/xml_installed_ml24_tests.cpp#environment",
+    "new": "tests/support/env.hpp#eawr::testing::environment"
+  },
+  {
+    "old": "tests/data/galactic/galactic_data_tests.cpp#environment",
+    "new": "tests/support/env.hpp#eawr::testing::environment"
+  },
+  {
+    "old": "tests/data/galactic/galactic_data_tests.cpp#TempTree::~TempTree",
+    "new": "tests/support/temp_dir.hpp#eawr::testing::remove_temp_directory"
+  },
+  {
+    "old": "tests/scene/space_population_tests.cpp#environment",
+    "new": "tests/support/env.hpp#eawr::testing::environment"
+  },
+  {
+    "old": "tests/script/authoritative/lua_limits_tests.cpp#environment",
+    "new": "tests/support/env.hpp#eawr::testing::environment"
+  }
+]

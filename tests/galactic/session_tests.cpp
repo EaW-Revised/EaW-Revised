@@ -314,7 +314,7 @@ void gather_phase() {
 
 } // namespace
 
-int main() {
+int case_galactic_session_tests() {
     setup_validation();
     submission_rules();
     execution_and_events();

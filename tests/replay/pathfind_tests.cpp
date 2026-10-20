@@ -1,3 +1,9 @@
+// P2-08 (#71): FoC's space path finder and tracking layers (docs/behaviour/space-movement.md,
+// AV-01 to AV-15). The rule cases use the FoC corvette and Nebulon-B limits and the footprints
+// units::motion_table measures from the FoC data; the session cases check the static layer
+// (a mining pad), the layer rule, the partitioned tracking phase and worker equality.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/replay.hpp"
 #include "eawr/sim/tactical/motion.hpp"
@@ -10,19 +16,15 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <optional>
-#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-// P2-08 (#71): FoC's space path finder and tracking layers (docs/behaviour/space-movement.md,
-// AV-01 to AV-15). The rule cases use the FoC corvette and Nebulon-B limits and the footprints
-// units::motion_table measures from the FoC data; the session cases check the static layer
-// (a mining pad), the layer rule, the partitioned tracking phase and worker equality.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -31,13 +33,11 @@ using math::Fixed;
 using math::Vec2;
 using math::Vec3;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

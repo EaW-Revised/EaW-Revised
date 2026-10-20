@@ -5,22 +5,27 @@
 // with its reason, and every FoC object with HardPoints is checked against
 // the rule; nothing from the installation is written.
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/scene/space_population.hpp"
-
 #include "eawr/assets/map.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <map>
-#include <set>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -28,13 +33,11 @@ namespace {
 using eawr::scene::Cause;
 using eawr::scene::SpaceRole;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 eawr::scene::Surface surface(const std::string& shader) {
@@ -137,6 +140,51 @@ void synthetic_contracts() {
     expect(eawr::scene::is_shadow_volume_shader("meshshadowvolume.FX"), "shadow volume match ignores case");
     expect(!eawr::scene::is_shadow_volume_shader("MeshGloss.fx"), "gloss is not a shadow volume");
     expect(eawr::scene::to_string(SpaceRole::not_drawable) == "not_drawable", "role names are stable");
+}
+
+void live_unit_contracts() {
+    eawr::data::EffectiveObject object;
+    object.object_id = "BackgroundUnit";
+    object.type_name = "SpaceUnit";
+    eawr::data::EffectiveValue background;
+    background.value.name = "In_Background";
+    background.value.raw_text = " Yes ";
+    object.values.push_back(background);
+    const auto live_tags = eawr::scene::live_unit_tags(object);
+    auto prop = object;
+    prop.object_id = "BackgroundProp";
+    prop.type_name = "SpaceProp";
+    const auto map_tags = eawr::scene::space_object_tags(prop);
+    const auto unit = placement(42, object.object_id, {"MeshGloss.fx", "MeshShadowVolume.fx"});
+    eawr::scene::Scene map;
+    map.placements.push_back(placement(0, prop.object_id, {"MeshGloss.fx"}));
+    const auto map_decision = eawr::scene::classify_space_placements(map,
+        [&](std::string_view) { return std::optional(map_tags); }).front();
+    const auto live = eawr::scene::classify_live_unit(unit, live_tags);
+    expect(map_decision.role == SpaceRole::environment && map_decision.drawn_surfaces.empty(),
+        "classifier-level background map props remain owned by the environment");
+    expect(live.role == SpaceRole::drawn && live.drawn_surfaces == std::vector<std::size_t>{0},
+        "BP-75: an In_Background live unit draws its supported hull");
+    expect(live.scene_ordinal == 42 && live.object_id == object.object_id && live.type_name == "SpaceUnit",
+        "live classification preserves unit identity");
+    expect(live.shadow_volume_surfaces == 1 && live.missing.empty(),
+        "live classification preserves shadow accounting");
+    // BP-75: live composition ignores both map environment tags. The retail
+    // manifest authors Is_Nebula only on SpaceProp; this also covers mod units.
+    object.values.front().value.name = "Is_Nebula";
+    const auto nebula = eawr::scene::classify_live_unit(unit, eawr::scene::live_unit_tags(object));
+    expect(nebula.role == SpaceRole::drawn && nebula.drawn_surfaces == std::vector<std::size_t>{0},
+        "a live Is_Nebula unit draws its supported hull independently of map environment");
+    auto hidden = unit;
+    hidden.transform.reset();
+    expect(eawr::scene::classify_live_unit(hidden, live_tags).role == SpaceRole::not_drawable,
+        "live background types still require a drawable model");
+    auto marker = live_tags;
+    marker.marker = true;
+    expect(eawr::scene::classify_live_unit(unit, marker).role == SpaceRole::marker,
+        "live classification keeps catalog markers hidden");
+    expect(eawr::scene::classify_live_unit(unit, std::nullopt).role == SpaceRole::drawn,
+        "uncatalogued drawable placement keeps its surface policy");
 }
 
 void tag_contracts() {
@@ -376,19 +424,7 @@ void hardpoint_state_contracts() {
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _MSC_VER
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 // Read-only classification of the M1 space reference map.
@@ -679,6 +715,11 @@ void projectile_effect_contracts() {
         eawr::scene::Scene only;
         only.placements.push_back(scene.placements[index]);
         const auto ability = eawr::scene::classify_space_placements(only, tags, true).front();
+        eawr::scene::LiveUnitTags live_tags;
+        live_tags.type_name = tags(only.placements.front().object_id)->type_name;
+        const auto live = eawr::scene::classify_live_unit(only.placements.front(), live_tags, true);
+        expect(live.role == ability.role && live.drawn_surfaces == ability.drawn_surfaces
+            && live.missing == ability.missing, "live ability proxy policy preserves map classifier results");
         expect(ability.role == (index == 5 || index == 6 ? SpaceRole::drawn : SpaceRole::not_drawable),
             "ability proxy owners still reject missing effects, invalid transforms and decode failures");
     }
@@ -687,6 +728,7 @@ void projectile_effect_contracts() {
 int main() {
     projectile_effect_contracts();
     synthetic_contracts();
+    live_unit_contracts();
     tag_contracts();
     damage_decal_contracts();
     hardpoint_state_contracts();

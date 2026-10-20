@@ -35,6 +35,9 @@ import zipfile
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 CONFIG = HERE / "config.json"
 TEXT_LIMIT = 64 * 1024 * 1024
@@ -42,14 +45,6 @@ TEXT_LIMIT = 64 * 1024 * 1024
 
 class ScanError(Exception):
     pass
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def pinned_digest(path: Path, relpath: str, digest: str, scan: dict[str, Any]) -> str:

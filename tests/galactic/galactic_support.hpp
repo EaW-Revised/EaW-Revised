@@ -1,5 +1,7 @@
 #pragma once
 
+#include "../support/check.hpp"
+
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/sim/galactic/synthetic.hpp"
 
@@ -8,6 +10,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -19,13 +22,51 @@ namespace galactic_test {
 
 namespace galactic = eawr::sim::galactic;
 
-inline int failures = 0;
+inline eawr::testing::Checker checker;
+inline int& failures = checker.failures;
 
 inline void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
+    checker.check(condition, message, std::cerr);
+}
+
+// GCMP-24: a multiplayer galactic game. The saved victory context carries the one multiplayer flag; setup validation
+// wants its players and planets to cover the galaxy, with no conditions installed.
+inline void mark_multiplayer(galactic::GalacticSetup& setup) {
+    setup.victory.emplace();
+    auto& context = setup.victory->context;
+    context.multiplayer = true;
+    for (const auto& player : setup.players) {
+        galactic::VictoryPlayer row; row.player = player.player_id; row.faction = "Faction" + std::to_string(player.player_id);
+        row.playable = true; context.players.push_back(std::move(row));
     }
+    for (const auto& planet : setup.planets) {
+        galactic::VictoryPlanet row; row.planet = planet.id; row.type = planet.id; row.current = row.target = row.owner = planet.owner;
+        context.planets.push_back(row);
+    }
+}
+// #4058: a save written outside the SaveRequest path leaves the history base where it was, while a reload of it starts
+// a new window. A game that goes on after such a save and is compared with its reload marks the boundary the load does.
+template <class Session> void mark_saved(Session& game) {
+    auto frontier = game.history_frontier();
+    if (!frontier) throw std::runtime_error(frontier.error().message);
+    game.schedule_history_rebase(std::move(frontier).value());
+}
+// A rebased world record against an unbounded oracle's: the same commands and journal after the dropped history.
+template <class World> [[nodiscard]] bool record_follows(const World& rebased, const World& unbounded) {
+    const auto a = rebased.record(); const auto b = unbounded.record();
+    const auto commands = static_cast<std::ptrdiff_t>(rebased.executed_dropped() - unbounded.executed_dropped());
+    const auto effects = static_cast<std::ptrdiff_t>(rebased.native_dropped() - unbounded.native_dropped());
+    if (commands < 0 || effects < 0 || static_cast<std::size_t>(commands) > b.commands.size()
+        || static_cast<std::size_t>(effects) > b.native_effects.size()) return false;
+    if (a.setup != b.setup || a.final_tick_count != b.final_tick_count) return false;
+    if (!std::equal(a.commands.begin(), a.commands.end(), b.commands.begin() + commands, b.commands.end())) return false;
+    if (a.native_effects.size() != b.native_effects.size() - static_cast<std::size_t>(effects)) return false;
+    for (std::size_t i = 0; i < a.native_effects.size(); ++i) {
+        auto expected = b.native_effects[static_cast<std::size_t>(effects) + i];
+        expected.sequence -= static_cast<std::uint64_t>(effects);
+        if (!(a.native_effects[i] == expected)) return false;
+    }
+    return true;
 }
 
 [[nodiscard]] inline bool has_code(const eawr::core::Result<void>& result, const std::string_view code) {

@@ -646,7 +646,7 @@ an unchanged repeat reports no change; the next opposite write replaces it rathe
 than adding or subtracting a source count. A first write for a name absent from
 the type's nested handlers fails. Do not replace WHD-05 with an any-survivor scan
 across stations. `test_station_radar_and_named_locks` in
-`tests/replay/ability_tests.cpp` covers two same-owner/same-type instances,
+`tests/replay/ability_support_tests.cpp` covers two same-owner/same-type instances,
 owner/type/name isolation, repeated-write no-op, absent-name rejection,
 opposite writes, creation, ownership transfer, removal and retained canonical
 NLCK state, with lifecycle hashes equal on 1/2/4/8 workers. These station-radar

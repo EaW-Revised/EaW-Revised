@@ -1,3 +1,8 @@
+// #561: ion weapons (docs/behaviour/space-damage.md EN-07, IS-01 to IS-09). The pure rules are
+// checked on small values; the session contracts cover the energy drain, the stun's fire-rate and
+// speed cuts and its expiry, with identical hashes at 1, 2, 4 and 8 workers.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -16,22 +21,17 @@
 #include <utility>
 #include <vector>
 
-// #561: ion weapons (docs/behaviour/space-damage.md EN-07, IS-01 to IS-09). The pure rules are
-// checked on small values; the session contracts cover the energy drain, the stun's fire-rate and
-// speed cuts and its expiry, with identical hashes at 1, 2, 4 and 8 workers.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

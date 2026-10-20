@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/presentation/space/sun_retail.hpp"
 
@@ -29,13 +31,11 @@
 // evaluator under test. All bones, cameras and lights are invented here.
 namespace eawr_sun_retail_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 Rigid12 translation(const float x, const float y, const float z) { return {1, 0, 0, x, 0, 1, 0, y, 0, 0, 1, z}; }

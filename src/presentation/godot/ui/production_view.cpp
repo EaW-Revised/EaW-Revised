@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "production_view.hpp"
 #include "production_allocation.hpp"
 
@@ -64,12 +65,7 @@ constexpr double press_seconds = presentation::ui::command_bar_press_fade_second
 }
 
 [[nodiscard]] std::string json(const std::string& text) {
-    std::string out = "\"";
-    for (const char c : text) {
-        if (c == '"' || c == '\\') out += '\\';
-        out += c;
-    }
-    return out + "\"";
+    return eawr::core::json_quote_verbatim_controls(text);
 }
 
 [[nodiscard]] Color colour(const data::ui::Rgba8& rgba) {

@@ -23,6 +23,9 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 LSP_REVISION = "4461416d401b0f665bc1fe82aad60b90bd707fa9"
 SCHEMA_REVISION = "3e1b825a124fbc13b2293665f34a36dd4d4be80f"
@@ -79,8 +82,7 @@ def sha256_bytes(data: bytes) -> str:
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    python_helpers.write_json(path, value, create_parents=True, ensure_ascii=False)
 
 
 def _walk_keys(node: Any):

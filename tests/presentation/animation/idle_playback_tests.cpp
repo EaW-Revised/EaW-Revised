@@ -4,24 +4,30 @@
 // (300 frames at 5 fps) and space junk (590 frames at 30 fps) idle clips; no
 // asset is read.
 
+#include "../../support/check.hpp"
 #include "eawr/presentation/animation/idle_playback.hpp"
 #include "eawr/presentation/skin_pose.hpp"
 #include "../../../src/presentation/godot/submission_plan.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
-#include <optional>
 #include <new>
+#include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
-#include <utility>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace {
 std::atomic<std::size_t> global_allocations{0};
@@ -47,12 +53,10 @@ namespace {
 
 namespace idle = eawr::presentation::animation;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 bool rate_is(const std::string_view text, const std::uint32_t numerator, const std::uint32_t denominator) {

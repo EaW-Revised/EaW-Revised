@@ -128,30 +128,26 @@ void bind_team_colour(MaterialDescription& material, const std::array<std::uint8
 
 } // namespace
 
-bool MapMode::State::compose_placements(const assets::Map& map,
-    std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset,
-    sim::EntityId& next_entity) {
-    if (!catalog) {
-        failure = "populate requires the XML catalog, which did not load";
-        return false;
-    }
-    scene::VfsAssetCache cache(*filesystem);
-    scene::BuildInput input;
-    input.map = &map;
-    input.map_sha256 = map_hash;
-    input.catalog = &*catalog;
-    input.access = cache.access();
-    scene = scene::build(input);
-    build_attached_plan(cache);
+struct MapMode::State::PlacementComposition final {
+    using Colour = std::optional<std::array<std::uint8_t, 3>>;
+    std::map<sim::AssetId, std::vector<std::uint8_t>>* capture_variants{};
+    std::set<sim::AssetId>* capture_checked{};
+    std::map<sim::AssetId, const scene::Placement*>* first_use{};
+    std::map<sim::AssetId, std::set<Colour>>* asset_colours{};
+    std::map<std::string, assets::Texture>* textures{};
+    std::map<std::tuple<sim::AssetId, std::size_t, Colour>, SurfaceUpload>* uploads{};
+    std::map<sim::AssetId, lighting::wind::Box>* bend_boxes{};
+    Colour (*surface_colour)(const scene::Placement&, const scene::Surface&){};
+};
+
+void MapMode::State::collect_capture_variants(scene::VfsAssetCache& cache, PlacementComposition& work) {
     // XML CAPTURE_POINT behavior marks the stateful placements. Their ALO
     // meshes are all authored visible, while the matching idle clips vary
     // visibility at the faction emblem bones. Cache that data per model; the
     // placement's capture_state is the Phase 2 owner input.
-    std::map<sim::AssetId, std::vector<std::uint8_t>> capture_variants;
-    std::set<sim::AssetId> capture_checked;
     for (const scene::Placement& placement : scene->placements) {
         if (!placement.capture_point || placement.asset_id == 0
-            || !capture_checked.insert(placement.asset_id).second) continue;
+            || !(*work.capture_checked).insert(placement.asset_id).second) continue;
         const assets::Model* model = cache.model(placement.model_path);
         if (model == nullptr) continue;
         std::vector<assets::Animation> idle_clips;
@@ -163,49 +159,28 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         }
         auto variants = scene::capture_variant_bones(*model, idle_clips);
         if (std::any_of(variants.begin(), variants.end(), [](const std::uint8_t value) { return value != 0U; })) {
-            capture_variants.emplace(placement.asset_id, std::move(variants));
+            (*work.capture_variants).emplace(placement.asset_id, std::move(variants));
         }
     }
-    if (fog) {
-        for (const auto& placement : scene->placements) {
-            if (placement.drawable()) continue;
-            for (const auto& issue : placement.issues) {
-                fog_uncomposed.push_back("placement " + std::to_string(placement.scene_ordinal)
-                    + " " + placement.object_id + ": " + std::string(scene::to_string(issue.cause))
-                    + " " + issue.detail);
-            }
-        }
-    }
+}
 
-    // One renderer asset per (scene asset, supported surface, team colour),
-    // in scene asset order, then surface order, then colour order, so
-    // renderer ids are as stable as scene ids. Only a colorizing surface has
-    // more than one colour: no colour (its authored Colorization) and each
-    // distinct team colour of the placements that use the asset.
-    using Colour = std::optional<std::array<std::uint8_t, 3>>;
-    std::map<sim::AssetId, const scene::Placement*> first_use;
-    std::map<sim::AssetId, std::set<Colour>> asset_colours;
+void MapMode::State::collect_placement_colours(PlacementComposition& work) {
     for (const scene::Placement& placement : scene->placements) {
         if (placement.asset_id != 0 && (!fog || placement.drawable())) {
-            first_use.try_emplace(placement.asset_id, &placement);
-            asset_colours[placement.asset_id].insert(placement.team_colour);
+            (*work.first_use).try_emplace(placement.asset_id, &placement);
+            (*work.asset_colours)[placement.asset_id].insert(placement.team_colour);
         }
         if (!placement.drawable()) continue;
         ++team_colour_by_status[placement.team_colour_status];
         if (placement.team_colour) team_colour_factions.try_emplace(placement.owner_faction, *placement.team_colour);
     }
-    const auto surface_colour = [](const scene::Placement& placement, const scene::Surface& surface) {
-        return !surface.effect_missing && scene::colorizes(surface.shader) ? placement.team_colour : Colour{};
-    };
-    std::map<std::string, assets::Texture> textures;
-    std::map<std::tuple<sim::AssetId, std::size_t, Colour>, SurfaceUpload> uploads;
-    // #147: each wind model's source-basis bend box, the tree sway's H.
-    std::map<sim::AssetId, lighting::wind::Box> bend_boxes;
-    const float wind_speed = wind ? std::abs(wind->speed) : 0.0F;
+}
+
+void MapMode::State::upload_placement_surfaces(scene::VfsAssetCache& cache, PlacementComposition& work, sim::AssetId& next_asset, float wind_speed) {
     for (const scene::SceneAsset& asset : scene->assets) {
-        const auto use = first_use.find(asset.asset_id);
+        const auto use = (*work.first_use).find(asset.asset_id);
         const assets::Model* model = cache.model(asset.logical_path);
-        if (use == first_use.end() || model == nullptr) continue;
+        if (use == (*work.first_use).end() || model == nullptr) continue;
         const std::vector<scene::Surface>& surfaces = use->second->surfaces;
         std::optional<std::vector<lighting::wind::Matrix>> wind_bones;
         for (std::size_t index = 0; index < surfaces.size(); ++index) {
@@ -232,10 +207,10 @@ bool MapMode::State::compose_placements(const assets::Map& map,
             assets::Texture texture = placeholder_texture();
             for (const scene::TextureBinding& binding : surface.textures) {
                 if (!ieq(binding.parameter, "BaseTexture") || binding.resolved.empty()) continue;
-                auto found = textures.find(binding.resolved);
-                if (found == textures.end()) {
+                auto found = (*work.textures).find(binding.resolved);
+                if (found == (*work.textures).end()) {
                     auto decoded = assets::load_texture(*filesystem, binding.resolved);
-                    found = textures.emplace(binding.resolved,
+                    found = (*work.textures).emplace(binding.resolved,
                         decoded ? std::move(decoded.value()) : placeholder_texture()).first;
                 }
                 texture = found->second;
@@ -260,7 +235,7 @@ bool MapMode::State::compose_placements(const assets::Map& map,
             if (legacy::reads_wind(authored)) {
                 if (!wind_bones) wind_bones = reference_bones(*model);
                 const auto box = lighting::wind::model_bend_box(*model, *wind_bones);
-                if (box) bend_boxes.emplace(asset.asset_id, *box);
+                if (box) (*work.bend_boxes).emplace(asset.asset_id, *box);
                 bind_wind_frame(authored, box.value_or(lighting::wind::Box{}), source_mesh, submesh, *wind_bones);
                 const float bend_scale = std::abs(legacy::bindings::scalar_or(authored, "BendScale", 1.0F));
                 if (selector->program == "Grass.fx") {
@@ -295,20 +270,20 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                 [&](const std::string_view declared) -> std::optional<assets::Texture> {
                     for (const scene::TextureBinding& binding : surface.textures) {
                         if (binding.declared != declared || binding.resolved.empty()) continue;
-                        auto found = textures.find(binding.resolved);
-                        if (found == textures.end()) {
+                        auto found = (*work.textures).find(binding.resolved);
+                        if (found == (*work.textures).end()) {
                             auto decoded = assets::load_texture(*filesystem, binding.resolved);
                             if (!decoded) return std::nullopt;
-                            found = textures.emplace(binding.resolved, std::move(decoded.value())).first;
+                            found = (*work.textures).emplace(binding.resolved, std::move(decoded.value())).first;
                         }
                         return found->second;
                     }
                     return std::nullopt;
                 });
-            const std::set<Colour> uncoloured{Colour{}};
-            const std::set<Colour>& colours = !surface.effect_missing && scene::colorizes(surface.shader)
-                ? asset_colours[asset.asset_id] : uncoloured;
-            for (const Colour& colour : colours) {
+            const std::set<PlacementComposition::Colour> uncoloured{PlacementComposition::Colour{}};
+            const std::set<PlacementComposition::Colour>& colours = !surface.effect_missing && scene::colorizes(surface.shader)
+                ? (*work.asset_colours)[asset.asset_id] : uncoloured;
+            for (const PlacementComposition::Colour& colour : colours) {
                 MaterialDescription material = authored;
                 if (colour) bind_team_colour(material, *colour);
                 const auto uploaded = renderer->upload(next_asset, single, texture, material, family_textures);
@@ -346,11 +321,13 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                     upload.minimum, upload.maximum);
                 ++renderer_assets;
                 if (legacy::reads_effect_time(material)) effect_clock_assets.push_back(upload.renderer_asset);
-                uploads.emplace(std::make_tuple(asset.asset_id, index, colour), std::move(upload));
+                (*work.uploads).emplace(std::make_tuple(asset.asset_id, index, colour), std::move(upload));
             }
         }
     }
+}
 
+void MapMode::State::compose_placement_instances(scene::VfsAssetCache& cache, PlacementComposition& work, std::vector<sim::RenderInstance>& instances, sim::EntityId& next_entity) {
     // Idle clips, one player per (model, clip). A placement whose clip does
     // not bind keeps the bind pose and is counted by status.
     struct ClipBinding final {
@@ -419,9 +396,9 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         bool any_skinned = false;
         float sway = 0.0F;
         for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
-            const auto upload = uploads.find(std::make_tuple(placement.asset_id, index,
-                surface_colour(placement, placement.surfaces[index])));
-            if (upload != uploads.end() && upload->second.pose) any_skinned = true;
+            const auto upload = (*work.uploads).find(std::make_tuple(placement.asset_id, index,
+                work.surface_colour(placement, placement.surfaces[index])));
+            if (upload != (*work.uploads).end() && upload->second.pose) any_skinned = true;
         }
         const std::optional<std::size_t> clip = any_skinned ? bind_clip(placement) : std::nullopt;
         std::optional<std::size_t> idle;
@@ -437,26 +414,26 @@ bool MapMode::State::compose_placements(const assets::Map& map,
                 ++idle_sample_failures;
             }
         }
-        const auto variants = capture_variants.find(placement.asset_id);
+        const auto variants = (*work.capture_variants).find(placement.asset_id);
         const assets::Model* capture_model = placement.capture_point
             && placement.capture_state == scene::Placement::CaptureState::uncaptured
-            && variants != capture_variants.end() ? cache.model(placement.model_path) : nullptr;
+            && variants != (*work.capture_variants).end() ? cache.model(placement.model_path) : nullptr;
         for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
             if (capture_model != nullptr) {
                 const auto& surface = placement.surfaces[index];
                 const auto& mesh = capture_model->meshes[surface.mesh_index];
                 if (!scene::uncaptured_mesh_visible(*capture_model, mesh, variants->second)) continue;
             }
-            const auto upload = uploads.find(std::make_tuple(placement.asset_id, index,
-                surface_colour(placement, placement.surfaces[index])));
-            if (upload == uploads.end()) continue;
+            const auto upload = (*work.uploads).find(std::make_tuple(placement.asset_id, index,
+                work.surface_colour(placement, placement.surfaces[index])));
+            if (upload == (*work.uploads).end()) continue;
             const sim::EntityId entity = next_entity++;
             instances.push_back({entity, upload->second.renderer_asset, matrix});
             ++unit_instances;
             drawn = true;
             sway = std::max(sway, upload->second.grass_sway);
-            if (const auto box = bend_boxes.find(placement.asset_id);
-                upload->second.tree_sway > 0.0F && box != bend_boxes.end()) {
+            if (const auto box = (*work.bend_boxes).find(placement.asset_id);
+                upload->second.tree_sway > 0.0F && box != (*work.bend_boxes).end()) {
                 // W-04: the world box height through the placement's absolute matrix.
                 const assets::Vec3f& half = box->second.half_extent;
                 const sim::math::Mat3x4& m = placement.transform->matrix;
@@ -507,6 +484,66 @@ bool MapMode::State::compose_placements(const assets::Map& map,
         }
         if (drawn && bounds.minimum[0] <= bounds.maximum[0]) unit_bounds.push_back(bounds);
     }
+}
+
+bool MapMode::State::compose_placements(const assets::Map& map,
+    std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset,
+    sim::EntityId& next_entity) {
+    if (!catalog) {
+        failure = "populate requires the XML catalog, which did not load";
+        return false;
+    }
+    scene::VfsAssetCache cache(*filesystem);
+    scene::BuildInput input;
+    input.map = &map;
+    input.map_sha256 = map_hash;
+    input.catalog = &*catalog;
+    input.access = cache.access();
+    scene = scene::build(input);
+    build_attached_plan(cache);
+    std::map<sim::AssetId, std::vector<std::uint8_t>> capture_variants;
+    std::set<sim::AssetId> capture_checked;
+    PlacementComposition work;
+    work.capture_variants = &capture_variants;
+    work.capture_checked = &capture_checked;
+    collect_capture_variants(cache, work);
+    if (fog) {
+        for (const auto& placement : scene->placements) {
+            if (placement.drawable()) continue;
+            for (const auto& issue : placement.issues) {
+                fog_uncomposed.push_back("placement " + std::to_string(placement.scene_ordinal)
+                    + " " + placement.object_id + ": " + std::string(scene::to_string(issue.cause))
+                    + " " + issue.detail);
+            }
+        }
+    }
+
+    // One renderer asset per (scene asset, supported surface, team colour),
+    // in scene asset order, then surface order, then colour order, so
+    // renderer ids are as stable as scene ids. Only a colorizing surface has
+    // more than one colour: no colour (its authored Colorization) and each
+    // distinct team colour of the placements that use the asset.
+    using Colour = std::optional<std::array<std::uint8_t, 3>>;
+    std::map<sim::AssetId, const scene::Placement*> first_use;
+    std::map<sim::AssetId, std::set<Colour>> asset_colours;
+    work.first_use = &first_use;
+    work.asset_colours = &asset_colours;
+    collect_placement_colours(work);
+    const auto surface_colour = [](const scene::Placement& placement, const scene::Surface& surface) {
+        return !surface.effect_missing && scene::colorizes(surface.shader) ? placement.team_colour : Colour{};
+    };
+    std::map<std::string, assets::Texture> textures;
+    std::map<std::tuple<sim::AssetId, std::size_t, Colour>, SurfaceUpload> uploads;
+    // #147: each wind model's source-basis bend box, the tree sway's H.
+    std::map<sim::AssetId, lighting::wind::Box> bend_boxes;
+    const float wind_speed = wind ? std::abs(wind->speed) : 0.0F;
+    work.textures = &textures;
+    work.uploads = &uploads;
+    work.bend_boxes = &bend_boxes;
+    work.surface_colour = +surface_colour;
+    upload_placement_surfaces(cache, work, next_asset, wind_speed);
+
+    compose_placement_instances(cache, work, instances, next_entity);
     return true;
 }
 

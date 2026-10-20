@@ -168,7 +168,7 @@ void transport_container(const eawr::sim::PartitionExecutor& pool, std::vector<s
         "a transport supplies its first contained ability bearer in stored order");
 }
 } // namespace
-int main() {
+int case_galactic_ability_destruction_tests() {
     try {
         command_round_trip();
         std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1);

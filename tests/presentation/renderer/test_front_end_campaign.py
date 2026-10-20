@@ -49,7 +49,7 @@ class CampaignEntryContracts(unittest.TestCase):
     def test_menu_campaign_uses_the_shared_galactic_command_line_parser(self):
         host = (SRC / "viewer_host_ready.cpp").read_text(encoding="utf-8")
         for launcher in ("campaign_launcher", "saved_game_launcher"):
-            body = host.split("front_options." + launcher + " =", 1)[1].split("\n            };", 1)[0]
+            body = host.split("front_options." + launcher + " =", 1)[1].split("\n        };", 1)[0]
             self.assertIn("GalacticMode::from_command_line()", body)
             self.assertIn("start_galactic(std::move(campaign_options))", body)
 

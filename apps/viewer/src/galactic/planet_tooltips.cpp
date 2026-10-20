@@ -13,7 +13,7 @@ sim::galactic::TypeId GalacticMode::State::focused_planet_hover_type() const {
     auto* pointer = hud->get_viewport()->gui_get_hovered_control();
     if (!pointer) return 0;
     const auto point = hud->get_global_mouse_position();
-    const auto roster = ground_hud.rosters.find(selected_planet);
+    const auto roster = ground_roster_find(selected_planet);
     if (roster != ground_hud.rosters.end() && ground_hud.publication == displayed_snapshot) {
         for (const auto& [name, button] : ground_hud.buttons) {
             if (!button->is_visible_in_tree() || !button->get_global_rect().has_point(point)) continue;

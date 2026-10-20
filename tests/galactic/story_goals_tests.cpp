@@ -1,10 +1,18 @@
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/story_goals.hpp"
 #include <iostream>
 #include <stdexcept>
 namespace st = eawr::sim::galactic::story;
 namespace {
-int failures{};
-void expect(bool ok, const char* label) { if (!ok) { ++failures; std::cerr << label << '\n'; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, const char* label) {
+    if (!ok) local_checker.check_before_print(ok, label, std::cerr, "");
+}
 void objectives() {
     st::Goals goals(1); st::FakePresentationSink sink;
     const auto apply = [&](st::ObjectiveAction action, std::string key = {}, st::Objective value = {}) {
@@ -81,4 +89,4 @@ void adapter_sequence() {
     expect(request.parameters.size() == 2 && request.parameters[1] == "raw" && sink.events.back().owner == 1, "WST-U09 preserves raw parameters/owner");
 }
 }
-int main() { objectives(); dialogs(); adapter_sequence(); return failures == 0 ? 0 : 1; }
+int case_galactic_story_goals_tests() { objectives(); dialogs(); adapter_sequence(); return failures == 0 ? 0 : 1; }

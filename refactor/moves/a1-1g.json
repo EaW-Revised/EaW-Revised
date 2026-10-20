@@ -1,0 +1,62 @@
+[
+  {
+    "old": "tests/galactic/ai_movement_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/ai_movement_tests.cpp#done",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  },
+  {
+    "old": "tests/galactic/ai_execution_stock_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/ai_execution_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#eawr::testing::game_root"
+  },
+  {
+    "old": "tests/galactic/game_checkpoint_tests.cpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/game_checkpoint_tests.cpp#check",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/ai_access_tests.cpp#done",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/surface_launch_tests.cpp#done",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  },
+  {
+    "old": "tests/galactic/control_tests.cpp#capture_checked",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::take"
+  },
+  {
+    "old": "tests/galactic/live_battle_dialog_tests.cpp#checked",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_colon::take"
+  },
+  {
+    "old": "tests/galactic/tactical_return_tests.cpp#checked",
+    "new": "tests/support/result.hpp#eawr::testing::take"
+  },
+  {
+    "old": "tests/galactic/tactical_return_tests.cpp#okay",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_gate.hpp#required",
+    "new": "tests/support/result.hpp#eawr::testing::result_code_space::take"
+  },
+  {
+    "old": "tests/galactic/campaign_economy_tests.cpp#checked",
+    "new": "tests/support/result.hpp#eawr::testing::take"
+  },
+  {
+    "old": "tests/galactic/ai_usability_tests.cpp#done",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  }
+]

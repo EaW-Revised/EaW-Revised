@@ -374,12 +374,12 @@ def handler_needs(row, mechanic, need):
                     "Point activation, enemy target proxy and ordinary projectile/rate/accuracy overrides exist. Broadside and Marauder pass RG-03; their enabled HUD buttons dispatch world-point area commands. Area-decal presentation and U-07 retail captures remain separate fidelity work.",
                     ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#apply_area_ability",
                      "src/sim/tactical/combat_fire.cpp#attempt", "src/presentation/ui/command_sink.cpp#command_payload",
-                     "apps/viewer/src/battle_input_commands.cpp#BARRAGE"), ("WAD-38", "BARR-01"), 1074)
+                     "apps/viewer/src/battle_input_commands.cpp#left_release"), ("WAD-38", "BARR-01"), 1074)
             elif kind == "LURE":
                 add("unit-ability:" + kind, kind + " ability", "partial",
                     "RG-03 admits the squadron and craft buttons. Authored radius, exact target types, pulse timing, enemy-team orders, expiry, recharge and take-damage mode use the WLU service; the viewer shows the team particle. The team-mean particle attachment and integer-frame pulse timing remain documented approximations; the retail comparison is pending.",
                     ("src/units/unit_abilities.cpp#ability_table", "src/sim/tactical/session_step_commands.cpp#lure",
-                     "apps/viewer/src/battle_effects_prepare.cpp#lure"),
+                     "apps/viewer/src/battle_effects_prepare.cpp#prepare_unit_looks"),
                     ("RG-03", "WLU-01", "WLU-02", "WLU-03", "WLU-04", "WLU-05", "WLU-06", "WLU-07", "WLU-08", "WLU-09", "WLU-10"), 2060)
             else:
                 add("unit-ability:" + kind, kind + " ability", "implemented",
@@ -402,7 +402,7 @@ def handler_needs(row, mechanic, need):
                     ("src/units/unit_abilities.cpp#ability_table",), ("WHE-22",), 938)
             add("ability-plan-events", "Ability ready/finished plan events", "partial",
                 "Countdown services exist; the ability walk identifies missing AI plan notifications.",
-                ("src/sim/tactical/abilities.cpp#expire_abilities", "src/script/foc/tactical_ai_bindings.cpp#Unit_Ability_Ready"), ("WAB-34",), None, "S")
+                ("src/sim/tactical/abilities.cpp#expire_abilities", "src/script/foc/ai_taskforces.cpp#service_taskforce_events"), ("WAB-34",), None, "S")
         else:
             add("unit-ability:" + kind, kind + " ability", "missing",
                 "Not in the supported simulation dispatch; the loader skips unsupported kinds. UC-03 records data-only handlers whose complete original service remains unverified.",
@@ -441,14 +441,15 @@ def handler_needs(row, mechanic, need):
                 "with authored pulse effects. Stable query ties, competing healers, outside-centre bounds and the late damage phase "
                 "remain inferred adapters; exceptional lifecycle interfaces remain UFS-28. Other activation modes are outside this consumer.",
                 ("src/units/unit_tables_profiles.cpp#load_abilities", "src/sim/tactical/session_abilities.cpp#service_healing",
-                 "src/sim/tactical/durability.cpp#heal_health", "apps/viewer/src/live_session_frame.cpp#healing_lights_"),
+                 "src/sim/tactical/durability.cpp#heal_health", "apps/viewer/src/live_session_frame.cpp#observe_frame_ability_lights"),
                 tuple("WSH-%02d" % index for index in range(1, 9)), 2275)
             continue
         upgrade = row["class"].lower() == "upgradeobject"
         if upgrade and handler == "Starbase_Upgrade_Ability" and styles == ["Skirmish_Automatic"]:
             implemented = True
             reason = "Completed station upgrades replace the logical station, carry held objects, queues and references, raise allied tech and open the next authored menu."
-            code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#income_and_launch"]
+            code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#economy",
+                     "src/sim/tactical/session_step_economy.cpp#station_upgrades"]
         elif upgrade and handler == "Income_Stream_Mod_Ability" and (not styles or styles == ["Space_Automatic"]):
             targets = {v.strip().lower() for v in ability["fields"].get("Target_Stream_Source", [])}
             # WBP-25: the six validated stock levels target these loaded space streams.
@@ -480,8 +481,8 @@ def handler_needs(row, mechanic, need):
             reason = "Held upgrade profiles apply allied health, damage, energy, shield, defense and movement bonuses with stacking categories."
             if unsupported:
                 reason += " Authored effects remain unsupported: " + ", ".join(unsupported) + ". Purchase admission does not prove these effects."
-            code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_abilities.cpp#ability_helpers",
-                     "src/sim/tactical/session_step_economy.cpp#upgrade_bonus_phase"]
+            code += ["src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_economy.cpp#profile_bonuses",
+                     "src/sim/tactical/session_step_economy.cpp#bonuses"]
         add("special-handler:" + handler, handler.replace("_", " "),
             "implemented" if implemented else "partial" if partial else "missing", reason, tuple(code), ids, ticket)
     behaviours = set(row["behaviours"])
@@ -503,12 +504,13 @@ def handler_needs(row, mechanic, need):
     if row.get("catalog_namespace_collision"):
         add("catalog-ability-name-collision", "Separate object and ability name lookup", "implemented",
             "Production, menus and presentation resolve the game-object namespace; nested ability occurrences remain scoped to their owning object's closest authored layer. Legacy global lookup is retained for inventory tooling.",
-            ("src/data/xml_registry.cpp#index_winners", "src/data/xml.cpp#find_game_object", "src/data/xml_merge.cpp#resolve", "src/units/unit_support.cpp#resolve", "src/units/unit_tables_profiles.cpp#load_abilities"), ("UC-02", "WPR-22"), None, "S")
+            ("src/data/xml_registry.cpp#index_winners", "src/data/xml.cpp#Catalog::find", "src/data/xml_merge.cpp#resolve", "src/units/unit_support.cpp#resolve", "src/units/unit_tables_profiles.cpp#load_abilities"), ("UC-02", "WPR-22"), None, "S")
     levels = [a["level"] for a in row["acquisition"] if a["route"] in ("station_menu", "station")]
     if levels and min(levels) > 1:
         add("station-unlocks", "Station level-up and menu unlocks", "implemented",
             "WPR-52 station replacement and allied tech progression open these authored menus; their deployed units' combat and lifecycle needs remain separate.",
-            ("src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#income_and_launch"), ("WPR-50", "WPR-52"), 540, "L")
+            ("src/skirmish/economy.cpp#economy_rules", "src/sim/tactical/session_step_economy.cpp#economy",
+             "src/sim/tactical/session_step_economy.cpp#station_upgrades"), ("WPR-50", "WPR-52"), 540, "L")
     if behaviours & {"CAPTURE_POINT", "TACTICAL_BUILD_OBJECTS", "TACTICAL_UNDER_CONSTRUCTION"} or any(a["route"] in ("pad_menu", "constructed") for a in row["acquisition"]):
         add("pad-lifecycle", "Captured pad construction and completed combat objects", "missing",
             "Damageable construction, replacement/parent links and capture ownership are absent; satellites require admission as ordinary combat units.",
@@ -524,7 +526,7 @@ def handler_needs(row, mechanic, need):
     if "ASTEROID_FIELD_DAMAGE" in behaviours:
         add("asteroid-damage", "Asteroid contact damage service", "implemented",
             "Opted-in frigate/capital layers service center-XY contact every frame with independent field rolls and ordinary hardpoint damage; failed layer/locomotor/scalar gates retain cached contact.",
-            ("src/units/unit_motion.cpp#motion_table", "src/sim/tactical/session_step_systems.cpp#systems", "src/sim/tactical/damage.cpp#apply_hit"),
+            ("src/units/unit_motion.cpp#append_avoidance_footprints", "src/sim/tactical/session_step_systems.cpp#systems", "src/sim/tactical/damage.cpp#apply_hit"),
             ("WHZ-10", "WHZ-11", "WHZ-12", "WHZ-13", "WHZ-14"), 924)
     if "NEBULA" in behaviours:
         add("nebula-contact", "Nebula contact, ability and weapon gates", "missing",

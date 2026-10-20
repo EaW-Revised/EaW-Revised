@@ -1,3 +1,9 @@
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <memory>
+#include <utility>
+#include "../support/check.hpp"
 // S9a: the galactic perception store keeps one shard per player. The layout is invisible: the same restored rows,
 // hints and story flags, loaded in any order and spread over the shards in any way the order produces, export
 // the same canonical bytes, hash the same incrementally and cold, and a restore round trip changes nothing. The
@@ -16,8 +22,11 @@
 namespace {
 namespace ai = s9_fixture::ai;
 using s9_fixture::must;
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
+}
 
 constexpr std::uint64_t frame = 100;
 
@@ -154,7 +163,7 @@ void save_at_n_restore_at_m() {
 }
 } // namespace
 
-int main() {
+int case_galactic_ai_perception_shards_tests() {
     try {
         shard_layout_is_invisible();
         round_trip_and_mutation();

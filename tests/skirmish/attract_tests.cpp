@@ -2,12 +2,15 @@
 // map choice and cycle, clocks and keys, and the saved camera it reads. Engine-free and needs
 // no game data: the XML nodes and the map chunks are built here.
 
+#include "../support/self_test.hpp"
+#include "../support/check.hpp"
 #include "eawr/skirmish/attract.hpp"
 
-#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -22,13 +25,11 @@ using skirmish::AttractKey;
 using skirmish::AttractManager;
 using skirmish::AttractSettings;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 eawr::data::XmlNode node(std::string name, std::string text) {
@@ -282,6 +283,10 @@ void saved_camera() {
 } // namespace
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     settings_read();
     map_paths();
     cycle_and_clocks();

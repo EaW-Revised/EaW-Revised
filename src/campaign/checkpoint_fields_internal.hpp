@@ -149,6 +149,18 @@ template <> struct Fields<::eawr::campaign::RecordedConflict> {
     }
 };
 
+template <> struct Fields<::eawr::campaign::HistoryBoundary> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.tick, v.digest, v.last_key);
+    }
+};
+
+template <> struct Fields<::eawr::campaign::HistoryBase> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.at, v.executed_dropped, v.native_dropped, v.child_attempts);
+    }
+};
+
 template <> struct Fields<::eawr::campaign::ReturnedUpgrade> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.type, v.holder, v.owner);

@@ -395,7 +395,6 @@ gc::GalacticReplay ScriptedGalacticSession::record() const { return impl_->world
 core::Result<std::string> ScriptedGalacticSession::script_state_hash() { return impl_->script_hash(); }
 core::Result<std::string> ScriptedGalacticSession::script_sync_hash() { return impl_->script_hash(true); }
 bool ScriptedGalacticSession::uses_sync_hash() const noexcept { return impl_->ai_engine && impl_->ai_engine->uses_sync_hash(); }
-core::Result<std::string> ScriptedGalacticSession::save_ai() { return impl_->ai.save(); }
 core::Result<std::string> ScriptedGalacticSession::save_story() { return impl_->story.save(); }
 core::Result<GalacticScriptSave> ScriptedGalacticSession::save_scripts() {
     if (impl_->failure) return core::Result<GalacticScriptSave>::failure(*impl_->failure);

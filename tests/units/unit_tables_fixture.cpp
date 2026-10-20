@@ -1,12 +1,24 @@
+#include "../support/temp_dir.hpp"
 #include "unit_tables_support.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <map>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace unit_tables_test_support {
 
 TempTree::TempTree() { std::filesystem::create_directories(root); }
 
 TempTree::~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
 
 

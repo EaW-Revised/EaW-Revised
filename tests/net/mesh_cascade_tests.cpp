@@ -1,20 +1,26 @@
+// Relay cascades at nine seats (#4021, N9-H): a pair goes silent, the 15 s watchdog closes it, the redial takes a few seconds,
+// and while that repair runs more pairs of the same seat go silent. Every seat runs its own MeshIncident over a PairNetwork
+// and a model of the transport's repair bookkeeping (who may call a closed pair "relay failed" and when), so a seat only
+// ever learns about pairs of its own and through the reports its open pairs deliver.
+
+#include "../support/check.hpp"
 #include "pair_network.hpp"
 #include "eawr/net/mesh_incident.hpp"
 
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
 #include <random>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
-// Relay cascades at nine seats (#4021, N9-H): a pair goes silent, the 15 s watchdog closes it, the redial takes a few seconds,
-// and while that repair runs more pairs of the same seat go silent. Every seat runs its own MeshIncident over a PairNetwork
-// and a model of the transport's repair bookkeeping (who may call a closed pair "relay failed" and when), so a seat only
-// ever learns about pairs of its own and through the reports its open pairs deliver.
 namespace {
 namespace net = eawr::net;
 using eawr::testing::PairNetwork;
@@ -22,10 +28,11 @@ using eawr::testing::PairTransport;
 using Time = std::chrono::milliseconds;
 using Kind = net::MeshIncidentResult::Kind;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 bool explore{};
 void expect(bool value, const std::string& message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
 
 // What the transport answers MeshIncidentOptions::relay_failed with. The higher seat of a pair dials, so its pair is only
@@ -81,7 +88,7 @@ struct Cascade {
         network.round = now;
         apply_events();
         for (net::PeerIndex seat = 0; seat < count; ++seat) {
-            if (stopped[seat]) continue;
+            if (stopped[seat] || (paused_seat == seat && now < resume_at)) continue;
             auto& model = models[seat];
             // The viewer arms the repair epoch only while the incident runs; the deadline starts at the epoch's first loss.
             if (incidents[seat]->running() && model.armed_incident != incidents[seat]->incident()) {
@@ -133,6 +140,8 @@ struct Cascade {
         return total;
     }
     unsigned count{};
+    std::optional<net::PeerIndex> paused_seat;
+    std::uint64_t resume_at{};
     bool trace{};
     PairNetwork network;
     std::uint64_t now{};
@@ -156,6 +165,65 @@ void expect_agreement(const Cascade& rig, const std::string& context) {
             expect(found->second.survivors == result.survivors, context + ": every peer agrees on survivors");
         }
     }
+}
+
+// Guard whole-participant silence: this passes on main, rather than reproducing the native relay cascade. No sends,
+// receives or incident timers run at the suspended participant.
+void silent_seat(bool returns) {
+    Cascade rig(9);
+    constexpr net::PeerIndex silent = 4;
+    rig.run(1'000);
+    rig.paused_seat = silent;
+    rig.resume_at = returns ? rig.now + 20'000 : 1'000'000;
+    for (net::PeerIndex peer = 0; peer < 9; ++peer) {
+        if (peer == silent) continue;
+        rig.silent_pair(rig.now + 100, silent, peer, returns ? 6'000 : 1'000'000);
+    }
+    rig.run(180'000);
+    const auto context = returns ? "twenty-second whole-seat silence" : "permanent whole-seat silence";
+    expect_agreement(rig, context);
+    expect(rig.leavers("EAWR-NET-1780") == 0 && rig.leavers("EAWR-NET-1781") == 0,
+        std::string(context) + ": untouched seats never fail agreement");
+    for (net::PeerIndex seat = 0; seat < 9; ++seat) {
+        if (seat == silent && !returns) continue;
+        expect(!rig.stopped[seat] || (seat == silent && rig.leavers("EAWR-NET-1778") == 1),
+            std::string(context) + ": only the silent seat may leave with the named removal code");
+        expect(rig.errors[seat].empty(), std::string(context) + ": no protocol error");
+        if (!rig.stopped[seat]) {
+            expect(!rig.incidents[seat]->running(), std::string(context) + ": every continuing seat completes the incident");
+            expect(rig.incidents[seat]->incident() == rig.incidents[0]->incident(),
+                std::string(context) + ": every continuing seat advances to the same incident id");
+        }
+        if (seat == silent) continue;
+        if (!returns) {
+            bool removed = false;
+            for (const auto& result : rig.results[seat])
+                if (result.kind == Kind::departure && result.removed == net::mesh_seat(silent)) removed = true;
+            expect(removed, std::string(context) + ": every survivor names seat four as the sole leaver");
+        }
+    }
+    if (returns && !rig.stopped[silent]) expect(rig.restorations() >= 9, "The returned seat and all eight neighbours agree restoration");
+    net::MeshSeats continuing{};
+    for (net::PeerIndex seat = 0; seat < 9; ++seat)
+        if (!rig.stopped[seat] && (returns || seat != silent)) continuing |= net::mesh_seat(seat);
+    for (net::PeerIndex from = 0; from < 9; ++from) {
+        if (!(continuing & net::mesh_seat(from))) continue;
+        for (net::PeerIndex to = 0; to < 9; ++to)
+            if (from != to && (continuing & net::mesh_seat(to)))
+                expect(static_cast<bool>(rig.transports[from]->send(to, std::array<std::uint8_t, 2>{127, static_cast<std::uint8_t>(from)})),
+                    std::string(context) + ": every continuing pair can send after recovery");
+    }
+    ++rig.network.round;
+    for (net::PeerIndex seat = 0; seat < 9; ++seat) {
+        if (!(continuing & net::mesh_seat(seat))) continue;
+        net::MeshSeats received{};
+        while (const auto frame = rig.transports[seat]->poll())
+            if (frame->frame.size() == 2 && frame->frame.front() == 127 && frame->frame.back() == frame->from)
+                received |= net::mesh_seat(frame->from);
+        expect(received == (continuing & ~net::mesh_seat(seat)), std::string(context) + ": every continuing pair delivers after recovery");
+    }
+    std::cout << context << ": leavers=" << rig.leavers() << " 1780=" << rig.leavers("EAWR-NET-1780")
+        << " restorations=" << rig.restorations() << '\n';
 }
 
 // N9-B t8130..8142: a repaired incident is followed immediately by more losses. One seat has pledged but misses the
@@ -305,6 +373,11 @@ void seeded_cascades() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "silent-seat") {
+        silent_seat(true);
+        silent_seat(false);
+        return failures == 0 ? 0 : 1;
+    }
     explore = argc > 1 && std::string(argv[1]) == "x";
     if (argc > 3 && std::string(argv[1]) == "fuzz") {
         unsigned bad{}, most{};

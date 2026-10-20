@@ -33,7 +33,7 @@ using space::SunRetailStatus;
 using space::SunVec3;
 using Rigid12 = std::array<float, 12>;
 
-extern int failures;
+extern int& failures;
 
 void expect(const bool condition, const std::string& message);
 

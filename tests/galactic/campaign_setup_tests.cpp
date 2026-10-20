@@ -1,3 +1,14 @@
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <span>
+#include <vector>
+#include <iostream>
+#include <cstddef>
+#include <string_view>
+#include <string>
+#include <optional>
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/campaign/control.hpp"
@@ -7,10 +18,10 @@
 #include "eawr/platform/live_game_session.hpp"
 #include "../../apps/viewer/src/galactic/fleet_visibility.hpp"
 
-#include <cstdlib>
 #include <chrono>
 #include <filesystem>
 #include <map>
+#include <utility>
 
 namespace {
 namespace cp = eawr::campaign;
@@ -220,6 +231,13 @@ void planning() {
     input.campaigns[0].starting_forces.clear(); opts.seed = 0;
     expect(p.forces().size() == 4 && p.galaxy().seed == 42, "plan owns immutable copies of loader and option inputs");
     expect(!cp::plan_campaign_setup(data(), types(), "Unknown", options()), "unknown definition refuses");
+    opts = options(); opts.seat_control.emplace();
+    const auto single_player_control = cp::plan_campaign_setup(data(), types(), "Ordinary", opts);
+    expect(!single_player_control && single_player_control.error().message == "campaign setup: seat control requires multiplayer mode",
+        "single-player mode refuses multiplayer seat control before constructing a plan");
+    opts = options(); opts.mode = cp::CampaignSetupMode::multiplayer;
+    expect(bool(cp::plan_campaign_setup(data(), types(), "Ordinary", opts)),
+        "multiplayer campaign authoring callers can still plan without seat control");
     opts = options(); opts.players.back().active = false;
     expect(!cp::plan_campaign_setup(data(), types(), "Ordinary", opts), "inactive neutral refuses");
     opts = options(); opts.types.push_back({9, "ship"});
@@ -479,18 +497,11 @@ void retained_parent() {
 }
 
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") != 0 || !value) return std::nullopt;
-    std::string result(value); std::free(value); return result.empty() ? std::nullopt : std::optional<std::string>(result);
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>(value) : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void installed() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: stock campaign setup needs EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock campaign setup needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
@@ -727,7 +738,7 @@ void installed() {
     }
 }
 } // namespace
-int main(int argc, const char* const[]) {
+int case_galactic_campaign_setup_tests(int argc, const char* const[]) {
     if (argc > 1) installed(); else { full_initial_control(); victory_authoring_contracts(); planning(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

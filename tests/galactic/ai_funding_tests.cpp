@@ -1,22 +1,25 @@
+#include <cstdint>
+#include <optional>
+#include <string_view>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "eawr/sim/galactic/ai_funding.hpp"
 
 #include <iostream>
 #include <limits>
-#include <stdexcept>
+#include <exception>
 
 namespace {
 namespace f = eawr::sim::galactic::funding;
 using A = f::Amount;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 A n(std::int64_t value) { return A::from_integer(value).value(); }
 A ratio(std::int64_t a, std::int64_t b) { return A::from_ratio(a, b).value(); }
 void expect(bool ok, const char* message) {
-    if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
 }
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::must;
 template<class F> void rejects(F call, std::string_view code, const char* message) {
     const auto result = call();
     expect(!result && result.error().code == code && !result.error().message.empty(), message);
@@ -280,7 +283,7 @@ void diagnostics() {
     failure_unchanged(small, [&] { return f::purchase_wait(small, 1, n(40000)); }, f::diagnostic_codes::overflow, "purchase wait propagates implied-rate overflow");
 }
 }
-int main() {
+int case_galactic_ai_funding_tests() {
     try { allocation(); reservations(); spending(); fiscal_and_templates(); tactical(); diagnostics(); }
     catch (const std::exception& e) { std::cerr << "Unexpected: " << e.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;

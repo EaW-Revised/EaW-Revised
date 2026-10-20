@@ -20,6 +20,10 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Iterable
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
 
 MAX_ENTRIES = 4000
 KEEP_ENTRIES = 2000
@@ -32,7 +36,7 @@ INCLUDABLE_SUFFIXES = {"", ".h", ".hh", ".hpp", ".hxx", ".h++", ".inc", ".inl", 
 
 def sha256_file(path: Path) -> str | None:
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return python_helpers.sha256_file(path)
     except OSError:
         return None
 

@@ -1,0 +1,47 @@
+[
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_battle_overlay",
+    "tag": "Font_Point_Size"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_battle_overlay",
+    "tag": "Font_Name"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_battle_overlay",
+    "tag": "Text_Color"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Class_Y_Offset"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Cost_Offset"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Icon_X_Offset"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Icon_Y_Offset"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Name_Offset"
+  },
+  {
+    "old": "src/presentation/godot/ui/tactical_hud_build.cpp#TacticalHud::build",
+    "new": "src/presentation/godot/ui/tactical_hud_build.cpp#build_unit_cards",
+    "tag": "Encyclopedia_Population_Offset"
+  }
+]

@@ -1,4 +1,5 @@
 #pragma once
+#include "eawr/battle/start.hpp"
 #include "lan_lobby_screen.hpp"
 #include "online_service_settings.hpp"
 #include "dialog_rectangles.hpp"
@@ -333,8 +334,8 @@ struct EawrLanLobby::Resources final {
     Ref<Theme> theme;
     Vector2 theme_size;
     std::vector<skirmish::SetupMap> maps;
-    std::vector<skirmish::LobbyColour> palette;
-    skirmish::MatchOptions defaults;
+    std::vector<battle::LobbyColour> palette;
+    battle::MatchOptions defaults;
     std::optional<skirmish::CreditsBounds> credits_bounds; // MNU-22 / WSS-25: the options dialog's credits display
     std::vector<std::string> sfx_ids; // the effective SFX events, for the chat sounds
 };
@@ -371,6 +372,7 @@ struct EawrLanLobby::Impl final {
     std::shared_ptr<net::OnlineRoomSource> online_rooms;
     std::size_t online_page{};
     std::size_t online_rooms_total{};
+    model::OnlineMenuChat menu_chat{model::OnlineMenuChat::idle};
     std::optional<model::OnlinePasswordPrompt> prompt;
     model::OnlineHostingPhase hosting{model::OnlineHostingPhase::idle};
     std::string join_game, join_room; // the online room being joined: its name and id

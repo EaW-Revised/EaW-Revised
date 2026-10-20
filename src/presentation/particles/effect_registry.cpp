@@ -57,6 +57,10 @@ struct EffectRegistry::Instance final {
     // One stream per plan, kept between frames so a grown stream allocates nothing (#439); the
     // batched calls build them on the executor and upload them afterwards (#638).
     std::vector<VertexStream> streams;
+    // Dense worker-produced render set; the caller commits it in authored plan order.
+    std::vector<std::size_t> render_active;
+    std::vector<bool> backend_empty;
+    std::vector<bool> backend_terminal;
     // Disjoint instance-local scratch: one scan replaces one full-system scan
     // per drawable emitter. Pointers keep particle bits and input order intact.
     std::vector<std::vector<const Particle*>> particle_buckets;
@@ -70,6 +74,7 @@ struct EffectRegistry::Instance final {
     bool updated{};
     bool was_rendered{};
     bool backend_visible{true};
+    bool exhausted{};
     float accumulated{};
     double step_ms{}, build_ms{};
     StreamBuildTimings stream_timing;
@@ -177,6 +182,8 @@ core::Result<EffectHandle> EffectRegistry::spawn_impl(
     if(measure_)timings_.spawn_cpu_ms+=std::chrono::duration<double,std::milli>(backend_start-spawn_start).count();
     Measure backend_time(measure_?&timings_.spawn_backend_ms:nullptr);
     instance->resources.assign(instance->plans.size(), 0U);
+    instance->backend_empty.assign(instance->plans.size(), false);
+    instance->backend_terminal.assign(instance->plans.size(), false);
     for (std::size_t index = 0; index < instance->plans.size(); ++index) {
         EmitterRenderPlan& plan = instance->plans[index];
         if (!plan.drawable) continue;
@@ -470,6 +477,7 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
     instance.stream_timing = {};
     instance.packing_ms = 0;
     const std::span<const Particle> live = instance.cpu.particles();
+    instance.exhausted = instance.cpu.exhausted();
     const ParticleBounds bounds = particle_bounds(instance.plans, live);
     instance.visible = intersects(bounds, culling_);
     instance.prepared = !culling_.enabled || (instance.visible && !instance.cpu.finished());
@@ -487,6 +495,15 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
         }
     }
     if (!instance.prepared) {
+        // Finished/empty groups still retire their last submission. Camera or
+        // fog rejection alone never proves that retained particles are empty.
+        if (live.empty()) {
+            instance.render_active.clear();
+            for (auto& stream : instance.streams) {
+                if (instance.exhausted) stream = VertexStream{};
+                else stream.clear();
+            }
+        }
         if (stats != nullptr) {
             stats->has_bounds = bounds.valid;
             stats->bounds_min = bounds.minimum;
@@ -504,6 +521,7 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
             instance.particle_buckets[particle.emitter_index].push_back(&particle);
         }
     }
+    instance.render_active.clear();
     for (std::size_t index = 0; index < instance.plans.size(); ++index) {
         VertexStream& stream = instance.streams[index];
         stream.clear();
@@ -527,9 +545,17 @@ void EffectRegistry::build(Instance& instance, const CameraFrame& camera, Effect
                 vertex.color = {channel(vertex.color.x),channel(vertex.color.y),channel(vertex.color.z),channel(vertex.color.w)};
             }
         }
-        if (instance.resources[index] != 0U) {
+        if (instance.resources[index] != 0U && !stream.indices.empty()) {
+            instance.render_active.push_back(index);
             Measure timer(measure_ ? &instance.packing_ms : nullptr);
             backend_->prepare_emitter(instance.resources[index], stream);
+        }
+        // Only terminal CPU lifecycles relinquish reusable stream capacity.
+        // A temporary gap keeps it for the next burst, with identical RNG/age.
+        if (instance.exhausted) stream = VertexStream{};
+        if (stream.vertices.empty()) {
+            stream.axis_samples = stream.axis_reversed = 0;
+            stream.axis_max_sine_error = 0;
         }
         if (stats == nullptr) continue;
         const bool drawn = instance.resources[index] != 0U;
@@ -586,6 +612,19 @@ void EffectRegistry::upload(Instance& instance, const bool stepped, const bool h
     if (stepped && instance.deferred) ++work_.updates_deferred;
     if (stepped) { if (instance.stepped) ++work_.steps; }
     else ++work_.presents;
+    // Workers establish empty streams; only this ordered main-thread commit
+    // changes residency. Notify once per empty span and once on a later
+    // terminal upgrade, including groups outside render preparation.
+    if (instance.prepared || instance.cpu.particles().empty()) {
+        for (std::size_t index = 0; index < instance.resources.size(); ++index) {
+            if (instance.resources[index] == 0U
+                || (instance.backend_empty[index] && (!instance.exhausted || instance.backend_terminal[index]))
+                || !instance.streams[index].indices.empty()) continue;
+            backend_->empty_emitter(instance.resources[index], instance.exhausted);
+            instance.backend_empty[index] = true;
+            instance.backend_terminal[index] = instance.exhausted;
+        }
+    }
     // PS-39: hide retained geometry when culled; re-entry rebuilds it before
     // restoring visibility. Backend calls remain in caller order.
     if (!instance.prepared) {
@@ -595,9 +634,10 @@ void EffectRegistry::upload(Instance& instance, const bool stepped, const bool h
         }
         return;
     }
-    for (std::size_t index = 0; index < instance.plans.size(); ++index) {
-        if (instance.resources[index] == 0U) continue;
+    for (const std::size_t index : instance.render_active) {
         backend_->update_emitter(instance.resources[index], instance.streams[index]);
+        instance.backend_empty[index] = false;
+        instance.backend_terminal[index] = false;
         if (!instance.backend_visible) backend_->set_emitter_visible(instance.resources[index], true);
         if (!instance.streams[index].indices.empty()) instance.was_rendered = true;
         ++work_.uploads;
@@ -655,6 +695,10 @@ std::size_t EffectRegistry::reserved_particles(const EffectHandle handle) const 
 
 std::size_t EffectRegistry::live_effects() const noexcept { return instances_.size(); }
 std::size_t EffectRegistry::live_backend_resources() const noexcept { return live_resources_; }
+bool EffectRegistry::exhausted(const EffectHandle handle) const noexcept {
+    const auto* instance = find(handle);
+    return instance != nullptr && instance->cpu.exhausted();
+}
 std::span<const core::Diagnostic> EffectRegistry::diagnostics() const noexcept { return diagnostics_; }
 
 } // namespace eawr::presentation::particles

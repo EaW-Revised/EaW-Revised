@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/fonts.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"
 
@@ -11,14 +12,8 @@ namespace {
 
 constexpr std::uint64_t max_cache_file_bytes = 4U * 1024U * 1024U;
 
-[[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
-
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    return left.size() == right.size()
-        && std::equal(left.begin(), left.end(), right.begin(),
-                      [](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 
 core::Diagnostic cache_warning(const std::string& path, std::string message) {

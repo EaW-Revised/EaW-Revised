@@ -1,15 +1,31 @@
 // FT-21 / ADR-020: two human seats share one tactical faction. The router is
 // exercised through the shared lockstep transport, including held batches.
+
+#include <exception>
+#include <variant>
+#include "../support/env.hpp"
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 #include "../support/lockstep_loopback.hpp"
 #include "eawr/sim/tactical/seat_router.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/scene/scene.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+using eawr::testing::require;
 
 namespace {
 namespace sim = eawr::sim;
@@ -18,14 +34,12 @@ namespace lockstep = eawr::testing::lockstep;
 namespace skirmish = eawr::skirmish;
 using sim::math::Fixed;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool condition, const std::string& message) {
-    if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
-template <typename T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
-}
+
 Fixed units(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 sim::math::Vec3 at(std::int64_t x, std::int64_t y) { return {units(x), units(y), {}}; }
 const std::vector<tactical::SeatBinding> bindings{{{1}, 1, true, false}, {{2}, 1, true, false}};
@@ -302,15 +316,8 @@ int main(int argc, char** argv) {
     try {
         auto scenario = synthetic();
         if (argc > 1 && std::string_view(argv[1]) == "--installed") {
-            std::string root;
-#ifdef _WIN32
-            char* value{}; std::size_t size{};
-            if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") == 0 && value) root = value;
-            std::free(value);
-#else
-            if (const auto* value = std::getenv("EAWR_EAW_GAME_ROOT")) root = value;
-#endif
-            if (root.empty()) { std::cout << "SKIPPED: installed game required\n"; return 0; }
+            std::string root = eawr::testing::game_root().value_or("");
+            if (root.empty()) { return eawr::testing::skip_installed("SKIPPED: installed game required\n", 0, std::cout); }
             scenario = installed(root);
         }
         expanded_router_roster(); router_contracts(scenario);

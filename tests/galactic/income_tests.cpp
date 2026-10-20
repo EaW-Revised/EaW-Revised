@@ -1,3 +1,6 @@
+#include <variant>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -8,20 +11,29 @@
 #include "eawr/vfs/vfs.hpp"
 #include "ability_ruins_support.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
-#include <stdexcept>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+using eawr::testing::take;
 
 namespace {
 using namespace galactic_test;
 using eawr::sim::math::Fixed;
 namespace gc = eawr::sim::galactic;
-template <class T> T take(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().message);
-    return std::move(value).value();
-}
+
 Fixed f(std::int64_t n) { return take(Fixed::from_integer(n)); }
-void take(eawr::core::Result<void> value) { if (!value) throw std::runtime_error(value.error().message); }
+
 Fixed d(std::string_view n) { return take(Fixed::from_decimal(n)); }
 gc::GalacticSetup setup() {
     gc::SyntheticGalaxyOptions options; options.players = 2; options.planets = 4;
@@ -294,6 +306,13 @@ void lifecycle_and_queues() {
         for (const bool price : {true, false})
             expect(take(gc::income_production_multiplier(gathered, planet, who, 2000, price))
                 == take(gc::income_production_multiplier(inputs, owners, planet, who, 2000, price)), "gathered reductions equal per-query reductions");
+    // The AI can-advance-tech query prepares offers against one gathered list; both overloads give the same offer.
+    const auto& authored = config.production->planets[0].offers[0];
+    for (const auto planet : {gc::PlanetId{1}, gc::PlanetId{2}}) for (const auto who : {gc::PlayerId{1}, gc::PlayerId{2}}) {
+        const auto per_offer = take(gc::prepared_production_offer(authored, &inputs, owners, planet, who, nullptr));
+        const auto shared = take(gc::prepared_production_offer(authored, &inputs, gathered, planet, who, nullptr));
+        expect(per_offer.price == shared.price && per_offer.seconds == shared.seconds, "prepared offer equals with gathered reductions");
+    }
     config = setup(); config.income->types[1].gambling.reset();
     auto mine = take(gc::GalacticSession::create(config));
     for (int i = 0; i < 4; ++i) (void)take(mine.step(serial));
@@ -691,14 +710,7 @@ void technology_price_callbacks() {
     }
 }
 void installed_data() {
-    std::string root;
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") == 0 && value) root = value;
-    std::free(value);
-#else
-    if (const auto* value = std::getenv("EAWR_EAW_GAME_ROOT")) root = value;
-#endif
+    std::string root = eawr::testing::game_root().value_or("");
     if (root.empty()) return;
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -1048,7 +1060,7 @@ void gathered_reduction_categories() {
                 "gathered category maximum equals the general reduction multiplier");
     }
 }
-int main() {
+int case_galactic_income_tests() {
     try { math_rules(); filters(); planet_reduction_cards(); technology_price_planets(); technology_price_callbacks(); lifecycle_and_queues(); replay_checkpoint(); installed_data(); publication_cache(); political_income_retention(); land_return_publication();
         gathered_reduction_categories(); nested_sources(); ruined_income_readers(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -1,4 +1,5 @@
 #include "eawr/data/retail_values.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/data/tag_trace.hpp"
 #include "xml_internal.hpp"
@@ -16,9 +17,7 @@ namespace {
 }
 
 [[nodiscard]] std::string_view stripped(std::string_view text) noexcept {
-    while (!text.empty() && space(text.front())) text.remove_prefix(1);
-    while (!text.empty() && space(text.back())) text.remove_suffix(1);
-    return text;
+    return core::trim_view(text);
 }
 
 [[nodiscard]] bool digit(const char value) noexcept { return value >= '0' && value <= '9'; }

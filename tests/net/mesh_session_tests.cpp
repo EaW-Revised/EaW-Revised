@@ -1,3 +1,10 @@
+// LockstepSession over an N-peer room mesh with cuttable pairs (docs/net-online-npeer.md, section 3 and the test plan rows
+// "Lockstep integration" and "Pair-loss agreement"): the pair-loss decision, its hand-off to the departure protocol, the
+// per-pair RTT minimum at the host and the timing freeze. Repair cases compare partitioned adapter tick hashes at 1/2/4/8
+// workers here; the same equality over the real tactical simulation is mesh_session_workers_tests.cpp.
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "pair_network.hpp"
 #include "setup_test_support.hpp"
 #include "eawr/core/sha256.hpp"
@@ -5,37 +12,37 @@
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
+#include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
 #include <iostream>
 #include <memory>
-#include <algorithm>
 #include <optional>
 #include <set>
-#include <stdexcept>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-// LockstepSession over an N-peer room mesh with cuttable pairs (docs/net-online-npeer.md, section 3 and the test plan rows
-// "Lockstep integration" and "Pair-loss agreement"): the pair-loss decision, its hand-off to the departure protocol, the
-// per-pair RTT minimum at the host and the timing freeze. Repair cases compare partitioned adapter tick hashes at 1/2/4/8
-// workers here; the same equality over the real tactical simulation is mesh_session_workers_tests.cpp.
 namespace {
 namespace net = eawr::net;
 namespace sim = eawr::sim;
 using eawr::testing::PairNetwork;
 using eawr::testing::PairTransport;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 unsigned test_workers{1};
 std::vector<std::string> worker_evidence;
 void expect(bool value, const std::string& message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::require;
 
 class CounterAdapter final : public net::SessionAdapter {
 public:

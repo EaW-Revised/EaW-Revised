@@ -1,18 +1,26 @@
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/population_index.hpp"
 
 #include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 #include <iostream>
 #include <limits>
+#include <optional>
+#include <span>
 #include <thread>
+#include <vector>
 
 namespace {
 namespace space = eawr::presentation::space;
 namespace math = eawr::sim::math;
 using eawr::sim::EntityId;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const char* message) {
-    if (!condition) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 struct Piece final {
@@ -65,6 +73,8 @@ void test_linear_frame_budget() {
         expect(index.work().opacity_changes == 4, "settled opacity has no per-piece update work");
 
         const EntityId survivor = index.entities(ships - 1).front();
+        index.reset_opacity(0);
+        expect(index.opacity_changed(0, 1.0F), "explicit retirement forgets cached opacity for reused slots");
         expect(index.opacity_changed(ships - 1, .5F), "survivor starts fading");
         std::erase_if(pieces, [](const Piece& piece) { return piece.live == 0; });
         std::erase_if(clips, [](const Clip& clip) { return clip.ship == 0; });

@@ -28,7 +28,7 @@ class LanRecoveryWiring(unittest.TestCase):
         header = (ROOT / "apps/viewer/src/live_session_view.hpp").read_text(encoding="utf-8")
         economy = (ROOT / "apps/viewer/src/live_session_economy.cpp").read_text(encoding="utf-8")
         frame = source_text("apps/viewer/src/live_session_frame.cpp")
-        prepare = source_text("apps/viewer/src/live_session_prepare.cpp")
+        prepare = (ROOT / "apps/viewer/src/live_session_prepare.cpp").read_text(encoding="utf-8")
         self.assertIn("input_sink_ ? input_sink_.get() : scheduler_.get()", function_body(header, "command_sink()"))
         for method in ("sell_pad_structure", "special_fire", "repair_hardpoint", "buy", "cancel_build", "reinforce"):
             with self.subTest(method=method):
@@ -44,6 +44,9 @@ class LanRecoveryWiring(unittest.TestCase):
     def test_only_outcome_and_summary_audio_bypass_recovery(self):
         source = (ROOT / "apps/viewer/src/battle_audio_events.cpp").read_text(encoding="utf-8")
         body = function_body(source, "BattleAudio::frame(")
+        phase_call = "present_outcome_cues(live, battle, recovery_quiet);"
+        self.assertEqual(body.count(phase_call), 1)
+        body = body.replace(phase_call, function_body(source, "BattleAudio::present_outcome_cues("))
         quiet = body.index("if (recovery_quiet) return;")
         self.assertLess(body.index("if (!outcome_shown_"), quiet)
         self.assertLess(body.index("if (!summary_shown_"), quiet)
@@ -63,13 +66,14 @@ class LanRecoveryWiring(unittest.TestCase):
         self.assertIn("save_diagnostic_details()", body)
 
     def test_controllers_and_hud_read_the_published_adapter(self):
-        source = source_text("apps/viewer/src/lan_match.cpp")
-        activate = function_body(source, "core::Result<void> activate_adapter(")
+        source = (ROOT / "src/platform/net/lan_match_recovery.cpp").read_text(encoding="utf-8")
+        activate = function_body(source, "core::Result<void> TcpLanMatch::activate_adapter(")
         self.assertIn("core_session().active_adapter() != &adapter", activate)
         self.assertIn("adapter.staging->activate()", activate)
         self.assertIn("adapter.bind_live_context(*current_context_", activate)
         self.assertIn("adapter_ = &adapter", activate)
-        drive = function_body(source, "DriverResult drive(")
+        drive = function_body((ROOT / "src/platform/net/lan_match_drive_session.cpp").read_text(encoding="utf-8"),
+                              "DriverResult TcpLanMatch::drive_session(")
         self.assertIn("session.active_adapter()", drive)
         self.assertIn("activate_adapter(*published)", drive)
         frame = source_text("apps/viewer/src/live_session_frame.cpp")
@@ -79,9 +83,10 @@ class LanRecoveryWiring(unittest.TestCase):
         self.assertIn("event_log_ = LiveEventLog", platform)
 
     def test_drop_feedback_and_speed_admission(self):
-        source = source_text("apps/viewer/src/lan_match.cpp")
-        self.assertIn("lan_gameplay_enabled(view_)", function_body(source, "bool request_speed("))
-        drop = function_body(source, "void discard_command(")
+        source = (ROOT / "src/platform/net/lan_match_lifecycle.cpp").read_text(encoding="utf-8")
+        self.assertIn("lan_gameplay_enabled(view_)", function_body(source, "bool TcpLanMatch::request_speed("))
+        drop = function_body((ROOT / "src/platform/net/lan_match_diagnostics.cpp").read_text(encoding="utf-8"),
+                             "void TcpLanMatch::discard_command(")
         self.assertIn("observer(command.key.sequence)", drop)
         self.assertIn("view_.input_feedback", drop)
         gate = source_text("apps/viewer/src/lan_match.hpp")

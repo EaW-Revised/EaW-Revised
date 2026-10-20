@@ -37,7 +37,7 @@ class FieldCompletenessTests(unittest.TestCase):
             ("src/campaign/checkpoint_fields_internal.hpp", "withdraw_admitted", "AutoResolveProgress"),
             ("src/campaign/checkpoint_owner_internal.hpp", "sequences", "ChildOwner"),
             ("src/sim/galactic/session.cpp", "native_sequence", "GalacticSession::Impl"),
-            ("src/campaign/game_session.cpp", "withdrawing_player", "GameSession::Impl"),
+            ("src/campaign/game_session_lifecycle.cpp", "withdrawing_player", "GameSession::Impl"),
         ):
             with self.subTest(path=path):
                 source = re.sub(r"\bv\." + field + r",\s*", "", source_text(path))
@@ -48,7 +48,7 @@ class FieldCompletenessTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         for path, declaration in (
             ("src/sim/galactic/session_impl.hpp", "class GalacticSession::Impl {"),
-            ("src/campaign/game_session.cpp", "class GameSession::Impl {"),
+            ("src/campaign/game_session_impl.hpp", "class GameSession::Impl {"),
         ):
             with self.subTest(path=path):
                 source = source_text(path).replace(

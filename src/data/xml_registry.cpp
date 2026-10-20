@@ -1,4 +1,5 @@
 #include "xml_internal.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/core/sha256.hpp"
 
@@ -40,15 +41,11 @@ struct SchemaValue {
 };
 
 std::string ascii_lower(std::string_view value) {
-    std::string result(value);
-    for (char& ch : result) {
-        if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + ('a' - 'A'));
-    }
-    return result;
+    return core::to_lower(value);
 }
 
 bool ascii_iequals(const std::string_view left, const std::string_view right) {
-    return ascii_lower(left) == ascii_lower(right);
+    return core::iequals(left, right);
 }
 
 std::string alnum_key(std::string_view value) {
@@ -63,11 +60,7 @@ std::string alnum_key(std::string_view value) {
 }
 
 std::string trim(std::string_view value) {
-    std::size_t first = 0;
-    while (first < value.size() && xml_space(static_cast<unsigned char>(value[first]))) ++first;
-    std::size_t last = value.size();
-    while (last > first && xml_space(static_cast<unsigned char>(value[last - 1]))) --last;
-    return std::string(value.substr(first, last - first));
+    return core::trim(value, core::xml_whitespace);
 }
 
 std::string input_hash(const std::span<const std::byte> bytes) {

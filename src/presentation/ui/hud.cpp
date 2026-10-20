@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/hud.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -8,9 +9,7 @@ namespace eawr::presentation::ui {
 namespace {
 
 bool equal_name(std::string_view a, std::string_view b) {
-    const auto lower = [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a'-'A')) : c; };
-    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
-        [&](char x, char y) { return lower(x) == lower(y); });
+    return core::iequals(a, b);
 }
 core::Diagnostic diagnostic(std::string code, std::string message, std::string path = {}) {
     core::Diagnostic out;

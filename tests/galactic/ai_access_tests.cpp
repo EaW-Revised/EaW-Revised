@@ -1,11 +1,19 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_world.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
 
-#include <sstream>
-#include <stdexcept>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -14,11 +22,10 @@ namespace ai = eawr::script::foc::ai;
 namespace ga = eawr::script::foc::galactic_ai;
 using galactic_test::expect;
 using ai::real;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
+using eawr::testing::result_diagnostic::take;
+void done(eawr::core::Result<void> result) {
+    eawr::testing::must(std::move(result));
 }
-void done(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
 eawr::sim::math::Fixed f(std::int64_t n) { return take(eawr::sim::math::Fixed::from_integer(n)); }
 gc::GalacticSetup fixture() {
     gc::GalacticSetup s; s.seed = 71; s.debug_commands = true;
@@ -130,7 +137,7 @@ void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
     encoded.push_back(0); expect(!standalone.restore_planet_access(encoded), "malformed access restore refuses atomically");
 }
 }
-int main() {
+int case_galactic_ai_access_tests() {
     try {
         for (const bool fog : {false, true}) {
             std::string reference;

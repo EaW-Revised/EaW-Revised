@@ -1,13 +1,17 @@
 // Synthetic controls for the shot-readiness census, palette, attachment and
 // digest helpers. Every expectation is derived by hand from the fixture.
 
+#include "../../support/check.hpp"
 #include "eawr/presentation/animation/shot_readiness.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
 #include <limits>
-#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -15,9 +19,10 @@ using namespace eawr;
 namespace playback = eawr::presentation::animation;
 using playback::Matrix;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 bool close(const double left, const double right, const double tolerance = 1.0e-5) {
     return std::abs(left - right) <= tolerance;

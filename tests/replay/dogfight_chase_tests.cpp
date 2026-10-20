@@ -1,5 +1,14 @@
 #include "dogfight_support.hpp"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <string>
+#include <vector>
+
 namespace dogfight_test_support {
 
 // C-22 (FD-01 to FD-04, FD-06): the attacker records a cell, the defender turns on it once its

@@ -1,21 +1,18 @@
 #pragma once
 
+#include "../../support/check.hpp"
 #include "corpus_associations.hpp"
 
 #include <algorithm>
-#include <cstdlib>
-#include <cwctype>
-#include <filesystem>
-#include <fstream>
-#include <functional>
+#include <cstddef>
+#include <cstdint>
 #include <iostream>
-#include <iterator>
 #include <map>
 #include <optional>
-#include <random>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace association_contracts {
@@ -23,9 +20,10 @@ using namespace eawr;
 namespace corpus = eawr::tests::animation_corpus;
 namespace audit = eawr::tests::animation_corpus::associations;
 
-inline int failures{};
+inline eawr::testing::Checker local_checker;
+inline int& failures = local_checker.failures;
 inline void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 inline assets::Bone bone(const std::string_view name, const std::int32_t parent) {

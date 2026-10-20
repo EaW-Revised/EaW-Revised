@@ -239,43 +239,12 @@ core::Result<void> session_detail::Tick::hull_service() {
     return core::Result<void>::success();
 }
 
-core::Result<void> session_detail::Tick::systems() {
-    const auto& arrivals = staging_.value().arrivals.value();
-    const auto& world = targets_.value().world.value();
-    const auto& damage_rules = flights_.value().damage_rules.value();
-    auto& staged = tracked_.value().staged.value();
-    const auto& craft_states = staging_.value().crafts.value();
-    const auto& squadron_states = craft_prep_.value().minds.value();
-    auto& pads = impl_->pad_stage.values;
-    const auto& construction = impl_->construction_stage.values;
-    // Systems phase: workers service recharge and build instances from copied ascending-ID
-    // units. Hull cap and drag already ran before targeting (WFO-23).
-    mark("systems_setup", true);
-    systems_.emplace();
-    auto& inputs = systems_.value().inputs.emplace(staged.release());
-    if (auto serviced = impl_->service_healing(inputs, arrivals, tick, executor, targets_->combat_events.value()); !serviced) return serviced;
-    if (auto serviced = impl_->service_beams(inputs, tick, executor); !serviced) return serviced;
-    if (auto serviced = impl_->service_weaken(inputs, tick, executor); !serviced) return serviced;
-    if (inputs.size() != impl_->concentrate_service_census
-        || (!inputs.empty() && inputs.back().state.entity_id != impl_->concentrate_service_last_id)) {
-        if (auto serviced = impl_->service_concentrate(inputs, tick, executor); !serviced) return serviced;
-    }
-    if (auto refreshed = impl_->refresh_concentrate_bonuses(inputs, impl_->command_ledger, staging_->ledgers.value(), executor); !refreshed) return refreshed;
-    auto& asteroid_scratch = impl_->asteroid_scratch;
-    auto& asteroid_impacts = asteroid_scratch.impacts;
-    auto& asteroid_queries = asteroid_scratch.queries;
-    auto& asteroid_candidates = asteroid_scratch.examined;
-    asteroid_impacts.resize(inputs.size());
-    asteroid_scratch.deliveries.resize(inputs.size());
-    for (auto& output : asteroid_scratch.deliveries) output.clear();
-    asteroid_queries.assign(inputs.size(), 0);
-    asteroid_candidates.assign(inputs.size(), 0);
-    for (auto& output : asteroid_impacts) output.clear();
-    auto& field_slots = asteroid_scratch.field_slots;
-    auto& fields = asteroid_scratch.fields;
-    auto& field_index = asteroid_scratch.index;
-    fields.clear();
-    math::Fixed field_reach{};
+
+core::Result<void> session_detail::Tick::prepare_asteroid_fields(std::vector<LiveUnit>& inputs, const DamageRules* const& damage_rules,
+    const std::map<EntityId, ArrivalState>& arrivals,
+    std::vector<std::optional<AsteroidFieldInput>>& field_slots, AsteroidScratch& asteroid_scratch,
+    std::vector<AsteroidFieldInput>& fields, math::Fixed& field_reach, SpaceIndex& field_index,
+    std::vector<std::vector<AsteroidImpact>>& asteroid_impacts) {
     // WHZ-11: disabled scalars skip geometry; static tracking is available only with avoidance.
     if (damage_rules != nullptr && damage_rules->asteroid_damage.raw() != 0
         && damage_rules->asteroid_rate.raw() != 0 && impl_->motion.avoidance) {
@@ -315,8 +284,13 @@ core::Result<void> session_detail::Tick::systems() {
     }
     for (auto& candidates : asteroid_scratch.candidates) candidates.reserve(fields.size());
     for (auto& impacts : asteroid_impacts) impacts.reserve(fields.size());
-    auto& capture_jobs = impl_->capture_jobs;
-    auto& capture_inputs = impl_->capture_inputs;
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::prepare_capture_jobs(std::vector<CaptureJob>& capture_jobs, std::vector<CaptureCandidate>& capture_inputs,
+    std::map<EntityId, PadState>& pads, std::vector<LiveUnit>& inputs,
+    const std::map<EntityId, ArrivalState>& arrivals, const core::Result<detail::CombatWorld>& world) {
     capture_jobs.clear();
     if ((tick + 1) % 4 == 0) {
         // Pad-only scheduling; occupied points do not prepare or query the world.
@@ -413,235 +387,13 @@ core::Result<void> session_detail::Tick::systems() {
             [&service_capture_jobs](const std::size_t partition) { service_capture_jobs(partition); });
         if (!captured) return core::Result<void>::failure(captured.error());
     }
-    auto& instances = systems_.value().instances.emplace(inputs.size());
-    auto& serviced = systems_.value().serviced.emplace(inputs.size());
-    std::vector<std::optional<core::Diagnostic>> errors(inputs.size());
-    std::vector<std::uint8_t> proxy_live;
-    const bool barrage_bound = std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(),
-        [](const UnitAbilityProfile& profile) { return ability_slot(profile, AbilityKind::barrage).has_value(); });
-    if (barrage_bound) {
-        proxy_live.resize(inputs.size(), 1U);
-        // Read the staged ability/health state before workers mutate their own inputs.
-        const auto proxies = executor.execute_phase("barrage-proxies", tick_partition_count, [&](const std::size_t partition) {
-            const auto range = partition_range(partition, inputs.size());
-            for (auto index = range.begin; index < range.end; ++index) {
-                const auto& unit = inputs[index];
-                if (unit.state.barrage_source == invalid_entity_id) continue;
-                const auto source = std::lower_bound(inputs.begin(), inputs.end(), unit.state.barrage_source,
-                    [](const LiveUnit& candidate, const EntityId id) { return candidate.state.entity_id < id; });
-                const auto* profile = source != inputs.end() && source->state.entity_id == unit.state.barrage_source
-                    ? impl_->abilities.find(source->state.type_id) : nullptr;
-                const auto slot = profile != nullptr ? ability_slot(*profile, AbilityKind::barrage) : std::nullopt;
-                proxy_live[index] = source != inputs.end() && slot && source->abilities
-                    && (!source->durability || source->durability->hull.raw() > 0)
-                    && source->abilities->slots[*slot].active
-                    && source->abilities->slots[*slot].target == unit.state.entity_id ? 1U : 0U;
-            }
-        });
-        if (!proxies) return core::Result<void>::failure(proxies.error());
-    }
-    // WNO-23/42: transfer work is bounded by capture jobs and held bonus objects.
-    // Each transferred unit changes owner inside the existing partitioned service.
-    const bool transfers = std::any_of(capture_jobs.begin(), capture_jobs.end(),
-        [](const CaptureJob& job) { return job.before != job.owner; });
-    std::map<EntityId, TypeId> transfer_containers;
-    std::vector<CombatBonuses> transfer_categories;
-    if (transfers) {
-        transfer_categories.resize(tick_partition_count * impl_->bonus_categories.size());
-        for (const auto& account : staging_->ledgers.value()) for (const auto& held : account.completed) {
-            const auto host = std::lower_bound(inputs.begin(), inputs.end(), held.station,
-                [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
-            if (host != inputs.end() && host->state.entity_id == held.station)
-                transfer_containers.emplace(held.station, host->state.type_id);
-        }
-    }
-    mark("systems_setup", false);
-    // WSL-38/41: gather only active repair work inside the existing partitioned entity phase.
-    std::array<std::vector<std::size_t>, tick_partition_count> repair_units;
-    const auto executed = executor.execute_phase("unit-systems", tick_partition_count, [&](const std::size_t partition) {
-        const auto range = partition_range(partition, inputs.size());
-        for (auto index = range.begin; index < range.end; ++index) {
-            auto& unit = inputs[index];
-            if (unit.state.barrage_source != invalid_entity_id && proxy_live[index] == 0U) {
-                serviced[index].unit_destroyed = true;
-                continue;
-            }
-            if (unit.abilities) {
-                const auto& profile = *impl_->abilities.find(unit.state.type_id);
-                if (const auto slot = ability_slot(profile, AbilityKind::barrage)) {
-                    auto& active = unit.abilities->slots[*slot];
-                    const auto target = std::lower_bound(inputs.begin(), inputs.end(), active.target,
-                        [](const LiveUnit& candidate, const EntityId id) { return candidate.state.entity_id < id; });
-                    if (!active.active || target == inputs.end() || target->state.entity_id != active.target) {
-                        static_cast<void>(deactivate_ability(profile.abilities[*slot], active, tick));
-                        if (unit.combat && unit.combat->attack_target == active.target) {
-                            unit.combat->attack_target = invalid_entity_id;
-                            unit.combat->direct = false;
-                        }
-                        if (unit.state.order.target == active.target) unit.state.order = {};
-                        active.target = invalid_entity_id;
-                    }
-                }
-            }
-            const auto context = [&] {
-                return "tick " + std::to_string(tick) + " unit " + std::to_string(unit.state.entity_id) + ": ";
-            };
-            const auto job = std::lower_bound(capture_jobs.begin(), capture_jobs.end(), unit.state.entity_id,
-                [](const CaptureJob& entry, const EntityId id) { return entry.id < id; });
-            if (job != capture_jobs.end() && job->id == unit.state.entity_id && job->before != job->owner) {
-                // Resolve the new owner's contributions without changing the live identity.
-                const auto categories = std::span(transfer_categories).subspan(
-                    partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
-                const auto bonuses = impl_->command_bonuses_for(unit, impl_->command_ledger,
-                    staging_->ledgers.value(), transfer_containers, categories, nullptr, true, job->owner);
-                const auto changed = impl_->transfer_owner(unit, job->owner, bonuses);
-                if (!changed) {
-                    errors[index] = detail::diagnostic(diagnostic_codes::worker_failure, context() + changed.error().message);
-                    continue;
-                }
-            }
-            if (unit.durability) {
-                const auto& profile = *impl_->health_profile(unit);
-                // WBP-16: retain post-command construction healing, so a killed
-                // under-construction object cannot heal before the command hit.
-                if (const auto building = construction.find(unit.state.entity_id);
-                    building != construction.end() && tick > building->second.start_frame && unit.durability->hull.raw() > 0) {
-                    unit.durability->hull = service_construction(unit.durability->hull, profile.max_hull, building->second);
-                }
-                // With damage rules (#74): a lost last shield generator drops the shield (DG-17); the
-                // pool (EN-02), then the shield (DG-13), recharge on the unit's own recharge frames.
-                if (damage_rules != nullptr) {
-                    auto& state = *unit.durability;
-                    shield_generators_lost(profile, *damage_rules, state, tick);
-                    auto recharged = core::Result<void>::success();
-                    // AB-22, AB-23: an active ability scales the recharge intervals and amounts.
-                    const auto factor = [&](const AbilityModifier modifier) { return impl_->ability_factor(unit, modifier); };
-                    if (has_energy_pool(profile, *damage_rules) && tick >= state.next_energy_frame) {
-                        state.next_energy_frame =
-                            tick + scaled_interval(damage_rules->energy_recharge_frames, factor(AbilityModifier::energy_regen_interval));
-                        recharged = recharge_energy(profile, *damage_rules, state, factor(AbilityModifier::energy_regen));
-                    }
-                    if (recharged && tick >= state.next_shield_frame) {
-                        state.next_shield_frame =
-                            tick + scaled_interval(damage_rules->shield_recharge_frames, factor(AbilityModifier::shield_regen_interval));
-                        recharged = recharge_shields(profile, *damage_rules, state, tick, factor(AbilityModifier::shield_regen));
-                        if (recharged && profile.max_shields.raw() > 0 && unit.combat) {
-                            // WHZ-30/31: recharge first, then refresh contact every shield service.
-                            // Neither membership nor a successful refresh cancels DEFEND.
-                            auto& nebula = impl_->nebula_scratch;
-                            auto& candidates = nebula.candidates[partition];
-                            const math::Vec3 center{unit.state.position.x, unit.state.position.y, math::Fixed{}};
-                            nebula.index.box_positions(center, {nebula.reach, nebula.reach, math::Fixed{}}, candidates);
-                            bool contact = false;
-                            for (const auto candidate : candidates) {
-                                const auto& volume = nebula.volumes[candidate];
-                                if (volume.ion_storm && volume.body.entity_id != unit.state.entity_id
-                                    && within_range(center, volume.soft_center, volume.radius, RangeMetric::planar)) { contact = true; break; }
-                            }
-                            state.ion_storm_contact = contact ? std::optional(tick) : std::nullopt;
-                        }
-                    }
-                    if (recharged) impl_->end_depleted_defend(unit, tick);
-                    if (!recharged) {
-                        errors[index] = detail::diagnostic(
-                            diagnostic_codes::worker_failure, context() + recharged.error().message);
-                        continue;
-                    }
-                }
-            }
-            const auto* footprint = impl_->motion.footprint(unit.state.type_id);
-            // WHZ-10/11/13: failed service gates retain prior contact; moving means translation.
-            const bool layer = footprint != nullptr && (footprint->layer == SpaceLayer::frigate
-                || footprint->layer == SpaceLayer::capital || footprint->layer == SpaceLayer::super_capital);
-            const bool locomotor_gate = footprint != nullptr && (!footprint->locomotor
-                || (unit.speed.raw() > 0 && unit.motion && unit.motion->kind != MotionKind::turn
-                    && !arrivals.contains(unit.state.entity_id)));
-            if (!damage_blocked() && damage_rules != nullptr && damage_rules->asteroid_damage.raw() != 0
-                && damage_rules->asteroid_rate.raw() != 0 && footprint != nullptr && footprint->asteroid_damage
-                && layer && locomotor_gate && unit.combat && unit.durability && unit.durability->hull.raw() > 0) {
-                asteroid_queries[index] = 1;
-                bool contact = false;
-                CombatRandom random(impl_->setup.seed, tick, unit.state.entity_id, asteroid_service_slot);
-                // WHZ-12: predict only this unit's health to preserve successive hardpoint
-                // selection and random draws. Actual damage belongs to the ordered commit.
-                std::optional<LiveUnit> predicted;
-                // Center XY at this logical frame; neither swept motion nor hull/height contact.
-                auto& candidates = asteroid_scratch.candidates[partition];
-                // Flat index coordinates keep height out of the broad phase as well as exact contact.
-                const math::Vec3 center{unit.state.position.x, unit.state.position.y, math::Fixed{}};
-                field_index.box_positions(center, {field_reach, field_reach, math::Fixed{}}, candidates);
-                std::sort(candidates.begin(), candidates.end()); // sorted body positions are sorted IDs
-                for (const auto position : candidates) {
-                    const auto& field = fields[position];
-                    const auto id = field.body.entity_id;
-                    if (id == unit.state.entity_id
-                        || !within_range(center, field.body.position, field_reach, RangeMetric::planar)) continue;
-                    ++asteroid_candidates[index];
-                    if (!within_range(center, field.body.position, field.radius, RangeMetric::planar)) continue;
-                    contact = true;
-                    // WHZ-12: each overlapping field consumes its own inclusive probability draw.
-                    const auto draw = random.uniform(0, static_cast<std::uint32_t>(math::Fixed::scale));
-                    if (static_cast<std::int64_t>(draw) > damage_rules->asteroid_rate.raw()) continue;
-                    if (!predicted) predicted = unit;
-                    const auto& profile = *impl_->health_profile(unit);
-                    const auto selected = random_destroyable_hardpoint(profile, *predicted->durability, random);
-                    const auto* combat_profile = impl_->combat.find(unit.state.type_id);
-                    const auto selected_route = combat_profile != nullptr && selected != hull_target
-                        ? damage_mesh_route(combat_profile->hardpoint_meshes, selected) : hull_target;
-                    const auto route = damage_target_valid(profile, selected_route) ? selected_route : hull_target;
-                    Hit hit;
-                    hit.amount = damage_rules->asteroid_damage;
-                    hit.damage_type = damage_rules->asteroid_damage_type;
-                    hit.hardpoint = route;
-                    hit.kind = HitKind::asteroid;
-                    hit.source = id;
-                    hit.internal_damage_misc = false;
-                    const auto arrival_defense = unit.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
-                    hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw() + arrival_defense.raw());
-                    hit.take_damage_multiplier = predicted->take_damage_mode;
-                    asteroid_scratch.deliveries[index].push_back(hit);
-                    if (!redirect_recipients(unit.state.entity_id).empty()) continue;
-                    auto outcome = apply_hit(profile, *damage_rules, *predicted->durability, hit, tick);
-                    if (!outcome) { errors[index] = outcome.error(); break; }
-                    impl_->end_depleted_defend(*predicted, tick, outcome.value().storm_shield_branch);
-                    if (outcome.value().damage.unit_destroyed) break;
-                }
-                unit.asteroid_contact = contact ? std::optional(tick) : std::nullopt;
-                if (errors[index]) continue;
-            }
-            const auto transform = unit_transform(unit);
-            if (!transform) {
-                errors[index] = detail::diagnostic(
-                    diagnostic_codes::worker_failure, context() + transform.error().message);
-                continue;
-            }
-            if (unit.durability && !serviced[index].unit_destroyed && !arrivals.contains(unit.state.entity_id)
-                && std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(),
-                    [](const auto& payers) { return !payers.empty(); })) repair_units[partition].push_back(index);
-            instances[index] = impl_->instance_for(unit, transform.value(), tick + 1, &special_weapons_);
-            // WSU-34: publish copied render inputs in the existing disjoint worker slots.
-            if (const auto craft = craft_states.find(unit.state.entity_id); craft != craft_states.end()) {
-                instances[index].craft_velocity_per_frame = craft->second.velocity;
-            }
-            if (const auto squadron = squadron_states.find(unit.state.entity_id); squadron != squadron_states.end()) {
-                instances[index].squadron_in_idle_grid = squadron->second.idle_cell.has_value();
-                if (squadron->second.idle_cell) instances[index].squadron_idle_anchor = squadron->second.anchor;
-                // SND-46: copied path state in this existing disjoint snapshot slot; no new sim pass.
-                const auto& flight = squadron->second;
-                instances[index].has_movement_path = flight.mode == SquadronMode::move || flight.approach
-                    || (flight.mode == SquadronMode::escort && !flight.idle_cell);
-            }
-        }
-    });
-    if (!executed) {
-        return core::Result<void>::failure(executed.error());
-    }
-    for (auto& error : errors) {
-        if (error) {
-            return core::Result<void>::failure(std::move(*error));
-        }
-    }
+    return core::Result<void>::success();
+}
 
+
+core::Result<void> session_detail::Tick::commit_environmental_hits(std::vector<LiveUnit>& inputs, std::vector<ServiceOutcome>& serviced,
+    const DamageRules* const& damage_rules, std::vector<std::vector<AsteroidImpact>>& asteroid_impacts,
+    AsteroidScratch& asteroid_scratch, std::vector<TacticalInstance>& instances) {
     auto& events = impacts_.value().events.value();
     // VT-02/WCC-40/WHE-64: commit all staged environmental hits in source/field/member order.
     // Register each destruction before the next delivery, including another routed share.
@@ -693,6 +445,13 @@ core::Result<void> session_detail::Tick::systems() {
         }
     }
 
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::service_hardpoint_repairs(std::vector<LiveUnit>& inputs, std::vector<ServiceOutcome>& serviced,
+    std::array<std::vector<std::size_t>, tick_partition_count>& repair_units,
+    std::vector<TacticalInstance>& instances, std::vector<std::optional<core::Diagnostic>>& errors) {
     struct RepairJob {
         std::size_t unit{};
         std::vector<std::vector<PlayerId>> paid;
@@ -757,6 +516,307 @@ core::Result<void> session_detail::Tick::systems() {
             if (!point.special_ability_name.empty()) set_named_hardpoint_gate(unit.state, point.special_ability_name, true);
         }
     }
+    return core::Result<void>::success();
+}
+
+
+
+void session_detail::Tick::service_asteroid_contact(LiveUnit& unit, std::size_t& index, const std::size_t& partition,
+    const std::map<EntityId, ArrivalState>& arrivals, const DamageRules* const& damage_rules,
+    std::vector<std::uint64_t>& asteroid_queries, AsteroidScratch& asteroid_scratch, SpaceIndex& field_index,
+    math::Fixed& field_reach, std::vector<AsteroidFieldInput>& fields,
+    std::vector<std::uint64_t>& asteroid_candidates, std::vector<std::optional<core::Diagnostic>>& errors) {
+    const auto* footprint = impl_->motion.footprint(unit.state.type_id);
+    // WHZ-10/11/13: failed service gates retain prior contact; moving means translation.
+    const bool layer = footprint != nullptr && (footprint->layer == SpaceLayer::frigate
+        || footprint->layer == SpaceLayer::capital || footprint->layer == SpaceLayer::super_capital);
+    const bool locomotor_gate = footprint != nullptr && (!footprint->locomotor
+        || (unit.speed.raw() > 0 && unit.motion && unit.motion->kind != MotionKind::turn
+            && !arrivals.contains(unit.state.entity_id)));
+    if (!damage_blocked() && damage_rules != nullptr && damage_rules->asteroid_damage.raw() != 0
+        && damage_rules->asteroid_rate.raw() != 0 && footprint != nullptr && footprint->asteroid_damage
+        && layer && locomotor_gate && unit.combat && unit.durability && unit.durability->hull.raw() > 0) {
+        asteroid_queries[index] = 1;
+        bool contact = false;
+        CombatRandom random(impl_->setup.seed, tick, unit.state.entity_id, asteroid_service_slot);
+        // WHZ-12: predict only this unit's health to preserve successive hardpoint
+        // selection and random draws. Actual damage belongs to the ordered commit.
+        std::optional<LiveUnit> predicted;
+        // Center XY at this logical frame; neither swept motion nor hull/height contact.
+        auto& candidates = asteroid_scratch.candidates[partition];
+        // Flat index coordinates keep height out of the broad phase as well as exact contact.
+        const math::Vec3 center{unit.state.position.x, unit.state.position.y, math::Fixed{}};
+        field_index.box_positions(center, {field_reach, field_reach, math::Fixed{}}, candidates);
+        std::sort(candidates.begin(), candidates.end()); // sorted body positions are sorted IDs
+        for (const auto position : candidates) {
+            const auto& field = fields[position];
+            const auto id = field.body.entity_id;
+            if (id == unit.state.entity_id
+                || !within_range(center, field.body.position, field_reach, RangeMetric::planar)) continue;
+            ++asteroid_candidates[index];
+            if (!within_range(center, field.body.position, field.radius, RangeMetric::planar)) continue;
+            contact = true;
+            // WHZ-12: each overlapping field consumes its own inclusive probability draw.
+            const auto draw = random.uniform(0, static_cast<std::uint32_t>(math::Fixed::scale));
+            if (static_cast<std::int64_t>(draw) > damage_rules->asteroid_rate.raw()) continue;
+            if (!predicted) predicted = unit;
+            const auto& profile = *impl_->health_profile(unit);
+            const auto selected = random_destroyable_hardpoint(profile, *predicted->durability, random);
+            const auto* combat_profile = impl_->combat.find(unit.state.type_id);
+            const auto selected_route = combat_profile != nullptr && selected != hull_target
+                ? damage_mesh_route(combat_profile->hardpoint_meshes, selected) : hull_target;
+            const auto route = damage_target_valid(profile, selected_route) ? selected_route : hull_target;
+            Hit hit;
+            hit.amount = damage_rules->asteroid_damage;
+            hit.damage_type = damage_rules->asteroid_damage_type;
+            hit.hardpoint = route;
+            hit.kind = HitKind::asteroid;
+            hit.source = id;
+            hit.internal_damage_misc = false;
+            const auto arrival_defense = unit.arrival_vulnerable_until ? impl_->economy.vulnerability : math::Fixed{};
+            hit.defense = math::Fixed::from_raw(unit.upgrade_bonuses[4].raw() + arrival_defense.raw());
+            hit.take_damage_multiplier = predicted->take_damage_mode;
+            asteroid_scratch.deliveries[index].push_back(hit);
+            if (!redirect_recipients(unit.state.entity_id).empty()) continue;
+            auto outcome = apply_hit(profile, *damage_rules, *predicted->durability, hit, tick);
+            if (!outcome) { errors[index] = outcome.error(); break; }
+            impl_->end_depleted_defend(*predicted, tick, outcome.value().storm_shield_branch);
+            if (outcome.value().damage.unit_destroyed) break;
+        }
+        unit.asteroid_contact = contact ? std::optional(tick) : std::nullopt;
+    }
+}
+
+void session_detail::Tick::service_systems_partition(const std::size_t& partition, std::vector<LiveUnit>& inputs,
+    std::vector<std::uint8_t>& proxy_live, std::vector<ServiceOutcome>& serviced,
+    std::vector<CaptureJob>& capture_jobs, std::vector<CombatBonuses>& transfer_categories,
+    std::map<EntityId, TypeId>& transfer_containers, const std::map<EntityId, ConstructionState>& construction,
+    const DamageRules* const& damage_rules, std::vector<std::optional<core::Diagnostic>>& errors,
+    const std::map<EntityId, ArrivalState>& arrivals, std::vector<std::uint64_t>& asteroid_queries,
+    AsteroidScratch& asteroid_scratch, SpaceIndex& field_index, math::Fixed& field_reach,
+    std::vector<AsteroidFieldInput>& fields, std::vector<std::uint64_t>& asteroid_candidates,
+    std::array<std::vector<std::size_t>, tick_partition_count>& repair_units,
+    std::vector<TacticalInstance>& instances, const detail::MapStage<CraftState>& craft_states,
+    const detail::MapStage<SquadronState>& squadron_states) {
+    const auto range = partition_range(partition, inputs.size());
+    for (auto index = range.begin; index < range.end; ++index) {
+        auto& unit = inputs[index];
+        if (unit.state.barrage_source != invalid_entity_id && proxy_live[index] == 0U) {
+            serviced[index].unit_destroyed = true;
+            continue;
+        }
+        if (unit.abilities) {
+            const auto& profile = *impl_->abilities.find(unit.state.type_id);
+            if (const auto slot = ability_slot(profile, AbilityKind::barrage)) {
+                auto& active = unit.abilities->slots[*slot];
+                const auto target = std::lower_bound(inputs.begin(), inputs.end(), active.target,
+                    [](const LiveUnit& candidate, const EntityId id) { return candidate.state.entity_id < id; });
+                if (!active.active || target == inputs.end() || target->state.entity_id != active.target) {
+                    static_cast<void>(deactivate_ability(profile.abilities[*slot], active, tick));
+                    if (unit.combat && unit.combat->attack_target == active.target) {
+                        unit.combat->attack_target = invalid_entity_id;
+                        unit.combat->direct = false;
+                    }
+                    if (unit.state.order.target == active.target) unit.state.order = {};
+                    active.target = invalid_entity_id;
+                }
+            }
+        }
+        const auto context = [&] {
+            return "tick " + std::to_string(tick) + " unit " + std::to_string(unit.state.entity_id) + ": ";
+        };
+        const auto job = std::lower_bound(capture_jobs.begin(), capture_jobs.end(), unit.state.entity_id,
+            [](const CaptureJob& entry, const EntityId id) { return entry.id < id; });
+        if (job != capture_jobs.end() && job->id == unit.state.entity_id && job->before != job->owner) {
+            // Resolve the new owner's contributions without changing the live identity.
+            const auto categories = std::span(transfer_categories).subspan(
+                partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
+            const auto bonuses = impl_->command_bonuses_for(unit, impl_->command_ledger,
+                staging_->ledgers.value(), transfer_containers, categories, nullptr, true, job->owner);
+            const auto changed = impl_->transfer_owner(unit, job->owner, bonuses);
+            if (!changed) {
+                errors[index] = detail::diagnostic(diagnostic_codes::worker_failure, context() + changed.error().message);
+                continue;
+            }
+        }
+        if (unit.durability) {
+            const auto& profile = *impl_->health_profile(unit);
+            // WBP-16: retain post-command construction healing, so a killed
+            // under-construction object cannot heal before the command hit.
+            if (const auto building = construction.find(unit.state.entity_id);
+                building != construction.end() && tick > building->second.start_frame && unit.durability->hull.raw() > 0) {
+                unit.durability->hull = service_construction(unit.durability->hull, profile.max_hull, building->second);
+            }
+            // With damage rules (#74): a lost last shield generator drops the shield (DG-17); the
+            // pool (EN-02), then the shield (DG-13), recharge on the unit's own recharge frames.
+            if (damage_rules != nullptr) {
+                auto& state = *unit.durability;
+                shield_generators_lost(profile, *damage_rules, state, tick);
+                auto recharged = core::Result<void>::success();
+                // AB-22, AB-23: an active ability scales the recharge intervals and amounts.
+                const auto factor = [&](const AbilityModifier modifier) { return impl_->ability_factor(unit, modifier); };
+                if (has_energy_pool(profile, *damage_rules) && tick >= state.next_energy_frame) {
+                    state.next_energy_frame =
+                        tick + scaled_interval(damage_rules->energy_recharge_frames, factor(AbilityModifier::energy_regen_interval));
+                    recharged = recharge_energy(profile, *damage_rules, state, factor(AbilityModifier::energy_regen));
+                }
+                if (recharged && tick >= state.next_shield_frame) {
+                    state.next_shield_frame =
+                        tick + scaled_interval(damage_rules->shield_recharge_frames, factor(AbilityModifier::shield_regen_interval));
+                    recharged = recharge_shields(profile, *damage_rules, state, tick, factor(AbilityModifier::shield_regen));
+                    if (recharged && profile.max_shields.raw() > 0 && unit.combat) {
+                        // WHZ-30/31: recharge first, then refresh contact every shield service.
+                        // Neither membership nor a successful refresh cancels DEFEND.
+                        auto& nebula = impl_->nebula_scratch;
+                        auto& candidates = nebula.candidates[partition];
+                        const math::Vec3 center{unit.state.position.x, unit.state.position.y, math::Fixed{}};
+                        nebula.index.box_positions(center, {nebula.reach, nebula.reach, math::Fixed{}}, candidates);
+                        bool contact = false;
+                        for (const auto candidate : candidates) {
+                            const auto& volume = nebula.volumes[candidate];
+                            if (volume.ion_storm && volume.body.entity_id != unit.state.entity_id
+                                && within_range(center, volume.soft_center, volume.radius, RangeMetric::planar)) { contact = true; break; }
+                        }
+                        state.ion_storm_contact = contact ? std::optional(tick) : std::nullopt;
+                    }
+                }
+                if (recharged) impl_->end_depleted_defend(unit, tick);
+                if (!recharged) {
+                    errors[index] = detail::diagnostic(
+                        diagnostic_codes::worker_failure, context() + recharged.error().message);
+                    continue;
+                }
+            }
+        }
+        service_asteroid_contact(unit, index, partition, arrivals, damage_rules, asteroid_queries, asteroid_scratch, field_index, field_reach, fields, asteroid_candidates, errors);
+        // errors starts empty each tick. Earlier error paths set their slot and continue,
+        // so only service_asteroid_contact can have set errors[index] when this check is reached.
+        if (errors[index]) continue;
+        const auto transform = unit_transform(unit);
+        if (!transform) {
+            errors[index] = detail::diagnostic(
+                diagnostic_codes::worker_failure, context() + transform.error().message);
+            continue;
+        }
+        if (unit.durability && !serviced[index].unit_destroyed && !arrivals.contains(unit.state.entity_id)
+            && std::any_of(unit.durability->repairing_players.begin(), unit.durability->repairing_players.end(),
+                [](const auto& payers) { return !payers.empty(); })) repair_units[partition].push_back(index);
+        instances[index] = impl_->instance_for(unit, transform.value(), tick + 1, &special_weapons_);
+        // WSU-34: publish copied render inputs in the existing disjoint worker slots.
+        if (const auto craft = craft_states.find(unit.state.entity_id); craft != craft_states.end()) {
+            instances[index].craft_velocity_per_frame = craft->second.velocity;
+        }
+        if (const auto squadron = squadron_states.find(unit.state.entity_id); squadron != squadron_states.end()) {
+            instances[index].squadron_in_idle_grid = squadron->second.idle_cell.has_value();
+            if (squadron->second.idle_cell) instances[index].squadron_idle_anchor = squadron->second.anchor;
+            // SND-46: copied path state in this existing disjoint snapshot slot; no new sim pass.
+            const auto& flight = squadron->second;
+            instances[index].has_movement_path = flight.mode == SquadronMode::move || flight.approach
+                || (flight.mode == SquadronMode::escort && !flight.idle_cell);
+        }
+    }
+}
+
+core::Result<void> session_detail::Tick::systems() {
+    const auto& arrivals = staging_.value().arrivals.value();
+    const auto& world = targets_.value().world.value();
+    const auto& damage_rules = flights_.value().damage_rules.value();
+    auto& staged = tracked_.value().staged.value();
+    const auto& craft_states = staging_.value().crafts.value();
+    const auto& squadron_states = craft_prep_.value().minds.value();
+    auto& pads = impl_->pad_stage.values;
+    const auto& construction = impl_->construction_stage.values;
+    // Systems phase: workers service recharge and build instances from copied ascending-ID
+    // units. Hull cap and drag already ran before targeting (WFO-23).
+    mark("systems_setup", true);
+    systems_.emplace();
+    auto& inputs = systems_.value().inputs.emplace(staged.release());
+    if (auto serviced = impl_->service_healing(inputs, arrivals, tick, executor, targets_->combat_events.value()); !serviced) return serviced;
+    if (auto serviced = impl_->service_beams(inputs, tick, executor); !serviced) return serviced;
+    if (auto serviced = impl_->service_weaken(inputs, tick, executor); !serviced) return serviced;
+    if (inputs.size() != impl_->concentrate_service_census
+        || (!inputs.empty() && inputs.back().state.entity_id != impl_->concentrate_service_last_id)) {
+        if (auto serviced = impl_->service_concentrate(inputs, tick, executor); !serviced) return serviced;
+    }
+    if (auto refreshed = impl_->refresh_concentrate_bonuses(inputs, impl_->command_ledger, staging_->ledgers.value(), executor); !refreshed) return refreshed;
+    auto& asteroid_scratch = impl_->asteroid_scratch;
+    auto& asteroid_impacts = asteroid_scratch.impacts;
+    auto& asteroid_queries = asteroid_scratch.queries;
+    auto& asteroid_candidates = asteroid_scratch.examined;
+    asteroid_impacts.resize(inputs.size());
+    asteroid_scratch.deliveries.resize(inputs.size());
+    for (auto& output : asteroid_scratch.deliveries) output.clear();
+    asteroid_queries.assign(inputs.size(), 0);
+    asteroid_candidates.assign(inputs.size(), 0);
+    for (auto& output : asteroid_impacts) output.clear();
+    auto& field_slots = asteroid_scratch.field_slots;
+    auto& fields = asteroid_scratch.fields;
+    auto& field_index = asteroid_scratch.index;
+    fields.clear();
+    math::Fixed field_reach{};
+    if (auto result = prepare_asteroid_fields(inputs, damage_rules, arrivals, field_slots, asteroid_scratch, fields, field_reach, field_index, asteroid_impacts); !result) return result;
+    auto& capture_jobs = impl_->capture_jobs;
+    auto& capture_inputs = impl_->capture_inputs;
+    if (auto result = prepare_capture_jobs(capture_jobs, capture_inputs, pads, inputs, arrivals, world); !result) return result;
+    auto& instances = systems_.value().instances.emplace(inputs.size());
+    auto& serviced = systems_.value().serviced.emplace(inputs.size());
+    std::vector<std::optional<core::Diagnostic>> errors(inputs.size());
+    std::vector<std::uint8_t> proxy_live;
+    const bool barrage_bound = std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(),
+        [](const UnitAbilityProfile& profile) { return ability_slot(profile, AbilityKind::barrage).has_value(); });
+    if (barrage_bound) {
+        proxy_live.resize(inputs.size(), 1U);
+        // Read the staged ability/health state before workers mutate their own inputs.
+        const auto proxies = executor.execute_phase("barrage-proxies", tick_partition_count, [&](const std::size_t partition) {
+            const auto range = partition_range(partition, inputs.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto& unit = inputs[index];
+                if (unit.state.barrage_source == invalid_entity_id) continue;
+                const auto source = std::lower_bound(inputs.begin(), inputs.end(), unit.state.barrage_source,
+                    [](const LiveUnit& candidate, const EntityId id) { return candidate.state.entity_id < id; });
+                const auto* profile = source != inputs.end() && source->state.entity_id == unit.state.barrage_source
+                    ? impl_->abilities.find(source->state.type_id) : nullptr;
+                const auto slot = profile != nullptr ? ability_slot(*profile, AbilityKind::barrage) : std::nullopt;
+                proxy_live[index] = source != inputs.end() && slot && source->abilities
+                    && (!source->durability || source->durability->hull.raw() > 0)
+                    && source->abilities->slots[*slot].active
+                    && source->abilities->slots[*slot].target == unit.state.entity_id ? 1U : 0U;
+            }
+        });
+        if (!proxies) return core::Result<void>::failure(proxies.error());
+    }
+    // WNO-23/42: transfer work is bounded by capture jobs and held bonus objects.
+    // Each transferred unit changes owner inside the existing partitioned service.
+    const bool transfers = std::any_of(capture_jobs.begin(), capture_jobs.end(),
+        [](const CaptureJob& job) { return job.before != job.owner; });
+    std::map<EntityId, TypeId> transfer_containers;
+    std::vector<CombatBonuses> transfer_categories;
+    if (transfers) {
+        transfer_categories.resize(tick_partition_count * impl_->bonus_categories.size());
+        for (const auto& account : staging_->ledgers.value()) for (const auto& held : account.completed) {
+            const auto host = std::lower_bound(inputs.begin(), inputs.end(), held.station,
+                [](const LiveUnit& unit, const EntityId id) { return unit.state.entity_id < id; });
+            if (host != inputs.end() && host->state.entity_id == held.station)
+                transfer_containers.emplace(held.station, host->state.type_id);
+        }
+    }
+    mark("systems_setup", false);
+    // WSL-38/41: gather only active repair work inside the existing partitioned entity phase.
+    std::array<std::vector<std::size_t>, tick_partition_count> repair_units;
+    const auto executed = executor.execute_phase("unit-systems", tick_partition_count, [&](const std::size_t partition) {
+        service_systems_partition(partition, inputs, proxy_live, serviced, capture_jobs, transfer_categories, transfer_containers, construction, damage_rules, errors, arrivals, asteroid_queries, asteroid_scratch, field_index, field_reach, fields, asteroid_candidates, repair_units, instances, craft_states, squadron_states);
+    });
+    if (!executed) {
+        return core::Result<void>::failure(executed.error());
+    }
+    for (auto& error : errors) {
+        if (error) {
+            return core::Result<void>::failure(std::move(*error));
+        }
+    }
+
+    if (auto result = commit_environmental_hits(inputs, serviced, damage_rules, asteroid_impacts, asteroid_scratch, instances); !result) return result;
+    if (auto result = service_hardpoint_repairs(inputs, serviced, repair_units, instances, errors); !result) return result;
     return core::Result<void>::success();
 }
 

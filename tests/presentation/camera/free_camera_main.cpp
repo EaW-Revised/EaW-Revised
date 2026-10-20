@@ -6,6 +6,7 @@
 // use a stated tolerance; expectations about rejection compare exact state, so
 // a rejected step is proven to leave nothing partially applied.
 
+#include "../../support/check.hpp"
 #include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/camera/free_camera.hpp"
 
@@ -22,13 +23,11 @@
 namespace {
 namespace camera = eawr::presentation::camera;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 void expect_close(const float actual, const float expected, const std::string_view message,

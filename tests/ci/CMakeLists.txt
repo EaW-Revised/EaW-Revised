@@ -1,4 +1,5 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME ci_python_helpers COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_python_helpers.py")
 
 # Public documentation describes work; tracker numbers are explicit legacy references.
 add_test(NAME ci_doc_refs COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/publish_scan/doc_refs.py"
@@ -33,6 +34,12 @@ add_test(
 set_tests_properties(ci_xml_literal_gate PROPERTIES LABELS "ci-tools")
 add_test(NAME ci_xml_literal_check COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_xml_literal_check.py")
 set_tests_properties(ci_xml_literal_check PROPERTIES LABELS "ci-tools")
+
+# The MSVC shift-guard probe (cmake/EawrMsvcGuard.cmake, legacy #3930).
+add_test(
+    NAME ci_msvc_guard
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_msvc_guard.py"
+)
 
 # #527: the shared evidence-read retry guard, and that every tools/compare_*.py comparator uses it.
 add_test(

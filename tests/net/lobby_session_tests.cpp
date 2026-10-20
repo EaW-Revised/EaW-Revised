@@ -471,7 +471,7 @@ void mesh_refusal_and_start_gate() {
     expect(room.host().snapshot().seats.size() == 2 && room.host().snapshot().revision > before
         && room.client().snapshot() == room.host().snapshot(), "everyone else sees a roster revision without the newcomer");
     expect(room.removed.back() == std::pair{net::PeerIndex{2}, net::LobbyReason::pair_unreachable}, "the slot and stream are released with the typed reason");
-    const std::string line = "guest-2 could not connect to guest-1 and was not admitted.";
+    const std::string line = "guest-2 (Seat 3) could not connect to guest-1 (Seat 2) and was not admitted.";
     expect(!room.host().chat_history().empty() && room.host().chat_history().back().text == line
         && room.host().chat_history().back().seat == sim::SeatId{1}, "the host posts one room line naming both players");
     expect(!room.client().chat_history().empty() && room.client().chat_history().back().text == line, "the player it could not reach hears who and why");
@@ -484,7 +484,7 @@ void mesh_refusal_and_start_gate() {
         && net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "").code == "EAWR-NET-1764"
         && net::lobby_diagnostic(net::LobbyReason::recovery_unavailable, "").code == "EAWR-NET-1615", "new reasons take the 1760..1779 diagnostics");
     require(room.host().refuse_unreachable(2, 1, true)); // already gone: only the room line is posted
-    expect(room.host().chat_history().back().text == "A player could not connect to guest-1 and was not admitted.", "a newcomer that never took a seat is still reported");
+    expect(room.host().chat_history().back().text == "A player (Seat 3) could not connect to guest-1 (Seat 2) and was not admitted.", "a newcomer that never took a seat is still reported");
     require(room.host().admit(2, "identity-2", selection(2), 3, room.revision()));
     expect(room.host().snapshot().seats.size() == 3, "no ban: the freed slot takes the same identity again");
     expect(!room.host().refuse_unreachable(0, 1, true) && !room.host().refuse_unreachable(1, 1, true), "the host and the unreachable seat itself cannot be refused");

@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "battle_overlay.hpp"
 
 #include "eawr/presentation/ui/battle_messages.hpp"
@@ -40,12 +41,7 @@ namespace model = presentation::ui;
 }
 
 [[nodiscard]] std::string json(const std::string& value) {
-    std::string output = "\"";
-    for (const char character : value) {
-        if (character == '"' || character == '\\') output += '\\';
-        output += character;
-    }
-    return output + "\"";
+    return eawr::core::json_quote_verbatim_controls(value);
 }
 
 // TP-07: diagnostic fallback, also used by the project Begin barrier.

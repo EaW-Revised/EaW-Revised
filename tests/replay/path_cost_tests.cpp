@@ -1,20 +1,3 @@
-#include "eawr/sim/tactical/motion.hpp"
-#include "eawr/sim/tactical/pathfind.hpp"
-
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iomanip>
-#include <iostream>
-#include <optional>
-#include <string>
-#include <string_view>
-#include <vector>
-
 // #520: the path search's work and the bounded search's paths (docs/behaviour/space-movement.md
 // PC-06, docs/simulation.md#path-search-cost). Moves on Coruscant's static layer (the M2 start's
 // stations, pads and satellites) with held fleets in the corvette and frigate layers, a dense
@@ -29,6 +12,27 @@
 //
 // --report prints every search against the exact one; --profile prints the time split of the
 // bounded searches. Timings are printed, never checked.
+
+#include "../support/check.hpp"
+#include "eawr/sim/tactical/motion.hpp"
+#include "eawr/sim/tactical/pathfind.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <ios>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -37,13 +41,11 @@ using math::Fixed;
 using math::Vec2;
 using math::Vec3;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

@@ -30,6 +30,9 @@ TOOL = ROOT / "tools/fonts/extract_eaw_fonts.py"
 sys.path.insert(0, str(ROOT / "tests/ui"))
 import sfnt_fixture  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3] / "tools/common"))
+import eawr_python_helpers as python_helpers  # noqa: E402
+
 RUNTIME = bool(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST"))
 GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 FACES = ("EmpireAtWar-Bold", "EmpireAtWar-Light", "EmpireAtWar-Medium", "EmpireAtWar-Stencil")
@@ -72,13 +75,11 @@ def run_viewer(test: unittest.TestCase, directory: pathlib.Path, name: str, cach
     test.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
     report = directory / f"{name}.json"
     capture = directory / f"{name}.png"
-    completed = subprocess.run(
-        [executable, "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--",
+    completed = python_helpers.run_viewer([executable, "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--",
          "--eawr-fonts", "--eawr-font-cache", str(cache), "--eawr-report", str(report),
-         "--eawr-capture", str(capture)],
-        cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=240)
+         "--eawr-capture", str(capture)], cwd=ROOT, timeout=240)
     test.assertTrue(report.is_file(), completed.stdout)
-    result = json.loads(report.read_text(encoding="utf-8"))
+    result = python_helpers.read_json(report)
     test.assertEqual(completed.returncode, 0, result.get("failure") or completed.stdout)
     test.assertEqual(result["status"], "captured", result.get("failure"))
     test.assertEqual(result["capture"]["png"], {"width": 1280, "height": 720})

@@ -1,11 +1,14 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_campaign_economy
+    CONST_ARGV
+
     NAME galactic_galaxy_graph_tests
     SOURCES galaxy_graph_tests.cpp
     LIBS eawr::campaign eawr::checkpoint eawr::platform
     TESTS galactic_galaxy_graph_contracts
 )
 
-add_test(NAME galactic_galaxy_graph_stock COMMAND galactic_galaxy_graph_tests --installed)
+add_test(NAME galactic_galaxy_graph_stock COMMAND galactic_area_campaign_economy galactic_galaxy_graph_tests --installed)
 set_tests_properties(galactic_galaxy_graph_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_test(NAME galactic_graph_replay_corpus
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/replay_corpus_check.py"

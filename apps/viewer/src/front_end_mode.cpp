@@ -1,4 +1,5 @@
 #include "front_end_mode.hpp"
+#include "eawr/core/text.hpp"
 
 #include "attract_runner.hpp"
 #include "audio_buses.hpp"
@@ -92,9 +93,7 @@ bool same(std::string_view a, std::string_view b) {
 }
 
 std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string_view::npos) return {};
-    return std::string(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
+    return core::trim(value, core::xml_whitespace);
 }
 
 // FES-09: the events the dialogs' buttons play are the data's own: the registry names them, and a

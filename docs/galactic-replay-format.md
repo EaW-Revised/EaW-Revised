@@ -57,6 +57,19 @@ keeps section versions at 1: setup/replay carries the extension and the planets 
 length-framed graph-state blob after planet and route blobs. This allocation is compatible with
 existing synthetic saves and does not change tactical replay/checkpoint encodings.
 
+## Interactive summary policy (tag 18)
+
+Optional tag 18 contains one nonzero uint32 active human seat. An absent tag
+retains headless operation and its existing bytes. The campaign owner uses this
+recorded solo observer to acquire a nested pause at a displayable battle outcome
+(WGP-81/89), for either battle layer. Multiplayer and uninvolved observers add no
+summary hold. Multiplayer owners omit this local policy from their recordings
+and hashes, so different local seats cannot change synchronized state.
+Session opcode 9 acknowledges a summary with one uint64 nonzero
+conflict ID; only its owning seat can release that conflict's hold. A stale close
+cannot release another summary or a player pause. Acquisition and release are
+part of deterministic session state, checkpoints and hashes.
+
 ## Native effect journal (tag 16)
 
 The project reconstruction journal records direct native owner admissions separately from
@@ -247,7 +260,8 @@ A reserved number without an implementation is refused like an unknown one.
 |---|---|---|
 | session | 1 pause, 2 resume, 3 set strategic speed, 4 set tactical speed | implemented |
 | session | 5 save request, 6 resign, 7 battle choice, 8 battle vote, 9 dialog acknowledge, 10 victory retry or continue, 11 seat leave, 12 seat rejoin | 5/7/11/12 implemented; remaining numbers reserved for save/battle/coop work |
-| session | 13..61 | reserved for the wave-3 walks |
+| session | 16 invasion accept | implemented (GCMP-04, WGP-89): u64 conflict, never zero; decided at execution from the agreed session state, so a refusal is journaled and replays identically |
+| session | 17..61 | reserved for the wave-3 walks |
 | session | 62 debug set planet owner, 63 debug set fleet orbit | implemented; only with header flag bit 0 |
 | galactic | 1 create fleet, 2 add members, 3 remove members, 4 merge fleets, 5 move fleet, 6 set orbit slot, 7 production, 8 land transports, 9..11 legacy production reservations, 12 black-market prepare, 13 black-market buy, 14 special action prepare, 15 special action execute, 16 special action cancel, 17 galactic ability | 1/2/3/4/6/7 implemented; others reserved |
 | galactic | 18..127 | reserved for the wave-3 walks |
@@ -659,6 +673,16 @@ same deadlines, ownership cleanup and contributions. Absent income keeps previou
 replay/state/snapshot/checkpoint bytes unchanged. This project continuation does
 not claim retail random-stream or restore equivalence; see the named boundaries
 in the [economy walk](behaviour/walks/gc-economy-production.md).
+
+### Story rewards, WST-41/64 (legacy EAWR-683)
+
+Native effect kind **19** (`production_lock`) journals one `BUILDABLE_UNIT` or `LOCK_UNIT` write as uint32 player,
+uint64 unlock type, uint64 lock type (zero skips that half), uint8 slicer-check flag and the int64 current tech level
+before the write. Reconstruction verifies the level, then runs the same writer: unlock (remove the build lock, list
+the type as unlocked), lock (list the lock), and the faction post-check, whose tech increment is part of this effect
+and not journaled twice. Kind **12** (`technology`) carries an optional trailing uint8 maximum mode (1 raise to the
+target, 2 set only) for `SET_TECH_LEVEL` and `SET_MAX_TECH_LEVEL`; recordings without story rewards keep their
+previous bytes.
 
 ## Galactic victory extension
 

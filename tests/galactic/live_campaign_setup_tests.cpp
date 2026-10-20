@@ -1,3 +1,6 @@
+#include <exception>
+#include <initializer_list>
+#include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
@@ -9,28 +12,36 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
 #include "galactic/fleet_traits.hpp"
+#include "galactic/planet_hud.hpp"
+#include "galactic/ground_roster.hpp"
 #include "eawr/presentation/ui/campaign_setup.hpp"
+#include "eawr/data/ui/command_bar.hpp"
+#include "eawr/data/ui/shell_anchors.hpp"
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <set>
+#include <iostream>
 #include <limits>
 #include <map>
+#include <memory>
+#include <optional>
+#include <set>
 #include <stdexcept>
-#include <chrono>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text); return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    return text && *text ? std::optional<std::string>{text} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 void production_domains(const gc::GalacticSetup& setup, const cp::CampaignSetupPlan& plan) {
     std::set<std::string> orbital_companies;
@@ -69,9 +80,83 @@ void production_domains(const gc::GalacticSetup& setup, const cp::CampaignSetupP
         else expect(hashes == baseline, "production domains remain deterministic on 1/2/4/8 workers");
     }
 }
-void installed(bool domains_only = false) {
+void structure_slot_counter(cp::CampaignRoot campaign, const cp::CampaignSetupPlan& plan,
+    const cp::CampaignSetupOptions& options) {
+    namespace hud = eawr::viewer::galactic;
+    const auto local = *options.local_observer;
+    auto initial = campaign.game()->galaxy().snapshot();
+    const auto offers = initial->production_offers();
+    const auto mining = std::find_if(offers.begin(), offers.end(), [&](const auto& row) {
+        const auto* type = plan.original_type(row.type);
+        return row.player == local && row.domain == gc::ProductionDomain::ground
+            && row.kind == gc::ProductionKind::structure && row.admission == gc::ProductionAdmission::allowed
+            && type && type->name == "Empire_Ground_Mining_Facility";
+    });
+    if (mining == offers.end()) throw std::runtime_error("stock local mining offer missing");
+    const auto planet = mining->planet;
+    const auto type = mining->type;
+    const auto facts = [&](const auto& snapshot) {
+        const auto observations = snapshot->observations();
+        const auto observation = std::find_if(observations.begin(), observations.end(), [&](const auto& row) {
+            return row.player == local && row.planet == planet;
+        });
+        const auto& producers = snapshot->production()->planets;
+        const auto producer = std::find_if(producers.begin(), producers.end(), [&](const auto& row) { return row.planet == planet; });
+        if (observation == observations.end() || producer == producers.end())
+            throw std::runtime_error("stock owned planet HUD inputs missing");
+        return hud::observed_hud_facts(*observation, nullptr, &*producer, local, {});
+    };
+    const auto before = facts(initial);
+    expect(before.structures_known && before.structures.has_value(), "stock local structure count is known");
+    if (!before.structures) throw std::runtime_error("stock local structure knowledge missing");
+    const auto initial_roster = hud::ground_roster(*initial, local, planet);
+    expect(initial_roster.structures.size() == *before.structures,
+        "initial filled structure icon slots match the HUD facts");
+    const auto seat = std::find_if(options.seats.begin(), options.seats.end(), [&](const auto& row) { return row.player == local; });
+    auto started = eawr::platform::LiveGameSession::start(std::move(campaign),
+        {.workers = 2, .pacing = eawr::platform::LiveGameSession::Pacing::driven});
+    if (!started) throw std::runtime_error(eawr::core::format_diagnostic(started.error()));
+    auto& live = *started.value();
+    live.submit(gc::GameCommand{{0, seat->seat_id, 1}, gc::ProductionCommand{planet, type,
+        gc::ProductionAction::buy, gc::ProductionDomain::ground, 0}});
+    std::shared_ptr<const gc::GalacticSnapshot> completed;
+    for (std::uint64_t tick = 1; tick <= 10000; ++tick) {
+        live.advance_to(tick);
+        if (!live.wait_for(tick, std::chrono::seconds(30))) throw std::runtime_error("stock mining completion timed out");
+        auto snapshot = live.frame().latest;
+        const auto after = facts(snapshot);
+        if (after.structures && before.structures && *after.structures == *before.structures + 1) {
+            live.advance_to(tick + 1);
+            if (!live.wait_for(tick + 1, std::chrono::seconds(30))) throw std::runtime_error("next mining snapshot timed out");
+            completed = live.frame().latest; break;
+        }
+    }
+    live.stop();
+    expect(completed != nullptr && !live.failure() && live.rejected_orders().empty(), "stock mining completes through the live campaign publication");
+    if (!completed) return;
+    const auto after = facts(completed);
+    expect(after.structures_known && after.structures == std::optional(*before.structures + 1)
+        && after.ground_capacity == before.ground_capacity,
+        "completion preserves structure knowledge and authored ground capacity");
+    const auto roster = hud::ground_roster(*completed, local, planet);
+    expect(roster.structures.size() == *after.structures
+        && roster.structure_capacity == static_cast<std::size_t>(*after.ground_capacity),
+        "focused roster and HUD count the same structures once");
+    std::set<eawr::sim::EntityId> ids;
+    std::size_t new_mines{};
+    for (const auto& structure : roster.structures) {
+        expect(ids.insert(structure.id).second, "filled structure slot identities are unique");
+        if (structure.type == type && std::none_of(initial_roster.structures.begin(), initial_roster.structures.end(),
+            [&](const auto& old) { return old.id == structure.id; })) ++new_mines;
+    }
+    expect(new_mines == 1 && roster.structures.size() == initial_roster.structures.size() + 1,
+        "one completed ground structure fills exactly one additional icon slot");
+    std::cout << "slot-counter before=" << *before.structures << " after=" << *after.structures
+        << " capacity=" << *after.ground_capacity << " tick=" << completed->completed_tick() << '\n';
+}
+void installed(bool domains_only = false, bool slots_only = false) {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
@@ -93,7 +178,7 @@ void installed(bool domains_only = false) {
         "every installed stock Build_Advances_Tech_Level value parses as its numeric target");
     bool installed_stealth_hero_fleet = false;
     for (const auto& name : {"Sandbox_Equal_Footing_Underworld", "Sandbox_Equal_Footing_Rebel", "Sandbox_Equal_Footing_Empire"}) {
-        if (domains_only && std::string_view(name) != "Sandbox_Equal_Footing_Empire") continue;
+        if ((domains_only || slots_only) && std::string_view(name) != "Sandbox_Equal_Footing_Empire") continue;
         const auto* source = data.campaign(name); expect(source != nullptr, "stock family exists"); if (!source) continue;
         cp::CampaignSetupOptions options; options.seed = 42;
         for (const auto& faction : data.factions) {
@@ -228,6 +313,32 @@ void installed(bool domains_only = false) {
         auto created = cp::CampaignRoot::create(planned.value(), services.value());
         if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
         auto campaign = std::move(created).value(); const auto& setup = campaign.game()->galaxy().setup();
+        // Story-only leaders (no starting object) still carry their authored price reductions: the plot places them later.
+        for (const auto* leader : {"Emperor_Palpatine", "Mon_Mothma"}) {
+            const auto original = std::find_if(options.types.begin(), options.types.end(),
+                [&](const auto& row) { return row.original_type == leader; });
+            expect(original != options.types.end(), std::string(leader) + " binds in the stock campaign");
+            if (original == options.types.end()) continue;
+            const auto profile = std::find_if(setup.income->types.begin(), setup.income->types.end(),
+                [&](const auto& row) { return row.type == original->id; });
+            expect(profile != setup.income->types.end() && !profile->reductions.empty(),
+                std::string(leader) + " keeps its price reductions although no stock start object holds it");
+        }
+        if (slots_only) {
+            const auto ui = eawr::data::ui::load_command_bar(filesystem).value();
+            for (const auto shell_name : {"i_main_commandbar", "i_main_organize"}) {
+                const auto* component = ui.catalog.find(shell_name);
+                if (!component) throw std::runtime_error("stock galactic shell missing");
+                const auto anchors = eawr::data::ui::load_shell_anchors(filesystem,
+                    component->text(eawr::data::ui::Field::model_name)).value();
+                expect(!anchors.shell.find("Text_Planetary_Pop"), "stock galactic shells do not author a numeric structure counter");
+                if (std::string_view(shell_name) == "i_main_organize")
+                    expect(anchors.shell.find("Planet_structure_00") && anchors.shell.find("Planet_structure_08"),
+                        "stock focused shell authors the structure icon slots");
+                else expect(anchors.shell.find("Text_Day_Counter"), "the numeric fiscal cycle belongs to the galactic command bar");
+            }
+            structure_slot_counter(std::move(campaign), planned.value(), options); return;
+        }
         const auto* bothawui = data.planet("Bothawui");
         expect(bothawui && bothawui->system_spies.size() == 1
             && bothawui->system_spies[0].mask == 61438U
@@ -593,7 +704,7 @@ void installed(bool domains_only = false) {
 }
 void installed_origin_starbases() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: Origin starbases require EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: Origin starbases require EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
         mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
@@ -718,7 +829,7 @@ void installed_origin_starbases() {
 }
 void installed_starting_levels(const bool accepted_route = false) {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: starting technology requires EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: starting technology requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
         mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
@@ -958,7 +1069,7 @@ void installed_starting_levels(const bool accepted_route = false) {
 // discovery reach stay undiscovered for both (WGUI-04/05/06/12/38).
 void installed_unscouted_intel() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");
@@ -1200,7 +1311,8 @@ int main(int argc, const char* const argv[]) {
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);
         else if (argc == 2 && std::string_view(argv[1]) == "--unscouted-intel") installed_unscouted_intel();
-        else installed(argc == 2 && std::string_view(argv[1]) == "--production-domains");
+        else installed(argc == 2 && std::string_view(argv[1]) == "--production-domains",
+            argc == 2 && std::string_view(argv[1]) == "--structure-slots");
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

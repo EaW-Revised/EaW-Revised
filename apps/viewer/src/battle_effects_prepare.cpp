@@ -152,8 +152,7 @@ const assets::Texture* BattleEffects::resolve_texture(const std::string_view aut
     return found->second ? &*found->second : nullptr;
 }
 
-void BattleEffects::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat) {
-    core::load_profile::Scope load_scope(core::load_profile::Phase::particles);
+void BattleEffects::prepare_effect_constants() {
     laser_scales_ = presentation_constants::load_lasers(*filesystem_);
     if (auto constants = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
         // OF-01/02: retain the authored effects and space scale, including mod overrides.
@@ -207,60 +206,10 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
             }
         }
     }
-    const auto look_of = [&](const std::string& projectile) {
-        ProjectileLook look;
-        look.projectile = projectile;
-        auto object = catalog_->resolve(projectile, data::Category::game_object);
-        if (!object) {
-            unresolved_.push_back("projectile " + projectile + ": " + core::format_diagnostic(object.error()));
-            return look;
-        }
-        const data::EffectiveObject& value = object.value();
-        const auto behaviours = type_list(value, "Behavior");
-        look.hide_when_fogged = std::any_of(behaviours.begin(), behaviours.end(),
-            [](const auto& name) { return lower(name) == "hide_when_fogged"; });
-        look.immediate_fog = truthy(tag(value, "Last_State_Visible_Under_FOW"));
-        const auto visible_to_enemy = tag(value, "Model_Visible_To_Enemy");
-        look.visible_to_enemy = visible_to_enemy.empty() || truthy(visible_to_enemy);
-        // BP-01: Projectile_Custom_Render 1 is the laser beam, 2 the laser kite; anything else
-        // draws Space_Model_Name.
-        const int custom = presentation_constants::custom_render(tag(value, "Projectile_Custom_Render"));
-        look.render = custom == 1 ? Render::beam : custom == 2 ? Render::kite
-            : tag(value, "Space_Model_Name").empty() ? Render::none : Render::model;
-        const auto width = numbers(tag(value, "Projectile_Width"));
-        const auto length_value = numbers(tag(value, "Projectile_Length"));
-        const auto slot = numbers(tag(value, "Projectile_Texture_Slot"));
-        const auto colour = numbers(tag(value, "Projectile_Laser_Color"));
-        if (!width.empty()) look.width = width.front();
-        if (!length_value.empty()) look.length = length_value.front();
-        if (slot.size() >= 2) look.slot = {slot[0], slot[1]};
-        if (colour.size() >= 4) look.colour = {colour[0] / 255.0F, colour[1] / 255.0F, colour[2] / 255.0F, colour[3] / 255.0F};
-        look.detonation = tag(value, "Projectile_Object_Detonation_Particle");
-        look.lifetime_detonation = tag(value, "Projectile_Lifetime_Detonation_Particle");
-        const auto death_explosions = type_list(value, "Death_Explosions");
-        if (!death_explosions.empty()) look.death_explosion = death_explosions.front();
-        look.armor_reduced = tag(value, "Projectile_Object_Armor_Reduced_Detonation_Particle");
-        look.shield_absorbed = tag(value, "Projectile_Absorbed_By_Shields_Particle");
-        return look;
-    };
-    for (const auto& type : tables.units) for (const auto& ability : type.abilities) {
-        if (ability.spawned_object.empty()) continue;
-        const auto id = battle::type_id(ability.spawned_object);
-        types_[id].weapons.emplace(tactical::object_weapon, look_of(ability.spawned_object));
-        if (ability.spawned_projectile_index < tables.projectiles.size())
-            weaken_particles_[id] = tables.projectiles[ability.spawned_projectile_index].weaken.status_effect;
-    }
-    // #862 (space-abilities AB-60, AB-66): the craft of a squadron whose team holds
-    // ION_CANNON_SHOT fire its Projectile_Types_Override while it is on; craft type -> projectile.
-    for (const units::UnitType& type : tables.units) {
-        if (!type.cluster_bomb) continue;
-        // WCB-01: the real bomb authors object death effects for either terminal path.
-        auto look = look_of(type.cluster_bomb->bomb_type);
-        if (look.detonation.empty()) look.detonation = look.death_explosion;
-        if (look.lifetime_detonation.empty()) look.lifetime_detonation = look.death_explosion;
-        types_[battle::type_id(type.cluster_bomb->bomb_type)].weapons.emplace(tactical::object_weapon,
-            std::move(look));
-    }
+}
+
+template <typename LookOf>
+void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, LookOf& look_of) {
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -535,6 +484,9 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
         }
         types_.emplace(id, std::move(looks));
     }
+}
+
+void BattleEffects::prewarm_effect_programs() {
     // Warm programs from the references this battle's loaded looks actually use.
     // Resource holds are bounded by the backend; definitions decoded only for
     // this pass are released so the lazy CPU effect cache does not grow here.
@@ -579,6 +531,67 @@ void BattleEffects::prepare(const units::UnitTables& tables, const tactical::Com
     }
     backend_->finish_program_prewarm(std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - warm_start).count());
+}
+
+void BattleEffects::prepare(const units::UnitTables& tables, const tactical::CombatTable& combat) {
+    core::load_profile::Scope load_scope(core::load_profile::Phase::particles);
+    prepare_effect_constants();
+    const auto look_of = [&](const std::string& projectile) {
+        ProjectileLook look;
+        look.projectile = projectile;
+        auto object = catalog_->resolve(projectile, data::Category::game_object);
+        if (!object) {
+            unresolved_.push_back("projectile " + projectile + ": " + core::format_diagnostic(object.error()));
+            return look;
+        }
+        const data::EffectiveObject& value = object.value();
+        const auto behaviours = type_list(value, "Behavior");
+        look.hide_when_fogged = std::any_of(behaviours.begin(), behaviours.end(),
+            [](const auto& name) { return lower(name) == "hide_when_fogged"; });
+        look.immediate_fog = truthy(tag(value, "Last_State_Visible_Under_FOW"));
+        const auto visible_to_enemy = tag(value, "Model_Visible_To_Enemy");
+        look.visible_to_enemy = visible_to_enemy.empty() || truthy(visible_to_enemy);
+        // BP-01: Projectile_Custom_Render 1 is the laser beam, 2 the laser kite; anything else
+        // draws Space_Model_Name.
+        const int custom = presentation_constants::custom_render(tag(value, "Projectile_Custom_Render"));
+        look.render = custom == 1 ? Render::beam : custom == 2 ? Render::kite
+            : tag(value, "Space_Model_Name").empty() ? Render::none : Render::model;
+        const auto width = numbers(tag(value, "Projectile_Width"));
+        const auto length_value = numbers(tag(value, "Projectile_Length"));
+        const auto slot = numbers(tag(value, "Projectile_Texture_Slot"));
+        const auto colour = numbers(tag(value, "Projectile_Laser_Color"));
+        if (!width.empty()) look.width = width.front();
+        if (!length_value.empty()) look.length = length_value.front();
+        if (slot.size() >= 2) look.slot = {slot[0], slot[1]};
+        if (colour.size() >= 4) look.colour = {colour[0] / 255.0F, colour[1] / 255.0F, colour[2] / 255.0F, colour[3] / 255.0F};
+        look.detonation = tag(value, "Projectile_Object_Detonation_Particle");
+        look.lifetime_detonation = tag(value, "Projectile_Lifetime_Detonation_Particle");
+        const auto death_explosions = type_list(value, "Death_Explosions");
+        if (!death_explosions.empty()) look.death_explosion = death_explosions.front();
+        look.armor_reduced = tag(value, "Projectile_Object_Armor_Reduced_Detonation_Particle");
+        look.shield_absorbed = tag(value, "Projectile_Absorbed_By_Shields_Particle");
+        return look;
+    };
+    for (const auto& type : tables.units) for (const auto& ability : type.abilities) {
+        if (ability.spawned_object.empty()) continue;
+        const auto id = battle::type_id(ability.spawned_object);
+        types_[id].weapons.emplace(tactical::object_weapon, look_of(ability.spawned_object));
+        if (ability.spawned_projectile_index < tables.projectiles.size())
+            weaken_particles_[id] = tables.projectiles[ability.spawned_projectile_index].weaken.status_effect;
+    }
+    // #862 (space-abilities AB-60, AB-66): the craft of a squadron whose team holds
+    // ION_CANNON_SHOT fire its Projectile_Types_Override while it is on; craft type -> projectile.
+    for (const units::UnitType& type : tables.units) {
+        if (!type.cluster_bomb) continue;
+        // WCB-01: the real bomb authors object death effects for either terminal path.
+        auto look = look_of(type.cluster_bomb->bomb_type);
+        if (look.detonation.empty()) look.detonation = look.death_explosion;
+        if (look.lifetime_detonation.empty()) look.lifetime_detonation = look.death_explosion;
+        types_[battle::type_id(type.cluster_bomb->bomb_type)].weapons.emplace(tactical::object_weapon,
+            std::move(look));
+    }
+    prepare_unit_looks(tables, combat, look_of);
+    prewarm_effect_programs();
 }
 
 const BattleEffects::ParticleType* BattleEffects::particle_type(const std::string& name) {

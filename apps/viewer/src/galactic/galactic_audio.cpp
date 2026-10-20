@@ -1,4 +1,5 @@
 #include "galactic_audio.hpp"
+#include "eawr/core/text.hpp"
 #include "audio_output.hpp"
 #include "galactic_mode_internal.hpp"
 
@@ -18,8 +19,7 @@
 namespace eawr::presentation::godot_backend {
 namespace {
 std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    return first == value.npos ? std::string{} : std::string(value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1));
+    return core::trim(value, core::xml_whitespace);
 }
 std::vector<audio::Field> fields(const data::XmlNode& node) {
     std::vector<audio::Field> result;

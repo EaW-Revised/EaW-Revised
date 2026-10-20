@@ -232,6 +232,15 @@ core::Result<std::vector<Offer>> offers(const MarketContext& context,
     }
     return R::success(std::move(result));
 }
+std::optional<int> menu_header_tech(const bool multiplayer, const Id item_faction, const std::span<const MarketPlayer> players) {
+    const auto faction_player = std::find_if(players.begin(), players.end(),
+        [&](const MarketPlayer& player) { return player.faction == item_faction; });
+    if (faction_player == players.end()) return std::nullopt;
+    if (!multiplayer) return faction_player->displayed_tech;
+    int highest = -1;
+    for (const auto& player : players) if (player.id != faction_player->id) highest = std::max(highest, player.displayed_tech);
+    return highest == -1 ? faction_player->displayed_tech : highest;
+}
 core::Result<bool> menu_enabled(const Offer& offer, Fixed credits) {
     if (offer.owned) return core::Result<bool>::success(false);
     const auto half = Fixed::from_raw(Fixed::scale / 2);

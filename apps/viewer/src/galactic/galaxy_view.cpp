@@ -5,6 +5,7 @@
 #include <map>
 #include <numbers>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 namespace eawr::viewer::galactic {
@@ -33,11 +34,14 @@ namespace {
 
 template <class Item>
 [[nodiscard]] bool unique_ids(const std::vector<Item>& items) {
-    std::set<decltype(Item{}.id)> seen;
+    std::vector<decltype(Item{}.id)> ids;
+    ids.reserve(items.size());
     for (const Item& item : items) {
-        if (item.id == 0 || !seen.insert(item.id).second) return false;
+        if (item.id == 0) return false;
+        ids.push_back(item.id);
     }
-    return true;
+    std::sort(ids.begin(), ids.end());
+    return std::adjacent_find(ids.begin(), ids.end()) == ids.end();
 }
 
 // WGUI-60: debug-build engine factor; the authored per-type scale multiplies it.
@@ -86,7 +90,8 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     for (const auto& row : intelligence.presence) presence.emplace(row.planet, row.owner);
     std::set<ObjectId> counted;
     for (const auto& row : intelligence.cards) if (row.fleet) counted.insert(*row.fleet);
-    std::map<ObjectId, PlayerId> planet_owners;
+    std::unordered_map<ObjectId, PlayerId> planet_owners;
+    planet_owners.reserve(snapshot.planets().size());
     for (const auto& row : snapshot.planets()) planet_owners.emplace(row.id, row.owner);
     const auto* observer = snapshot.observer() ? &*snapshot.observer() : nullptr;
     const bool local_observer = observer && observer->local_player == local;
@@ -121,20 +126,23 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     display.completed_tick = snapshot.completed_tick();
     display.players = metadata.players;
     display.seats = metadata.seats;
+    // One id lookup per planet instead of a scan of the metadata (#4313); emplace keeps the first row of a repeated id, as the scans did.
+    std::unordered_map<ObjectId, std::size_t> art_slots;
+    art_slots.reserve(metadata.planets.size());
+    for (std::size_t slot = 0; slot < metadata.planets.size(); ++slot) art_slots.emplace(metadata.planets[slot].id, slot);
+    display.planets.reserve(snapshot.planets().size() + scene_objects.size());
     for (const auto& planet : snapshot.planets()) {
-        const auto art = std::find_if(metadata.planets.begin(), metadata.planets.end(),
-            [&](const auto& item) { return item.id == planet.id; });
-        if (art == metadata.planets.end()) return {{}, "live planet has no presentation metadata"};
-        auto item = *art;
+        const auto art = art_slots.find(planet.id);
+        if (art == art_slots.end()) return {{}, "live planet has no presentation metadata"};
+        auto item = metadata.planets[art->second];
         item.position = {planet.position.x, planet.position.y, planet.position.z};
         item.owner = planet.owner == neutral_owner ? std::nullopt : std::optional(planet.owner);
         display.planets.push_back(std::move(item));
     }
     for (const auto id : scene_objects) {
-        const auto art = std::find_if(metadata.planets.begin(), metadata.planets.end(),
-            [id](const auto& item) { return item.id == id; });
-        if (art == metadata.planets.end()) return {{}, "scene object has no presentation metadata"};
-        auto item = *art;
+        const auto art = art_slots.find(id);
+        if (art == art_slots.end()) return {{}, "scene object has no presentation metadata"};
+        auto item = metadata.planets[art->second];
         item.owner.reset();
         display.planets.push_back(std::move(item));
     }
@@ -229,7 +237,8 @@ ViewResult build_view(const GalaxySnapshotStub& snapshot, const SeatId local_sea
         return *owner == view.local.player ? Relation::own : Relation::other;
     };
 
-    std::map<ObjectId, std::size_t> planet_index;
+    std::unordered_map<ObjectId, std::size_t> planet_index;
+    planet_index.reserve(snapshot.planets.size());
     for (const StubPlanet& planet : snapshot.planets) {
         if (planet.owner && !players.contains(*planet.owner)) {
             return fail("planet " + std::to_string(planet.id) + " is owned by an unknown player");

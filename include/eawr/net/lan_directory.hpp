@@ -41,6 +41,12 @@ inline constexpr std::size_t lan_max_datagram = 1200;
 // Field limits of the wire format (bytes of UTF-8).
 inline constexpr std::size_t lan_max_text = 255;
 inline constexpr std::size_t lan_max_chat = 400;
+// Production LAN browser menu chat uses the same visible bounds and spacing as the online menu.
+inline constexpr std::size_t lan_menu_max_chat = 128;
+inline constexpr std::size_t lan_menu_max_name = 20;
+inline constexpr std::chrono::milliseconds lan_menu_chat_spacing{1000};
+// Leave 250 ms for network/frame-pump jitter between legal one-second sends.
+inline constexpr std::chrono::milliseconds lan_menu_receive_spacing{750};
 // Players repeat their presence at this interval; one not heard within the timeout is dropped.
 inline constexpr std::chrono::milliseconds lan_presence_interval{1000};
 inline constexpr std::chrono::milliseconds lan_presence_timeout{5000};
@@ -94,6 +100,8 @@ struct LanChat {
 // at `limit` bytes on a character boundary, never inside a sequence. Used on every text field
 // the decoder returns, so nothing the UI receives from a datagram is invalid.
 [[nodiscard]] std::string sanitize_lan_text(std::string_view text, std::size_t limit);
+// Menu text additionally drops control bytes and trims ASCII spaces.
+[[nodiscard]] std::string sanitize_lan_menu_text(std::string_view text, std::size_t limit);
 
 [[nodiscard]] std::vector<std::uint8_t> encode_presence(const LanPresence& presence);
 [[nodiscard]] std::vector<std::uint8_t> encode_chat(const LanChat& chat);
@@ -136,6 +144,7 @@ struct LanDirectoryOptions {
     std::uint64_t self{};
     std::uint32_t protocol{};
     std::string build;
+    bool menu_chat_limits{};
 };
 
 class LanDirectory {
@@ -169,6 +178,7 @@ private:
     struct ChatSequence {
         std::uint32_t sequence{};
         LanClock::time_point seen;
+        std::optional<LanClock::time_point> menu_seen;
     };
     std::map<std::uint64_t, ChatSequence> chat_sequences_;
     std::deque<LanChat> chat_;

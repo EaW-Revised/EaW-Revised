@@ -1,12 +1,17 @@
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/session.hpp"
 #include "../../src/sim/tactical/blast_internal.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -14,11 +19,12 @@ namespace t = eawr::sim::tactical;
 namespace d = t::detail;
 namespace m = eawr::sim::math;
 using m::Fixed;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 Fixed q(const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 m::Vec3 at(const std::int64_t x, const std::int64_t y = 0, const std::int64_t z = 0) { return {q(x), q(y), q(z)}; }
 void expect(const bool condition, const std::string& message) {
-    if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 struct QueryFixture {

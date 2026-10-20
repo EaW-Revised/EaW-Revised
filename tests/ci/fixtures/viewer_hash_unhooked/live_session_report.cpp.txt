@@ -1,0 +1,26 @@
+// Frozen hook-free historical source context; this git-only fixture is not compiled.
+#include <charconv>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <iterator>
+
+// Other historical source omitted from this git-only fixture.
+
+    return rows;
+}
+
+void LiveSessionView::write_report(std::ostream& output) const {
+    output << "  \"live_session\": {\"fixture\": " << json(options_.fixture)
+           << ", \"victory_condition\": " << json(tactical::to_string(victory_.condition))
+
+// Other historical source omitted from this git-only fixture.
+
+    }
+    output << "]}, \"event_gaps\": [";
+    for (std::size_t index = 0; index < event_gap_rows_.size(); ++index) output << (index ? ", " : "") << event_gap_rows_[index];
+    output << "], \"completed_ticks\": " << hashes_.size()
+           << ", \"final_state_sha256\": " << json(hashes_.empty() ? "" : hashes_.back())
+           << ", \"headless_hashes_equal\": " << (headless_equal_ ? (*headless_equal_ ? "true" : "false") : "null")
+           << ", \"outcome\": ";

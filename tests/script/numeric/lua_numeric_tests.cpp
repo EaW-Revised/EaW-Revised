@@ -12,6 +12,9 @@
 // integer backend. The vm mode also compares against the P0 hardware-double
 // VM as a differential oracle on the running target.
 
+#include <cstddef>
+#include <utility>
+#include "../../support/check.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/numeric/backend.hpp"
 #include "eawr/script/numeric/binary64.hpp"
@@ -42,13 +45,11 @@ namespace numeric = eawr::script::numeric;
 namespace test = eawr::script::numeric::test;
 using numeric::LuaNumber;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 std::string hex(std::uint64_t value) {

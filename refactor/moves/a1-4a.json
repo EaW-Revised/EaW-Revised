@@ -1,0 +1,58 @@
+[
+  {
+    "old": "tests/presentation/animation/corpus_declarations_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/animation/corpus_structural_declaration_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/camera/constants_source_main.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/fog/fog_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/lighting/lighting_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/lighting/scene_bloom_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/lighting/wind_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/particles/map_attachment_owner_main.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/particles/render_test_support.hpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/renderer/main.cpp#check",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/space/event_snapshot_cache_tests.cpp#require",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/presentation/space/space_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/space/sun_retail_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/presentation/terrain/terrain_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  }
+]

@@ -17,6 +17,12 @@ std::optional<Real> number(const std::vector<Binding>& bindings, std::string_vie
         if (const auto* value = std::get_if<Real>(&binding.value)) return *value;
     return {};
 }
+// The fixed token spelling of a per-planet read loop: interned on first use, then reused for every planet.
+struct PlanetSlot {
+    std::vector<std::string> spelling;
+    std::optional<std::uint64_t> id{};
+    const std::vector<std::string>* canonical{};
+};
 bool finite(Real value) { return (value.repr & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
 std::optional<std::int32_t> rounded(Real value) {
     if (!finite(value) || value < real(std::numeric_limits<std::int32_t>::min())
@@ -343,15 +349,25 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
     std::string_view token, ReadMode mode) const {
     PlayerEconomyMemo uncached_memo;
     auto& memo = economy_memo(key, mode, uncached_memo);
+    const std::vector<Binding> no_bindings;
+    // Same read() call, order and arguments as building a fresh key per planet, without the per-planet token copies
+    // and re-interning (#4306).
+    const auto read_slot = [&](PlanetSlot& slot, const std::vector<Binding>& bindings, galactic::PlanetId planet) {
+        if (!slot.id) {
+            auto& mine = shard(key.player);
+            slot.id = intern_token(mine, slot.spelling);
+            slot.canonical = &token_of(mine, *slot.id).tokens;
+        }
+        return read(GalacticQueryKey{key.player, key.enemy, key.human, planet, *slot.canonical, bindings, *slot.id}, mode);
+    };
+    PlanetSlot ownership_slot{{"VARIABLE_TARGET", "TARGETPLAYERID"}};
     if (token == "PLANETSCONTROLLED" || token == "PLANETSCONTROLLEDUNNORMALIZED") {
         std::optional<GalacticInternedKey> canonical;
         if (mode == ReadMode::ordinary) { canonical = memo_key(key); canonical->planet = 0; }
         if (mode == ReadMode::ordinary) if (const auto cached = memo.queries.find(*canonical); cached != memo.queries.end()) return cached->second;
         Real controlled{};
         for (const auto& row : planets_) {
-            auto ownership = copy_key(key); ownership.planet = row.planet.id;
-            ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
-            const auto target_owner = read(ownership, mode); if (!target_owner) return {};
+            const auto target_owner = read_slot(ownership_slot, no_bindings, row.planet.id); if (!target_owner) return {};
             const auto selected = rounded(*target_owner); if (!selected) return {};
             if (*selected == static_cast<std::int64_t>(owner)) controlled += real(1);
         }
@@ -413,9 +429,7 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         if (token == "MAINTENANCE" || token == "NETINCOMEUNNORMALIZED" || token == "GROSSINCOMEUNNORMALIZED") {
             Real gross{};
             for (const auto& row : planets_) {
-                auto ownership = copy_key(key); ownership.planet = row.planet.id;
-                ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
-                const auto target_owner = read(ownership, mode); if (!target_owner) return {};
+                const auto target_owner = read_slot(ownership_slot, no_bindings, row.planet.id); if (!target_owner) return {};
                 if (*target_owner != real(owner)) continue;
                 if (!row.income) { return {}; }
                 gross += *row.income;
@@ -441,6 +455,10 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
             const auto* population = find(snapshot_->population(), owner, [](const auto& row) { return row.player; });
             if (!builder || !balance) return {};
             const auto reservations = galactic::production_reservations(production, owner);
+            // The reduction sources depend only on the income inputs and planets, not on the offer: gather them once
+            // per evaluation instead of once per prepared offer and per price/time multiplier (#3003 overload).
+            const auto* income_inputs = snapshot_->income() ? &snapshot_->income()->inputs : nullptr;
+            std::optional<std::vector<galactic::ProductionReductionSource>> reductions;
             // WGEP-149: the same retained target view exposed by targets(),
             // testing this exact first type's heads before eligibility at each target.
             for (const auto& target : planets_) {
@@ -449,9 +467,11 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
                 for (const auto& queue : location.queues)
                     if (!queue.empty() && queue.front().builder == owner && queue.front().type == next->second) return real(1);
                 for (const auto& offer : location.offers) if (offer.type == next->second) {
-                    const auto prepared = galactic::prepared_production_offer(offer,
-                        snapshot_->income() ? &snapshot_->income()->inputs : nullptr, snapshot_->planets(), location.planet, owner,
-                        snapshot_->economy_corruption());
+                    if (income_inputs && !reductions) reductions = galactic::production_reduction_sources(*income_inputs, snapshot_->planets());
+                    const auto prepared = galactic::prepared_production_offer(offer, income_inputs,
+                        reductions ? std::span<const galactic::ProductionReductionSource>(*reductions)
+                                   : std::span<const galactic::ProductionReductionSource>{},
+                        location.planet, owner, snapshot_->economy_corruption());
                     if (!prepared) return {};
                     const galactic::ProductionAdmissionInputs inputs{production, location, *builder, *balance,
                         snapshot_->fleets(), target.planet.owner, population, next_id_, reader_.view()->units.size() + snapshot_->routes().size(), &reservations};
@@ -464,31 +484,26 @@ std::optional<Real> GalacticWorld::player_economy_token(const GalacticQueryKey& 
         const auto requested = rounded(number(key.bindings, "PARAMETER_COUNT").value_or(real(1)));
         const auto types = selected_types(setup_, key.bindings);
         std::int64_t owned{}, matches{}, structures{};
+        PlanetSlot current_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "STARBASELEVEL" : "GROUNDBASELEVEL"}};
+        PlanetSlot maximum_slot{{"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "MAXSTARBASELEVEL" : "MAXGROUNDBASELEVEL"}};
+        PlanetSlot qualifies_slot{{"VARIABLE_TARGET", token.find("STARBASE") != std::string_view::npos ? "HASSTARBASEOFLEVEL" : "HASGROUNDBASEOFLEVEL"}};
+        PlanetSlot structure_slot{{"VARIABLE_TARGET", std::string(token)}};
         for (const auto& row : economy_planets_) {
-            auto ownership = copy_key(key); ownership.planet = row.planet;
-            ownership.tokens = {"VARIABLE_TARGET", "TARGETPLAYERID"}; ownership.bindings.clear();
-            const auto target_owner = read(ownership, mode); if (!target_owner) return {};
+            const auto target_owner = read_slot(ownership_slot, no_bindings, row.planet); if (!target_owner) return {};
             if (*target_owner != real(owner)) continue;
             ++owned;
             if (!row.production_available) return {};
             if (token == "MAXEDSTARBASES" || token == "MAXEDGROUNDBASES") {
-                auto nested = copy_key(key); nested.planet = row.planet; nested.bindings.clear();
-                nested.tokens = {"VARIABLE_TARGET", token == "MAXEDSTARBASES" ? "STARBASELEVEL" : "GROUNDBASELEVEL"};
-                const auto current = read(nested, mode); if (!current) return {};
-                nested.tokens.back() = token == "MAXEDSTARBASES" ? "MAXSTARBASELEVEL" : "MAXGROUNDBASELEVEL";
-                const auto maximum = read(nested, mode); if (!maximum) return {};
+                const auto current = read_slot(current_slot, no_bindings, row.planet); if (!current) return {};
+                const auto maximum = read_slot(maximum_slot, no_bindings, row.planet); if (!maximum) return {};
                 if (*current == *maximum) ++matches;
             } else if (token == "HASSTARBASEOFLEVEL" || token == "NUMSTARBASEOFLEVEL"
                 || token == "HASGROUNDBASEOFLEVEL" || token == "NUMGROUNDBASEOFLEVEL") {
                 if (!level || *level < 1 || !requested) return {};
-                auto nested = copy_key(key); nested.planet = row.planet;
-                nested.tokens = {"VARIABLE_TARGET", token.find("STARBASE") != std::string_view::npos ? "HASSTARBASEOFLEVEL" : "HASGROUNDBASEOFLEVEL"};
-                const auto qualifies = read(nested, mode); if (!qualifies) return {};
+                const auto qualifies = read_slot(qualifies_slot, key.bindings, row.planet); if (!qualifies) return {};
                 if (*qualifies != Real{}) ++matches;
             } else if (token == "HASSTRUCTURE" || token == "STRUCTURECOUNT") {
-                auto nested = copy_key(key); nested.planet = row.planet;
-                nested.tokens = {"VARIABLE_TARGET", std::string(token)};
-                const auto value = read(nested, mode); if (!value) return {};
+                const auto value = read_slot(structure_slot, key.bindings, row.planet); if (!value) return {};
                 structures += static_cast<std::int64_t>(*value);
             }
         }

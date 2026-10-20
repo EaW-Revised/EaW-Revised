@@ -12,6 +12,8 @@
 // timeline.csv is the one-worker run's plan journal (tick, player, plan, goal, target, event,
 // detail); costs.csv its Lua cost per tick. Both feed the eye-check material.
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/live_scripts.hpp"
 #include "eawr/platform/live_session.hpp"
@@ -22,46 +24,22 @@
 #include "eawr/skirmish/start.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "eawr/vfs/vfs.hpp"
-
-#include <algorithm>
-#include <chrono>
-#include <cmath>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <iostream>
-#include <map>
-#include <optional>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "foc_plan_support.hpp"
+
+#include <iostream>
+#include <optional>
+#include <string>
 
 namespace foc_plan_test_support {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 } // namespace foc_plan_test_support

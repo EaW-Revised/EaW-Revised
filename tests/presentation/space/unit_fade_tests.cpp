@@ -1,26 +1,26 @@
 // #535: the per-unit fade as the local player's space fog reveals or hides a unit
 // (presentation::space::UnitFade, docs/behaviour/space-fog-presentation.md FW-16 to FW-18).
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/unit_fade.hpp"
 
-#include <iostream>
+#include <array>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <string>
-#include <vector>
 
 namespace {
 
 namespace space = eawr::presentation::space;
 using eawr::sim::EntityId;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 // FW-17: an entity `alive` has not held before starts at full opacity at once when it is shown.

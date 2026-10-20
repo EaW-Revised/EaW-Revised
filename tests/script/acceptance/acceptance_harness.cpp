@@ -1,3 +1,5 @@
+#include "../../support/temp_dir.hpp"
+#include "../../support/check.hpp"
 #include "eawr/script/pglua.hpp"
 #include "eawr/script/script_host.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -9,6 +11,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -23,13 +26,11 @@ namespace {
 using eawr::script::ScriptValue;
 using eawr::script::ValueList;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, std::string_view message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 struct TempTree {
@@ -38,8 +39,7 @@ struct TempTree {
             std::chrono::steady_clock::now().time_since_epoch().count()));
     TempTree() { std::filesystem::create_directories(root); }
     ~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
 };
 

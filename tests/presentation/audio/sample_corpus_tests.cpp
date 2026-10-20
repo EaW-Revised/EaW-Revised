@@ -5,6 +5,10 @@
 //
 // EAWR_MOD_AUDIO_ROOTS lists name=leaf[;parent] entries separated by '|'; a root is a mod folder
 // or its Data folder. EAWR_AUDIO_CORPUS_LIST=1 also prints every unresolved name.
+
+#include "../../support/check.hpp"
+#include "../../support/env.hpp"
+#include "../../support/temp_dir.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -13,16 +17,18 @@
 #include <array>
 #include <cctype>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -31,29 +37,15 @@ namespace audio = eawr::presentation::audio;
 namespace data = eawr::data;
 namespace vfs = eawr::vfs;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _MSC_VER
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 std::string lower(std::string text) {
@@ -147,7 +139,7 @@ void synthetic_tree() {
         {root / "bare.meg", "bare", "data/audio/sfx"}, {root / "full.meg", "full", ""}, {root / "prefixed.meg", "prefixed", "data/audio/sfx"}}}, vfs::MountSpec{"parent", root / "parent", "data", {}}};
     auto filesystem = vfs::Vfs::mount(mounts);
     expect(static_cast<bool>(filesystem), "the synthetic audio tree mounts");
-    if (!filesystem) { std::error_code ignored; std::filesystem::remove_all(root, ignored); return; }
+    if (!filesystem) { eawr::testing::remove_temp_directory(root); return; }
     const auto decode = [&](const std::string& name, std::string& error) {
         const auto bytes = audio::open_sfx_sample(filesystem.value(), name);
         if (!bytes) {
@@ -207,8 +199,7 @@ void synthetic_tree() {
            "a rooted miss never falls through to a bare archive entry via its mount prefix");
     expect(archives_only && audio::open_sfx_sample(archives_only.value(), "Bare_Sample.wav"),
            "the same bare archive entry still serves a bare request");
-    std::error_code ignored;
-    std::filesystem::remove_all(root, ignored);
+    eawr::testing::remove_temp_directory(root);
 }
 
 struct Tally final {

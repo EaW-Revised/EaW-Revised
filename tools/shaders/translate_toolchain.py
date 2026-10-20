@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import hashlib
 import json
 import platform
 from pathlib import Path
@@ -19,6 +18,9 @@ import shutil
 import subprocess
 import sys
 from typing import Optional
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file  # noqa: E402
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -59,14 +61,6 @@ class ShaderPolicyError(RuntimeError):
 def canonical_json(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2,
                        allow_nan=False) + "\n").encode("utf-8")
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _resolve_output_path(output: Path) -> Path:

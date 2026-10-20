@@ -85,10 +85,8 @@ inline constexpr std::string_view invalid_free_request = "EAWR-CAMERA-0302";
 // callers validate before wrapping.
 [[nodiscard]] float wrap_yaw_degrees(float yaw_degrees) noexcept;
 
-// Unit view direction and unit screen-right direction for a pose. Right is
-// always horizontal, so it stays orthogonal to the view direction.
+// Unit view direction for a pose.
 [[nodiscard]] core::Result<std::array<float, 3>> free_camera_forward(const FreeCameraPose& pose);
-[[nodiscard]] core::Result<std::array<float, 3>> free_camera_right(const FreeCameraPose& pose);
 
 // Builds the starting pose from an existing camera: the eye is copied, yaw is
 // wrapped, and pitch is copied. A pitch outside the settings' bounds is

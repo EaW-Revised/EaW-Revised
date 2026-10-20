@@ -18,6 +18,15 @@ struct ObservedNeutralizationChoice {
     hero_actions::Neutralization prepared;
     hero_actions::Id current_type{}, original_type{}, source_type{};
     bool named{}, affordable{};
+    std::optional<PreparedAbility> live_prepared{}; // the host's exact typed capability for a live victim
+};
+// WGCH-97: a live sabotage option; the structure type is display data, identity and price ride the capability.
+struct ObservedSabotageChoice {
+    std::size_t prepared_index{};
+    TypeId structure_type{};
+    math::Fixed price;
+    bool affordable{};
+    std::optional<PreparedAbility> live_prepared{};
 };
 // WGCH-66/112: the weapon identity is display-only, never a queued target ID.
 struct HackMenuPreparation {
@@ -47,6 +56,7 @@ struct HeroActionMenus {
     unsigned tech{};
     std::optional<std::vector<ObservedTheftChoice>> theft;
     std::optional<std::vector<ObservedNeutralizationChoice>> neutralization;
+    std::optional<std::vector<ObservedSabotageChoice>> sabotage;
     std::optional<ObservedHackChoice> hack;
     std::optional<DestructionPreparation> destruction;
     std::uint64_t preparation{};

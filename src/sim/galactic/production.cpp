@@ -100,6 +100,13 @@ core::Result<std::int64_t> GalacticSession::Impl::assign_technology(const Techno
         return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "unbound technology writer"));
     dirty[static_cast<std::size_t>(StateSection::players)] = true;
     dirty[static_cast<std::size_t>(StateSection::production)] = true;
+    // WST-41: SET_MAX_TECH_LEVEL moves the maximum and nothing else; SET_TECH_LEVEL raises it first when needed.
+    if (write.maximum == TechnologyMaximum::set_only) {
+        account->maximum_tech = write.target;
+        return Result::success(account->current_tech);
+    }
+    if (write.maximum == TechnologyMaximum::raise_to_target && write.target > account->maximum_tech)
+        account->maximum_tech = write.target;
     auto assigned = galactic::assign_technology(*account, *player, production->technology_types,
         write.target, write.process_unlocks, [&](PlayerId id, std::int64_t tech) {
             return technology_notice_handler ? technology_notice_handler({TechnologyNotice::Kind::assigned, id, tech})
@@ -124,10 +131,14 @@ core::Result<std::int64_t> GalacticSession::set_technology(const TechnologyWrite
         [&](const auto& row) { return row.player == write.player; });
     if (account == impl.economy->players.end())
         return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "unbound technology writer"));
+    if (write.maximum == TechnologyMaximum::set_only && write.target < account->current_tech)
+        return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "a maximum technology level below the current level is refused"));
     std::vector<std::uint8_t> bytes;
     detail::put_u32(bytes, write.player); detail::put_i64(bytes, write.target);
     detail::put_u8(bytes, write.process_unlocks ? 1 : 0); detail::put_u8(bytes, write.request_sound ? 1 : 0);
     detail::put_i64(bytes, account->current_tech); detail::put_i64(bytes, account->maximum_tech);
+    // Only story writes carry a tail, so every other recording keeps its bytes.
+    if (write.maximum != TechnologyMaximum::keep) detail::put_u8(bytes, static_cast<std::uint8_t>(write.maximum));
     auto recorded = append_native_effect(NativeEffectKind::technology, std::move(bytes));
     if (!recorded) return Result::failure(recorded.error());
     auto result = impl.assign_technology(write);
@@ -135,6 +146,60 @@ core::Result<std::int64_t> GalacticSession::set_technology(const TechnologyWrite
     const auto events = impl.snapshot->events();
     impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
     return result;
+}
+core::Result<GalacticSession::ProductionLockReceipt> GalacticSession::apply_production_lock(const ProductionLockWrite& write) {
+    using Result = core::Result<ProductionLockReceipt>;
+    auto& impl = *impl_;
+    if (impl.failed || !impl.economy || !impl.production)
+        return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production lock writer requires live owners"));
+    auto account = std::find_if(impl.economy->players.begin(), impl.economy->players.end(),
+        [&](const auto& row) { return row.player == write.player; });
+    auto player = std::find_if(impl.production->players.begin(), impl.production->players.end(),
+        [&](const auto& row) { return row.player == write.player; });
+    if (account == impl.economy->players.end() || player == impl.production->players.end())
+        return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "unbound production lock writer"));
+    const auto& registry = impl.production->technology_types;
+    const auto registered = [&](TypeId type) {
+        if (!type) return true;
+        const auto at = std::lower_bound(registry.begin(), registry.end(), type, [](const auto& row, TypeId id) { return row.type < id; });
+        return at != registry.end() && at->type == type;
+    };
+    if (!registered(write.unlock) || !registered(write.lock))
+        return Result::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production lock names an unregistered type"));
+    std::vector<std::uint8_t> bytes;
+    detail::put_u32(bytes, write.player); detail::put_u64(bytes, write.unlock); detail::put_u64(bytes, write.lock);
+    detail::put_u8(bytes, write.slicer_check ? 1 : 0); detail::put_i64(bytes, account->current_tech);
+    auto recorded = append_native_effect(NativeEffectKind::production_lock, std::move(bytes));
+    if (!recorded) return Result::failure(recorded.error());
+    ProductionLockReceipt receipt;
+    // WST-64: remove the build lock and list the unlock, then list the lock. Both lists stay ascending.
+    if (write.unlock) {
+        const auto at = std::lower_bound(player->locked.begin(), player->locked.end(), write.unlock);
+        if (at != player->locked.end() && *at == write.unlock) player->locked.erase(at);
+        const auto listed = std::lower_bound(player->unlocked.begin(), player->unlocked.end(), write.unlock);
+        if (listed == player->unlocked.end() || *listed != write.unlock) player->unlocked.insert(listed, write.unlock);
+    }
+    if (write.lock) {
+        const auto at = std::lower_bound(player->locked.begin(), player->locked.end(), write.lock);
+        if (at == player->locked.end() || *at != write.lock) player->locked.insert(at, write.lock);
+    }
+    impl.dirty[static_cast<std::size_t>(StateSection::production)] = true;
+    if (write.slicer_check) {
+        const bool remains = std::any_of(registry.begin(), registry.end(), [&](const auto& type) {
+            return type.initially_locked && type.slicer_unlockable && type.tech <= account->current_tech
+                && std::binary_search(type.affiliated_players.begin(), type.affiliated_players.end(), write.player)
+                && !std::binary_search(player->unlocked.begin(), player->unlocked.end(), type.type);
+        });
+        // WGEP-148: at or above the maximum nothing is written.
+        if (!remains && account->current_tech < account->maximum_tech) {
+            auto raised = impl.assign_technology({write.player, account->current_tech + 1, true, true});
+            if (!raised) { impl.failed = true; return Result::failure(raised.error()); }
+            receipt.tech_incremented = true;
+        }
+    }
+    const auto events = impl.snapshot->events();
+    impl.snapshot = impl.make_snapshot({events.begin(), events.end()});
+    return Result::success(receipt);
 }
 core::Result<std::int64_t> GalacticSession::increment_technology(PlayerId id) {
     using Result = core::Result<std::int64_t>;

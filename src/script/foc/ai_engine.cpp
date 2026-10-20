@@ -118,9 +118,6 @@ const Plan* Engine::plan(std::uint64_t id) const {
     return row == owner->running.end() ? nullptr : &row->second;
 }
 
-Plan* Engine::mutable_plan(std::uint64_t id) {
-    return const_cast<Plan*>(std::as_const(*this).plan(id));
-}
 Plan* Engine::mutable_plan_of_instance(std::uint64_t id) {
     return const_cast<Plan*>(std::as_const(*this).plan_of_instance(id));
 }

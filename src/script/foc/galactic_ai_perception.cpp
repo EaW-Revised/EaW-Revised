@@ -327,9 +327,6 @@ GalacticBindingId GalacticWorld::intern_bindings(tactical::PlayerId player, cons
     const auto id = static_cast<std::uint64_t>(values.size());
     values.push_back(bindings); bucket.push_back(id); return {identity.value_or(id), id};
 }
-GalacticInternedKey GalacticWorld::intern_key(const GalacticCacheKey& key) const {
-    return {key.player, key.enemy, key.human, key.planet, intern_token(shard(key.player), key.tokens), intern_bindings(key.player, key.bindings)};
-}
 GalacticInternedKey GalacticWorld::intern_restored_key(const GalacticCacheKey& key) const {
     return {key.player, key.enemy, key.human, key.planet, intern_shared_token(key.tokens), intern_bindings(key.player, key.bindings)};
 }

@@ -36,7 +36,8 @@ public:
     void vacate(PeerIndex seat);
     bool pair_open(PeerIndex a, PeerIndex b);
     // A direct failure clears readiness but cannot refuse/regrant until both
-    // endpoints have exhausted relay repair.
+    // endpoints have exhausted this ICE attempt. Nonhost pairs get two fresh
+    // grants per occupancy before the later admission is refused.
     MeshFormationResult pair_failed(PeerIndex a, PeerIndex b, MeshRelayFailure relay);
     bool complete() const;
     bool connected(PeerIndex seat) const;
@@ -44,9 +45,9 @@ public:
 private:
     std::uint32_t capacity_{};
     MeshSeats occupied_{};
-    std::array<MeshSeats, max_match_seats> links_{}, regranted_{};
+    std::array<MeshSeats, max_match_seats> links_{};
+    std::array<std::array<unsigned, max_match_seats>, max_match_seats> retries_{};
     std::array<std::uint64_t, max_match_seats> admitted_{};
-    std::array<bool, max_match_seats> established_{};
     bool closed_{};
 };
 

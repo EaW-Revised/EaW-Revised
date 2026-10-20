@@ -1,19 +1,16 @@
 #include "live_battle_bounty.hpp"
 #include "galactic_mode_internal.hpp"
-#include "orbit_hud_fixture.hpp"
 #include "capture_viewport.hpp"
 #include "viewer_path.hpp"
-#include "hud_clock_fixture.hpp"
-#include "capture_hud_fixture.hpp"
 #include "auto_summary_hint.hpp"
-#include "weapon_action_live_fixture.hpp"
 #include "live_battle_dialog_view.hpp"
 #include "galactic_mode_seats.hpp"
 #include "galactic_reveal.hpp"
 #include "native_ai_flag.hpp"
 
-#include "eawr/core/diagnostic.hpp"
 #include "eawr/campaign/setup_plan.hpp"
+#include "eawr/core/diagnostic.hpp"
+#include "eawr/core/text.hpp"
 
 #include <godot_cpp/classes/input_event_key.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
@@ -89,14 +86,8 @@ bool GalacticMode::State::build_view() {
         return false;
     }
     galactic_view::GalaxySnapshotStub snapshot = galactic_view::synthetic_galaxy();
-    if (options.campaign == galactic_view::synthetic_campaign)
-        galactic_view::configure_orbit_scene_fixture(snapshot, options.hud_fixture);
-    if (options.campaign == galactic_view::synthetic_campaign && (options.hud_fixture == "radar-locked"
-        || options.hud_fixture == "corruption-locked"))
-        map_input.gates.tutorial_locked = true; // Explicit runtime fixture, never live campaign permissions.
     galaxy_setup = galactic_view::synthetic_live_setup();
-    if (options.campaign == galactic_view::synthetic_campaign && !options.synthetic_battle && !options.hud_fixture.empty())
-        galactic_view::configure_synthetic_hud_clock(galaxy_setup);
+    if (options.hud_provider && !options.hud_provider->configure_scene(*this, snapshot)) return false;
     if (filesystem) {
         auto loaded = data::load_catalog_strict(*filesystem, profile == "remake" ? data::Profile::remake
             : (profile == "foc" ? data::Profile::foc : data::Profile::eaw));
@@ -195,11 +186,7 @@ bool GalacticMode::State::build_view() {
             std::map<galactic_view::ObjectId, galactic_view::PlanetArt> remapped_art;
             std::map<galactic_view::ObjectId, galactic_view::ObjectId> remapped_planets;
             const auto equal_name = [](const std::string_view a, const std::string_view b) {
-                return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(), [](char x, char y) {
-                    if (x >= 'A' && x <= 'Z') x = static_cast<char>(x + ('a' - 'A'));
-                    if (y >= 'A' && y <= 'Z') y = static_cast<char>(y + ('a' - 'A'));
-                    return x == y;
-                });
+                return core::iequals(a, b);
             };
             for (auto& planet : snapshot.planets) {
                 const auto location = std::find_if(planned.locations().begin(), planned.locations().end(),
@@ -257,81 +244,9 @@ bool GalacticMode::State::build_view() {
     }
     metadata = std::move(snapshot);
     galaxy = std::move(built.view);
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::fleet_hud_fixture(options.hud_fixture)
-        && !galactic_view::ground_fixture(options.hud_fixture)) {
-        galactic_view::configure_fleet_hud_fixture(galaxy_setup, galaxy->local.player, options.hud_fixture,
-            fleet_display_traits, fleet_visibility, production_names);
-        // Explicit synthetic audio witnesses; live type names come from the campaign.
-        if (options.hud_fixture.starts_with("fleet-drag-xwing")) {
-            production_names[1000] = "Rebel_X-Wing_Squadron";
-            galaxy_setup.fleets[0].members = options.hud_fixture == "fleet-drag-xwing-mixed"
-                ? std::vector<sim::galactic::FleetMember>{{7001,1000},{7002,1002}}
-                : std::vector<sim::galactic::FleetMember>{{7001,1000}};
-            if (options.hud_fixture == "fleet-drag-xwing-roster" && audio_catalog) {
-                const std::array<data::ValueOverride, 1> roster{{
-                    {"Rebel_X-Wing_Squadron", "Squadron_Units", {"X-Wing", "Tartan_Patrol_Cruiser"}}}};
-                auto overridden = data::with_overrides(*audio_catalog, roster);
-                if (!overridden) { failure = core::format_diagnostic(overridden.error()); return false; }
-                audio_catalog = std::make_shared<const data::Catalog>(std::move(overridden).value());
-            }
-        }
-    }
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "fleet-drag-home") {
-        // Explicit native Home producer fixture: no configured home, first leader at another world.
-        galaxy_setup.fleets.front().orbit = 102;
-        // The census owner requires the live production service, with a complete seat/planet table.
-        auto& production = galaxy_setup.production.emplace();
-        production.maximum_human_queue = 5;
-        for (const auto& player : galaxy_setup.players) {
-            const bool human = std::any_of(galaxy_setup.seats.begin(), galaxy_setup.seats.end(), [&](const auto& candidate) {
-                return candidate.player == player.player_id && candidate.kind == sim::SeatKind::human;
-            });
-            sim::galactic::ProductionPlayer row; row.player = player.player_id; row.human = human;
-            row.pay_as_you_go = !human; row.uses_population_cap = human;
-            production.players.push_back(row);
-        }
-        for (const auto& planet : galaxy_setup.planets) {
-            sim::galactic::PlanetProduction row; row.planet = planet.id; row.target_owner = planet.owner;
-            row.maximum_space_level = 5; production.planets.push_back(row);
-        }
-        auto& census = galaxy_setup.census.emplace();
-        for (const auto& type : galaxy_setup.fleet_control->types) census.types.push_back({type.type, {}, 0});
-        for (const auto& player : galaxy_setup.players) census.players.push_back({player.player_id, 50, false, {}});
-        for (const auto& fleet : galaxy_setup.fleets) for (const auto& member : fleet.members)
-            census.objects.push_back({member.id, member.type, fleet.owner, fleet.orbit, fleet.id, false, false,
-                member.type, 0, sim::galactic::ActorCombatRole::ordinary});
-        std::sort(census.objects.begin(), census.objects.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
-        if (content) {
-            content->home_types.erase(galaxy->local.player);
-            content->leader_types[galaxy->local.player] = production_names.at(census.objects.front().current_type);
-        }
-    }
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::ground_fixture(options.hud_fixture))
-        galactic_view::configure_ground_fixture(galaxy_setup,galaxy->local.player,options.hud_fixture,
-            fleet_display_traits,fleet_visibility,production_names);
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_live_fixture(options.hud_fixture))
-        galactic_view::configure_weapon_action_live_fixture(galaxy_setup, galaxy->local.player,
-            fleet_display_traits, fleet_visibility, production_names, options.hud_fixture);
-    if (options.campaign == galactic_view::synthetic_campaign
-        && (options.hud_fixture == "production" || options.hud_fixture == "production-unlocks")) {
-        galactic_view::configure_synthetic_hud_production(galaxy_setup, galaxy->local.player);
-        if (options.hud_fixture == "production-unlocks") {
-            // SND-68: explicit synthetic registered types, independent of the
-            // currently legal offers. One completed research unlocks both.
-            galaxy_setup.production->technology_types = {{8100, 2, true, true, {galaxy->local.player}},
-                {8101, 0, true, true, {galaxy->local.player}}};
-        }
-        production_names = {{1000, "TIE_Scout_Squadron"}, {1001, "Empire_Star_Base_2"},
-            {1002, "DS_Shield_Gen"}, {1003, "Imperial_Stormtrooper_Squad"}, {1004, "E_Ground_Barracks"}};
-    }
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "capture-live") {
-        galactic_view::configure_capture_hud_fixture(galaxy_setup, galaxy->local.player);
-        production_names = {{1003, "Imperial_Stormtrooper_Squad"}, {1004, "E_Ground_Barracks"}};
-    }
+    if (options.hud_provider && !options.hud_provider->configure_setup(*this)) return false;
+
     if (content) {
-        if (options.campaign == galactic_view::synthetic_campaign)
-            galactic_view::configure_orbit_fixture(galaxy_setup, galaxy->local.player, options.hud_fixture,
-                fleet_display_traits, fleet_visibility, production_names);
         for (auto& planet : galaxy->planets) {
             galactic_view::update_affiliation(affiliations[planet.id],
                 galactic_view::affiliation_for_owner(*content, planet.owner));
@@ -345,11 +260,11 @@ bool GalacticMode::State::build_view() {
 }
 
 bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_options) {
-    if (!configure_score_fixture(live_options)) return false;
+    if (options.hud_provider && !options.hud_provider->configure_score(*this, live_options)) return false;
     configure_save_repository(live_options, options);
-    const bool transit_fixture = options.campaign == galactic_view::synthetic_campaign
-        && options.hud_fixture == "fleet-transit";
+    const bool transit_fixture = fixture_enabled(GalacticHudFixture::Feature::driven_transit);
     live_options.workers = platform::LiveSession::game_worker_count();
+    if (interactive) live_options.interactive_seat = sim::SeatId{galaxy->local.seat};
     live_options.pacing = interactive && !transit_fixture ? platform::LiveGameSession::Pacing::real_time
         : platform::LiveGameSession::Pacing::driven;
     auto started = campaign_root ? platform::LiveGameSession::start(std::move(campaign_root), std::move(live_options))
@@ -371,64 +286,10 @@ bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_opt
             return false;
         }
     }
-    if (transit_fixture) {
-        // Drawing fixture only: movement admission requires an unpaused galaxy.
-        // Driven pacing publishes each command before freezing the transit view.
-        const auto publish = [&](sim::galactic::CommandPayload payload) {
-            const auto target = game->frame().session_tick + 1;
-            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, std::move(payload), {}});
-            game->advance_to(target);
-            return game->wait_for(target, std::chrono::seconds(5));
-        };
-        // Fixture distance only: travel clear of the source planet's model so the
-        // fleet model and its facing are visible (#3071).
-        constexpr std::uint64_t transit_fixture_ticks = 50;
-        const auto travel = [&] {
-            const auto target = game->frame().session_tick + transit_fixture_ticks;
-            game->advance_to(target);
-            return game->wait_for(target, std::chrono::seconds(5));
-        };
-        if ((options.paused && !publish(sim::galactic::ResumeGalaxy{}))
-            || !publish(sim::galactic::MoveFleet{601, {101,102}, std::nullopt}) || !travel()
-            || (options.paused && !publish(sim::galactic::PauseGalaxy{}))) {
-            failure = "fleet transit drawing fixture was not published";
-            return false;
-        }
-        const auto frame = game->frame();
-        if (!std::any_of(frame.latest->fleets().begin(), frame.latest->fleets().end(),
-            [](const auto& fleet) { return fleet.id == 601 && fleet.motion.transit.has_value(); })) {
-            failure = "fleet transit drawing fixture did not enter transit";
-            return false;
-        }
-    }
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "capture-live") {
-        const auto publish = [&](sim::galactic::CommandPayload payload) {
-            const auto target = game->frame().session_tick + 1;
-            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, std::move(payload), {}});
-            game->advance_to(target);
-            return game->wait_for(target, std::chrono::seconds(5));
-        };
-        if ((options.paused && !publish(sim::galactic::ResumeGalaxy{}))
-            || !publish(sim::galactic::LandFleet{601, 101})) {
-            failure = "live capture fixture landing failed"; return false;
-        }
-        const auto target = game->frame().session_tick + 35;
-        game->advance_to(target);
-        if (!game->wait_for(target, std::chrono::seconds(5))
-            || (options.paused && !publish(sim::galactic::PauseGalaxy{}))) {
-            failure = "live capture fixture control was not published"; return false;
-        }
-    }
-    if (!run_score_ledger()) return false;
+    if (options.hud_provider && !options.hud_provider->start_session(*this)) return false;
+    if (options.hud_provider && !options.hud_provider->run_score_ledger(*this)) return false;
     if (!options.queue_type.empty() && !queue_requested_build()) return false;
-    if (options.campaign == galactic_view::synthetic_campaign && galactic_view::weapon_action_live_fixture(options.hud_fixture)) {
-        // Live acceptance fixture: the ability menu is opened by a real seat command; the HUD then queues the host's
-        // typed capability (never a copied menu). Real-time pacing processes it even while the galaxy is paused.
-        game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::PrepareGalacticAbility{
-            galactic_view::live_hack_actor, galactic_view::live_hack_planet,
-            options.hud_fixture.starts_with("destruction-live") ? sim::galactic::AbilityKind::planet_destruction
-                : sim::galactic::AbilityKind::superweapon_hack}, {}});
-    }
+    if (options.hud_provider && !options.hud_provider->prepare_ability(*this)) return false;
     return refresh_game();
 }
 
@@ -546,6 +407,7 @@ void GalacticMode::State::request_pause(const bool value) {
 }
 
 bool GalacticMode::State::refresh_game() {
+    const auto measured = measure_frame(FramePhase::snapshot);
     if (!game) return true;
     if (const auto error = game->failure()) { failure = core::format_diagnostic(*error); return false; }
     const auto frame = game->frame();
@@ -555,25 +417,27 @@ bool GalacticMode::State::refresh_game() {
         capture_metrics.observe(frame, events);
         if (options.all_ai_capture && !capture_metrics.failure.empty()) { failure = capture_metrics.failure; return false; }
     }
+    if (frame.summary_closed && frame.summary_closed_seat == sim::SeatId{galaxy->local.seat})
+        (void)galactic_view::acknowledge_battle_summary(acknowledged_battle_summary, frame, frame.summary_closed);
     if (frame.latest == published_snapshot) return true;
     // #3931: with the reveal on, every presentation reader gets the omniscient draw view of this publication.
     const auto shown = options.galactic_reveal ? galactic_view::reveal_snapshot(frame.latest) : frame.latest;
-    if (!galactic_view::fleet_hud_fixture(options.hud_fixture))
+    if (!fixture_enabled(GalacticHudFixture::Feature::fleet_visibility))
         fleet_visibility = galactic_view::live_fleet_visibility(*shown);
     auto built = galactic_view::build_live_view(*shown, metadata, galaxy->local.seat, neutral_owner,
         scene_objects, {fleet_visibility, {}, options.all_ai_capture || options.galactic_reveal, options.galactic_reveal});
     if (!built.view) { failure = built.failure; return false; }
+    // Rows shared by storage between two publications are equal without a member-wise compare.
+    const auto rows_differ = [](const auto& now, const auto& before) {
+        return (now.data() != before.data() || now.size() != before.size())
+            && !std::equal(now.begin(), now.end(), before.begin(), before.end());
+    };
     const bool changed = !displayed_snapshot
         || galaxy->fleets != built.view->fleets
-        || !std::equal(shown->planets().begin(), shown->planets().end(),
-            displayed_snapshot->planets().begin(), displayed_snapshot->planets().end())
-        || !std::equal(shown->routes().begin(), shown->routes().end(),
-            displayed_snapshot->routes().begin(), displayed_snapshot->routes().end())
-        || !std::equal(shown->fleets().begin(), shown->fleets().end(),
-            displayed_snapshot->fleets().begin(), displayed_snapshot->fleets().end())
-        || (shown->observations().data() != displayed_snapshot->observations().data()
-            && !std::equal(shown->observations().begin(), shown->observations().end(),
-                displayed_snapshot->observations().begin(), displayed_snapshot->observations().end()));
+        || rows_differ(shown->planets(), displayed_snapshot->planets())
+        || rows_differ(shown->routes(), displayed_snapshot->routes())
+        || rows_differ(shown->fleets(), displayed_snapshot->fleets())
+        || rows_differ(shown->observations(), displayed_snapshot->observations());
     galaxy = std::move(built.view);
     displayed_snapshot = shown;
     published_snapshot = frame.latest;
@@ -596,15 +460,19 @@ bool GalacticMode::State::refresh_game() {
         if (renderer && !build_overlay()) return false;
         // Reuse the route adapter's relation seam when live ownership changes.
         if (route_styles) {
+            // One id lookup per published view instead of a planet scan per route end (#4313); emplace keeps the first
+            // planet of a duplicated id, as the scans did.
+            std::unordered_map<galactic_view::ObjectId, std::size_t> planet_slots;
+            planet_slots.reserve(galaxy->planets.size());
+            for (std::size_t slot = 0; slot < galaxy->planets.size(); ++slot) planet_slots.emplace(galaxy->planets[slot].id, slot);
+            const auto observed = local_observation_index();
             for (const auto& route : galaxy->routes) {
                 const auto line = route_lines.find(route.id);
                 if (line == route_lines.end()) continue;
-                const auto from = std::find_if(galaxy->planets.begin(), galaxy->planets.end(),
-                    [&](const auto& planet) { return planet.id == route.from; });
-                const auto to = std::find_if(galaxy->planets.begin(), galaxy->planets.end(),
-                    [&](const auto& planet) { return planet.id == route.to; });
-                if (from == galaxy->planets.end() || to == galaxy->planets.end()) continue;
-                const auto owners = route_owners(*from, *to);
+                const auto from = planet_slots.find(route.from);
+                const auto to = planet_slots.find(route.to);
+                if (from == planet_slots.end() || to == planet_slots.end()) continue;
+                const auto owners = route_owners(galaxy->planets[from->second], galaxy->planets[to->second], &observed);
                 if (line->second.set_type(galactic_view::route_type(owners, options.red_green_routes,
                     route_styles->good_faction, route_styles->evil_faction)) && line->second.zoom() == 1.0F) {
                     // A recreated relation invalidates its focused zoom material/spark state.
@@ -734,6 +602,7 @@ const galactic_view::PlanetView* GalacticMode::State::picked_planet(const float 
 }
 
 void GalacticMode::State::apply_camera() {
+    const auto measured = measure_frame(FramePhase::camera);
     if (interactive) {
         const Vector2 size = host->get_viewport()->get_visible_rect().size;
         if (size.x >= 1.0F && size.y >= 1.0F) {
@@ -834,6 +703,7 @@ std::optional<std::array<float, 12>> GalacticMode::State::zoom_pose(const bool a
 }
 
 void GalacticMode::State::submit() {
+    const auto measured = measure_frame(FramePhase::submit);
     // WGUI-60/62: the camera switches its target between ALT0 and ALT1.
     // WGUI-05: an undiscovered planet shows its ALT2 surfaces (the authored grid
     // shell) whatever the camera does. Untagged surfaces always draw.
@@ -972,6 +842,7 @@ GalacticMode::Options GalacticMode::from_command_line() {
     }
     options.proof_options_invalid |= options.capture_seed.has_value() && !options.all_ai_capture;
     if (!options.all_ai_capture && options.simulation_ticks > 3600) options.camera_options_invalid = true;
+    options.hud_provider = make_capture_hud_fixture(options);
     return options;
 }
 
@@ -1029,8 +900,7 @@ bool GalacticMode::ready(Node3D& host) {
             state.selected_planet = home->id;
         }
     }
-    if (state.options.all_ai_capture || (state.options.campaign == galactic_view::synthetic_campaign
-        && state.options.hud_fixture.starts_with("corruption-spread"))) {
+    if (state.options.all_ai_capture || state.fixture_enabled(GalacticHudFixture::Feature::corruption_overview)) {
         // Capture the playable galaxy rather than only the authored starting home.
         auto camera_metadata = state.metadata;
         std::erase_if(camera_metadata.planets, [&](const auto& planet) {
@@ -1106,8 +976,16 @@ bool GalacticMode::ready(Node3D& host) {
         if (!owner->game || !owner->galaxy) return false;
         if (choice == galactic_view::BattleChoice::continue_galaxy) {
             if (owner->battle_dialog && owner->battle_dialog->view().phase == galactic_view::BattleDialogPhase::summary
-                && owner->battle_dialog->view().conflict == conflict)
-                return galactic_view::acknowledge_battle_summary(owner->acknowledged_battle_summary, owner->battle_dialog_frame(), conflict);
+                && owner->battle_dialog->view().conflict == conflict) {
+                const auto frame = owner->battle_dialog_frame();
+                if (!galactic_view::acknowledge_battle_summary(owner->acknowledged_battle_summary, frame, conflict)) return false;
+                if (frame.summary_hold == conflict) {
+                    owner->game->submit(platform::LiveGameOrder{sim::SeatId{owner->galaxy->local.seat},
+                        sim::galactic::BattleSummaryAcknowledge{conflict}, {}});
+                    ++owner->submitted_orders;
+                }
+                return true;
+            }
             return owner->acknowledged_battle_summary.contains(conflict);
         }
         if (choice == galactic_view::BattleChoice::invade) {
@@ -1115,9 +993,10 @@ bool GalacticMode::ready(Node3D& host) {
             if (!frame.invasion_offer || frame.invasion_offer->conflict != conflict
                 || frame.invasion_offer->observer != owner->galaxy->local.player
                 || !frame.invasion_offer->visible_admitted || !frame.invasion_offer->accept_permitted) return false;
-            if (!galactic_view::acknowledge_battle_summary(owner->acknowledged_battle_summary, frame, conflict)) return false;
+            // The offer gating above only hides the button; the simulation decides at execution. A refused
+            // invasion keeps the summary and its hold open until Continue.
             owner->game->submit(platform::LiveGameOrder{sim::SeatId{owner->galaxy->local.seat},
-                sim::galactic::PauseGalaxy{}, {}, conflict});
+                sim::galactic::InvasionAccept{conflict}, {}});
             ++owner->submitted_orders;
             return true;
         }
@@ -1152,6 +1031,7 @@ bool GalacticMode::ready(Node3D& host) {
 std::optional<int> GalacticMode::process(const double delta) {
     State& state = *state_;
     if (state.completed) return std::nullopt;
+    const auto measured = state.measure_frame(State::FramePhase::main);
     ++state.frames;
     if (state.save_controls) state.save_controls->service();
     if (!state.options.space_cycle_proof.empty() && !state.service_space_cycle_proof()) {
@@ -1159,7 +1039,7 @@ std::optional<int> GalacticMode::process(const double delta) {
         static_cast<void>(state.write_report());
         return 2;
     }
-    if (state.game && state.battle_dialog && state.galaxy && !state.options.hud_fixture.starts_with("battle-")) {
+    if (state.game && state.battle_dialog && state.galaxy && !state.fixture_enabled(GalacticHudFixture::Feature::battle_dialog)) {
         const auto frame = state.battle_dialog_frame();
         if (!state.battle_pending_publication.reuse(frame, sim::SeatId{state.galaxy->local.seat},
             state.galaxy->local.player, state.battle_metadata_generation)
@@ -1303,9 +1183,6 @@ std::optional<int> GalacticMode::process(const double delta) {
     state.service_approach(delta);
     if (state.game && state.options.synthetic_battle && state.process_handoff(delta)) return std::nullopt;
     if (state.game && !state.options.synthetic_battle && state.process_battle_transition(delta)) return std::nullopt;
-    if (!state.options.space_cycle_proof.empty() && state.failure.empty()
-        && (state.cycles.empty() || !state.proof_summary_acknowledged
-            || (state.battle_dialog && state.battle_dialog->visible()))) return std::nullopt;
     // The diagnostic clock traverses long stock idle clips deterministically.
     // Live and paused presentation keep their ordinary clock semantics.
     const bool refreshed = state.failure.empty() && state.refresh_game();
@@ -1317,6 +1194,11 @@ std::optional<int> GalacticMode::process(const double delta) {
         static_cast<void>(state.write_report());
         return 2;
     }
+    // A cycle capture can wait at a pending battle while the live galaxy has
+    // already published discovery. Present it before waiting, just as load does.
+    if (!state.options.space_cycle_proof.empty()
+        && (state.cycles.empty() || !state.proof_summary_acknowledged
+            || (state.battle_dialog && state.battle_dialog->visible()))) return std::nullopt;
     if (state.options.zoom_probe_planet != 0) {
         const auto planet = std::find_if(state.galaxy->planets.begin(), state.galaxy->planets.end(),
             [&](const auto& value) { return value.id == state.options.zoom_probe_planet; });
@@ -1715,7 +1597,7 @@ bool GalacticMode::State::resolve_restore_save() {
     if (!options.restore_save) return true;
     const auto refuse = [&](std::string text) { failure = "EAWR-SAVE-0105: " + std::move(text); return false; };
     if (options.restore_save->name.empty()) return refuse("--eawr-galactic-restore needs a save name");
-    if (options.synthetic_battle || !options.space_cycle_proof.empty() || !options.hud_fixture.empty()
+    if (options.synthetic_battle || !options.space_cycle_proof.empty() || bool(options.hud_provider)
         || !options.queue_type.empty() || options.paused) return refuse("a restored campaign takes no start fixtures");
     auto slot = platform::read_save_slot(ViewerPath::utf8(save_directory(options)), options.restore_save->name);
     if (!slot) { failure = core::format_diagnostic(slot.error()); return false; }

@@ -4,7 +4,8 @@
 #include "eawr/presentation/camera/constants_source.hpp"
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/camera/free_camera.hpp"
-#include "eawr/skirmish/start.hpp"
+#include "eawr/assets/map.hpp"
+#include "eawr/battle/start.hpp"
 
 #include <array>
 #include <cstddef>
@@ -58,7 +59,7 @@ struct MapCameraConfig final {
 // #908 SC-02: project live-camera policy, centred on the fleet placed around
 // the local spawn by PL-01/PL-03 and bounded by the declared map extents.
 [[nodiscard]] core::Result<MapCameraConfig> skirmish_camera_config(
-    const assets::Map& map, const skirmish::SkirmishStart& start, sim::tactical::PlayerId local_player);
+    const assets::Map& map, const battle::BattleStart& start, sim::tactical::PlayerId local_player);
 
 // Campaign entry/restore has exact actors, but does not save selected fleet-marker IDs.
 [[nodiscard]] core::Result<MapCameraConfig> campaign_camera_config(

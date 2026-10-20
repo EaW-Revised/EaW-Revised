@@ -117,8 +117,8 @@ core::Result<GnsEnvelope> GnsFrameDecoder::receive(std::span<const std::uint8_t>
                 || (body[8] == 1 && (seat(9) >= options_.peers || seat(9) == seat(0) || !gns_pair_reason(seat(13)) || body[17] > 1))
                 || (body[8] != 1 && (seat(9) != 0 || seat(13) != 0 || body[17] != 0))) return bad();
         } else if (kind == TcpMessage::mesh_report) {
-            // remote seat, state (0 open, 1 failed, 2 lost), relay offered, reason code
-            if (!host_local || body.size() != 10 || seat(0) == 0 || seat(0) == remote_ || seat(0) >= options_.peers
+            // remote seat, state (0 open, 1 failed, 2 lost), relay offered, reason code, grant secret
+            if (!host_local || body.size() != 10 + gns_pair_secret_size || seat(0) == 0 || seat(0) == remote_ || seat(0) >= options_.peers
                 || body[4] > 2 || body[5] > 1 || !gns_pair_reason(seat(6))) return bad();
         } else {
             const auto mask = body.size() == 4 ? seat(0) : 0xffffffffU;

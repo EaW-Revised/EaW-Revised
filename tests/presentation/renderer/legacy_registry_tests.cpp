@@ -1,5 +1,15 @@
 #include "legacy_family_support.hpp"
 
+#include <array>
+#include <cstddef>
+#include <regex>
+#include <string>
+#include <string_view>
+#include <tuple>
+#include <utility>
+#include <variant>
+#include <vector>
+
 namespace legacy_family_test_support {
 
 // The renderer's original selector table (renderer_contract.cpp), as

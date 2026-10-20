@@ -149,6 +149,8 @@ struct MinimapUnit {
     bool team{};         // MM-17: a model-free team's extent is the authored radar scale itself
     MinimapLiveState radar{};
     std::optional<MinimapCaptureColour> capture{};
+    // MM-15: a squadron's live craft supply radar permission; its team type supplies style.
+    std::optional<bool> team_radar_visible{};
 };
 
 // WNO-44: stored identity and transform, with no live admission/selection fields.

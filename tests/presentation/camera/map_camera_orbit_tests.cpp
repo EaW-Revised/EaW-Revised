@@ -1,5 +1,11 @@
 #include "map_camera_movement_support.hpp"
 
+#include <cmath>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <string_view>
+
 namespace eawr_map_camera_test {
 
 void test_ctrl_orbit_through_the_bridge() {

@@ -10,7 +10,7 @@ namespace eawr::net {
 
 struct LanBroadcaster::Impl {
     explicit Impl(LanBroadcastOptions value)
-        : options(std::move(value)), directory({0, options.protocol, options.build}) {}
+        : options(std::move(value)), directory({0, options.protocol, options.build, options.menu_chat_limits}) {}
     ~Impl() { socket::close(handle); }
 
     LanBroadcastOptions options;
@@ -22,7 +22,7 @@ struct LanBroadcaster::Impl {
     std::optional<LanClock::time_point> last_sent;
     bool dirty{true};
     std::uint32_t chat_sequence{};
-    std::uint64_t ignored{};
+    std::optional<LanClock::time_point> menu_chat_sent;
     std::vector<std::uint16_t> targets;
 
     void send_everywhere(std::span<const std::uint8_t> bytes) {
@@ -49,7 +49,7 @@ core::Result<std::unique_ptr<LanBroadcaster>> LanBroadcaster::open(LanBroadcastO
         impl->self = (static_cast<std::uint64_t>(device()) << 32) ^ device()
             ^ static_cast<std::uint64_t>(LanClock::now().time_since_epoch().count());
     } while (impl->self == 0);
-    impl->directory = LanDirectory({impl->self, impl->options.protocol, impl->options.build});
+    impl->directory = LanDirectory({impl->self, impl->options.protocol, impl->options.build, impl->options.menu_chat_limits});
     impl->targets.push_back(impl->port);
     for (const std::uint16_t extra : impl->options.extra_ports) {
         if (std::find(impl->targets.begin(), impl->targets.end(), extra) == impl->targets.end()) {
@@ -70,9 +70,9 @@ std::uint64_t LanBroadcaster::self() const noexcept { return impl_->self; }
 std::uint16_t LanBroadcaster::port() const noexcept { return impl_->port; }
 LanDirectory& LanBroadcaster::directory() noexcept { return impl_->directory; }
 const LanDirectory& LanBroadcaster::directory() const noexcept { return impl_->directory; }
-std::uint64_t LanBroadcaster::ignored_datagrams() const noexcept { return impl_->ignored; }
 
 void LanBroadcaster::set_presence(LanPresence presence) {
+    if (impl_->options.menu_chat_limits) presence.name = sanitize_lan_menu_text(presence.name, lan_menu_max_name);
     presence.sender = impl_->self;
     presence.protocol = impl_->options.protocol;
     presence.build = impl_->options.build;
@@ -83,6 +83,19 @@ void LanBroadcaster::set_presence(LanPresence presence) {
 }
 
 void LanBroadcaster::send_chat(const ChatScope scope, std::string game, std::string name, std::string text) {
+    static_cast<void>(try_send_chat(scope, std::move(game), std::move(name), std::move(text), LanClock::now()));
+}
+
+bool LanBroadcaster::try_send_chat(const ChatScope scope, std::string game, std::string name, std::string text,
+                                  const LanClock::time_point now) {
+    if (impl_->options.menu_chat_limits && scope == ChatScope::lobby) {
+        if (text.size() > lan_menu_max_chat) return false;
+        name = sanitize_lan_menu_text(name, lan_menu_max_name);
+        text = sanitize_lan_menu_text(text, lan_menu_max_chat);
+        if (name.empty() || text.empty()) return false;
+        if (impl_->menu_chat_sent && now - *impl_->menu_chat_sent < lan_menu_chat_spacing) return false;
+        impl_->menu_chat_sent = now;
+    }
     LanChat chat;
     chat.sender = impl_->self;
     chat.sequence = ++impl_->chat_sequence;
@@ -91,6 +104,7 @@ void LanBroadcaster::send_chat(const ChatScope scope, std::string game, std::str
     chat.name = std::move(name);
     chat.text = std::move(text);
     impl_->send_everywhere(encode_chat(chat));
+    return true;
 }
 
 bool LanBroadcaster::pump(const LanClock::time_point now) {
@@ -109,7 +123,6 @@ bool LanBroadcaster::pump(const LanClock::time_point now) {
         if (datagram.count == 0) continue;
         const std::span<const std::uint8_t> bytes(buffer.data(), datagram.count);
         if (!decode_lan_message(bytes)) {
-            ++impl.ignored;
             continue;
         }
         if (impl.directory.receive(bytes, ipv4_text(datagram.from), now)) changed = true;

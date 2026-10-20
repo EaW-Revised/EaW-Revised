@@ -2,6 +2,11 @@
 
 #include "session_types.hpp"
 
+#include <algorithm>
+#include <tuple>
+#include <utility>
+#include <vector>
+
 namespace eawr::sim::tactical::session_detail {
 
 // Ordered fragments preserve the session's original member lifetime order.
@@ -22,6 +27,22 @@ struct SessionStoreAbilityEffects {
         math::Fixed cause{};
         friend bool operator==(const ConcentrateEffect&, const ConcentrateEffect&) = default;
     };
+    // Total order over every field: two effects from one source (tractor + concentrate fire) can share
+    // (target, category, source), and which comes first reaches the checkpoint bytes and the change test.
+    static void sort_concentrate_effects(std::vector<ConcentrateEffect>& effects) {
+        std::sort(effects.begin(), effects.end(), [](const ConcentrateEffect& a, const ConcentrateEffect& b) {
+            return std::tie(a.target, a.category, a.source, a.kind, a.cause, a.defense, a.speed)
+                < std::tie(b.target, b.category, b.source, b.kind, b.cause, b.defense, b.speed);
+        });
+    }
+    // Sorts `next` and, when it differs from the stored effects, marks both sets of targets changed.
+    void commit_concentrate_effects(std::vector<ConcentrateEffect> next) {
+        sort_concentrate_effects(next);
+        if (next == concentrate_effects) return;
+        for (const auto& effect : concentrate_effects) concentrate_changed_targets.insert(effect.target);
+        for (const auto& effect : next) concentrate_changed_targets.insert(effect.target);
+        concentrate_effects = std::move(next);
+    }
     // Derived source references; only activation recruits, service never scans recipients.
     std::vector<ConcentrateEffect> concentrate_effects;
     std::set<EntityId> concentrate_changed_targets;

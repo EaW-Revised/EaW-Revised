@@ -198,7 +198,21 @@ bool GalacticMode::State::service_space_cycle_proof() {
             }
             if (proof_move_submitted) break;
         }
-        if (!proof_move_submitted) { failure = "Space cycle proof found no hostile authored fleet route"; return false; }
+        if (!proof_move_submitted) {
+            failure = "Space cycle proof found no hostile authored fleet route";
+            // Dump the start state so a missing precondition is diagnosable from the report alone.
+            failure += " (session_tick=" + std::to_string(frame.session_tick) + " seat_player=" + std::to_string(galaxy->local.player);
+            for (const auto& fleet : fleets)
+                failure += " fleet#" + std::to_string(fleet.id) + "{owner=" + std::to_string(fleet.owner)
+                    + ",orbit=" + std::to_string(fleet.orbit) + ",members=" + std::to_string(fleet.members.size())
+                    + (fleet.motion.transit ? ",transit" : "") + "}";
+            for (const auto& planet : planets)
+                failure += " planet#" + std::to_string(planet.id) + "{owner=" + std::to_string(planet.owner) + "}";
+            for (const auto& route : frame.latest->routes())
+                failure += " route{" + std::to_string(route.from) + "-" + std::to_string(route.to) + "}";
+            failure += ")";
+            return false;
+        }
     }
     const bool prompt_save = options.space_cycle_proof == "prompt-save";
     if (!proof_fight_enabled && frame.pending_conflict && frame.pending_conflict->choice_ready && battle_dialog

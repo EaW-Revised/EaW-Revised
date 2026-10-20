@@ -383,7 +383,7 @@ void member_transfer_contracts() {
 }
 
 } // namespace
-int main(const int argc, const char* const argv[]) {
+int case_galactic_fleet_tests(const int argc, const char* const argv[]) {
     if (argc == 3 && std::string_view(argv[1]) == "--generate") {
         const auto r = replay(); auto game = eawr::campaign::GameSession::create(r.setup).value();
         for (const auto& c : r.commands) if (!game.submit(c)) return 1;

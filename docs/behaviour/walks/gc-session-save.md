@@ -159,7 +159,7 @@ Reference fixups, rather than freshly created same-type units, restore identity.
 
 | ID | Rule and conditions, in save-call order | Source |
 |---|---|---|
-| WGS-33 | Quick-save and autosave entry points do nothing in multiplayer mode. Otherwise they initialize the save list and call the ordinary saver with their respective reserved descriptions. Quick-save additionally captures a preview and opens the saved notification. These entry points alone do not establish every menu/hotkey admission gate, WGS-U04. | debug build EGS-11 |
+| WGS-33 | Quick-save and autosave entry points do nothing in multiplayer mode (the LAN/online mode flag, never the number of human seats, so a multiplayer game down to one human still writes none). Otherwise they initialize the save list and call the ordinary saver with their respective reserved descriptions. Quick-save additionally captures a preview and opens the saved notification. These entry points alone do not establish every menu/hotkey admission gate, WGS-U04. | debug build EGS-11 |
 | WGS-34 | An executed save event keeps its requested save slot only for the local initiating player; other participants change their event's slot to **-1** before invoking the registered callback. This separate event route must not be replaced by quick-save's multiplayer gate. Callback/network coordination remains WGS-U04. | debug build EGS-11 |
 | WGS-35 | An invasion event can request the autosave callback before replacing story land-force context, checking special story-map routing or invoking ordinary invasion. Rejected paused/queued-local-conflict events return before this callback. Later special-map handling can clear the invasion-autosave flag without undoing the already-issued callback. Thus prebattle save timing precedes invasion mutation; callback registration and space-battle autosave triggers remain WGS-U04. Admission/force filtering remain WGM-44..51. | debug build EGS-23 |
 | WGS-36 | The ordinary saver creates the save directory, flushes deletion-pending objects across modes, rejects an empty description or failed file open, then writes a preview/header followed by **players, mode manager, signal dispatcher and speech events**. It closes the file and checks reference linkage. Its aggregate result tracks section writer results; this is not evidence of atomic file replacement. | debug build EGS-11 |
@@ -644,6 +644,19 @@ restore that exact slot, inventory retained parent/child references and compare
 first resumed work for WGS-U05/U08. The galactic frame-service owner supplies
 the entry/commit timing seam under GFS-01/02 and GFSC-12/15; no new cadence trace
 or universal admission rule is introduced by this walk.
+
+Project implementation (legacy EAWR-2524): the live owner issues the reserved autosave
+(WGS-142/143) through the ordinary `SaveRequest` route one tick before the Begin
+choice of a pending single-human space conflict runs, so the capture is the pending
+prompt and no child exists yet (WGS-144). The conflict owner opens the admission
+window only while the conflict is pending with its pause held and nothing staged;
+every other state, multiplayer and non-human seats keep refusing it. Publication
+failure never holds the battle back (WGS-145) and is reported in the save outcome.
+The first Begin after restoring the autosave itself writes nothing. Solo-galaxy Quit
+Yes (WGS-165) requests the same slot through an ordinary autosave request and leaves
+once it terminates; the tactical branch and multiplayer leave without one. Unverified
+and not implemented: the invasion-callback route, the automatic tactical route (no
+Begin choice) and land entries.
 
 ## Bounded AI and competing credit-result captures
 

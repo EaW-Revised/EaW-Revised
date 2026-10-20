@@ -3,6 +3,7 @@
 #include "relay_prefix_budget.hpp"
 #include "relay_directory.hpp"
 #include "relay_room.hpp"
+#include "relay_menu.hpp"
 #include "relay_hash_worker.hpp"
 #include "relay_cloudflare.hpp"
 #include "relay_renewal.hpp"
@@ -49,10 +50,19 @@ bool valid(const RelayServerOptions& o) {
         && o.session_lifetime >= std::chrono::seconds(1) && o.session_lifetime <= std::chrono::hours(24)
         && o.max_session_lifetime >= o.session_lifetime && o.max_session_lifetime <= std::chrono::hours(24 * 7)
         && o.renewal_window.count() > 0 && o.renewal_window <= o.max_session_lifetime
+        && o.menu_operations_per_minute > 0 && o.menu_operations_per_minute <= 100000
+        && o.menu_bytes_per_minute >= max_body && o.menu_bytes_per_minute <= 1024ULL * 1024 * 1024
+        && o.menu_max_members > 0 && o.menu_max_members <= 4096
+        && o.menu_recent_lines <= 200 && o.menu_line_lifetime.count() > 0 && o.menu_line_lifetime <= std::chrono::hours(1)
         && o.room_operations_per_member_per_minute > 0 && o.room_operations_per_member_per_minute <= 100000
         && o.room_bytes_per_member_per_minute >= max_body && o.room_bytes_per_member_per_minute <= 1024ULL * 1024 * 1024
         && o.room_reservation_timeout >= std::chrono::seconds(1) && o.room_reservation_timeout <= std::chrono::minutes(10)
         && o.room_hold_timeout >= std::chrono::seconds(1) && o.room_hold_timeout <= std::chrono::hours(24);
+}
+MenuOptions menu_options(const RelayServerOptions& o) {
+    MenuOptions m;
+    m.max_members = o.menu_max_members; m.recent_lines = o.menu_recent_lines; m.line_lifetime = o.menu_line_lifetime;
+    return m;
 }
 RoomOptions room_options(const RelayServerOptions& o) {
     RoomOptions r;
@@ -110,7 +120,7 @@ struct RelayServer::Impl {
         std::string ip, identity, session;
         Clock::time_point created{}, last_read{}, closing_at{};
         bool closing{};
-        bool directory{}, hashing{}, room{};
+        bool directory{}, hashing{}, room{}, menu{};
         Bytes hash_request;
     };
     struct Session {
@@ -142,6 +152,7 @@ struct RelayServer::Impl {
     std::map<std::string, Session> sessions;
     PrefixBudgets ips;
     Directory directory;
+    MenuChannel menu;
     PasswordHashWorker hashes;
     std::unique_ptr<CloudflareTurnWorker> turns;
     std::deque<Clock::time_point> turn_calls;
@@ -178,7 +189,7 @@ struct RelayServer::Impl {
     RoomService rooms;
     Impl(RelayServerOptions o, Now clock, socket::Open open, Context ctx, RelayServer::PasswordHash hash, std::shared_ptr<TurnRefresh> turn_refresh)
         : options(std::move(o)), now(clock), listener(open), context(std::move(ctx)), ips(options.max_connections),
-          directory(options.max_sessions, options.max_connections), hashes(hash ? hash : password_hash),
+          directory(options.max_sessions, options.max_connections), menu(menu_options(options)), hashes(hash ? hash : password_hash),
           rooms(room_options(options), room_host, directory, ips) {
         directory.set_room_scope(&rooms);
         directory.set_bridge_hooks({
@@ -254,6 +265,7 @@ struct RelayServer::Impl {
         if (found == clients.end()) return;
         directory.disconnect(id, now());
         rooms.disconnect(id, now());
+        menu.disconnect(id);
         const auto session = sessions.find(found->second.session);
         if (session != sessions.end()) {
             directory.invalidate_bridge(session->first);
@@ -405,6 +417,18 @@ struct RelayServer::Impl {
             if (c.directory || !c.session.empty()) { fail(c, 1540); return; }
             c.room = true;
             rooms.request(id, c.ip, bytes, now()); return;
+        }
+        if (menu_kind(static_cast<unsigned>(kind))) {
+            // Menu channel (#3758): a connection of its own, never a directory, room or legacy session connection.
+            if (c.directory || c.room || !c.session.empty() || (!c.menu && kind != Kind::menu_open)) { fail(c, 1540); return; }
+            auto reply = menu.request(id, bytes, now());
+            if (kind == Kind::menu_open && reply.size() > 1 && reply[1] == static_cast<std::uint8_t>(Kind::menu_page)) c.menu = true;
+            if (!ips.at(c.ip).menu.add_bytes(reply.size(), options.menu_bytes_per_minute)) { fail(c, 1525); return; }
+            output(c, std::move(reply)); return;
+        }
+        if (c.menu) {
+            if (kind == Kind::ping && reader.done()) return;
+            fail(c, 1540); return;
         }
         if (c.room) {
             // Ticket E's renewal and the client heartbeat run unchanged on a room member connection.
@@ -605,28 +629,31 @@ struct RelayServer::Impl {
                 if (c.tls->ready() && c.tls->drained() && !c.tls->finish_writes()) dead.push_back(id);
             }
             auto& budget = ips.at(c.ip);
-            auto& traffic = c.directory ? budget.directory : c.room ? budget.room : static_cast<Budget&>(budget);
+            auto& traffic = c.directory ? budget.directory : c.menu ? budget.menu : c.room ? budget.room : static_cast<Budget&>(budget);
             traffic.refresh(time);
             // A prefix may carry up to connections_per_ip member connections of the per-member room limits.
             const auto byte_limit = c.directory ? options.directory_bytes_per_minute
+                : c.menu ? options.menu_bytes_per_minute
                 : c.room ? options.room_bytes_per_member_per_minute * options.connections_per_ip : options.bytes_per_minute;
             if (!traffic.add_bytes(c.tls->take_read_bytes(), byte_limit)) fail(c, 1525);
             if (!c.closing && !c.hashing) if (auto bytes = c.tls->receive()) {
                 c.last_read = time;
                 const bool directory_request = bytes->size() >= 2 && (*bytes)[1] >= 20 && (*bytes)[1] <= 29;
+                const bool menu_request = c.menu || (bytes->size() >= 2 && menu_kind((*bytes)[1]));
                 const bool room_request = c.room || (bytes->size() >= 2 && room_kind((*bytes)[1]));
-                auto& operations = directory_request ? budget.directory : room_request ? budget.room : static_cast<Budget&>(budget);
+                auto& operations = directory_request ? budget.directory : menu_request ? budget.menu : room_request ? budget.room : static_cast<Budget&>(budget);
                 operations.refresh(time);
                 const auto limit = directory_request ? options.directory_operations_per_minute
+                    : menu_request ? options.menu_operations_per_minute
                     : room_request ? options.room_operations_per_member_per_minute * options.connections_per_ip : options.operations_per_minute;
                 if (++operations.operations > limit) fail(c, 1525);
                 else request(id, c, *bytes);
             }
             const auto session = sessions.find(c.session);
             const bool paired = session != sessions.end() && session->second.paired;
-            if (!c.closing && !c.directory && !c.room && !paired && c.session.empty() && time - c.created >= options.admission_timeout) fail(c, 1528);
+            if (!c.closing && !c.directory && !c.room && !c.menu && !paired && c.session.empty() && time - c.created >= options.admission_timeout) fail(c, 1528);
             if (!c.closing && session != sessions.end() && !paired && time >= session->second.expires) fail(c, 1522);
-            if (!c.closing && (c.directory || c.room || !c.session.empty()) && time - c.last_read >= options.idle_timeout) fail(c, 1528);
+            if (!c.closing && (c.directory || c.room || c.menu || !c.session.empty()) && time - c.last_read >= options.idle_timeout) fail(c, 1528);
             if (!c.closing && paired && time >= lease_end(session->second))
                 fail(c, lease_end(session->second) >= lease_hard_end(session->second) ? lease_ended_at_maximum : lease_not_renewed);
             if (c.tls->failed() || (c.closing && time >= c.closing_at)) dead.push_back(id);

@@ -1,3 +1,6 @@
+#include "eawr/core/ascii.hpp"
+#include "eawr/core/diagnostic.hpp"
+#include "eawr/core/json_text.hpp"
 #include "unit_mode.hpp"
 
 #include "capture_viewport.hpp"
@@ -7,8 +10,8 @@
 #include "viewer_path.hpp"
 
 #include "eawr/assets/assets.hpp"
-#include "eawr/core/diagnostic.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/scene/scene.hpp"
@@ -49,35 +52,15 @@ namespace preview = eawr::viewer::model_preview;
 }
 
 [[nodiscard]] std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20) output << "\\u00" << hex[character >> 4] << hex[character & 0x0f];
-            else output << static_cast<char>(character);
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote(value);
 }
 
 [[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
+    return static_cast<char>(core::ascii_lower(static_cast<unsigned char>(value)));
 }
 
 [[nodiscard]] bool ieq(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] std::string hash_bytes(const std::span<const std::byte> bytes) {

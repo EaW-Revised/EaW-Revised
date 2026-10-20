@@ -10,14 +10,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools/common"))
+from eawr_python_helpers import sha256_file as digest  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALLED = ROOT / 'tests/skirmish/fixtures/installed'
 WORKERS = (1, 2, 4, 8)
 KINDS = {'hashes': '--hash-out', 'events': '--events-out', 'snapshots': '--snapshot-out'}
-
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 def validate_inputs(program, game_root, required=False):
     if not program.is_file():

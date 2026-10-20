@@ -344,6 +344,24 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     return core::Result<ControlStep>::success(std::move(out));
 }
 
+// WGM-53/60/188: one structure actor leaves its planet: the census row, the owner's counts and population, and the
+// original-type record. The caller erases the production row. Shared by clearing and live sabotage (WGCH-29).
+void GalacticSession::Impl::release_structure_object(PlanetProduction& planet, const ProductionObject& object) {
+    lose_actor(object.id);
+    const auto owner = std::lower_bound(production->players.begin(), production->players.end(), object.owner,
+        [](const auto& row, auto id) { return row.player < id; });
+    if (owner != production->players.end() && owner->player == object.owner) {
+        const auto count = std::lower_bound(owner->counts.begin(), owner->counts.end(), object.type,
+            [](const auto& row, auto id) { return row.type < id; });
+        if (count != owner->counts.end() && count->type == object.type && count->owned) --count->owned;
+        const auto offer = find_row(planet.offers, object.type, [](const auto& row) { return row.type; });
+        if (offer) owner->population_used = std::max(Fixed{}, math::subtract(owner->population_used, offer->population).value());
+    }
+    if (std::erase_if(production_originals, [&](const auto& row) { return row.id == object.id; }))
+        published_production_originals.reset();
+    --live_object_count;
+}
+
 void GalacticSession::Impl::clear_control_structures(const std::size_t index, const std::optional<ProductionDomain> only,
     std::vector<EntityId>* const removed_ids) {
     if (!production) return;
@@ -354,19 +372,8 @@ void GalacticSession::Impl::clear_control_structures(const std::size_t index, co
     std::erase_if(planet.objects, [&](const auto& object) {
         if (object.kind != ProductionKind::structure || (only && object.domain != *only)) return false;
         if (removed_ids) removed_ids->push_back(object.id);
-        lose_actor(object.id);
-        const auto owner = std::lower_bound(production->players.begin(), production->players.end(), object.owner,
-            [](const auto& row, auto id) { return row.player < id; });
-        if (owner != production->players.end() && owner->player == object.owner) {
-            const auto count = std::lower_bound(owner->counts.begin(), owner->counts.end(), object.type,
-                [](const auto& row, auto id) { return row.type < id; });
-            if (count != owner->counts.end() && count->type == object.type && count->owned) --count->owned;
-            const auto offer = find_row(planet.offers, object.type, [](const auto& row) { return row.type; });
-            if (offer) owner->population_used = std::max(Fixed{}, math::subtract(owner->population_used, offer->population).value());
-        }
-        if (std::erase_if(production_originals, [&](const auto& row) { return row.id == object.id; }))
-            published_production_originals.reset();
-        --live_object_count; removed = true;
+        release_structure_object(planet, object);
+        removed = true;
         return true;
     });
     if (!removed) return;
@@ -667,6 +674,12 @@ core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::admit_nati
     if (!recorded) return Result::failure(recorded.error());
     return result;
 }
+core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::admit_native_invasion_by_command(PlayerId player, FleetId id,
+    std::span<const EntityId> retained_transports) {
+    using Result = core::Result<NativeInvasionReceipt>;
+    if (native_shadow()) return Result::failure(invalid<void>("an invasion command cannot run inside the native action phase").error());
+    return session_detail::admit_native_invasion_rows(*impl_, player, id, retained_transports, false);
+}
 core::Result<void> GalacticSession::Impl::complete_undefended_invasion(NativeInvasion& request, std::vector<GalacticEvent>& events) {
     const auto* supplied = find_row(control->planets, request.planet, [](const auto& row) { return row.planet; });
     if (!supplied) return invalid<void>("queued invasion surface disappeared");
@@ -780,6 +793,18 @@ core::Result<void> GalacticSession::retire_native_invasion(std::uint64_t number)
     if (request.state == NativeInvasion::State::completed || request.state == NativeInvasion::State::unqueued) impl.native_invasions.erase(found);
     impl.dirty[static_cast<std::size_t>(StateSection::native_invasions)] = true;
     return append_native_effect(NativeEffectKind::invasion, invasion_words({1, 3, number}));
+}
+core::Result<void> GalacticSession::retire_native_invasion_by_command(std::uint64_t number) {
+    if (native_shadow()) return invalid<void>("an invasion command cannot run inside the native action phase");
+    auto& impl = *impl_;
+    const auto found = impl.native_invasions.find(number);
+    if (impl.failed || found == impl.native_invasions.end()) return invalid<void>("invasion reader release requires its retained identity");
+    auto& request = found->second;
+    if (request.reader_released) return core::Result<void>::success();
+    request.reader_released = true;
+    if (request.state == NativeInvasion::State::completed || request.state == NativeInvasion::State::unqueued) impl.native_invasions.erase(found);
+    impl.dirty[static_cast<std::size_t>(StateSection::native_invasions)] = true;
+    return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::Impl::replay_native_invasion(GalacticSession& world, const NativeEffect& effect) {
     const auto words = invasion_words(std::span<const std::uint8_t>(effect.payload));

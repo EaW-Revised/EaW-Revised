@@ -18,7 +18,10 @@ namespace eawr::checkpoint {
 // v32: complete direct owner/barrier payload; recordings retain history only.
 // v33 (#4058): the owner keeps only the native journal's length (the recording carries its entries), and a
 // production bill journals just its outcome (build, accepted, payer, charge).
-inline constexpr std::uint16_t galaxy_section_version = 33;
+// v34 (#4058): a save keeps the history since the previous save or load. The session section carries the history base
+// (boundary tick, chained frontier digest, last sealed key, dropped counts); the frontier input digest is
+// sha256(previous digest || replay window bytes), never a digest of the window alone.
+inline constexpr std::uint16_t galaxy_section_version = 35;
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(
@@ -72,8 +75,11 @@ struct GameRestore {
     const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
     std::string_view logical_path = {});
 // Development equality oracle for the current format, never selected by production loads.
+// A save whose history starts at an earlier save needs that save as `base` (its window is replayed on top of the base
+// state, never from tick 0); a save from a new game needs none.
 [[nodiscard]] core::Result<GameRestore> replay_game_checkpoint_for_testing(std::span<const std::uint8_t> bytes,
-    const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor);
+    const Identities& build, const GameLoadOptions& options, const sim::PartitionExecutor& executor,
+    std::span<const std::uint8_t> base = {});
 // Any decode, identity, section, reconstruction or fixup failure leaves running untouched.
 [[nodiscard]] core::Result<void> restore_game_checkpoint(GameRestore& running,
     std::span<const std::uint8_t> bytes, const Identities& build, const GameLoadOptions& options,

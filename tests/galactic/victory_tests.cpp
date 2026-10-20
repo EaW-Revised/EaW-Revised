@@ -1,3 +1,13 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <optional>
+#include <string>
+#include <variant>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -5,6 +15,7 @@
 
 #include <array>
 #include <stdexcept>
+using eawr::testing::take;
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -12,10 +23,7 @@ namespace cp = eawr::checkpoint;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 using K = gc::VictoryKind;
-template<class T> T take(eawr::core::Result<T> r) {
-    if (!r) throw std::runtime_error(r.error().message);
-    return std::move(r).value();
-}
+
 gc::VictoryContext context() {
     gc::VictoryContext c;
     c.players = {{1, "First", false, true, true, false}, {2, "Second", false, true, false, true}, {3, "Neutral", true, false, false, false}};
@@ -601,7 +609,7 @@ void periodic_request_order() {
     }
 }
 }
-int main() {
+int case_galactic_victory_tests() {
     try { predicates(); installation(); live_leader_lifecycle(); live_destruction_callback(); live_story_rewards(); pending_and_parity(); return_producers(); fiscal_admission(); checkpoint(); account_admission(); capture_admission(); periodic_request_order(); }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;

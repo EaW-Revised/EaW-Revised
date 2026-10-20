@@ -1,9 +1,15 @@
+#include <cstdint>
+#include <exception>
+#include <variant>
+#include <cstddef>
+#include <string_view>
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/sim/galactic/story_adapters.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -12,11 +18,15 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace {
 namespace st = eawr::sim::galactic::story;
-int failures{};
-void expect(bool pass, const char* message) { if (!pass) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool pass, const char* message) {
+    if (!pass) local_checker.check_before_print(pass, message, std::cerr, "FAIL: ");
+}
 st::FixtureState fixture() {
     st::FixtureState s;
     s.players = {{1, "Rebel", false, true, 2, 2, 100, {}}, {2, "Empire", true, false, 1, 1, 0, {}}};
@@ -153,14 +163,7 @@ void rewards() {
 }
 
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* value = nullptr; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") != 0 || !value) return {};
-    std::string root(value); std::free(value); return root.empty() ? std::nullopt : std::optional<std::string>(root);
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    return value && *value ? std::optional<std::string>(value) : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 std::string field(const eawr::data::XmlNode& event, std::string_view key) {
     const auto it = std::find_if(event.children.begin(), event.children.end(), [&](const auto& n) { return n.name == key; });
@@ -176,7 +179,7 @@ std::vector<std::string> tokens(std::string text) {
 }
 void installed() {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: stock story adapter needs EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: stock story adapter needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}}) {
         auto mount = eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data");

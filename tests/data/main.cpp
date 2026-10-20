@@ -1,9 +1,8 @@
+#include "../support/check.hpp"
 #include "data_test_support.hpp"
 #include "../../apps/viewer/src/presentation_constants.hpp"
-
 #include "eawr/data/xml.hpp"
 
-#include <algorithm>
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -11,17 +10,14 @@
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace eawr::tests::data_contracts {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 } // namespace eawr::tests::data_contracts

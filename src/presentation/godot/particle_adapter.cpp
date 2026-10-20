@@ -34,9 +34,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <cmath>
 #include <chrono>
 #include <cstring>
+#include <cstdio>
 #include <map>
 #include <optional>
 #include <utility>
@@ -56,6 +58,16 @@ std::atomic<bool> measure_preparations{};
     const PackedStringArray arguments = os->get_cmdline_user_args();
     for (int64_t i = 0; i < arguments.size(); ++i) {
         if (String(arguments[i]) == String("--eawr-particle-spawn-trace")) return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool residency_trace_requested() {
+    OS* const os = OS::get_singleton();
+    if (os == nullptr) return false;
+    const PackedStringArray arguments = os->get_cmdline_user_args();
+    for (int64_t i = 0; i < arguments.size(); ++i) {
+        if (String(arguments[i]) == String("--eawr-particle-residency-trace")) return true;
     }
     return false;
 }
@@ -277,12 +289,21 @@ float eawr_particle_fog() {
 class GodotParticleBackend::Impl final {
     friend class GodotParticleBackend;
 public:
+    static constexpr std::size_t inactive_index = ~std::size_t{0};
     struct Shared final {
         RID rid;
         std::size_t references{};
         detail::GpuItem item{};
     };
     struct Emitter final {
+        particles::EmitterRenderPlan plan;
+        std::size_t active_index{inactive_index};
+        bool requested_visible{};
+        bool empty_pending{};
+        std::uint64_t empty_frame{};
+        detail::ParticleRestoreRetry retry;
+        std::string trace_effect;
+        std::uint64_t trace_tick{};
         std::string texture_key;
         std::string normal_key;
         std::string shader_key;
@@ -318,63 +339,91 @@ public:
 
     Impl(Node3D& host, TextureResolver resolver, GodotParticleBackend::FogCallbacks fog)
         : resolver_(std::move(resolver)), fog_(std::move(fog)), spawn_journal_(spawn_trace_requested()) {
+        trace_residency_ = residency_trace_requested();
+        if (trace_residency_) census_backends_.push_back(this);
         if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
     }
 
     ~Impl() {
+        if (trace_residency_) {
+            std::erase(census_backends_, this);
+            if (census_backends_.empty()) {
+                for (const auto& row : census_rows_) {
+                    std::printf("EAWR_PARTICLE_RESIDENCY %llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                        static_cast<unsigned long long>(row[0]), static_cast<unsigned long long>(row[1]),
+                        static_cast<unsigned long long>(row[2]), static_cast<unsigned long long>(row[3]),
+                        static_cast<unsigned long long>(row[4]), static_cast<unsigned long long>(row[5]),
+                        static_cast<unsigned long long>(row[6]), static_cast<unsigned long long>(row[7]),
+                        static_cast<unsigned long long>(row[8]),
+                        static_cast<unsigned long long>(row[9]),
+                        static_cast<unsigned long long>(row[10]));
+                }
+                census_rows_.clear();
+            }
+        }
         set_reuse(false);
         release_warm();
         while (!emitters_.empty()) destroy(emitters_.begin()->first);
     }
 
-    std::uint64_t create(const particles::EmitterRenderPlan& plan) {
+    std::optional<Emitter> allocate(const particles::EmitterRenderPlan& plan, const std::uint64_t resource,
+        const Emitter* const shared = nullptr) {
         detail::ParticleSpawnTrace trace(spawn_journal_.enabled() ? &spawn_journal_ : nullptr,
-            spawn_effect_, spawn_tick_, plan.texture, plan.emitter_index);
+            shared != nullptr ? shared->trace_effect : spawn_effect_,
+            shared != nullptr ? shared->trace_tick : spawn_tick_, plan.texture, plan.emitter_index);
+        trace.resource = resource;
         failure_.clear();
         RenderingServer* rendering = RenderingServer::get_singleton();
         if (rendering == nullptr || !scenario_.is_valid()) {
             failure_ = "RenderingServer or scenario is unavailable";
-            return 0;
+            return std::nullopt;
         }
         if (!plan.drawable) {
             failure_ = "plan is not drawable: " + plan.cause;
-            return 0;
+            return std::nullopt;
         }
         if (static_cast<bool>(fog_.register_material) != static_cast<bool>(fog_.unregister_material)) {
             failure_ = "fog registration callbacks must include both register and unregister";
-            return 0;
+            return std::nullopt;
         }
         if (fog_.register_material && (plan.blend == particles::Blend::heat_distortion
             || !plan.depth_test)) {
             failure_ = "emitter " + std::to_string(plan.emitter_index)
                 + ": fog-stub-v1 does not support heat/screen distortion or disabled depth test";
-            return 0;
+            return std::nullopt;
         }
         const MaterialDescription material = GodotParticleBackend::material_for(plan,
             static_cast<bool>(fog_.register_material));
         if (const auto valid = validate_material(material); !valid) {
             failure_ = valid.error().message;
-            return 0;
+            return std::nullopt;
         }
         trace.lap(detail::ParticleSpawnTrace::validation);
-        const assets::Texture* texture = resolver_ ? resolver_(plan.texture) : nullptr;
-        trace.lap(detail::ParticleSpawnTrace::texture_resolve);
-        if (texture == nullptr) {
-            failure_ = "colour texture '" + plan.texture + "' did not resolve";
-            return 0;
+        std::optional<RID> texture_rid;
+        if (shared != nullptr) {
+            texture_rid = textures_.at(shared->texture_key).rid;
+        } else {
+            const assets::Texture* texture = resolver_ ? resolver_(plan.texture) : nullptr;
+            trace.lap(detail::ParticleSpawnTrace::texture_resolve);
+            if (texture == nullptr) {
+                failure_ = "colour texture '" + plan.texture + "' did not resolve";
+                return std::nullopt;
+            }
+            if (trace.enabled()) trace.texture_cold = !textures_.contains(plan.texture);
+            texture_rid = acquire_texture(*rendering, plan.texture, *texture);
+            if (!texture_rid) {
+                failure_ = "colour texture '" + plan.texture + "': " + failure_;
+                return std::nullopt;
+            }
         }
-        if (trace.enabled()) trace.texture_cold = !textures_.contains(plan.texture);
-        const std::optional<RID> texture_rid = acquire_texture(*rendering, plan.texture, *texture);
         trace.lap(detail::ParticleSpawnTrace::texture_setup_upload);
-        if (!texture_rid) {
-            failure_ = "colour texture '" + plan.texture + "': " + failure_;
-            return 0;
-        }
-        // A bump emitter without a declared normal map is lit as a flat quad;
-        // a declared map that does not resolve fails like the colour texture.
+        // Shared references survive dormancy. Restore borrows their existing RIDs
+        // and transfers ownership only after all per-emitter creation succeeds.
         std::optional<RID> normal_rid;
         const bool bump = plan.blend == particles::Blend::bump_alpha;
-        if (bump && !plan.normal_texture.empty()) {
+        if (shared != nullptr) {
+            if (!shared->normal_key.empty()) normal_rid = textures_.at(shared->normal_key).rid;
+        } else if (bump && !plan.normal_texture.empty()) {
             const assets::Texture* normal = resolver_ ? resolver_(plan.normal_texture) : nullptr;
             trace.lap(detail::ParticleSpawnTrace::normal_resolve);
             if (trace.enabled()) trace.normal_cold = !textures_.contains(plan.normal_texture);
@@ -383,23 +432,30 @@ public:
                 failure_ = "normal texture '" + plan.normal_texture + "' did not resolve"
                     + (normal != nullptr ? ": " + failure_ : std::string{});
                 release_texture(*rendering, plan.texture);
-                return 0;
+                return std::nullopt;
             }
         }
         trace.lap(detail::ParticleSpawnTrace::normal_setup_upload);
         const std::string normal_key = normal_rid ? plan.normal_texture : std::string{};
         const auto release_textures = [&] {
+            if (shared != nullptr) return;
             release_texture(*rendering, plan.texture);
             if (!normal_key.empty()) release_texture(*rendering, normal_key);
         };
         const std::string shader_key = material.program;
+        assert(shared == nullptr || shared->shader_key == shader_key);
         if (trace.enabled()) trace.shader_cold = !shaders_.contains(shader_key);
-        const std::optional<RID> shader = acquire_shader(*rendering, shader_key);
+        const std::optional<RID> shader = shared != nullptr
+            ? std::optional<RID>{shaders_.at(shared->shader_key).rid}
+            : acquire_shader(*rendering, shader_key);
+        const auto release_new_shader = [&] {
+            if (shared == nullptr) release_shader(*rendering, shader_key);
+        };
         trace.lap(detail::ParticleSpawnTrace::shader_compile);
         if (!shader) {
             release_textures();
             failure_ = "Godot rejected the particle program (EAWR-RENDER-0007)";
-            return 0;
+            return std::nullopt;
         }
         const auto priority = render_pass_priority(material.pass)
             + static_cast<std::int32_t>(std::min<std::uint32_t>(plan.order_in_phase, 7U));
@@ -409,7 +465,8 @@ public:
         if (reuse_enabled_ && reuse_allowed) {
             if (auto retained = reuse_.take({plan.texture, normal_key, shader_key, priority})) {
                 // The retained emitter holds its program, but releases texture
-                // residency on retirement. This create keeps its new texture refs.
+                // residency on retirement. Texture refs are newly acquired for
+                // a create, or transferred from the dormant owner for a restore.
                 release_shader(*rendering, shader_key);
                 Emitter emitter = std::move(*retained);
                 emitter.owns_textures = true;
@@ -427,10 +484,12 @@ public:
                 rendering->instance_set_scenario(emitter.instance, scenario_);
                 // Cached bump materials missed intervening lighting updates.
                 if (emitter.bump) apply_lighting(*rendering, emitter.material);
-                const std::uint64_t id = next_id_++;
-                emitters_.emplace(id, std::move(emitter));
-                trace.resource = id;
-                return id;
+                emitter.plan = plan;
+                if (spawn_journal_.enabled()) {
+                    emitter.trace_effect = shared != nullptr ? shared->trace_effect : spawn_effect_;
+                    emitter.trace_tick = shared != nullptr ? shared->trace_tick : spawn_tick_;
+                }
+                return emitter;
             }
         }
         Emitter emitter;
@@ -442,10 +501,10 @@ public:
         emitter.reuse_allowed = reuse_allowed;
         emitter.material = rendering->material_create();
         if (!emitter.material.is_valid()) {
-            release_shader(*rendering, shader_key);
+            release_new_shader();
             release_textures();
             failure_ = "Godot rejected the particle material RID";
-            return 0;
+            return std::nullopt;
         }
         rendering->material_set_shader(emitter.material, *shader);
         // Emitters are ordered inside the public pass range; the spacing of
@@ -467,10 +526,10 @@ public:
             if (emitter.instance.is_valid()) rendering->free_rid(emitter.instance);
             if (emitter.mesh.is_valid()) rendering->free_rid(emitter.mesh);
             rendering->free_rid(emitter.material);
-            release_shader(*rendering, shader_key);
+            release_new_shader();
             release_textures();
             failure_ = "Godot rejected a particle mesh or instance RID";
-            return 0;
+            return std::nullopt;
         }
         rendering->instance_set_base(emitter.instance, emitter.mesh);
         rendering->instance_set_scenario(emitter.instance, scenario_);
@@ -486,17 +545,148 @@ public:
                 rendering->free_rid(emitter.instance);
                 rendering->free_rid(emitter.mesh);
                 rendering->free_rid(emitter.material);
-                release_shader(*rendering, shader_key);
+                release_new_shader();
                 release_textures();
-                return 0;
+                return std::nullopt;
             }
             emitter.fog_handle = registered.value();
         }
         trace.lap(detail::ParticleSpawnTrace::fog_registration);
-        const std::uint64_t id = next_id_++;
-        emitters_.emplace(id, std::move(emitter));
-        trace.resource = id;
+        emitter.plan = plan;
+        if (spawn_journal_.enabled()) {
+            emitter.trace_effect = shared != nullptr ? shared->trace_effect : spawn_effect_;
+            emitter.trace_tick = shared != nullptr ? shared->trace_tick : spawn_tick_;
+        }
+        return emitter;
+    }
+
+    std::uint64_t create(const particles::EmitterRenderPlan& plan) {
+        auto emitter = allocate(plan, next_id_);
+        if (!emitter) return 0;
+        const auto id = next_id_++;
+        auto& stored = emitters_.emplace(id, std::move(*emitter)).first->second;
+        activate(stored);
         return id;
+    }
+
+    void activate(Emitter& emitter) {
+        assert(emitter.active_index == inactive_index);
+        emitter.active_index = active_.size();
+        active_.push_back(&emitter);
+    }
+
+    void deactivate(Emitter& emitter) {
+        if (emitter.active_index == inactive_index) return;
+        const auto index = emitter.active_index;
+        active_[index] = active_.back();
+        active_[index]->active_index = index;
+        active_.pop_back();
+        emitter.active_index = inactive_index;
+    }
+
+    // Empty geometry is independent of camera/fog admission. Keep the public
+    // handle and authored plan; CPU age, RNG and future births stay in the registry.
+    void suspend(Emitter& emitter, RenderingServer* rendering, const bool terminal = false) {
+        if (!emitter.material.is_valid()) return;
+        const bool retained = emitter.active_index == inactive_index;
+        if (retained && !terminal) return;
+        UploadTimer timer(upload_work.retirement_ms);
+        if (retained) {
+            assert(retained_identities_ != 0);
+            --retained_identities_;
+        }
+        deactivate(emitter);
+        ++suspensions_;
+        Emitter dormant;
+        // Opaque equal-depth draws can sort by resource identity. A resumable
+        // owner keeps its three IDs but relinquishes every surface and packing
+        // buffer; terminal owners still release the complete draw resources.
+        if (detail::ParticleResidencyPolicy::keep_identity(terminal, emitter.plan.blend == particles::Blend::opaque)) {
+            if (rendering != nullptr) rendering->mesh_clear(emitter.mesh);
+            if (emitter.fog_handle && fog_.unregister_material)
+                fog_.unregister_material(emitter.fog_handle);
+            dormant.material = emitter.material;
+            dormant.mesh = emitter.mesh;
+            dormant.instance = emitter.instance;
+            ++retained_identities_;
+        } else {
+            release_draw(emitter, rendering);
+        }
+        dormant.plan = std::move(emitter.plan);
+        dormant.texture_key = std::move(emitter.texture_key);
+        dormant.normal_key = std::move(emitter.normal_key);
+        dormant.shader_key = std::move(emitter.shader_key);
+        dormant.priority = emitter.priority;
+        dormant.bump = emitter.bump;
+        // Only live owners enter this map; pooled owners alone drop texture refs.
+        dormant.owns_textures = emitter.owns_textures;
+        dormant.emitter_index = emitter.emitter_index;
+        dormant.trace_effect = std::move(emitter.trace_effect);
+        dormant.trace_tick = emitter.trace_tick;
+        emitter = std::move(dormant);
+    }
+
+    [[nodiscard]] static std::uint64_t current_frame() {
+        const auto* engine = Engine::get_singleton();
+        return engine != nullptr ? static_cast<std::uint64_t>(engine->get_process_frames()) : 0;
+    }
+
+    void restore_failed(const std::uint64_t id, Emitter& emitter, const std::uint64_t frame) {
+        if (!emitter.retry.failed(frame)) return;
+        constexpr auto code = particles::diagnostic_codes::backend_resource;
+        std::fprintf(stderr,
+            "%.*s: resource %llu restore failed: %s; retrying with bounded backoff\n",
+            static_cast<int>(code.size()), code.data(),
+            static_cast<unsigned long long>(id), failure_.c_str());
+    }
+
+    void cancel_empty(const std::uint64_t id, Emitter& emitter) {
+        if (!emitter.empty_pending) return;
+        const auto found = std::lower_bound(pending_empty_.begin(), pending_empty_.end(), id,
+            [](const auto& item, const auto wanted) { return item.first < wanted; });
+        if (found != pending_empty_.end() && found->first == id) pending_empty_.erase(found);
+        emitter.empty_pending = false;
+    }
+
+    void empty(const std::uint64_t id, const bool terminal) {
+        const auto found = emitters_.find(id);
+        if (found == emitters_.end() || !found->second.material.is_valid()) return;
+        auto& emitter = found->second;
+        auto* rendering = RenderingServer::get_singleton();
+        // Configured transparent reuse owners commonly release a completed
+        // drain in this same frame. Give that existing cache path the ordinary
+        // bounded dwell, avoiding a free/recreate cycle before owner release.
+        // Unreleased terminal resources still retire after the dwell/budget.
+        if (detail::ParticleResidencyPolicy::immediate(terminal, reuse_enabled_, emitter.reuse_allowed)) {
+            cancel_empty(id, emitter);
+            suspend(emitter, rendering, true);
+            return;
+        }
+        if (rendering != nullptr) rendering->instance_set_visible(emitter.instance, false);
+        emitter.quads = 0;
+        emitter.requested_visible = false;
+        if (emitter.empty_pending) return;
+        emitter.empty_pending = true;
+        emitter.empty_frame = current_frame();
+        const auto slot = std::lower_bound(pending_empty_.begin(), pending_empty_.end(), id,
+            [](const auto& item, const auto wanted) { return item.first < wanted; });
+        pending_empty_.insert(slot, {id, &emitter});
+    }
+
+    void retire_empty(const std::uint64_t frame, RenderingServer* rendering) {
+        // Short empty spans keep their existing surface and skip recreation.
+        // Only render residency uses this dwell, never CPU emission or RNG.
+        constexpr std::uint64_t dwell_frames = 4;
+        constexpr std::size_t retirement_budget = 8;
+        std::size_t retired{};
+        for (std::size_t index = 0; index < pending_empty_.size() && retired < retirement_budget;) {
+            auto& emitter = *pending_empty_[index].second;
+            if (frame < emitter.empty_frame || frame - emitter.empty_frame < dwell_frames) { ++index; continue; }
+            pending_empty_.erase(pending_empty_.begin() + static_cast<std::ptrdiff_t>(index));
+            emitter.empty_pending = false;
+            suspend(emitter, rendering);
+            ++retired;
+        }
     }
 
     bool prewarm(const particles::EmitterRenderPlan& plan){
@@ -645,15 +835,60 @@ public:
         }
         if (measure_uploads) upload_work.conversion_ms += emitter.preparation_ms;
         emitter.prepared = false;
-        if (emitter.quads == 0 && stream.vertices.empty()) return;
-        const bool was_empty = emitter.quads == 0;
-        emitter.quads = stream.quads + stream.triangles;
         if (stream.vertices.empty()) {
-            emitter.quads = 0;
-            UploadTimer timer(upload_work.submission_ms);
-            rendering->instance_set_visible(emitter.instance, false);
+            empty(id, false);
             return;
         }
+        cancel_empty(id, emitter);
+        if (!emitter.material.is_valid()) {
+            const auto frame = current_frame();
+            if (!emitter.retry.admits(frame)) return;
+            auto restored = [&] {
+                [[maybe_unused]] const auto scope = asset_work_.restoring();
+                return allocate(emitter.plan, id, &emitter);
+            }();
+            if (!restored) {
+                restore_failed(id, emitter, frame);
+                return;
+            }
+            restored->retry.succeeded();
+            // A cache hit has a different retained surface than the worker saw.
+            // Empty handles always prepare full arrays; discard any reused surface.
+            restored->shape = {};
+            restored->topology.clear();
+            restored->prepared_shape = emitter.prepared_shape;
+            restored->arrays = std::move(emitter.arrays);
+            restored->bounds = emitter.bounds;
+            restored->source_points = std::move(emitter.source_points);
+            emitter = std::move(*restored);
+            emitter.replace_surface = true;
+            activate(emitter);
+            ++recreations_;
+        }
+        if (emitter.active_index == inactive_index) {
+            assert(emitter.plan.blend == particles::Blend::opaque);
+            assert(emitter.shape.vertices == 0 && emitter.shape.indices == 0);
+            const auto frame = current_frame();
+            if (!emitter.retry.admits(frame)) return;
+            [[maybe_unused]] const auto scope = asset_work_.restoring();
+            if (fog_.register_material && emitter.fog_handle == 0) {
+                const auto registered = fog_.register_material(emitter.material, shaders_.at(emitter.shader_key).rid);
+                if (!registered || registered.value() == 0) {
+                    failure_ = registered ? "fog callback returned an empty consumer handle"
+                        : core::format_diagnostic(registered.error());
+                    restore_failed(id, emitter, frame);
+                    return;
+                }
+                emitter.fog_handle = registered.value();
+            }
+            emitter.retry.succeeded();
+            assert(retained_identities_ != 0);
+            --retained_identities_;
+            activate(emitter);
+            ++recreations_;
+        }
+        const bool was_empty = emitter.quads == 0;
+        emitter.quads = stream.quads + stream.triangles;
         if (measure_uploads) ++upload_work.uploads;
         UploadTimer timer(upload_work.submission_ms);
         if (!emitter.replace_surface) {
@@ -683,7 +918,10 @@ public:
         if (emitter.replace_surface || emitter.changed_indices) emitter.topology = stream.indices;
         // Bounds reflect live vertices only, never the retained surface's unused storage.
         rendering->mesh_set_custom_aabb(emitter.mesh, emitter.bounds);
-        if (was_empty) rendering->instance_set_visible(emitter.instance, true);
+        if (was_empty) {
+            emitter.requested_visible = true;
+            rendering->instance_set_visible(emitter.instance, true);
+        }
     }
 
     void destroy(const std::uint64_t id) {
@@ -691,6 +929,17 @@ public:
         const auto found = emitters_.find(id);
         if (found == emitters_.end()) return;
         RenderingServer* rendering = RenderingServer::get_singleton();
+        cancel_empty(id, found->second);
+        if (!found->second.material.is_valid()) {
+            release_emitter(found->second, rendering);
+            emitters_.erase(found);
+            return;
+        }
+        if (found->second.active_index == inactive_index) {
+            assert(retained_identities_ != 0);
+            --retained_identities_;
+        }
+        deactivate(found->second);
         if (reuse_enabled_ && found->second.reuse_allowed && rendering != nullptr) {
             Emitter& emitter = found->second;
             const auto bytes = detail::particle_reuse_charge(emitter.shape.vertices, emitter.vertex_stride,
@@ -718,7 +967,8 @@ public:
             // adding another synchronous free to a successful cache admission.
             // Refusals are reported, so persistent policy starvation is visible.
             if (reuse_.retain({emitter.texture_key, emitter.normal_key, emitter.shader_key, emitter.priority},
-                bytes, emitter)) {
+                // Most recent caller-thread frame; cache age never affects CPU clocks.
+                bytes, emitter, reuse_frame_)) {
                 emitters_.erase(found);
                 return;
             }
@@ -736,13 +986,54 @@ public:
         }
     }
 
-    void release_emitter(const Emitter& emitter, RenderingServer* rendering) {
+    void expire_reuse() {
+        const auto* engine = Engine::get_singleton();
+        if (engine == nullptr) return;
+        const auto frame = static_cast<std::uint64_t>(engine->get_process_frames());
+        if (frame == reuse_frame_) return;
+        reuse_frame_ = frame;
+        RenderingServer* const rendering = RenderingServer::get_singleton();
+        retire_empty(frame, rendering);
+        reuse_.expire(frame, [&](Emitter& emitter) { release_emitter(emitter, rendering); });
+    }
+
+    void sample_residency() const {
+        if (!trace_residency_) return;
+        const auto* engine = Engine::get_singleton();
+        if (engine == nullptr) return;
+        const auto frame = static_cast<std::uint64_t>(engine->get_process_frames());
+        if (frame / 30 == census_frame_ / 30 || census_rows_.size() >= 32768) return;
+        census_frame_ = frame;
+        std::array<std::uint64_t, 11> row{frame, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+        for (const auto* backend : census_backends_) {
+            row[1] += backend->active_.size() + backend->retained_identities_ + backend->reuse_.size();
+            row[3] += backend->emitters_.size();
+            row[4] += backend->reuse_.size();
+            row[5] += backend->suspensions_;
+            row[6] += backend->recreations_;
+            row[7] += backend->asset_work_.restores();
+            row[8] += backend->textures_.size() + backend->shaders_.size();
+            row[9] += backend->retained_identities_ * 3;
+            row[10] += backend->live_rids();
+            for (const auto* emitter : backend->active_)
+                row[2] += emitter->requested_visible && emitter->quads != 0 ? 1U : 0U;
+        }
+        census_rows_.push_back(row);
+    }
+
+    void release_draw(const Emitter& emitter, RenderingServer* rendering) {
         if (emitter.fog_handle && fog_.unregister_material)
             fog_.unregister_material(emitter.fog_handle);
         if (rendering != nullptr) {
             if (emitter.instance.is_valid()) rendering->free_rid(emitter.instance);
             if (emitter.mesh.is_valid()) rendering->free_rid(emitter.mesh);
             if (emitter.material.is_valid()) rendering->free_rid(emitter.material);
+        }
+    }
+
+    void release_emitter(const Emitter& emitter, RenderingServer* rendering) {
+        release_draw(emitter, rendering);
+        if (rendering != nullptr) {
             release_shader(*rendering, emitter.shader_key);
             if (emitter.owns_textures) {
                 release_texture(*rendering, emitter.texture_key);
@@ -756,18 +1047,20 @@ public:
         lighting_ = lighting;
         RenderingServer* rendering = RenderingServer::get_singleton();
         if (rendering == nullptr) return;
-        for (const auto& [id, emitter] : emitters_) {
-            if (emitter.bump) apply_lighting(*rendering, emitter.material);
+        for (const auto* emitter : active_) {
+            if (emitter->bump) apply_lighting(*rendering, emitter->material);
         }
     }
 
     [[nodiscard]] std::size_t live_rids() const noexcept {
-        return (emitters_.size() + reuse_.size()) * 3 + textures_.size() + shaders_.size();
+        return detail::ParticleResidencyPolicy::live_rids(active_.size(), reuse_.size(), retained_identities_,
+            textures_.size() + shaders_.size());
     }
-    [[nodiscard]] std::size_t live_emitters() const noexcept { return emitters_.size(); }
+    [[nodiscard]] std::size_t live_emitters() const noexcept { return active_.size(); }
     [[nodiscard]] std::vector<GodotParticleBackend::FogEmitterEvidence> fog_emitter_evidence() const {
         std::vector<GodotParticleBackend::FogEmitterEvidence> result;
         for (const auto& [resource, emitter] : emitters_) {
+            if (!emitter.material.is_valid()) continue;
             std::uint8_t minimum = fog_.attenuation_at_source_xy ? 0 : 255;
             std::uint8_t maximum = minimum;
             if (fog_.attenuation_at_source_xy && !emitter.source_points.empty()) {
@@ -789,6 +1082,7 @@ public:
 private:
     std::optional<RID> acquire_texture(RenderingServer& rendering, const std::string& key,
                                        const assets::Texture& source) {
+        asset_work_.acquired();
         if (auto found = textures_.find(key); found != textures_.end()) {
             ++found->second.references;
             detail::gpu_memory_ledger().reuse(found->second.item);
@@ -837,6 +1131,7 @@ private:
     }
 
     std::optional<RID> acquire_shader(RenderingServer& rendering, const std::string& program) {
+        asset_work_.acquired();
         if (auto found = shaders_.find(program); found != shaders_.end()) {
             ++found->second.references;
             return found->second.rid;
@@ -889,18 +1184,30 @@ private:
     GodotParticleBackend::FogCallbacks fog_;
     RID scenario_;
     std::map<std::uint64_t, Emitter> emitters_;
+    std::vector<Emitter*> active_;
+    // Stable map-node pointers. destroy() cancels an entry before erasing its node.
+    std::vector<std::pair<std::uint64_t, Emitter*>> pending_empty_;
     detail::ParticleReuseCache<Emitter> reuse_;
+    std::uint64_t reuse_frame_{};
     bool reuse_enabled_{};
     std::vector<std::uint64_t> warm_ids_;
     detail::ParticleWarmBudget warm_budget_;
     detail::ParticleProgramWarmBudget warm_program_budget_;
     ProgramPrewarmWork warm_program_work_;
     std::map<std::string, Shared> textures_;
-    std::string_view spawn_effect_;
+    std::string spawn_effect_;
     std::uint64_t spawn_tick_{};
     detail::ParticleSpawnJournal spawn_journal_;
     std::map<std::string, Shared> shaders_;
     std::uint64_t next_id_{1};
+    std::uint64_t suspensions_{}, recreations_{};
+    std::size_t retained_identities_{};
+    detail::ParticleAssetWork asset_work_;
+    bool trace_residency_{};
+    // Opt-in, bounded and flushed only at teardown: no measured-frame I/O.
+    static inline std::vector<Impl*> census_backends_;
+    static inline std::vector<std::array<std::uint64_t, 11>> census_rows_;
+    static inline std::uint64_t census_frame_{};
     std::string failure_;
 };
 
@@ -928,7 +1235,6 @@ void GodotParticleBackend::set_spawn_context(const std::string_view effect, cons
 bool GodotParticleBackend::prewarm_emitter(const particles::EmitterRenderPlan& plan){return impl_->prewarm(plan);}
 bool GodotParticleBackend::prewarm_program(const particles::EmitterRenderPlan& plan) { return impl_->prewarm_program(plan); }
 void GodotParticleBackend::release_prewarm(){impl_->release_warm();}
-std::size_t GodotParticleBackend::peak_prewarmed_programs() const noexcept { return impl_->warm_program_work_.programs; }
 std::size_t GodotParticleBackend::prewarm_program_limit() noexcept { return detail::ParticleProgramWarmBudget::max_programs; }
 bool GodotParticleBackend::begin_prewarm_reference() {
     ++impl_->warm_program_work_.references;
@@ -957,6 +1263,7 @@ void GodotParticleBackend::prepare_emitter(const std::uint64_t resource, const p
 void GodotParticleBackend::update_emitter(const std::uint64_t resource, const particles::VertexStream& stream) {
     impl_->update(resource, stream);
 }
+void GodotParticleBackend::empty_emitter(const std::uint64_t resource, const bool terminal) { impl_->empty(resource, terminal); }
 void GodotParticleBackend::destroy_emitter(const std::uint64_t resource) { impl_->destroy(resource); }
 void GodotParticleBackend::set_emitter_reuse(const bool enabled) { impl_->set_reuse(enabled); }
 GodotParticleBackend::ReuseWork GodotParticleBackend::reuse_work() const noexcept {
@@ -966,11 +1273,14 @@ GodotParticleBackend::ReuseWork GodotParticleBackend::reuse_work() const noexcep
 }
 std::string GodotParticleBackend::failure_cause() const { return impl_->failure(); }
 particles::CullingFrame GodotParticleBackend::culling_frame() const {
+    impl_->expire_reuse();
+    impl_->sample_residency();
     return particle_culling::frame(impl_->scenario_);
 }
 void GodotParticleBackend::set_emitter_visible(const std::uint64_t resource, const bool visible) {
     const auto found = impl_->emitters_.find(resource);
-    if (found != impl_->emitters_.end()) {
+    if (found != impl_->emitters_.end() && found->second.instance.is_valid()) {
+        found->second.requested_visible = visible && found->second.quads != 0;
         RenderingServer::get_singleton()->instance_set_visible(found->second.instance, visible && found->second.quads != 0);
     }
 }
@@ -995,6 +1305,10 @@ GodotParticleBackend::BumpLighting GodotParticleBackend::default_bump_lighting()
 void GodotParticleBackend::set_lighting(const BumpLighting& lighting) { impl_->set_lighting(lighting); }
 std::size_t GodotParticleBackend::live_rids() const noexcept { return impl_->live_rids(); }
 std::size_t GodotParticleBackend::live_emitters() const noexcept { return impl_->live_emitters(); }
+std::uint64_t GodotParticleBackend::suspensions() const noexcept { return impl_->suspensions_; }
+std::uint64_t GodotParticleBackend::recreations() const noexcept { return impl_->recreations_; }
+std::uint64_t GodotParticleBackend::restore_asset_acquisitions() const noexcept { return impl_->asset_work_.restores(); }
+std::uint64_t GodotParticleBackend::asset_acquisitions() const noexcept { return impl_->asset_work_.total(); }
 std::vector<GodotParticleBackend::FogEmitterEvidence> GodotParticleBackend::fog_emitter_evidence() const {
     return impl_->fog_emitter_evidence();
 }

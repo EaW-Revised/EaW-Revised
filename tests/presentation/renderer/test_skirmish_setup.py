@@ -538,6 +538,86 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout[-6000:])
             self.assertTrue(json.loads(report.read_text(encoding="utf-8"))["live_session"]["headless_hashes_equal"])
 
+    def test_campaign_bound_marker_replay_reproduces_every_hash(self):
+        # A campaign recording can use the ordinary marker map path without a
+        # native-scene selection. Its accounts and rules still come from CAMP.
+        recorded = (ROOT / "tests/skirmish/fixtures/m2-start.eawr-replay").read_bytes()
+        header, setup_start = canonical_replay_header(recorded, 3)
+        header = bytearray(header)
+        players, squadrons, units = struct.unpack_from("<IIQ", header, 48)
+        accounts = [struct.unpack_from("<I", recorded, setup_start + index * 24)[0]
+                    for index in range(players)
+                    if struct.unpack_from("<I", recorded, setup_start + index * 24 + 16)[0] & 1]
+        unit_start = setup_start + players * 24
+        identities = [struct.unpack_from("<Q", recorded, unit_start + index * 80)[0] for index in range(units)]
+        registered = [identities[index] for index in range(units)
+                      if struct.unpack_from("<I", recorded, unit_start + index * 80 + 16)[0] in accounts]
+        commands_start = unit_start + units * 80
+        for _ in range(squadrons):
+            identities.append(struct.unpack_from("<Q", recorded, commands_start)[0])
+            members = struct.unpack_from("<I", recorded, commands_start + 8)[0]
+            commands_start += 16 + 8 * members
+        one = 1 << 24
+        campaign = bytearray(struct.pack("<IqI", 5, one, len(accounts)))
+        for index, player in enumerate(accounts):
+            campaign += struct.pack("<IqIIqIIqqqq", player, (1234 + index) * one,
+                                    1000, int(index != 0), 0, 1, 5, one, one, 1000000 * one, 0)
+        campaign += struct.pack("<III", 0, 0, len(registered))  # reserves, upgrades, population
+        campaign += b"".join(struct.pack("<Q", entity) for entity in registered)
+        campaign += struct.pack("<IQ", 0, 0)  # no victory leaders or station
+        extensions = [struct.pack("<HHI", 1, 4, 4),  # campaign has no free starting templates
+                      struct.pack("<HHQ", 6, 8, max(identities) + 1),
+                      struct.pack("<HH", 10, len(campaign)) + campaign]
+        if setup_start > len(header):
+            offset = len(header) + 4
+            for _ in range(struct.unpack_from("<I", recorded, len(header))[0]):
+                tag, length = struct.unpack_from("<HH", recorded, offset)
+                end = offset + 4 + length
+                if tag not in (1, 5, 6, 10, 15, 16):
+                    extension = bytearray(recorded[offset:end])
+                    if tag == 2:
+                        flags_offset = 4
+                        for _ in range(2):
+                            size = struct.unpack_from("<H", extension, flags_offset)[0]
+                            flags_offset += 2 + size
+                        flags = struct.unpack_from("<I", extension, flags_offset)[0]
+                        struct.pack_into("<I", extension, flags_offset, (flags & ~15) | 4)
+                    extensions.append(extension)
+                offset = end
+        extensions.sort(key=lambda extension: struct.unpack_from("<H", extension)[0])
+        metadata = struct.pack("<I", len(extensions)) + b"".join(extensions)
+        struct.pack_into("<HH", header, 8, 5, len(header) + len(metadata))
+        struct.pack_into("<Q", header, 40, 60)
+        struct.pack_into("<Q", header, 64, 0)  # this focused recording has no player commands
+        with tempfile.TemporaryDirectory(prefix="campaign-marker-replay-") as temporary:
+            directory = Path(temporary)
+            replay = directory / "campaign.eawr-replay"
+            replay.write_bytes(header + metadata + recorded[setup_start:commands_start])
+            expected = None
+            for workers in (1, 2, 4, 8):
+                report = directory / f"campaign-{workers}.json"
+                hashes = directory / f"campaign-{workers}.csv"
+                result = subprocess.run([
+                    os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                    "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-live-session", "replay",
+                    "--eawr-populate", "--eawr-live-replay", str(replay),
+                    "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                    "--eawr-map", "data/art/maps/_mp_space_coruscant.ted", "--eawr-live-ticks", "29",
+                    "--eawr-map-timed-frames", "30", "--eawr-map-particle-frames", "1", "--eawr-live-step", "1",
+                    "--eawr-live-workers", str(workers), "--eawr-live-hashes", str(hashes),
+                    "--eawr-report", str(report), "--eawr-audio", "off"],
+                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+                (directory / f"campaign-{workers}.log").write_text(result.stdout, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                live = json.loads(report.read_text(encoding="utf-8"))["live_session"]
+                self.assertTrue(live["headless_hashes_equal"])
+                self.assertEqual(live["completed_ticks"], 30)
+                self.assertFalse(live["rejected"])
+                actual = hashes.read_bytes()
+                if expected is None:
+                    expected = actual
+                self.assertEqual(actual, expected)
+
     def test_gui_selects_map_faction_starts_and_returns(self):
         self._starts_and_returns(1)
 

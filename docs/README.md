@@ -74,6 +74,7 @@ a test, a tool or a provenance reference still needs it.
 - [ui/ui-layer.md](ui/ui-layer.md) — UI layer: retail sources, layout rules, architecture and plan.
 - [unit-data.md](unit-data.md) — M2 unit tables: loading rules, hardpoint positions in Q24, content identity.
 - [galactic-data.md](galactic-data.md) — galactic conquest data tables: campaigns, planets, trade routes, factions, constants, issue rows.
+- [gc-story-engine.md](gc-story-engine.md) — the live story engine for campaign plots: what runs, the interim event order, the seams.
 - [galactic-types.md](galactic-types.md) — Original-type galactic movement, population and production values.
 - [vfs.md](vfs.md) — Virtual file system contract.
 - [xml-model.md](xml-model.md) — XML object model and variant resolution.

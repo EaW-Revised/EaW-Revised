@@ -44,7 +44,8 @@ publication gate. The pool route requires all of these conditions:
 - Run public CI and release-core qualification before T0. Review the final delta
   explicitly and test affected code on the final candidate; rerun broad qualification
   when the delta invalidates it. Earlier green receipts alone do not prove later
-  changes. Required public checks still apply.
+  changes. Public hosted CI is advisory for this release route; the maintainer may
+  admin-merge the reviewed sync without waiting, as authorized by the release owner.
 - Build pool assets from the **exact public tagged commit**, not an approximately
   equivalent private head. Record tag object, commit/tree, build commands,
   compiler/dependency identities, logs and archive SHA-256 hashes in the release
@@ -63,18 +64,36 @@ publication gate. The pool route requires all of these conditions:
   non-blocking and file follow-up tickets on failure. **They can never block or pull
   a release.** The x64 assets are proven by the pool route, without duplicate hosted work.
 
-The maintainer creates the pool draft with `gh release create <tag> --draft --verify-tag`
+The maintainer creates the pool draft with
+`gh release create <tag> --repo <public-repo> --draft --verify-tag`
 and uploads tested archives, `SHA256SUMS.txt` and provenance with
 `gh release upload <tag> <files> --repo <public-repo>` without `--clobber`. Download and
 verify those exact bytes, then publish manually after owner approval. Hosted jobs have
 no release-write permission and never create, replace, publish or delete release assets.
 
-Pool builds retain publish scans, full applicable core CTest, tagged-main ancestry,
+Pool builds retain publish scans, core CTest excluding labels `game-data|installed-required`,
+separate installed-data/GPU acceptance, tagged-main ancestry,
 online-enabled Windows viewers, runtime/content checks, Debug symbols and checksums.
 Core and viewer compilation run concurrently when capacity permits. Restore only
 verified pinned dependencies; keep Release/Debug outputs isolated. Hosted attestations
 are not claimed for pool bytes: attach honest pool source/build/hash provenance.
 Preliminary fresh-user checks start as soon as candidate bytes exist.
+
+The maintainer tags and pushes the reviewed public commit explicitly (never through the
+NO-PUSH remote):
+
+```text
+git -C <public-clone> tag -s v0.2.5 <reviewed-public-commit> -m "EaW Revised v0.2.5"
+git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.2.5
+```
+
+The Windows publish scan must see the reviewed LF bytes of pinned text fixtures after
+checkout. Check the candidate's `.gitattributes`; never waive a fixture hash failure as
+a packaging detail. Scan a clean source export rather than a warm build directory: a
+retained `out/build/**/_deps/**` can contain upstream cryptographic test vectors that
+look like secrets. If a maintainer configures an exclusion for those dependency caches,
+keep it confined to `out/build/**/_deps/**`; never exclude project sources or archive
+payloads. Independently scan the final extracted archives and SHA256SUMS before upload.
 
 ## What a release contains
 
@@ -122,14 +141,16 @@ The acceptance checklist for a candidate (clean machine plus a normal user) is a
 ### The debug folder
 
 `package_release.py --debug --build-dir <Debug root build> --platform windows-x64 --version <version> --godot <Godot exe>
---launcher <EAWR.exe>` writes `eaw-revised-<version>-windows-x64-debug.zip` after the Release archives (both
-viewer builds write the same `apps/viewer/project/bin`, so package the Release archives first and build the Debug
-viewer last). It is laid out like the player folder with the viewer extension and the headless tools built in the
+--launcher <EAWR.exe>` writes `eaw-revised-<version>-windows-x64-debug.zip`. The parallel release route
+uses separate worktrees (or separate hosts), each with its own `apps/viewer/project/bin`, so Release
+and Debug builds cannot overwrite each other. For a single-worktree fallback, package the Release
+archives first, then build and package Debug; never run both viewer builds concurrently in one worktree. It is laid out like the player folder with the viewer extension and the headless tools built in the
 Debug configuration and their PDBs (`tools/`), plus `DEBUG-BUILD.md` ([the debug build guide](debug-build.md)). The
 pool build uses: `cmake --preset windows-msvc -B out/build/windows-msvc-debug
 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebug -DEAWR_WARNINGS_AS_ERRORS=OFF -DBUILD_TESTING=OFF`, the tool targets in
 Debug, then `apps/viewer` with `--config Debug`. The static debug C runtime keeps the programs runnable on a PC without
-Visual Studio. The Debug archive is not a gate and is not performance-representative.
+Visual Studio. The Debug archive is not performance-representative. Fresh-user 9/9 on BOTH the player
+and Debug archives is a publication gate.
 
 Each archive carries `LICENSE`, `THIRD_PARTY_NOTICES.md` and `README.md`. Pool assets
 carry a source/build/hash receipt; do not claim a hosted attestation for these bytes.

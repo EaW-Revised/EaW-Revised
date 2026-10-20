@@ -340,9 +340,7 @@ void TacticalSession::Impl::register_tractor(const LiveUnit& source, const LiveU
                     * (doubling ? 2 : 1)), AbilityKind::tractor_beam});
         }
     }
-    std::sort(concentrate_effects.begin(), concentrate_effects.end(), [](const auto& a, const auto& b) {
-        return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
-    });
+    sort_concentrate_effects(concentrate_effects);
 }
 
 core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& units,
@@ -398,14 +396,7 @@ core::Result<void> TacticalSession::Impl::service_beams(std::vector<LiveUnit>& u
     for (const auto& effect : concentrate_effects) if (effect.kind != AbilityKind::tractor_beam) next.push_back(effect);
     for (const auto& part : effects) next.insert(next.end(), part.begin(), part.end());
     for (const auto& part : leech_ended) concentrate_changed_targets.insert(part.begin(), part.end());
-    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
-        return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
-    });
-    if (next != concentrate_effects) {
-        for (const auto& effect : concentrate_effects) concentrate_changed_targets.insert(effect.target);
-        for (const auto& effect : next) concentrate_changed_targets.insert(effect.target);
-        concentrate_effects = std::move(next);
-    }
+    commit_concentrate_effects(std::move(next));
     beam_replans.clear();
     for (const auto& part : replans) beam_replans.insert(beam_replans.end(), part.begin(), part.end());
     std::sort(beam_replans.begin(), beam_replans.end());
@@ -543,9 +534,7 @@ void TacticalSession::Impl::register_concentrate(const LiveUnit& unit) {
         concentrate_effects.push_back({state.target, unit.state.entity_id, nested->concentrate_stacking_category,
             math::Fixed::from_raw(-nested->target_damage_increase.raw()),
             math::Fixed::from_raw(-nested->target_speed_decrease.raw())});
-        std::sort(concentrate_effects.begin(), concentrate_effects.end(), [](const auto& a, const auto& b) {
-            return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
-        });
+        sort_concentrate_effects(concentrate_effects);
     }
 }
 
@@ -593,14 +582,7 @@ core::Result<void> TacticalSession::Impl::service_concentrate(std::vector<LiveUn
     std::vector<ConcentrateEffect> next;
     for (const auto& effect : concentrate_effects) if (effect.kind != AbilityKind::concentrate_fire) next.push_back(effect);
     for (const auto& part : effects) next.insert(next.end(), part.begin(), part.end());
-    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
-        return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
-    });
-    if (next != concentrate_effects) {
-        for (const auto& effect : concentrate_effects) concentrate_changed_targets.insert(effect.target);
-        for (const auto& effect : next) concentrate_changed_targets.insert(effect.target);
-        concentrate_effects = std::move(next);
-    }
+    commit_concentrate_effects(std::move(next));
     return core::Result<void>::success();
 }
 
@@ -641,14 +623,7 @@ core::Result<void> TacticalSession::Impl::service_weaken(std::vector<LiveUnit>& 
     std::vector<ConcentrateEffect> next;
     for (const auto& effect : concentrate_effects) if (effect.kind != AbilityKind::weaken_enemy) next.push_back(effect);
     for (const auto& part : effects) next.insert(next.end(), part.begin(), part.end());
-    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
-        return std::tie(a.target, a.category, a.source) < std::tie(b.target, b.category, b.source);
-    });
-    if (next != concentrate_effects) {
-        for (const auto& effect : concentrate_effects) concentrate_changed_targets.insert(effect.target);
-        for (const auto& effect : next) concentrate_changed_targets.insert(effect.target);
-        concentrate_effects = std::move(next);
-    }
+    commit_concentrate_effects(std::move(next));
     return core::Result<void>::success();
 }
 

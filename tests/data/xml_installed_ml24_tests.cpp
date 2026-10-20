@@ -2,11 +2,12 @@
 // EffectiveObject::single_text (the reader the battle-audio, minimap and scene readers use).
 // Runs against EAWR_EAW_GAME_ROOT; exit 77 (skip) without it.
 
+#include "../support/self_test.hpp"
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/vfs/vfs.hpp"
 
-#include <array>
-#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -17,27 +18,15 @@
 
 namespace {
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 std::optional<std::string> environment(const char* name) {
-#if defined(_MSC_VER)
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-    return result.empty() ? std::nullopt : std::optional<std::string>(result);
-#else
-    const char* value = std::getenv(name);
-    return value == nullptr || *value == '\0' ? std::nullopt : std::optional<std::string>(value);
-#endif
+    return eawr::testing::environment(name);
 }
 
 struct Row {
@@ -49,6 +38,10 @@ struct Row {
 } // namespace
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     const auto root = environment("EAWR_EAW_GAME_ROOT");
     if (!root) return 77;
     std::vector<eawr::vfs::MountSpec> specs;

@@ -28,9 +28,14 @@ protected:
 struct GroundHudState {
     std::map<std::string, godot::TextureButton*> buttons;
     std::vector<viewer::galactic::InputWidget> widgets;
-    std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> rosters;
+    // #4316: a roster is a scan of the whole publication, and only the focused planet's is ever read. The maps fill
+    // when a roster is first asked for, from `publication` / `command_publication`, and empty at each new publication.
+    mutable std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> rosters;
     // #3931: launch/land gating reads rosters built from the truth publication; equals rosters when the reveal is off.
-    std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> command_rosters;
+    mutable std::map<viewer::galactic::ObjectId, viewer::galactic::GroundRoster> command_rosters;
+    // Holds the published (truth) snapshot while it differs from the displayed one, so its rosters can be built on first
+    // use. One snapshot at most; replaced or dropped at every displayed publication change.
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> command_publication;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> publication;
     EawrGroundInput* input{};
     godot::Label* count{};

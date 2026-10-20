@@ -1,5 +1,14 @@
 #include "map_camera_movement_support.hpp"
 
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+
 namespace eawr_map_camera_test {
 
 void test_terrain_ground_sampling() {

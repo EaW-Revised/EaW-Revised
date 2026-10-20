@@ -92,9 +92,16 @@ Output: the minimap image inside the radar mesh; camera moves and move orders fr
   The debug build's team path uses the arithmetic mean of current member positions, its first
   member's facing, and the team leader's radar fog admission. This centre is independent of the
   world icon's idle or combat grid anchor. The debug build creates a separate team from
-  `Create_Team_Type`, defaulting to `Team`; that type supplies the radar visibility and icon
-  policy. The remake uses this loaded team type with the squadron's colour, selection and
-  identity once, suppresses its craft identities, and leaves dead, docked and empty teams out.
+  `Create_Team_Type`, defaulting to `Team`; that type supplies the icon style and geometry.
+  A live member craft's `Is_Visible_On_Radar` permission admits the squadron even when
+  its team type omits that flag. A paired stock debug-build capture shows both
+  `Pirate_Fighter_Squadron` and `StarViper_Squadron` as orange marks for a Pirates owner without
+  a lobby slot; `StarViper_Team` omits the flag while its craft types author Yes. The remake admits
+  one identity when any current live member type permits radar, retaining the leader's fog
+  admission. A team-only permission with all member types hidden remains an unverified mod
+  case, recorded in the data-assumption audit. The remake uses the loaded team type with the
+  squadron's colour, selection and identity once, suppresses its craft identities, and leaves
+  dead, docked and empty teams out.
   The exact upstream member exclusion in the original is unverified; the squadron identity count
   follows the owner's observed presentation. Member deletion makes the first remaining member
   the leader for this presentation path.

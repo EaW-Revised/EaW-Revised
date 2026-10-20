@@ -347,7 +347,10 @@ void EawrLanLobby::refresh_lobby() {
             if (const auto error = impl.online_rooms->last_error(); error && (error->code == "EAWR-NET-1519" || error->code == "EAWR-NET-1528"))
                 impl.list_notice = "Could not reach or trust the online service. Check Network Options.";
         }
-        impl.chat_open = impl.online_rooms && !impl.players.empty();
+        impl.chat_open = impl.online_rooms
+            && (impl.online_rooms->menu_state() == model::OnlineMenuChat::active
+                || std::any_of(impl.players.begin(), impl.players.end(),
+                               [](const model::LobbyPlayer& player) { return player.place != model::LobbyPlace::lobby; }));
         impl.status = impl.list_notice;
         if (auto* notice = EAWR_CONTROL(EawrUiLabel, online_notice_label)) {
             notice->set_text(text(impl.list_notice));
@@ -454,10 +457,21 @@ void EawrLanLobby::refresh_online_rooms() {
     impl_->dirty = true;
 }
 
+std::shared_ptr<model::LobbyGameSource> EawrLanLobby::lan_source() {
+    if (options_.source) return options_.source;
+    if (!owned_lan_source_ && options_.lan_source_factory) {
+        std::string failure;
+        owned_lan_source_ = options_.lan_source_factory(failure);
+        if (!owned_lan_source_ && !failure.empty()) note_chat(model::ChatKind::error, failure);
+    }
+    return owned_lan_source_;
+}
+
 void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     if (page_ != Page::lobby || source == impl_->join_selection.source()) return;
     cancel_join();
     impl_->join_selection.select_source(source);
+    if (impl_->online_rooms) impl_->online_rooms->set_menu_visible(source == model::LobbySourceKind::online);
     if (source == model::LobbySourceKind::online) {
         if (!options_.online_rooms && !impl_->online_rooms && options_.online_settings) {
             auto configured = online_match_options(*options_.online_settings);
@@ -470,13 +484,17 @@ void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     }
     // No old source rows, queued chat, selection or invitation survives a switch.
     if (impl_->source) static_cast<void>(impl_->source->take_chat());
-    impl_->source = source == model::LobbySourceKind::lan ? options_.source
+    impl_->lobby_chat.clear();
+    if (source == model::LobbySourceKind::online) owned_lan_source_.reset();
+    impl_->source = source == model::LobbySourceKind::lan ? lan_source()
                                                           : std::shared_ptr<model::LobbyGameSource>(impl_->online_rooms);
     impl_->online_page = 0;
     impl_->prompt.reset();
     impl_->join_game.clear();
     impl_->join_room.clear();
     if (impl_->source) {
+        // A freshly opened LAN source must announce this profile before its first pump.
+        if (source == model::LobbySourceKind::lan) announce();
         // Drain arrivals accumulated while this source was inactive before drawing its new page.
         static_cast<void>(impl_->source->pump());
         static_cast<void>(impl_->source->take_chat());
@@ -486,7 +504,6 @@ void EawrLanLobby::select_source(const model::LobbySourceKind source) {
     impl_->players.clear();
     impl_->selected_key.clear();
     impl_->entered_code.clear();
-    impl_->lobby_chat.clear();
     impl_->last_message.clear();
     impl_->status.clear();
     open_lobby();
@@ -729,6 +746,11 @@ void EawrLanLobby::pump_online() {
         if (page_ == Page::lobby && failure != model::OnlineFailure::busy && failure != model::OnlineFailure::removed) continue;
         online_failure(notice);
     }
+    // A service that predates the room-less chat (#3758) gets one neutral line in the chat window, then nothing more.
+    const model::OnlineMenuChat menu = impl.online_rooms->menu_state();
+    if (menu == model::OnlineMenuChat::unavailable && impl.menu_chat != menu && page_ == Page::lobby)
+        note_chat(model::ChatKind::notice, std::string(model::online_menu_chat_notice(menu)));
+    if (menu != model::OnlineMenuChat::unavailable || page_ == Page::lobby) impl.menu_chat = menu;
     const net::OnlineHostingState state = impl.online_rooms->hosting_state();
     const model::OnlineHostingPhase phase = state == net::OnlineHostingState::publishing ? model::OnlineHostingPhase::publishing
         : state == net::OnlineHostingState::hosted ? model::OnlineHostingPhase::hosted

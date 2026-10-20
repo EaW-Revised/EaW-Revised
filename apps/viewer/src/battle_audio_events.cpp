@@ -1102,20 +1102,7 @@ void BattleAudio::retreat_cues(const tactical::TacticalSnapshot& snapshot, const
     }
 }
 
-void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
-                        std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
-                        std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback,
-                        std::vector<BattleEffects::TerminalSound> terminal_sounds) {
-    if (released_) return;
-    const bool recovery_quiet = live.multiplayer() && lan_recovery_audio_suppressed(live.lan_view());
-    ++frames_;
-    gui_dialog_ = live.time().paused(); // the viewer's pause banner is its modal dialog
-    event_delta_ms_ = std::max(0.0, delta) * 1000.0;
-    clock_ += delta;
-    if (!recovery_quiet) update_pause(live.time().paused(), delta);
-    for (auto& warning : radar_warnings_) warning.age += std::max(0.0, delta);
-    std::erase_if(radar_warnings_, [](const auto& warning) { return warning.age >= 4.0; });
-    const LiveSessionView::BattleFrame& battle = live.battle_frame();
+void BattleAudio::present_outcome_cues(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const bool recovery_quiet) {
     // HCB-12c: presentation consumes allied placement snapshots, including
     // intermediate reached ticks; fog bypass never admits an enemy cue.
     const auto beacon_cues = [&](const auto& snapshot) {
@@ -1178,8 +1165,9 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             cue_music({summary_event_, summary_event_->files.front(), audio::MusicDirector::Mode::none});
         }
     }
-    if (recovery_quiet) return; // Only the outcome and summary cues above bypass recovery silence.
-    presented_tick_ = battle.presented_tick;
+}
+
+void BattleAudio::update_listener(const LiveSessionView& live, const FixedCamera& camera) {
     // BA-12: the listener stands where the camera looks, on the plane z = 60.
     const assets::Vec3f eye = space::source_from_render(camera.eye);
     const assets::Vec3f target = space::source_from_render(camera.target);
@@ -1200,21 +1188,9 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     listener_text_ = text;
     listener_position_ = listener.position;
     update_voices(listener.position, live);
-    for (const auto& cue : reinforcement_feedback) {
-        const auto index = static_cast<std::size_t>(cue.kind);
-        const audio::SfxEvent* sound = reinforcement_sounds_[index];
-        if (cue.kind == LiveSessionView::ReinforcementFeedback::Kind::enroute) {
-            const auto type = types_.find(cue.type);
-            if (type != types_.end() && type->second.fleet_move) sound = type->second.fleet_move;
-        }
-        constexpr std::array reasons{"reinforcement_pane", "reinforcement_placement", "reinforcement_enroute", "reinforcement_cancelled"};
-        play(sound, std::nullopt, false, reasons[index]);
-    }
-    update_music(delta);
-    meter_buses();
-    if (!battle.latest) { update_speech(live.time().paused()); return; }
-    const tactical::PlayerId local = live.local_player();
+}
 
+void BattleAudio::remember_visible_units(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle) {
     // Where each unit the player sees stands (the last visible frame of one that left).
     if (metadata_snapshot_ != battle.latest) {
         if (battle.previous) {
@@ -1246,8 +1222,9 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             last_seen_.erase(craft.entity_id);
         }
     }
-    // BA-53/54: the confirmation precedes spawn playback, so the active-event guard avoids doubling it.
-    for (const auto& click : ability_clicks) target_ability(click, live);
+}
+
+void BattleAudio::present_reached_audio(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const sim::tactical::PlayerId local) {
     // The ticks this frame reaches: an event of tick t sounds once the frame presents t - 1 (as
     // the battle effects fire), up to the newest completed tick.
     const std::uint64_t latest = battle.latest->completed_tick();
@@ -1443,7 +1420,9 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
         }
     }
     fired_through_ = std::max(fired_through_, reach);
+}
 
+void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const sim::tactical::PlayerId local, const std::vector<BattleEffects::TerminalSound>& terminal_sounds) {
     // BA-15 (hits), BA-16 (deaths) and BA-17 (hardpoint deaths) from the event log.
     // WBP-20: loop ownership includes the voice's start frame, so a stolen voice is never stopped.
     for (auto loop = pad_loops_.begin(); loop != pad_loops_.end();) {
@@ -1716,6 +1695,46 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
             hardpoint_death(event.hardpoint, "hardpoint");
         }
     }
+}
+
+void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Acknowledgement> acknowledgements,
+                        std::vector<LiveSessionView::AbilityClick> ability_clicks, const FixedCamera& camera, const double delta,
+                        std::vector<LiveSessionView::ReinforcementFeedback> reinforcement_feedback,
+                        std::vector<BattleEffects::TerminalSound> terminal_sounds) {
+    if (released_) return;
+    const bool recovery_quiet = live.multiplayer() && lan_recovery_audio_suppressed(live.lan_view());
+    ++frames_;
+    gui_dialog_ = live.time().paused(); // the viewer's pause banner is its modal dialog
+    event_delta_ms_ = std::max(0.0, delta) * 1000.0;
+    clock_ += delta;
+    if (!recovery_quiet) update_pause(live.time().paused(), delta);
+    for (auto& warning : radar_warnings_) warning.age += std::max(0.0, delta);
+    std::erase_if(radar_warnings_, [](const auto& warning) { return warning.age >= 4.0; });
+    const LiveSessionView::BattleFrame& battle = live.battle_frame();
+    present_outcome_cues(live, battle, recovery_quiet);
+    if (recovery_quiet) return; // Only the outcome and summary cues above bypass recovery silence.
+    presented_tick_ = battle.presented_tick;
+    update_listener(live, camera);
+    for (const auto& cue : reinforcement_feedback) {
+        const auto index = static_cast<std::size_t>(cue.kind);
+        const audio::SfxEvent* sound = reinforcement_sounds_[index];
+        if (cue.kind == LiveSessionView::ReinforcementFeedback::Kind::enroute) {
+            const auto type = types_.find(cue.type);
+            if (type != types_.end() && type->second.fleet_move) sound = type->second.fleet_move;
+        }
+        constexpr std::array reasons{"reinforcement_pane", "reinforcement_placement", "reinforcement_enroute", "reinforcement_cancelled"};
+        play(sound, std::nullopt, false, reasons[index]);
+    }
+    update_music(delta);
+    meter_buses();
+    if (!battle.latest) { update_speech(live.time().paused()); return; }
+    const tactical::PlayerId local = live.local_player();
+
+    remember_visible_units(live, battle);
+    // BA-53/54: the confirmation precedes spawn playback, so the active-event guard avoids doubling it.
+    for (const auto& click : ability_clicks) target_ability(click, live);
+    present_reached_audio(live, battle, local);
+    present_combat_audio(live, battle, local, terminal_sounds);
     // BA-20 to BA-22: the unit responses to this frame's gestures.
     for (const BattleInput::Acknowledgement& acknowledgement : acknowledgements) respond(acknowledgement, live);
     // BA-52: the unit voices of this frame's ability presses.

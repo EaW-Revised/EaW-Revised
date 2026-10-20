@@ -30,6 +30,7 @@ struct ObservedFleetGroup {
     // group is anonymous.
     std::optional<FleetId> fleet;
     bool transport{}, strongest{}, superweapon{};
+    bool hero{}; // the disclosed representative is a hero (reports and tests; a hidden group stays false)
     // GHUD-S87: local presentation index, with the representative's disclosure permission.
     std::optional<std::int64_t> gui_index;
     friend bool operator==(const ObservedFleetGroup&, const ObservedFleetGroup&) = default;

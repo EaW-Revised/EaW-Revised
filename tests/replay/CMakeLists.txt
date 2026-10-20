@@ -1,6 +1,7 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 
-add_executable(tactical_station_upgrade_tests station_upgrade_tests.cpp station_allocations.cpp)
+add_executable(tactical_station_upgrade_tests station_upgrade_tests.cpp station_allocations.cpp
+    station_garrison_tests.cpp station_production_tests.cpp)
 target_link_libraries(tactical_station_upgrade_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_station_upgrade_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_station_upgrade_tests)
@@ -56,7 +57,12 @@ add_test(
     COMMAND tactical_durability_tests "${EAWR_REPLAY_FIXTURES}"
 )
 # #76: unit abilities (DEFEND, TURBO, POWER_TO_WEAPONS, SPOILER_LOCK).
-add_executable(tactical_ability_tests ability_tests.cpp)
+add_executable(tactical_ability_tests ability_tests.cpp
+    ability_rules_tests.cpp
+    ability_special_tests.cpp
+    ability_hero_tests.cpp
+    ability_defence_tests.cpp
+    ability_support_tests.cpp)
 target_link_libraries(tactical_ability_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_ability_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(tactical_ability_tests)
@@ -147,6 +153,9 @@ add_executable(tactical_fighter_tests fighter_tests.cpp
     fighter_spawner_tests.cpp
     fighter_orders_tests.cpp
     fighter_scans_tests.cpp
+    fighter_scans_targeting_tests.cpp
+    fighter_scans_destination_tests.cpp
+    fighter_scans_grid_tests.cpp
     fighter_attract_tests.cpp)
 target_link_libraries(tactical_fighter_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_fighter_tests PRIVATE cxx_std_20)

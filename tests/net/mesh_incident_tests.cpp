@@ -1,19 +1,29 @@
+// Pair-loss agreement over the N-peer room mesh (docs/net-online-npeer.md, section 3; test plan rows "Pair-loss agreement"
+// and "Mesh policy"). Every seat runs its own MeshIncident over a PairNetwork, so it sees only the reports its own open pairs
+// deliver; nothing here is a global view except the assertions.
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "pair_network.hpp"
 #include "eawr/net/mesh_incident.hpp"
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <random>
-#include <stdexcept>
+#include <span>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
-// Pair-loss agreement over the N-peer room mesh (docs/net-online-npeer.md, section 3; test plan rows "Pair-loss agreement"
-// and "Mesh policy"). Every seat runs its own MeshIncident over a PairNetwork, so it sees only the reports its own open pairs
-// deliver; nothing here is a global view except the assertions.
 namespace {
 namespace net = eawr::net;
 using eawr::testing::PairNetwork;
@@ -21,14 +31,12 @@ using eawr::testing::PairTransport;
 using Time = std::chrono::milliseconds;
 using Kind = net::MeshIncidentResult::Kind;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool value, const std::string& message) {
-    if (!value) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!value) local_checker.check_before_print(value, message, std::cerr, "FAIL: ");
 }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::require;
 constexpr net::MeshSeats seats_of(std::initializer_list<unsigned> seats) {
     net::MeshSeats mask{};
     for (const auto seat : seats) mask = static_cast<net::MeshSeats>(mask | (1U << seat));

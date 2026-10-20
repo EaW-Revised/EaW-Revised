@@ -1,4 +1,5 @@
 #include "eawr/presentation/ui/settings.hpp"
+#include "eawr/core/text.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -16,9 +17,10 @@ namespace {
 }
 
 [[nodiscard]] std::string_view trim(std::string_view text) {
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
-    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) text.remove_suffix(1);
-    return text;
+    // A carriage return is a separator only at the end of these line values.
+    const auto last = text.find_last_not_of(core::line_whitespace);
+    return core::trim_view(text.substr(0, last == std::string_view::npos ? 0 : last + 1),
+        core::horizontal_whitespace);
 }
 
 [[nodiscard]] std::string_view profile_name(const RenderProfileSetting setting) noexcept {

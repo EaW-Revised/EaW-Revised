@@ -27,16 +27,16 @@ view, not a census of tags used in a particular battle.
 
 | Status | Space skirmish | Everything |
 |---|---:|---:|
-| applied | 1886 | 1886 |
-| partial | 1032 | 1032 |
-| todo | 1253 | 1253 |
+| applied | 1907 | 1907 |
+| partial | 1054 | 1054 |
+| todo | 1245 | 1245 |
 | presentation-later | 0 | 457 |
 | foc-ignores | 251 | 251 |
 | deferred | 75 | 75 |
 | by-design | 10 | 10 |
-| land-or-galactic | 0 | 3240 |
+| land-or-galactic | 0 | 3205 |
 | multiplayer | 0 | 4 |
-| **Total** | **4507** | **8208** |
+| **Total** | **4542** | **8208** |
 
 ## Totals by area
 
@@ -45,7 +45,7 @@ view, not a census of tags used in a particular battle.
 | [ai](ai.md) | 102 | 112 |
 | [combat](combat.md) | 1310 | 3184 |
 | [data](data.md) | 74 | 74 |
-| [economy](economy.md) | 840 | 1109 |
+| [economy](economy.md) | 875 | 1109 |
 | [fighters](fighters.md) | 61 | 89 |
 | [movement](movement.md) | 414 | 491 |
 | [presentation](presentation.md) | 1706 | 3149 |

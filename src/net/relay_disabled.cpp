@@ -30,6 +30,14 @@ core::Result<OnlineRoomAdmission> NetworkOnlineLobby::join(std::string, std::str
 core::Result<void> NetworkOnlineLobby::leave() { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkOnlineLobby::send_chat(std::string) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<OnlineChatPage> NetworkOnlineLobby::chat(std::uint32_t) { return core::Result<OnlineChatPage>::failure(relay_disabled()); }
+// Answers like a relay that predates the menu channel (1521), so the source latches the menu as unavailable.
+core::Result<OnlineMenuPage> NetworkOnlineLobby::menu_enter(std::string) {
+    core::Diagnostic result; result.code = "EAWR-NET-1521"; result.message = "Menu channel was disabled at build time";
+    return core::Result<OnlineMenuPage>::failure(std::move(result));
+}
+core::Result<void> NetworkOnlineLobby::menu_say(std::string) { return core::Result<void>::failure(relay_disabled()); }
+core::Result<OnlineMenuPage> NetworkOnlineLobby::menu_poll(std::uint32_t, std::uint32_t) { return core::Result<OnlineMenuPage>::failure(relay_disabled()); }
+void NetworkOnlineLobby::menu_leave() {}
 core::Result<void> NetworkOnlineLobby::kick(const OnlineRoomPublication&, std::uint32_t) { return core::Result<void>::failure(relay_disabled()); }
 
 struct NetworkGnsRoom::Impl {};

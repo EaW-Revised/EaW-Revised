@@ -1,0 +1,562 @@
+[
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_death_star_live_unit_is_a_background_scene_object",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_death_star_live_unit_is_a_background_scene_object"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_peacebringer_blast_real_button_and_authored_shot",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_peacebringer_blast_real_button_and_authored_shot"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_corrupt_systems_point_cast_effects_and_sound",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_corrupt_systems_point_cast_effects_and_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_config_free_replay_laser_depth_uses_tactical_clips",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_config_free_replay_laser_depth_uses_tactical_clips"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_laser_depth_uses_tactical_clips_at_three_distances",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_laser_depth_uses_tactical_clips_at_three_distances"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_static_bomb_root_particle_and_countdown_audio",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_static_bomb_root_particle_and_countdown_audio"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_home_one_secondary_defend_and_purchase_slots_compose_shells",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_home_one_secondary_defend_and_purchase_slots_compose_shells"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_vengeance_stealth_swaps_its_hull_for_the_cloak",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_vengeance_stealth_swaps_its_hull_for_the_cloak"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_enemy_viewer_cannot_see_a_cloaked_vengeance",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_enemy_viewer_cannot_see_a_cloaked_vengeance"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_concentrate_fire_button_target_click_reaches_simulation",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_concentrate_fire_button_target_click_reaches_simulation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_lure_button_shows_team_particle",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_lure_button_shows_team_particle"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_rebel_lure_button_shows_team_particle",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_rebel_lure_button_shows_team_particle"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_stock_rebel_skirmish_lure_observation",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_stock_rebel_skirmish_lure_observation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases._lure_button_shows_team_particle",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#_lure_button_shows_team_particle"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_vader_replenishes_one_missing_escort_through_real_button",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_vader_replenishes_one_missing_escort_through_real_button"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_hero_bomb_and_weaken_buttons_spawn_authored_effects",
+    "new": "tests/presentation/renderer/live_session_effect_ability_cases.py#test_hero_bomb_and_weaken_buttons_spawn_authored_effects"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_hero_energy_and_tractor_beams_are_live_and_release",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_hero_energy_and_tractor_beams_are_live_and_release"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_laser_defence_zap_sound_and_beam",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_laser_defence_zap_sound_and_beam"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_tractor_line_width_texture_highlights_and_release",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_tractor_line_width_texture_highlights_and_release"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_falcon_invulnerability_shows_authored_bubble_and_expires",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_falcon_invulnerability_shows_authored_bubble_and_expires"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_power_to_weapons_shows_hidden_glow_and_drains_on_end",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_power_to_weapons_shows_hidden_glow_and_drains_on_end"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_keldabe_shield_leech_beam_particle_audio_and_target_button",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_keldabe_shield_leech_beam_particle_audio_and_target_button"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_ability_visuals_leech_origin_at_three_headings",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_ability_visuals_leech_origin_at_three_headings"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_buzz_droids_proxy_owner_draws_chases_and_hides_in_fog",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_buzz_droids_proxy_owner_draws_chases_and_hides_in_fog"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_full_salvo_shows_the_power_to_weapons_emitters",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_full_salvo_shows_the_power_to_weapons_emitters"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_self_destruct_shows_its_blast",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_self_destruct_shows_its_blast"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_self_destruct_cancel_stops_its_light_and_sound",
+    "new": "tests/presentation/renderer/live_session_effect_weapon_cases.py#test_self_destruct_cancel_stops_its_light_and_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_duel_fires_hits_and_explodes",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_duel_fires_hits_and_explodes"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_missiles_fly_as_models_with_their_trails",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_missiles_fly_as_models_with_their_trails"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_missile_trails_reach_their_true_last_tick_at_every_step",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_missile_trails_reach_their_true_last_tick_at_every_step"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_squadron_selection_plays_its_craft_lines",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_squadron_selection_plays_its_craft_lines"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_turbo_engine_boost_fades_out",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_turbo_engine_boost_fades_out"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_shield_flash_opt_in",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_shield_flash_opt_in"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_defend_shows_the_shield_shell",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_defend_shows_the_shield_shell"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_compiled_defend_shield_shell",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_compiled_defend_shield_shell"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_human_default_autofire_shows_defend_shell",
+    "new": "tests/presentation/renderer/live_session_effect_battle_cases.py#test_human_default_autofire_shows_defend_shell"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_duel_stall_keeps_every_event",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_duel_stall_keeps_every_event"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_duel_startup_stall_ages_every_effect",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_duel_startup_stall_ages_every_effect"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_unit_emitters_after_a_stall",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_unit_emitters_after_a_stall"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_corvette_glow_spans_nozzle_wall_during_turn",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_corvette_glow_spans_nozzle_wall_during_turn"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_engine_emitters_are_drawn_every_frame_of_a_turn",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_engine_emitters_are_drawn_every_frame_of_a_turn"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_generator_pulse_follows_hardpoint_state",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_generator_pulse_follows_hardpoint_state"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_kite_axis_matches_projected_flight_over_frames",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_kite_axis_matches_projected_flight_over_frames"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_effective_constants_change_drawn_width_and_flash",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_effective_constants_change_drawn_width_and_flash"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_effect_cases.py#LiveSessionEffectCases.test_live_camera_clip_planes_and_default_distance",
+    "new": "tests/presentation/renderer/live_session_effect_emitter_cases.py#test_live_camera_clip_planes_and_default_distance"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_spatial_xml_settings_and_missing_tags_keep_audio",
+    "new": "tests/presentation/renderer/live_session_audio_lifecycle_cases.py#test_spatial_xml_settings_and_missing_tags_keep_audio"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_station_upgrade_announces_owner_faction_once",
+    "new": "tests/presentation/renderer/live_session_audio_lifecycle_cases.py#test_station_upgrade_announces_owner_faction_once"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_sfx_lifecycle_delays_repeats_and_authored_chain",
+    "new": "tests/presentation/renderer/live_session_audio_lifecycle_cases.py#test_sfx_lifecycle_delays_repeats_and_authored_chain"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_audio_direct_map_repeated_early_teardown",
+    "new": "tests/presentation/renderer/live_session_audio_lifecycle_cases.py#test_audio_direct_map_repeated_early_teardown"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_game_pause_preserves_spatial_loops_2d_loops_and_speech",
+    "new": "tests/presentation/renderer/live_session_audio_lifecycle_cases.py#test_game_pause_preserves_spatial_loops_2d_loops_and_speech"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_barrage_confirmation",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_barrage_confirmation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_concentrate_confirmation",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_concentrate_confirmation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_stock_selection_overlap_refuses_confirmation",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_stock_selection_overlap_refuses_confirmation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_energy_confirmation",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_energy_confirmation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_tractor_confirmation",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_tractor_confirmation"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_weaken_confirmation_does_not_double_spawn",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_weaken_confirmation_does_not_double_spawn"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_scripted_weaken_attaches_to_source",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_scripted_weaken_attaches_to_source"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_seismic_charge_button_uses_voice_without_gun_fire",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_seismic_charge_button_uses_voice_without_gun_fire"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_payload_harmonic_authored_spatial_cue",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_ability_payload_harmonic_authored_spatial_cue"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_buzz_droids_scripted_point_arms_droids",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_buzz_droids_scripted_point_arms_droids"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_allied_buzz_droids_activation_requests_no_gui_sound",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#test_allied_buzz_droids_activation_requests_no_gui_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases._ability_payload_case",
+    "new": "tests/presentation/renderer/live_session_audio_ability_cases.py#_ability_payload_case"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_base_under_attack_uses_mode_cooldown_and_authored_radar",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_base_under_attack_uses_mode_cooldown_and_authored_radar"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_reinforcement_feedback_tracks_open_place_invalid_drop_and_submit",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_reinforcement_feedback_tracks_open_place_invalid_drop_and_submit"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_reinforcement_feedback_prefers_authored_fleet_move",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_reinforcement_feedback_prefers_authored_fleet_move"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases._reinforcement_feedback_case",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#_reinforcement_feedback_case"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ship_engine_loops_use_stock_zero_threshold_and_do_not_retry",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_ship_engine_loops_use_stock_zero_threshold_and_do_not_retry"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ship_engine_switches_follow_authored_threshold_and_attached_pose",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_ship_engine_switches_follow_authored_threshold_and_attached_pose"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_fogged_ship_engine_loops_are_admitted_and_muted",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_fogged_ship_engine_loops_are_admitted_and_muted"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_offscreen_enemy_ai_ability_toggles_are_silent",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_offscreen_enemy_ai_ability_toggles_are_silent"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases._allied_ai_cases",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#_allied_ai_cases"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_allied_ai_ability_toggles_request_no_gui_sound",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_allied_ai_ability_toggles_request_no_gui_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases._command_audio_overlay",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#_command_audio_overlay"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_command_cues_on_arm_disarm_execute_and_empty_stop",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_command_cues_on_arm_disarm_execute_and_empty_stop"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_order_button_hud_input_parser_rejects_unknown_and_modifiers",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_order_button_hud_input_parser_rejects_unknown_and_modifiers"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_negative_feedback_cooldown_invalid_target_and_silent_cancel",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_negative_feedback_cooldown_invalid_target_and_silent_cancel"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_response_assist_waits_for_primary_and_refused_primary_adds_none",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_response_assist_waits_for_primary_and_refused_primary_adds_none"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_variant_blank_assist_events_inherit_the_parent_event",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_variant_blank_assist_events_inherit_the_parent_event"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_removed_assist_source_cancels_pending_move_and_attack",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_removed_assist_source_cancels_pending_move_and_attack"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_environment_move_responses_use_live_hazard_footprints",
+    "new": "tests/presentation/renderer/live_session_audio_feedback_cases.py#test_environment_move_responses_use_live_hazard_footprints"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_fighter_flybys_require_a_path_and_use_stock_cadence_and_pitch",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_fighter_flybys_require_a_path_and_use_stock_cadence_and_pitch"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_fighter_flyby_timers_match_across_workers_and_presentation_steps",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_fighter_flyby_timers_match_across_workers_and_presentation_steps"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_fighter_flyby_promotes_live_leader_and_detaches_removed_craft",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_fighter_flyby_promotes_live_leader_and_detaches_removed_craft"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_fighter_flyby_attachment_mutes_when_the_craft_enters_fog",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_fighter_flyby_attachment_mutes_when_the_craft_enters_fog"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_sighting_announcements_are_once_per_type_and_battle",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_sighting_announcements_are_once_per_type_and_battle"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_production_speech_fifo_precedes_sfx_and_ducks_wav_responses",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_production_speech_fifo_precedes_sfx_and_ducks_wav_responses"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_speech_decodes_content_under_reversed_extensions",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_speech_decodes_content_under_reversed_extensions"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_station_hardpoint_lines_cover_shields_and_missing_hangar_fallback",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_station_hardpoint_lines_cover_shields_and_missing_hangar_fallback"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_empire_speaker_uses_the_targets_ion_hardpoint_kind",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_empire_speaker_uses_the_targets_ion_hardpoint_kind"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_stop_and_guard_play_the_ranked_unit_response",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_stop_and_guard_play_the_ranked_unit_response"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_reticle_attack_plays_the_speakers_hardpoint_line",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_reticle_attack_plays_the_speakers_hardpoint_line"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_production_and_hyperspace_emit_authored_cues_once",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_production_and_hyperspace_emit_authored_cues_once"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_cancelled_production_emits_no_complete_cue",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_cancelled_production_emits_no_complete_cue"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_spin_sound_replaces_death_until_the_copy_finishes",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_spin_sound_replaces_death_until_the_copy_finishes"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_lane_mute_keeps_the_audio_event_log",
+    "new": "tests/presentation/renderer/live_session_audio_flyby_speech_cases.py#test_lane_mute_keeps_the_audio_event_log"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_duel_plays_its_sounds",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_duel_plays_its_sounds"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_squadron_selection_survives_its_leader_dying",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_squadron_selection_survives_its_leader_dying"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_ability_presses_play_their_sounds",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_ability_presses_play_their_sounds"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_timed_ability_dial_stays_visible_at_zero_remaining",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_timed_ability_dial_stays_visible_at_zero_remaining"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_timed_abilities_that_run_out_play_no_off_sound",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_timed_abilities_that_run_out_play_no_off_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_switching_a_timed_ability_off_plays_its_off_sound",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_switching_a_timed_ability_off_plays_its_off_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/live_session_audio_cases.py#LiveSessionAudioCases.test_enemy_switches_request_no_gui_sound",
+    "new": "tests/presentation/renderer/live_session_audio_battle_cases.py#test_enemy_switches_request_no_gui_sound"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_compiled_scene_material_aliases",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_compiled_scene_material_aliases"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_compiled_scene_additive2x",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_compiled_scene_additive2x"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_scene_specular_glow_colorize",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_scene_specular_glow_colorize"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_scene_skinned_additive_alpha",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_scene_skinned_additive_alpha"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_scene_compiled_shields",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_scene_compiled_shields"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_scene_deathstar",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_scene_deathstar"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_scene_deathstar_stock_alpha_identity",
+    "new": "tests/presentation/renderer/space_map_material_cases.py#test_scene_deathstar_stock_alpha_identity"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_compiled_environment_material_routes",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_compiled_environment_material_routes"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_sunlit_mc80_shadow_acne",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_sunlit_mc80_shadow_acne"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_shadow_report_default_and_debug_ship",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_shadow_report_default_and_debug_ship"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_debug_ship_hardpoint_states",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_debug_ship_hardpoint_states"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_station_markers_attach_no_effects",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_station_markers_attach_no_effects"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_supported_population_upload_failure_fails_run_with_placement",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_supported_population_upload_failure_fails_run_with_placement"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_attached_effects_tick_in_environment_view",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_attached_effects_tick_in_environment_view"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_prewarmed_asteroid_density",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_prewarmed_asteroid_density"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_props_tumble_through_their_idle_clips",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_props_tumble_through_their_idle_clips"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_nebula_moves_on_the_effect_clock",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_nebula_moves_on_the_effect_clock"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_live_nebula_has_visible_coverage",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_live_nebula_has_visible_coverage"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_other_nebula_backdrops_move_in_lit_views",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_other_nebula_backdrops_move_in_lit_views"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_planet_map_marker_models_are_not_environment",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_planet_map_marker_models_are_not_environment"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases._place_at",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#_place_at"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_background_authored_space_unit_is_drawn_at_its_pose",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_background_authored_space_unit_is_drawn_at_its_pose"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_ordinary_space_unit_is_not_a_background_scene_object",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_ordinary_space_unit_is_not_a_background_scene_object"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_coruscant_default_pose_is_the_tactical_opening_pose",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_coruscant_default_pose_is_the_tactical_opening_pose"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_foc_reference_map_is_default_on_foc_install",
+    "new": "tests/presentation/renderer/space_map_environment_cases.py#test_foc_reference_map_is_default_on_foc_install"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_synthetic_primary_sky_draws_each_surface_with_its_own_texture",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_synthetic_primary_sky_draws_each_surface_with_its_own_texture"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_rigid_parent_sky_moves_in_predeclared_regions_repeatably",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_rigid_parent_sky_moves_in_predeclared_regions_repeatably"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_texture_swap_changes_only_that_surface",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_texture_swap_changes_only_that_surface"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_negative_controls_invalidate_their_evidence",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_negative_controls_invalidate_their_evidence"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_unsupported_primary_sky_continues",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_unsupported_primary_sky_continues"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_missing_tactical_cameras_fails_before_sky",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_missing_tactical_cameras_fails_before_sky"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_nonfinite_camera_fails_with_strict_json",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_nonfinite_camera_fails_with_strict_json"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_unwritable_requested_artifacts_fail_and_release",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_unwritable_requested_artifacts_fail_and_release"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_hidden_bone_visibility_fails_closed",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_hidden_bone_visibility_fails_closed"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_occluder_and_lifecycle_controls_pass",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_occluder_and_lifecycle_controls_pass"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_lit_foreground_excludes_the_sky_from_shadows",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_lit_foreground_excludes_the_sky_from_shadows"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_land_path_refuses_space_options",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_land_path_refuses_space_options"
+  },
+  {
+    "old": "tests/presentation/renderer/space_map_graphical_cases.py#SpaceGraphicalCases.test_pinned_space_reference_map_passes_or_names_its_blocker",
+    "new": "tests/presentation/renderer/space_map_sky_cases.py#test_pinned_space_reference_map_passes_or_names_its_blocker"
+  }
+]

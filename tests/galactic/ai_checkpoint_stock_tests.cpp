@@ -1,3 +1,15 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+#include "../support/result.hpp"
 // WGA-56/139 supporting native boundary contracts. The composed installed
 // campaign opponent/victory proof is a separate acceptance, not this fixture.
 #include "galactic_support.hpp"
@@ -8,10 +20,8 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/foc/galactic_ai_state.hpp"
 
-#include <array>
 #include <chrono>
 #include <filesystem>
-#include <limits>
 #include <stdexcept>
 
 namespace {
@@ -25,11 +35,8 @@ namespace funding = galactic::funding;
 using Fixed = eawr::sim::math::Fixed;
 using Bytes = std::vector<std::uint8_t>;
 using namespace std::chrono_literals;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
-void take(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
+using eawr::testing::result_code_colon_value::take;
+
 Fixed f(std::int64_t value) { return take(Fixed::from_integer(value)); }
 ai::FundingState funds() {
     funding::Ledger ledger;
@@ -312,7 +319,7 @@ void live_save(std::size_t workers, const std::filesystem::path& directory) {
     take(game->delete_save("native"));
 }
 } // namespace
-int main(int argc, char** argv) {
+int case_galactic_ai_checkpoint_tests(int argc, char** argv) {
     try {
         if (argc != 2) throw std::runtime_error("expected an output directory");
         codecs(); std::vector<std::string> reference;

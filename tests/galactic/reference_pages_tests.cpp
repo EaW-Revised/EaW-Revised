@@ -1,3 +1,13 @@
+#include <array>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+#include "../support/temp_dir.hpp"
+#include "../support/check.hpp"
 #include "galactic/reference_catalog.hpp"
 #include <algorithm>
 #include <chrono>
@@ -6,12 +16,14 @@
 
 #include <cmath>
 #include <iostream>
-#include <stdexcept>
+#include <exception>
 
 namespace page = eawr::viewer::galactic;
 namespace sim = eawr::sim::galactic;
 namespace {
-void require(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void require(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 struct CatalogFixture {
     std::filesystem::path root = std::filesystem::temp_directory_path() /
         ("eawr-reference-catalog-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -45,7 +57,7 @@ struct CatalogFixture {
         const auto normalized = R"xml(<SpaceUnit Name="Mod-Dup"><Affiliation>Empire</Affiliation><Icon_Name>dup-b.tga</Icon_Name></SpaceUnit>)xml";
         objects << (hyphen_first ? normalized : exact) << (hyphen_first ? exact : normalized) << "</GameObjectData>";
     }
-    ~CatalogFixture() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
+    ~CatalogFixture() { eawr::testing::remove_temp_directory(root); }
 };
 void populated_catalog() {
     CatalogFixture fixture;

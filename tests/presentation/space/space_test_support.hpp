@@ -23,7 +23,7 @@ namespace eawr_space_test {
 namespace space = eawr::presentation::space;
 using eawr::assets::Vec3f;
 
-extern int failures;
+extern int& failures;
 
 void expect(const bool condition, const std::string& message);
 

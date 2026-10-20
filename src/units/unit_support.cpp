@@ -1,4 +1,5 @@
 #include "unit_internal.hpp"
+#include "eawr/core/text.hpp"
 
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
@@ -13,10 +14,6 @@
 
 namespace eawr::units::detail {
 namespace {
-
-[[nodiscard]] char fold(const char value) noexcept {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value - 'A' + 'a') : value;
-}
 
 [[nodiscard]] bool space(const char value) noexcept {
     return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f' || value == '\v';
@@ -220,33 +217,19 @@ std::uint64_t enum_bits(const std::vector<EnumValue>& values, const std::vector<
 }
 
 std::string trim(const std::string_view value) {
-    std::size_t begin = 0;
-    std::size_t end = value.size();
-    while (begin < end && space(value[begin])) ++begin;
-    while (end > begin && space(value[end - 1])) --end;
-    return std::string(value.substr(begin, end - begin));
+    return core::trim(value);
 }
 
 std::string lower(const std::string_view value) {
-    std::string result(value);
-    for (char& item : result) item = fold(item);
-    return result;
+    return core::to_lower(value);
 }
 
 std::string upper(const std::string_view value) {
-    std::string result(value);
-    for (char& item : result) {
-        if (item >= 'a' && item <= 'z') item = static_cast<char>(item - 'a' + 'A');
-    }
-    return result;
+    return core::to_upper(value);
 }
 
 bool iequals(const std::string_view left, const std::string_view right) noexcept {
-    if (left.size() != right.size()) return false;
-    for (std::size_t index = 0; index < left.size(); ++index) {
-        if (fold(left[index]) != fold(right[index])) return false;
-    }
-    return true;
+    return core::iequals(left, right);
 }
 
 std::vector<std::string> tokens(const std::string_view text) {

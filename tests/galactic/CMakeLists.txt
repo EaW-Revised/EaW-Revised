@@ -1,5 +1,6 @@
 # M3 galactic tests (docs/galactic-architecture.md, testing).
 include(EawrTests)
+include("${CMAKE_CURRENT_SOURCE_DIR}/AreaTests.cmake")
 
 # Numeric prefixes preserve registration order, the tier boundary and late
 # cross-target properties. New independent cases may use any unused prefix.
@@ -10,3 +11,6 @@ list(SORT galactic_test_cases)
 foreach(galactic_test_case IN LISTS galactic_test_cases)
     include("${galactic_test_case}")
 endforeach()
+
+# Dispatchers are emitted after every fragment has registered its area cases.
+eawr_finish_galactic_areas()

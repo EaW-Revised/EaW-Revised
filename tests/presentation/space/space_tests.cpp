@@ -1,3 +1,6 @@
+#include "../../support/check.hpp"
+#include <string_view>
+
 #include "eawr/presentation/space/space.hpp"
 
 #include <algorithm>
@@ -20,13 +23,11 @@
 // its own texture per surface. Nothing is copied from an installed asset.
 namespace eawr_space_test {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 eawr::assets::Source source(const std::string& path) {

@@ -1,4 +1,14 @@
+// #3644 A1 (#3701): the object-turn world seam. A synthetic C++ provider stands in for the object-script
+// host: it answers due(tick), reads the staged rows and returns ability uses that the world applies in the
+// same tick, in (unit, sequence) order, before tracking, late impacts and the commands. The cases cover the
+// acceptance of the slice: same-turn DEFEND, cluster bombs and speed replans equal the native/command
+// results, ordering and refusals, 1/2/4/8 and reverse partitions, record() with a world-only replay,
+// a checkpoint at a barrier restored on another worker count, the re-entrancy guard and the phase name.
+
+#include "../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/live_session.hpp"
+#include "eawr/platform/live_scripts.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
 #include "eawr/sim/tactical/content.hpp"
 #include "eawr/sim/tactical/object_turn.hpp"
@@ -6,7 +16,7 @@
 #include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
-#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -16,15 +26,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
-// #3644 A1 (#3701): the object-turn world seam. A synthetic C++ provider stands in for the object-script
-// host: it answers due(tick), reads the staged rows and returns ability uses that the world applies in the
-// same tick, in (unit, sequence) order, before tracking, late impacts and the commands. The cases cover the
-// acceptance of the slice: same-turn DEFEND, cluster bombs and speed replans equal the native/command
-// results, ordering and refusals, 1/2/4/8 and reverse partitions, record() with a world-only replay,
-// a checkpoint at a barrier restored on another worker count, the re-entrancy guard and the phase name.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -33,13 +38,11 @@ using math::Fixed;
 using Kind = tactical::AbilityKind;
 using Action = tactical::AbilityAction;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;
@@ -886,9 +889,116 @@ void test_phase_name() {
     }
 }
 
+void test_live_recorded_playback() {
+    namespace auth = eawr::script::authoritative;
+    using eawr::platform::LiveSession;
+    Fixture fixture;
+    fixture.commands.push_back({{8, 1, 1}, {corvette}, tactical::StopPayload{}});
+    constexpr std::uint64_t end = 16;
+    tactical::TacticalContent content;
+    content.durability = fixture.durability;
+    content.motion = fixture.motion;
+    content.combat = fixture.combat;
+    content.abilities = fixture.abilities;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto scripts = std::make_shared<eawr::platform::LiveScripts>();
+        scripts->wrap = [](tactical::TacticalSession world) {
+            auto turn = std::make_shared<ScriptedTurn>();
+            turn->script = {{3, {use(corvette, 0, Kind::turbo)}}};
+            auto installed = world.set_object_turn_service(turn);
+            if (!installed) return eawr::core::Result<auth::ScriptedTacticalSession>::failure(installed.error());
+            auth::SessionConfig config; config.seed = 42; config.tick_duration = {1, 30};
+            auto scheduler = auth::ScriptScheduler::create(config, {});
+            if (!scheduler) return eawr::core::Result<auth::ScriptedTacticalSession>::failure(scheduler.error());
+            return auth::ScriptedTacticalSession::create(std::move(world), std::move(scheduler).value());
+        };
+        const auto source = [](std::vector<tactical::PlayerCommand> commands) {
+            return [commands = std::move(commands)](std::uint64_t tick) {
+                std::vector<tactical::PlayerCommand> due;
+                for (const auto& command : commands) if (command.key.tick == tick) due.push_back(command);
+                return due;
+            };
+        };
+        LiveSession::Options options;
+        options.workers = workers; options.pacing = LiveSession::Pacing::driven;
+        options.scripts = scripts; options.command_source = source(fixture.commands);
+        auto live = LiveSession::start(fixture.setup, content, options);
+        expect(static_cast<bool>(live), "live object-script session starts");
+        if (!live) continue;
+        live.value()->advance_to(end);
+        expect(live.value()->wait_for(end, std::chrono::seconds(60)), "live object-script session completes");
+        live.value()->stop();
+        auto hashes = live.value()->tick_hashes();
+        auto bytes = tactical::write_replay(live.value()->record());
+        expect(!live.value()->failure(), "live object-script session has no failure");
+        expect(static_cast<bool>(bytes), "live session records serialized replay");
+        if (!bytes) continue;
+        auto parsed = tactical::parse_replay(bytes.value());
+        expect(static_cast<bool>(parsed), "the live recording reloads");
+        if (!parsed) continue;
+        auto full = eawr::platform::headless_tick_hashes(parsed.value(), content);
+        expect(full && full.value() == hashes, "full headless replay equals live every tick");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "live digests are equal on 1/2/4/8 workers");
+        // Negative control: the old viewer fed only the player-command stream.
+        // This must differ, so the fixture detects an omitted object-script use.
+        options.scripts = {};
+        options.command_source = source(parsed.value().commands);
+        auto viewer = LiveSession::start(parsed.value().setup, content, options);
+        expect(static_cast<bool>(viewer), "command-only control starts");
+        if (!viewer) continue;
+        viewer.value()->advance_to(end);
+        expect(viewer.value()->wait_for(end, std::chrono::seconds(60)), "command-only control completes");
+        viewer.value()->stop();
+        auto viewer_hashes = viewer.value()->tick_hashes();
+        expect(hashes.size() == end && viewer_hashes.size() == end, "every completed tick is captured");
+        const auto mismatch = std::mismatch(hashes.begin(), hashes.end(), viewer_hashes.begin(), viewer_hashes.end());
+        const auto first = static_cast<std::size_t>(mismatch.first - hashes.begin()) + 1U;
+        expect(first == 4, "dropping object turns first differs at completed tick 4 (object-turn use at tick 3)");
+        expect(parsed.value().object_turns.size() == 1 && parsed.value().commands.size() == 2,
+            "the live recording includes the ability and player commands before and after it");
+        options.command_source = {};
+        auto playback = LiveSession::start(parsed.value(), content, options);
+        expect(static_cast<bool>(playback), "the shared replay initializer starts playback");
+        if (!playback) continue;
+        playback.value()->advance_to(end);
+        expect(playback.value()->wait_for(end, std::chrono::seconds(60)), "playback completes");
+        playback.value()->stop();
+        expect(!playback.value()->failure() && playback.value()->rejected_orders().empty(),
+            "playback accepts both recorded streams without a producer");
+        expect(playback.value()->tick_hashes() == hashes, "serialized playback equals live at every tick");
+        const auto rewritten = tactical::write_replay(playback.value()->record());
+        expect(rewritten && rewritten.value() == bytes.value(), "playback records both streams byte for byte");
+        options.command_source = [](const std::uint64_t tick) {
+            if (tick == 1) return std::vector<tactical::PlayerCommand>{
+                {{1, 1, 0}, {corvette}, tactical::StopPayload{}}};
+            return std::vector<tactical::PlayerCommand>{};
+        };
+        auto interactive = LiveSession::start(parsed.value(), content, options);
+        expect(static_cast<bool>(interactive), "interactive playback starts");
+        if (!interactive) continue;
+        expect(static_cast<bool>(interactive.value()->submit(
+            {1, {corvette}, tactical::FacePayload{at(0, 1000)}, 2})), "a timed live order queues before the recording's last command");
+        interactive.value()->advance_to(end);
+        expect(interactive.value()->wait_for(end, std::chrono::seconds(60)), "interactive playback completes");
+        interactive.value()->stop();
+        const auto edited = interactive.value()->record();
+        const auto edited_hashes = interactive.value()->tick_hashes();
+        expect(!interactive.value()->failure() && interactive.value()->rejected_orders().empty(),
+            "UI-source and held live orders are accepted before future recorded command keys");
+        expect(edited.commands.size() == 4 && edited.object_turns == parsed.value().object_turns,
+            "interactive playback records both new inputs and retains the original object turn");
+        expect(edited_hashes != hashes, "the interactive inputs actually change the run");
+        auto expected = eawr::platform::headless_tick_hashes(edited, content);
+        expect(expected && expected.value() == edited_hashes, "the edited playback re-records every tick faithfully");
+    }
+}
+
 } // namespace
 
 int main() {
+    test_live_recorded_playback();
     test_defend_same_turn();
     test_cluster_bomb_same_turn();
     test_speed_replan_same_turn();

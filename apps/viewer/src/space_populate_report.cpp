@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "space_populate.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "eawr/presentation/space/space.hpp"
@@ -31,21 +32,7 @@ namespace eawr::presentation::godot_backend {
 namespace {
 
 [[nodiscard]] std::string json(const std::string_view value) {
-    constexpr char hex[] = "0123456789abcdef";
-    std::string result{"\""};
-    for (const unsigned char character : value) {
-        if (character == '"' || character == '\\') {
-            result.push_back('\\');
-            result.push_back(static_cast<char>(character));
-        } else if (character < 0x20U || character >= 0x7fU) {
-            result += "\\u00";
-            result.push_back(hex[character >> 4U]);
-            result.push_back(hex[character & 15U]);
-        } else {
-            result.push_back(static_cast<char>(character));
-        }
-    }
-    return result + "\"";
+    return eawr::core::json_quote_ascii(value);
 }
 
 [[nodiscard]] std::string strings(const std::vector<std::string>& values) {
@@ -178,7 +165,8 @@ void SpacePopulation::write_report(std::ostream& output) const {
     output
            << ",\n    \"classification\": \"scene::classify_space_placements: catalog markers (Is_Marker or the Marker "
               "element) are never drawn; nebula and background objects (Is_Nebula, In_Background) are left to the "
-              "space environment; every other placement with a supported visible surface is drawn. Each HardPoints "
+              "space environment; scene::classify_live_unit ignores those environment tags for composed units. "
+              "Every other placement with a supported visible surface is drawn. Each HardPoints "
               "entry's state selects its art (scene::hardpoint_art): an intact hardpoint draws its Model_To_Attach "
               "at the bind frame of its Attachment_Bone and hides its Damage_Decal mesh and the damage emitters at "
               "and below its Damage_Particles bone. MeshShadowVolume surfaces are stencil-shadow geometry and are "

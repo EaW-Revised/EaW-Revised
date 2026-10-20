@@ -1,3 +1,14 @@
+#include <cstddef>
+#include <cstdint>
+#include <ios>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <vector>
+#include "../support/check.hpp"
+#include "../support/result.hpp"
 // WGA-23/24/99 and WGEP-28/43/46: native world reconstruction consumes journaled
 // admissions and billing outcomes, independently of native AI initialization.
 #include "galactic_ai_actions.hpp"
@@ -10,19 +21,18 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
-#include <stdexcept>
+#include <exception>
+using eawr::testing::must;
 
 namespace gc = eawr::sim::galactic;
 namespace ga = eawr::script::foc::galactic_ai;
 namespace ai = eawr::script::foc::ai;
 using eawr::sim::math::Fixed;
 namespace {
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().message);
-    return std::move(result).value();
+
+void expect(bool value, std::string_view message) {
+    if (!value) eawr::testing::require(value, message);
 }
-void must(eawr::core::Result<void> result) { if (!result) throw std::runtime_error(result.error().message); }
-void expect(bool value, std::string_view message) { if (!value) throw std::runtime_error(std::string(message)); }
 Fixed f(std::int64_t value) { return must(Fixed::from_integer(value)); }
 struct DiskJournal {
     std::filesystem::path path = std::filesystem::temp_directory_path()
@@ -87,7 +97,7 @@ gc::GalacticSession reconstruct(const gc::GalacticReplay& replay, const eawr::si
     return world;
 }
 }
-int main() {
+int case_galactic_ai_economic_replay_tests() {
     try {
         std::vector<std::string> tick_baseline;
         for (const auto count : {1U, 2U, 4U, 8U}) {

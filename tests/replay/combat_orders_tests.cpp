@@ -1,5 +1,16 @@
 #include "combat_support.hpp"
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
 namespace combat_test_support {
 
 void test_order_without_attack_distance() {

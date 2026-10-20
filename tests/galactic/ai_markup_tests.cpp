@@ -1,10 +1,23 @@
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_markup.hpp"
 #include "galactic_ai_world.hpp"
 #include "tactical_ai_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
-#include <stdexcept>
+#include <exception>
 
 namespace {
 namespace ai = eawr::script::foc::ai;
@@ -12,13 +25,8 @@ namespace foc = eawr::script::foc;
 namespace gc = eawr::sim::galactic;
 namespace auth = eawr::script::authoritative;
 using galactic_test::expect;
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
-void must(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-}
+using eawr::testing::result_diagnostic::must;
+
 struct RejectPublication final : auth::ImmediateEffectHost {
     std::shared_ptr<auth::ImmediateEffectHost> host;
     bool reject{};
@@ -448,7 +456,7 @@ std::string contracts(unsigned workers) {
     return must(world->state_hash()) + scripts.state_digest();
 }
 }
-int main() {
+int case_galactic_ai_markup_tests() {
     try {
         encoded_bytes_contract();
         std::string baseline;

@@ -30,7 +30,14 @@ class GalacticCommandBarRuntime(unittest.TestCase):
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         self.assertEqual(data["status"], "captured")
         self.assertTrue(data["paused"])
-        self.assertEqual(data["live_session"]["submitted_orders"], 1)
+        # TM-05: pausing first resets fast forward to 1x, then submits the pause.
+        # These are two clock commands, with no production purchase in setup (#4167).
+        self.assertEqual(data["live_session"]["submitted_orders"], 2 if fixture else 1)
+        if fixture:
+            self.assertEqual(data["live_session"]["clock_orders"], [
+                {"type": "SetSpeed", "issuer": seat, "session_tick": 0},
+                {"type": "PauseGalaxy", "issuer": seat, "session_tick": 0},
+            ])
         self.assertEqual(data["live_session"]["pause_depth"], 1)
         self.assertEqual(data["live_session"]["galactic_frame"], 0)
         return data, capture
@@ -53,7 +60,8 @@ class GalacticCommandBarRuntime(unittest.TestCase):
                 controls = {control["name"]: control for control in bar["controls"]}
                 self.assertTrue(controls["b_planet_tab"]["enabled"])
                 self.assertTrue(controls["b_play_pause"]["enabled"])
-                self.assertTrue(controls["b_fast_forward"]["enabled"])
+                # TM-03/04: fast forward is unavailable while the galaxy is paused.
+                self.assertFalse(controls["b_fast_forward"]["enabled"])
                 width, height, rows = decode_png(capture.read_bytes())
                 # Shell qualification samples its lower-left area, away from the galaxy.
                 sample = [p for row in rows[height - 130:height - 20] for p in row[:width // 3]]

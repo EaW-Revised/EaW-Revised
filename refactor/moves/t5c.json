@@ -1,0 +1,122 @@
+[
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_space_healing",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_space_healing"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_active_projectile_defence",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_active_projectile_defence"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_stealth",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_stealth"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_laser_defence",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_laser_defence"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_redirect_blaster",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_redirect_blaster"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_passive_projectile_defence",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_passive_projectile_defence"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_leech_shields",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_leech_shields"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_lure",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_lure"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_corrupt_systems",
+    "new": "tests/units/unit_tables_foc_defence_tests.cpp#foc_corrupt_systems"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_bomber_torpedo_volley",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_bomber_torpedo_volley"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_diamond_boron_cluster",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_diamond_boron_cluster"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_barrage_buttons",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_barrage_buttons"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_super_capitals",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_super_capitals"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_object_weapon_defaults",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_object_weapon_defaults"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_mass_drivers",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_mass_drivers"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_full_salvo",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_full_salvo"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_self_destruct",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_self_destruct"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_peacebringer_blast",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_peacebringer_blast"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_asymmetric_release_geometry",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_asymmetric_release_geometry"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_special_without_blast",
+    "new": "tests/units/unit_tables_foc_weapons_tests.cpp#foc_special_without_blast"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_resource_container",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_resource_container"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_container_not_opportunity",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_container_not_opportunity"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_living_collision",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_living_collision"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_gunboat_pole",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_gunboat_pole"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_fighter_muzzles",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_fighter_muzzles"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_asteroid_contacts",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_asteroid_contacts"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_hazard_maps",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_hazard_maps"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_planetary_sources",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_planetary_sources"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_hardpoint_ranks",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_hardpoint_ranks"
+  },
+  {
+    "old": "tests/units/unit_tables_foc_tests.cpp#foc_formation_deceleration",
+    "new": "tests/units/unit_tables_foc_world_tests.cpp#foc_formation_deceleration"
+  }
+]

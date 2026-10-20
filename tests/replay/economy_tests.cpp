@@ -1,3 +1,10 @@
+// #530: skirmish purchasing (docs/behaviour/space-purchasing.md). Synthetic two-player sessions
+// check income (PU-02 to PU-04), the build queues (PU-10 to PU-18), the reinforcement pool and
+// hyperspace arrival (PU-21, PU-30 to PU-39) and the PC cases; one command script must give the
+// same hashes at 1, 2, 4 and 8 workers, with scrambled storage and through a written-and-parsed
+// replay. A session without economy rules rejects every economy command and hashes as before.
+
+#include "../support/check.hpp"
 #include "economy_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/economy.hpp"
@@ -6,9 +13,10 @@
 #include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -16,21 +24,14 @@
 #include <utility>
 #include <vector>
 
-// #530: skirmish purchasing (docs/behaviour/space-purchasing.md). Synthetic two-player sessions
-// check income (PU-02 to PU-04), the build queues (PU-10 to PU-18), the reinforcement pool and
-// hyperspace arrival (PU-21, PU-30 to PU-39) and the PC cases; one command script must give the
-// same hashes at 1, 2, 4 and 8 workers, with scrambled storage and through a written-and-parsed
-// replay. A session without economy rules rejects every economy command and hashes as before.
 namespace economy_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] Fixed units(const std::int64_t value) { return Fixed::from_raw(value * one); }

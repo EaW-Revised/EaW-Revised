@@ -1,5 +1,6 @@
 #include "eawr/platform/campaign_scoring.hpp"
 
+#include "eawr/core/text.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
@@ -30,11 +31,6 @@ core::Diagnostic error(std::string message) {
     return {.code = "EAWR-PLATFORM-SCORING", .message = std::move(message),
         .logical_path = {}, .line = {}, .column = {}, .source_id = {}};
 }
-std::string trim(std::string_view value) {
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.remove_prefix(1);
-    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.remove_suffix(1);
-    return std::string(value);
-}
 lua::Value handle(const std::uint32_t kind, const std::uint64_t id) { return {lua::Handle{kind, id}}; }
 Number numeric(const Fixed value) { return Number(value.raw()) / Number(Fixed::scale); }
 lua::Value number(const Fixed value) { return lua::Value::number(numeric(value)); }
@@ -59,7 +55,7 @@ struct PlanetFacts { sim::galactic::PlanetId planet{}; sim::galactic::PlayerId o
 bool authored_boolean(const data::EffectiveObject& object, std::string_view tag, bool fallback) {
     if (const auto* field = object.value(tag)) {
         data::tag_trace::used(field->value);
-        return data::retail::boolean(trim(field->value.raw_text)).value_or(fallback);
+        return data::retail::boolean(core::trim(field->value.raw_text)).value_or(fallback);
     }
     return fallback;
 }
@@ -67,7 +63,7 @@ std::optional<Fixed> authored_fixed(const data::EffectiveObject& object, std::st
     const auto* field = object.value(tag);
     if (!field) return std::nullopt;
     data::tag_trace::used(field->value);
-    if (auto parsed = Fixed::from_decimal(trim(field->value.raw_text))) return parsed.value();
+    if (auto parsed = Fixed::from_decimal(core::trim(field->value.raw_text))) return parsed.value();
     return std::nullopt;
 }
 
@@ -232,7 +228,7 @@ core::Result<std::optional<CampaignScoringOutcome>> evaluate_campaign_scoring(
     for (const auto& child : constants.value().root.children) {
         if (child.name == "Game_Scoring_Script_Name") {
             data::tag_trace::used(child);
-            module = trim(child.raw_text);
+            module = core::trim(child.raw_text);
         }
     }
     if (module.empty()) return Result::success(Absent{});

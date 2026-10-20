@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "input_routing_mode.hpp"
 
 #include "capture_viewport.hpp"
@@ -562,15 +563,7 @@ void InputRoutingMode::State::drain() {
 bool InputRoutingMode::State::write_report(const bool passed) const {
     if (options.report_path.empty()) return true;
     std::ostringstream out;
-    const auto quoted = [](const std::string& text) {
-        std::string escaped = "\"";
-        for (const char c : text) {
-            if (c == '"' || c == '\\') escaped += '\\';
-            if (static_cast<unsigned char>(c) < 0x20U) continue;
-            escaped += c;
-        }
-        return escaped + "\"";
-    };
+    const auto quoted = eawr::core::json_quote_drop_controls;
     out << "{\n  \"schema\": \"eawr-input-routing-v1\",\n  \"status\": " << quoted(passed ? "passed" : "failed")
         << ",\n  \"failure\": " << quoted(failure) << ",\n  \"backend\": {\"adapter_name\": "
         << quoted(utf8(RenderingServer::get_singleton()->get_video_adapter_name())) << "},\n  \"viewport\": ["

@@ -1,4 +1,7 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_hud_models
+    NO_ARGS
+
     NAME galactic_planet_hud_tests
     SOURCES planet_hud_tests.cpp
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/planet_hud.cpp"

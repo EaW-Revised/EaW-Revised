@@ -1,3 +1,5 @@
+#include <utility>
+#include "../support/check.hpp"
 #include "eawr/assets/assets.hpp"
 
 #include <bit>
@@ -9,8 +11,11 @@
 #include <vector>
 
 namespace {
-int failures{};
-void expect(bool condition,const char* message){if(!condition){std::cerr<<"FAIL: "<<message<<'\n';++failures;}}
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool condition,const char* message){
+    local_checker.check(condition, message, std::cerr);
+}
 void u8(std::vector<std::byte>& out,std::uint8_t v){out.push_back(static_cast<std::byte>(v));}
 void u16(std::vector<std::byte>& out,std::uint16_t v){u8(out,v&255U);u8(out,(v>>8U)&255U);}
 void u32(std::vector<std::byte>& out,std::uint32_t v){for(unsigned s=0;s<32;s+=8)u8(out,(v>>s)&255U);}

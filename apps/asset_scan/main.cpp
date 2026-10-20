@@ -1,3 +1,5 @@
+#include "eawr/core/json_text.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -8,7 +10,6 @@
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -70,12 +71,11 @@ std::string utf8(const std::filesystem::path& path) {
 }
 
 std::string lower_ascii(std::string value) {
-    for (char& ch : value) if (ch >= 'A' && ch <= 'Z') ch = static_cast<char>(ch + ('a' - 'A'));
-    return value;
+    return eawr::core::to_lower(value);
 }
 
 bool iequals(const std::string_view left, const std::string_view right) {
-    return lower_ascii(std::string(left)) == lower_ascii(std::string(right));
+    return eawr::core::iequals(left, right);
 }
 
 std::string native_key(const std::filesystem::path& path) {
@@ -112,25 +112,7 @@ std::optional<std::vector<std::pair<std::string, std::filesystem::path>>> profil
 }
 
 std::string json_string(const std::string_view value) {
-    std::ostringstream out;
-    out << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char ch : value) {
-        switch (ch) {
-        case '"': out << "\\\""; break;
-        case '\\': out << "\\\\"; break;
-        case '\b': out << "\\b"; break;
-        case '\f': out << "\\f"; break;
-        case '\n': out << "\\n"; break;
-        case '\r': out << "\\r"; break;
-        case '\t': out << "\\t"; break;
-        default:
-            if (ch < 0x20U) out << "\\u00" << hex[ch >> 4U] << hex[ch & 0x0fU];
-            else out << static_cast<char>(ch);
-        }
-    }
-    out << '"';
-    return out.str();
+    return eawr::core::json_quote_short_controls(value);
 }
 
 void write_record(std::ostream& out, const eawr::vfs::AssetRecord& record) {

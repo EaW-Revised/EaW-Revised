@@ -1,25 +1,30 @@
 // Contracts for the pure half of E-space-environment-v1 (P1 #27): environment
 // light 0, the object transform, the render-basis conjugation, the family
 // hook, billboards and the default camera. Synthetic inputs only.
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
 
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <iostream>
 #include <string>
+#include <string_view>
+#include <utility>
 
 namespace {
 
 namespace space = eawr::presentation::space;
 namespace assets = eawr::assets;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const float a, const float b, const float tolerance = 1.0e-4F) {

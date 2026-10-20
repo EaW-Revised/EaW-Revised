@@ -25,15 +25,35 @@ TypeId true_type(const GalacticSnapshot& snapshot, const FleetMember& member) {
         [](const auto& row, auto key) { return row.id < key; });
     return at != rows.end() && at->id == member.id && at->original_type ? at->original_type : member.type;
 }
+// Flat sorted lookup tables replace the per-publication std::maps. Building one
+// keeps the FIRST row of a duplicate key, as map::emplace did.
+template<class Key, class Value> using FlatTable = std::vector<std::pair<Key, Value>>;
+template<class Key, class Value> void seal(FlatTable<Key, Value>& table) {
+    std::stable_sort(table.begin(), table.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    table.erase(std::unique(table.begin(), table.end(), [](const auto& a, const auto& b) { return a.first == b.first; }), table.end());
+}
+template<class Key, class Value> auto flat_find(const FlatTable<Key, Value>& table, const std::type_identity_t<Key>& key) {
+    const auto at = std::lower_bound(table.begin(), table.end(), key, [](const auto& row, const std::type_identity_t<Key>& k) { return row.first < k; });
+    return at != table.end() && at->first == key ? at : table.end();
+}
+// Insert keeping the table sorted; false (and no change) when the key exists.
+template<class Key, class Value> bool flat_emplace(FlatTable<Key, Value>& table, const std::type_identity_t<Key>& key, Value value) {
+    const auto at = std::lower_bound(table.begin(), table.end(), key, [](const auto& row, const std::type_identity_t<Key>& k) { return row.first < k; });
+    if (at != table.end() && at->first == key) return false;
+    table.insert(at, {key, std::move(value)});
+    return true;
+}
 // Group scan state of one published card, kept until every merged fleet of
 // its slot has contributed members.
 struct CardScan {
     std::size_t card{};
     bool allied{};
     const PlanetKnowledge* knowledge{};
-    std::map<std::pair<TypeId, std::int64_t>, std::size_t> indices;
-    std::vector<const FleetMember*> representatives;
-    std::vector<FleetId> owners; // fleet owning each group's representative
+    // One entry per published group, in group order: the (type, position) key,
+    // the representative member and the fleet owning it. The list is short (at
+    // most the group capacity), so lookups scan it.
+    struct Entry { std::pair<TypeId, std::int64_t> key; const FleetMember* representative; FleetId owner; };
+    std::vector<Entry> entries;
     bool full{};
 };
 }
@@ -48,27 +68,35 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     const auto& observer = *snapshot.observer();
     const auto* player = observer_detail::find(observer.players, local_player, [](const auto& row) { return row.player; });
     if (!player) return output;
-    std::map<PlanetId, const ObservedPlanet*> planets;
-    std::map<PlanetId, std::optional<bool>> sight;
-    for (const auto& row : visibility) sight.emplace(row.planet, row.current_visible);
+    FlatTable<PlanetId, const ObservedPlanet*> planets;
+    FlatTable<PlanetId, std::optional<bool>> sight;
+    sight.reserve(visibility.size());
+    for (const auto& row : visibility) sight.emplace_back(row.planet, row.current_visible);
+    seal(sight);
     for (const auto& row : snapshot.observations()) {
         ++output.observation_rows;
         if (row.player != local_player) continue;
-        const auto supplied = sight.find(row.planet);
+        const auto supplied = flat_find(sight, row.planet);
         // current_sight_provider (#1153/WGUI-06/28): a persistent discovery
         // flag/reveal counter is not the independent current visibility predicate.
         // Only an explicitly supplied true result admits existence; no fallback.
         const bool visible = supplied != sight.end() && supplied->second.value_or(false);
-        if (visible) planets.emplace(row.planet, &row);
+        if (visible) planets.emplace_back(row.planet, &row);
     }
-    std::map<TypeId, const FleetDisplayType*> types;
-    for (const auto& row : traits) types.emplace(row.type, &row);
-    std::set<std::pair<PlanetId, PlayerId>> presence;
+    seal(planets);
+    FlatTable<TypeId, const FleetDisplayType*> types;
+    types.reserve(traits.size());
+    for (const auto& row : traits) types.emplace_back(row.type, &row);
+    seal(types);
+    std::vector<std::pair<PlanetId, PlayerId>> presence;
     // One scan per published card; local fleets of one (planet, slot) share it.
     std::vector<CardScan> scans;
-    std::map<std::pair<PlanetId, std::uint8_t>, std::size_t> slots;
-    std::map<EntityId, std::int64_t> gui_indices;
-    for (const auto& row : presentation_indices) if (row.second >= 0) gui_indices.emplace(row);
+    scans.reserve(snapshot.fleets().size());
+    output.cards.reserve(snapshot.fleets().size());
+    FlatTable<std::pair<PlanetId, std::uint8_t>, std::size_t> slots;
+    FlatTable<EntityId, std::int64_t> gui_indices;
+    for (const auto& row : presentation_indices) if (row.second >= 0) gui_indices.emplace_back(row);
+    seal(gui_indices);
     const auto scan_members = [&](ObservedFleet& card, CardScan& scan, const Fleet& fleet) {
         // GHUD-S76: size-awareness admits the stack before this scan. Rank
         // its image from the real members, independently of the masked group
@@ -94,27 +122,26 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             const auto type = true_type(snapshot, member);
             // GHUD-S87: an individually positioned unit may split from its type
             // stack. Hidden groups retain type-only grouping (no layout leak).
-            const auto gui = gui_indices.find(member.id);
-            const auto position = scan.allied && gui != gui_indices.end() ? gui->second : -1;
+            const auto gui = flat_find(gui_indices, member.id);
+            const auto position = scan.allied && gui != gui_indices.end() ? gui->second : std::int64_t{-1};
             const auto key = std::pair{type, position};
-            auto index = scan.indices.find(key);
-            if (index == scan.indices.end()) {
+            auto index = std::find_if(scan.entries.begin(), scan.entries.end(), [&](const auto& entry) { return entry.key == key; });
+            if (index == scan.entries.end()) {
                 // WGUI-72: reaching a new-type limit ends the scan, including
                 // later duplicates and later merged fleets. WGUI-U07 keeps the
                 // supplied membership order (fleet order, then member order).
                 if (card.groups.size() >= group_capacity) { scan.full = true; return; }
-                index = scan.indices.emplace(key, card.groups.size()).first;
+                scan.entries.push_back({key, &member, fleet.id});
+                index = scan.entries.end() - 1;
                 card.groups.emplace_back();
-                scan.representatives.push_back(&member);
-                scan.owners.push_back(fleet.id);
             }
-            ++card.groups[index->second].count;
+            ++card.groups[static_cast<std::size_t>(index - scan.entries.begin())].count;
         }
     };
     for (const auto& fleet : snapshot.fleets()) {
         ++output.fleets_examined;
         if (fleet.motion.transit || !fleet.id) continue;
-        const auto planet = planets.find(fleet.orbit);
+        const auto planet = flat_find(planets, fleet.orbit);
         if (planet == planets.end()) continue;
         const auto& knowledge = planet->second->knowledge;
         const bool allied = observer_detail::allied(*player, fleet.owner);
@@ -142,14 +169,14 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             resolved = bool(skip); nonstealth = skip && !skip.value();
         }
         const bool visible = allied || (resolved && nonstealth);
-        if (visible && (allied || knowledge.fleet_presence)) presence.emplace(fleet.orbit, fleet.owner);
+        if (visible && (allied || knowledge.fleet_presence)) presence.emplace_back(fleet.orbit, fleet.owner);
         if (!visible || (!allied && !knowledge.fleet_count)) continue;
         // WGEP-40/WGEP-66, GQP-11: fleets are never merged at placement, so the
         // slot's panel shows every local fleet of (planet, slot) as one card. A
         // local fleet is always allied: its contents and identity are known.
         const bool local = fleet.owner == local_player;
         const auto slot = std::pair{fleet.orbit, fleet.orbit_slot};
-        const auto merged = local ? slots.find(slot) : slots.end();
+        const auto merged = local ? flat_find(slots, slot) : slots.end();
         if (merged != slots.end()) {
             auto& scan = scans[merged->second];
             auto& card = output.cards[scan.card];
@@ -161,23 +188,27 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             local, fleet.members.size(), {}, {}};
         // WGUI-29/42: count awareness alone publishes no fleet identity/slot.
         if (!allied && !knowledge.fleet_contents) { card.fleet.reset(); card.orbit_slot.reset(); }
-        scans.push_back({output.cards.size(), allied, &knowledge, {}, {}, {}, false});
-        if (local) slots.emplace(slot, scans.size() - 1);
+        scans.push_back({output.cards.size(), allied, &knowledge, {}, false});
+        {
+            const auto expected = std::min(group_capacity, fleet.members.size());
+            scans.back().entries.reserve(expected); card.groups.reserve(expected);
+        }
+        if (local) flat_emplace(slots, slot, scans.size() - 1);
         scan_members(card, scans.back(), fleet);
         output.cards.push_back(std::move(card));
     }
     // Groups are classified once per card, after every merged fleet is scanned.
     for (const auto& scan : scans) {
         auto& card = output.cards[scan.card];
-        const auto& representatives = scan.representatives;
+        const auto& entries = scan.entries;
         const auto& knowledge = *scan.knowledge;
         const bool allied = scan.allied;
         std::optional<std::size_t> strongest;
         auto greatest = math::Fixed::from_raw(-math::Fixed::scale);
         if (!allied && !knowledge.fleet_contents && knowledge.strongest_ship) {
             bool complete = true;
-            for (std::size_t index = 0; index < representatives.size(); ++index) {
-                const auto type = types.find(representatives[index]->type);
+            for (std::size_t index = 0; index < entries.size(); ++index) {
+                const auto type = flat_find(types, entries[index].representative->type);
                 if (type == types.end() || !type->second->damage) complete = false;
                 if (type != types.end() && type->second->damage && *type->second->damage > greatest) {
                     greatest = *type->second->damage; strongest = index;
@@ -187,15 +218,15 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
         }
         for (std::size_t index = 0; index < card.groups.size(); ++index) {
             auto& group = card.groups[index];
-            const auto& member = *representatives[index];
-            const auto type = types.find(member.type);
+            const auto& member = *entries[index].representative;
+            const auto type = flat_find(types, member.type);
             const auto* observed_type = observer_detail::find(observer.types, member.type, [](const auto& row) { return row.type; });
             if (allied && type == types.end()) {
                 // FleetMember is authoritative live direct membership. Its type
                 // may be displayed to allies without classifying an enemy hero.
                 group.type = true_type(snapshot, member); group.representative = member.id;
-                group.fleet = scan.owners[index];
-                if (const auto gui = gui_indices.find(member.id); gui != gui_indices.end()) group.gui_index = gui->second;
+                group.fleet = entries[index].owner;
+                if (const auto gui = flat_find(gui_indices, member.id); gui != gui_indices.end()) group.gui_index = gui->second;
                 continue;
             }
             if (type == types.end() || !observed_type) continue; // missing hero metadata is not ordinary contents
@@ -211,14 +242,16 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             }
             if (!details || !hero_known(display, live_observer, knowledge, allied)) continue;
             group.type = true_type(snapshot, member); group.representative = member.id;
-            if (allied) if (const auto gui = gui_indices.find(member.id); gui != gui_indices.end()) group.gui_index = gui->second;
+            if (allied) if (const auto gui = flat_find(gui_indices, member.id); gui != gui_indices.end()) group.gui_index = gui->second;
             // Count-only knowledge names no fleet, as the card does (WGUI-29/42).
-            if (allied || knowledge.fleet_contents) group.fleet = scan.owners[index];
+            if (allied || knowledge.fleet_contents) group.fleet = entries[index].owner;
             group.gui_slot = display.gui_slot == -1 ? 0 : display.gui_slot;
             group.transport = display.transport;
-            group.strongest = strongest == index; group.superweapon = superweapon;
+            group.strongest = strongest == index; group.superweapon = superweapon; group.hero = display.hero;
         }
     }
+    std::sort(presence.begin(), presence.end());
+    presence.erase(std::unique(presence.begin(), presence.end()), presence.end());
     for (const auto& [planet, owner] : presence) output.presence.push_back({planet, owner});
     return output;
 }

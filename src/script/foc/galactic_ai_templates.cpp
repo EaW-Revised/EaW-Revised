@@ -1,6 +1,7 @@
 #include "galactic_ai_internal.hpp"
 
 #include <algorithm>
+#include <optional>
 
 namespace eawr::script::foc::galactic_ai {
 namespace {
@@ -100,7 +101,12 @@ core::Result<void> Manager::Impl::templates(PlayerLifecycle& player) {
     if (names.empty()) return core::Result<void>::success();
     auto active = player.active_templates;
     auto order = player.activation_order;
-    auto policy = player.policy;
+    // The policy is copied only once a template flips; a pass that changes nothing never copies or compares it.
+    std::optional<TemplatePolicy> staged;
+    const auto policy = [&]() -> TemplatePolicy& {
+        if (!staged) staged = player.policy;
+        return *staged;
+    };
     const auto count = std::min(names.size(), std::max<std::size_t>(names.size() / (gc::galactic_frames_per_second * 10U), 1));
     auto cursor = player.template_cursor;
     for (std::size_t visit = 0; visit < count; ++visit) {
@@ -113,7 +119,7 @@ core::Result<void> Manager::Impl::templates(PlayerLifecycle& player) {
             active[index] = true;
             order.push_back(index);
             const auto& entry = data.templates.at(names[index]);
-            policy = apply_template(data, plans, std::move(policy), entry);
+            policy() = apply_template(data, plans, std::move(policy()), entry);
             if (!entry.budget.empty() || !entry.tactical_allowances.empty()) {
                 TemplatePolicy writes;
                 for (const auto& [category, equation] : entry.budget) writes.equations[category] = {equation, entry.priority};
@@ -132,21 +138,21 @@ core::Result<void> Manager::Impl::templates(PlayerLifecycle& player) {
         if (entry.untrigger.empty() ? !untriggered.value() : untriggered.value()) {
             active[index] = false;
             removed = true;
-            policy = reset_template(data, plans, std::move(policy), data.templates.at(names[index]));
+            policy() = reset_template(data, plans, std::move(policy()), data.templates.at(names[index]));
         }
     }
     if (removed) {
         std::erase_if(order, [&](std::size_t index) { return !active[index]; });
-        for (const auto index : order) policy = apply_template(data, plans, std::move(policy), data.templates.at(names[index]));
+        for (const auto index : order) policy() = apply_template(data, plans, std::move(policy()), data.templates.at(names[index]));
         if (auto cleared = capabilities.services->clear_equations(player.selected.player); !cleared) return cleared;
     }
-    const bool policy_differs = policy != player.policy;
-    if (removed || policy_differs) if (auto applied = capabilities.services->apply_policy(player.selected.player, policy,
+    const bool policy_differs = staged && *staged != player.policy;
+    if (removed || policy_differs) if (auto applied = capabilities.services->apply_policy(player.selected.player, *staged,
         removed ? PolicyWrite::reversal : PolicyWrite::ordinary); !applied) return applied;
     player.active_templates = std::move(active);
     player.activation_order = std::move(order);
     if (policy_differs) {
-        player.policy = std::move(policy);
+        player.policy = std::move(*staged);
         policy_changed(player.selected.player);
     }
     player.template_cursor = cursor;

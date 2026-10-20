@@ -20,8 +20,10 @@ To regenerate deliberately:
 1. Extract `src/skirmish/setup.cpp`, `src/skirmish/inputs.cpp` and
    `src/assets/map_decode.cpp` from the BASE commit above into a scratch directory
    using `git show`. Use distinct temporary filenames for their object outputs.
-2. Compile those three unmodified BASE translation units together with
-   `../capture_setup_map_golden.cpp`, using the repository include directories and
+2. Recover the historical capture tool into the scratch directory with
+   `git show 5679ea3e312e2ba8a96d145e13dbd0c0e86e1a23:tests/skirmish/capture_setup_map_golden.cpp`.
+   Compile those three unmodified BASE translation units together with that tool,
+   using the repository include directories and
    BASE libraries with the same compiler and runtime. Do not link the optimized
    production helpers from a newer revision. The capture does not call the test
    eager reference algorithm.

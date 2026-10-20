@@ -21,7 +21,7 @@ class RID;
 namespace eawr::presentation::godot_backend {
 
 // RenderingServer backend for the engine-free particle registry. Each drawable
-// emitter owns one mesh, one material and one instance in the host's scenario;
+// emitter with live geometry owns one mesh, one material and one instance in the host's scenario;
 // textures and shaders are shared and reference counted by name/policy. Vertex
 // streams arrive in the ALO basis and receive the one documented conversion
 // (x, y, z) -> (x, z, -y) here, exactly as model vertices do in renderer.cpp.
@@ -70,16 +70,21 @@ public:
         std::size_t programs{}, prepared_shaders{}, live_shaders{}, decoded_systems{};
         double prepare_ms{}, lookup_ms{};
     };
+    // Historical peak survives release for the final capture's budget evidence.
     [[nodiscard]] ProgramPrewarmWork program_prewarm_work() const noexcept;
     // Releases both kinds of warm hold; ordinary live emitters keep their refs.
     void release_prewarm();
-    // Historical peak survives release for the final capture's budget evidence.
-    [[nodiscard]] std::size_t peak_prewarmed_programs() const noexcept;
     [[nodiscard]] static std::size_t prewarm_program_limit() noexcept;
     [[nodiscard]] std::size_t prewarmed_emitters() const noexcept;
     [[nodiscard]] std::uint64_t prewarmed_texture_bytes() const noexcept;
     void prepare_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
+    // Empty submissions retire per-emitter RIDs and packing buffers. The logical
+    // handle/plan survive; the next nonempty submission recreates synchronously,
+    // once, in caller order, before that same stream is made visible. Shared
+    // texture and program references survive the empty span until owner release,
+    // including terminal owners (one shared RID per unique texture/program).
     void update_emitter(std::uint64_t resource, const particles::VertexStream& stream) override;
+    void empty_emitter(std::uint64_t resource, bool terminal) override;
     void destroy_emitter(std::uint64_t resource) override;
     // Battle backends may retain retired transparent non-fog emitters hidden, bounded by
     // entry and charged GPU-byte caps. Disable to drain before explicit teardown.
@@ -128,7 +133,11 @@ public:
     // instances, shared textures and shaders). Zero after the last emitter is
     // destroyed and all reuse/prewarm holds are released is the no-leak evidence.
     [[nodiscard]] std::size_t live_rids() const noexcept;
-    [[nodiscard]] std::size_t live_emitters() const noexcept;
+    [[nodiscard]] std::size_t live_emitters() const noexcept; // resident render instances only
+    [[nodiscard]] std::uint64_t suspensions() const noexcept;
+    [[nodiscard]] std::uint64_t recreations() const noexcept;
+    [[nodiscard]] std::uint64_t restore_asset_acquisitions() const noexcept;
+    [[nodiscard]] std::uint64_t asset_acquisitions() const noexcept;
     [[nodiscard]] std::vector<FogEmitterEvidence> fog_emitter_evidence() const;
 
     // Opt-in frame profiling across particle backends. Conversion sums preparation time

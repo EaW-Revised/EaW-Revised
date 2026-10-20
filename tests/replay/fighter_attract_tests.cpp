@@ -1,12 +1,20 @@
-#include "fighter_support.hpp"
-
-#include "eawr/sim/tactical/economy.hpp"
-#include "eawr/sim/tactical/replay.hpp"
-
 // MAT-15 (docs/behaviour/main-menu-attract.md): in an attract session a destroyed object that is
 // not a garrison unit and not a team member returns its type to its owner's reinforcement pool;
 // a squadron container returns once, when its last craft is gone. Without the attract record the
 // same battle returns nothing and hashes as before.
+
+#include "fighter_support.hpp"
+#include "eawr/sim/tactical/economy.hpp"
+#include "eawr/sim/tactical/replay.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace fighter_test_support {
 
 namespace {

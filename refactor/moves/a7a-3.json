@@ -1,0 +1,34 @@
+[
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#close_to",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#close_to"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#bounds",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#bounds"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#synthetic_placement",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#synthetic_placement"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#synthetic_failures",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#synthetic_failures"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#replay_round_trip",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#replay_round_trip"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#synthetic_tactical_super_weapon",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#synthetic_tactical_super_weapon"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#synthetic_heights",
+    "new": "tests/skirmish/skirmish_start_placement_tests.cpp#synthetic_heights"
+  },
+  {
+    "old": "tests/skirmish/skirmish_start_synthetic_tests.cpp#setup_contract",
+    "new": "tests/skirmish/skirmish_setup_contract_tests.cpp#setup_contract"
+  }
+]

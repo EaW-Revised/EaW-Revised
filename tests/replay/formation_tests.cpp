@@ -1,3 +1,9 @@
+// P2-08b (#344): FoC's group moves (docs/behaviour/space-movement.md FM-01 to FM-12). The slot
+// cases are computed by hand from the rules with the FoC corvette and Nebulon-B limits and
+// footprints; the session cases check a mixed group crossing open space and passing a ship in
+// its way, the staggered planning, the speed matching and worker equality.
+
+#include "../support/check.hpp"
 #include "formation_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/formation.hpp"
@@ -5,34 +11,23 @@
 #include "eawr/sim/tactical/pathfind.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <fstream>
-#include <functional>
 #include <iostream>
 #include <optional>
-#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
-// P2-08b (#344): FoC's group moves (docs/behaviour/space-movement.md FM-01 to FM-12). The slot
-// cases are computed by hand from the rules with the FoC corvette and Nebulon-B limits and
-// footprints; the session cases check a mixed group crossing open space and passing a ship in
-// its way, the staggered planning, the speed matching and worker equality.
 namespace formation_test_support {
 
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 

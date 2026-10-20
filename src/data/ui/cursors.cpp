@@ -1,4 +1,5 @@
 #include "eawr/data/ui/cursors.hpp"
+#include "eawr/core/text.hpp"
 #include "eawr/data/xml.hpp"
 #include "ui_internal.hpp"
 
@@ -10,10 +11,7 @@
 namespace eawr::data::ui {
 namespace {
 std::string trim(std::string_view value) {
-    constexpr std::string_view spaces = " \t\r\n";
-    const auto begin = value.find_first_not_of(spaces);
-    if (begin == std::string_view::npos) return {};
-    return std::string(value.substr(begin, value.find_last_not_of(spaces) - begin + 1));
+    return core::trim(value, core::xml_whitespace);
 }
 core::Diagnostic invalid(std::string message) {
     return {"EAWR-UI-CURSOR-0001", core::Severity::error, std::move(message), {}, {}, {}, {}};

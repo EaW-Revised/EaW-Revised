@@ -1,11 +1,19 @@
 #pragma once
+
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/setup.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/tactical_adapter.hpp"
 #include "eawr/core/build_identity.hpp"
 
-#include <stdexcept>
 #include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace setup_test {
 namespace net = eawr::net;
@@ -19,12 +27,9 @@ inline net::ReconnectTokens pair_keys(net::PeerIndex self, std::uint32_t count) 
     return keys;
 }
 inline void expect(bool value, const std::string& message) {
-    if (!value) throw std::runtime_error(message);
+    if (!value) eawr::testing::require(value, message);
 }
-template<class T> T require(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().code + ": " + value.error().message);
-    return std::move(value).value();
-}
+using eawr::testing::result_code_colon::require;
 inline sim::math::Fixed units(std::int64_t value) {
     return sim::math::Fixed::from_raw(value * sim::math::Fixed::scale);
 }

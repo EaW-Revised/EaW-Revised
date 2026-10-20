@@ -175,11 +175,18 @@ publishes a new one (new room ID, fresh admissions), as on LAN.
 
 Leave before Start frees the slot: the service pushes a roster without it, the host
 tells every member to close the pair, and a later newcomer gets fresh secrets. A pair
-between two already admitted members that closes before Start gets one regrant: the
-host sends both ends a fresh secret and the later-admitted end redials within the pair
-deadline. If that fails, the later-admitted of the two (by the host's admission order,
-recorded from the roster revision at which each slot attached) is refused exactly as a
-failing newcomer (section 3), and its slot is released for a refill. A lost host pair
+between nonhost members gets up to two regrants before Start, including a newcomer's
+first failed ICE attempt. Each regrant replaces only that pair's native ICE streams,
+uses a fresh secret and the latest credentials already issued to each room member,
+and lets the later-admitted end redial within the pair deadline. Opaque room signalling carries the immutable formation grant, and the adapter rejects
+superseded requests before GNS can create a new connection from them. Failure reports
+echo the failing link's grant secret so a delayed report cannot consume another attempt. The peer protocol
+revision is 3; mixed revisions refuse through the hello version check. Lobby retries
+never reattach the room and leave healthy streams alone. After the third failed attempt,
+the later-admitted of the two (by the host's admission order, recorded from the roster
+revision at which each slot attached) is refused exactly as a failing newcomer
+(section 3), and its slot is released for a refill. The host notice includes both seat
+numbers and the pair-unreachable diagnostic. A lost host pair
 refuses that member; there is no regrant for it. Kick is
 the host's `LobbySession` kick plus the service kick. Host connection loss before Lock
 closes the room for everyone (owner decision 4).
@@ -284,7 +291,7 @@ and tick zero run over the complete mesh exactly as on LAN.
 ### Partial-mesh failure policy
 
 **The newcomer is refused, not the room.** When pair (k, j) cannot connect, directly or
-via TURN, within the pair deadline, where k is the later admission:
+via TURN, after the bounded attempts and their pair deadlines, where k is the later admission:
 
 | Who | Is told | Effect |
 | --- | --- | --- |
@@ -297,9 +304,9 @@ Reasons: the members already in the room are mutually connected; the newcomer is
 only new variable, and refusing it keeps the room playable. If several pairs fail, the
 notice names up to three players. A failure on the host pair (0, k) is an ordinary join
 failure (`Could not connect to this game…`, existing text). Retry after a failure is
-manual so a blocked pair cannot loop through the service budgets. A pair between two
-members who were both already admitted gets one regrant first; if that fails, the
-later-admitted of the two is refused with the same texts (section 2, "Join, leave and
+manual after the two automatic nonhost-pair retries have been exhausted, so a blocked
+pair cannot loop through the service budgets. The later-admitted of the two is then
+refused with the same texts (section 2, "Join, leave and
 kick before Start").
 
 ### Departures in battle
@@ -450,7 +457,7 @@ departed seat's retained batches among survivors once, inside its bounded protoc
 ### Slice N4 implementation notes
 
 Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `LockstepSession` (`SessionOptions::mesh`), `LobbySession`
-(`LobbyHooks::mesh_complete`, `lock_room`, `refuse_unreachable`) and `apps/viewer/src/online_match.*` + `lan_match.*`.
+(`LobbyHooks::mesh_complete`, `lock_room`, `refuse_unreachable`) and `src/platform/net/online_match.*` + `lan_match.*`.
 
 - **Online bridge.** The host's room source publishes a plain directory room (no bridge invitation, protocol tag
   `online-room-v1`); the host's match waits for it (`OnlineMatchOptions::hosted_room`), opens the signalling scope with
@@ -668,7 +675,7 @@ hands out a STUN URI with the credentials (coturn answers STUN on the same port)
 
 | Layer | Fixture | Cases |
 | --- | --- | --- |
-| Mesh policy (no GNS) | pure state machine over fake pair links, in process | 3/4/9 peers: incremental formation, completeness, newcomer refusal for every failing (k, j), pre-Start loss of an admitted pair (regrant, then the later-admitted seat refused), leave/kick/refill before Lock, host-loss timing freeze, RTT per-pair minimum against a lying reporter |
+| Mesh policy (no GNS) | pure state machine over fake pair links, in process | 3/4/9 peers: incremental formation, completeness, newcomer refusal for every failing (k, j), pre-Start failure of a newcomer or admitted pair (two regrants, then the later-admitted seat refused), leave/kick/refill before Lock, host-loss timing freeze, RTT per-pair minimum against a lying reporter |
 | Pair-loss agreement (no GNS) | same, but each seat sees only the reports its open pairs deliver (no global view in the fixture) | **partitioned reports:** 4 seats a<b<c<d, pairs ab, ac, bc lost: d is the only all-open seat and decides; survivors {a, d}, b and c leave, a and d hold the same decision and a never computes its own; **no decider:** ab and cd lost, every seat leaves at the deadline and nobody steps past the stall tick; **two all-open seats:** five seats, ab lost, only c announces and d/e defer; **forged decision** from a seat that is not the lowest all-open seat is refused; **second loss** during the settle fails closed for everyone; all loss sets up to 3 pairs at nine seats end with every continuing seat holding the identical survivor set |
 | Lockstep integration (no GNS) | fake N-peer transport + `LockstepSession`/`SetupSession`, as `net_mesh_contracts`; the fake can cut single pairs | nine-peer coop, 3v3v3 and shared-control battles with mixed 1/2/4/8 sim workers, equal survivor tick hashes; partitioned pair loss (the ab/ac/bc case) through the decision and the existing departure protocol, survivors agreeing the cutoff tick and equal hashes after it; host departure with frozen timing |
 | Room service | loopback TLS `RelayServer`, single process | open/attach/roster/signal routing, source slot set by the service, forbidden destinations, leave/release/kick/lock/reattach, last-seat race between directory and alias admission, reservation expiry, per-member TURN credentials distinct, room budgets, ticket E renewal on room members, memory at max rooms |
@@ -712,10 +719,10 @@ wide.
 | Slice | Scope and acceptance | Main files | Depends on / conflicts | Cohort: median / p80 h |
 | --- | --- | --- | --- | --- |
 | **N1** room interface and mesh policy | `GnsRoomEndpoint` + in-process room fixture; pure mesh policy (formation, completeness, newcomer refusal, asymmetric-loss selection, host-loss timing freeze) with the first two test-plan rows | new `include/eawr/net/gns_room.hpp`, `src/net/gns_room_fixture.cpp`, `include/eawr/net/mesh_policy.hpp`, `src/net/mesh_policy.cpp`, `tests/net/mesh_policy_tests.cpp`; shared `src/net/sources.cmake`, `tests/net/CMakeLists.txt` | none on code; ticket E also adds lines to `tests/net/CMakeLists.txt` (additive, the second to merge rebases). Can start now | network/session: 3.250 / 5.854 |
-| **N2** GNS N-peer adapter | pair links, room factories, pair grants and reports (`TcpMessage` 15..18), completeness, partial-mesh reports, per-connection send buffer, signal counts and TURN-allocation/STUN findings measured; GNS mesh + partial-mesh rows with the in-process broker | `include/eawr/net/gns_transport.hpp`, `src/net/gns_transport.cpp` (option validation `2..max_match_seats`, hello with slot and roster size, `accept` with the accepted slot), `src/net/gns_frame_codec.*`, `tests/net/gns_frame_codec_tests.cpp` and `tests/net/gns_transport_tests.cpp` (new hello/accept layouts and mismatches), `tests/net/gns_mesh_tests.cpp`, `tests/net/gns_mesh_processes.py`, `docs/gns-transport.md` | N1. Touches `docs/gns-transport.md` after E's "Long sessions" section; additive | network/session: 3.250 / 5.854 |
+| **N2** GNS N-peer adapter | pair links, room factories, pair grants and reports (`TcpMessage` 15..18), completeness, partial-mesh reports, per-connection send buffer, signal counts and TURN-allocation/STUN findings measured; GNS mesh + partial-mesh rows with the in-process broker | `include/eawr/net/gns_transport.hpp`, `src/net/gns_transport_signalling.cpp` (option validation `2..max_match_seats`), `src/net/gns_transport_impl.cpp` (hello with slot and roster size, `accept` with the accepted slot), `src/net/gns_transport_formation.cpp` (room formation and signalling), `src/net/gns_frame_codec.*`, `tests/net/gns_frame_codec_tests.cpp` and `tests/net/gns_transport_tests.cpp` (new hello/accept layouts and mismatches), `tests/net/gns_mesh_tests.cpp`, `tests/net/gns_mesh_processes.py`, `docs/gns-transport.md` | N1. Touches `docs/gns-transport.md` after E's "Long sessions" section; additive | network/session: 3.250 / 5.854 |
 | **N3** room service + native client | room scope (Kind 34..49), shared reservation table and member capability in the directory admission reply, alias reservation, per-member TURN credentials (coturn and Cloudflare), room lease on E's renewal, room budgets; `NetworkGnsRoom`; deployment guide quotas | `src/net/relay_room.{hpp,cpp}` (new, keeps `relay_server.cpp` edits to dispatch hooks), `relay_protocol.hpp`, `relay_server.cpp`, `relay_directory.cpp`, `relay_client.cpp`, `include/eawr/net/relay_server.hpp`, `network_introduction.hpp`, `src/net/relay_sources.cmake`, `tests/net/relay_room_tests.cpp`, `docs/net-relay-server.md`, `docs/deploy/relay-server.md` | N1 interface; **after ticket E merges** (same files: `relay_server.cpp`, `relay_client.cpp`, `relay_protocol.hpp`, both docs). Parallel with N2 | relay service: 4.674 / 20.973 |
-| **N4** session integration | online bridge creates a room endpoint instead of a two-peer pairing; `LobbySession` pair-unreachable refusal and notices, Start gated on completeness + Lock; link reports, the single-decider pair-loss decision and its hand-off to the existing departure protocol; per-pair RTT minimum at the host; timing freeze | `apps/viewer/src/online_match.*`, `include/eawr/net/lobby_session.hpp`, `src/net/lobby_session.cpp`, shared `include/eawr/net/lockstep_session.hpp` + `src/net/lockstep_session.cpp`, `tests/net/viewer_online_tests.cpp`, lockstep/departure tests | N2 + N3; ticket E touches `lan_match.*` (merge after E) | network/session: 3.250 / 5.854 |
-| **N5** in-battle repair over the room | Reattach, re-dial survivors, nonce/HMAC proof per pair before data, refreshed TURN credentials for repaired connections, asymmetric pair repair before the departure fallback | `src/net/gns_transport.cpp` (repair mode), `include/eawr/net/reconnect.hpp` if a seam is needed, reconnect and GNS mesh tests | N2 + N3 + N4; reuses the MP-5 held-seat core | network/session: 3.250 / 5.854 |
+| **N4** session integration | online bridge creates a room endpoint instead of a two-peer pairing; `LobbySession` pair-unreachable refusal and notices, Start gated on completeness + Lock; link reports, the single-decider pair-loss decision and its hand-off to the existing departure protocol; per-pair RTT minimum at the host; timing freeze | `src/platform/net/online_match.*`, `include/eawr/net/lobby_session.hpp`, `src/net/lobby_session.cpp`, shared `include/eawr/net/lockstep_session.hpp` + `src/net/lockstep_session_mesh.cpp`, `tests/net/viewer_online_tests.cpp`, lockstep/departure tests | N2 + N3; ticket E touches `lan_match.*` (merge after E) | network/session: 3.250 / 5.854 |
+| **N5** in-battle repair over the room | Reattach, re-dial survivors, nonce/HMAC proof per pair before data, refreshed TURN credentials for repaired connections, asymmetric pair repair before the departure fallback | `src/net/gns_transport_mesh.cpp` (repair mode), `include/eawr/net/reconnect.hpp` if a seam is needed, reconnect and GNS mesh tests | N2 + N3 + N4; reuses the MP-5 held-seat core | network/session: 3.250 / 5.854 |
 | **N6** nine-seat online in the viewer | lift the two-seat online limits (seat chooser `seat_limit`, `direct_seats = 2` in the join paths), pair-failure texts, staging connected state per seat, nine-peer page in the cross-network kit runbook; GPU case for a nine-seat online staging fixture | `apps/viewer/src/lan_lobby_screen.cpp`, `lan_match.*`, `tests/net/viewer_lan_tests.cpp`, `tests/presentation/...` case, `docs/ui/lan-lobby.md` | N4 (N5 for the recovery texts) | viewer/lobby UI: 6.220 / 9.909 |
 
 Totals, adding each slice's cohort numbers with no multiplier: medians 23.894 h, p80s

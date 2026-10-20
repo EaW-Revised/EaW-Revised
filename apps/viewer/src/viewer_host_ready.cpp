@@ -157,117 +157,134 @@ void ViewerHost::_ready() try {
     if (!options_->skirmish_setup && !options_->front_end && (!options_->report_path.empty() || options_->startup_metrics))
         startup_trace.begin(false, process_start);
     if (options_->skirmish_setup || options_->front_end) {
-        // The front end draws the menus itself and takes captures of its own; the setup screen
-        // behind it only captures in the stand-alone mode.
-        skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
-            options_->game_root, options_->mod_root, options_->report_path,
-            options_->front_end ? std::filesystem::path{} : options_->capture_path,
-            options_->profile, options_->cache_shaders});
-        if (!skirmish_setup_->ready(*this)) {
-            status_message_ = skirmish_setup_->failure();
+        ready_battle_setup();
+        return;
+    }
+
+    if (ready_requested_mode()) return;
+
+    ready_replay_scene();
+} catch (const std::exception& error) {
+    status_message_ = std::string("Viewer startup failed: ") + error.what() +
+        ". Check read permissions for this account and verify or repair the FoC installation.";
+    UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
+    if (options_) static_cast<void>(write_report("failed"));
+    stop(2);
+}
+
+void ViewerHost::ready_battle_setup() {
+    // The front end draws the menus itself and takes captures of its own; the setup screen
+    // behind it only captures in the stand-alone mode.
+    skirmish_setup_ = std::make_unique<SkirmishSetupMode>(SkirmishSetupMode::Options{
+        options_->game_root, options_->mod_root, options_->report_path,
+        options_->front_end ? std::filesystem::path{} : options_->capture_path,
+        options_->profile, options_->cache_shaders});
+    if (!skirmish_setup_->ready(*this)) {
+        status_message_ = skirmish_setup_->failure();
+        static_cast<void>(write_report("failed"));
+        stop(2);
+        return;
+    }
+    gpu_memory_trace.sample("setup_ready");
+    if (options_->front_end) {
+        skirmish_setup_->leave();
+        auto front_options = FrontEndMode::from_command_line(
+            options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
+        // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
+        const auto start_galactic = [this](GalacticMode::Options campaign_options) {
+            campaign_options.game_root = options_->game_root;
+            campaign_options.mod_root = options_->mod_root;
+            auto* campaign_host = memnew(Node3D);
+            add_child(campaign_host);
+            auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
+            if (!campaign->ready(*campaign_host)) {
+                const std::string reason = campaign->failure();
+                campaign.reset();
+                remove_child(campaign_host);
+                memdelete(campaign_host);
+                return reason.empty() ? std::string("The campaign could not be started.") : reason;
+            }
+            galactic_mode_ = std::move(campaign);
+            galactic_host_ = campaign_host;
+            return std::string{};
+        };
+        front_options.saved_game_launcher = [start_galactic](const presentation::ui::SavedGameRequest& request) {
+            auto campaign_options = GalacticMode::from_command_line();
+            campaign_options.restore_save = GalacticMode::Options::RestoreSave{request.directory, request.name};
+            return start_galactic(std::move(campaign_options));
+        };
+        // MNU-34: the staging screen's chosen campaign entry (WGP-29: the set's entry of the chosen
+        // faction). Faction and difficulty need no option of their own: the entry names its faction,
+        // and the mode starts every campaign at the authored difficulty. Accepted technology
+        // options cross the same campaign-creation boundary (WGP-190).
+        front_options.campaign_launcher = [start_galactic](const presentation::ui::CampaignStartRequest& request) {
+            auto campaign_options = GalacticMode::from_command_line();
+            campaign_options.campaign = request.campaign;
+            campaign_options.custom_economy = request.economy;
+            return start_galactic(std::move(campaign_options));
+        };
+        front_end_ = std::make_unique<FrontEndMode>(std::move(front_options));
+        if (!front_end_->ready(*this, *skirmish_setup_)) {
+            status_message_ = front_end_->failure();
+            UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
             static_cast<void>(write_report("failed"));
             stop(2);
             return;
         }
-        gpu_memory_trace.sample("setup_ready");
-        if (options_->front_end) {
-            skirmish_setup_->leave();
-            auto front_options = FrontEndMode::from_command_line(
-                options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
-            // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
-            const auto start_galactic = [this](GalacticMode::Options campaign_options) {
-                campaign_options.game_root = options_->game_root;
-                campaign_options.mod_root = options_->mod_root;
-                auto* campaign_host = memnew(Node3D);
-                add_child(campaign_host);
-                auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
-                if (!campaign->ready(*campaign_host)) {
-                    const std::string reason = campaign->failure();
-                    campaign.reset();
-                    remove_child(campaign_host);
-                    memdelete(campaign_host);
-                    return reason.empty() ? std::string("The campaign could not be started.") : reason;
-                }
-                galactic_mode_ = std::move(campaign);
-                galactic_host_ = campaign_host;
-                return std::string{};
-            };
-            front_options.saved_game_launcher = [start_galactic](const presentation::ui::SavedGameRequest& request) {
-                auto campaign_options = GalacticMode::from_command_line();
-                campaign_options.restore_save = GalacticMode::Options::RestoreSave{request.directory, request.name};
-                return start_galactic(std::move(campaign_options));
-            };
-            // MNU-34: the staging screen's chosen campaign entry (WGP-29: the set's entry of the chosen
-            // faction). Faction and difficulty need no option of their own: the entry names its faction,
-            // and the mode starts every campaign at the authored difficulty. Accepted technology
-            // options cross the same campaign-creation boundary (WGP-190).
-            front_options.campaign_launcher = [start_galactic](const presentation::ui::CampaignStartRequest& request) {
-                auto campaign_options = GalacticMode::from_command_line();
-                campaign_options.campaign = request.campaign;
-                campaign_options.custom_economy = request.economy;
-                return start_galactic(std::move(campaign_options));
-            };
-            front_end_ = std::make_unique<FrontEndMode>(std::move(front_options));
-            if (!front_end_->ready(*this, *skirmish_setup_)) {
-                status_message_ = front_end_->failure();
-                UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
-                static_cast<void>(write_report("failed"));
-                stop(2);
-                return;
-            }
-        }
-        skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
-        set_process_input(true);
-        set_process_unhandled_input(true);
-        get_viewport()->connect("size_changed", callable_mp(this, &ViewerHost::on_map_viewport_size_changed));
-        return;
     }
+    skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
+    set_process_input(true);
+    set_process_unhandled_input(true);
+    get_viewport()->connect("size_changed", callable_mp(this, &ViewerHost::on_map_viewport_size_changed));
+    return;
+}
 
+bool ViewerHost::ready_requested_mode() {
     if (UnitMode::requested()) {
         unit_mode_ = std::make_unique<UnitMode>(UnitMode::from_command_line());
         if (!unit_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (EffectMode::requested()) {
         effect_mode_ = std::make_unique<EffectMode>(EffectMode::from_command_line());
         if (!effect_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (FontMode::requested()) {
         font_mode_ = std::make_unique<FontMode>(FontMode::from_command_line());
         if (!font_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (UiGalleryMode::requested()) {
         ui_gallery_mode_ = std::make_unique<UiGalleryMode>(UiGalleryMode::from_command_line());
         if (!ui_gallery_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (LanLobbyMode::requested()) {
         lan_lobby_mode_ = std::make_unique<LanLobbyMode>(LanLobbyMode::from_command_line());
         if (!lan_lobby_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (GalacticMode::requested()) {
         galactic_mode_ = std::make_unique<GalacticMode>(GalacticMode::from_command_line());
         if (!galactic_mode_->ready(*this)) {
             stop(2);
-            return;
+            return true;
         }
         set_process_input(true);
         set_process_unhandled_input(true);
-        return;
+        return true;
     }
 
     if (OptionsMode::requested()) {
         options_mode_ = std::make_unique<OptionsMode>(OptionsMode::from_command_line());
         if (!options_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (AttractRunner::requested()) {
@@ -278,13 +295,13 @@ void ViewerHost::_ready() try {
         attract_runner_ = std::make_unique<AttractRunner>(std::move(attract));
         set_process_input(true);
         set_process_unhandled_input(true);
-        return;
+        return true;
     }
 
     if (InputRoutingMode::requested()) {
         input_routing_mode_ = std::make_unique<InputRoutingMode>(InputRoutingMode::from_command_line());
         if (!input_routing_mode_->ready(*this)) stop(2);
-        return;
+        return true;
     }
 
     if (!options_->map_path.empty()) {
@@ -304,7 +321,7 @@ void ViewerHost::_ready() try {
         });
         if (!map_mode_->ready(*this)) {
             stop(2);
-            return;
+            return true;
         }
         get_viewport()->connect("size_changed",
             callable_mp(this, &ViewerHost::on_map_viewport_size_changed));
@@ -314,7 +331,7 @@ void ViewerHost::_ready() try {
                                     "pan with Alt and mouse motion, "
                                     "Home resets; close the window to exit (bindings are project-authored)");
         }
-        return;
+        return true;
     }
 
     if (!options_->camera_mode.empty()) {
@@ -324,7 +341,7 @@ void ViewerHost::_ready() try {
             static_cast<void>(write_report("failed"));
             stop(2);
         }
-        return;
+        return true;
     }
 
     if (!options_->atlas_path.empty()) {
@@ -333,7 +350,7 @@ void ViewerHost::_ready() try {
             static_cast<void>(write_report("failed"));
             stop(2);
         }
-        return;
+        return true;
     }
 
     if (options_->renderer_runtime_test) {
@@ -344,9 +361,13 @@ void ViewerHost::_ready() try {
             static_cast<void>(write_report("failed"));
             stop(2);
         }
-        return;
+        return true;
     }
 
+    return false;
+}
+
+void ViewerHost::ready_replay_scene() {
     if (!load_replay()) {
         static_cast<void>(write_report("failed"));
         stop(2);
@@ -393,11 +414,5 @@ void ViewerHost::_ready() try {
         static_cast<void>(write_report("failed"));
         stop(2);
     }
-} catch (const std::exception& error) {
-    status_message_ = std::string("Viewer startup failed: ") + error.what() +
-        ". Check read permissions for this account and verify or repair the FoC installation.";
-    UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
-    if (options_) static_cast<void>(write_report("failed"));
-    stop(2);
 }
 } // namespace eawr::presentation::godot_backend

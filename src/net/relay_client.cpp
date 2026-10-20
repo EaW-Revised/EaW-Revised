@@ -2,6 +2,7 @@
 #include "relay_protocol.hpp"
 #include "relay_renewal.hpp"
 #include "relay_directory_codec.hpp"
+#include "relay_menu.hpp"
 #include "relay_client_options.hpp"
 
 #if EAWR_HAS_RELAY
@@ -277,6 +278,10 @@ struct NetworkOnlineLobby::Impl {
     std::string published_principal;
     std::unique_ptr<TlsStream> stream;
     std::optional<core::Diagnostic> failure;
+    // Menu channel (#3758): a connection of its own, so a relay without the channel (it closes the connection that sent
+    // the unknown kind) never costs the directory connection.
+    std::mutex menu_mutex;
+    std::unique_ptr<TlsStream> menu_stream;
     Impl(NetworkIntroductionOptions o, std::string resume) : options(std::move(o)), principal(std::move(resume)), published_principal(principal) {}
     void set_principal(std::string value) {
         principal = std::move(value);
@@ -333,6 +338,43 @@ struct NetworkOnlineLobby::Impl {
         }
         return wire(std::move(request));
     }
+    // One request on the menu connection; `opening` replaces the connection first. A transport failure or a budget refusal
+    // that ends the connection drops the stream, so the caller's next menu_enter starts over.
+    core::Result<Bytes> menu_exchange(Bytes request, bool opening) {
+        std::lock_guard lock(menu_mutex);
+        if (opening) {
+            menu_stream.reset();
+            if (!valid(options, true)) return core::Result<Bytes>::failure(error(1519, "Invalid lobby client configuration"));
+            auto context = client_context(options.ca_file, options.certificate_sha256);
+            if (!context) return core::Result<Bytes>::failure(context.error());
+            const auto handle = connect_service(options.address, options.port, Clock::now() + options.timeout);
+            if (handle == socket::invalid) return core::Result<Bytes>::failure(error(1519, "Lobby endpoint failed"));
+            menu_stream = std::make_unique<TlsStream>(std::move(context).value(), handle, false, options.certificate_name,
+                options.certificate_sha256, options.queue_bytes, options.queue_frames);
+        } else if (!menu_stream) return core::Result<Bytes>::failure(error(1519, "Lobby chat connection is closed"));
+        if (!menu_stream->queue(std::move(request))) { menu_stream.reset(); return core::Result<Bytes>::failure(error(1526, "Lobby request queue full")); }
+        const auto deadline = Clock::now() + options.timeout;
+        auto transient = error(1552, "Lobby response timed out");
+        while (Clock::now() < deadline) {
+            menu_stream->pump();
+            if (auto reply = menu_stream->receive()) {
+                if (reply->size() < 2 || (*reply)[0] != 2) { transient = error(1540, "Malformed lobby response"); break; }
+                if ((*reply)[1] == static_cast<std::uint8_t>(Kind::error)) {
+                    Reader reader{std::span(*reply).subspan(2)}; const auto code = reader.u32();
+                    if (!reader.done() || !room_error_number(code)) { transient = error(1540, "Malformed lobby refusal"); break; }
+                    // 1521 on open: the relay predates the channel and closes this connection. 1525..1528 end it too.
+                    if (opening || (code >= 1519 && code <= 1528)) menu_stream.reset();
+                    return core::Result<Bytes>::failure(error(code, "Lobby service refused the request"));
+                }
+                return core::Result<Bytes>::success(std::move(*reply));
+            }
+            if (menu_stream->failed()) { transient = menu_stream->failure().value_or(error(1519, "Lobby TLS connection failed")); break; }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        menu_stream.reset();
+        return core::Result<Bytes>::failure(std::move(transient));
+    }
+    void menu_leave() { std::lock_guard lock(menu_mutex); menu_stream.reset(); }
     void latch_protocol(core::Diagnostic diagnostic) {
         std::lock_guard lock(mutex); failure = std::move(diagnostic); stream.reset();
     }
@@ -424,6 +466,36 @@ core::Result<OnlineChatPage> NetworkOnlineLobby::chat(std::uint32_t after) {
     if (!reply) return core::Result<OnlineChatPage>::failure(reply.error());
     auto decoded = chat_page(reply.value(), after); if (!decoded) impl_->latch_protocol(decoded.error()); return decoded;
 }
+core::Result<OnlineMenuPage> NetworkOnlineLobby::menu_enter(std::string display_name) {
+    display_name = clean_text(display_name, 20);
+    if (display_name.empty()) return core::Result<OnlineMenuPage>::failure(error(1540, "Invalid lobby chat name"));
+    auto request = message(Kind::menu_open); string(request, display_name);
+    auto reply = impl_->menu_exchange(std::move(request), true);
+    if (!reply) return core::Result<OnlineMenuPage>::failure(reply.error());
+    auto decoded = menu_page_decode(reply.value(), 0);
+    if (!decoded || !decoded.value().roster_present) { impl_->menu_leave(); return core::Result<OnlineMenuPage>::failure(error(1540, "Malformed lobby chat page")); }
+    return decoded;
+}
+core::Result<void> NetworkOnlineLobby::menu_say(std::string text) {
+    if (text.size() > 128 || clean_text(text, 128).empty()) return core::Result<void>::failure(error(1540, "Invalid lobby chat line"));
+    auto request = message(Kind::menu_chat); string(request, text);
+    auto reply = impl_->menu_exchange(std::move(request), false);
+    if (!reply) return core::Result<void>::failure(reply.error());
+    auto decoded = menu_page_decode(reply.value(), 0);
+    if (!decoded || !decoded.value().lines.empty() || decoded.value().roster_present) {
+        impl_->menu_leave(); return core::Result<void>::failure(error(1540, "Malformed lobby chat acknowledgement"));
+    }
+    return core::Result<void>::success();
+}
+core::Result<OnlineMenuPage> NetworkOnlineLobby::menu_poll(std::uint32_t after, std::uint32_t roster_version) {
+    auto request = message(Kind::menu_poll); u32(request, after); u32(request, roster_version);
+    auto reply = impl_->menu_exchange(std::move(request), false);
+    if (!reply) return core::Result<OnlineMenuPage>::failure(reply.error());
+    auto decoded = menu_page_decode(reply.value(), after);
+    if (!decoded) { impl_->menu_leave(); return core::Result<OnlineMenuPage>::failure(decoded.error()); }
+    return decoded;
+}
+void NetworkOnlineLobby::menu_leave() { impl_->menu_leave(); }
 core::Result<void> NetworkOnlineLobby::kick(const OnlineRoomPublication& publication, std::uint32_t seat) {
     if (!owner_valid(publication) || seat < 2) return core::Result<void>::failure(error(1540, "Invalid room chat removal"));
     auto request = owner_request(Kind::directory_kick, publication); u32(request, seat); return impl_->ack(std::move(request));

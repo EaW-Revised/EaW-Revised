@@ -1,3 +1,15 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic/map_input.hpp"
 #include "galactic/ground_roster.hpp"
@@ -6,9 +18,9 @@
 #include "eawr/campaign/auto_resolve_live.hpp"
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
+#include <utility>
 
 namespace {
 namespace gc = eawr::sim::galactic;
@@ -16,20 +28,9 @@ namespace view = eawr::viewer::galactic;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 using namespace std::chrono_literals;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
+using eawr::testing::result_diagnostic::take;
 std::optional<std::string> game_root() {
-#if defined(_MSC_VER)
-    char* text{}; std::size_t size{};
-    if (_dupenv_s(&text, &size, "EAWR_EAW_GAME_ROOT") || !text) return {};
-    std::string result(text); std::free(text);
-    return result.empty() ? std::nullopt : std::optional<std::string>{result};
-#else
-    const auto* text = std::getenv("EAWR_EAW_GAME_ROOT");
-    return text && *text ? std::optional<std::string>{text} : std::nullopt;
-#endif
+    return eawr::testing::game_root();
 }
 std::vector<view::InputPlanet> input_planets(const gc::GalacticSnapshot& snapshot, gc::PlayerId player) {
     std::vector<view::InputPlanet> result;
@@ -39,7 +40,7 @@ std::vector<view::InputPlanet> input_planets(const gc::GalacticSnapshot& snapsho
 }
 void installed_loop(bool purchase_only) {
     const auto root = game_root();
-    if (!root) { std::cout << "SKIPPED: S2 stock-stat campaign requires EAWR_EAW_GAME_ROOT\n"; return; }
+    if (!root) { eawr::testing::skip_installed("SKIPPED: S2 stock-stat campaign requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
         mounts.push_back(take(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data")).mount);
@@ -183,7 +184,7 @@ void installed_loop(bool purchase_only) {
         const auto purchased_type = offer->type;
         const auto before_purchase = view::ground_roster(*production, attacker, home);
         live->submit(eawr::platform::LiveGameOrder{human_seat,
-            gc::ProductionCommand{home, purchased_type, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0, {}}, {}, {}});
+            gc::ProductionCommand{home, purchased_type, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0, {}}, {}});
         bool produced{}; auto cursor = live->galactic_events_after(0).through;
         const auto production_deadline = tick + 8000;
         while (!produced && tick < production_deadline) {
@@ -230,7 +231,7 @@ void installed_loop(bool purchase_only) {
         for (const auto& row : assembly->fleets()) if (row.owner == attacker && row.orbit == home) {
             assembled_members += row.members.size();
             if (row.id != moving_fleet)
-                live->submit(eawr::platform::LiveGameOrder{human_seat, gc::MergeFleets{row.id, moving_fleet}, {}, {}});
+                live->submit(eawr::platform::LiveGameOrder{human_seat, gc::MergeFleets{row.id, moving_fleet}, {}});
         }
         live->advance_to(++tick);
         if (!wait_for_tick(tick)) throw std::runtime_error("S2 fleet assembly stalled");
@@ -251,7 +252,7 @@ void installed_loop(bool purchase_only) {
             if (!intent) throw std::runtime_error("S2 move intent refused");
             const auto move = input.command(*intent, input_planets(*attack_snapshot, attacker));
             if (!move) throw std::runtime_error("S2 map command refused");
-            live->submit(eawr::platform::LiveGameOrder{human_seat, *move, {}, {}});
+            live->submit(eawr::platform::LiveGameOrder{human_seat, *move, {}});
             bool travelled{}, arrived{}, space_result{}, land_result{}, invaded{}, flipped{};
             eawr::sim::EntityId chosen{}, space_conflict{};
             const auto conquest_deadline = tick + 4000;
@@ -289,7 +290,7 @@ void installed_loop(bool purchase_only) {
                     if (!land) throw std::runtime_error("S2 invasion intent refused");
                     const auto command = input.command(*land, input_planets(*frame.latest, attacker));
                     if (!command) throw std::runtime_error("S2 invasion command refused");
-                    live->submit(eawr::platform::LiveGameOrder{human_seat, *command, {}, {}}); invaded = true;
+                    live->submit(eawr::platform::LiveGameOrder{human_seat, *command, {}}); invaded = true;
                 }
                 if (frame.pending_conflict && frame.pending_conflict->choice_ready)
                     expect(frame.latest->clock().pause_depth != 0, "land admission owns its conflict pause");
@@ -338,7 +339,7 @@ void installed_loop(bool purchase_only) {
             }
             const auto command = input.command(*next, input_planets(*snapshot, attacker));
             if (!command) throw std::runtime_error("S2 redeparture map command refused");
-            live->submit(eawr::platform::LiveGameOrder{human_seat, *command, {}, {}});
+            live->submit(eawr::platform::LiveGameOrder{human_seat, *command, {}});
             bool departed{}, returned{}; const auto deadline = tick + 4000;
             while (!returned && tick < deadline) {
                 live->advance_to(++tick);
@@ -382,7 +383,7 @@ void installed_loop(bool purchase_only) {
     }
 }
 } // namespace
-int main(int argc, char** argv) {
+int case_galactic_s2_loop_tests(int argc, char** argv) {
     try { installed_loop(argc == 2 && std::string_view(argv[1]) == "--purchase-only"); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

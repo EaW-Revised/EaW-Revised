@@ -1,5 +1,7 @@
 // #415: how a live battle orients and places a shield hit (presentation::space shield_hits,
 // docs/behaviour/battle-presentation.md BP-10, BP-17 to BP-19). Synthetic inputs only.
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/space/shield_hits.hpp"
 #include "eawr/presentation/space/live_units.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
@@ -7,6 +9,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <optional>
@@ -18,13 +21,11 @@ namespace {
 namespace space = eawr::presentation::space;
 using space::Vec3d;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const double a, const double b, const double tolerance = 1.0e-9) {

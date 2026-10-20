@@ -2,7 +2,21 @@
 #include "../../apps/sim_headless/json.hpp"
 #include "../../src/sim/tactical/combat_algorithms.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <ios>
+#include <iterator>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 namespace combat_test_support {
 

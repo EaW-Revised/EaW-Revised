@@ -1,10 +1,22 @@
+#include <exception>
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
-#include "galactic/weapon_action_live_fixture.hpp"
-#include "galactic/hud_clock_fixture.hpp"
+#include "../presentation/galactic/weapon_action_live_fixture.hpp"
+#include "../presentation/galactic/hud_clock_fixture.hpp"
 #include "galactic/galaxy_view.hpp"
 #include "galactic/map_input.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include <algorithm>
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+using eawr::testing::take;
 
 // The live acceptance fixture behind the viewer's "hack-live" HUD case: the host, not a copied snapshot, owns the
 // menu. Choose queues the exact typed capability; cancel retracts it; neither moves anything else.
@@ -12,11 +24,6 @@ namespace {
 namespace gc = eawr::sim::galactic;
 namespace view = eawr::viewer::galactic;
 using galactic_test::expect;
-template<class T> T take(eawr::core::Result<T> r) {
-    if (!r) throw std::runtime_error(r.error().message);
-    return std::move(r).value();
-}
-void take(eawr::core::Result<void> r) { if (!r) throw std::runtime_error(r.error().message); }
 
 constexpr gc::PlayerId local = 1;
 gc::GalacticSetup make_setup(eawr::sim::SeatId& seat, std::string_view fixture = "hack-live") {

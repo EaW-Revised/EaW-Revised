@@ -2,6 +2,7 @@
 // entry a destroyed unit uses, the death clip's timing and its sampled pose. The file names
 // below are the FoC death-clone clips the M2 roster uses; no asset is read.
 
+#include "../../support/check.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
 
 #include <cmath>
@@ -19,12 +20,10 @@ namespace {
 
 namespace clips = eawr::presentation::animation;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 void test_table() {

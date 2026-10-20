@@ -1,0 +1,14 @@
+[
+  {
+    "old": "tests/galactic/ai_freestore_tests.cpp#done",
+    "new": "tests/support/result.hpp#eawr::testing::result_diagnostic::must"
+  },
+  {
+    "old": "tests/galactic/seat_roles_tests.cpp#check",
+    "new": "tests/support/result.hpp#must(Result<void>)"
+  },
+  {
+    "old": "tests/galactic/space_entry_synthetic.cpp#check",
+    "new": "tests/support/result.hpp#must(Result<void>)"
+  }
+]

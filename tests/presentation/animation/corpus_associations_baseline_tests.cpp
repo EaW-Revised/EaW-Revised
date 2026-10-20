@@ -1,4 +1,22 @@
+#include "../../support/temp_dir.hpp"
 #include "corpus_associations_test_support.hpp"
+
+#include <algorithm>
+#include <cstddef>
+#include <cwctype>
+#include <filesystem>
+#include <fstream>
+#include <functional>
+#include <ios>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <optional>
+#include <random>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace association_contracts {
 // ---------------------------------------------------------------------------
@@ -323,8 +341,7 @@ struct TempDirectory final {
         std::filesystem::create_directories(path);
     }
     ~TempDirectory() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
+        eawr::testing::remove_temp_directory(path);
     }
     TempDirectory(const TempDirectory&) = delete;
     TempDirectory& operator=(const TempDirectory&) = delete;

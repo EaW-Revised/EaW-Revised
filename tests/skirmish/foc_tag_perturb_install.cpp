@@ -1,24 +1,37 @@
+#include "../support/env.hpp"
 #include "foc_tag_perturb_support.hpp"
+#include "eawr/core/text.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <charconv>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <ios>
+#include <mutex>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace foc_tag_perturb_test_support {
 
 [[nodiscard]] std::string lower(std::string_view text) {
-    std::string result(text);
-    for (auto& letter : result) {
-        if (letter >= 'A' && letter <= 'Z') letter = static_cast<char>(letter - 'A' + 'a');
-    }
-    return result;
+    return eawr::core::to_lower(text);
 }
 
 [[nodiscard]] bool iequals(const std::string_view left, const std::string_view right) {
-    return lower(left) == lower(right);
+    return eawr::core::iequals(left, right);
 }
 
 [[nodiscard]] std::string trim(std::string_view text) {
-    const auto begin = text.find_first_not_of(" \t\r\n");
-    if (begin == std::string_view::npos) return {};
-    const auto end = text.find_last_not_of(" \t\r\n");
-    return std::string(text.substr(begin, end - begin + 1));
+    return eawr::core::trim(text, eawr::core::xml_whitespace);
 }
 
 [[nodiscard]] std::vector<std::string> split(const std::string_view text, const char separator) {
@@ -34,19 +47,7 @@ namespace foc_tag_perturb_test_support {
 }
 
 [[nodiscard]] std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 [[nodiscard]] std::optional<std::uint64_t> whole(const std::string_view text, const std::uint64_t low, const std::uint64_t high) {

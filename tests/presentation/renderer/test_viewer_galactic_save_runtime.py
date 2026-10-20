@@ -455,6 +455,7 @@ var original = []
 var restored = []
 var quiet_since = 0.0
 var roundtrips = []
+var original_planets = {}
 func _initialize():
     instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
     root.add_child(instance)
@@ -487,6 +488,13 @@ func captions(node):
         result.append(str(node.get_meta("battle_caption")))
     for child in node.get_children(): result.append_array(captions(child))
     return result
+func planet_labels(node):
+    var result = {}
+    if node is Label and str(node.name).begins_with("planet_name_"):
+        result[str(node.name)] = {"text": node.text, "colour": str(node.get_theme_color("font_color")),
+            "tooltip": node.tooltip_text}
+    for child in node.get_children(): result.merge(planet_labels(child))
+    return result
 func finish(error):
     var file = FileAccess.open(TRACE, FileAccess.WRITE)
     file.store_string(JSON.stringify({"error": error, "phase": phase, "original": original, "restored": restored, "roundtrips": roundtrips}))
@@ -510,6 +518,7 @@ func _process(delta):
         0:
             if not ready(control(battle, "choice_button_right")): return false
             original = captions(battle)
+            original_planets = planet_labels(instance)
             root.get_texture().get_image().save_png(OUTPUT + "/pending-before.png")
             key(KEY_ESCAPE); phase = 1
         1:
@@ -547,12 +556,16 @@ func _process(delta):
             if menu != null and not menu.visible:
                 if not ready(control(battle, "IDC_CONTINUE_BUTTON" if summary else "choice_button_right")): return false
                 restored = captions(battle)
-                roundtrips.append({"summary": summary, "before": original, "after": restored})
+                var restored_planets = planet_labels(instance)
+                roundtrips.append({"summary": summary, "before": original, "after": restored,
+                    "planets_before": original_planets, "planets_after": restored_planets})
                 if original.is_empty() or restored != original: finish("restored prompt captions differ"); return false
+                if original_planets.is_empty() or restored_planets != original_planets:
+                    finish("planet discovery presentation changed after load"); return false
                 var restored_image = "/resaved-summary-restored.png" if resaved else ("/summary-restored.png" if summary else "/pending-restored.png")
                 root.get_texture().get_image().save_png(OUTPUT + restored_image)
                 if summary and not resaved:
-                    resaved = true; original = restored
+                    resaved = true; original = restored; original_planets = restored_planets
                     key(KEY_ESCAPE); phase = 1; return false
                 if click(battle, "IDC_CONTINUE_BUTTON" if summary else "choice_button_right"):
                     phase = 9 if summary else 8
@@ -561,6 +574,7 @@ func _process(delta):
             if ready(control(battle, "IDC_CONTINUE_BUTTON")):
                 summary = true
                 original = captions(battle)
+                original_planets = planet_labels(instance)
                 root.get_texture().get_image().save_png(OUTPUT + "/summary-before.png")
                 key(KEY_ESCAPE); phase = 1
         9:
@@ -581,6 +595,8 @@ func _process(delta):
         for row in trace["roundtrips"]:
             self.assertTrue(row["before"])
             self.assertEqual(row["before"], row["after"])
+            self.assertTrue(row["planets_before"])
+            self.assertEqual(row["planets_before"], row["planets_after"])
         self.assertEqual(data["save_controls"]["saved"], 3)
         self.assertEqual(data["save_controls"]["loaded"], 3)
         self.assertEqual(data["save_controls"]["world_leaks"], 0)
@@ -590,6 +606,91 @@ func _process(delta):
         for name in ("pending-before", "pending-restored", "summary-before", "summary-restored", "resaved-summary-restored"):
             self.assertTrue((directory / (name + ".png")).is_file())
         print("prompt save captures:", directory)
+
+    def test_begin_writes_prebattle_autosave_listed_in_load(self):
+        """WGS-99/142: Begin on the pending space battle writes the reserved autosave before the
+        child; the Escape menu's Load list then shows it."""
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-prebattle-autosave-"))
+        saves = directory / "saves"
+        driver = r'''extends SceneTree
+var instance
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var rows = []
+var begun_at = 0.0
+func _initialize():
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code):
+    for pressed in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = pressed
+        Input.parse_input_event(event)
+func control(parent, name):
+    return null if parent == null else parent.find_child(name, true, false)
+func ready(node):
+    return node != null and node.is_visible_in_tree() and not node.is_disabled()
+func click(parent, name):
+    var node = control(parent, name)
+    if not ready(node): return false
+    for pressed in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = node.get_global_rect().get_center()
+        event.global_position = event.position
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = pressed
+        Input.parse_input_event(event)
+    return true
+func finish(error):
+    var file = FileAccess.open(TRACE, FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": error, "phase": phase, "rows": rows}))
+    file.close()
+    instance.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit(0 if error == "" else 2)
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 300: finish("prebattle autosave timed out"); return false
+    if beat < 0.2: return false
+    beat = 0
+    var battle = control(instance, "CampaignBattleDialog")
+    var menu = control(instance, "GalacticSaveMenu")
+    var esc = control(menu, "IDD_GAME_OPTIONS_DIALOG")
+    var load_panel = control(menu, "IDD_LOAD_GAME_DIALOG")
+    match phase:
+        0:
+            if not ready(control(battle, "choice_button_left")): return false
+            if FileAccess.file_exists(SAVES + "/Auto Save.eawrsave"): finish("autosave exists before Begin"); return false
+            if click(battle, "choice_button_left"): phase = 1; begun_at = elapsed
+        1:
+            # Escape is refused while the battle's loading state is still shown: wait for the ready child.
+            if FileAccess.file_exists(SAVES + "/Auto Save.eawrsave") and instance.find_child("CampaignSpaceBattleReady", true, false) != null:
+                key(KEY_ESCAPE); phase = 2
+            elif elapsed - begun_at > 60: finish("Begin never wrote the autosave")
+        2:
+            if click(esc, "IDC_LOAD_GAME"): phase = 3
+        3:
+            var list = control(load_panel, "IDC_SAVE_GAME_LIST")
+            if list != null and list.is_visible_in_tree() and list.item_count > 0:
+                for i in list.item_count: rows.append(list.get_item_text(i))
+                finish("")
+            else:
+                # The click can land while the battle layer still owns the pointer: press Load again.
+                click(esc, "IDC_LOAD_GAME")
+    return false
+'''.replace("TRACE", json.dumps((directory / "trace.json").as_posix())).replace("SAVES", json.dumps(saves.as_posix()))
+        result, data = self.run_viewer(directory, driver, qualified_campaign_arguments("prompt-save") + [
+            "--eawr-galactic-save-dir", str(saves)])
+        self.assertTrue((directory / "trace.json").is_file(), data.get("failure"))
+        trace = json.loads((directory / "trace.json").read_text(encoding="utf-8"))
+        self.assertEqual(trace["error"], "", trace)
+        self.assertTrue((saves / "Auto Save.eawrsave").is_file())
+        self.assertTrue(any("auto" in row.lower() for row in trace["rows"]), trace["rows"])
+        self.assertEqual(data["failure"], "")
+        print("prebattle autosave rows:", trace["rows"], directory)
 
 
 if __name__ == "__main__":

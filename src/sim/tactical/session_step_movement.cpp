@@ -124,31 +124,10 @@ core::Result<void> session_detail::Tick::gather() {
     return core::Result<void>::success();
 }
 
-core::Result<void> session_detail::Tick::prepare_craft() {
-    auto& moving = gather_.value().moving.value();
-    auto& gathered_crafts = gather_.value().gathered_crafts.value();
-    const auto& squadron_table = impl_->motion.squadrons;
-    // Craft phase inputs (#75): the start-of-tick flight of every squadron craft, and per squadron
-    // its leader and order. Built serially like the combat world: an index over the craft and one
-    // entry per squadron, which the workers only read.
-    mark("craft_views_minds", true);
-    craft_prep_.emplace();
-    auto& minds = craft_prep_.value().minds.emplace(impl_->minds);
-    auto& craft_views = craft_prep_.value().craft_views.emplace();
-    craft_views.reserve(impl_->crafts.size());
-    for (auto& craft : gathered_crafts) {
-        if (!craft) continue;
-        // Scratch map insertion is ordered and serial; later craft partitions own one cache each.
-        craft->trig_cache = &impl_->craft_trig.try_emplace(craft->id).first->second;
-        craft_views.push_back(*craft);
-    }
-    mark("craft_views_minds", false);
-    // FM-24 (#687, walk 1 WSQ-09): a squadron reverting to idle at `desired` keeps the idle cell it
-    // holds, else claims one and holds its point; with none free it holds `desired`. Serial, in
-    // ascending container ID, since a claim changes what the next one sees.
-    const auto idle_reach = math::Fixed::from_raw(idle_cell_size * math::Fixed::scale);
-    auto& squadron_frames = craft_prep_.value().squadron_frames.emplace();
-    auto& craft_squadron = craft_prep_.value().craft_squadron.emplace();
+
+core::Result<void> session_detail::Tick::prepare_squadron_frames(detail::MapStage<SquadronState>& minds,
+    std::map<EntityId, SquadronFrame>& squadron_frames, std::map<EntityId, EntityId>& craft_squadron,
+    const SquadronTable& squadron_table, std::vector<LiveUnit>& moving, const math::Fixed& idle_reach) {
     for (const auto& squadron : impl_->squadrons) {
         const auto mind = minds.find(squadron.container);
         if (mind == minds.end()) continue;
@@ -246,6 +225,12 @@ core::Result<void> session_detail::Tick::prepare_craft() {
         }
         squadron_frames.emplace(squadron.container, frame);
     }
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::prepare_formation_lanes(std::vector<LiveUnit>& moving, std::map<EntityId, SquadronFrame>& squadron_frames,
+    const SquadronTable& squadron_table) {
     // FO-10, FO-11 (#599): the squadrons still on a group move fly their formation's path, each
     // steering toward its lane and keeping level with its row. Serial, per formation: every
     // member reads every other one's place (O(members^2), a few squadrons per formation).
@@ -296,107 +281,12 @@ core::Result<void> session_detail::Tick::prepare_craft() {
         }
     }
 
-    // #457: the squadron behind a target: the target itself when it is a team container, else
-    // the squadron of a craft (FO-04). Zero for any other unit.
-    const auto squadron_of = [&](const EntityId target) -> EntityId {
-        if (target == invalid_entity_id) return invalid_entity_id;
-        for (const auto& squadron : impl_->squadrons) {
-            if (squadron.container == target
-                || std::binary_search(squadron.members.begin(), squadron.members.end(), target)) {
-                return squadron.container;
-            }
-        }
-        return invalid_entity_id;
-    };
-    const auto team_of = [&](const EntityId id) -> std::optional<TeamId> {
-        const auto* unit = live_unit(moving, id);
-        if (unit == nullptr) return std::nullopt;
-        return impl_->teams.at(unit->state.owner);
-    };
-    const auto hostile_units = [&](const EntityId owner, const EntityId target) {
-        const auto* source = live_unit(moving, owner);
-        const auto* recipient = live_unit(moving, target);
-        return source != nullptr && recipient != nullptr
-            && players_hostile(impl_->snapshot_players, source->state.owner, recipient->state.owner);
-    };
-    // FT-05, WSQ-47: hand a squadron's new target to its craft, or take the old
-    // one back.
-    // FD-09: combat ends: the squadron leaves its cell and, holding a point, holds where its
-    // leader will be this frame at its layer height, or, left without a target, the idle cell it
-    // claims there (FM-24, walk 1 WSQ-14).
-    // WU-25a: the cell a dogfight around `target` settles on.
-    const auto search_cell = [&](const math::Vec3& target) {
-        const CombatCell centre = combat_cell_of(target, impl_->map_box);
-        const auto joined = [&](const CombatCell cell) {
-            return std::any_of(minds.begin(), minds.end(),
-                [&](const auto& entry) { return entry.second.joined && entry.second.cell == cell; });
-        };
-        CombatCell best_cell = centre;
-        std::optional<math::detail::UInt192> best;
-        for (std::int32_t y = centre.y - 1; y <= centre.y + 1; ++y) {
-            for (std::int32_t x = centre.x - 1; x <= centre.x + 1; ++x) {
-                const CombatCell cell{x, y};
-                math::detail::UInt192 score = math::detail::from_u64(0);
-                if (!joined(cell)) {
-                    const auto point = combat_cell_point(cell, math::Fixed{}, impl_->map_box);
-                    const auto dx = math::detail::unsigned_magnitude(point.x.raw() - target.x.raw());
-                    const auto dy = math::detail::unsigned_magnitude(point.y.raw() - target.y.raw());
-                    score = math::detail::multiply_u64(dx, dx);
-                    static_cast<void>(math::detail::add_magnitude(score, math::detail::multiply_u64(dy, dy)));
-                }
-                if (!best || math::detail::compare(score, *best) < 0) {
-                    best = score;
-                    best_cell = cell;
-                }
-            }
-        }
-        return best_cell;
-    };
-    // WSQ-15, WWP-21 (#739): the target's soft radius as the combat world gives it: a squadron's
-    // team container in a formation has its ideal team box's radius; anything else, craft and
-    // unformed containers included, its type's.
-    const auto target_soft_radius = [&](const EntityId id, const LiveUnit& target) -> core::Result<math::Fixed> {
-        if (const auto team = squadron_frames.find(id); team != squadron_frames.end() && team->second.state->formation
-            && team->second.profile != nullptr) {
-            const auto& roster = team->second.live_roster;
-            if (!(roster.size() == 1 && roster.front() == id)) {
-                std::vector<std::optional<TypeId>> types;
-                types.reserve(roster.size());
-                for (const auto member : roster) {
-                    const auto* unit = live_unit(moving, member);
-                    types.push_back(unit != nullptr ? std::optional<TypeId>{unit->state.type_id} : std::nullopt);
-                }
-                auto box = detail::formation_target_footprint(impl_->combat, &impl_->motion, types, *team->second.profile);
-                if (!box) return core::Result<math::Fixed>::failure(box.error());
-                return core::Result<math::Fixed>::success(box.value().radius);
-            }
-        }
-        return core::Result<math::Fixed>::success(detail::type_soft_radius(impl_->combat, &impl_->motion, target.state.type_id));
-    };
-    // WSQ-15/18: one retained attachment per command coordinator and active target.
-    // Independent or autonomous singleton teams retain their own destination.
-    using AttackPoint = std::pair<math::Vec3, std::uint32_t>;
-    const auto resolve_attack_point = [&](const SquadronFrame& frame, const LiveUnit& target,
-        const std::uint32_t retained) -> core::Result<AttackPoint> {
-        auto transform = unit_transform(target); // immutable, also before a placement cache exists
-        if (!transform) return core::Result<AttackPoint>::failure(transform.error());
-        detail::CombatUnit geometry;
-        geometry.position = target.state.position;
-        geometry.transform = transform.value();
-        geometry.profile = impl_->combat.find_target_type(target.state.type_id);
-        geometry.durability_profile = impl_->health_profile(target);
-        geometry.durability = target.durability ? &*target.durability : nullptr;
-        const auto* chosen = detail::standing_hardpoint(geometry, retained);
-        if (chosen == nullptr) {
-            if (const auto* leader = live_unit(moving, frame.leader))
-                chosen = detail::best_hardpoint(&impl_->combat, impl_->combat.find(leader->state.type_id),
-                    geometry, leader->state.position);
-        }
-        if (chosen == nullptr) return core::Result<AttackPoint>::success({target.state.position, attack_hull});
-        auto point = math::transform_point(geometry.transform, chosen->position);
-        if (!point) return core::Result<AttackPoint>::failure(point.error());
-        return core::Result<AttackPoint>::success({point.value(), chosen->hardpoint});
-    };
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::prepare_attack_attachments(std::map<EntityId, SquadronFrame>& squadron_frames, std::vector<LiveUnit>& moving,
+    auto& resolve_attack_point) {
     using AttackCohortKey = std::tuple<std::optional<CommandKey>, EntityId, EntityId>;
     std::map<AttackCohortKey, std::vector<SquadronFrame*>> cohorts;
     for (auto& [container, frame] : squadron_frames) {
@@ -434,6 +324,14 @@ core::Result<void> session_detail::Tick::prepare_craft() {
         for (auto& error : attack_point_errors)
             if (error) return core::Result<void>::failure(std::move(*error));
     }
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::prepare_dogfight_cells(std::map<EntityId, SquadronFrame>& squadron_frames,
+    detail::MapStage<SquadronState>& minds, std::vector<LiveUnit>& moving, const SquadronTable& squadron_table,
+    auto& hostile_units, auto& squadron_of, auto& resolve_attack_point, auto& target_soft_radius,
+    auto& search_cell) {
     // The squadrons' targets and dogfights (#457, FD-01 to FD-04, FD-09; foc-battle-world-ui
     // WU-25): serial in ascending container ID, the service order, since a squadron's cell and a
     // retaliation change what the squadrons after it see. O(squadrons) per frame with a short scan
@@ -457,7 +355,12 @@ core::Result<void> session_detail::Tick::prepare_craft() {
             state.target = next;
             state.target_hardpoint = attack_hull; // #531: the dogfight's own target names no hardpoint
             state.approach = next != invalid_entity_id;
+            // FT-05, WSQ-47: hand a squadron's new target to its craft, or take the old
+            // one back.
             hand_target(container, previous, next);
+            // FD-09: combat ends: the squadron leaves its cell and, holding a point, holds where its
+            // leader will be this frame at its layer height, or, left without a target, the idle cell it
+            // claims there (FM-24, walk 1 WSQ-14).
             if (next == invalid_entity_id) end_combat(container, state, leader);
         }
         // WDF-03: a shared find can be refused by the movement formation.
@@ -552,6 +455,13 @@ core::Result<void> session_detail::Tick::prepare_craft() {
         }
     }
 
+    return core::Result<void>::success();
+}
+
+
+core::Result<void> session_detail::Tick::prepare_chase_pairs(std::vector<CraftView>& craft_views, std::map<EntityId, EntityId>& craft_squadron,
+    std::map<EntityId, SquadronFrame>& squadron_frames, detail::MapStage<SquadronState>& minds, auto& team_of,
+    auto& hostile_units) {
     // Chase pairing (#457, FD-05, FD-06). A run-out chase timer clears the chase, and a chased craft
     // that died is dropped (its timer runs on). Then every craft of a squadron fighting in a cell,
     // near the cell point and with its timer run out, looks for a craft to chase among the enemy
@@ -639,7 +549,135 @@ core::Result<void> session_detail::Tick::prepare_craft() {
         for (const auto tests : cone_tests) dogfight_cone_tests += tests;
         claim_chases(craft_views, scanners, std::span(candidates).first(scanners.size()), frame_number);
     }
-    // FD-10: the ships and static objects craft steer around, ascending ID, at the start of the frame.
+    return core::Result<void>::success();
+}
+
+core::Result<void> session_detail::Tick::prepare_craft() {
+    auto& moving = gather_.value().moving.value();
+    auto& gathered_crafts = gather_.value().gathered_crafts.value();
+    const auto& squadron_table = impl_->motion.squadrons;
+    // Craft phase inputs (#75): the start-of-tick flight of every squadron craft, and per squadron
+    // its leader and order. Built serially like the combat world: an index over the craft and one
+    // entry per squadron, which the workers only read.
+    mark("craft_views_minds", true);
+    craft_prep_.emplace();
+    auto& minds = craft_prep_.value().minds.emplace(impl_->minds);
+    auto& craft_views = craft_prep_.value().craft_views.emplace();
+    craft_views.reserve(impl_->crafts.size());
+    for (auto& craft : gathered_crafts) {
+        if (!craft) continue;
+        // Scratch map insertion is ordered and serial; later craft partitions own one cache each.
+        craft->trig_cache = &impl_->craft_trig.try_emplace(craft->id).first->second;
+        craft_views.push_back(*craft);
+    }
+    mark("craft_views_minds", false);
+    // FM-24 (#687, walk 1 WSQ-09): a squadron reverting to idle at `desired` keeps the idle cell it
+    // holds, else claims one and holds its point; with none free it holds `desired`. Serial, in
+    // ascending container ID, since a claim changes what the next one sees.
+    const auto idle_reach = math::Fixed::from_raw(idle_cell_size * math::Fixed::scale);
+    auto& squadron_frames = craft_prep_.value().squadron_frames.emplace();
+    auto& craft_squadron = craft_prep_.value().craft_squadron.emplace();
+    if (auto result = prepare_squadron_frames(minds, squadron_frames, craft_squadron, squadron_table, moving, idle_reach); !result) return result;
+    if (auto result = prepare_formation_lanes(moving, squadron_frames, squadron_table); !result) return result;
+    // #457: the squadron behind a target: the target itself when it is a team container, else
+    // the squadron of a craft (FO-04). Zero for any other unit.
+    const auto squadron_of = [&](const EntityId target) -> EntityId {
+        if (target == invalid_entity_id) return invalid_entity_id;
+        for (const auto& squadron : impl_->squadrons) {
+            if (squadron.container == target
+                || std::binary_search(squadron.members.begin(), squadron.members.end(), target)) {
+                return squadron.container;
+            }
+        }
+        return invalid_entity_id;
+    };
+    const auto team_of = [&](const EntityId id) -> std::optional<TeamId> {
+        const auto* unit = live_unit(moving, id);
+        if (unit == nullptr) return std::nullopt;
+        return impl_->teams.at(unit->state.owner);
+    };
+    const auto hostile_units = [&](const EntityId owner, const EntityId target) {
+        const auto* source = live_unit(moving, owner);
+        const auto* recipient = live_unit(moving, target);
+        return source != nullptr && recipient != nullptr
+            && players_hostile(impl_->snapshot_players, source->state.owner, recipient->state.owner);
+    };
+    // WU-25a: the cell a dogfight around `target` settles on.
+    const auto search_cell = [&](const math::Vec3& target) {
+        const CombatCell centre = combat_cell_of(target, impl_->map_box);
+        const auto joined = [&](const CombatCell cell) {
+            return std::any_of(minds.begin(), minds.end(),
+                [&](const auto& entry) { return entry.second.joined && entry.second.cell == cell; });
+        };
+        CombatCell best_cell = centre;
+        std::optional<math::detail::UInt192> best;
+        for (std::int32_t y = centre.y - 1; y <= centre.y + 1; ++y) {
+            for (std::int32_t x = centre.x - 1; x <= centre.x + 1; ++x) {
+                const CombatCell cell{x, y};
+                math::detail::UInt192 score = math::detail::from_u64(0);
+                if (!joined(cell)) {
+                    const auto point = combat_cell_point(cell, math::Fixed{}, impl_->map_box);
+                    const auto dx = math::detail::unsigned_magnitude(point.x.raw() - target.x.raw());
+                    const auto dy = math::detail::unsigned_magnitude(point.y.raw() - target.y.raw());
+                    score = math::detail::multiply_u64(dx, dx);
+                    static_cast<void>(math::detail::add_magnitude(score, math::detail::multiply_u64(dy, dy)));
+                }
+                if (!best || math::detail::compare(score, *best) < 0) {
+                    best = score;
+                    best_cell = cell;
+                }
+            }
+        }
+        return best_cell;
+    };
+    // WSQ-15, WWP-21 (#739): the target's soft radius as the combat world gives it: a squadron's
+    // team container in a formation has its ideal team box's radius; anything else, craft and
+    // unformed containers included, its type's.
+    const auto target_soft_radius = [&](const EntityId id, const LiveUnit& target) -> core::Result<math::Fixed> {
+        if (const auto team = squadron_frames.find(id); team != squadron_frames.end() && team->second.state->formation
+            && team->second.profile != nullptr) {
+            const auto& roster = team->second.live_roster;
+            if (!(roster.size() == 1 && roster.front() == id)) {
+                std::vector<std::optional<TypeId>> types;
+                types.reserve(roster.size());
+                for (const auto member : roster) {
+                    const auto* unit = live_unit(moving, member);
+                    types.push_back(unit != nullptr ? std::optional<TypeId>{unit->state.type_id} : std::nullopt);
+                }
+                auto box = detail::formation_target_footprint(impl_->combat, &impl_->motion, types, *team->second.profile);
+                if (!box) return core::Result<math::Fixed>::failure(box.error());
+                return core::Result<math::Fixed>::success(box.value().radius);
+            }
+        }
+        return core::Result<math::Fixed>::success(detail::type_soft_radius(impl_->combat, &impl_->motion, target.state.type_id));
+    };
+    // WSQ-15/18: one retained attachment per command coordinator and active target.
+    // Independent or autonomous singleton teams retain their own destination.
+    using AttackPoint = std::pair<math::Vec3, std::uint32_t>;
+    const auto resolve_attack_point = [&](const SquadronFrame& frame, const LiveUnit& target,
+        const std::uint32_t retained) -> core::Result<AttackPoint> {
+        auto transform = unit_transform(target); // immutable, also before a placement cache exists
+        if (!transform) return core::Result<AttackPoint>::failure(transform.error());
+        detail::CombatUnit geometry;
+        geometry.position = target.state.position;
+        geometry.transform = transform.value();
+        geometry.profile = impl_->combat.find_target_type(target.state.type_id);
+        geometry.durability_profile = impl_->health_profile(target);
+        geometry.durability = target.durability ? &*target.durability : nullptr;
+        const auto* chosen = detail::standing_hardpoint(geometry, retained);
+        if (chosen == nullptr) {
+            if (const auto* leader = live_unit(moving, frame.leader))
+                chosen = detail::best_hardpoint(&impl_->combat, impl_->combat.find(leader->state.type_id),
+                    geometry, leader->state.position);
+        }
+        if (chosen == nullptr) return core::Result<AttackPoint>::success({target.state.position, attack_hull});
+        auto point = math::transform_point(geometry.transform, chosen->position);
+        if (!point) return core::Result<AttackPoint>::failure(point.error());
+        return core::Result<AttackPoint>::success({point.value(), chosen->hardpoint});
+    };
+    if (auto result = prepare_attack_attachments(squadron_frames, moving, resolve_attack_point); !result) return result;
+    if (auto result = prepare_dogfight_cells(squadron_frames, minds, moving, squadron_table, hostile_units, squadron_of, resolve_attack_point, target_soft_radius, search_cell); !result) return result;
+    if (auto result = prepare_chase_pairs(craft_views, craft_squadron, squadron_frames, minds, team_of, hostile_units); !result) return result;
     return core::Result<void>::success();
 }
 
@@ -651,6 +689,7 @@ core::Result<void> session_detail::Tick::movement() {
     const auto& craft_views = craft_prep_.value().craft_views.value();
     const auto& squadron_frames = craft_prep_.value().squadron_frames.value();
     const auto& craft_squadron = craft_prep_.value().craft_squadron.value();
+    // FD-10: the ships and static objects craft steer around, ascending ID, at the start of the frame.
     std::vector<CraftObstacle> obstacles;
     if (!craft_views.empty()) {
         for (const auto& unit : moving) {

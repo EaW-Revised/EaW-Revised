@@ -1,0 +1,178 @@
+[
+  {
+    "old": "src/presentation/animation/unit_clips.cpp#lower",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/animation/unit_clips.cpp#equals_ignoring_case",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/animation/unit_clips.cpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/camera/constants_source.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/camera/constants_source.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/camera/constants_source.cpp#whitespace",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/space/environment_scene.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/space/environment_scene.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/space/fog_field.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/space/space.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/space/space.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/ui/battle_messages.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/ui/credits.cpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/ui/fonts.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/ui/fonts.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/ui/font_extract.cpp#lower",
+    "new": "include/eawr/core/text.hpp#to_lower"
+  },
+  {
+    "old": "src/presentation/ui/hud.cpp#equal_name",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/ui/hud_shell.cpp#equal_name",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/ui/hud_shell.cpp#lower",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/ui/loading_screen.cpp#equal_name",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "src/presentation/ui/loading_screen.cpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "src/presentation/ui/loading_screen.cpp#lower",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "src/presentation/ui/minimap.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/ui/player_profile.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/ui/settings.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim_view"
+  },
+  {
+    "old": "src/presentation/ui/theme.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/camera_binding_values.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "apps/viewer/src/camera_binding_values.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/campaign_setup_screen.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "apps/viewer/src/front_end_mode.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "apps/viewer/src/land_look.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/map_mode.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/model_preview.cpp#iequals",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/space_fog_units_compose.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/space_populate_assets.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/unit_mode.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "apps/viewer/src/unit_mode.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/viewer_host.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/galactic/galactic_audio.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "apps/viewer/src/galactic/galactic_scene.cpp#fold",
+    "new": "include/eawr/core/ascii.hpp#ascii_lower"
+  },
+  {
+    "old": "apps/viewer/src/galactic/galactic_scene.cpp#ieq",
+    "new": "include/eawr/core/text.hpp#iequals"
+  },
+  {
+    "old": "apps/viewer/src/galactic/reference_catalog.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "apps/viewer/src/galactic/route_lines.cpp#trim",
+    "new": "include/eawr/core/text.hpp#trim"
+  },
+  {
+    "old": "apps/viewer/src/galactic/scene_content.cpp#trimmed",
+    "new": "include/eawr/core/text.hpp#trim"
+  }
+]

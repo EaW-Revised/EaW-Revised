@@ -90,6 +90,20 @@ class _MultiMemberSource(str):
 # Keys retain the original reader scope. Production moves extend only the
 # corresponding tuple, so a contract never searches unrelated source files.
 SOURCE_BUNDLES = {
+    "apps/viewer/src/galactic/galactic_mode.cpp": ("apps/viewer/src/galactic/galactic_mode.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/galactic_hud.cpp": ("apps/viewer/src/galactic/galactic_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/galactic_fleet_hud.cpp": ("apps/viewer/src/galactic/galactic_fleet_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/galactic_battle_dialog.cpp": ("apps/viewer/src/galactic/galactic_battle_dialog.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/galactic_campaign_score.cpp": ("apps/viewer/src/galactic/galactic_campaign_score.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/galactic_scene.cpp": ("apps/viewer/src/galactic/galactic_scene.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/black_market_hud.cpp": ("apps/viewer/src/galactic/black_market_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/corruption_hud.cpp": ("apps/viewer/src/galactic/corruption_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/destruction_hud.cpp": ("apps/viewer/src/galactic/destruction_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/hero_action_hud.cpp": ("apps/viewer/src/galactic/hero_action_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/weapon_action_hud.cpp": ("apps/viewer/src/galactic/weapon_action_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/orbit_hud.cpp": ("apps/viewer/src/galactic/orbit_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
+    "apps/viewer/src/galactic/fleet_hud_fixture.hpp": ("tests/presentation/galactic/fleet_hud_fixture.hpp",),
+    "apps/viewer/src/galactic/orbit_hud_fixture.hpp": ("tests/presentation/galactic/orbit_hud_fixture.hpp",),
     "apps/viewer/src/lan_lobby_screen.cpp": ('apps/viewer/src/lan_lobby_screen.cpp', 'apps/viewer/src/lan_lobby_screen_internal.hpp', 'apps/viewer/src/lan_lobby_screen_list.cpp', 'apps/viewer/src/lan_lobby_screen_chat.cpp', 'apps/viewer/src/lan_lobby_screen_staging.cpp', 'apps/viewer/src/lan_lobby_screen_options.cpp', 'apps/viewer/src/lan_lobby_screen_refresh.cpp'),
     "apps/viewer/src/world_ui_view.cpp": (
         "apps/viewer/src/world_ui_view.cpp",
@@ -119,7 +133,12 @@ SOURCE_BUNDLES = {
         "apps/viewer/src/live_session_view.cpp",
         "apps/viewer/src/live_session_config.cpp",
         "apps/viewer/src/live_session_prepare.cpp",
-        "apps/viewer/src/skirmish_prepare.cpp",
+        "apps/viewer/src/battle_source.cpp",
+        "apps/viewer/src/battle_source_local.cpp",
+        "apps/viewer/src/battle_source_replay.cpp",
+        "apps/viewer/src/battle_source_lan.cpp",
+        "apps/viewer/src/battle_source_borrowed.cpp",
+        "src/platform/net/skirmish_prepare.cpp",
         "apps/viewer/src/live_session_report.cpp",
         "apps/viewer/src/live_session_death.cpp",
         "apps/viewer/src/live_session_economy.cpp",
@@ -162,7 +181,7 @@ SOURCE_BUNDLES = {
     "apps/viewer/src/space_environment.cpp": ("apps/viewer/src/space_environment.cpp", "apps/viewer/src/space_environment_config.cpp", "apps/viewer/src/space_environment_prepare.cpp", "apps/viewer/src/space_environment_probe.cpp"),
     "apps/viewer/src/space_environment_report.cpp": ("apps/viewer/src/space_environment_report.cpp", "apps/viewer/src/space_environment_report_surfaces.cpp"),
     "apps/viewer/src/space_environment_view.cpp": ("apps/viewer/src/space_environment_view.cpp", "apps/viewer/src/space_environment_surfaces.cpp", "apps/viewer/src/space_environment_effects.cpp", "apps/viewer/src/space_environment_internal.hpp"),
-    "apps/viewer/src/space_populate.cpp": ("apps/viewer/src/space_populate.cpp", "apps/viewer/src/space_populate_compose.cpp", "apps/viewer/src/space_populate_materials.cpp", "apps/viewer/src/space_populate_animation.cpp", "apps/viewer/src/space_populate_report.cpp", "apps/viewer/src/space_populate_internal.hpp"),
+    "apps/viewer/src/space_populate.cpp": ("apps/viewer/src/space_populate.cpp", "apps/viewer/src/space_populate_compose.cpp", "apps/viewer/src/space_populate_arrivals.cpp", "apps/viewer/src/space_populate_materials.cpp", "apps/viewer/src/space_populate_animation.cpp", "apps/viewer/src/space_populate_report.cpp", "apps/viewer/src/space_populate_internal.hpp"),
     "apps/viewer/src/viewer_host.cpp": ("apps/viewer/src/viewer_host.cpp", "apps/viewer/src/viewer_host_ready.cpp", "apps/viewer/src/viewer_host_config.cpp", "apps/viewer/src/viewer_host_scene.cpp", "apps/viewer/src/viewer_host_process.cpp"),
     "apps/viewer/src/viewer_host_camera.cpp": ("apps/viewer/src/viewer_host_camera.cpp", "apps/viewer/src/viewer_host_camera_setup.cpp", "apps/viewer/src/viewer_host_camera_probe.cpp", "apps/viewer/src/viewer_host_camera_steps.cpp"),
     "src/presentation/godot/renderer_upload.cpp": (
@@ -193,14 +212,45 @@ SOURCE_BUNDLES = {
         "apps/viewer/src/live_session_lan.hpp",
         "apps/viewer/src/live_session_report.hpp",
     ),
-    "apps/viewer/src/live_session_prepare.cpp": ("apps/viewer/src/live_session_prepare.cpp",),
+    "apps/viewer/src/live_session_prepare.cpp": (
+        "apps/viewer/src/live_session_prepare.cpp",
+        "apps/viewer/src/battle_source.cpp",
+        "apps/viewer/src/battle_source_local.cpp",
+        "apps/viewer/src/battle_source_replay.cpp",
+        "apps/viewer/src/battle_source_lan.cpp",
+        "apps/viewer/src/battle_source_borrowed.cpp",
+    ),
     "apps/viewer/src/live_session_config.cpp": ("apps/viewer/src/live_session_config.cpp",),
     "apps/viewer/src/live_session_fighters.cpp": ("apps/viewer/src/live_session_fighters.cpp",),
     "apps/viewer/src/live_session_report.cpp": ("apps/viewer/src/live_session_report.cpp",),
     "apps/viewer/src/live_session_frame.cpp": ("apps/viewer/src/live_session_frame.cpp",),
-    "apps/viewer/src/space_populate_compose.cpp": ("apps/viewer/src/space_populate_compose.cpp",),
-    "apps/viewer/src/lan_match.cpp": ("apps/viewer/src/lan_match.cpp",),
-    "apps/viewer/src/lan_match.hpp": ("apps/viewer/src/lan_match.hpp",),
+    "apps/viewer/src/space_populate_compose.cpp": ("apps/viewer/src/space_populate_compose.cpp", "apps/viewer/src/space_populate_arrivals.cpp", "apps/viewer/src/space_populate_internal.hpp",),
+    "apps/viewer/src/lan_match.cpp": (
+        "src/platform/net/lan_match.cpp",
+        "src/platform/net/lan_match_diagnostics.cpp",
+        "src/platform/net/lan_match_drive.cpp",
+        "src/platform/net/lan_match_drive_commit.cpp",
+        "src/platform/net/lan_match_drive_prepare.cpp",
+        "src/platform/net/lan_match_drive_rejoin.cpp",
+        "src/platform/net/lan_match_drive_session.cpp",
+        "src/platform/net/lan_match_drive_submit.cpp",
+        "src/platform/net/lan_match_launch.cpp",
+        "src/platform/net/lan_match_lifecycle.cpp",
+        "src/platform/net/lan_match_lobby.cpp",
+        "src/platform/net/lan_match_online.cpp",
+        "src/platform/net/lan_match_recovery.cpp",
+        "src/platform/net/lan_match_support.cpp",
+        "src/platform/net/lan_match_internal.hpp",
+    ),
+    "apps/viewer/src/lan_match.hpp": ("src/platform/net/lan_match.hpp",),
+    "apps/viewer/src/lan_match_fake.cpp": ("src/platform/net/lan_match_fake.cpp",),
+    "apps/viewer/src/match_transport.hpp": ("src/platform/net/match_transport.hpp",),
+    "apps/viewer/src/online_match.cpp": ("src/platform/net/online_match.cpp",),
+    "apps/viewer/src/online_match.hpp": ("src/platform/net/online_match.hpp",),
+    "apps/viewer/src/skirmish_prepare.cpp": ("src/platform/net/skirmish_prepare.cpp",),
+    "apps/viewer/src/skirmish_prepare.hpp": ("src/platform/net/skirmish_prepare.hpp",),
+    "apps/viewer/src/lan_diagnostics.hpp": ("src/platform/net/lan_diagnostics.hpp",),
+    "apps/viewer/src/online_service_settings.hpp": ("src/platform/net/online_service_settings.hpp",),
     "src/sim/tactical/session_step_commands.cpp": ("src/sim/tactical/session_step_commands.cpp", "src/sim/tactical/session_cmd_orders.cpp", "src/sim/tactical/session_cmd_lanes.cpp", "src/sim/tactical/session_cmd_economy.cpp", "src/sim/tactical/session_cmd_abilities.cpp", "src/sim/tactical/session_cmd_targeted.cpp"),
     "src/sim/tactical/session_step_fighters.cpp": ("src/sim/tactical/session_step_fighters.cpp",),
     "src/sim/tactical/session_state.cpp": (
@@ -245,7 +295,12 @@ SOURCE_BUNDLES = {
     ),
     "src/units/unit_motion.cpp": ("src/units/unit_motion.cpp",),
     "include/eawr/campaign/game_session.hpp": ("include/eawr/campaign/game_session.hpp",),
-    "src/campaign/game_session.cpp": ("src/campaign/game_session.cpp",),
+    "src/campaign/game_session.cpp": (
+        "src/campaign/game_session.cpp",
+        "src/campaign/game_session_impl.hpp",
+        "src/campaign/game_session_diagnostic.hpp",
+        "src/campaign/game_session_lifecycle.cpp",
+    ),
     "src/campaign/live_setup.cpp": ("src/campaign/live_setup.cpp",),
     "src/campaign/auto_resolve_live.cpp": ("src/campaign/auto_resolve_live.cpp",),
     "src/campaign/galactic_ai_runtime.cpp": ("src/campaign/galactic_ai_runtime.cpp",),
@@ -327,7 +382,7 @@ def viewer_build_source() -> str:
             if re.sub(token, "", body).strip():
                 raise ValueError(f"Unsupported source expression in {name}: {variable}")
             lists[variable] = "\n".join(
-                (manifest.parent / member).relative_to(ROOT).as_posix() if member
+                (manifest.parent / member).resolve().relative_to(ROOT).as_posix() if member
                 else "${" + nested + "}"
                 for member, nested in re.findall(token, body))
 

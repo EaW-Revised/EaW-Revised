@@ -1,11 +1,14 @@
-eawr_add_test_case(
+eawr_add_galactic_area_case(
+    AREA galactic_area_campaign_economy
+    NO_ARGS
+
     NAME galactic_starting_forces_tests
     SOURCES starting_forces_tests.cpp
     LIBS eawr::campaign eawr::checkpoint eawr::platform
     TESTS galactic_starting_forces_contracts
 )
 
-add_test(NAME galactic_campaign_setup_stock COMMAND galactic_campaign_setup_tests --installed)
+add_test(NAME galactic_campaign_setup_stock COMMAND galactic_area_campaign_economy galactic_campaign_setup_tests --installed)
 set_tests_properties(galactic_campaign_setup_stock PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
 add_test(NAME galactic_fleet_replay_corpus

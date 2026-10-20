@@ -42,10 +42,28 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 
 
 class LanLobbyStructure(unittest.TestCase):
+    def test_production_multiplayer_lan_discovery_is_lazy_and_released(self):
+        production = (SRC / "skirmish_setup_mode.cpp").read_text(encoding="utf-8")
+        online = production.split("void SkirmishSetupMode::enter_online(", 1)[1].split("void SkirmishSetupMode::enter(", 1)[0]
+        self.assertIn("options.lan_source_factory =", online)
+        self.assertIn("discovery.menu_chat_limits = true", online)
+        self.assertIn("BroadcastLobbySource::open", online)
+        screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
+        self.assertIn("options_.lan_source_factory(failure)", screen)
+        self.assertIn("initial_source != model::LobbySourceKind::online ? lan_source()", screen)
+        self.assertIn("if (source == model::LobbySourceKind::online) owned_lan_source_.reset()", screen)
+        physical = (SRC / "lan_lobby_screen.cpp").read_text(encoding="utf-8")
+        closing = physical.split("void EawrLanLobby::close_screen(", 1)[1].split("void EawrLanLobby::dismiss()", 1)[0]
+        self.assertIn("owned_lan_source_.reset()", closing)
+        chat = (SRC / "lan_lobby_screen_chat.cpp").read_text(encoding="utf-8")
+        self.assertIn("impl_->source->try_send_chat", chat)
+        self.assertIn("edit->set_text(text(typed))", chat)
+
     def test_every_production_match_constructor_configures_loaded_factions(self):
         import re
         constructors = 0
-        for path in (ROOT / "apps/viewer/src").rglob("*.cpp"):
+        production_roots = (ROOT / "apps/viewer/src", ROOT / "src/platform/net")
+        for path in (path for folder in production_roots for path in folder.rglob("*.cpp")):
             if path.name == "lan_match.cpp":  # Factory definition, not a construction site.
                 continue
             source = path.read_text(encoding="utf-8")
@@ -178,16 +196,16 @@ class LanLobbyStructure(unittest.TestCase):
             self.assertIn(call, bridge)
         self.assertIn("room->snapshot.seats", screen)
         self.assertIn("room->chat", screen)
-        for name in ("lan_lobby_screen.cpp", "live_session_prepare.cpp"):
+        for name in ("lan_lobby_screen.cpp", "battle_source_local.cpp"):
             source = source_text(f"apps/viewer/src/{name}")
             self.assertIn("prepare_skirmish(", source)
             self.assertIn("lan_recording_setup(", source)
-        self.assertIn("src/skirmish_prepare.cpp", source_text("apps/viewer/CMakeLists.txt"))
-        self.assertIn("skirmish_prepare.cpp", (ROOT / "tests/net/CMakeLists.txt").read_text(encoding="utf-8"))
+        self.assertIn("src/platform/net/skirmish_prepare.cpp", source_text("apps/viewer/CMakeLists.txt"))
+        self.assertIn("eawr::platform_net", (ROOT / "tests/net/CMakeLists.txt").read_text(encoding="utf-8"))
 
     def test_online_service_uses_saved_settings_and_live_adapters(self):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
-        service = (SRC / "online_service_settings.hpp").read_text(encoding="utf-8")
+        service = (ROOT / "src/platform/net/online_service_settings.hpp").read_text(encoding="utf-8")
         self.assertIn("make_live_online_source(configured.value())", screen)
         self.assertIn("make_online_match(std::move(configured).value()", screen)
         self.assertIn("make_unique<net::NetworkOnlineLobby>", service)
@@ -211,7 +229,7 @@ class LanLobbyStructure(unittest.TestCase):
         # Rows, paging, refresh, the password prompt, the hosting state and the chat window.
         for call in ("online_row_text(", "online_page(", "online_rooms->refresh()", "take_join_results()",
                      "begin_join(*attempt, room, password, impl.name)", "set_host_password(impl.host_password)",
-                     "hosting_state()", "take_notices()", "online_chat_closed_notice()", "check_join(selected, impl.name, true)",
+                     "hosting_state()", "take_notices()", "online_menu_chat_notice(", "check_join(selected, impl.name, true)",
                      "drawn.locked = online && game.passworded"):
             self.assertIn(call, screen)
         for control in ("EAWR_LOBBY_REFRESH", "EAWR_LOBBY_PREV_PAGE", "EAWR_LOBBY_NEXT_PAGE", "EAWR_LOBBY_PROMPT_PASSWORD",

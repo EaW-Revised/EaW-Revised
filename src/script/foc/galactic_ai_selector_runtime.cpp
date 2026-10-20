@@ -5,15 +5,49 @@
 #include "ai_learning.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_selection_content.hpp"
+#include "galactic_ai_execution_work.hpp"
 
 #include <algorithm>
 #include <stdexcept>
+#include <tuple>
 
 namespace eawr::script::foc::ai {
 using namespace engine_internal;
 namespace gc = sim::galactic;
 namespace gg = galactic_goals;
 namespace {
+struct StageKey {
+    const PlanDef* plan{};
+    gc::PlanetId target{};
+    std::string_view policy;
+    bool operator<(const StageKey& other) const {
+        if (plan != other.plan) return std::less<const PlanDef*>{}(plan, other.plan);
+        return std::tie(target, policy) < std::tie(other.target, other.policy);
+    }
+};
+struct ExecutionFacts;
+thread_local ExecutionFacts* execution_facts{};
+thread_local GalacticExecutionWork completed_execution_work;
+// The scope belongs to one ordered player execution turn. Snapshot/input owners
+// prevent pointer reuse, and any publication change discards the derived rows.
+// Actor predicates, assignments and route arithmetic remain live per read.
+struct ExecutionFacts {
+    const Engine* engine;
+    tactical::PlayerId player;
+    ExecutionFacts* previous{execution_facts};
+    GalacticExecutionWork work;
+    std::shared_ptr<const gc::GalacticSnapshot> snapshot;
+    std::shared_ptr<const galactic_ai::WorldInput> input;
+    std::map<StageKey, std::shared_ptr<const std::vector<gc::PlanetId>>> stages;
+    ExecutionFacts(const Engine* owner, tactical::PlayerId id) : engine(owner), player(id) { execution_facts = this; }
+    ~ExecutionFacts() { completed_execution_work = work; execution_facts = previous; }
+    void publication(std::shared_ptr<const gc::GalacticSnapshot> next_snapshot,
+        std::shared_ptr<const galactic_ai::WorldInput> next_input) {
+        if (snapshot != next_snapshot || input != next_input) {
+            stages.clear(); snapshot = std::move(next_snapshot); input = std::move(next_input);
+        }
+    }
+};
 template<class T> T required(core::Result<T> result) {
     if (!result) throw std::runtime_error(result.error().message);
     return std::move(result).value();
@@ -46,6 +80,8 @@ gg::ProductionEstimate estimate(const GalacticSelectionInput& input, const Poten
     return required(gg::estimate_production(input.producers, player, requests, input.reachable, workers));
 }
 }
+
+GalacticExecutionWork galactic_execution_work() noexcept { return completed_execution_work; }
 
 std::shared_ptr<const GalacticSelectionInput> Engine::galactic_selection(const PlayerAi& player,
     const Goal& goal, const PlanDef& plan) const {
@@ -521,15 +557,21 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
 }
 
 void Engine::service_galactic_execution(PlayerAi& player) {
+    ExecutionFacts facts(this, player.player);
     auto taskforces_ = all_taskforces();
     auto blocks_ = all_blocks();
     const auto native_record_write = native_record_scope();
     native_records_changed(player.player, {4, 13, 14, 15, 16, 17, 21, 22, 23, 32});
     mark_native_state_changed();
-    std::set<std::uint64_t> touched;
+    std::map<std::uint64_t, std::vector<std::size_t>> touched;
+    std::size_t task_index{};
     for (auto& task : player.tasks) {
-        touched.insert(task.block);
+        touched[task.block].push_back(task_index++);
+        ++facts.work.indexed_tasks;
         if (task.finished) continue;
+        // Native purchases and other task kinds may publish changed production
+        // facts. Their ordered admission must precede the next preparation.
+        if (task.source != 0) facts.stages.clear();
         auto force = taskforces_.find(task.taskforce);
         const auto* running = force == taskforces_.end() ? nullptr : this->plan(force->second.plan);
         if (!running || !galactic_goal(player.player, running->goal)) {
@@ -633,15 +675,21 @@ void Engine::service_galactic_execution(PlayerAi& player) {
         }
     }
     service_galactic_assembly(player);
-    for (auto id : touched) {
+    for (const auto& [id, tasks] : touched) {
         const auto block = blocks_.find(id); if (block == blocks_.end()) continue;
         bool done = true, failed = false;
-        for (const auto& task : player.tasks) if (task.block == id) { done = done && task.finished; failed = failed || task.failed; }
+        for (const auto index : tasks) {
+            const auto& task = player.tasks[index];
+            ++facts.work.reduced_tasks;
+            done = done && task.finished; failed = failed || task.failed;
+        }
         if (done) {
             const bool newly_failed = failed && !block->second.finished;
             block->second.finished = true; block->second.result = !failed;
-            if (newly_failed) for (const auto& task : player.tasks) if (task.block == id
-                && task.galactic_assembly == BuildTask::GalacticAssembly::failed) {
+            if (newly_failed) for (const auto index : tasks) {
+                const auto& task = player.tasks[index];
+                ++facts.work.failure_tasks;
+                if (task.galactic_assembly != BuildTask::GalacticAssembly::failed) continue;
                 const auto* force = taskforce(task.taskforce);
                 const auto* running = force ? plan(force->plan) : nullptr;
                 if (running) emit_call(*running, *force, "Production_Failed", {Value{authoritative::Handle{handle_type, task.type}}});
@@ -653,83 +701,154 @@ void Engine::service_galactic_execution(PlayerAi& player) {
 
 core::Result<std::pair<Real, bool>> Engine::galactic_freestore_selection_facts(
     tactical::PlayerId id, gc::PlanetId target_id, sim::EntityId object, const PlanDef& definition) const {
+    return galactic_freestore_selection_batch(id, target_id, definition)(object);
+}
+
+Engine::GalacticFreestoreActorFacts Engine::galactic_freestore_selection_batch(
+    tactical::PlayerId id, gc::PlanetId target_id, const PlanDef& definition) const {
     using Result = core::Result<std::pair<Real, bool>>;
-    const auto refuse = [](std::string message) { return Result::failure(detail::make_error(authoritative::codes::missing_api, std::move(message))); };
-    const auto* actions = dynamic_cast<const galactic_ai::NativeActions*>(host_->galactic_execution.get());
-    const auto* world = dynamic_cast<const GalacticWorld*>(host_->ai_world.get());
-    const auto* player = player_ai(id);
-    if (!actions || !world || !player || !player->galactic) return refuse("BTP-U04: native stage/garrison owners unavailable");
-    const auto store = actions->freestore_owner().lock(); const auto* facts = store ? store->facts(object) : nullptr;
-    if (!facts || !facts->qualified || facts->object.owner != id || !galactic_stage_garrison_)
-        return refuse("BTP-U04: retained per-object garrison flag unavailable");
-    const auto snapshot = actions->snapshot(); if (!snapshot) return refuse("BTP-U04: completed stage world unavailable");
-    const auto garrison = galactic_stage_garrison_(id, *snapshot, object);
-    if (!garrison) return Result::failure(garrison.error());
-    if (!target_id) return Result::success({Real{}, garrison.value()}); // BTP-S01: global proposal has zero stage cost
-    if (!galactic_stage_combat_skip_) return refuse("BTP-U04: retained actor combat-skip predicate unavailable");
-    const auto skip = galactic_stage_combat_skip_(id, *snapshot, object);
-    if (!skip) return Result::failure(skip.error());
-    if (skip.value()) return Result::success({Real{}, garrison.value()});
-    const GoalType* goal_type{};
-    for (const auto* rows : {&player->active, &player->proposed}) for (const auto& goal : *rows) {
-        const auto* destination = target(goal.target);
-        const auto* running = plan(goal.plan);
-        const auto index = goal.potential ? std::optional{goal.potential->plan}
-            : running ? std::optional{running->definition} : std::nullopt;
-        if (!destination || destination->object != target_id || !index || plans_.at(*index).name != definition.name) continue;
-        const auto* candidate = player->functions.at(goal.function).goal;
-        if (goal_type && goal_type->reachability != candidate->reachability) return refuse("BTP-U04: ambiguous authored staging policy");
-        goal_type = candidate;
-    }
-    if (!goal_type || !galactic_stage_catalog_) return refuse("BTP-U04: retained goal/stage catalog unavailable");
-    const auto constraints = galactic_stage_catalog_->constraints.find(definition.name);
-    const auto input = world->copy_input();
-    if (constraints == galactic_stage_catalog_->constraints.end() || !input || !snapshot || !host_->view)
-        return refuse("BTP-U04: authored stage constraints/completed world unavailable");
-    std::vector<gc::PlanetId> sites;
-    for (const auto& site : input->targets) {
-        if (!allowed_production_site(*input, id, site.planet)) continue;
-        const auto reach = world->goal_reachable(id, target_id, site.planet, goal_type->reachability);
-        if (!reach) return refuse("BTP-U04: stage production-site relation unavailable");
-        if (*reach) sites.push_back(site.planet);
-    }
-    const auto stages = galactic_force_stages(definition, constraints->second.forces, target_id, goal_type->reachability, sites);
-    if (!stages) return Result::failure(stages.error());
-    const auto* actor = host_->view->find(object);
-    if (!actor || actor->owner != id) return refuse("BTP-U04: live stage actor unavailable");
-    auto source = facts->object.planet;
-    if (!source && facts->parent && facts->enroute) {
-        const auto fleet = std::lower_bound(snapshot->fleets().begin(), snapshot->fleets().end(), facts->parent,
-            [](const auto& row, auto key) { return row.id < key; });
-        if (fleet != snapshot->fleets().end() && fleet->id == facts->parent && fleet->motion.transit) {
-            const auto& transit = *fleet->motion.transit;
-            if (transit.hop + 1 < transit.path.size()) source = transit.path[transit.hop + 1];
+    // Everything here depends on (player, target, plan, completed publication), never on the actor. Each piece is
+    // resolved lazily at the position the per-actor read first needed it, so the first refusal and its order are
+    // exactly those of an independent read of that actor.
+    struct Batch {
+        const galactic_ai::NativeActions* actions{};
+        const GalacticWorld* world{};
+        const PlayerAi* player{};
+        std::shared_ptr<galactic_ai::QualifiedFreestore> store;
+        bool snapshot_read{};
+        std::shared_ptr<const gc::GalacticSnapshot> snapshot;
+        bool goals_scanned{}, ambiguous{};
+        const GoalType* goal_type{};
+        bool stage_ready{};
+        std::optional<core::Diagnostic> stage_failure;
+        ExecutionFacts* memo{};
+        std::shared_ptr<const galactic_ai::WorldInput> input;
+        std::shared_ptr<const std::vector<gc::PlanetId>> stages;
+        std::vector<const galactic_ai::TargetInput*> positions; // one per stage; null when the stage has no target row
+        bool prefix{};
+        Real tolerance{};
+    };
+    auto batch = std::make_shared<Batch>();
+    batch->actions = dynamic_cast<const galactic_ai::NativeActions*>(host_->galactic_execution.get());
+    batch->world = dynamic_cast<const GalacticWorld*>(host_->ai_world.get());
+    batch->player = player_ai(id);
+    return [this, batch, id, target_id, &definition](sim::EntityId object) -> Result {
+        const auto refuse = [](std::string message) { return Result::failure(detail::make_error(authoritative::codes::missing_api, std::move(message))); };
+        auto& b = *batch;
+        const auto* world = b.world;
+        if (!b.actions || !world || !b.player || !b.player->galactic) return refuse("BTP-U04: native stage/garrison owners unavailable");
+        if (!b.store) b.store = b.actions->freestore_owner().lock();
+        const auto* facts = b.store ? b.store->facts(object) : nullptr;
+        if (!facts || !facts->qualified || facts->object.owner != id || !galactic_stage_garrison_)
+            return refuse("BTP-U04: retained per-object garrison flag unavailable");
+        if (!b.snapshot_read) { b.snapshot = b.actions->snapshot(); b.snapshot_read = true; }
+        const auto& snapshot = b.snapshot; if (!snapshot) return refuse("BTP-U04: completed stage world unavailable");
+        const auto garrison = galactic_stage_garrison_(id, *snapshot, object);
+        if (!garrison) return Result::failure(garrison.error());
+        if (!target_id) return Result::success({Real{}, garrison.value()}); // BTP-S01: global proposal has zero stage cost
+        if (!galactic_stage_combat_skip_) return refuse("BTP-U04: retained actor combat-skip predicate unavailable");
+        const auto skip = galactic_stage_combat_skip_(id, *snapshot, object);
+        if (!skip) return Result::failure(skip.error());
+        if (skip.value()) return Result::success({Real{}, garrison.value()});
+        if (!b.goals_scanned) {
+            b.goals_scanned = true;
+            for (const auto* rows : {&b.player->active, &b.player->proposed}) for (const auto& goal : *rows) {
+                const auto* destination = target(goal.target);
+                const auto* running = plan(goal.plan);
+                const auto index = goal.potential ? std::optional{goal.potential->plan}
+                    : running ? std::optional{running->definition} : std::nullopt;
+                if (!destination || destination->object != target_id || !index || plans_.at(*index).name != definition.name) continue;
+                const auto* candidate = b.player->functions.at(goal.function).goal;
+                if (b.goal_type && b.goal_type->reachability != candidate->reachability) { b.ambiguous = true; break; }
+                b.goal_type = candidate;
+            }
         }
-    }
-    if (!source) return Result::success({gg::rejected_estimate(), garrison.value()});
-    if (!galactic_stage_usability_) return refuse("BTP-U04: source planet AI-usability unavailable");
-    const auto usable = galactic_stage_usability_(id, *snapshot, source);
-    if (!usable) return Result::failure(usable.error());
-    if (!usable.value()) return Result::success({gg::rejected_estimate(), garrison.value()});
-    if (!world->execution_available()) return refuse("BTP-U04: stage reach helper/pathfinder unavailable");
-    Real cost{}; bool reachable{};
-    const bool prefix = upper_case(goal_type->reachability) == "SINGLE_HOP_DISCONNECTED";
-    const auto tolerance = parse_real("0.0001").value();
-    for (const auto stage : stages.value()) {
-        const auto position = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == stage; });
-        if (position == input->targets.end()) return refuse("BTP-U04: stage target position unavailable");
-        Real helper = gg::rejected_estimate();
-        if (source == stage) helper = {};
-        else if (const auto* route = world->execution_route(id, source, stage)) {
-            if (!route->empty && (prefix ? route->prefix_threat : route->threat) <= tolerance) helper = route->distance;
+        if (b.ambiguous) return refuse("BTP-U04: ambiguous authored staging policy");
+        if (!b.goal_type || !galactic_stage_catalog_) return refuse("BTP-U04: retained goal/stage catalog unavailable");
+        const auto* goal_type = b.goal_type;
+        if (!b.stage_ready) {
+            b.stage_ready = true;
+            const auto constraints = galactic_stage_catalog_->constraints.find(definition.name);
+            b.input = world->copy_input();
+            if (constraints == galactic_stage_catalog_->constraints.end() || !b.input || !snapshot || !host_->view) {
+                b.stage_failure = detail::make_error(authoritative::codes::missing_api, "BTP-U04: authored stage constraints/completed world unavailable");
+            } else {
+                const auto& input = b.input;
+                auto* memo = execution_facts;
+                if (memo && (memo->engine != this || memo->player != id)) memo = nullptr;
+                b.memo = memo;
+                if (memo) memo->publication(snapshot, input);
+                const StageKey key{&definition, target_id, goal_type->reachability};
+                if (memo) {
+                    const auto cached = memo->stages.find(key);
+                    if (cached != memo->stages.end()) { b.stages = cached->second; ++memo->work.stage_reuses; }
+                }
+                if (!b.stages) {
+                    if (memo) ++memo->work.stage_preparations;
+                    std::vector<gc::PlanetId> sites;
+                    for (const auto& site : input->targets) {
+                        if (memo) ++memo->work.production_sites;
+                        if (!allowed_production_site(*input, id, site.planet)) continue;
+                        const auto reach = world->goal_reachable(id, target_id, site.planet, goal_type->reachability);
+                        if (!reach) { b.stage_failure = detail::make_error(authoritative::codes::missing_api, "BTP-U04: stage production-site relation unavailable"); break; }
+                        if (*reach) sites.push_back(site.planet);
+                    }
+                    if (!b.stage_failure) {
+                        auto computed = galactic_force_stages(definition, constraints->second.forces, target_id, goal_type->reachability, sites);
+                        if (!computed) b.stage_failure = computed.error();
+                        else {
+                            b.stages = std::make_shared<const std::vector<gc::PlanetId>>(std::move(computed).value());
+                            if (memo) memo->stages.emplace(key, b.stages);
+                        }
+                    }
+                }
+                if (!b.stage_failure) {
+                    b.positions.reserve(b.stages->size());
+                    for (const auto stage : *b.stages) {
+                        const auto position = std::find_if(input->targets.begin(), input->targets.end(), [&](const auto& row) { return row.planet == stage; });
+                        b.positions.push_back(position == input->targets.end() ? nullptr : &*position);
+                    }
+                    b.prefix = upper_case(goal_type->reachability) == "SINGLE_HOP_DISCONNECTED";
+                    b.tolerance = parse_real("0.0001").value();
+                }
+            }
+        } else if (b.memo && !b.stage_failure) ++b.memo->work.stage_reuses; // the same retained stage list, read for this actor
+        if (b.stage_failure) return Result::failure(*b.stage_failure);
+        const auto& stages = b.stages;
+        const auto* actor = host_->view->find(object);
+        if (!actor || actor->owner != id) return refuse("BTP-U04: live stage actor unavailable");
+        auto source = facts->object.planet;
+        if (!source && facts->parent && facts->enroute) {
+            const auto fleet = std::lower_bound(snapshot->fleets().begin(), snapshot->fleets().end(), facts->parent,
+                [](const auto& row, auto key) { return row.id < key; });
+            if (fleet != snapshot->fleets().end() && fleet->id == facts->parent && fleet->motion.transit) {
+                const auto& transit = *fleet->motion.transit;
+                if (transit.hop + 1 < transit.path.size()) source = transit.path[transit.hop + 1];
+            }
         }
-        if (helper != gg::rejected_estimate()) { cost = to_single(cost + to_single(helper * helper)); reachable = true; }
-        const auto x = to_single(numeric::from_fixed(actor->position.x) - numeric::from_fixed(position->position.x));
-        const auto y = to_single(numeric::from_fixed(actor->position.y) - numeric::from_fixed(position->position.y));
-        cost = to_single(cost + to_single(to_single(x * x) + to_single(y * y)));
-    }
-    if (!reachable || stages.value().empty()) return Result::success({gg::rejected_estimate(), garrison.value()});
-    return Result::success({to_single(cost / real(stages.value().size())), garrison.value()}); // BTP-S02/03
+        if (!source) return Result::success({gg::rejected_estimate(), garrison.value()});
+        if (!galactic_stage_usability_) return refuse("BTP-U04: source planet AI-usability unavailable");
+        const auto usable = galactic_stage_usability_(id, *snapshot, source);
+        if (!usable) return Result::failure(usable.error());
+        if (!usable.value()) return Result::success({gg::rejected_estimate(), garrison.value()});
+        if (!world->execution_available()) return refuse("BTP-U04: stage reach helper/pathfinder unavailable");
+        Real cost{}; bool reachable{};
+        for (std::size_t index = 0; index < stages->size(); ++index) {
+            const auto stage = (*stages)[index]; const auto* position = b.positions[index];
+            if (!position) return refuse("BTP-U04: stage target position unavailable");
+            Real helper = gg::rejected_estimate();
+            if (source == stage) helper = {};
+            else if (const auto* route = world->execution_route(id, source, stage)) {
+                if (!route->empty && (b.prefix ? route->prefix_threat : route->threat) <= b.tolerance) helper = route->distance;
+            }
+            if (helper != gg::rejected_estimate()) { cost = to_single(cost + to_single(helper * helper)); reachable = true; }
+            const auto x = to_single(numeric::from_fixed(actor->position.x) - numeric::from_fixed(position->position.x));
+            const auto y = to_single(numeric::from_fixed(actor->position.y) - numeric::from_fixed(position->position.y));
+            cost = to_single(cost + to_single(to_single(x * x) + to_single(y * y)));
+        }
+        if (!reachable || stages->empty()) return Result::success({gg::rejected_estimate(), garrison.value()});
+        return Result::success({to_single(cost / real(stages->size())), garrison.value()}); // BTP-S02/03
+    };
 }
 
 core::Result<Engine::GalacticBuildPublication> Engine::galactic_build_budgets(

@@ -1,3 +1,5 @@
+#include "../../support/check.hpp"
+
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/particles/attachment_lifecycle.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
@@ -30,9 +32,10 @@ namespace math = eawr::sim::math;
 
 namespace {
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const char* message) {
-    if (!condition) { std::cerr << "FAIL: " << message << '\n'; ++failures; }
+    local_checker.check(condition, message, std::cerr);
 }
 
 class RecordingBackend final : public particles::RenderBackend {

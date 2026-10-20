@@ -12,6 +12,8 @@
 // acceptance asks for. Agreement with the original game at those levels still
 // requires original captures; see docs/camera.md.
 
+#include "../../support/self_test.hpp"
+#include "../../support/check.hpp"
 #include "eawr/presentation/camera/camera.hpp"
 #include "eawr/presentation/camera/input.hpp"
 
@@ -19,22 +21,20 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
-#include <limits>
 #include <vector>
 
 namespace {
 namespace camera = eawr::presentation::camera;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 [[nodiscard]] bool close(const float left, const float right, const float tolerance = 1e-3F) {
@@ -635,6 +635,10 @@ void test_mode_names_match_the_xml_definitions() {
 } // namespace
 
 int main() {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     test_three_zoom_levels_per_mode();
     test_zoom_limits_and_clamping();
     test_invalid_constants_are_rejected();

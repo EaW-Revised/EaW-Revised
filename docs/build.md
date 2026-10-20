@@ -18,6 +18,32 @@ a renderer, graphics/audio libraries, game files, shaders, or anything under
   - `linux-x64-clang`: Clang 18 (`clang++-18`) and Ninja.
   - `linux-arm64-gcc`: GCC 14 (`g++-14`) and Ninja on a native ARM64 host.
 
+## MSVC 19.51 miscompile
+
+Visual Studio 18 (MSVC 19.51, toolset 14.51.36231) compiles `n == -1 ? 0 : (1 << n)` at `/O2` as an
+unconditional shift, so `n == -1` gives `INT_MIN`. Upstream Lua 5.0.2's `computesizes()` has that line, and the
+first table rehash of every Lua state then reads `array[INT_MIN]`: the viewer dies with an access violation right
+after the front end is ready, and the Lua tests crash (legacy EAWR-3930, EAWR-1287). The source is well defined, so this is a
+compiler bug. Visual Studio 2022 (MSVC 19.44), `/O1` and `/Od` compile it correctly.
+
+`cmake/EawrMsvcGuard.cmake` (root and viewer configure) builds and runs a small probe of that pattern with `/O2`.
+A compiler that gets it right (Visual Studio 2022, a fixed Visual Studio 18) changes nothing, so the pool builds keep
+their exact flags and no version number is pinned. A compiler that gets it wrong compiles the one Lua unit that has the
+pattern (`src/script/sflua/upstream/ltable.cpp`, in both the root `eawr_lua_502_sf` and the viewer's
+`eawr_viewer_script`) with `/Od` and everything else with `/O2`, and the configure prints one status line naming the
+compiler bug. `-DEAWR_MSVC_GUARD_MODE=` chooses what happens:
+
+- `workaround` (default): `/Od` on that unit when the probe fails.
+- `refuse`: stop the configure when the probe fails or cannot be built (use it to insist on a compiler that is not
+  affected).
+- `off`: no probe, no workaround; a miscompiling MSVC then crashes Lua tables.
+
+A probe that cannot be built or run on MSVC fails closed: the workaround applies, with a warning. Cross builds are
+not probed. `eawr_msvc_guard_apply()` stops the configure when the unit it is told to relax is not one of the
+target's sources, so a moved file cannot turn the workaround into a silent no-op.
+
+The P0 C runtime (`third_party/lua`) already builds at `/Od`. The guard's own test is `ci_msvc_guard`.
+
 ## Configure, build, and test
 
 Run a complete configure/build/CTest workflow from the repository root:

@@ -147,6 +147,61 @@ struct PendingAbilityDrop {
     return false;
 }
 
+// WGCH-151..155 / WGUI-172: the hero ability one dragged local fleet offers at the planet it is parked over.
+// Every action shares the planet's special-action slot; the selector tries destruction, theft, sabotage, then
+// neutralization (WGCH-152; the black-market, spy, siphon, corruption and removal actions have their own entries).
+// Among several actors the first in stored order whose type authors an action wins; the original-type ranking
+// between several qualified heroes is unverified (WGCH-152 rank tie-break) and kept as the least visible choice.
+// Availability is the authored profile plus the target rule that needs no hidden state: a planet the local
+// player does not own. The host revalidates eligibility, ownership, price and preparation identity.
+struct AbilityDrop {
+    ObjectId actor{}, planet{};
+    sim::galactic::AbilityKind kind{};
+    friend bool operator==(const AbilityDrop&, const AbilityDrop&) = default;
+};
+[[nodiscard]] inline std::optional<sim::galactic::AbilityKind> authored_drop_kind(
+    const sim::galactic::GalacticAbilityProfile& profile) {
+    using sim::galactic::AbilityKind;
+    if (profile.lifecycle_only) return std::nullopt;
+    if (profile.destruction) return AbilityKind::planet_destruction;
+    if (profile.theft) return AbilityKind::technology_theft;
+    if (profile.sabotage) return AbilityKind::structure_sabotage;
+    if (profile.neutralize) return AbilityKind::hero_neutralization;
+    return std::nullopt;
+}
+[[nodiscard]] inline std::optional<AbilityDrop> ability_drop_candidate(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId fleet_id,
+    const sim::galactic::GalacticAbilitySetup& host) {
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::lower_bound(fleets.begin(), fleets.end(), fleet_id,
+        [](const auto& row, auto id) { return row.id < id; });
+    if (fleet == fleets.end() || fleet->id != fleet_id || fleet->owner != local || fleet->motion.transit) return std::nullopt;
+    const auto planets = snapshot.planets();
+    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == fleet->orbit; });
+    if (target == planets.end() || target->owner == local) return std::nullopt;
+    for (const auto& actor : snapshot.actor_records()) {
+        if (actor.owner != local || actor.dead || actor.delete_pending) continue;
+        const auto profile = std::find_if(host.profiles.begin(), host.profiles.end(),
+            [&](const auto& row) { return row.type == actor.current_type; });
+        if (profile == host.profiles.end()) continue;
+        const auto kind = authored_drop_kind(*profile);
+        if (kind && ability_source_in_fleet(snapshot, local, actor.id, fleet_id))
+            return AbilityDrop{actor.id, fleet->orbit, *kind};
+    }
+    return std::nullopt;
+}
+// The typed order a release on the slot submits: preparation for the menu abilities, whose published menu
+// then opens; destruction queues its unpriced execution directly (the host holds no menu for it, WGCH-156).
+[[nodiscard]] inline AbilityIntent ability_drop_order(const AbilityDrop& drop) {
+    using sim::galactic::AbilityKind;
+    if (drop.kind == AbilityKind::planet_destruction) {
+        sim::galactic::PreparedAbility queued;
+        queued.actor = drop.actor; queued.planet = drop.planet; queued.kind = drop.kind;
+        return sim::galactic::ExecutePreparedAbility{queued};
+    }
+    return sim::galactic::PrepareGalacticAbility{drop.actor, drop.planet, drop.kind};
+}
+
 // WGUI-49/50: resolve the live identity's parents, rather than accepting a
 // widget's cached planet. Fleet shells need not have census rows; their orbit is authoritative.
 [[nodiscard]] inline ObjectId actor_containing_planet(const sim::galactic::GalacticSnapshot& snapshot,
@@ -236,6 +291,8 @@ struct PendingAbilityDrop {
         access.push_back(row);
     }
     PathOptions options; options.allow_bad_final = true;
+    // WGM-18: multiplayer omits the local-reveal gate; the saved session flag decides, never the viewer.
+    options.multiplayer = snapshot.victory() && snapshot.victory()->context.multiplayer;
     auto path = find_planet_path(graph.value(), source, destination, access, options);
     if (!path || path.value().planets.size() < 2) return std::nullopt;
     return std::move(path).value().planets;

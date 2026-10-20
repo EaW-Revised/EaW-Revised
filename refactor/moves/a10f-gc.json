@@ -1,0 +1,6 @@
+[
+  {
+    "old": "src/sim/galactic/session.cpp#refresh_credit_caps",
+    "new": "src/sim/galactic/session_state.cpp#refresh_credit_caps"
+  }
+]

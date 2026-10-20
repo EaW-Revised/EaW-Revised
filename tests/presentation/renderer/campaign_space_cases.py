@@ -62,12 +62,16 @@ def qualified_campaign_arguments(mode):
     Corellian corvette before moving. Loss/save keep the first single squadron.
     The Imperial Byss defender has a Tartan patrol cruiser and authored station.
     Tactical admission remains a production gate; this fixture never bypasses it.
+    The native galactic AI (on by default since the 0.2.5 release default) is
+    switched off: it launches every opposing fleet on the first ticks, leaving
+    no authored defender in Byss orbit for the proof to attack.
     """
     if mode not in ("win", "retreat", "loss", "save", "prompt-save"):
         raise ValueError("unsupported campaign space proof mode: " + str(mode))
     return [
         "--eawr-galactic", "Sandbox_Gateways_Rebel",
         "--eawr-galactic-paused", "no",
+        "--eawr-galactic-ai", "off",
         "--eawr-galactic-space-proof", mode,
     ]
 

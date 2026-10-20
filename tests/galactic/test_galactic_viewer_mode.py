@@ -44,12 +44,30 @@ class GalacticModeStructure(unittest.TestCase):
         self.assertEqual(viewer_sources.count("${EAWR_VIEWER_GALACTIC_SOURCES}"), 1)
         listed = re.findall(r'"\$\{CMAKE_CURRENT_LIST_DIR\}/([^"]+)"',
                             (GALACTIC / "sources.cmake").read_text(encoding="utf-8"))
-        self.assertEqual(sorted(listed), sorted(path.name for path in GALACTIC.glob("*.cpp")))
+        self.assertEqual(sorted(listed), sorted([path.name for path in GALACTIC.glob("*.cpp")] +
+                                ["../../../../tests/presentation/galactic/galactic_hud_capture.cpp"]))
         build = source_text("apps/viewer/CMakeLists.txt")
         for name in listed:
-            self.assertIn(f"apps/viewer/src/galactic/{name}", build)
+            self.assertIn((GALACTIC / name).resolve().relative_to(ROOT).as_posix(), build)
         for name in MODE_SOURCES["galactic_mode"]:
-            self.assertTrue((ROOT / "apps/viewer/src" / name).is_file(), name)
+            self.assertTrue(all((ROOT / member).is_file() for member in
+                                SOURCE_BUNDLES.get(f"apps/viewer/src/{name}", (f"apps/viewer/src/{name}",))), name)
+
+    def test_hud_fixture_data_and_selectors_stay_with_captures(self):
+        # Capture implementations can supply data, but normal HUD translation units
+        # must not select a synthetic scenario by its command-line spelling.
+        capture = ROOT / "tests/presentation/galactic"
+        self.assertTrue((capture / "fleet_hud_fixture.hpp").is_file())
+        self.assertTrue((capture / "orbit_hud_fixture.hpp").is_file())
+        for path in GALACTIC.glob("*.cpp"):
+            text = path.read_text(encoding="utf-8")
+            self.assertNotRegex(text, r'hud_fixture\.(?:starts_with|ends_with|empty)', path.name)
+            self.assertNotRegex(text, r'hud_fixture\s*(?:==|!=)', path.name)
+            self.assertNotRegex(text, r'#include "(?!galactic_hud_fixture)[^"\n]*fixture\.hpp"', path.name)
+        provider = (GALACTIC / "galactic_hud_fixture.hpp").read_text(encoding="utf-8")
+        self.assertIn("virtual ~GalacticHudFixture()", provider)
+        mode = (GALACTIC / "galactic_mode.cpp").read_text(encoding="utf-8")
+        self.assertIn("options.hud_provider = make_capture_hud_fixture(options)", mode)
 
     def test_my_seat_and_my_faction_stay_separate(self):
         # ADR-020: colours and relations come from the faction, the camera from the seat.

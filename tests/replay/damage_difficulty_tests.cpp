@@ -1,9 +1,17 @@
-#include "damage_support.hpp"
-#include "eawr/sim/tactical/durability.hpp"
-
 // WTA-46 (#735): an AI player's difficulty adjustment scales the maximum hull, hardpoint health
 // and shield of everything it owns, and the damage its objects deal. The values are the setup's
 // resolved scales (DurabilityTable::difficulty); a player without an entry is Normal.
+
+#include "damage_support.hpp"
+#include "eawr/sim/tactical/durability.hpp"
+
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <utility>
+#include <vector>
+
 namespace damage_test_support {
 
 namespace {

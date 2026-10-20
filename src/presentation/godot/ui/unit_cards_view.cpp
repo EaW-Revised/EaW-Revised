@@ -67,7 +67,7 @@ constexpr data::ui::ReferenceRect encyclopedia_header{62.0F, 471.5F, 265.0F, 19.
     return rect;
 }
 
-[[nodiscard]] std::string json(const std::string_view value) {
+[[nodiscard]] std::string json_space_controls_with_newline(const std::string_view value) {
     std::string out{"\""};
     for (const char character : value) {
         if (character == '\n') { out += "\\n"; continue; }
@@ -773,14 +773,14 @@ std::string EawrUnitCards::report_json() const {
         const Card& card = cards_[index];
         std::string icon;
         const Ref<Texture2D> texture = portrait(card.type, &icon);
-        output << (index ? ", " : "") << "{\"slot\": " << card.slot << ", \"type\": " << json(card.type)
-               << ", \"icon\": " << json(icon) << ", \"icon_drawn\": " << (texture.is_valid() ? "true" : "false")
+        output << (index ? ", " : "") << "{\"slot\": " << card.slot << ", \"type\": " << json_space_controls_with_newline(card.type)
+               << ", \"icon\": " << json_space_controls_with_newline(icon) << ", \"icon_drawn\": " << (texture.is_valid() ? "true" : "false")
                << ", \"count\": " << card.count << ", \"stacked\": " << (card.stacked ? "true" : "false")
                << ", \"health_level\": " << card.health_level;
         if (card.price) {
             output << ", \"price\": " << *card.price << ", \"disabled\": " << (card.disabled ? "true" : "false");
             if (card.build_frames) output << ", \"build_frames\": " << *card.build_frames;
-            output << ", \"disabled_reason\": " << json(card.disabled_reason);
+            output << ", \"disabled_reason\": " << json_space_controls_with_newline(card.disabled_reason);
         }
         if (const auto rect = slot_rect(card.slot)) output << ", \"rect\": " << rect_json(*rect);
         if (!card.stacked && !card.price && card.slot < setup_.slots.size()) {
@@ -789,7 +789,7 @@ std::string EawrUnitCards::report_json() const {
                 const auto texture = setup_.texture(bar.overlay.back());
                 if (texture.is_null()) return;
                 const assets::Vec2f centre{bar.origin.x + bar.offset.x, bar.origin.y + bar.offset.y};
-                output << ", " << json(key) << ": "
+                output << ", " << json_space_controls_with_newline(key) << ": "
                        << rect_json(aligned_bar(screen(centred(centre, texture->get_size(), bar.scale))));
             };
             const auto& look = setup_.slots[card.slot];
@@ -809,21 +809,21 @@ std::string EawrUnitCards::report_json() const {
         if (!card->disabled_reason.empty()) name += "\n" + String(card->disabled_reason.c_str());
         const CharString utf8 = name.utf8();
         output << "{\"slot\": " << card->slot << ", \"external\": " << (shown_external_ ? "true" : "false")
-               << ", \"alpha\": " << timing_.alpha << ", \"text\": " << json(std::string(utf8.get_data(), utf8.length()))
+               << ", \"alpha\": " << timing_.alpha << ", \"text\": " << json_space_controls_with_newline(std::string(utf8.get_data(), utf8.length()))
                << ", \"rect\": " << rect_json(tooltip_rect_);
         if (popup_.popup_rect_.has_area()) {
-            output << ", \"description\": " << json(popup_.popup_content_.description)
-                   << ", \"unit_class\": " << json(popup_.popup_content_.unit_class)
+            output << ", \"description\": " << json_space_controls_with_newline(popup_.popup_content_.description)
+                   << ", \"unit_class\": " << json_space_controls_with_newline(popup_.popup_content_.unit_class)
                    << ", \"population\": " << popup_.popup_content_.population
                    << ", \"title_rect\": " << rect_json(popup_.popup_name_rect_)
                    << ", \"portrait_rect\": " << rect_json(popup_.popup_portrait_rect_)
-                   << ", \"cost_font\": " << json(setup_.popup_cost_font.is_valid()
+                   << ", \"cost_font\": " << json_space_controls_with_newline(setup_.popup_cost_font.is_valid()
                        ? std::string(setup_.popup_cost_font->get_font_name().utf8().get_data()) : std::string());
             const auto icons = [&](const char* key, const std::vector<std::string>& entries, const std::size_t column) {
-                output << ", " << json(key) << ": [";
+                output << ", " << json_space_controls_with_newline(key) << ": [";
                 for (std::size_t slot = 0; slot < entries.size(); ++slot) {
                     const auto texture = entries[slot].empty() || !setup_.texture ? Ref<Texture2D>() : setup_.texture(entries[slot]);
-                    output << (slot ? ", " : "") << "{\"icon\": " << json(entries[slot])
+                    output << (slot ? ", " : "") << "{\"icon\": " << json_space_controls_with_newline(entries[slot])
                            << ", \"icon_drawn\": " << (texture.is_valid() ? "true" : "false")
                            << ", \"rect\": " << rect_json(popup_.popup_icon_rects_[column * 3 + slot]) << "}";
                 }
@@ -833,11 +833,11 @@ std::string EawrUnitCards::report_json() const {
             icons("vulnerable_to", popup_.popup_content_.vulnerable_to_icons, 1);
             output << ", \"ability_icons\": [";
             for (std::size_t index = 0; index < popup_.popup_content_.ability_icons.size(); ++index)
-                output << (index ? ", " : "") << json(popup_.popup_content_.ability_icons[index]);
-            output << "], \"icon_back\": " << json(popup_.popup_content_.icon_back) << ", \"cells\": [";
+                output << (index ? ", " : "") << json_space_controls_with_newline(popup_.popup_content_.ability_icons[index]);
+            output << "], \"icon_back\": " << json_space_controls_with_newline(popup_.popup_content_.icon_back) << ", \"cells\": [";
             for (std::size_t index = 0; index < popup_.popup_content_.cells.size() && index < popup_.popup_cell_rects_.size(); ++index) {
                 const auto& cell = popup_.popup_content_.cells[index];
-                output << (index ? ", " : "") << "{\"icon\": " << json(cell.icon) << ", \"count\": " << cell.count
+                output << (index ? ", " : "") << "{\"icon\": " << json_space_controls_with_newline(cell.icon) << ", \"count\": " << cell.count
                        << ", \"rect\": " << rect_json(popup_.popup_cell_rects_[index]) << "}";
             }
             output << ']';

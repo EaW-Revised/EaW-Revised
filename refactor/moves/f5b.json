@@ -1,0 +1,30 @@
+[
+  {
+    "old": "src/sim/tactical/session_step_economy.cpp#income_and_launch",
+    "new": "src/sim/tactical/session_step_economy.cpp#economy"
+  },
+  {
+    "old": "src/sim/tactical/session_step_economy.cpp#upgrade_bonus_phase",
+    "new": "src/sim/tactical/session_step_economy.cpp#bonuses"
+  },
+  {
+    "old": "src/sim/tactical/session_abilities.cpp#ability_helpers",
+    "new": "src/sim/tactical/session_abilities.cpp#entering_abilities"
+  },
+  {
+    "old": "src/script/foc/tactical_ai_bindings.cpp#Unit_Ability_Ready",
+    "new": "src/script/foc/ai_taskforces.cpp#service_taskforce_events"
+  },
+  {
+    "old": "src/data/xml.cpp#find_game_object",
+    "new": "src/data/xml.cpp#Catalog::find"
+  },
+  {
+    "old": "apps/viewer/src/battle_input_commands.cpp#BARRAGE",
+    "new": "apps/viewer/src/battle_input_commands.cpp#left_release"
+  },
+  {
+    "old": "apps/viewer/src/battle_effects_prepare.cpp#lure",
+    "new": "apps/viewer/src/battle_effects_prepare.cpp#prepare_unit_looks"
+  }
+]

@@ -1,0 +1,190 @@
+[
+  {
+    "old": "tests/net/desync_monitor_tests.cpp#require",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/desync_session_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/desync_session_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/gns_dependency/smoke.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_frame_codec_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_frame_codec_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/gns_introduced_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_introduced_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/gns_link_stats_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_mesh_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_mesh_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/gns_signalling_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_signalling_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/gns_transport_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/gns_transport_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/lan_directory_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/net/lockstep_session_agreement_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/lockstep_session_fixtures.hpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/mesh_cascade_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/mesh_incident_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/mesh_incident_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/mesh_policy_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/mesh_policy_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/mesh_session_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/mesh_session_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/mesh_session_workers_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/mesh_session_workers_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/online_lobby_source_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/port_mapping_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/net/reconnect_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check_before_print"
+  },
+  {
+    "old": "tests/net/reconnect_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/relay_cloudflare_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/relay_cloudflare_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/relay_room_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/relay_room_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/relay_server_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/relay_server_tests.cpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/setup_test_support.hpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/setup_test_support.hpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/net/tcp_lockstep_tests.cpp#expect",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/tcp_lockstep_tests.cpp#take",
+    "new": "tests/support/result.hpp#result_code_colon::take"
+  },
+  {
+    "old": "tests/net/tcp_transport_tests.cpp#require",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/net/viewer_lan_fixtures.hpp#require",
+    "new": "tests/support/result_require.hpp#result_code_colon::require"
+  },
+  {
+    "old": "tests/ui/ui_test_support.hpp#TempTree::~TempTree",
+    "new": "tests/support/temp_dir.hpp#remove_temp_directory"
+  },
+  {
+    "old": "tests/ui/ui_test_support.hpp#environment",
+    "new": "tests/support/env.hpp#environment"
+  },
+  {
+    "old": "tests/ui/ui_test_support.hpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/ui/ui_test_support.hpp#failures",
+    "new": "tests/support/check.hpp#Checker::failures"
+  }
+]

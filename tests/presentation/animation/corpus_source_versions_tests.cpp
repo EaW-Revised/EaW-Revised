@@ -1,13 +1,17 @@
+#include "../../support/check.hpp"
+#include "../../support/temp_dir.hpp"
 #include "corpus_source_versions.hpp"
 
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
 #include <map>
@@ -25,9 +29,10 @@ using namespace eawr;
 namespace audit = eawr::tests::animation_corpus::associations;
 namespace sources = eawr::tests::animation_corpus::source_versions;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) { std::cerr << "FAILED: " << message << '\n'; ++failures; }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +138,7 @@ struct TempTree final {
             / ("eawr-source-versions-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(root / "empty");
     }
-    ~TempTree() { std::error_code ignored; std::filesystem::remove_all(root, ignored); }
+    ~TempTree() { eawr::testing::remove_temp_directory(root); }
     TempTree(const TempTree&) = delete;
     TempTree& operator=(const TempTree&) = delete;
     [[nodiscard]] std::filesystem::path data(const std::string& layer) const { return root / layer / "Data"; }

@@ -1,31 +1,41 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "eawr/net/tactical_adapter.hpp"
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "fake_transport.hpp"
 #include "setup_test_support.hpp"
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
-#include <stdexcept>
+#include <optional>
+#include <span>
 #include <sstream>
-#include <iomanip>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 namespace net = eawr::net;
 namespace sim = eawr::sim;
 namespace tactical = sim::tactical;
 using Bytes = std::vector<std::uint8_t>;
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(bool ok, const std::string& message) {
-    if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; }
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
 }
-template<class T> T require(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
-void require(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-}
+using eawr::testing::result_code_colon::require;
+
 sim::math::Fixed units(std::int64_t value) { return sim::math::Fixed::from_raw(value * sim::math::Fixed::scale); }
 tactical::TacticalSetup setup(std::uint32_t players = 2) {
     tactical::TacticalSetup result;

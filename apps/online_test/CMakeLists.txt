@@ -7,15 +7,11 @@ target_include_directories(eawr_online_test_core PUBLIC "${CMAKE_CURRENT_LIST_DI
 target_compile_features(eawr_online_test_core PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_online_test_core)
 
-add_executable(eawr_online_test main.cpp run.cpp
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/online_match.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/skirmish_prepare.cpp"
-    "${PROJECT_SOURCE_DIR}/apps/viewer/src/lan_match_fake.cpp")
+add_executable(eawr_online_test main.cpp run.cpp)
 # The synthetic two-player match comes from the net tests' fixtures.
 target_include_directories(eawr_online_test PRIVATE
     "${PROJECT_SOURCE_DIR}/apps/viewer/src" "${PROJECT_SOURCE_DIR}/tests/net")
-target_link_libraries(eawr_online_test PRIVATE eawr_online_test_core eawr::net eawr::platform eawr::skirmish eawr::ui_model)
+target_link_libraries(eawr_online_test PRIVATE eawr::platform_net eawr_online_test_core eawr::net eawr::platform eawr::skirmish eawr::ui_model)
 eawr_target_project_warnings(eawr_online_test)
 
 # Bundle the MSVC runtime app-local; target runtime discovery does not include it.

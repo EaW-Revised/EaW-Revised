@@ -36,7 +36,7 @@ namespace eawr::tests::scene_tests {
 using eawr::scene::Cause;
 using Fixed = eawr::sim::math::Fixed;
 
-extern int failures;
+extern int& failures;
 void expect(bool condition, std::string_view message);
 
 class ReversedExecutor final : public eawr::sim::PartitionExecutor {

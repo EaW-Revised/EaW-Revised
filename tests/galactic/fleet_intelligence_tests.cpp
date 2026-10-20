@@ -3,6 +3,8 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <stdexcept>
 #include <array>
 
@@ -303,8 +305,77 @@ void gui_index_projection() {
         && stack.cards[0].groups[0].gui_index == 4, "Ctrl-positioned type stack keeps one shared cell");
     expect(original.canonical_bytes() == canonical, "local per-object order changes no simulation bytes");
 }
-int main() {
-    try { masking(); overview_image_masking(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); gui_index_projection(); }
+// Duplicate lookup rows keep the first one, as the map-based tables did.
+void duplicate_rows_keep_first() {
+    gc::PlanetKnowledge k; k.fleet_presence = k.fleet_count = k.fleet_contents = true;
+    const auto s = snapshot(k);
+    const std::array<gc::FleetDisplayVisibility, 2> sight{{{10, true}, {10, false}}};
+    const std::array<gc::FleetDisplayVisibility, 2> hidden{{{10, false}, {10, true}}};
+    expect(!gc::observed_fleets(s, 1, traits(), 8, sight).cards.empty(), "first visibility row for a planet wins (visible)");
+    expect(gc::observed_fleets(s, 1, traits(), 8, hidden).cards.empty(), "first visibility row for a planet wins (hidden)");
+    auto twice = traits(); twice.push_back({100, true, true, true, true, damage(99), 5});
+    const std::array<gc::FleetDisplayVisibility, 1> seen{{{10, true}}};
+    expect(gc::observed_fleets(s, 1, twice, 8, seen) == gc::observed_fleets(s, 1, traits(), 8, seen),
+        "first trait row for a type wins");
+}
+// Synthetic mod-scale publication (250 planets, 12 factions): prints a digest of the projection and the median
+// call time so BASE and HEAD can be compared. The timing is informational and never asserted.
+void scale_digest() {
+    constexpr gc::PlanetId planets = 250; constexpr gc::PlayerId factions = 12;
+    auto setup = observer();
+    setup.players.clear(); setup.planets.clear();
+    for (gc::PlayerId p = 1; p <= factions; ++p) setup.players.push_back({p, p != 1, false, 0, 0, p % 3 == 1 ? std::vector<gc::PlayerId>{1, 4} : std::vector<gc::PlayerId>{}});
+    std::sort(setup.players.begin(), setup.players.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
+    std::vector<gc::Planet> planet_rows;
+    auto observed = std::make_shared<std::vector<gc::ObservedPlanet>>();
+    std::vector<gc::Fleet> fleets;
+    std::vector<gc::FleetDisplayVisibility> sight;
+    eawr::sim::EntityId entity = 1000; gc::FleetId fleet = 1;
+    for (gc::PlanetId id = 10; id < 10 + planets; ++id) {
+        planet_rows.push_back({id, {}, static_cast<gc::PlayerId>(1 + id % factions)});
+        setup.planets.push_back({id, 2, 2, 2, 2});
+        for (gc::PlayerId p = 1; p <= factions; ++p) {
+            gc::ObservedPlanet row; row.player = p; row.planet = id; row.discovered = true;
+            row.knowledge.fleet_presence = row.knowledge.fleet_count = true; row.knowledge.fleet_contents = id % 2 == 0;
+            observed->push_back(row);
+        }
+        sight.push_back({id, id % 7 != 0});
+        for (unsigned f = 0; f < 3; ++f) {
+            gc::Fleet value{fleet++, static_cast<gc::PlayerId>(1 + (id + f) % factions), id, {}};
+            value.orbit_slot = static_cast<std::uint8_t>(f % 2);
+            for (unsigned m = 0; m < 6; ++m) value.members.push_back({entity++, static_cast<gc::TypeId>(100 * (1 + (id + m + f) % 4))});
+            fleets.push_back(std::move(value));
+        }
+    }
+    std::vector<gc::GalacticPlayer> player_rows;
+    for (gc::PlayerId p = 1; p <= factions; ++p) player_rows.push_back({p, p, 0});
+    const gc::GalacticSnapshot source(0, {}, std::move(player_rows), std::move(planet_rows), {}, std::move(fleets),
+        {}, {}, std::nullopt, {}, {}, {}, {}, {}, {}, {}, {}, std::move(setup), {}, {}, {}, observed, {}, {}, {}, {}, {}, {}, 0, {}, {});
+    const auto run = [&] { return gc::observed_fleets(source, 1, traits(), 35, sight); };
+    const auto result = run();
+    std::uint64_t digest = 1469598103934665603ULL;
+    const auto mix = [&](std::uint64_t v) { digest = (digest ^ v) * 1099511628211ULL; };
+    for (const auto& p : result.presence) { mix(p.planet); mix(p.owner); }
+    for (const auto& c : result.cards) {
+        mix(c.planet); mix(c.owner); mix(c.count); mix(c.local); mix(c.fleet.value_or(0)); mix(c.orbit_slot.value_or(9));
+        mix(c.overview_type.value_or(0));
+        for (const auto& g : c.groups) { mix(g.count); mix(g.gui_slot); mix(g.type.value_or(0)); mix(g.representative.value_or(0)); mix(g.fleet.value_or(0)); mix(g.transport); mix(g.strongest); mix(g.superweapon); }
+    }
+    mix(result.observation_rows); mix(result.fleets_examined); mix(result.members_examined);
+    std::vector<double> times;
+    for (int i = 0; i < 40; ++i) {
+        const auto begin = std::chrono::steady_clock::now();
+        const auto again = run();
+        times.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - begin).count());
+        if (again.cards.size() != result.cards.size()) throw std::runtime_error("projection changed between calls");
+    }
+    std::sort(times.begin(), times.end());
+    std::cout << "OBSERVED-FLEETS cards=" << result.cards.size() << " presence=" << result.presence.size()
+        << " digest=" << digest << " median_us=" << times[times.size() / 2] << std::endl;
+    expect(!result.cards.empty(), "the scale projection publishes cards");
+}
+int case_galactic_fleet_intelligence_tests() {
+    try { masking(); overview_image_masking(); live_actor_masking(); strongest_and_capacity(); slot_merge(); company_true_type(); worker_parity(); delayed_sight(); gui_index_projection(); duplicate_rows_keep_first(); scale_digest(); }
     catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

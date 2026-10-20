@@ -1,12 +1,16 @@
+#include "../support/check.hpp"
 #include "../../src/net/gns_link_stats.hpp"
 
+#include <exception>
 #include <iostream>
-#include <stdexcept>
+#include <optional>
 
 namespace {
 using namespace std::chrono_literals;
 using eawr::net::GnsLinkStatsSampler;
-void expect(bool value, const char* message) { if (!value) throw std::runtime_error(message); }
+void expect(bool value, const char* message) {
+    if (!value) eawr::testing::require(value, message);
+}
 void cadence() {
     GnsLinkStatsSampler sampler;
     const GnsLinkStatsSampler::Clock::time_point start{};

@@ -1,5 +1,7 @@
 // P2-21 (#84): FoC's sound-event rules (presentation::audio, docs/behaviour/battle-audio.md).
 // Synthetic inputs only; no game data.
+
+#include "../../support/check.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
@@ -11,8 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -23,13 +28,11 @@ namespace sim = eawr::sim;
 using audio::Field;
 using Result = audio::Start::Result;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        ++failures;
-        std::cerr << "FAIL: " << message << '\n';
-    }
+    if (!condition) local_checker.check_before_print(condition, message, std::cerr, "FAIL: ");
 }
 
 [[nodiscard]] bool near(const double a, const double b, const double tolerance = 1.0e-9) {

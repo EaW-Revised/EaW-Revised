@@ -81,6 +81,10 @@ public:
     [[nodiscard]] core::Result<std::int64_t> assign_technology(const TechnologyWrite&);
     std::optional<IncomeState> income;
     std::optional<EconomyCorruptionState> economy_corruption;
+    // GCMP-24: both saved copies come from the one campaign setup mode.
+    [[nodiscard]] bool multiplayer_flag() const noexcept {
+        return victory ? victory->context.multiplayer : economy_corruption && economy_corruption->multiplayer;
+    }
     std::optional<GalacticAbilityState> ability_host;
     // GHUD-S61: raw scoring counters; only ordered commits write them.
     CampaignScoreLedger score_ledger;
@@ -141,6 +145,13 @@ public:
     void lose_ability_actor(EntityId);
     void execute_ability(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     [[nodiscard]] std::optional<HeroDefeat> prepare_ability_defeat(const CensusObject&, math::Fixed, bool bypass);
+    // WGCH-27..30/96..99: live structure sabotage and WGCH-20..26/91..95 hero neutralization on the shared host.
+    void release_structure_object(PlanetProduction&, const ProductionObject&);
+    [[nodiscard]] bool sabotage_admitted(const CensusObject& actor, PlanetId) const;
+    void prepare_sabotage(const GameCommand&, const CensusObject&, std::uint64_t, std::vector<GalacticEvent>&);
+    void execute_sabotage(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
+    void prepare_neutralization(const GameCommand&, const CensusObject&, std::uint64_t, std::vector<GalacticEvent>&);
+    void execute_neutralization(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     void prepare_theft(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_theft(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     // Sparse expiry calendar; reconstructed from the saved ledger at creation.
@@ -333,6 +344,7 @@ public:
     GalacticClock clock;
     GalacticSession::TimelineService timeline_service;
     bool failed{};
+    bool prebattle_autosave_window{}; // WGS-99/142: owner-derived per step, never saved
 
     // The seat table as state: whether each seat is active (ascending seat ID).
     std::vector<Seat> seats;
@@ -341,6 +353,9 @@ public:
     std::map<CommandOrderKey, GameCommand> pending;
     std::map<SeatId, std::pair<std::uint64_t, std::uint64_t>> last_submitted;
     std::vector<GameCommand> executed;
+    // #4058: history before the last save/load boundary is dropped from memory; the counts keep the
+    // command-limit arithmetic and the absolute native sequence (native_sequence == native_dropped + journal + 1) unchanged.
+    std::uint64_t executed_dropped{}, native_dropped{};
 
     std::shared_ptr<StateHasher> hasher;
     // Each section's digest as of its last change, and whether a commit changed it since.
@@ -380,6 +395,19 @@ public:
     [[nodiscard]] std::vector<Route> sorted_routes() const;
     [[nodiscard]] std::vector<Fleet> sorted_fleets() const;
     [[nodiscard]] FleetControlSetup fleet_control_state() const;
+    [[nodiscard]] core::Result<void> service_tick_control(GalacticSession& session, const PartitionExecutor& executor,
+        const std::uint64_t executing, std::vector<GalacticEvent>& events, GalacticTick& tick);
+    [[nodiscard]] core::Result<void> service_tick_objects(GalacticSession& session, const PartitionExecutor& executor,
+        const std::uint64_t executing, std::vector<GalacticEvent>& events, GalacticTick& tick,
+        const bool pending_local_conflict);
+    [[nodiscard]] core::Result<void> service_tick_fiscal(const PartitionExecutor& executor, const std::uint64_t executing,
+        std::vector<GalacticEvent>& events, GalacticTick& tick, const std::uint32_t duration);
+    [[nodiscard]] core::Result<void> service_tick_clock(const PartitionExecutor& executor, const std::uint64_t executing,
+        std::vector<GalacticEvent>& events, GalacticTick& tick, const bool frame_admitted,
+        const bool step_timer);
+    [[nodiscard]] core::Result<void> commit_tick_commands(const PartitionExecutor& executor, const std::uint64_t executing,
+        std::vector<GalacticEvent>& events, const bool pending_local_conflict);
+
     void execute_fleet(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict, bool production_placement = false);
     [[nodiscard]] core::Result<void> service_control(const PartitionExecutor& executor,

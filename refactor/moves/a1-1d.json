@@ -1,0 +1,98 @@
+[
+  {
+    "old": "tests/galactic/ability_ruins_support.hpp#take",
+    "new": "tests/support/result.hpp#eawr::testing::take"
+  },
+  {
+    "old": "tests/galactic/ai_composed_state_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_economy_tokens_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_learning_tests.cpp#require (two local lambdas)",
+    "new": "tests/support/check.hpp#require"
+  },
+  {
+    "old": "tests/galactic/ai_perception_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_plan_loading_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_s9_fixture.hpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/ai_save_growth_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_selector_stock_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_selector_test_support.hpp#must",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/ai_synchronized_day_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/ai_underworld_day_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_live_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_live_tests.cpp#check",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_outcome_tests.cpp#check",
+    "new": "tests/support/result.hpp#eawr::testing::must"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_strength_tests.cpp#environment",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/campaign_setup_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/economy_corruption_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/galaxy_graph_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/gc_profile_tests.cpp#expect (local lambda)",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/galactic/live_campaign_setup_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/space_rules_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/story_adapters_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  },
+  {
+    "old": "tests/galactic/tactical_return_tests.cpp#game_root",
+    "new": "tests/support/env.hpp#game_root"
+  }
+]

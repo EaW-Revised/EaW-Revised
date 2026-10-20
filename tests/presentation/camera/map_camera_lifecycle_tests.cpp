@@ -1,5 +1,11 @@
 #include "map_camera_test_support.hpp"
 
+#include <cstddef>
+#include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
+
 namespace eawr_map_camera_test {
 
 void test_space_activation_and_provenance() {

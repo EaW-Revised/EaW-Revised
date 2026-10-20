@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "camera_binding_config_internal.hpp"
 
 #include <algorithm>
@@ -63,33 +64,7 @@ std::span<const std::string_view> edge_scroll_rate_tags() noexcept {
 
 
 std::string json_string_literal(const std::string_view value) {
-    constexpr std::string_view hex = "0123456789abcdef";
-    std::string output;
-    output.reserve(value.size() + 2U);
-    output.push_back('"');
-    for (const char character : value) {
-        const auto byte = static_cast<unsigned char>(character);
-        switch (character) {
-        case '"': output += "\\\""; break;
-        case '\\': output += "\\\\"; break;
-        case '\b': output += "\\b"; break;
-        case '\f': output += "\\f"; break;
-        case '\n': output += "\\n"; break;
-        case '\r': output += "\\r"; break;
-        case '\t': output += "\\t"; break;
-        default:
-            if (byte < 0x20U) {
-                output += "\\u00";
-                output.push_back(hex[byte >> 4U]);
-                output.push_back(hex[byte & 0x0FU]);
-            } else {
-                output.push_back(character);
-            }
-            break;
-        }
-    }
-    output.push_back('"');
-    return output;
+    return eawr::core::json_quote_short_controls(value);
 }
 
 std::optional<Context> context_for(const camera::Mode mode) noexcept {

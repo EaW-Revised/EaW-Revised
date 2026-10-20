@@ -1,15 +1,18 @@
+// #469 target-scan collection trees (docs/behaviour/space-targeting.md CO-01 to CO-12): the
+// reverse walk order, a moved box climbing to the root's end, the one-second rebuild and its split
+// along the longest axis, strict box tests, big boxes after the split, and the slot a leaving
+// link frees.
+
+#include "../support/check.hpp"
 #include "../../src/sim/tactical/collection.hpp"
 
 #include <cstdint>
 #include <iostream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
-// #469 target-scan collection trees (docs/behaviour/space-targeting.md CO-01 to CO-12): the
-// reverse walk order, a moved box climbing to the root's end, the one-second rebuild and its split
-// along the longest axis, strict box tests, big boxes after the split, and the slot a leaving
-// link frees.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -20,13 +23,11 @@ using tactical::detail::CollectionTree;
 using tactical::detail::CollectionTrees;
 using tactical::detail::CullBox;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

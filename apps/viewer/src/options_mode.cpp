@@ -1,3 +1,4 @@
+#include "eawr/core/json_text.hpp"
 #include "options_mode.hpp"
 
 #include "audio_buses.hpp"
@@ -40,23 +41,7 @@ constexpr int settle_frames = 6;
 }
 
 [[nodiscard]] std::string json(const std::string_view value) {
-    std::ostringstream output;
-    output << '"';
-    constexpr char hex[] = "0123456789abcdef";
-    for (const unsigned char character : value) {
-        switch (character) {
-        case '"': output << "\\\""; break;
-        case '\\': output << "\\\\"; break;
-        case '\n': output << "\\n"; break;
-        case '\r': output << "\\r"; break;
-        case '\t': output << "\\t"; break;
-        default:
-            if (character < 0x20) output << "\\u00" << hex[character >> 4] << hex[character & 0x0f];
-            else output << static_cast<char>(character);
-        }
-    }
-    output << '"';
-    return output.str();
+    return eawr::core::json_quote(value);
 }
 
 [[nodiscard]] bool write_bytes(const std::filesystem::path& path, const PackedByteArray& bytes) {

@@ -8,7 +8,7 @@
 #include <string_view>
 
 namespace eawr::tests::data_contracts {
-extern int failures;
+extern int& failures;
 void expect(bool condition, std::string_view message);
 
 // xml_catalog_tests.cpp

@@ -387,8 +387,6 @@ void GraphValidator::require(bool condition, ::std::string_view message) {
         return found != nullptr && found->kind == kind;
     }
 
-[[nodiscard]] bool GraphValidator::is_table(::std::uint32_t id) const noexcept { return is(id, kind_table) || is(id, kind_handle_table); }
-
 [[nodiscard]] bool GraphValidator::is_value(const IrValue& value) const noexcept {
         if (value.tag != tag_reference) return true;
         const IrObject* found = object(value.reference);

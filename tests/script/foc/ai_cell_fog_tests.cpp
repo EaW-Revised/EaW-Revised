@@ -4,6 +4,11 @@
 // tests check the formulas against the documented rules (no retail table cell is pinned here; the
 // scouting desire values are checked by the stock-after measurement of the PR).
 
+#include <cstddef>
+#include <cstdint>
+#include <utility>
+#include <string_view>
+#include "../../support/check.hpp"
 #include "ai_engine.hpp"
 #include "tactical_ai_world.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -27,13 +32,11 @@ namespace tactical = eawr::sim::tactical;
 using eawr::sim::math::Fixed;
 using ai::Real;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    local_checker.check(condition, message, std::cerr);
 }
 
 constexpr tactical::PlayerId rebel = 11;

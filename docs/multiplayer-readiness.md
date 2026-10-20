@@ -522,6 +522,47 @@ M3 must measure representative GC saves, worst script graphs and fleet battles;
 oversize checkpoints fail admission explicitly, never truncate. Format bounds and
 advertised session limits may be revised through versioned qualification.
 
+### Galactic campaign setup offer (legacy EAWR-3768)
+
+The setup/readiness service carries a second domain, `galactic-campaign-v1`, beside `tactical-skirmish-v1`. The offer
+envelope (kinds 40..44, wire revision 3), accept, preview, Start, refusal and the tick-zero hash barrier are unchanged;
+only `SetupOffer::domain` and `SetupOffer::setup` differ, so the skirmish offer bytes did not move
+(`tests/net/galactic_setup_tests.cpp` rebuilds them independently of the encoder). The payload (`include/eawr/net/galactic_setup.hpp`)
+is a roster, never a galaxy: campaign and difficulty names, custom options, every faction (data-driven name, any
+number of AI factions, dropout policy and the agreed AI controller configuration), every seat with its human side,
+the lead of each side, the batch quotas and the host's claim of the tick-zero digest. The offer's seed, delay, final tick,
+recovery policy and seat-to-peer mapping stay in the envelope.
+
+Each peer derives the rest independently from its own content (`campaign::derive_mp_agreement`): it plans the campaign
+with the roster's players, seats and controllers, builds the session at tick zero and computes these identity domains.
+
+| Domain | Derived from |
+| --- | --- |
+| `gc-campaign` | the planner's campaign identity: selected definition, faction and type bindings, mode, custom options, seat control |
+| `gc-content` | campaign/planet/faction XML and the galactic type table |
+| `gc-map` | the planned galaxy layout: planet positions, owners, route graph |
+| `gc-story` | the campaign's story names and the mounted Lua manifest digest |
+| `gc-ai-data` | the mounted XML closure digest (AI data) |
+| `gc-ai-controllers` | the local AI configuration of every non-human faction, beside the roster's claim when it differs |
+| `gc-resolver` | auto-resolve permission, excluded locations and the authored auto-resolve constants |
+| `gc-rules` | galactic rules version, tick rate, fixed-point format, numeric ABI, Lua sandbox policy, batch quotas |
+| `gc-tick-zero` | the peer's own session digest at tick zero, beside the host's claim when it differs |
+
+A claim in the roster never replaces a local value. When the claim equals the local value the domain is the local value;
+when it differs the domain hashes both, so it differs from the host's and the setup service refuses the offer before the
+adapter is built or any shared step runs. A peer whose content cannot run the roster at all (campaign missing or not
+multiplayer, faction not playable, other batch quotas) fails the same way with a local-build refusal.
+
+Roster rules that need no content: up to eight human seats sharing one faction against AI, or exactly two human sides
+holding distinct factions; a third side, duplicate or unlisted seats, a lead outside its side, an AI configuration on a human
+faction and a missing one on a non-human faction are refused by the encoder and the decoder alike. The offer's peers must be
+exactly the active human seats of the roster. The tick-zero digest in the roster and in the identity must be the same claim.
+
+Not in this slice: the galactic `SessionAdapter` (legacy EAWR-3769), the lockstep driver (GCMP-03), the lobby, GCMP-07 (legacy EAWR-4363)
+and per-seat local presentation state (observer reveal, camera), which never enters the agreed digest. The AI controller is
+GC AI on every peer (owner decision D2, recommended option); a passive controller would be another configuration value
+in the same field, not a format change.
+
 ### Lessons and acceptance
 
 The owner reports Galactic Conquest desyncs and worse online experience after the

@@ -5,6 +5,8 @@
 #include "options_screen.hpp"
 #include <chrono>
 
+namespace eawr::core::tick_profile { struct Recording; }
+
 namespace eawr::presentation::godot_backend {
 
 using namespace map_mode_detail;
@@ -462,6 +464,11 @@ struct MapMode::State final {
     std::uint64_t units_animated{};
     std::optional<std::uint32_t> unit_sample;
     [[nodiscard]] bool fail_ready(std::string message);
+    void parse_ready_arguments(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error);
+    [[nodiscard]] bool configure_ready_options(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error);
+    [[nodiscard]] bool mount_ready_content(assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure);
+    [[nodiscard]] bool configure_ready_camera(Node3D& host, const assets::Map& map, const terrain::Mesh& mesh, const assets::Vec3f& minimum, const assets::Vec3f& maximum);
+    [[nodiscard]] bool prepare_ready_particles(Node3D& host, const assets::Map& map);
     [[nodiscard]] bool ready_space(Node3D& host, const assets::Map& map,
                                    const assets::ObjectTypeCatalog& catalog, const std::string& catalog_failure);
     [[nodiscard]] bool ready_land_population(const assets::Map& map, std::vector<sim::RenderInstance>& instances,
@@ -573,6 +580,13 @@ struct MapMode::State final {
     std::uint32_t frame{};
     std::chrono::steady_clock::time_point timing_start{};
     double timed_seconds{};
+    void record_frame_trace(double delta, const core::tick_profile::Recording& ui_recording);
+    void update_attract_camera(double delta, const std::optional<int>& finished);
+    void update_follow_camera(const std::optional<int>& finished);
+    [[nodiscard]] bool advance_map_camera(double delta);
+    [[nodiscard]] std::optional<int> process_comparison_capture();
+    [[nodiscard]] std::optional<int> draw_map_frame(double delta);
+    [[nodiscard]] std::optional<int> capture_map_frame();
     std::string capture_hash;
     // The final read-back's size, reported beside the camera identity.
     std::optional<std::array<std::uint32_t, 2>> capture_size;
@@ -593,6 +607,13 @@ struct MapMode::State final {
 
     [[nodiscard]] bool verify_capture(const CaptureResult& capture);
     [[nodiscard]] bool verify_unlocked_capture(const CaptureResult& capture);
+    struct PlacementComposition;
+    [[nodiscard]] bool prepare_live_population(Node3D& host, const assets::Map& map, std::optional<eawr::viewer::MapCameraSource>& space_camera_source, std::vector<std::uint32_t>& session_records);
+    [[nodiscard]] SpacePopulateHook make_population_hook();
+    void collect_capture_variants(scene::VfsAssetCache& cache, PlacementComposition& work);
+    void collect_placement_colours(PlacementComposition& work);
+    void upload_placement_surfaces(scene::VfsAssetCache& cache, PlacementComposition& work, sim::AssetId& next_asset, float wind_speed);
+    void compose_placement_instances(scene::VfsAssetCache& cache, PlacementComposition& work, std::vector<sim::RenderInstance>& instances, sim::EntityId& next_entity);
     [[nodiscard]] bool compose_placements(const assets::Map& map,
         std::vector<sim::RenderInstance>& instances, sim::AssetId& next_asset,
         sim::EntityId& next_entity);

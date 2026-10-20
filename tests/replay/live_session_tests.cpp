@@ -1,3 +1,10 @@
+// #80 part A: the viewer's live tactical session (eawr::platform::LiveSession). A session that
+// steps on its own thread while a presentation reader takes its snapshots gives the same
+// per-tick state hashes as the headless run of the same command stream (the committed
+// tactical-motion goldens), for every worker count; a real-time run with orders stamped as they
+// arrive records the replay that reproduces it headless.
+
+#include "../support/check.hpp"
 #include "eawr/platform/live_session.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/platform/live_scripts.hpp"
@@ -15,25 +22,26 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <mutex>
+#include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
-// #80 part A: the viewer's live tactical session (eawr::platform::LiveSession). A session that
-// steps on its own thread while a presentation reader takes its snapshots gives the same
-// per-tick state hashes as the headless run of the same command stream (the committed
-// tactical-motion goldens), for every worker count; a real-time run with orders stamped as they
-// arrive records the replay that reproduces it headless.
 namespace {
 
 namespace tactical = eawr::sim::tactical;
@@ -42,13 +50,11 @@ using eawr::platform::LiveOrder;
 using eawr::platform::LiveSession;
 using math::Fixed;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 constexpr std::int64_t one = std::int64_t{1} << 24;

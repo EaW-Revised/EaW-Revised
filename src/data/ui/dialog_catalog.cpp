@@ -1,4 +1,5 @@
 #include "eawr/data/ui/dialog_catalog.hpp"
+#include "eawr/core/text.hpp"
 
 #include <pugixml.hpp>
 
@@ -24,26 +25,14 @@ constexpr std::array<std::string_view, 8> font_fields{
     "Top_Color", "Bottom_Color", "Emboss", "Outline",
 };
 
-char fold(const char value) {
-    return value >= 'A' && value <= 'Z' ? static_cast<char>(value + ('a' - 'A')) : value;
-}
 bool iequals(const std::string_view left, const std::string_view right) {
-    return left.size() == right.size() &&
-        std::equal(left.begin(), left.end(), right.begin(),
-                   [](const char a, const char b) { return fold(a) == fold(b); });
+    return core::iequals(left, right);
 }
 std::string lower(std::string_view text) {
-    std::string result(text);
-    std::transform(result.begin(), result.end(), result.begin(), fold);
-    return result;
+    return core::to_lower(text);
 }
 std::string_view trim(std::string_view text) {
-    const auto space = [](const char value) {
-        return value == ' ' || value == '\t' || value == '\r' || value == '\n';
-    };
-    while (!text.empty() && space(text.front())) text.remove_prefix(1);
-    while (!text.empty() && space(text.back())) text.remove_suffix(1);
-    return text;
+    return core::trim_view(text, core::xml_whitespace);
 }
 
 core::Diagnostic make_diagnostic(const Source& source, const std::string_view code,

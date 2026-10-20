@@ -1,4 +1,5 @@
 #include "eawr/presentation/camera/constants_source.hpp"
+#include "eawr/core/text.hpp"
 
 #include <pugixml.hpp>
 
@@ -13,24 +14,11 @@ namespace {
 constexpr std::string_view source_error = "EAWR-CAMERA-0004";
 
 [[nodiscard]] bool ieq(std::string_view left, std::string_view right) {
-    if (left.size() != right.size()) return false;
-    for (std::size_t i = 0; i < left.size(); ++i) {
-        const auto fold = [](char c) {
-            return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c;
-        };
-        if (fold(left[i]) != fold(right[i])) return false;
-    }
-    return true;
-}
-
-[[nodiscard]] bool whitespace(char c) {
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    return core::iequals(left, right);
 }
 
 [[nodiscard]] std::string_view trim(std::string_view text) {
-    while (!text.empty() && whitespace(text.front())) text.remove_prefix(1);
-    while (!text.empty() && whitespace(text.back())) text.remove_suffix(1);
-    return text;
+    return core::trim_view(text, core::xml_whitespace);
 }
 
 [[nodiscard]] std::optional<std::string> whole_text(const pugi::xml_node node) {

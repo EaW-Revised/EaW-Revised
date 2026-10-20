@@ -1,3 +1,17 @@
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <streambuf>
+#include <string>
+#include <string_view>
+#include <vector>
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_markup.hpp"
 #include "eawr/campaign/live_setup.hpp"
@@ -10,11 +24,11 @@
 #include "../../src/campaign/galactic_ai_usability.hpp"
 #include "eawr/script/numeric/decimal.hpp"
 
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <sstream>
+#include <utility>
 
 namespace {
 namespace cp = eawr::campaign;
@@ -22,28 +36,17 @@ namespace gc = eawr::sim::galactic;
 namespace ai = eawr::script::foc::ai;
 namespace ga = eawr::script::foc::galactic_ai;
 using galactic_test::expect;
-template<class T> T must(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
-void must(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-}
+using eawr::testing::result_diagnostic::must;
+
 struct PreparationLog {
     std::ostringstream text;
     std::streambuf* previous{std::clog.rdbuf(text.rdbuf())};
     ~PreparationLog() { std::clog.rdbuf(previous); }
 };
 std::filesystem::path game_root() {
-#ifdef _WIN32
-    char* value{}; std::size_t size{};
-    if (_dupenv_s(&value, &size, "EAWR_EAW_GAME_ROOT") || !value) throw std::runtime_error("markup stock test requires game data");
-    std::filesystem::path root(value); std::free(value); return root;
-#else
-    const auto* value = std::getenv("EAWR_EAW_GAME_ROOT");
-    if (!value) throw std::runtime_error("markup stock test requires game data");
-    return value;
-#endif
+    auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
+    if (!root) throw std::runtime_error("markup stock test requires game data");
+    return std::filesystem::path(std::move(*root));
 }
 std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
     const eawr::data::galactic::GalacticData& data, const eawr::units::GalacticTypeTable& types,
@@ -228,7 +231,7 @@ std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
     return must(world->state_hash());
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_markup_stock_tests(int argc, char** argv) {
     try {
         const bool drift = argc > 1 && std::string_view(argv[1]) == "--drift";
         const auto directory = std::filesystem::path(argc > 2 ? argv[2] : "out/galactic-ai-markup");

@@ -1,22 +1,22 @@
 // Light effect contracts (WSD-02, WSD-08): the self-destruct pulse and its cancel flash, from frame counts only.
 
+#include "../../support/check.hpp"
 #include "eawr/presentation/effects/light_effect.hpp"
 
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <optional>
 #include <string_view>
 
 namespace {
 
 namespace le = eawr::presentation::light_effect;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAILED: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAILED: ");
 }
 bool near(const float a, const float b) { return std::fabs(a - b) < 1e-4F; }
 

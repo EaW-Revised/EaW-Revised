@@ -1,4 +1,5 @@
 #include "galactic/planet_hud.hpp"
+#include "galactic/hud_retained.hpp"
 #include "eawr/presentation/ui/encyclopedia_timing.hpp"
 
 #ifdef NDEBUG
@@ -13,7 +14,7 @@
 
 using namespace eawr::viewer::galactic;
 
-int main() {
+int case_galactic_planet_hud_tests() {
     {
         // TM-03..TM-06: the galactic fast-forward button.
         using eawr::sim::math::Fixed;
@@ -455,4 +456,145 @@ int main() {
     assert(player_hud_view(player, "Cycle").population.empty());
     const auto unknown = player_hud_view({}, "Cycle");
     assert(unknown.cycle.empty() && unknown.population.empty() && unknown.next_income.empty() && unknown.technology.empty());
+    {
+        // #4315: the label placement digest follows exactly the facts the planet labels, level pips, status icons and
+        // fleet badges read, so an unchanged digest means an identical placement.
+        PlanetHudFacts base;
+        base.planet = 7; base.discovered = true; base.display_name = "Kuat"; base.observed_faction = "Empire";
+        base.observed_owner = 2; base.name_colour = {0.5F, 0.25F, 0.125F};
+        base.visible_income = 120.0; base.income_overlay = "$ 120";
+        base.ground_level = 2; base.space_level = 3; base.ground_capacity = 5; base.space_capacity = 4;
+        base.structures = 6; base.political_control = 0.5; base.local_allegiance = true;
+        const auto reference = label_placement_digest(base);
+        assert(label_placement_digest(base) == reference);
+        const auto moves = [&](auto&& edit) {
+            auto copy = base; edit(copy);
+            return label_placement_digest(copy) != reference;
+        };
+        assert(moves([](auto& f) { f.planet = 8; }));
+        assert(moves([](auto& f) { f.discovered = false; }));
+        assert(moves([](auto& f) { f.observed_owner.reset(); }));
+        assert(moves([](auto& f) { f.observed_owner = 3; }));
+        assert(moves([](auto& f) { f.apparent_owner = 3; }));
+        assert(moves([](auto& f) { f.apparent_allegiance_owner = 3; }));
+        assert(moves([](auto& f) { f.locally_controlled = true; }));
+        assert(moves([](auto& f) { f.local_allegiance = false; }));
+        assert(moves([](auto& f) { f.queue_revealed = true; }));
+        assert(moves([](auto& f) { f.surface_accessible = true; }));
+        assert(moves([](auto& f) { f.display_name = "Kuati"; }));
+        assert(moves([](auto& f) { f.observed_faction = "Rebel"; }));
+        assert(moves([](auto& f) { f.name_colour.g = 0.26F; }));
+        assert(moves([](auto& f) { f.visible_income = 121.0; }));
+        assert(moves([](auto& f) { f.visible_income.reset(); }));
+        assert(moves([](auto& f) { f.income_overlay = "$ 121"; }));
+        assert(moves([](auto& f) { f.ground_level = 3; }));
+        assert(moves([](auto& f) { f.space_level.reset(); }));
+        assert(moves([](auto& f) { f.ground_capacity = 6; }));
+        assert(moves([](auto& f) { f.space_capacity = 5; }));
+        assert(moves([](auto& f) { f.structures = 7; }));
+        assert(moves([](auto& f) { f.political_control = 0.75; }));
+        assert(moves([](auto& f) { f.political_breakdown_known = true; }));
+        assert(moves([](auto& f) { f.structures_known = true; }));
+        assert(moves([](auto& f) { f.ground_level_known = true; }));
+        assert(moves([](auto& f) { f.space_level_known = true; }));
+        assert(moves([](auto& f) { f.corrupted = true; }));
+        assert(moves([](auto& f) { f.local_benefits_from_corruption = true; }));
+        // A queue row appearing or emptying changes whether the build icon shows; its progress ticking does not,
+        // and neither do the build choices or the queue limit.
+        auto queued = base;
+        ProductionItem item; item.progress_percent = 10;
+        queued.space_queue = std::vector<ProductionItem>{item};
+        assert(label_placement_digest(queued) != reference);
+        auto ticking = queued;
+        ticking.space_queue->front().progress_percent = 55;
+        assert(label_placement_digest(ticking) == label_placement_digest(queued));
+        auto emptied = base; emptied.space_queue = std::vector<ProductionItem>{};
+        assert(label_placement_digest(emptied) == reference);
+        auto priced = base; priced.choices.emplace_back(); priced.maximum_queue = 9;
+        assert(label_placement_digest(priced) == reference);
+        // Progress stays outside the digest whatever the other facts are.
+        auto flipped = queued; flipped.local_allegiance = false;
+        auto flipped_ticking = ticking; flipped_ticking.local_allegiance = false;
+        assert(label_placement_digest(flipped) == label_placement_digest(flipped_ticking));
+    }
+    {
+        // #4315: a fact that changes while a planet's labels are culled is written when the planet is next placed, and
+        // a planet panned back on screen is placed as a never-culled planet would be: the pass keeps controls only
+        // while nothing they read changed, so the controls always end up built from the current facts.
+        struct Key {
+            std::array<float, 2> anchor{};
+            std::uint64_t facts{};
+            bool operator==(const Key&) const = default;
+            bool same_but_anchor(const Key& other) const { return facts == other.facts; }
+        };
+        PlanetHudFacts planet;
+        planet.planet = 7; planet.discovered = true; planet.display_name = "Kuat"; planet.observed_owner = 2;
+        planet.visible_income = 120.0; planet.income_overlay = "$ 120";
+        const HudView screen{1000.0F, 800.0F};
+        HudBounds reach; // a name and an income line around the anchor
+        reach.include(-40.0F, -10.0F, 80.0F, 30.0F, 0.0F, 0.0F);
+        const auto place = [&](const Key& previous, const Key& next, const bool culled) {
+            return hud_placement(previous, next, culled, reach, screen, next.anchor[0], next.anchor[1], 32.0F);
+        };
+        const Key off_screen{{-500.0F, 400.0F}, label_placement_digest(planet)};
+        // Panned further out while nothing changed: kept, no placement. Unchanged altogether: kept.
+        assert(place(off_screen, Key{{-600.0F, 400.0F}, off_screen.facts}, true) == HudPlacement::keep_culled);
+        assert(place(off_screen, off_screen, true) == HudPlacement::keep);
+        // The owner, then the income, changes while the planet is culled and still off screen: placed.
+        auto taken = planet; taken.observed_owner = 3;
+        assert(place(off_screen, Key{{-600.0F, 400.0F}, label_placement_digest(taken)}, true) == HudPlacement::place);
+        auto richer = planet; richer.visible_income = 150.0; richer.income_overlay = "$ 150";
+        assert(place(off_screen, Key{{-600.0F, 400.0F}, label_placement_digest(richer)}, true) == HudPlacement::place);
+        // Panned back on screen with unchanged facts: its controls sit off screen, so it is placed there.
+        assert(place(off_screen, Key{{500.0F, 400.0F}, off_screen.facts}, true) == HudPlacement::place);
+        // A planet whose last placement was on screen is never skipped by the cull, only by an equal key.
+        assert(place(off_screen, Key{{-600.0F, 400.0F}, off_screen.facts}, false) == HudPlacement::place);
+        // The placement after the change is the key the never-culled path would hold: kept from then on.
+        const Key after{{500.0F, 400.0F}, label_placement_digest(taken)};
+        assert(place(after, after, false) == HudPlacement::keep);
+    }
+    {
+        // #4315/#4316: retained values, the cull rectangle and the change digest.
+        Retained<int> shown;
+        assert(shown.set(3) && !shown.set(3) && shown.set(4) && !shown.set(4));
+        shown.reset();
+        assert(shown.set(4) && shown.get() && *shown.get() == 4);
+
+        const HudView screen{1000.0F, 800.0F};
+        assert(screen.contains(0.0F, 0.0F) && screen.contains(1000.0F, 800.0F) && !screen.contains(-1.0F, 5.0F)
+            && !screen.contains(5.0F, 801.0F));
+        HudBounds no_bounds;
+        assert(no_bounds.outside(screen, 500.0F, 400.0F, 32.0F)); // no control, nothing on screen
+        HudBounds bounds;
+        // A control at (100, 50) of size 40 x 20 around an anchor at (110, 60) covers [-10, 30] x [-10, 10].
+        bounds.include(100.0F, 50.0F, 40.0F, 20.0F, 110.0F, 60.0F);
+        assert(bounds.min_x == -10.0F && bounds.max_x == 30.0F && bounds.min_y == -10.0F && bounds.max_y == 10.0F);
+        bounds.include(120.0F, 100.0F, 10.0F, 10.0F, 110.0F, 60.0F); // [10, 20] x [40, 50]
+        assert(bounds.max_y == 50.0F && bounds.max_x == 30.0F && bounds.min_x == -10.0F);
+        assert(!bounds.outside(screen, 500.0F, 400.0F, 0.0F));
+        // Left of the screen: the right edge -100 + 30 = -70 is off, but within a 80 px margin it is not.
+        assert(bounds.outside(screen, -100.0F, 400.0F, 0.0F) && bounds.outside(screen, -100.0F, 400.0F, 69.0F));
+        assert(!bounds.outside(screen, -100.0F, 400.0F, 70.0F) && !bounds.outside(screen, -100.0F, 400.0F, 80.0F));
+        // Right of the screen: the left edge 1020 - 10 = 1010 is off by 10.
+        assert(bounds.outside(screen, 1020.0F, 400.0F, 9.0F) && !bounds.outside(screen, 1020.0F, 400.0F, 10.0F));
+        // Above and below.
+        assert(bounds.outside(screen, 500.0F, -100.0F, 0.0F) && !bounds.outside(screen, 500.0F, -41.0F, 0.0F));
+        assert(bounds.outside(screen, 500.0F, 820.0F, 0.0F) && !bounds.outside(screen, 500.0F, 810.0F, 0.0F));
+        // Touching the edge counts as on screen: the boundary is inclusive.
+        assert(!bounds.outside(screen, -30.0F, 400.0F, 0.0F));
+
+        HudDigest a, b, c, d;
+        a.add(std::uint64_t{5}); a.add(std::string_view{"x"}); a.add(std::optional<int>{});
+        b.add(std::uint64_t{5}); b.add(std::string_view{"x"}); b.add(std::optional<int>{});
+        c.add(std::uint64_t{5}); c.add(std::string_view{"x"}); c.add(std::optional<int>{0});
+        d.add(std::uint64_t{5}); d.add(std::string_view{"y"}); d.add(std::optional<int>{});
+        assert(a.value() == b.value() && a.value() != c.value() && a.value() != d.value());
+        HudDigest e, f;
+        e.add(1.0); f.add(1.0F);
+        assert(e.value() == f.value());
+        HudDigest g, h;
+        g.add(true); h.add(false);
+        assert(g.value() != h.value());
+    }
+    return 0;
 }

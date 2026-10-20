@@ -1,0 +1,46 @@
+[
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#qualified_safety_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#qualified_safety_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#no_source_transit_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#no_source_transit_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#nested_actor_facts_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#nested_actor_facts_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#actor_parent_depth_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#actor_parent_depth_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#sparse_actor_change_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#sparse_actor_change_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#free_fleet_signal_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#free_fleet_signal_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#real_factory_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#real_factory_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#prepared_restore_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#prepared_restore_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#authored_selection_contracts",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#authored_selection_contracts"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#schedulers",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#schedulers"
+  },
+  {
+    "old": "tests/galactic/ai_campaign_stock_tests.cpp#ExternalFixture",
+    "new": "tests/galactic/ai_campaign_stock_contracts.cpp#ExternalFixture"
+  }
+]

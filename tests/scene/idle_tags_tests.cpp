@@ -1,8 +1,8 @@
 // Idle_Anim_00 tag contracts (#145 space, #157 land). The objects are shaped
 // like FoC XML types but invented here; no installation is read.
 
+#include "../support/check.hpp"
 #include "eawr/scene/idle_tags.hpp"
-
 #include "eawr/assets/map.hpp"
 #include "eawr/data/xml.hpp"
 
@@ -18,13 +18,11 @@ namespace {
 using eawr::assets::MapKind;
 using eawr::scene::idle_tags;
 
-int failures{};
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 eawr::data::EffectiveObject object(const std::initializer_list<std::pair<std::string, std::string>> tags) {

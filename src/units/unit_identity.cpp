@@ -419,10 +419,7 @@ void encode(Encoder& out, const UnitType& unit) {
     out.fixed(unit.follow_distance);
 }
 
-} // namespace
-
-std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
-    Encoder out;
+void encode_core_table_rows(Encoder& out, const UnitTables& tables) {
     out.text("eawr-unit-tables-v7");
     out.each(tables.units, [&](const UnitType& unit) { encode(out, unit); });
     out.each(tables.obstacles, [&](const ObstacleType& obstacle) {
@@ -511,6 +508,9 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
         out.text(row.armor_type);
         out.fixed(row.multiplier);
     });
+}
+
+void encode_capture_lifecycle_extensions(Encoder& out, const UnitTables& tables) {
     // WPR-12: retain existing Normal identities; alternate credit rules bind replays.
     if (tables.ai_credit_multiplier != Fixed::from_raw(Fixed::scale)) {
         out.text("AI-CREDITS-v1");
@@ -615,6 +615,9 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             });
         });
     }
+}
+
+void encode_projectile_hero_extensions(Encoder& out, const UnitTables& tables) {
     // WAB-70..73: bind authored buzz-droid content without changing profiles that omit it.
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
             return unit.buzz_droids || unit.team_buzz_droids;
@@ -695,6 +698,9 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             out.flag(unit.special_weapon_in_space);
         });
     }
+}
+
+void encode_special_ability_extensions(Encoder& out, const UnitTables& tables) {
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
             return !unit.special_abilities.empty() || !unit.team_special_abilities.empty();
         })) {
@@ -802,6 +808,9 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             out.each(unit.team_special_abilities, special);
         });
     }
+}
+
+void encode_production_campaign_extensions(Encoder& out, const UnitTables& tables) {
     if (std::any_of(tables.units.begin(), tables.units.end(), [](const UnitType& unit) {
             return !unit.production.upgrade_object && !unit.production.combat_bonuses.empty();
         })) {
@@ -928,6 +937,17 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
             }
         });
     }
+}
+
+} // namespace
+
+std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
+    Encoder out;
+    encode_core_table_rows(out, tables);
+    encode_capture_lifecycle_extensions(out, tables);
+    encode_projectile_hero_extensions(out, tables);
+    encode_special_ability_extensions(out, tables);
+    encode_production_campaign_extensions(out, tables);
     return out.take();
 }
 

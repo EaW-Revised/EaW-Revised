@@ -1,3 +1,9 @@
+#include <algorithm>
+#include <cstddef>
+#include <exception>
+#include <string>
+#include <utility>
+#include "../support/check.hpp"
 // S9-early contracts: per-player galactic random streams and per-player identity ranges for plans,
 // targets, task forces and plan-script instances. Tactical players share the stream mechanism while
 // keeping engine-wide identity counters (GFS-A24). Synthetic data only; the 600-frame and 1/2/4/8 acceptance runs use the stock
@@ -7,7 +13,6 @@
 
 #include <cstdint>
 #include <iostream>
-#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -174,8 +179,11 @@ namespace ai = s9_fixture::ai;
 namespace gc = s9_fixture::gc;
 using s9_fixture::must;
 using Access = ai::EngineContractAccess;
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
+}
 
 constexpr std::uint64_t two_pow_32 = std::uint64_t{1} << 32;
 constexpr std::uint64_t two_pow_53 = std::uint64_t{1} << 53;
@@ -417,7 +425,7 @@ void tactical_unchanged() {
 }
 } // namespace
 
-int main() {
+int case_galactic_ai_stream_ids_tests() {
     try {
         seeding(); independence(); identities(); exhaustion(); archive(); bounded_record_reconciliation(); owned_runtime_records(); tactical_unchanged();
     } catch (const std::exception& error) {

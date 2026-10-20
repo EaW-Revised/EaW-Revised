@@ -1,19 +1,27 @@
+#include "../support/check.hpp"
+#include "../support/result_require.hpp"
 #include "../../src/net/gns_frame_codec.hpp"
 #include "../../src/net/gns_log_redact.hpp"
+#include "../../src/net/gns_room_signal.hpp"
 #include "eawr/net/gns_transport.hpp"
 
-#include <iostream>
 #include <array>
-#include <stdexcept>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <iostream>
+#include <optional>
+#include <span>
+#include <string>
+#include <vector>
 
 namespace {
 using namespace eawr::net;
 using Bytes = std::vector<std::uint8_t>;
-void expect(bool ok, const char* reason) { if (!ok) throw std::runtime_error(reason); }
-template<class T> T require(eawr::core::Result<T> value) {
-    if (!value) throw std::runtime_error(value.error().code + ": " + value.error().message);
-    return std::move(value).value();
+void expect(bool ok, const char* reason) {
+    if (!ok) eawr::testing::require(ok, reason);
 }
+using eawr::testing::result_code_colon::require;
 void u32(Bytes& bytes, std::uint32_t value) {
     for (unsigned i = 0; i < 4; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8)));
 }
@@ -192,6 +200,25 @@ Bytes words(std::initializer_list<std::uint32_t> values, std::initializer_list<s
     bytes.insert(bytes.end(), tail.begin(), tail.end());
     return bytes;
 }
+void room_signal_attempts() {
+    GnsFormationSecret old_grant{}, current_grant{};
+    old_grant.fill(11); current_grant.fill(29);
+    const Bytes request{1, 2, 3, 4}; // opaque native request/proof signalling
+    const auto old_wire = encode_room_signal(request, old_grant);
+    const auto current_wire = encode_room_signal(request, current_grant);
+    const auto old = decode_room_signal(old_wire), current = decode_room_signal(current_wire);
+    expect(old && current && room_signal_matches_grant(*old, old_grant), "Original grant carries its native signals");
+    // Attempt N's delayed request arrives after the acceptor has installed N+1.
+    // It must never enter GNS to create a new link with N+1's expected proof.
+    expect(!room_signal_matches_grant(*old, current_grant)
+        && room_signal_matches_grant(*current, current_grant), "Regrant rejects the old request and accepts its own request");
+    expect(Bytes(current->payload.begin(), current->payload.end()) == request, "Only the opaque native payload reaches GNS");
+    for (std::size_t size = 0; size <= old_wire.size() - request.size(); ++size)
+        expect(!decode_room_signal(std::span(old_wire).first(size)), "Truncated grant envelope is rejected");
+    auto malformed = current_wire; malformed[3] = 255;
+    expect(!decode_room_signal(malformed) && !decode_room_signal(request), "Unknown revisions and unwrapped pair signals are rejected");
+    expect(encode_room_signal(Bytes(64 * 1024, 7), current_grant).empty(), "The envelope preserves the room signal size bound");
+}
 void mesh_controls() {
     const Bytes secret(16, 7);
     const auto pair = [&](std::uint32_t from, std::uint32_t to) {
@@ -204,7 +231,8 @@ void mesh_controls() {
         Bytes body = words({seat, 2}, {reason}); u32(body, other); u32(body, code); body.push_back(relay); return control(16, body);
     };
     const auto report = [&](std::uint32_t remote, std::uint8_t status, std::uint8_t relay, std::uint32_t code = 1762) {
-        Bytes body = words({remote}, {status, relay}); u32(body, code); return control(17, body);
+        Bytes body = words({remote}, {status, relay}); u32(body, code);
+        body.insert(body.end(), gns_pair_secret_size, 73); return control(17, body);
     };
     const auto ready = [&](std::uint32_t mask) { return control(18, words({mask})); };
     const auto decode = [&](GnsFrameDecoder& decoder, const Bytes& packet, GnsDecodeContext context = {true, true, false, 0, 0}) {
@@ -257,6 +285,9 @@ void mesh_controls() {
     refused(at_host, report(1, 1, 2), "EAWR-NET-1770");
     for (const auto code : {1500U, 1507U, 1762U, 1768U, 1771U}) expect(static_cast<bool>(decode(at_host, report(1, 1, 1, code))), "Reports carry the pair's reason");
     for (const auto code : {0U, 1530U, 1760U, 1765U, 1772U}) refused(at_host, report(1, 1, 1, code), "EAWR-NET-1770");
+    refused(at_host, control(17, Bytes(10, 0)), "EAWR-NET-1770"); // report without its attempt secret
+    auto truncated_report = report(1, 1, 1); truncated_report.pop_back();
+    refused(at_host, truncated_report, "EAWR-NET-1770");
     expect(decode(at_host, ready(0b1011)) && decode(at_host, ready(0)), "Ready masks to the host");
     refused(at_host, ready(0b0100), "EAWR-NET-1770"); refused(at_host, ready(0b10000), "EAWR-NET-1770");
     refused(at_host, control(18, Bytes(5, 0)), "EAWR-NET-1770");
@@ -277,6 +308,6 @@ static void log_redaction() {
     expect(redact_log_text("got 'a\001b'") == "got 'a?b'", "Control characters are replaced");
 }
 int main() {
-    try { log_redaction(); handshake(); hello_revisions(); framing(); refusals(); mesh_controls(); std::cout << "GNS-independent envelope failure contracts passed\n"; return 0; }
+    try { log_redaction(); handshake(); hello_revisions(); framing(); refusals(); room_signal_attempts(); mesh_controls(); std::cout << "GNS-independent envelope failure contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

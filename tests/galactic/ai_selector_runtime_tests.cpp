@@ -7,6 +7,7 @@
 #include "galactic_ai_goal_state.hpp"
 #include "galactic_ai_movement_runtime.hpp"
 #include "galactic_ai_selection_content.hpp"
+#include "galactic_ai_selection_work.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/platform/sim_workers.hpp"
 
@@ -46,6 +47,42 @@ namespace auth = eawr::script::authoritative;
 using eawr::sim::math::Fixed;
 std::string assembly_contract(const eawr::sim::PartitionExecutor&, unsigned, bool sparse = true);
 namespace {
+void goal_reach_index_contracts() {
+    const auto lookup = [](const ai::GalacticGoalReachIndex& index, const std::vector<ai::GalacticGoalReach>& rows, decltype(ai::GalacticGoalReach::player) player,
+        gc::PlanetId source, std::string_view policy) -> std::optional<std::vector<gc::PlanetId>> {
+        const auto id = ai::goal_reach_policy(ai::upper_case(ai::trimmed(policy)));
+        if (!id) return std::nullopt;
+        const auto* found = index.find(player, source, *id);
+        return found ? std::optional{rows[found->row].production_sites.get()} : std::nullopt;
+    };
+    // Duplicate keys keep the first published row, row spellings are case-folded, unknown spellings never match.
+    const std::vector<ai::GalacticGoalReach> rows = {{2, 7, "Any", {5}}, {1, 7, "Friendly_Only", {9, 3}}, {1, 7, "FRIENDLY_ONLY", {4}},
+        {1, 7, "Mystery", {1}}, {1, 6, "Single_Hop_Disconnected", {}}, {1, 7, "ANY", {2}}};
+    const auto index = ai::GalacticGoalReachIndex::build(rows);
+    expect(index.entries.size() == 5, "unrecognised policy spellings stay out of the goal-reach index");
+    expect(lookup(index, rows, 1, 7, " friendly_only ") == std::vector<gc::PlanetId>({9, 3}), "first row of a duplicated key wins, in published order");
+    expect(lookup(index, rows, 1, 7, "any") == std::vector<gc::PlanetId>({2}) && lookup(index, rows, 2, 7, "ANY") == std::vector<gc::PlanetId>({5}),
+        "goal-reach lookup separates players");
+    expect(lookup(index, rows, 1, 6, "Single_Hop_Disconnected") == std::vector<gc::PlanetId>{}, "an empty site list is a known row");
+    expect(!lookup(index, rows, 1, 6, "Any") && !lookup(index, rows, 1, 8, "Any") && !lookup(index, rows, 3, 7, "Any"), "missing rows report no relation");
+    expect(!lookup(index, rows, 1, 7, "Mystery"), "unaccepted policy has no lookup id");
+    expect(ai::GalacticGoalReachIndex{}.find(1, 7, ai::GoalReachPolicy::any) == nullptr, "empty index finds nothing");
+}
+void shared_planet_list_contracts() {
+    const ai::SharedPlanetList none, listed{4, 7, 9};
+    const auto copy = listed;
+    expect(none.empty() && none.size() == 0 && none.begin() == none.end() && ai::SharedPlanetList(std::vector<gc::PlanetId>{}).empty(),
+        "an empty list holds no storage");
+    expect(copy.begin() == listed.begin() && copy == listed && copy.size() == 3 && copy.front() == 4,
+        "a copy shares the ids of the list it was made from");
+    expect(listed == ai::SharedPlanetList(std::vector<gc::PlanetId>{4, 7, 9}) && listed.begin() != ai::SharedPlanetList{4, 7, 9}.begin()
+        && !(listed == ai::SharedPlanetList{4, 7}) && !(listed == none), "equality compares the ids, not the storage");
+    ai::SharedPlanetList cleared = listed; cleared.clear();
+    expect(cleared.empty() && listed.size() == 3, "clearing a row's list leaves the sharers untouched");
+    const std::vector<gc::PlanetId>& ids = listed;
+    expect(ids == std::vector<gc::PlanetId>({4, 7, 9}) && std::find(listed.begin(), listed.end(), 7) != listed.end(),
+        "a shared list reads as the ordered vector it replaces");
+}
 void starbase_proposal_contracts() {
     ai::GalacticSelectionContent content;
     for (const auto& [id, name, level, next] : {
@@ -126,6 +163,162 @@ std::string garrison_fact_contracts() {
     content.types.at(100).space_escorts.push_back("UNBOUND");
     expect(!ai::galactic_proposal_garrisons(content, 100, 3, 10), "unbound authored escort refuses the whole fact result");
     return trace;
+}
+std::shared_ptr<ai::GalacticSelectionContent> indexed_selection_content() {
+    auto content = std::make_shared<ai::GalacticSelectionContent>();
+    content->population_check = false; content->technology_weight = ai::real(1);
+    content->faction_speed[1] = ai::real(1);
+    content->planets.emplace(10, ai::GalacticSelectionContentPlanet{"MUD", 2, {}, {}});
+    content->terrain["MUD"]["WALK"] = ai::real(1) / ai::real(2);
+    for (gc::TypeId id = 1000; id < 1256; ++id) {
+        ai::GalacticSelectionContentType type; type.name = "DUMMY_" + std::to_string(id);
+        content->types.emplace(id, std::move(type));
+        foc::AiType traits; traits.type_id = id; traits.name = "DUMMY";
+        content->ai.types.push_back(std::move(traits));
+    }
+    for (const auto& [id, name, power, movement] : {
+        std::tuple{98ULL, "alpha", 999, "FLY"}, std::tuple{99ULL, "ALPHA", 55, "WALK"},
+        std::tuple{100ULL, "CARRIER", 7, "FLY"}, std::tuple{101ULL, "ALPHA", 100, "FLY"},
+        std::tuple{102ULL, "BETA", 20, "FLY"}}) {
+        ai::GalacticSelectionContentType type; type.name = name; type.movement_class = movement;
+        type.company = id == 102; content->types.emplace(id, std::move(type));
+        foc::AiType traits; traits.type_id = id; traits.name = name;
+        traits.combat_power = ai::real(power); traits.category_bits = 1;
+        content->ai.types.push_back(std::move(traits));
+    }
+    // Duplicate names retain the lowest content ID; duplicate AI identities
+    // retain the first authored row, independently of that map order.
+    for (const auto id : {99ULL, 100ULL}) {
+        foc::AiType duplicate; duplicate.type_id = id;
+        duplicate.combat_power = ai::real(999); duplicate.category_bits = 2;
+        content->ai.types.push_back(std::move(duplicate));
+    }
+    auto original = std::make_shared<eawr::units::GalacticType>(); original->name = "CARRIER";
+    original->starting_spawned_units[1] = {{"Alpha", 2}, {"BETA", 1}, {"ALPHA", 9}};
+    auto& carrier = content->types.at(100); carrier.original = std::move(original);
+    carrier.space_escorts = {"BETA", "Alpha"}; carrier.named_hero = carrier.value.hero = true;
+    carrier.value.tech = 2; carrier.value.cost = ai::real(100); carrier.value.build_seconds = ai::real(1);
+    return content;
+}
+std::string indexed_selection_contract(const eawr::sim::PartitionExecutor& executor) {
+    auto session = must(gc::GalacticSession::create(setup()));
+    Owner owner(session, executor);
+    ai::GalacticPerceptionSetup perception;
+    perception.players = {{1, 1, "Empire", "Normal", false, true, false, 10}};
+    perception.planets = {{10, "ALPHA", 1000, {}, {}, {}, {}, {}}};
+    perception.planets.front().enemy_indigenous.emplace();
+    perception.types = owner.host->setup.content.types;
+    auto world = std::make_shared<ai::GalacticWorld>(perception);
+    ai::GalacticConnectivity connectivity; connectivity.goal_reach.push_back({1, 10, "ANY", {10}});
+    auto published = session.snapshot();
+    must(world->bind(published, connectivity, executor, 0, session.next_entity_id()));
+    auto plan = definition(); plan.ignore_target = false; plan.allow_free_store = true;
+    plan.galactic_contrast_qualified = true;
+    auto plans = std::make_shared<ai::galactic_goals::MaterializedPlanCatalog>();
+    plans->constraints[plan.name].forces.resize(plan.taskforces.size());
+    const auto goal = data().goals.at("GOAL");
+    auto content = indexed_selection_content();
+    const auto expected = must(ai::galactic_proposal_garrisons(*content, 100, 2, 10));
+    const auto expected_low_tech = must(ai::galactic_proposal_garrisons(*content, 100, 0, 10));
+    expect(expected.size() == 7 && expected.front().type == 99 && expected.front().power == ai::real(55),
+        "indexed fixture distinguishes canonical case, duplicate names, first AI row and first spawned count");
+    const auto content_rows = content->types.size(), trait_rows = content->ai.types.size();
+    const auto before = ai::galactic_selection_work();
+    std::uint64_t freestore_reads{}, hero_reads{}; bool refuse_freestore{}, refuse_hero{};
+    const auto heroes = [&](auto, auto, auto, const auto&) -> eawr::core::Result<ai::GalacticHeroSelection> {
+        ++hero_reads;
+        if (refuse_hero) {
+            eawr::core::Diagnostic error; error.code = "TEST-HERO-LIVE"; error.message = "live hero refusal";
+            return eawr::core::Result<ai::GalacticHeroSelection>::failure(std::move(error));
+        }
+        ai::GalacticHeroSelection result; result.target_weight = ai::real(static_cast<std::int64_t>(hero_reads));
+        result.containment_allowed = true;
+        return eawr::core::Result<ai::GalacticHeroSelection>::success(result);
+    };
+    const auto freestore = [&](auto, auto, const auto&) -> eawr::core::Result<std::vector<ai::GalacticSelectionObject>> {
+        ++freestore_reads;
+        if (refuse_freestore) {
+            eawr::core::Diagnostic error; error.code = "TEST-FREESTORE-LIVE"; error.message = "live freestore refusal";
+            return eawr::core::Result<std::vector<ai::GalacticSelectionObject>>::failure(std::move(error));
+        }
+        ai::GalacticSelectionObject row; row.object = 900 + freestore_reads; row.type = 100;
+        return eawr::core::Result<std::vector<ai::GalacticSelectionObject>>::success({row});
+    };
+    std::weak_ptr<const ai::GalacticSelectionContent> lifetime = content;
+    auto discarded = ai::stock_selection_provider(content, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    discarded = {}; // The runtime constructs a fresh provider for each read.
+    auto provider = ai::stock_selection_provider(content, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    auto copied = provider;
+    auto rebound = ai::stock_selection_provider(content, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    content.reset(); // The active bindings retain content independently of the weak cache.
+    const auto equal_garrisons = [](const auto& actual, const auto& oracle) {
+        return actual.size() == oracle.size() && std::equal(actual.begin(), actual.end(), oracle.begin(), [](const auto& a, const auto& b) {
+            return a.type == b.type && a.channel == b.channel && a.power == b.power && a.population == b.population
+                && a.terrain_effectiveness == b.terrain_effectiveness && a.all_main_domains == b.all_main_domains;
+        });
+    };
+    const auto first = must(provider(1, 10, goal, plan));
+    const auto second = must(rebound(1, 10, goal, plan));
+    expect(first->complete && first->reachable && !first->producers.empty() && first->types.at(100).terrain_allowed,
+        "stock indexed preparation uses the first AI row for target terrain and actual producer admission");
+    expect(equal_garrisons(first->types.at(100).garrisons, expected)
+        && equal_garrisons(second->types.at(100).garrisons, expected),
+        "indexed provider and copied closure preserve the original garrison reader's full ordered values");
+    expect(first->freestore.front().object == 901 && second->freestore.front().object == 902
+        && first->types.at(100).hero_weight == ai::real(1) && second->types.at(100).hero_weight == ai::real(2),
+        "immutable content preparation never memoizes live freestore or hero callbacks");
+    auto changed = setup(); changed.player_economy->players.front().current_tech = 0;
+    changed.production->planets.front().enabled = false;
+    auto next = must(gc::GalacticSession::create(changed));
+    (void)must(next.step(executor)); published = next.snapshot();
+    must(world->bind(published, connectivity, executor, published->completed_tick(), next.next_entity_id()));
+    const auto third = must(copied(1, 10, goal, plan));
+    expect(third->complete && !third->reachable && third->producers.empty() && third->player_tech == 0
+        && equal_garrisons(third->types.at(100).garrisons, expected_low_tech)
+        && third->freestore.front().object == 903 && third->types.at(100).hero_weight == ai::real(3),
+        "new completed publications retain their own tech, allowed sites, producer rows and live callback values");
+    const auto after = ai::galactic_selection_work();
+    expect(after.content_indices_built - before.content_indices_built == 1
+        && after.content_index_rows - before.content_index_rows == content_rows
+        && after.trait_index_rows - before.trait_index_rows == trait_rows,
+        "content is indexed once across discarded, reconstructed and copied providers and new world publications");
+    expect(after.garrison_name_lookups - before.garrison_name_lookups == 16
+        && after.garrison_trait_lookups - before.garrison_trait_lookups == 16
+        && after.proposal_trait_lookups - before.proposal_trait_lookups == 3,
+        "lookup work follows emitted garrisons and proposal types rather than catalog rows times requests");
+    refuse_freestore = true;
+    const auto free_failure = provider(1, 10, goal, plan);
+    expect(!free_failure && free_failure.error().code == "TEST-FREESTORE-LIVE", "new freestore refusal remains live");
+    refuse_freestore = false; refuse_hero = true;
+    const auto hero_failure = copied(1, 10, goal, plan);
+    expect(!hero_failure && hero_failure.error().code == "TEST-HERO-LIVE", "new hero refusal remains live");
+    refuse_hero = false;
+    provider = {}; copied = {}; rebound = {};
+    expect(lifetime.expired(), "the weak cache releases content with the last provider binding");
+    auto malformed = indexed_selection_content(); malformed->types.at(100).space_escorts.push_back("MISSING");
+    auto missing = ai::galactic_proposal_garrisons(*malformed, 100, 0, 10);
+    auto bad = ai::stock_selection_provider(malformed, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    auto refused = bad(1, 10, goal, plan);
+    expect(!missing && !refused && missing.error().code == refused.error().code && missing.error().message == refused.error().message,
+        "indexed missing names refuse at the same authored entry as the original garrison reader");
+    bad = {}; // End this immutable binding before preparing a different content owner.
+    malformed = indexed_selection_content();
+    std::erase_if(malformed->ai.types, [](const auto& row) { return row.type_id == 99; });
+    missing = ai::galactic_proposal_garrisons(*malformed, 100, 0, 10);
+    bad = ai::stock_selection_provider(malformed, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    refused = bad(1, 10, goal, plan);
+    expect(!missing && !refused && missing.error().code == refused.error().code && missing.error().message == refused.error().message,
+        "indexed missing garrison traits retain the original refusal and ordering");
+    bad = {}; malformed = indexed_selection_content(); plan.ignore_target = true;
+    std::erase_if(malformed->ai.types, [](const auto& row) { return row.type_id == 100; });
+    bad = ai::stock_selection_provider(malformed, plans, world, owner.engine, [&] { return published; }, heroes, freestore);
+    refused = bad(1, 10, goal, plan);
+    expect(!refused && refused.error().message == "stock original AI type missing",
+        "missing proposal traits still refuse when target contrast and garrisons are not requested");
+    std::string trace;
+    for (const auto& rows : {first->types.at(100).garrisons, third->types.at(100).garrisons})
+        for (const auto& row : rows) trace += std::to_string(row.type) + ":" + std::to_string(row.power.repr) + ";";
+    return trace + session.state_sha256() + next.state_sha256();
 }
 void staging_contracts() {
     ai::PlanDef plan; plan.taskforces.resize(3);
@@ -426,6 +619,8 @@ std::string frontier_rebind_contract(const eawr::sim::PartitionExecutor& executo
 int main() {
     try {
         staging_contracts();
+        goal_reach_index_contracts();
+        shared_planet_list_contracts();
         starbase_proposal_contracts();
         const auto garrison_trace = garrison_fact_contracts();
         for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -441,8 +636,12 @@ int main() {
         std::array<std::string, 24> assembly_baselines;
         std::string frontier_baseline;
         std::string sparse_force_baseline;
+        std::string indexed_selection_baseline;
         for (const auto count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count);
+            const auto prepared_content_trace = indexed_selection_contract(executor);
+            if (indexed_selection_baseline.empty()) indexed_selection_baseline = prepared_content_trace;
+            else expect(prepared_content_trace == indexed_selection_baseline, "indexed selection preparation equals at 1/2/4/8 workers");
             const auto force_trace = sparse_force_work_contract(executor);
             if (sparse_force_baseline.empty()) sparse_force_baseline = force_trace;
             else expect(force_trace == sparse_force_baseline, "sparse/full force equality at 1/2/4/8 workers");
@@ -959,6 +1158,21 @@ int main() {
                 must(staged.actions->qualified_freestore().update(actor));
                 const auto pair = must(staged.engine->galactic_freestore_selection_facts(1, 20, 31, staged.engine->plans().front()));
                 expect(pair.first == ai::real(37) && pair.second, "native stage reader averages helper squared plus actor-stage XY squared over all authored forces");
+                {
+                    // One (player, target, plan) batch resolves goal type and stages once; each read still answers live.
+                    const auto read = staged.engine->galactic_freestore_selection_batch(1, 20, staged.engine->plans().front());
+                    expect(must(read(31)) == pair && must(read(31)) == pair, "batch reader repeats the independent per-actor answer");
+                    usable = false;
+                    expect(must(read(31)).first == ai::galactic_goals::rejected_estimate(), "batch reader reads live source usability per actor");
+                    usable = true; combat_skip = true;
+                    expect(must(read(31)).first == ai::Real{}, "batch reader reads live combat skip per actor");
+                    combat_skip = false;
+                    expect(must(read(31)) == pair, "batch reader recovers with the live predicates");
+                    expect(!read(32), "batch reader refuses an actor without retained facts like an independent read");
+                    expect(!staged.engine->galactic_freestore_selection_batch(1, 20, staged.engine->plans().front())(32)
+                        && !staged.engine->galactic_freestore_selection_facts(1, 20, 32, staged.engine->plans().front()),
+                        "single-actor wrapper and batch refuse identically");
+                }
                 paths.execution_routes.front().threat = ai::real(5);
                 must(staged.world->bind(stage_session.snapshot(), paths, executor, 0, stage_session.next_entity_id()));
                 expect(must(staged.engine->galactic_freestore_selection_facts(1, 20, 31, staged.engine->plans().front())).first == ai::parse_real("12.5").value(), "failed helper still contributes XY when another stage helper succeeds");

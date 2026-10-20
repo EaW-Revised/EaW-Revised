@@ -1,0 +1,114 @@
+[
+  {
+    "old": "tests/galactic/ability_corruption_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/ability_host_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/ability_theft_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/ai_composed_state_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_economic_replay_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_economy_tokens_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_goal_state_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_learning_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_plan_loading_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_plans_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_save_growth_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_selector_stock_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_synchronized_day_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_underworld_day_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/ai_world_reader_tests.cpp#must",
+    "new": "tests/support/result.hpp#must"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_live_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/auto_resolve_outcome_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/economy_corruption_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/galactic_support.hpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/galactic/income_blocker_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/income_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/observer_tests.cpp#require",
+    "new": "tests/support/result.hpp#require"
+  },
+  {
+    "old": "tests/galactic/observer_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/shared_control_tests.cpp#require",
+    "new": "tests/support/result.hpp#require"
+  },
+  {
+    "old": "tests/galactic/space_entry_stock.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/space_entry_synthetic.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/victory_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  },
+  {
+    "old": "tests/galactic/weapon_action_live_fixture_tests.cpp#take",
+    "new": "tests/support/result.hpp#take"
+  }
+]

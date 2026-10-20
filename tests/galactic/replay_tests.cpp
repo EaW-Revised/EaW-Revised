@@ -313,7 +313,7 @@ void refusals() {
 
 } // namespace
 
-int main() {
+int case_galactic_replay_tests() {
     payloads();
     refusals();
     human_side_round_trip();

@@ -204,3 +204,22 @@ for the cross-network dry run and the logs to keep.
 - **The connect dialog** shown between Start and the battle load is not built.
 - **Sort direction** of a repeated press is not traced; every press sorts ascending.
 - **Direct-connect addresses** are kept for the session only.
+
+
+## Multiplayer browser LAN menu chat
+
+The LAN tab inside the multiplayer browser opens the existing LAN discovery source on demand.
+Its chat window and player list use UDP broadcast on the existing discovery port, without an
+Internet relay or an additional firewall rule. The separate skirmish LAN setup is unchanged.
+The socket closes when the player switches to Online or closes the browser. Peers remove the
+old presence after the existing five-second expiry; selecting LAN again announces a fresh presence.
+Only players browsing LAN appear in the menu list. Hosting/joining advertises the existing
+room presence instead; menu chat is ignored while staging, and leaving the room returns to menu chat.
+
+Menu lines have a 128-byte UTF-8 bound, display names a 20-byte bound, and a one-second spacing
+per sender on send. Receivers allow 250 ms of network/frame-pump jitter (750 ms minimum arrival
+spacing) while still dropping floods. Controls and directional formatting are removed. Refused
+local sends keep the draft and do not add a false local echo. Sender accounting and received queues
+retain the discovery directory's existing caps and expiry; the screen keeps its bounded chat log.
+The existing lobby/game datagram scopes and discovery wire version are unchanged. UDP remains
+best effort and subnet-local; menus do not promise message delivery or persistent history.

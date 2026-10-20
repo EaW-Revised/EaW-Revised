@@ -15,6 +15,8 @@
 //
 // timeline.csv is the one-worker run's plan journal (tick, player, plan, goal, target, event, detail).
 
+#include "../support/env.hpp"
+#include "../support/check.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -25,14 +27,19 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
-#include <optional>
 #include <map>
+#include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -41,29 +48,15 @@ namespace tactical = eawr::sim::tactical;
 namespace skirmish = eawr::skirmish;
 namespace foc = eawr::script::foc;
 
-int failures = 0;
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
 
 void expect(bool condition, const std::string& message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures;
-    }
+    if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
 }
 
 std::optional<std::string> environment(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
+    return eawr::testing::environment(name);
 }
 
 struct Battle {

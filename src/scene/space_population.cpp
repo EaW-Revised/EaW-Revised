@@ -46,12 +46,10 @@ namespace {
 
 } // namespace
 
-SpaceObjectTags space_object_tags(const data::EffectiveObject& object, const ObjectResolver& resolve) {
-    SpaceObjectTags tags;
+LiveUnitTags live_unit_tags(const data::EffectiveObject& object, const ObjectResolver& resolve) {
+    LiveUnitTags tags;
     tags.type_name = object.type_name;
     tags.marker = flag(object, "Is_Marker") || ieq(object.type_name, "Marker");
-    tags.nebula = flag(object, "Is_Nebula");
-    tags.background = flag(object, "In_Background");
     tags.idle = idle_tags(object, assets::MapKind::space);
     if (const data::EffectiveValue* list = object.value("HardPoints")) {
         const std::string_view text = list->value.raw_text;
@@ -78,6 +76,18 @@ SpaceObjectTags space_object_tags(const data::EffectiveObject& object, const Obj
             start = end + 1;
         }
     }
+    return tags;
+}
+
+SpaceObjectTags space_object_tags(const data::EffectiveObject& object, const ObjectResolver& resolve) {
+    auto unit = live_unit_tags(object, resolve);
+    SpaceObjectTags tags;
+    tags.type_name = std::move(unit.type_name);
+    tags.marker = unit.marker;
+    tags.nebula = flag(object, "Is_Nebula");
+    tags.background = flag(object, "In_Background");
+    tags.idle = std::move(unit.idle);
+    tags.hardpoints = std::move(unit.hardpoints);
     return tags;
 }
 
@@ -198,6 +208,77 @@ bool drawable_projectile_effects(const Placement& placement) noexcept {
                [](const Issue& issue) { return issue.cause == Cause::model_has_no_surface; });
 }
 
+namespace {
+SpacePlacementDecision classify_object(const Placement& placement,
+    const std::optional<LiveUnitTags>& tags, const bool environment, const bool ability_proxy_owner) {
+    SpacePlacementDecision decision;
+    decision.scene_ordinal = placement.scene_ordinal;
+    decision.object_id = placement.object_id;
+    if (tags) decision.type_name = tags->type_name;
+    const bool effect_owner = tags && (tags->type_name == "Projectile" || (ability_proxy_owner && tags->type_name == "SpaceUnit"))
+        && drawable_projectile_effects(placement);
+    for (const Surface& surface : placement.surfaces) {
+        if (is_shadow_volume_shader(surface.shader)) ++decision.shadow_volume_surfaces;
+    }
+    if (tags && tags->marker) {
+        decision.role = SpaceRole::marker;
+    } else if (environment) {
+        decision.role = SpaceRole::environment;
+    } else if (placement.drawable() || effect_owner) {
+        decision.role = SpaceRole::drawn;
+        if (tags) decision.hardpoints = tags->hardpoints;
+        const auto decal = [&](const std::string_view mesh) {
+            return static_cast<std::size_t>(std::find_if(decision.hardpoints.begin(), decision.hardpoints.end(),
+                [&](const HardpointAttachment& hardpoint) {
+                    return !hardpoint.damage_decal.empty() && ieq(hardpoint.damage_decal, mesh);
+                }) - decision.hardpoints.begin());
+        };
+        for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
+            const Surface& surface = placement.surfaces[index];
+            if (!surface.supported || material_selector(surface) == nullptr) continue;
+            if (const std::size_t hardpoint = decal(surface.mesh_name); hardpoint < decision.hardpoints.size()) {
+                ++decision.damage_decal_surfaces;
+                decision.damage_decals.push_back({index, hardpoint});
+                continue;
+            }
+            decision.drawn_surfaces.push_back(index);
+        }
+        for (const Issue& issue : placement.issues) {
+            if (!shadow_volume_issue(issue)
+                && !(effect_owner && issue.cause == Cause::model_has_no_surface)) {
+                decision.missing.push_back(describe(issue));
+            }
+        }
+        if (decision.drawn_surfaces.empty() && !effect_owner) {
+            // Only damage decals were supported: nothing of the intact
+            // object would draw.
+            decision.role = SpaceRole::not_drawable;
+            decision.hardpoints.clear();
+            decision.damage_decals.clear();
+            decision.missing.emplace_back("no_supported_surface besides damage decals");
+        }
+    } else {
+        decision.role = SpaceRole::not_drawable;
+        const bool blocked = std::any_of(placement.issues.begin(), placement.issues.end(),
+                                         [](const Issue& issue) { return blocks_drawing(issue.cause); });
+        for (const Issue& issue : placement.issues) {
+            // Blocking causes explain it alone; otherwise it is the
+            // surfaces that have no supported material.
+            if (blocked ? blocks_drawing(issue.cause) : !shadow_volume_issue(issue)) {
+                decision.missing.push_back(describe(issue));
+            }
+        }
+        if (decision.missing.empty()) decision.missing.emplace_back("no_supported_surface");
+    }
+    return decision;
+}
+} // namespace
+
+SpacePlacementDecision classify_live_unit(const Placement& placement,
+    const std::optional<LiveUnitTags>& tags, const bool ability_proxy_owner) {
+    return classify_object(placement, tags, false, ability_proxy_owner);
+}
+
 std::vector<SpacePlacementDecision> classify_space_placements(
     const Scene& scene,
     const std::function<std::optional<SpaceObjectTags>(std::string_view object_id)>& tags_of,
@@ -205,68 +286,12 @@ std::vector<SpacePlacementDecision> classify_space_placements(
     std::vector<SpacePlacementDecision> decisions;
     decisions.reserve(scene.placements.size());
     for (const Placement& placement : scene.placements) {
-        SpacePlacementDecision decision;
-        decision.scene_ordinal = placement.scene_ordinal;
-        decision.object_id = placement.object_id;
         std::optional<SpaceObjectTags> tags;
         if (!placement.object_id.empty() && tags_of) tags = tags_of(placement.object_id);
-        if (tags) decision.type_name = tags->type_name;
-        const bool effect_owner = tags && (tags->type_name == "Projectile" || (ability_proxy_owner && tags->type_name == "SpaceUnit"))
-            && drawable_projectile_effects(placement);
-        for (const Surface& surface : placement.surfaces) {
-            if (is_shadow_volume_shader(surface.shader)) ++decision.shadow_volume_surfaces;
-        }
-        if (tags && tags->marker) {
-            decision.role = SpaceRole::marker;
-        } else if (tags && (tags->nebula || tags->background)) {
-            decision.role = SpaceRole::environment;
-        } else if (placement.drawable() || effect_owner) {
-            decision.role = SpaceRole::drawn;
-            if (tags) decision.hardpoints = tags->hardpoints;
-            const auto decal = [&](const std::string_view mesh) {
-                return static_cast<std::size_t>(std::find_if(decision.hardpoints.begin(), decision.hardpoints.end(),
-                    [&](const HardpointAttachment& hardpoint) {
-                        return !hardpoint.damage_decal.empty() && ieq(hardpoint.damage_decal, mesh);
-                    }) - decision.hardpoints.begin());
-            };
-            for (std::size_t index = 0; index < placement.surfaces.size(); ++index) {
-                const Surface& surface = placement.surfaces[index];
-                if (!surface.supported || material_selector(surface) == nullptr) continue;
-                if (const std::size_t hardpoint = decal(surface.mesh_name); hardpoint < decision.hardpoints.size()) {
-                    ++decision.damage_decal_surfaces;
-                    decision.damage_decals.push_back({index, hardpoint});
-                    continue;
-                }
-                decision.drawn_surfaces.push_back(index);
-            }
-            for (const Issue& issue : placement.issues) {
-                if (!shadow_volume_issue(issue)
-                    && !(effect_owner && issue.cause == Cause::model_has_no_surface)) {
-                    decision.missing.push_back(describe(issue));
-                }
-            }
-            if (decision.drawn_surfaces.empty() && !effect_owner) {
-                // Only damage decals were supported: nothing of the intact
-                // object would draw.
-                decision.role = SpaceRole::not_drawable;
-                decision.hardpoints.clear();
-                decision.damage_decals.clear();
-                decision.missing.emplace_back("no_supported_surface besides damage decals");
-            }
-        } else {
-            decision.role = SpaceRole::not_drawable;
-            const bool blocked = std::any_of(placement.issues.begin(), placement.issues.end(),
-                                             [](const Issue& issue) { return blocks_drawing(issue.cause); });
-            for (const Issue& issue : placement.issues) {
-                // Blocking causes explain it alone; otherwise it is the
-                // surfaces that have no supported material.
-                if (blocked ? blocks_drawing(issue.cause) : !shadow_volume_issue(issue)) {
-                    decision.missing.push_back(describe(issue));
-                }
-            }
-            if (decision.missing.empty()) decision.missing.emplace_back("no_supported_surface");
-        }
-        decisions.push_back(std::move(decision));
+        std::optional<LiveUnitTags> unit;
+        if (tags) unit = LiveUnitTags{tags->type_name, tags->marker, tags->idle, tags->hardpoints};
+        decisions.push_back(classify_object(placement, unit, tags && (tags->nebula || tags->background),
+                                            ability_proxy_owner));
     }
     return decisions;
 }

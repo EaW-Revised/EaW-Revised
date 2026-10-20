@@ -1,3 +1,6 @@
+#include "../support/self_test.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_freestore.hpp"
@@ -9,9 +12,22 @@
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
 
-#include <cstdlib>
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace {
 namespace ga = eawr::script::foc::galactic_ai;
@@ -19,13 +35,8 @@ namespace ai = eawr::script::foc::ai;
 namespace gc = eawr::sim::galactic;
 namespace auth = eawr::script::authoritative;
 using galactic_test::expect;
-template<class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-    return std::move(result).value();
-}
-void done(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(eawr::core::format_diagnostic(result.error()));
-}
+using eawr::testing::result_diagnostic::take;
+void done(eawr::core::Result<void> result) { eawr::testing::result_diagnostic::must(std::move(result)); }
 ga::FreestoreFacts actor(eawr::sim::EntityId id = 20) {
     ga::FreestoreFacts row; row.object.id = id; row.object.type = row.current_type = 4;
     row.object.owner = 1; row.object.planet = row.parent = 1;
@@ -1036,13 +1047,7 @@ std::string stock_redistribution(const eawr::vfs::Vfs& files, eawr::platform::Th
 }
 void installed() {
     namespace cp = eawr::campaign;
-    std::string root;
-#if defined(_MSC_VER)
-    char* environment{}; std::size_t size{};
-    if (_dupenv_s(&environment, &size, "EAWR_EAW_GAME_ROOT") == 0 && environment) { root = environment; std::free(environment); }
-#else
-    if (const auto* environment = std::getenv("EAWR_EAW_GAME_ROOT")) root = environment;
-#endif
+    std::string root = eawr::testing::game_root().value_or("");
     if (root.empty()) throw std::runtime_error("installed freestore requires EAWR_EAW_GAME_ROOT");
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -1115,7 +1120,11 @@ void installed() {
     }
 }
 }
-int main(int argc, char** argv) {
+int case_galactic_ai_freestore_tests(int argc, char** argv) {
+    if (!eawr::testing::support_contract_self_test()) {
+        std::cerr << "FAIL: shared check/require self-test\n";
+        return 1;
+    }
     try { if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else { gates(); landing_gates_and_preference(); std::vector<std::uint8_t> return_baseline; std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
             for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); player_publications(executor); retained(executor, return_baseline); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }

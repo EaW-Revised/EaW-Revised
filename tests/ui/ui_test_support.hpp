@@ -3,14 +3,17 @@
 // Shared helpers for ui_data_tests. Corpus checks are opt-in: they run only
 // when EAWR_EAW_GAME_ROOT names a read-only game installation.
 
+#include "../support/check.hpp"
+#include "../support/env.hpp"
+#include "../support/temp_dir.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <array>
 #include <chrono>
 #include <cstddef>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -21,33 +24,18 @@
 
 namespace eawr::test::ui {
 
-inline int& failures() {
-    static int count{};
-    return count;
+inline eawr::testing::Checker& checker() {
+    static eawr::testing::Checker value;
+    return value;
 }
+
+inline int& failures() { return checker().failures; }
 
 inline void expect(const bool condition, const char* message) {
-    if (!condition) {
-        std::cerr << "FAIL: " << message << '\n';
-        ++failures();
-    }
+    if (!condition) checker().check(condition, message, std::cerr);
 }
 
-inline std::optional<std::string> environment(const char* name) {
-#ifdef _MSC_VER
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) return std::nullopt;
-    std::string result(value);
-    std::free(value);
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) return std::nullopt;
-    std::string result(value);
-#endif
-    if (result.empty()) return std::nullopt;
-    return result;
-}
+using eawr::testing::environment;
 
 inline void write_bytes(const std::filesystem::path& path, const std::span<const std::byte> bytes) {
     std::filesystem::create_directories(path.parent_path());
@@ -69,8 +57,7 @@ struct TempTree final {
         std::filesystem::create_directories(root);
     }
     ~TempTree() {
-        std::error_code ignored;
-        std::filesystem::remove_all(root, ignored);
+        eawr::testing::remove_temp_directory(root);
     }
     TempTree(const TempTree&) = delete;
     TempTree& operator=(const TempTree&) = delete;

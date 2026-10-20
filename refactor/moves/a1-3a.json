@@ -1,0 +1,14 @@
+[
+  {
+    "old": "tests/replay/ability_fixtures.hpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/dogfight_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  },
+  {
+    "old": "tests/replay/economy_tests.cpp#expect",
+    "new": "tests/support/check.hpp#Checker::check"
+  }
+]

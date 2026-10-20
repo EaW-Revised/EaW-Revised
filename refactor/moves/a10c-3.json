@@ -1,0 +1,242 @@
+[
+  {
+    "old": "src/units/unit_combat.cpp#damage_type",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#category",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#FlightKind",
+    "new": "src/units/unit_combat.cpp#bind_projectile_flight"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#damage",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#does_energy_damage",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#does_hitpoint_damage",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#does_shield_damage",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#energy_per_shot",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ion_stun_duration",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ion_stun",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ion_stun_shot_rate_reduction",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#max_flight_distance",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#inaccuracy",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ion_stun_stack_duration",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#max_rate_of_turn",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#max_speed",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ion_stun_speed_reduction",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#opportunity_fire_when_targeting",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#category_restrictions",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#max_recharge_seconds",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#min_recharge_seconds",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#pulse_count",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#pulse_delay_seconds",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#opportunity_cutoff",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#opportunity_fire_when_idle",
+    "new": "src/units/unit_combat.cpp#WeaponProfileBuilder"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#ai_combat_power",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#charged_projectile_index",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#cone_height_degrees",
+    "new": "src/units/unit_combat.cpp#apply_hardpoint_weapon_limits"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#cone_width_degrees",
+    "new": "src/units/unit_combat.cpp#apply_hardpoint_weapon_limits"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#targetable",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#manual_turret_required",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#manual_cooldown_frames",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#barrage_shot",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#barrel_pivot",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#fire_a",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#fire_b",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#manual_turret",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#collision_box_modifier",
+    "new": "src/units/unit_combat.cpp#append_combat_collision_geometry"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#collision_mesh",
+    "new": "src/units/unit_combat.cpp#append_combat_collision_geometry"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#category_bits",
+    "new": "src/units/unit_combat.cpp#bind_combat_profile_identity"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#target_stealth_units",
+    "new": "src/units/unit_combat.cpp#bind_combat_profile_identity"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#targeting_max_attack_distance",
+    "new": "src/units/unit_combat.cpp#bind_combat_profile_identity"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#targeting_stickiness_seconds",
+    "new": "src/units/unit_combat.cpp#bind_combat_profile_identity"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#object_turret",
+    "new": "src/units/unit_combat.cpp#append_object_combat_weapon"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#projectile_power",
+    "new": "src/units/unit_combat.cpp#ProjectilePower"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Allow_Opportunity_Fire_When_Targeting"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Cone_Height"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Cone_Width"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Max_Recharge_Seconds"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Min_Recharge_Seconds"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Pulse_Count"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Pulse_Delay_Seconds"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Fire_Range_Distance"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#append_hardpoint_combat_profiles",
+    "tag": "Allow_Opportunity_Fire_When_Idle"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#combat_table",
+    "new": "src/units/unit_combat.cpp#ShotProfileBuilder",
+    "tag": "Projectile_Disable_Engines_Duration"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#cone_height_degrees",
+    "new": "src/units/unit_combat.cpp#append_object_combat_weapon",
+    "tag": "Turret_Elevate_Extent_Degrees"
+  },
+  {
+    "old": "src/units/unit_combat.cpp#cone_width_degrees",
+    "new": "src/units/unit_combat.cpp#append_object_combat_weapon",
+    "tag": "Turret_Rotate_Extent_Degrees"
+  }
+]

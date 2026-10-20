@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <sstream>
 
 namespace {
@@ -375,11 +376,23 @@ void campaign_map_admission() {
     }
 }
 
-void handoff_corpus(bool fiscal_enabled = false) {
+// The two-seat space-conflict galaxy shared by the handoff corpus and the admission tests. Owned by address:
+// the start inputs and the service closures point into it.
+struct Handoff {
+    units::UnitTables tables;
+    skirmish::StartInputs inputs;
+    skirmish::Fixture fixture;
+    sim::galactic::GalacticSetup galaxy;
+    campaign::GameSession::ContentResolver content;
+    campaign::GameSession::ConflictService service;
+};
+std::unique_ptr<Handoff> make_handoff(const bool fiscal_enabled) {
     namespace gc = sim::galactic;
-    const auto tables = synthetic_tables(); const auto inputs = synthetic_inputs(tables);
-    const auto fixture = fixture_for(inputs); const auto ship = skirmish::type_id("Ship");
-    gc::GalacticSetup galaxy; galaxy.seed = 17; galaxy.content_identity = units::content_identity(tables);
+    auto handoff = std::make_unique<Handoff>();
+    handoff->tables = synthetic_tables(); handoff->inputs = synthetic_inputs(handoff->tables);
+    handoff->fixture = fixture_for(handoff->inputs);
+    const auto ship = skirmish::type_id("Ship");
+    auto& galaxy = handoff->galaxy; galaxy.seed = 17; galaxy.content_identity = units::content_identity(handoff->tables);
     galaxy.players = {{1, 1, 0}, {2, 2, 0}};
     galaxy.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}, {{2}, 2, gc::SeatKind::ai, 1, true, 0}};
     galaxy.planets = {{1, {}, 1}, {2, {whole(12), {}, {}}, 2}};
@@ -397,15 +410,16 @@ void handoff_corpus(bool fiscal_enabled = false) {
     movement.planets = {{1, whole(1), false}, {2, whole(1), false}};
     for (const auto& p : galaxy.players) for (const auto& planet : galaxy.planets)
         movement.access.push_back({p.player_id, planet.id, true, p.player_id == 1 && planet.id == 2});
-    const campaign::GameSession::ContentResolver content = [&](const auto& record) {
-        return campaign::conflict_entry_content(record.tactical, inputs);
+    handoff->content = [handoff = handoff.get()](const auto& record) {
+        return campaign::conflict_entry_content(record.tactical, handoff->inputs);
     };
     const campaign::ForceQualifier qualify = [&](const gc::FleetMember& member, gc::PlayerId owner, sim::EntityId parent) {
         campaign::AdmissionForce row; row.force = {member.id, member.type, owner, parent};
         row.space_allowed = row.triggers_space = true; row.population = whole(1); row.power = whole(10);
         return core::Result<campaign::AdmissionForce>::success(row);
     };
-    const campaign::GameSession::ConflictService service = [&](const auto& snapshot, const auto& event, sim::EntityId next) {
+    handoff->service = [handoff = handoff.get(), qualify](const auto& snapshot, const auto& event, sim::EntityId next) {
+        const auto& inputs = handoff->inputs; const auto& fixture = handoff->fixture; const auto& galaxy = handoff->galaxy;
         using Result = core::Result<std::optional<campaign::RecordedAdmission>>;
         auto presence = campaign::collect_conflict_presence(snapshot, event, qualify, [](const auto&) { return core::Result<campaign::OuterFleetFacts>::success({false, true, true, false}); });
         if (!presence) return Result::failure(presence.error());
@@ -424,6 +438,13 @@ void handoff_corpus(bool fiscal_enabled = false) {
         campaign::ArbitrationInputs arbitration; arbitration.local_involved = true; arbitration.queue_tactical = true;
         return Result::success(campaign::RecordedAdmission{0, entry.value().conflict, campaign::arbitrate_conflict(arbitration).value()});
     };
+    return handoff;
+}
+
+void handoff_corpus(bool fiscal_enabled = false) {
+    namespace gc = sim::galactic;
+    const auto handoff = make_handoff(fiscal_enabled);
+    const auto& galaxy = handoff->galaxy; const auto& content = handoff->content; const auto& service = handoff->service;
     std::vector<std::string> reference;
     for (const auto workers : std::array<std::size_t, 4>{1, 2, 4, 8}) {
         auto services = std::make_shared<platform::CampaignServiceConfiguration>();
@@ -545,8 +566,17 @@ void handoff_corpus(bool fiscal_enabled = false) {
         hashes.push_back(game.step(executor).value().state_hash.get());
         expect(game.galaxy().clock().galactic_frame == paused_frame + 1, "galaxy resumes after child/result return");
         expect(fiscal_paid_once(), "result return and resume preserve the one paid fiscal window");
+        // The session was loaded from `saved`, so its history is the window after that save: replay it on that save's state.
         const auto recording = game.recording();
-        auto replayed = campaign::GameSession::from_recording(recording, content, {}, eawr::campaign::ScriptRequirement::none).value();
+        auto replay_options = options; replay_options.apply_result = {};
+        auto replayed_load = checkpoint::load_game_checkpoint(saved, identities, replay_options, executor);
+        expect(bool(replayed_load), "handoff window base restores");
+        if (!replayed_load) return;
+        auto replayed = std::move(replayed_load.value().session);
+        const auto window_start = replayed.completed_tick();
+        const auto appended = replayed.append_recording_window(recording);
+        expect(bool(appended), "handoff history window attaches to its base");
+        if (!appended) { std::cerr << appended.error().message << '\n'; return; }
         std::vector<std::string> replay_hashes;
         while (replayed.completed_tick() < recording.commands.final_tick_count) {
             replayed.scramble_storage_for_testing(); auto step = replayed.step(executor);
@@ -554,7 +584,8 @@ void handoff_corpus(bool fiscal_enabled = false) {
             if (!step) { std::cerr << step.error().message << '\n'; return; }
             replay_hashes.push_back(step.value().state_hash.get());
         }
-        expect(replay_hashes == hashes, "arrival -> pending -> child -> result -> resume reproduces every hash");
+        expect(window_start <= hashes.size() && replay_hashes == std::vector<std::string>(hashes.begin() + static_cast<std::ptrdiff_t>(window_start), hashes.end()),
+            "arrival -> pending -> child -> result -> resume reproduces every hash after its base");
         if (workers == 1) reference = hashes; else expect(reference == hashes, "handoff corpus equal on 1/2/4/8 workers");
     }
     // WAR-02/03: an automatic branch waiting on its resolver remains automatic,
@@ -616,6 +647,96 @@ void handoff_corpus(bool fiscal_enabled = false) {
         game.set_vote_progress([](const auto&, const auto&) { return core::Result<std::optional<bool>>::success(true); });
         expect(bool(game.submit({{game.completed_tick(), {2}, 1}, gc::BattleChoice{id, true}})), "other human yes vote accepted");
         expect(bool(game.step(executor)) && game.battle(), "forced tactical vote result loads the child");
+    }
+}
+
+// GCMP-04: a battle choice is admitted when its tick executes it, from the agreed session state, never from a
+// publication at submission. Two sessions fed the same command stream end byte-equal however early they were
+// handed it, and a refused choice is refused on both.
+struct ChoiceRun {
+    std::vector<std::string> hashes, refusals;
+    bool battle{};
+};
+ChoiceRun feed_choice_stream(const Handoff& handoff, const std::vector<sim::galactic::GameCommand>& stream,
+    const bool early, const bool undecided_vote, const std::uint64_t ticks, const std::size_t workers) {
+    const platform::ThreadWorkerAdapter executor(workers);
+    auto game = campaign::GameSession::create(handoff.galaxy).value();
+    game.set_conflict_service(handoff.service, handoff.content, {}, eawr::campaign::ScriptRequirement::none);
+    if (undecided_vote) game.set_vote_progress([](const auto&, const auto&) {
+        return core::Result<std::optional<bool>>::success(std::optional<bool>{});
+    });
+    ChoiceRun run;
+    std::size_t next = 0;
+    if (early) for (const auto& command : stream) expect(bool(game.submit(command)), "an early command is accepted at submission");
+    while (game.completed_tick() < ticks) {
+        if (!early) while (next < stream.size() && stream[next].key.tick <= game.completed_tick()) {
+            expect(bool(game.submit(stream[next])), "a due command is accepted at submission");
+            ++next;
+        }
+        auto step = game.step(executor);
+        expect(bool(step), "the admission stream steps");
+        if (!step) return run;
+        run.hashes.push_back(step.value().state_hash.get());
+        for (const auto& response : step.value().battle_choice_responses)
+            run.refusals.push_back(std::to_string(response.seat.value) + ":" + response.refusal);
+        // A reader polling the pending view between steps changes nothing the next tick decides.
+        if (!early) (void)game.pending_conflict_view();
+    }
+    run.battle = game.battle() != nullptr;
+    return run;
+}
+void battle_choice_admission() {
+    namespace gc = sim::galactic;
+    const auto handoff = make_handoff(false);
+    std::uint64_t ready_tick{};
+    sim::EntityId conflict{};
+    {
+        const platform::ThreadWorkerAdapter executor(1);
+        auto game = campaign::GameSession::create(handoff->galaxy).value();
+        game.set_conflict_service(handoff->service, handoff->content, {}, eawr::campaign::ScriptRequirement::none);
+        expect(bool(game.submit({{0, {1}, 1}, gc::MoveFleet{10, {1, 2}, {}}})), "the admission probe movement is accepted");
+        while (!game.pending_conflict() && game.completed_tick() < 20) {
+            auto step = game.step(executor);
+            expect(bool(step), "the admission probe steps");
+            if (!step) return;
+        }
+        expect(game.pending_conflict() != nullptr, "the admission probe reaches a pending conflict");
+        if (!game.pending_conflict()) return;
+        conflict = game.pending_conflict()->id;
+        expect(bool(game.step(executor)), "the arbitration probe steps");
+        ready_tick = game.completed_tick();
+    }
+    const std::vector<gc::GameCommand> solo{
+        {{0, {1}, 1}, gc::MoveFleet{10, {1, 2}, {}}},
+        {{ready_tick, {2}, 1}, gc::BattleChoice{conflict, true}},       // the AI side cannot choose
+        {{ready_tick, {1}, 2}, gc::BattleChoice{conflict + 1, true}},   // a stale identity
+        {{ready_tick + 1, {1}, 3}, gc::BattleChoice{conflict, true}}};  // the human's Begin loads the child
+    auto versus = make_handoff(false);
+    versus->galaxy.seats[1].kind = gc::SeatKind::human; versus->galaxy.seats[1].human_side_id = 2;
+    const std::vector<gc::GameCommand> duel{
+        {{0, {1}, 1}, gc::MoveFleet{10, {1, 2}, {}}},
+        {{ready_tick, {1}, 2}, gc::BattleChoice{conflict, true}},       // recorded: the opponent has not voted
+        {{ready_tick + 1, {1}, 3}, gc::BattleChoice{conflict, false}},  // the same side waits for its opponent
+        {{ready_tick + 1, {2}, 1}, gc::BattleChoice{conflict, true}}};  // the opponent votes; the vote stays undecided
+    std::vector<std::string> solo_reference, duel_reference;
+    for (const std::size_t workers : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
+        const auto due = feed_choice_stream(*handoff, solo, false, false, ready_tick + 3, workers);
+        const auto early = feed_choice_stream(*handoff, solo, true, false, ready_tick + 3, workers);
+        expect(!due.hashes.empty() && due.hashes == early.hashes && due.refusals == early.refusals && due.battle == early.battle,
+            "a battle choice handed over at the start or when due ends byte-equal");
+        const auto refused = std::count_if(due.refusals.begin(), due.refusals.end(), [](const auto& row) { return row.back() != ':'; });
+        expect(refused == 2 && due.refusals.size() == 3 && due.refusals.back() == "1:" && due.battle,
+            "the AI side and a stale identity are refused on both sessions while the human's choice loads the child");
+        const auto duel_due = feed_choice_stream(*versus, duel, false, true, ready_tick + 3, workers);
+        const auto duel_early = feed_choice_stream(*versus, duel, true, true, ready_tick + 3, workers);
+        expect(!duel_due.hashes.empty() && duel_due.hashes == duel_early.hashes && duel_due.refusals == duel_early.refusals,
+            "a two-human vote handed over at the start or when due ends byte-equal");
+        const auto waiting = std::count_if(duel_due.refusals.begin(), duel_due.refusals.end(), [](const auto& row) {
+            return row.find("waiting for the opponent") != std::string::npos;
+        });
+        expect(waiting == 1 && !duel_due.battle, "a side that already voted is refused on both sessions while its opponent is undecided");
+        if (workers == 1) { solo_reference = due.hashes; duel_reference = duel_due.hashes; }
+        else expect(solo_reference == due.hashes && duel_reference == duel_due.hashes, "battle choice admission equal on 1/2/4/8 workers");
     }
 }
 
@@ -804,6 +925,6 @@ int main(const int argc, char** argv) {
         return galactic_test::failures == 0 ? 0 : 1;
     }
     if (argc == 3 || argc == 4) return export_installed(argv[1], argv[2], argc == 4 ? argv[3] : "");
-    contracts(); queued_pending_alerts(); native_content_selection();
+    contracts(); queued_pending_alerts(); native_content_selection(); battle_choice_admission();
     return galactic_test::failures == 0 ? 0 : 1;
 }

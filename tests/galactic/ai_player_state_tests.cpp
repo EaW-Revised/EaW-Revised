@@ -1,3 +1,6 @@
+#include <cstddef>
+#include <exception>
+#include "../support/check.hpp"
 // S9a: a galactic player's service call is one player turn. Everything it writes to engine-wide state stages in
 // that player's effects; while the barrier owner defers the commit, the staged effects of every player wait for
 // commit_galactic_events and apply there in ascending player order (GFS-A20). The deferred barrier must end in
@@ -10,14 +13,16 @@
 #include <iostream>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace {
 namespace ai = s9_fixture::ai;
 namespace lifecycle = s9_fixture::lifecycle;
 using s9_fixture::must;
-int failures{};
-void expect(bool ok, std::string_view message) { if (!ok) { ++failures; std::cerr << "FAIL: " << message << '\n'; } }
+eawr::testing::Checker local_checker;
+int& failures = local_checker.failures;
+void expect(bool ok, std::string_view message) {
+    if (!ok) local_checker.check_before_print(ok, message, std::cerr, "FAIL: ");
+}
 
 struct Outcome {
     std::string engine, world;
@@ -98,7 +103,7 @@ void order_independence() {
 }
 } // namespace
 
-int main() {
+int case_galactic_ai_player_state_tests() {
     try {
         staged_turns();
         chain_owners();

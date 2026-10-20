@@ -1,3 +1,4 @@
+#include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -6,12 +7,28 @@
 #include "../../src/campaign/checkpoint_owner_internal.hpp"
 #include "../../src/sim/tactical/checkpoint_archive_internal.hpp"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <ios>
+#include <iostream>
 #include <iterator>
-#include <stdexcept>
-#include <chrono>
+#include <memory>
+#include <optional>
 #include <set>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <variant>
+#include <vector>
 
 namespace {
 using namespace galactic_test;
@@ -34,12 +51,9 @@ public:
 private:
     const eawr::sim::PartitionExecutor& executor_;
 };
-template <class T> T take(eawr::core::Result<T> result) {
-    if (!result) throw std::runtime_error(result.error().code + ": " + result.error().message);
-    return std::move(result).value();
-}
+using eawr::testing::result_code_colon::take;
 void check(eawr::core::Result<void> result) {
-    if (!result) throw std::runtime_error(result.error().message);
+    eawr::testing::must(std::move(result));
 }
 galactic::GalacticSetup setup(bool coop = false) {
     galactic::SyntheticGalaxyOptions spec; spec.planets = 8; spec.players = 2;
@@ -47,6 +61,12 @@ galactic::GalacticSetup setup(bool coop = false) {
     spec.debug_commands = true;
     auto result = galactic::synthetic_galaxy(spec);
     if (!coop) { result.seats[1].kind = galactic::SeatKind::ai; result.seats[1].human_side_id = 0; }
+    return result;
+}
+// GCMP-24/WGS-33: the multiplayer game carries the one saved flag (the campaign setup copies its mode into the victory context).
+galactic::GalacticSetup multiplayer_setup(bool multiplayer, bool coop) {
+    auto result = setup(coop);
+    if (multiplayer) galactic_test::mark_multiplayer(result);
     return result;
 }
 namespace auth = eawr::script::authoritative;
@@ -582,6 +602,13 @@ void human_command_history_growth() {
         before = after;
     }
 }
+// A restored session dropped the journal it was loaded with (#4058); what follows must equal the control's journal.
+bool journal_tail_matches(const campaign::GameSession& control, const campaign::GameSession& restored) {
+    const auto all = control.galaxy().native_effects(); const auto kept = restored.galaxy().native_effects();
+    const auto dropped = restored.galaxy().native_dropped();
+    return control.galaxy().native_dropped() == 0 && dropped <= all.size() && kept.size() == all.size() - dropped
+        && std::equal(kept.begin(), kept.end(), all.begin() + static_cast<std::ptrdiff_t>(dropped));
+}
 void future_native_frontier() {
     galactic::SyntheticGalaxyOptions spec; spec.planets = 8; spec.players = 2;
     spec.fleets_per_player = 2; spec.members_per_fleet = 2;
@@ -616,7 +643,7 @@ void future_native_frontier() {
             for (int i = 0; i < 90; ++i) {
                 expect(take(control.step(pool)).state_hash.get() == take(restored.session.step(pool)).state_hash.get(),
                     "future native effect and its consumed cursor continue identically for 90 ticks");
-                expect(control.record().native_effects == restored.session.record().native_effects,
+                expect(journal_tail_matches(control, restored.session),
                     "future native receipt fires exactly once and preserves journal order");
             }
             while (control.completed_tick() < recording.commands.final_tick_count) {
@@ -633,9 +660,9 @@ void future_native_frontier() {
                     "second native mutation is admitted after restore");
             };
             mutate(control); mutate(restored.session);
-            expect(control.record().native_effects == restored.session.record().native_effects,
+            expect(journal_tail_matches(control, restored.session),
                 "post-restore native sequence preserves the complete receipt journal");
-            expect(restored.session.galaxy().native_effects().size() == 2,
+            expect(restored.session.galaxy().native_dropped() + restored.session.galaxy().native_effects().size() == 2,
                 "one retained receipt and one new receipt are recorded exactly once");
             expect(take(control.step(pool)).state_hash.get() == take(restored.session.step(pool)).state_hash.get(),
                 "post-restore native mutation continues with the same state");
@@ -677,8 +704,21 @@ void corpus(const std::filesystem::path& directory) {
 }
 void admission_and_fixups() {
     const eawr::sim::InlineExecutor executor;
+    // WGS-33: the flag decides, not the seat count; a multiplayer game down to one human still has no quick/autosave.
+    for (const bool multiplayer : {false, true}) {
+        auto lone = take(campaign::GameSession::create(multiplayer_setup(multiplayer, false)));
+        std::uint64_t sequence = 0;
+        for (const auto& request : {galactic::SaveRequest{1, true, false, false}, galactic::SaveRequest{2, false, true, false}}) {
+            check(lone.submit({{lone.completed_tick(), {1}, ++sequence}, request}));
+            expect(take(lone.step(executor)).save_events.back().kind == (multiplayer ? galactic::GalacticEventKind::save_rejected
+                : galactic::GalacticEventKind::save_requested), "quick and autosave follow the multiplayer flag with one human seat");
+        }
+        check(lone.submit({{lone.completed_tick(), {1}, ++sequence}, galactic::SaveRequest{3, false, false, false}}));
+        expect(take(lone.step(executor)).save_events.back().kind == galactic::GalacticEventKind::save_requested,
+            "the ordinary save stays admitted in multiplayer");
+    }
     for (const bool coop : {false, true}) {
-        auto config = setup(coop); auto game = take(campaign::GameSession::create(config));
+        auto config = multiplayer_setup(coop, coop); auto game = take(campaign::GameSession::create(config));
         check(game.submit({{0, {1}, 1}, galactic::SaveRequest{42, true, false, false}}));
         const auto event = take(game.step(executor)).save_events.back();
         expect(event.kind == (coop ? galactic::GalacticEventKind::save_rejected : galactic::GalacticEventKind::save_requested), "quick save multiplayer admission");
@@ -691,7 +731,7 @@ void admission_and_fixups() {
         check(game.submit({{2, {1}, 5}, galactic::SetSpeed{false, eawr::sim::math::Fixed::from_raw(2 * eawr::sim::math::Fixed::scale)}}));
         check(game.submit({{2, {1}, 6}, galactic::SaveRequest{5, false, true, true}}));
         const auto paused = take(game.step(executor));
-        expect(paused.save_events.back().kind == galactic::GalacticEventKind::save_rejected, "paused prebattle autosave is rejected");
+        expect(paused.save_events.back().kind == galactic::GalacticEventKind::save_rejected, "WGS-142 paused prebattle autosave outside a pending prompt is rejected");
         const auto identities = cp::game_identities(config);
         const Bytes hints{1, 2, 3}; const auto saved = take(cp::save_game_checkpoint(game, identities, hints));
         auto runtime = take(cp::load_game_checkpoint(saved, identities, {}, executor));
@@ -710,6 +750,77 @@ void admission_and_fixups() {
         check(loaded.session.submit({{3, {1}, 7}, galactic::SaveRequest{9, false, false, false}}));
         check(restored_again.session.submit({{3, {1}, 7}, galactic::SaveRequest{9, false, false, false}}));
         expect(take(loaded.session.step(executor)).state_hash.get() == take(restored_again.session.step(executor)).state_hash.get(), "load continues with restored submission cursor");
+    }
+}
+// WGS-99/142/143: the prebattle autosave is the producer at Begin. Only the pending prompt of a
+// single-human game admits it; the save captures the still-pending state, which restores equal on
+// every worker count. A capture that never happens must not poison the next manual save.
+void prebattle_autosave_admission() {
+    const eawr::sim::InlineExecutor executor;
+    const auto no_content = [](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success({}); };
+    const auto configure = [&](campaign::GameSession& session) {
+        session.set_conflict_service([](const auto&, const auto&, auto) {
+            return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+        }, no_content, {}, eawr::campaign::ScriptRequirement::none);
+        return eawr::core::Result<void>::success();
+    };
+    for (const bool coop : {false, true}) {
+        const auto config = multiplayer_setup(coop, coop); const auto identities = cp::game_identities(config);
+        campaign::ConflictRecord conflict; conflict.id = 9000; conflict.planet = config.planets.front().id;
+        conflict.invader = 1; conflict.defender = 2; conflict.tactical.first_free_entity_id = 9001;
+        conflict.tactical.content_identity = config.content_identity;
+        conflict.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}}; conflict.seats = {{{1}, 1}, {{2}, 2}};
+        std::uint64_t sequence = 10;
+        const auto prompt = [&](campaign::GameSession& game) {
+            check(configure(game));
+            check(game.queue_conflict(conflict, {campaign::ConflictRoute::pending_tactical, false, false}));
+            for (int i = 0; i < 8 && !(game.pending_conflict_view() && game.pending_conflict_view()->choice_ready); ++i)
+                (void)take(game.step(executor));
+            expect(game.pending_conflict_view() && game.pending_conflict_view()->choice_ready, "fixture reaches the paused pending prompt");
+        };
+        const auto autosave = [&](campaign::GameSession& game, const std::uint32_t seat) {
+            ++sequence;
+            check(game.submit({{game.completed_tick(), {seat}, sequence},
+                galactic::SaveRequest{static_cast<std::int64_t>(sequence), false, true, true}}));
+            return take(game.step(executor)).save_events.back();
+        };
+        auto fresh = take(campaign::GameSession::create(config)); check(configure(fresh));
+        expect(autosave(fresh, 1).kind == galactic::GalacticEventKind::save_rejected,
+            "WGS-142 no pending prompt: the prebattle autosave is refused");
+        auto game = take(campaign::GameSession::create(config)); prompt(game);
+        if (!coop) expect(autosave(game, 2).kind == galactic::GalacticEventKind::save_rejected,
+            "WGS-143 a non-human seat cannot issue the prebattle autosave");
+        const auto event = autosave(game, 1);
+        expect(event.kind == (coop ? galactic::GalacticEventKind::save_rejected : galactic::GalacticEventKind::save_requested),
+            "WGS-99/143 the pending prompt admits the prebattle autosave for a single human only");
+        if (coop) continue;
+        expect(event.subject == 1U && game.pending_conflict() && !game.conflict(), "the admitted request leaves the prompt pending, no child");
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        cp::GameLoadOptions options; options.script_requirement = eawr::campaign::ScriptRequirement::none;
+        options.content = no_content; options.configure_session = configure;
+        options.conflict_service = [](const auto&, const auto&, auto) {
+            return eawr::core::Result<std::optional<campaign::RecordedAdmission>>::success({});
+        };
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            const eawr::platform::ThreadWorkerAdapter pool(workers);
+            auto restored = take(cp::load_game_checkpoint(saved, identities, options, pool));
+            expect(restored.session.state_sha256() == game.state_sha256() && restored.session.pending_conflict(),
+                "WGS-99 the autosave restores the pending-prompt state hash on every worker count");
+        }
+        check(game.submit({{game.completed_tick(), {1}, ++sequence}, galactic::BattleChoice{conflict.id, true}}));
+        (void)take(game.step(executor));
+        expect(game.mode() == campaign::SessionMode::battle, "Begin enters the child after the autosave tick");
+        expect(autosave(game, 1).kind == galactic::GalacticEventKind::save_rejected,
+            "WGS-142 once the child is staged the prebattle autosave is refused");
+        // WGS-145: a requested autosave whose capture never happens keeps later manual saves verifiable.
+        auto lost = take(campaign::GameSession::create(config)); prompt(lost);
+        expect(autosave(lost, 1).kind == galactic::GalacticEventKind::save_requested, "lost-capture fixture admits its request");
+        for (int i = 0; i < 3; ++i) (void)take(lost.step(executor));
+        check(lost.submit({{lost.completed_tick(), {1}, ++sequence}, galactic::SaveRequest{static_cast<std::int64_t>(sequence), false, false, false}}));
+        expect(take(lost.step(executor)).save_events.back().kind == galactic::GalacticEventKind::save_requested, "manual save follows");
+        const auto manual = take(cp::save_game_checkpoint(lost, identities));
+        auto reloaded = take(cp::load_game_checkpoint(manual, identities, options, executor));
+        expect(reloaded.session.state_sha256() == lost.state_sha256(), "a manual save after a lost prebattle capture still restores equal");
     }
 }
 void refusals() {
@@ -941,7 +1052,7 @@ void child_roundtrip() {
     const auto original_tick = take(game.step(serial));
     expect(waiting_tick.state_hash.get() == original_tick.state_hash.get(), "queued child activates identically");
     expect(original_tick.save_events.back().kind == galactic::GalacticEventKind::save_rejected,
-        "queued local conflict prebattle autosave is refused before child activation");
+        "WGS-99/142 a staged (not pending) conflict refuses the prebattle autosave before child activation");
     for (int i = 0; i < 4; ++i) (void)take(game.step(serial));
     expect(game.galaxy().completed_tick() < game.completed_tick(),
         "active child deliberately freezes the galaxy world clock behind the shared session barrier");
@@ -1016,7 +1127,9 @@ void direct_child_refusals() {
     const auto encode_tail = [&](const archive::ChildOwner& row, campaign::ModeTimelineSnapshot clock) {
         archive::Writer out;
         out(std::optional(clock), std::optional<campaign::ModeTimelineSnapshot>{},
-            std::optional(row), std::optional<archive::ChildOwner>{}, std::optional<Bytes>{});
+            std::uint32_t{0}, eawr::sim::EntityId{0}, // interactive seat and summary hold
+            std::optional(row), std::optional<archive::ChildOwner>{}, std::optional<Bytes>{},
+            std::optional<galactic::story::State>{});
         return out.bytes;
     };
     const auto bytes = take(game.save_checkpoint_state());
@@ -1056,7 +1169,8 @@ void direct_child_refusals() {
     auto galaxy = take(campaign::GameSession::create(config));
     (void)take(galaxy.step(executor));
     auto state = take(galaxy.save_checkpoint_state());
-    archive::Reader in(state); Bytes world; in(world);
+    archive::Reader in(state); Bytes world; std::uint32_t owner_version{};
+    in(owner_version, world); expect(owner_version == 3, "crafted refusal fixture reads the current owner format");
     const auto offset = state.size() - in.remaining();
     state[offset] = 2; // parent tick now ahead of the galaxy clock without a child
     auto fresh = take(campaign::GameSession::create(config));
@@ -1447,14 +1561,17 @@ void timeline_contracts() {
     }
 }
 } // namespace
-int main(int argc, char** argv) {
+int case_galactic_game_checkpoint_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--timeline") { timeline_contracts(); return failures == 0 ? 0 : 1; }
+        if (argc == 2 && std::string_view(argv[1]) == "--prebattle-autosave") {
+            prebattle_autosave_admission(); return failures == 0 ? 0 : 1;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--pending-conflict") {
             pending_conflict_resave(); return failures == 0 ? 0 : 1;
         }
         nested_child_commands(); large_blob_contracts<GalacticArchive>("galactic"); large_blob_contracts<TacticalArchive>("tactical"); direct_child_refusals(); direct_restore_equality(); owner_journal_refusal(); human_command_history_growth(); future_native_frontier(); scripted_roundtrip(); victory_tail_barrier(); victory_tail_refusals(); hero_return_tail_barrier(); story_clock_refusals(); pending_conflict_resave();
-        admission_and_fixups(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
+        admission_and_fixups(); prebattle_autosave_admission(); refusals(); child_roundtrip(); observer_load_clock(); child_return_and_future_input();
         scripted_child_barriers(); child_casualty_return();
         if (argc != 2) throw std::runtime_error("expected corpus directory");
         corpus(argv[1]);
