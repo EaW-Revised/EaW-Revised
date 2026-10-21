@@ -2,6 +2,7 @@
 
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/net/lockstep_session.hpp"
+#include "eawr/net/galactic_clock_policy.hpp"
 
 #include <functional>
 #include <memory>
@@ -35,9 +36,10 @@ enum class GalacticPayloadAuthority : std::uint8_t { human_wire, engine_only };
 enum class GalacticDeparturePolicy : std::uint8_t { configured_fallback };
 
 struct GalacticAdapterOptions {
-    // The network child Begin/return barrier belongs to GCMP-05 (#1115/#2016). Until it lands, tactical-layer
-    // commands are refused at validate and install, so no battle input can enter the shared stream.
-    bool child_battle_commands{false};
+    GalacticClockPolicy clock_policy{GalacticClockPolicy::unrestricted};
+    // The adapter drives child Begin/return through the same sealed frontier as the galaxy.
+    // A caller can explicitly restrict an adapter to galaxy-only commands.
+    bool child_battle_commands{true};
     GalacticDeparturePolicy departure_policy{GalacticDeparturePolicy::configured_fallback};
 };
 
@@ -50,6 +52,8 @@ public:
     GalacticSessionAdapter(campaign::GameSession& game, const sim::PartitionExecutor& executor,
         GalacticAdapterOptions options = {});
 
+    // Rebind once the agreed owner transfers from setup to its live worker pool.
+    void bind_executor(const sim::PartitionExecutor& executor) noexcept { executor_ = &executor; }
     std::uint64_t completed_tick() const override;
     std::string state_hash() const override;
     std::vector<std::uint8_t> canonical_state() const override;
@@ -71,11 +75,10 @@ public:
     void set_engine_source(EngineSource source) { engine_source_ = std::move(source); }
     // The newest completed tick for publication; the adapter keeps no further copy.
     [[nodiscard]] std::optional<campaign::GameTick> take_tick() { return std::exchange(last_tick_, std::nullopt); }
-    // BattleChoice commands the session refused at install because its alert had already closed. The owner
-    // decides that from the pending_alert view (local seat, wall clock, local votes), which is not agreed state:
-    // the refusal is peer-identical only while no pending_alert reader is wired (none is on main). GCMP-04
-    // (#4360) moves the decision to execution from shared state; until then the refusal is recorded, never fatal.
+    // Gameplay refusals at the executing sealed tick, including tactical input for a closed conflict.
+    // These are also published in the completed tick diagnostics; static wire admission remains fatal.
     [[nodiscard]] const std::vector<core::Diagnostic>& refused() const noexcept { return refused_; }
+    [[nodiscard]] std::span<const sim::SeatId> clock_refusals() const noexcept { return clock_refusals_; }
     [[nodiscard]] const campaign::GameSession& game() const noexcept { return *game_; }
 
 private:
@@ -83,12 +86,17 @@ private:
     [[nodiscard]] const sim::galactic::Seat* seat(sim::SeatId id) const;
     campaign::GameSession* game_{};
     const sim::PartitionExecutor* executor_{};
+    [[nodiscard]] std::vector<std::uint8_t> clock_state() const;
+    [[nodiscard]] std::string clock_hash(std::string base) const;
     GalacticAdapterOptions options_;
+    GalacticClockLimiter clock_limiter_;
+    std::vector<sim::SeatId> clock_refusals_;
     std::vector<sim::galactic::Seat> roster_; // tick-zero seats, ascending seat identity
     bool debug_commands_{};
     EngineSource engine_source_;
     std::optional<campaign::GameTick> last_tick_;
     std::vector<core::Diagnostic> refused_;
+    std::size_t tick_refusal_begin_{};
     // Every command this adapter submitted for the tick in flight (installed human input, then engine input).
     std::vector<sim::galactic::GameCommand> tick_commands_;
     std::vector<std::uint8_t> last_input_; // canonical encoding of the tick completed last

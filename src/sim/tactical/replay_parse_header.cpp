@@ -569,6 +569,20 @@ core::Result<void> parse_header_extensions(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_battle_domain) {
+                std::uint32_t version{}, domain{};
+                if (length != 8 || !reader.read_u32(version) || !reader.read_u32(domain)) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid battle domain extension length", logical_path);
+                }
+                if (version != 1) {
+                    return fail<Parsed>(diagnostic_codes::version, "unsupported battle domain extension version", logical_path);
+                }
+                if (domain != static_cast<std::uint32_t>(BattleDomain::land)) {
+                    return fail<Parsed>(diagnostic_codes::malformed, "battle domain extension requires land; space must be omitted", logical_path);
+                }
+                replay.setup.domain = BattleDomain::land;
+                continue;
+            }
             if (tag == replay_extension_cinematic_seats) {
                 if (auto section = parse_extension_cinematic_seats(bytes, reader, logical_path, replay, length); !section) {
                     return core::Result<void>::failure(section.error());
@@ -667,7 +681,8 @@ core::Result<void> parse_header_extensions(
                 && !replay.setup.first_free_entity_id && !replay.setup.campaign && carriers.empty()
                 && replay.setup.cinematic_seats.empty() && !replay.setup.match_identity
                 && !replay.setup.departure_policy && replay.setup.beacon_rules.empty()
-                && !replay.setup.attract_pool && !replay.setup.native_scene && object_turn_count == 0)) {
+                && !replay.setup.attract_pool && !replay.setup.native_scene && object_turn_count == 0
+                && replay.setup.domain == BattleDomain::space)) {
             return fail<Parsed>(diagnostic_codes::malformed, "invalid replay header extension length", logical_path);
         }
     }

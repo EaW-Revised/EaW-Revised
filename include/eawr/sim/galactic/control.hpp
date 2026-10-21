@@ -14,6 +14,9 @@ struct ControlStep {
 };
 
 [[nodiscard]] core::Result<void> validate_control_setup(const GalacticSetup& setup);
+// GPC-01: sparse lifecycle writes; actor location zero means in transit/absent.
+bool update_control_actor(PoliticalControlSetup&, const CensusObject&);
+bool erase_control_actor(PoliticalControlSetup&, EntityId);
 // WGM-106: an ordinary transport needs at least one direct payload combatant
 // with positive current-type power that does not stay inside transports.
 // No recursive capability or independent payload death filter is applied.

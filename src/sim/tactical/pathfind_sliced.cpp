@@ -310,7 +310,9 @@ core::Result<SlicedPathSearch> SlicedPathSearch::from_checkpoint(const MotionTab
     if (saved.has_statics) world.statics = &saved.statics;
     SlicedPathSearch restored(table, saved.limits, saved.footprint, world, saved.entity, saved.tick,
         saved.position, saved.yaw, saved.speed, saved.target, saved.through_hazards, saved.filter_destination);
-    if (saved.started) static_cast<void>(restored.run(saved.expansions));
+    // Completion can require a terminal queue pop after the last counted
+    // expansion. Rebuild that terminal state too, then verify the exact cursor.
+    if (saved.started) static_cast<void>(restored.run(saved.ended ? unlimited : saved.expansions));
     if (restored.expansions() != saved.expansions || restored.ended() != saved.ended) return invalid();
     return core::Result<SlicedPathSearch>::success(std::move(restored));
 }

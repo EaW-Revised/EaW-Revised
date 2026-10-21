@@ -3,8 +3,81 @@
 
 #include <algorithm>
 #include <limits>
+#include <sstream>
+#include "eawr/data/retail_values.hpp"
 
 namespace eawr::campaign {
+namespace gc = sim::galactic;
+using sim::math::Fixed;
+core::Result<std::optional<gc::RaidSetup>> build_raid_inputs(const units::GalacticTypeTable& types,
+    const data::galactic::GalacticData& data, std::span<const FleetTypeBinding> bindings,
+    std::span<const RaidFactionBinding> factions) {
+    using Out = std::optional<gc::RaidSetup>;
+    const auto fail = [](std::string message) {
+        core::Diagnostic error; error.code = std::string(gc::diagnostic_codes::invalid_setup); error.message = std::move(message);
+        return core::Result<Out>::failure(std::move(error));
+    };
+    const auto key = [](std::string text) {
+        for (auto& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        return text;
+    };
+    const auto words = [&](const std::string& text) {
+        std::istringstream stream(text); std::vector<std::string> result;
+        for (std::string word; stream >> word;) if (word != ",") result.push_back(key(word));
+        return result;
+    };
+    const auto contains = [&](const std::vector<std::string>& names, const std::string& name) {
+        return std::find(names.begin(), names.end(), key(name)) != names.end();
+    };
+    const auto* faction = data.constant("Raid_Force_Required_Faction");
+    const auto* free = data.constant("Raid_Force_Free_Object_Category_Mask");
+    const auto* limited = data.constant("Raid_Force_Limited_Object_Category_Mask");
+    const auto* heroes = data.constant("Raid_Force_Max_Heros");
+    const auto* count = data.constant("Raid_Force_Max_Limited_Objects");
+    if (!faction && !free && !limited && !heroes && !count) return core::Result<Out>::success({});
+    if (!faction || !free || !limited || !heroes || !count) return fail("incomplete raid policy");
+    const auto cap = [](const auto* constant) -> std::optional<std::uint32_t> {
+        const auto value = constant->number;
+        if (!value || value->raw() < 0 || value->raw() % Fixed::scale != 0
+            || static_cast<std::uint64_t>(value->raw() / Fixed::scale) > std::numeric_limits<std::uint32_t>::max()) return {};
+        return static_cast<std::uint32_t>(value->raw() / Fixed::scale);
+    };
+    const auto max_heroes = cap(heroes), max_limited = cap(count);
+    if (!max_heroes || !max_limited) return fail("invalid raid caps");
+    gc::RaidSetup out;
+    // Two internal bits classify membership in the two authored masks. They
+    // are representation values, not a fixed list of game categories.
+    out.rules = {0, 1, 2, *max_heroes, *max_limited};
+    if (!data::retail::is_placeholder(faction->text)) {
+        gc::FactionId unused{};
+        for (const auto& binding : factions) unused = std::max(unused, binding.id);
+        if (unused == std::numeric_limits<gc::FactionId>::max()) return fail("raid faction identity exhausted");
+        out.rules.required_faction = unused + 1; // absent roster faction permits no player
+        for (const auto& binding : factions) if (key(binding.faction) == key(faction->text))
+            out.rules.required_faction = binding.id;
+    }
+    auto free_text = free->text, limited_text = limited->text;
+    std::replace_if(free_text.begin(), free_text.end(), [](char c) { return c == '|' || c == ','; }, ' ');
+    std::replace_if(limited_text.begin(), limited_text.end(), [](char c) { return c == '|' || c == ','; }, ' ');
+    const auto free_names = words(free_text), limited_names = words(limited_text);
+    gc::TypeId previous{};
+    for (const auto& binding : bindings) {
+        if (!binding.id || binding.id <= previous) return fail("invalid raid type binding order");
+        previous = binding.id;
+        const auto* type = types.find(binding.original_type);
+        if (!type) return fail("unbound raid type");
+        gc::RaidType row; row.type = binding.id;
+        for (const auto& category : type->category_mask) {
+            if (contains(free_names, category)) row.categories |= 1;
+            if (contains(limited_names, category)) row.categories |= 2;
+        }
+        row.hero = type->named_hero.value_or(false); row.stays_in_transport = type->stays_in_transport.value_or(false);
+        out.types.push_back(row);
+    }
+    return core::Result<Out>::success(std::move(out));
+}
+
+
 core::Result<sim::galactic::MovementPlanet> prepare_initial_movement_planet(
     sim::galactic::PlanetId planet, const assets::Model& model, sim::math::Fixed scale_factor) {
     using Out = sim::galactic::MovementPlanet;

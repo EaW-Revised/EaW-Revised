@@ -1,4 +1,5 @@
 #include "eawr/net/galactic_adapter.hpp"
+#include "eawr/core/sha256.hpp"
 
 #include <algorithm>
 #include <type_traits>
@@ -27,7 +28,7 @@ EAWR_GALACTIC_POLICY(ResumeGalaxy, human_wire);
 EAWR_GALACTIC_POLICY(SetSpeed, human_wire);
 EAWR_GALACTIC_POLICY(DebugSetPlanetOwner, human_wire); // only when the agreed setup enables debug commands
 EAWR_GALACTIC_POLICY(DebugSetFleetOrbit, human_wire);
-EAWR_GALACTIC_POLICY(TacticalLayerCommand, human_wire); // only once the child barrier is enabled (GCMP-05)
+EAWR_GALACTIC_POLICY(TacticalLayerCommand, human_wire);
 EAWR_GALACTIC_POLICY(SaveRequest, human_wire);
 EAWR_GALACTIC_POLICY(PostLoadFixup, engine_only); // internal restore prologue
 EAWR_GALACTIC_POLICY(CreateFleet, human_wire);
@@ -113,13 +114,37 @@ core::Result<galactic::GameCommand> decode_galactic_input(const SeatInput& input
 
 GalacticSessionAdapter::GalacticSessionAdapter(campaign::GameSession& game, const sim::PartitionExecutor& executor,
     GalacticAdapterOptions options)
-    : game_(&game), executor_(&executor), options_(options),
+    : game_(&game), executor_(&executor), options_(options), clock_limiter_(options.clock_policy),
       roster_(game.galaxy().setup().seats), debug_commands_(game.galaxy().setup().debug_commands) {
     std::sort(roster_.begin(), roster_.end(), [](const auto& left, const auto& right) { return left.seat_id < right.seat_id; });
 }
 
 std::uint64_t GalacticSessionAdapter::completed_tick() const { return game_->completed_tick(); }
-std::string GalacticSessionAdapter::state_hash() const { return game_->state_sha256(); }
+std::string GalacticSessionAdapter::state_hash() const { return clock_hash(game_->state_sha256()); }
+
+Bytes GalacticSessionAdapter::clock_state() const {
+    Bytes bytes;
+    put(bytes, static_cast<std::uint8_t>(clock_limiter_.policy()), 1);
+    put(bytes, GalacticClockLimiter::window_ticks, 8);
+    put(bytes, GalacticClockLimiter::changes_per_window, 4);
+    put(bytes, clock_limiter_.history().size(), 4);
+    for (const auto& [seat_id, changes] : clock_limiter_.history()) {
+        put(bytes, seat_id.value, 4);
+        put(bytes, changes.size(), 4);
+        for (const auto tick : changes) put(bytes, tick, 8);
+    }
+    return bytes;
+}
+
+std::string GalacticSessionAdapter::clock_hash(std::string base) const {
+    if (options_.clock_policy == GalacticClockPolicy::unrestricted) return base;
+    constexpr std::string_view domain = "eawr-galactic-lan-clock-v1";
+    Bytes bytes(domain.begin(), domain.end());
+    bytes.insert(bytes.end(), base.begin(), base.end());
+    const auto clock = clock_state();
+    bytes.insert(bytes.end(), clock.begin(), clock.end());
+    return core::sha256_hex(bytes);
+}
 
 Bytes GalacticSessionAdapter::canonical_state() const {
     auto bytes = game_->galaxy().canonical_state_bytes();
@@ -130,6 +155,14 @@ Bytes GalacticSessionAdapter::canonical_state() const {
         put(bytes, game_->conflict() ? game_->conflict()->id : 0, 8);
         put(bytes, tactical.size(), 8);
         bytes.insert(bytes.end(), tactical.begin(), tactical.end());
+    }
+    if (options_.clock_policy != GalacticClockPolicy::unrestricted) {
+        const auto clock = clock_state();
+        bytes.push_back(0x43); // LAN clock extension, independent of campaign checkpoint bytes.
+        const auto base = game_->state_sha256();
+        bytes.insert(bytes.end(), base.begin(), base.end());
+        put(bytes, clock.size(), 8);
+        bytes.insert(bytes.end(), clock.begin(), clock.end());
     }
     return bytes;
 }
@@ -161,7 +194,7 @@ core::Result<galactic::GameCommand> GalacticSessionAdapter::authorize(const Seat
         return fail_with<galactic::GameCommand>(session_errors::admission, "debug commands are off in this session");
     if (!options_.child_battle_commands && std::holds_alternative<galactic::TacticalLayerCommand>(payload))
         return fail_with<galactic::GameCommand>(session_errors::admission,
-            "child battle commands are disabled until the Begin/return barrier lands (#1115/#2016)");
+            "child battle commands are disabled for this driver");
     return decoded;
 }
 
@@ -198,15 +231,31 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
         decoded.push_back(std::move(command).value());
     }
     tick_commands_.clear();
+    tick_refusal_begin_ = refused_.size();
+    clock_limiter_.expire(tick);
+    clock_refusals_.clear();
     for (auto& command : decoded) {
+        const bool clock_command = std::holds_alternative<galactic::PauseGalaxy>(command.payload)
+            || std::holds_alternative<galactic::SetSpeed>(command.payload); // Resume is always allowed.
+        const auto live_seats = game_->galaxy().seats();
+        const auto issuer = std::find_if(live_seats.begin(), live_seats.end(),
+            [&](const auto& row) { return row.seat_id == command.key.seat; });
+        if (clock_command && issuer != live_seats.end() && issuer->active
+            && !clock_limiter_.admit(command.key.seat, tick)) {
+            if (std::find(clock_refusals_.begin(), clock_refusals_.end(), command.key.seat) == clock_refusals_.end())
+                clock_refusals_.push_back(command.key.seat);
+            refused_.push_back(fail_with<void>(session_errors::admission,
+                "Shared clock limit: two pause/speed changes per 45 session seconds per seat.").error());
+            tick_commands_.push_back(std::move(command)); // Attempts remain in the agreed input journal.
+            continue;
+        }
         if (auto submitted = game_->submit(command); !submitted) {
-            // WGM-174/177: GameSession::submit refuses a choice for an alert that already closed, reading its
-            // pending_alert view (local seat, wall-clock elapsed, local votes). That view is NOT agreed state, so
-            // this refusal is not peer-deterministic once a reader is wired: it is only safe while none is (no
-            // setter exists on main). The agreed path is GCMP-04 (#4360), which decides a BattleChoice at execution
-            // from shared state; until then the refusal is recorded and the match continues.
-            if (std::holds_alternative<galactic::BattleChoice>(command.payload)) {
+            // Installation is the executing sealed tick. An input that outlived its conflict is a shared
+            // gameplay refusal, not a failed network session; retain it in the canonical input and report it.
+            if (std::holds_alternative<galactic::BattleChoice>(command.payload)
+                || (options_.child_battle_commands && std::holds_alternative<galactic::TacticalLayerCommand>(command.payload))) {
                 refused_.push_back(submitted.error());
+                tick_commands_.push_back(std::move(command));
                 continue;
             }
             return fail_with<void>(session_errors::simulation, submitted.error().message);
@@ -247,7 +296,12 @@ core::Result<CompletedTick> GalacticSessionAdapter::step() {
     }
     tick_commands_.clear();
     last_tick_ = std::move(stepped).value();
-    const auto hash = last_tick_->state_sha256.empty() ? last_tick_->state_hash.get() : last_tick_->state_sha256;
+    last_tick_->diagnostics.insert(last_tick_->diagnostics.end(),
+        refused_.begin() + static_cast<std::ptrdiff_t>(tick_refusal_begin_), refused_.end());
+    const auto base_hash = last_tick_->state_sha256.empty() ? last_tick_->state_hash.get() : last_tick_->state_sha256;
+    const auto hash = clock_hash(base_hash);
+    last_tick_->state_sha256 = hash;
+    last_tick_->state_hash = sim::StateHash(hash);
     return core::Result<CompletedTick>::success({last_tick_->completed_tick, hash});
 }
 

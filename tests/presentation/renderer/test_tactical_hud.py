@@ -16,6 +16,7 @@ deleted after the run; only the reports and captures are kept.
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -170,10 +171,12 @@ class TacticalHudStructure(unittest.TestCase):
         self.assertIn("bool EawrHeroTray::_has_point(const Vector2& point) const { return slot_at(point).has_value(); }", view)
         # An unchanged roster costs no redraw.
         self.assertIn("if (friendly == icons_[0] && hostile == icons_[1]) return;", view)
-        # Presentation only: the model reads the snapshot and nothing else.
+        # Presentation only: callbacks leave selection/order effects with the viewer.
+        # Check code dependencies, not explanatory comments about the admitted target.
         model = (ROOT / "src/presentation/ui/hero_tray.cpp").read_text(encoding="utf-8")
-        self.assertNotIn("submit", model)
-        self.assertNotIn("command", model.lower().replace("command_bar", ""))
+        code = re.sub(r"//[^\n]*|/\*.*?\*/", "", model, flags=re.DOTALL)
+        self.assertNotIn("submit", code)
+        self.assertNotIn("command", code.lower().replace("command_bar", ""))
 
     def test_the_minimap_is_drawn_in_the_radar_mesh(self):
         # #455 (docs/behaviour/foc-minimap.md): the minimap model, its Godot control and the live

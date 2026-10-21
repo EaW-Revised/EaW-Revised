@@ -837,6 +837,22 @@ void scene_contracts() {
     const auto stowed = take(campaign::prepare_space_entry(record, transport_input, 100, 17));
     expect(marker_of(stowed, 21) == 1 && marker_of(stowed, 22) == 4 && marker_of(stowed, 20) == 1,
         "WGT-114: multiple stowed passengers advance once per transport, then wrap");
+    {
+        // A passenger whose transport is not in the conflict (27), or is held by another owner (28), is left out
+        // with a note; the entry still starts and the other passengers and every marker are unchanged.
+        auto orphaned = transport_input;
+        orphaned.riders.push_back({{27, 4, 1, 10}, "Commander", 99, {}, {}});
+        orphaned.riders.push_back({{28, 4, 1, 10}, "Commander", 30, {}, {}});
+        const auto kept = take(campaign::prepare_space_entry(record, orphaned, 100, 17));
+        const auto in_plan = [&](sim::EntityId id) {
+            return std::any_of(kept.conflict.forces.begin(), kept.conflict.forces.end(), [id](const auto& f) { return f.id == id; });
+        };
+        expect(kept.notes.size() == 2 && !in_plan(27) && !in_plan(28) && in_plan(24) && in_plan(26),
+            "an orphan passenger is left out with a note instead of refusing the entry");
+        expect(marker_of(kept, 21) == 1 && marker_of(kept, 22) == 4 && marker_of(kept, 20) == 1
+            && kept.conflict.forces.size() == stowed.conflict.forces.size() && kept.riders.size() == stowed.riders.size()
+            && stowed.notes.empty(), "leaving an orphan passenger out changes no other force, rider or marker");
+    }
     transport_input.types[3].attach_to_flagship = true;
     const auto deferred = take(campaign::prepare_space_entry(record, transport_input, 100, 17));
     expect(marker_of(deferred, 20) == 1 && deferred.riders.front().force.carrier == 20,

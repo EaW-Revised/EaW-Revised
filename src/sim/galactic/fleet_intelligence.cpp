@@ -64,7 +64,7 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
     const std::function<std::optional<std::uint32_t>(TypeId)>& icon_rank,
     const std::span<const std::pair<EntityId, std::int64_t>> presentation_indices) {
     FleetIntelligence output;
-    if (!snapshot.observer() || snapshot.observer()->local_player != local_player) return output;
+    if (!snapshot.observer() || !local_player || (snapshot.view_player() && snapshot.view_player() != local_player)) return output;
     const auto& observer = *snapshot.observer();
     const auto* player = observer_detail::find(observer.players, local_player, [](const auto& row) { return row.player; });
     if (!player) return output;

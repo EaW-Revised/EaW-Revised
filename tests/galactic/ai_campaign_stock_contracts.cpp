@@ -1005,4 +1005,103 @@ void authored_selection_contracts() {
     expect(!cp::select_live_galactic_ai_players(data, plan, ai_data, "Missing_Adjustment"),
         "missing difficulty mapping refuses instead of assuming Normal");
 }
+namespace {
+struct MpSelectionFixture {
+    eawr::data::galactic::GalacticData data;
+    eawr::script::foc::ai::AiData ai;
+    cp::CampaignSetupOptions options;
+
+    MpSelectionFixture() {
+        namespace ai_data = eawr::script::foc::ai;
+        for (const auto& name : {"Azure", "Copper", "Jade", "Rogue", "Ambient"}) {
+            eawr::data::galactic::Faction faction; faction.name = name;
+            faction.is_neutral = std::string_view(name) == "Rogue";
+            faction.is_playable = std::string_view(name) != "Rogue" && std::string_view(name) != "Ambient";
+            if (*faction.is_playable) faction.basic_ai = std::string(name) + "_Mod_Controller";
+            data.factions.push_back(std::move(faction));
+        }
+        eawr::data::galactic::Planet planet; planet.name = "Home"; planet.behaviors = {"PLANET"};
+        planet.galactic_position = eawr::data::galactic::Position{}; data.planets.push_back(planet);
+        data.constants = {{"MaximumFleetMovementDistance", "10", eawr::sim::math::Fixed::from_integer(10).value()},
+            {"Fiscal_Cycle_Time_In_Secs", "45", eawr::sim::math::Fixed::from_integer(45).value()}};
+        eawr::data::galactic::Campaign campaign; campaign.name = "Mod_Multiplayer";
+        campaign.is_multiplayer = true; campaign.locations = {"Home"}; campaign.planets = {"Home"};
+        data.campaigns.push_back(std::move(campaign));
+        options.mode = cp::CampaignSetupMode::multiplayer; options.seed = 42;
+        for (galactic::PlayerId id = 1; id <= data.factions.size(); ++id) {
+            const auto& faction = data.factions[id - 1];
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            options.seats.push_back({galactic::SeatId{id}, id, id == 1 ? galactic::SeatKind::human : galactic::SeatKind::ai,
+                id - 1, true, id == 1 ? 1U : 0U});
+            if (id == 2 || id == 3) {
+                ai_data::PlayerType type; type.name = faction.basic_ai;
+                type.difficulty.emplace("HARD", "MOD_CHALLENGE");
+                type.difficulty.emplace("EASY", "MOD_GENTLE");
+                ai.players.emplace(ai_data::upper_case(type.name), std::move(type));
+            }
+        }
+    }
+    auto select(std::string_view difficulty = "mod_challenge") const {
+        const auto plan = must(cp::plan_campaign_setup(data, {}, data.campaigns.front().name, options));
+        return cp::select_live_galactic_ai_players(data, plan, ai, difficulty);
+    }
+};
+}
+
+void mp_ai_uses_authored_faction_basic_ai() {
+    MpSelectionFixture fixture;
+    // Deliberately unrelated campaign pairs cannot replace the agreed MP faction policy.
+    fixture.data.campaigns.front().ai_player_control = {{"Copper", "Unresolved_Solo_Controller"}};
+    const auto selected = must(fixture.select());
+    expect(selected.size() == 2 && selected[0].player == galactic::PlayerId{2}
+        && selected[0].player_type == "Copper_Mod_Controller" && selected[1].player_type == "Jade_Mod_Controller",
+        "GCMP-AI-01 selects each playable MP AI faction's own mod-authored Basic_AI, without campaign pairs");
+    // Mode is an agreed runtime input, not campaign menu metadata.
+    fixture.options.mode = cp::CampaignSetupMode::single_player;
+    expect(!fixture.select(), "single-player still resolves its authored pair, even on an MP-listed definition");
+    fixture.data.campaigns.front().ai_player_control.clear();
+    expect(must(fixture.select()).empty(), "single-player does not borrow the multiplayer Basic_AI extension");
+}
+
+void mp_ai_uses_agreed_difficulty_mapping() {
+    MpSelectionFixture fixture;
+    const auto hard = must(fixture.select("mOd_ChAlLeNgE"));
+    const auto easy = must(fixture.select("mod_gentle"));
+    expect(hard.size() == 2 && easy.size() == 2 && hard[0].difficulty == "HARD" && hard[1].difficulty == "HARD"
+        && easy[0].difficulty == "EASY" && easy[1].difficulty == "EASY",
+        "GCMP-AI-02 resolves the global agreed adjustment through every selected type's authored mapping");
+    expect(must(fixture.select("mOd_ChAlLeNgE")) == hard, "independent selection yields canonical identical controller inputs");
+}
+
+void mp_ai_preserves_human_inactive_and_ambient_absence() {
+    MpSelectionFixture fixture;
+    // Human Azure's Basic_AI is intentionally unresolved; ambient factions omit it.
+    fixture.options.players[2].active = false; fixture.options.seats[2].active = false;
+    const auto selected = must(fixture.select());
+    expect(selected.size() == 1 && selected.front().player == galactic::PlayerId{2},
+        "GCMP-AI-03 excludes humans, inactive AI and Neutral, leaving unauthored ambient controllers absent");
+    fixture.data.campaigns.front().ai_player_control = {{"Ambient", "Copper_Mod_Controller"}};
+    const auto authored = must(fixture.select());
+    expect(authored.size() == 2 && authored.back().player == galactic::PlayerId{5},
+        "GCMP-AI-03 preserves a nonplayable ambient faction's explicit campaign assignment");
+}
+
+void mp_ai_refuses_unsupported_playable_inputs() {
+    MpSelectionFixture fixture;
+    fixture.data.factions[1].basic_ai.clear();
+    auto missing = fixture.select();
+    expect(!missing && missing.error().code == "EAWR-GCAI-RUNTIME-0001"
+        && missing.error().message == "galactic AI provider absent: multiplayer playable faction Basic_AI",
+        "GCMP-AI-04 names missing playable Basic_AI rather than installing a stock fallback");
+    fixture.data.factions[1].basic_ai = "Unknown_Mod_Controller";
+    missing = fixture.select();
+    expect(!missing && missing.error().message == "galactic AI provider absent: authored AI player type",
+        "GCMP-AI-04 refuses an unresolved authored Basic_AI reference");
+    fixture.data.factions[1].basic_ai = "Copper_Mod_Controller";
+    missing = fixture.select("mod_unsupported");
+    expect(!missing && missing.error().message == "galactic AI provider absent: authored difficulty level",
+        "GCMP-AI-04 refuses an unsupported global difficulty without assuming Normal");
+    fixture.ai.players.at("COPPER_MOD_CONTROLLER").difficulty.emplace("NORMAL", "MOD_CHALLENGE");
+    expect(!fixture.select(), "GCMP-AI-04 refuses ambiguous selected-type difficulty mappings");
+}
 } // namespace galactic_campaign_stock_test

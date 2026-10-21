@@ -623,6 +623,15 @@ core::Result<void> session_detail::Tick::retire_fighter_state(detail::MapStage<S
 }
 
 core::Result<void> session_detail::Tick::fighters() {
+    if (impl_->setup.domain != BattleDomain::space) {
+        // Finish/commit consume these stages even when the space services do not run.
+        fighters_.emplace();
+        fighters_->spins.emplace(impl_->spins);
+        fighters_->squadrons.emplace(impl_->squadrons);
+        fighters_->spawners.emplace(impl_->spawners);
+        fighters_->free_garrisons.emplace(impl_->free_garrisons);
+        return core::Result<void>::success();
+    }
     auto& minds = craft_prep_.value().minds.value();
     auto& crafts = staging_.value().crafts.value();
     const auto& arrived_squadrons = staging_.value().arrived_squadrons.value();
@@ -645,6 +654,7 @@ core::Result<void> session_detail::Tick::fighters() {
 }
 
 core::Result<void> session_detail::Tick::hangars() {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     auto& minds = craft_prep_.value().minds.value();
     auto& crafts = staging_.value().crafts.value();
     auto& respawns = staging_.value().respawns.value();

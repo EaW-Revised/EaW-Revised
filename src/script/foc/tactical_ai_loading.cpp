@@ -3,6 +3,7 @@
 
 #include "eawr/script/foc/tactical_ai.hpp"
 
+#include "ai_mode.hpp"
 #include "tactical_ai_internal.hpp"
 
 #include <algorithm>
@@ -149,7 +150,8 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
     for (const auto& [path, bytes] : modules) {
         if (auto added = manifest.add(path, bytes); !added) return PlansResult::failure(added.error());
     }
-    const std::vector<std::string> paths = selected_plans(modules);
+    const ai::AiMode& mode = ai::ai_mode(host->setup.domain);
+    const std::vector<std::string> paths = selected_plans(modules, host->setup.domain);
     for (const std::string& path : paths) {
         // L-03a / ML-33: require substitutes the request verbatim. Keep the
         // admitted logical directory so root-level AI plans resolve too.
@@ -165,7 +167,7 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
     authoritative::SessionConfig config;
     config.seed = host->setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
-    config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/AI/SpaceMode/"};
+    config.script_directories = {"Data/Scripts/Library/", std::string(mode.script_directory)};
     auto scripts = ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scripts) return PlansResult::failure(scripts.error());
     auto loaded = std::make_shared<std::map<std::uint64_t, ValueList>>();
@@ -215,7 +217,7 @@ core::Result<std::vector<ai::PlanDef>> load_plans(const HostPtr& host, const std
         }
         plans.push_back(std::move(plan).value());
     }
-    if (selected_goals) notes.push_back("AI selected space plan definitions loaded=" + std::to_string(plans.size())
+    if (selected_goals) notes.push_back(std::string("AI selected ") + (host->setup.domain == tactical::BattleDomain::land ? "land" : "space") + " plan definitions loaded=" + std::to_string(plans.size())
         + ", outside selection=" + std::to_string(outside_selection));
     return PlansResult::success(std::move(plans));
 }
@@ -283,8 +285,10 @@ ai::ConverterFunction converters(const HostPtr& host) {
 using namespace detail;
 using namespace tactical_ai_detail;
 
-std::vector<std::string> required_xml() {
-    auto paths = ai::ai_xml_files();
+std::vector<std::string> required_xml() { return required_xml(tactical::BattleDomain::space); }
+
+std::vector<std::string> required_xml(const tactical::BattleDomain domain) {
+    auto paths = ai::ai_xml_files(domain);
     paths.push_back(enum_path(goal_category_converter));
     return paths;
 }
@@ -324,11 +328,12 @@ std::string freestore_module(const AiSetup& setup, const AiPlayer& player) {
     // keeps the default and follows the selected controller's XML instead.
     if (setup.freestore_module != AiSetup{}.freestore_module) return setup.freestore_module;
     if (player.player_type.empty()) return setup.freestore_module;
+    const std::string tag = std::string(ai::ai_mode(setup.domain).freestore_tag) + "FreeStoreScript";
     for (const auto& [path, text] : setup.xml) {
         if (upper(path).find("/AI/PLAYERS/") == std::string::npos) continue;
         const auto document = ai::parse_xml(path, text);
         if (!document || upper(document.value().child_text("Name")) != upper(player.player_type)) continue;
-        auto script = document.value().child_text("SpaceFreeStoreScript");
+        auto script = document.value().child_text(tag);
         if (script.empty()) return setup.freestore_module;
         if (!upper(script).ends_with(".LUA") && !upper(script).ends_with(".LC")) script += ".lua";
         return "Data/Scripts/FreeStore/" + script;
@@ -337,6 +342,11 @@ std::string freestore_module(const AiSetup& setup, const AiPlayer& player) {
 }
 
 std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules) {
+    return selected_plans(modules, tactical::BattleDomain::space);
+}
+
+std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules, const tactical::BattleDomain domain) {
+    const ai::AiMode& mode = ai::ai_mode(domain);
     std::vector<std::string> paths;
     for (const auto& [path, bytes] : modules) {
         static_cast<void>(bytes);
@@ -349,7 +359,7 @@ std::vector<std::string> selected_plans(const std::map<std::string, std::string>
         const auto slash = relative.find('/');
         if (slash != std::string::npos) {
             const auto directory = relative.substr(0, slash);
-            if ((directory != "SPACEMODE" && directory != "LANDMODE" && directory != "STORYARC")
+            if ((directory != mode.plan_directory && directory != "STORYARC")
                 || relative.find('/', slash + 1) != std::string::npos) continue;
         }
         if (key.ends_with(".LC")) {
@@ -379,7 +389,7 @@ std::vector<std::string> plan_library_modules() {
 }
 
 core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup, const std::map<std::string, std::string>& modules) {
-    return inspect_plans(setup, modules, selected_plans(modules));
+    return inspect_plans(setup, modules, selected_plans(modules, setup.domain));
 }
 
 core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup,
@@ -400,7 +410,7 @@ core::Result<std::vector<PlanInspection>> inspect_plans(const AiSetup& setup,
     authoritative::SessionConfig config;
     config.seed = setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
-    config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/AI/SpaceMode/"};
+    config.script_directories = {"Data/Scripts/Library/", std::string(ai::ai_mode(setup.domain).script_directory)};
     auto scripts = ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scripts) return InspectResult::failure(scripts.error());
     std::vector<core::Diagnostic> errors;

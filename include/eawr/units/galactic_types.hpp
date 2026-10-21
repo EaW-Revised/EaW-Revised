@@ -29,6 +29,14 @@ struct GalacticInitialStealth {
     std::string activation_style;
     std::optional<sim::math::Fixed> evade_chance;
 };
+struct GalacticControlAbility {
+    std::string name;
+    bool protection{};
+    std::optional<bool> initially_enabled{true};
+    std::string activation_style{"Galactic_Automatic"};
+    std::optional<sim::math::Fixed> multiplier{sim::math::Fixed{}};
+    std::optional<std::int64_t> category{0};
+};
 
 // GC original-type values, separate from UnitTables and its tactical identity (ADR-017).
 // Absent or malformed values stay absent: consumers supply only walk-verified defaults.
@@ -84,6 +92,7 @@ struct GalacticType {
     std::array<std::vector<GalacticSpawn>, 6> starting_spawned_units; // WAR-23, authored tech rows
     std::vector<GalacticStrengthBonus> strength_bonuses; // WAR-26
     std::vector<GalacticInitialStealth> initial_stealth; // WGS-84: fresh galactic ability admission
+    std::vector<GalacticControlAbility> control_abilities; // WGM-197 / GPC-01
 };
 
 struct GalacticTypeTable {

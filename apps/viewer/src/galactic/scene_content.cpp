@@ -114,6 +114,9 @@ std::map<std::string, ProductionArt> load_production_art(
         art.encyclopedia = looks.description;
         art.max_health = fields.number("Tactical_Health");
         art.named_hero = fields.flag("Is_Named_Hero");
+        if (const auto* rank = fields.node("Ranking_In_Category"))
+            if (const auto value = data::retail::leading_number(rank->raw_text))
+                art.hero_rank = value->value.trunc_to_integer();
         art.hero = art.named_hero || fields.flag("Is_Generic_Hero") || fields.flag("Is_Special_Weapon_In_Space");
         art.force_sensitive = fields.flag("Is_Force_Sensitive");
         // Shared object content (CARD-17): negative Population_Value usage.

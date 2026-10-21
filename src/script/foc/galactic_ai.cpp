@@ -13,24 +13,25 @@ Manager::Manager(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 Manager::~Manager() = default;
 
 void Manager::Impl::policy_changed(gc::PlayerId player) {
-    auto& cache = policy_cache[player];
+    auto& cache = player_state.at(player).policy;
     if (++cache.revision == 0) std::terminate();
     cache.snapshot.reset();
 }
 void Manager::Impl::policy_restored() {
-    for (auto& entry : policy_cache) policy_changed(entry.first);
+    for (auto& entry : player_state) policy_changed(entry.first);
 }
 std::shared_ptr<const TemplatePolicy> Manager::Impl::policy_snapshot(const PlayerLifecycle& player) {
-    auto& cache = policy_cache[player.selected.player];
+    auto& slice = player_state.at(player.selected.player);
+    auto& cache = slice.policy;
     if (cache.snapshot && cache.built_revision == cache.revision) {
 #ifndef NDEBUG
         if (*cache.snapshot != player.policy) std::terminate(); // a policy write skipped policy_changed.
 #endif
-        ++policy_stats.reuses;
+        ++slice.policy_stats.reuses;
         return cache.snapshot;
     }
     gc_profile::Scope profile_scope(gc_profile::Phase::policy_snapshot);
-    ++policy_stats.builds;
+    ++slice.policy_stats.builds;
     cache.snapshot = std::make_shared<const TemplatePolicy>(player.policy);
     cache.built_revision = cache.revision;
     return cache.snapshot;
@@ -69,8 +70,9 @@ core::Result<std::shared_ptr<Manager>> Manager::create(LifecycleSetup setup, Cap
         player.selected = std::move(selected);
         player.active_templates.resize(type->second.galactic_templates.size());
         impl->state.players.push_back(std::move(player));
+        impl->player_state.try_emplace(impl->state.players.back().selected.player);
     }
-    impl->records = impl->rebuild_records();
+    impl->reset_records();
     return Result::success(std::shared_ptr<Manager>(new Manager(std::move(impl))));
 }
 
@@ -93,7 +95,7 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
     if (!world || world->clocks != clocks) return abort(lifecycle_error("galactic manager requires a copied view at its two clocks"));
     impl.state.clocks = clocks; impl.update_record();
     for (auto& player : impl.state.players) {
-        struct RecordWrite { Impl& owner; gc::PlayerId player{}; ~RecordWrite() { owner.update_record(player); } } record_write{impl, player.selected.player};
+        struct RecordWrite { Impl& owner; gc::PlayerId player{}; ~RecordWrite() { owner.publish_traces(player); owner.update_record(player); } } record_write{impl, player.selected.player};
         if (!player.initialized) if (auto initialized = impl.initialize(player); !initialized) return abort(initialized.error());
         for (std::size_t index = 0; index < service_count; ++index) {
             const auto service_kind = static_cast<Service>(index);
@@ -102,7 +104,7 @@ core::Result<void> Manager::service(Clocks clocks, Admission admission, authorit
             const auto delay = impl.state.service_periods[index];
             if (clocks.synchronization > std::numeric_limits<std::uint64_t>::max() - delay) return abort(lifecycle_error("galactic service deadline overflow"));
             player.deadlines[index] = clocks.synchronization + delay;
-            append_ai_diagnostic(impl.traces, impl.traces_dropped, ServiceTrace{player.selected.player, service_kind, clocks});
+            impl.player_state.at(player.selected.player).traces.push_back(ServiceTrace{player.selected.player, service_kind, clocks});
             if (service_kind == Service::templates) {
                 if (auto changed = impl.templates(player); !changed) return abort(changed.error());
             }
@@ -136,6 +138,14 @@ bool Manager::perception_due(std::uint64_t synchronization) const noexcept {
         return player.deadlines[static_cast<std::size_t>(Service::perception)] <= synchronization;
     });
 }
+bool Manager::service_due(gc::PlayerId player, Service service, std::uint64_t synchronization) const noexcept {
+    const auto& admission = impl_->state.admission;
+    if (!admission.processing || admission.active_mode != Mode::galactic) return false;
+    const auto found = std::find_if(impl_->state.players.begin(), impl_->state.players.end(),
+        [&](const auto& entry) { return entry.selected.player == player; });
+    return found != impl_->state.players.end() && found->initialized
+        && found->deadlines[static_cast<std::size_t>(service)] <= synchronization;
+}
 ServicePeriods Manager::service_periods() const noexcept { return impl_->state.service_periods; }
 core::Result<void> Manager::after_service(authoritative::ServiceReport& report) {
     return impl_->capabilities.services->after_service(report);
@@ -148,7 +158,18 @@ void Manager::set_admission(Admission admission) noexcept {
 LifecycleState Manager::lifecycle() const { return impl_->state; }
 const std::vector<ServiceTrace>& Manager::trace() const noexcept { return impl_->traces; }
 std::uint64_t Manager::trace_dropped() const noexcept { return impl_->traces_dropped; }
-PolicySnapshotStats Manager::policy_snapshot_stats() const noexcept { return impl_->policy_stats; }
+PolicySnapshotStats Manager::policy_snapshot_stats() const noexcept {
+    PolicySnapshotStats result;
+    for (const auto& [player, slice] : impl_->player_state) {
+        static_cast<void>(player); result.builds += slice.policy_stats.builds; result.reuses += slice.policy_stats.reuses;
+    }
+    return result;
+}
+void Manager::Impl::publish_traces(gc::PlayerId player) {
+    auto& pending = player_state.at(player).traces;
+    for (auto& row : pending) append_ai_diagnostic(traces, traces_dropped, std::move(row));
+    pending.clear();
+}
 
 core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
     if (saved.version != 2 || std::any_of(saved.service_periods.begin(), saved.service_periods.end(), [](auto frames) { return frames == 0; })
@@ -189,7 +210,7 @@ core::Result<void> Manager::restore_lifecycle(const LifecycleState& saved) {
     mark_state_changed();
     impl_->state = saved; // deadlines and policy survive; never fresh initialization.
     impl_->policy_restored();
-    impl_->records = impl_->rebuild_records();
+    impl_->reset_records();
     impl_->failure.reset();
     impl_->traces.clear();
     return core::Result<void>::success();

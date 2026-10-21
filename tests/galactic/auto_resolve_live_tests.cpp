@@ -241,7 +241,7 @@ void installed() {
     auto data = take(dg::load_galactic_data(filesystem, catalog.catalog)); const auto types = eawr::units::galactic_type_table(catalog.catalog);
     dg::Campaign authored; authored.name = "AdapterFixture"; authored.locations = {"Shola", "Kamino"}; authored.planets = authored.locations; authored.starting_active_player = "Rebel";
     authored.starting_tech_levels = {{"Rebel", 0}, {"Empire", 0}}; authored.max_tech_levels = {{"Rebel", 5}, {"Empire", 5}}; data.campaigns.push_back(authored);
-    cp::CampaignSetupOptions options; options.seed = 123; options.local_observer = 1;
+    cp::CampaignSetupOptions options; options.seed = 123; options.solo_reference_human = 1;
     options.players = {{{1, 1, 0}, "Rebel", true}, {{2, 2, 0}, "Empire", true}, {{3, 3, 0}, "Neutral", true}};
     options.seats = {{gc::SeatId{1}, 1, gc::SeatKind::human, 0, true, 1}, {gc::SeatId{2}, 2, gc::SeatKind::ai, 1, true, 0}};
     for (const auto& type : types.types) options.types.push_back({eawr::assets::object_type_crc(type.name), type.name});

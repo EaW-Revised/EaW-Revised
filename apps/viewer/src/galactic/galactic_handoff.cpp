@@ -117,7 +117,7 @@ void GalacticMode::State::capture_space_cycle_stage(std::string_view stage) {
     }
     proof_captures.push_back(path.generic_string());
     // Keep phase evidence beside the captures, including failed proof runs.
-    const auto frame = game->frame();
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     std::ofstream timeline(directory / (std::string(stage) + "-phase.json"));
     timeline << "{\"stage\":\"" << stage << "\",\"viewer_frame\":" << frames
              << ",\"session_tick\":" << frame.session_tick
@@ -129,7 +129,7 @@ void GalacticMode::State::capture_space_cycle_stage(std::string_view stage) {
 bool GalacticMode::State::service_space_cycle_proof() {
     if (!game || !galaxy) { failure = "Space cycle proof has no campaign owner"; return false; }
     if (frames > 36000 && !proof_save_ready) { failure = "Space cycle proof did not finish within its frame budget"; return false; }
-    const auto frame = game->frame();
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     if (tactical && loading && loading->shown() && options.space_cycle_proof != "save") {
         if (loading->ready_for_begin()) loading->request_begin();
         return failure.empty();
@@ -371,7 +371,7 @@ bool GalacticMode::State::service_space_cycle_proof() {
 bool GalacticMode::State::process_battle_transition(double delta) {
     if (!game || !galaxy) return false;
     sync_battle_viewport();
-    const auto frame = game->frame();
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     if (const auto error = game->failure()) {
         failure = core::format_diagnostic(*error);
         release_battle_presentation();
@@ -734,7 +734,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         if (frames - returned_frame < 120 || std::chrono::steady_clock::now() - returned_at < std::chrono::seconds(3))
             return true; // let deferred GPU destruction and process sampling settle
         if (cycles.size() == cycle) {
-            cycles.push_back({child_ready_tick, game->frame().result->tactical_frames,
+            cycles.push_back({child_ready_tick, game->frame(sim::SeatId{galaxy->local.seat}).result->tactical_frames,
                 galaxy_memory, combined_memory, return_memory, galaxy_video_memory,
                 combined_video_memory, return_video_memory, battle_load_ms,
                 child_lifetime.expired(), feed_lifetime.expired(), scene_lifetime.expired()
@@ -771,11 +771,11 @@ bool GalacticMode::State::process_handoff(double delta) {
     if (!conflict) {
         // The deterministic capture harness may be paused for art/lifetime checks.
         // A due, unchanged speed command services one parent boundary without resuming it.
-        if (game->frame().latest->clock().pause_depth != 0 && game->completed_tick() <= entry_ticks[cycle])
+        if (game->frame(sim::SeatId{galaxy->local.seat}).latest->clock().pause_depth != 0 && game->completed_tick() <= entry_ticks[cycle])
             game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, sim::galactic::SetSpeed{
-                false, game->frame().latest->clock().strategic_speed}, {}});
+                false, game->frame(sim::SeatId{galaxy->local.seat}).latest->clock().strategic_speed}, {}});
         game->advance_to(entry_ticks[cycle] + 1);
-        const auto frame = game->frame();
+        const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
         if (!frame.conflict) return true;
         conflict = frame.conflict->id;
         if (audio) audio->battle_load(); // WGP-26: session conflict enters its loading screen.
@@ -803,7 +803,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         if (!feed) { failure = "local seat has no conflict-scoped battle feed"; return false; }
         // The foundation conflict owns its own player IDs. A loaded campaign's
         // display player can differ; use the same seat binding as battle_feed.
-        const auto entry = game->frame().conflict;
+        const auto entry = game->frame(sim::SeatId{galaxy->local.seat}).conflict;
         if (!entry || entry->id != conflict) { failure = "battle seat binding is stale"; return false; }
         const auto seat = std::find_if(entry->seats.begin(), entry->seats.end(),
             [&](const auto& binding) { return binding.seat == sim::SeatId{galaxy->local.seat}; });
@@ -828,7 +828,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.lighting = "sh";
         map.shadows = "on";
         map.environment = "map";
-        child_lifetime = game->frame().battle_lifetime;
+        child_lifetime = game->frame(sim::SeatId{galaxy->local.seat}).battle_lifetime;
         feed_lifetime = feed;
         tactical_host = memnew(Node3D);
         host->add_child(tactical_host);
@@ -853,7 +853,7 @@ bool GalacticMode::State::process_handoff(double delta) {
         UtilityFunctions::print("EAWR handoff phase: tactical-ready cycle=", cycle + 1);
         return true;
     }
-    const auto frame = game->frame();
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     combined_memory = std::max(combined_memory, OS::get_singleton()->get_static_memory_usage());
     combined_video_memory = std::max(combined_video_memory, video_memory());
     if (frame.result && frame.result->conflict == conflict) {

@@ -140,21 +140,23 @@ const Block* Engine::block(std::uint64_t id) const {
 PlayerAi* Engine::positioning_owner(sim::EntityId unit) {
     if (host_->view) if (const auto* actor = host_->view->find(unit))
         if (auto* owner = player_ai(actor->owner)) return owner;
-    return players_.empty() ? nullptr : &players_.front();
+    return players_.empty() ? nullptr : player_ai(players_.front().player);
 }
 
 AttackPositioning* Engine::positioning(sim::EntityId unit) {
     // Rows outlive their issuing plan and can survive a unit's ownership change.
-    for (auto& owner : players_) {
-        const auto found = owner.positioning.find(unit);
-        if (found != owner.positioning.end()) return &found->second;
+    for (const auto& selected : players_) {
+        auto* owner = player_ai(selected.player); if (!owner) continue;
+        const auto found = owner->positioning.find(unit);
+        if (found != owner->positioning.end()) return &found->second;
     }
     return nullptr;
 }
 
 bool Engine::reserved(sim::EntityId object) const {
-    for (const PlayerAi& player : players_) {
-        if (player.reserved.contains(object) || player.assigned.contains(object)) return true;
+    for (const auto& selected : players_) {
+        const auto* player = player_ai(selected.player);
+        if (player && (player->reserved.contains(object) || player->assigned.contains(object))) return true;
     }
     return false;
 }
@@ -165,7 +167,23 @@ std::optional<Real> Engine::global_value(const std::string& name) const {
     return found->second;
 }
 
+void Engine::freeze_galactic_decision_reads() {
+    if (decision_effects()) throw std::logic_error("galactic decision reads freeze only at the serial boundary");
+    decision_players_.clear(); decision_reads_frozen_ = true;
+    for (const auto& player : players_) {
+        auto copied = std::make_shared<PlayerAi>(player);
+        copied->effects.clear(player.player);
+        decision_players_.emplace(player.player, std::move(copied));
+    }
+}
+
 PlayerAi* Engine::player_ai(tactical::PlayerId player) {
+    if (auto* turn = decision_effects(); turn && player != turn->owner && decision_reads_frozen_) {
+        if (const auto copied = turn->foreign_players.find(player); copied != turn->foreign_players.end()) return copied->second.get();
+        const auto frozen = decision_players_.find(player);
+        if (frozen == decision_players_.end()) return nullptr;
+        return turn->foreign_players.emplace(player, std::make_shared<PlayerAi>(*frozen->second)).first->second.get();
+    }
     for (PlayerAi& entry : players_) {
         if (entry.player == player) return &entry;
     }
@@ -173,15 +191,12 @@ PlayerAi* Engine::player_ai(tactical::PlayerId player) {
 }
 
 const PlayerAi* Engine::player_ai(tactical::PlayerId player) const {
-    for (const PlayerAi& entry : players_) {
-        if (entry.player == player) return &entry;
-    }
-    return nullptr;
+    return const_cast<Engine*>(this)->player_ai(player);
 }
 
 const PlayerAi* Engine::player_of_slot(std::uint32_t slot) const {
     for (const PlayerAi& entry : players_) {
-        if (entry.galactic && entry.slot == slot) return &entry;
+        if (entry.galactic && entry.slot == slot) return player_ai(entry.player);
     }
     return nullptr;
 }
@@ -370,6 +385,7 @@ struct TurnBinding {
     PlayerEffects* effects{};
 };
 thread_local TurnBinding turn_binding;
+thread_local TurnBinding decision_binding;
 std::atomic<Engine::EffectObserver> effect_observer{nullptr};
 
 void add_counts(EffectCounts& to, const EffectCounts& from) {
@@ -382,6 +398,20 @@ void add_counts(EffectCounts& to, const EffectCounts& from) {
     to.reads.row_scans += from.reads.row_scans;
 }
 } // namespace
+
+thread_local const Engine* Engine::build_reader_engine_{};
+thread_local tactical::PlayerId Engine::build_reader_player_{};
+Engine::BuildBudgetReads::BuildBudgetReads() noexcept
+    : previous_engine_(build_reader_engine_), previous_player_(build_reader_player_) {
+    build_reader_engine_ = nullptr; build_reader_player_ = 0;
+}
+Engine::BuildBudgetReads::BuildBudgetReads(const Engine& engine, tactical::PlayerId player) noexcept
+    : previous_engine_(build_reader_engine_), previous_player_(build_reader_player_) {
+    build_reader_engine_ = &engine; build_reader_player_ = player;
+}
+Engine::BuildBudgetReads::~BuildBudgetReads() {
+    build_reader_engine_ = previous_engine_; build_reader_player_ = previous_player_;
+}
 
 Engine::TurnScope::TurnScope(Engine& engine, PlayerAi& player) noexcept
     : TurnScope(engine, player, engine.staggered() && !player.galactic) {}
@@ -398,6 +428,29 @@ Engine::TurnScope::TurnScope(Engine& engine, PlayerAi& player, const bool stage)
 Engine::TurnScope::~TurnScope() {
     turn_binding.engine = previous_engine_;
     turn_binding.effects = previous_effects_;
+}
+
+Engine::DecisionScope::DecisionScope(Engine& engine, PlayerAi& player) noexcept
+    : previous_engine_(decision_binding.engine), previous_effects_(decision_binding.effects), turn_(engine, player, true) {
+    decision_binding = {&engine, &player.effects};
+}
+
+Engine::DecisionScope::~DecisionScope() {
+    decision_binding = {previous_engine_, previous_effects_};
+}
+
+core::Result<std::shared_ptr<void>> Engine::galactic_decision_scope(const tactical::PlayerId player) {
+    if (decision_reads_frozen_) {
+        for (auto& owner : players_) if (owner.player == player && owner.galactic)
+            return core::Result<std::shared_ptr<void>>::success(std::make_shared<DecisionScope>(*this, owner));
+    }
+    core::Diagnostic error; error.code = std::string(authoritative::codes::invalid_request);
+    error.message = "galactic decision scope requires a frozen player frontier";
+    return core::Result<std::shared_ptr<void>>::failure(std::move(error));
+}
+
+PlayerEffects* Engine::decision_effects() const noexcept {
+    return decision_binding.engine == this ? decision_binding.effects : staged();
 }
 
 Engine::BoundaryScope::BoundaryScope() noexcept : previous_effects_(turn_binding.effects) { turn_binding.effects = nullptr; }
@@ -453,6 +506,7 @@ void Engine::journal_service(const AiServiceEvent& row) {
 const PadReservation* Engine::pad_claim(const sim::EntityId pad) const {
     auto* turn = staged();
     for (auto owner = players_.rbegin(); owner != players_.rend(); ++owner) {
+        if (decision_reads_frozen_ && turn && &owner->effects != turn) continue;
         const auto found = owner->effects.pads.find(pad);
         if (found == owner->effects.pads.end()) continue;
         if (turn != nullptr && &owner->effects != turn) ++turn->reads.pads;
@@ -480,7 +534,10 @@ void Engine::release_pad_claims(const tactical::PlayerId player, const std::uint
     // the stacked lookup (the committed claims, then each earlier turn's net claims, then the own turn's).
     std::vector<sim::EntityId> pads;
     for (const auto& [pad, claim] : pad_reservations_) if (held(claim)) pads.push_back(pad);
-    for (const auto& owner : players_) for (const auto& [pad, claim] : owner.effects.pads) if (claim && held(*claim)) pads.push_back(pad);
+    for (const auto& owner : players_) {
+        if (decision_reads_frozen_ && &owner.effects != turn) continue;
+        for (const auto& [pad, claim] : owner.effects.pads) if (claim && held(*claim)) pads.push_back(pad);
+    }
     std::sort(pads.begin(), pads.end());
     pads.erase(std::unique(pads.begin(), pads.end()), pads.end());
     for (const auto pad : pads) {
@@ -493,6 +550,7 @@ std::int64_t Engine::uncommitted_credits(const tactical::PlayerId id) const noex
     auto* turn = staged();
     std::int64_t raw = 0;
     for (const auto& owner : players_) {
+        if (decision_reads_frozen_ && turn && &owner.effects != turn) continue;
         const auto found = owner.effects.credits.find(id);
         if (found == owner.effects.credits.end()) continue;
         raw += found->second.raw();
@@ -518,7 +576,7 @@ void Engine::retire_runtime(const RuntimeTable table, const std::uint64_t id) {
 }
 
 bool Engine::foreign_row(const RuntimeTable table, const std::uint64_t id) const {
-    const auto* turn = staged();
+    const auto* turn = decision_effects();
     if (turn == nullptr) return false;
     const auto& index = table == RuntimeTable::plans ? runtime_index_.plans
         : table == RuntimeTable::taskforces ? runtime_index_.taskforces
@@ -528,7 +586,13 @@ bool Engine::foreign_row(const RuntimeTable table, const std::uint64_t id) const
 }
 
 void Engine::operate(const CrossOwnerOp& op) {
-    if (auto* turn = staged()) ++turn->operations;
+    if (auto* turn = decision_effects()) {
+        ++turn->operations;
+        const auto table = op.kind == CrossOwnerOp::Kind::plan_release_pad ? RuntimeTable::plans
+            : op.kind == CrossOwnerOp::Kind::block_finish ? RuntimeTable::blocks : RuntimeTable::taskforces;
+        if (decision_reads_frozen_ && foreign_row(table, op.id)) turn->foreign_operations.push_back(op);
+    }
+    // A frozen pass edits its private foreign copy for its own later reads. The real row changes at commit.
     apply_operation(op);
 }
 
@@ -656,6 +720,7 @@ core::Result<void> Engine::commit_effects(authoritative::ScriptScheduler& script
         for (const auto& [pad, claim] : effects.pads) {
             if (claim) pad_reservations_[pad] = *claim; else pad_reservations_.erase(pad);
         }
+        for (const auto& operation : effects.foreign_operations) apply_operation(operation);
         for (const auto& attach : effects.attaches) pending_attach_.push_back(attach);
         for (const auto& change : effects.index) {
             auto& table = change.table == RuntimeTable::plans ? runtime_index_.plans

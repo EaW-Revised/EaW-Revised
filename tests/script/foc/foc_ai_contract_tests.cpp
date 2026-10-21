@@ -2320,6 +2320,7 @@ int main(int argc, char** argv) {
     threat_flat_storage();
     plan_definition_paths();
     mounted_ai_discovery();
+    mode_selected_closure();
     authored_goal_extension();
     unit_concentration();
     coroutine_module_loading();

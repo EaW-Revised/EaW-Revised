@@ -270,47 +270,155 @@ void queued_ability_drop_is_scoped_to_preparation_and_owner() {
 // WGCH-151..155: the parked hero fleet's authored action at a hostile planet starts through the typed inbox.
 void hero_fleet_drop_offers_authored_ability() {
     namespace gc = eawr::sim::galactic;
-    // Fleet 10 (local, planet 2 owned by the enemy) carries a saboteur 30 and a plain ship 31; fleet 11 sits at home.
-    const auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{},
-        std::vector<gc::GalacticPlayer>{}, std::vector<gc::Planet>{{1, {}, 1}, {2, {}, 2}},
-        std::vector<gc::Route>{}, std::vector<gc::Fleet>{{10, 1, 2, {{30, 8}, {31, 9}}}, {11, 1, 1, {{32, 8}}}},
-        std::vector<gc::GalacticEvent>{});
-    std::vector<gc::CensusObject> actors{{30, 8, 1, 2, 10, false, false, 8}, {31, 9, 1, 2, 10, false, false, 9},
-        {32, 8, 1, 1, 11, false, false, 8}};
+    using gc::AbilityKind;
+    using eawr::sim::math::Fixed;
+    std::vector<gc::Fleet> fleets{{10, 1, 2, {{30, 8}}}, {11, 1, 1, {{32, 8}}}};
+    std::vector<gc::CensusObject> actors{{30, 8, 1, 2, 10, false, false, 8},
+        {31, 9, 1, 2, 10, false, false, 9}, {32, 8, 1, 1, 11, false, false, 8}};
+    gc::PoliticalControlSetup control;
+    control.players = {{1, false, true}, {2, false, true}};
+    control.relations = {{1, 1, true}, {1, 2, false}};
+    control.planets = {{1}, {2}};
+    control.state.resize(2);
+    control.state[0].current_player = control.state[0].target_player = 1;
+    control.state[1].current_player = control.state[1].target_player = 2;
+    gc::EconomyCorruptionState economy;
+    gc::CorruptionEconomyPlayer owner; owner.player = 2; owner.playable = true;
+    economy.players = {owner}; economy.planets = {{1}, {2}};
+    economy.planets[1].corruption = gc::corruption_fixture::Type::black_market;
+    gc::ProductionSetup production;
+    gc::ProductionPlayer producer; producer.player = 1; production.players = {producer};
+    gc::PlanetProduction location; location.planet = 2;
+    location.objects = {{70, 70, 2, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure}};
+    production.planets = {location}; production.technology_types = {{70, 1, true, true, {1}}};
+    gc::PlayerEconomySetup accounts;
+    gc::GalacticPlayerEconomy account; account.player = 1; account.current_tech = 2; accounts.players = {account};
+    gc::GalacticAbilitySetup host;
+    gc::GalacticAbilityProfile profile; profile.type = 8; profile.has_market = false;
+    profile.sabotage = gc::SabotageAbilityProfile{"S", true, {}};
+    host.profiles = {profile}; host.activated_sabotage_abilities = {"S"};
+    host.activated_destruction_abilities = {"D"}; host.activated_neutralize_abilities = {"N"};
+    host.activated_corruption_abilities = {"C"}; host.activated_hack_abilities = {"H"};
+    host.sabotage_costs = {{70, Fixed::from_integer(100).value()}};
+    host.technologies = {{70}};
+    host.theft_planets = {{2}};
+    gc::CorruptionPlanet corruption; corruption.planet = 2; corruption.retains_influence = true;
+    corruption.slots[0].type = gc::corruption_fixture::Type::piracy; host.corruption_planets = {corruption};
+    gc::AbilityActorState service; service.actor = 30; service.type = 8; service.sabotage_enabled = true;
+    std::shared_ptr<const gc::MovementSetup> movement;
     const auto snapshot = [&] {
+        auto base = std::shared_ptr<const gc::GalacticSnapshot>(new gc::GalacticSnapshot(0, {}, {},
+            {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {}, std::nullopt, std::nullopt, movement,
+            std::nullopt, {}, accounts, production, control, {}, {}, std::nullopt, std::nullopt, std::nullopt,
+            {}, {}, std::nullopt, {}, std::nullopt, std::nullopt, economy));
         gc::NativeSnapshotChanges changes;
         changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(actors);
+        changes.ability_services = std::make_shared<const std::vector<gc::AbilityActorState>>(std::vector{service});
         return gc::GalacticSnapshot::native_view(base, std::move(changes));
     };
-    gc::GalacticAbilitySetup host;
-    gc::GalacticAbilityProfile saboteur; saboteur.type = 8; saboteur.sabotage = gc::SabotageAbilityProfile{"S", true, {}};
-    host.profiles = {saboteur};
-    const auto drop = ability_drop_candidate(*snapshot(), 1, 10, host);
-    assert(drop && drop->actor == 30 && drop->planet == 2 && drop->kind == gc::AbilityKind::structure_sabotage);
-    const auto order = ability_drop_order(*drop);
-    assert(std::get<gc::PrepareGalacticAbility>(order) == (gc::PrepareGalacticAbility{30, 2, gc::AbilityKind::structure_sabotage}));
-    MapInput input;
-    DropIntent intent; intent.kind = DropKind::ability; intent.source = 30; intent.planet = 2; intent.ability = order;
-    const std::vector<InputPlanet> visible{{1, {}, 1, true}, {2, {}, 2, true}};
-    assert(input.command(intent, visible));
-    assert(!ability_drop_candidate(*snapshot(), 1, 11, host)); // Own planet: no hostile target.
-    assert(!ability_drop_candidate(*snapshot(), 2, 10, host)); // Not the local player's fleet.
-    assert(!ability_drop_candidate(*snapshot(), 1, 99, host)); // Stale fleet.
-    host.profiles[0].lifecycle_only = true;
-    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Lifecycle-only profiles activate nothing.
-    host.profiles[0].lifecycle_only = false; actors[0].dead = true;
-    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Dead actor.
-    actors[0].dead = false; actors[0].owner = 2;
-    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Foreign actor.
-    actors[0].owner = 1;
-    host.profiles[0].sabotage.reset(); host.profiles[0].theft.emplace();
-    assert(ability_drop_candidate(*snapshot(), 1, 10, host)->kind == gc::AbilityKind::technology_theft);
-    host.profiles[0].neutralize.emplace(); host.profiles[0].destruction.emplace();
-    const auto first = ability_drop_candidate(*snapshot(), 1, 10, host); // Destruction precedes the rest (WGCH-152).
-    assert(first && first->kind == gc::AbilityKind::planet_destruction);
-    const auto queued = std::get<gc::ExecutePreparedAbility>(ability_drop_order(*first)).prepared;
-    assert(queued.actor == 30 && queued.planet == 2 && !queued.preparation && queued.price == eawr::sim::math::Fixed{});
+    auto drop = ability_drop_candidate(*snapshot(), 1, 10, host);
+    assert(drop && drop->actor == 30 && drop->planet == 2 && drop->kind == AbilityKind::structure_sabotage);
+    assert(std::get<gc::PrepareGalacticAbility>(ability_drop_order(*drop)) == (gc::PrepareGalacticAbility{30, 2, AbilityKind::structure_sabotage}));
+    assert(!ability_drop_candidate(*snapshot(), 1, 11, host));
+    assert(!ability_drop_candidate(*snapshot(), 2, 10, host));
+    assert(!ability_drop_candidate(*snapshot(), 1, 99, host));
+    service.sabotage_cancelled = true; assert(!ability_drop_candidate(*snapshot(), 1, 10, host));
+    service.sabotage_cancelled = false;
+    host.profiles[0].lifecycle_only = true; assert(!ability_drop_candidate(*snapshot(), 1, 10, host));
+    host.profiles[0].lifecycle_only = false;
+    actors[0].dead = true; assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); actors[0].dead = false;
+    actors[0].owner = 2; assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); actors[0].owner = 1;
+    economy.planets[1].corruption = gc::corruption_fixture::Type::none;
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Sabotage needs corruption.
+    economy.planets[1].corruption = gc::corruption_fixture::Type::black_market;
+    AbilityPreviewPolicy policy;
+    policy.restricted = [](auto) { return true; };
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy)); policy.restricted = {};
+    policy.space_override = [](auto, auto) { return true; };
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy)); policy.space_override = {};
+
+    // Every supported kind uses its live service gate, authored routing and target rule.
+    const std::array kinds{AbilityKind::planet_destruction, AbilityKind::technology_theft, AbilityKind::black_market,
+        AbilityKind::structure_sabotage, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
+    for (const auto kind : kinds) {
+        auto& p = host.profiles[0]; p = {}; p.type = 8; p.has_market = false;
+        service = {}; service.actor = 30; service.type = 8;
+        if (kind == AbilityKind::planet_destruction) { p.destruction = gc::DestructionAbilityProfile{"D"}; service.destruction_enabled = true; }
+        if (kind == AbilityKind::technology_theft) { p.theft.emplace(); service.theft_enabled = true; }
+        if (kind == AbilityKind::black_market) { p.has_market = true; service.enabled = true; }
+        if (kind == AbilityKind::structure_sabotage) { p.sabotage = gc::SabotageAbilityProfile{"S"}; service.sabotage_enabled = true; }
+        if (kind == AbilityKind::hero_neutralization) { p.neutralize.emplace(); p.neutralize->name = "N"; service.neutralize_enabled = true; }
+        if (kind == AbilityKind::corruption) { p.corruption = gc::CorruptionAbilityProfile{"C"}; service.corruption_enabled = true; }
+        if (kind == AbilityKind::superweapon_hack) { p.hack = gc::HackAbilityProfile{"H"}; service.hack_enabled = true; }
+        economy.planets[1].corruption = kind == AbilityKind::corruption ? gc::corruption_fixture::Type::none : gc::corruption_fixture::Type::black_market;
+        if (kind == AbilityKind::superweapon_hack) {
+            host.hack_required_type = 99;
+            fleets.push_back({12, 2, 2, {{40, 99}}}); actors.push_back({40, 99, 2, 2, 12, false, false, 99});
+        }
+        drop = ability_drop_candidate(*snapshot(), 1, 10, host);
+        assert(drop && drop->kind == kind);
+        if (kind == AbilityKind::superweapon_hack) {
+            control.state[1].target_player = 1; control.planets[1].destroyed = true;
+            assert(ability_drop_candidate(*snapshot(), 1, 10, host)); // Hack has neither opposing nor ruins gate.
+            control.state[1].target_player = 2; control.planets[1].destroyed = false;
+            fleets.pop_back(); actors.pop_back();
+            assert(!ability_drop_candidate(*snapshot(), 1, 10, host));
+        }
+        policy.kind_restricted = [kind](auto, auto candidate) { return candidate == kind; };
+        assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy)); policy.kind_restricted = {};
+    }
+    // Rank uses ORIGINAL type, includes ineligible entries, and retains stored order on ties.
+    auto& p = host.profiles[0]; p = {}; p.type = 8; p.has_market = false;
+    p.destruction = gc::DestructionAbilityProfile{"D"}; service = {}; service.actor = 30; service.type = 8; service.destruction_enabled = true;
+    p.neutralize.emplace(); p.neutralize->name = "N"; service.neutralize_enabled = true;
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host)->kind == AbilityKind::planet_destruction);
+    service.destruction_enabled = false;
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host)->kind == AbilityKind::hero_neutralization);
+    service.destruction_enabled = true; p.neutralize.reset(); service.neutralize_enabled = false;
+    fleets[0].members.push_back({31, 9});
+    policy.rank = [](auto type) -> std::int64_t { return type == 8 ? 2000 : 3000; };
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host, policy)->actor == 30); // First candidate above 999 survives.
+    policy.rank = [](auto type) -> std::int64_t { return type == 9 ? 0 : 100; };
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy)); // Lower-ranked actor has no ability; no fallback.
+    actors[0].original_type = 9; actors[1].original_type = 8;
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host, policy)->actor == 30);
+    actors[0].original_type = 8; actors[1].original_type = 9;
+    policy.rank = [](auto) -> std::int64_t { return 25; };
+    assert(ability_drop_candidate(*snapshot(), 1, 10, host, policy)->actor == 30);
+    std::reverse(fleets[0].members.begin(), fleets[0].members.end());
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy));
+    std::reverse(fleets[0].members.begin(), fleets[0].members.end());
+    p.destruction.reset(); p.sabotage = gc::SabotageAbilityProfile{"S"}; service.sabotage_enabled = true;
+    assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Multiple supplied entries suppress non-destruction.
+    fleets[0].members.pop_back();
+
+    // Stored transport order is resolved from current identities. The typed menu uses the live bearer.
+    auto contents = std::make_shared<gc::MovementSetup>();
+    gc::MovementType transport; transport.type = 7; transport.transport = true; contents->types = {transport};
+    contents->contents = {{30, {{31, 8}}}}; movement = contents;
+    actors[0].current_type = 7; actors[1].container = 30; actors[1].current_type = 8;
+    service.actor = 31; service.type = 8;
+    drop = ability_drop_candidate(*snapshot(), 1, 10, host);
+    assert(drop && drop->actor == 31 && drop->supplied == 30);
+    actors[1].container = 99; assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); actors[1].container = 30;
+    // Presentation services are not canonical GC state, including flattened native overlays.
+    const auto before = snapshot();
+    auto disabled = service; disabled.sabotage_cancelled = true;
+    gc::NativeSnapshotChanges changed;
+    changed.ability_services = std::make_shared<const std::vector<gc::AbilityActorState>>(std::vector{disabled});
+    const auto after = gc::GalacticSnapshot::native_view(before, std::move(changed));
+    assert(before->canonical_bytes() == after->canonical_bytes() && before->sha256() == after->sha256());
+    assert(!ability_drop_candidate(*after, 1, 10, host));
+    gc::NativeSnapshotChanges unrelated; unrelated.observer_generation = 42;
+    const auto flattened = gc::GalacticSnapshot::native_view(after, std::move(unrelated));
+    assert(flattened->ability_services()[0].sabotage_cancelled);
+    assert(before->canonical_bytes() == flattened->canonical_bytes());
+    gc::NativeSnapshotChanges other_seat; other_seat.observer.emplace();
+    other_seat.observer->human_observers = {2}; other_seat.observer->solo_reference_human = 2;
+    const auto foreign = gc::GalacticSnapshot::native_view(flattened, std::move(other_seat));
+    assert(foreign->ability_services().empty()); // Inherited service gates never cross observer seats.
 }
+
 void typed_ability_intents_preserve_capabilities() {
     namespace gc = eawr::sim::galactic;
     MapInput input;
@@ -479,7 +587,7 @@ void published_discovery_is_player_specific() {
     auto without = eawr::sim::galactic::GalacticSession::create(setup);
     assert(without && !observer_discovery(*without.value().snapshot(), 1, 101).has_value());
     eawr::sim::galactic::ObserverSetup observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     observer.types.push_back({1, false, false, false});
     for (const auto& player : setup.players) {
         eawr::sim::galactic::ObserverPlayer row;
@@ -651,7 +759,7 @@ void live_fleet_traits_follow_the_authored_art() {
 }
 void hero_map_collection_is_local_stable_and_live() {
     namespace gc = eawr::sim::galactic;
-    struct Look { bool named_hero{}; std::string icon; bool hero{named_hero}; };
+    struct Look { bool named_hero{}; std::string icon; bool hero{named_hero}; std::int64_t hero_rank{25}; };
     const std::map<gc::TypeId, std::string> names{{7, "hero"}, {8, "ship"}, {9, "generic"},
         {10, "no_icon"}, {11, "second_hero"}};
     const std::map<std::string, Look> art{{"hero", {true, "hero.tga"}}, {"ship", {false, "ship.tga"}},
@@ -673,6 +781,13 @@ void hero_map_collection_is_local_stable_and_live() {
     auto entries = collect();
     assert((entries == std::vector<HeroMapEntry>{{7, 22, 1}, {11, 21, 1}}));
     assert(collect() == entries); // Stable type order, independent of first-seen type.
+    const std::array pending{gc::HeroReturnView{7, 1, 1, 0, 100}};
+    assert(collect_map_heroes(*snapshot(), 1, names, art, pending) == entries); // Live entry wins a duplicate schedule.
+    auto ranked_art = art;
+    ranked_art.at("hero").hero_rank = 10;
+    ranked_art.at("second_hero").hero_rank = 90;
+    const auto ranked = collect_map_heroes(*snapshot(), 1, names, ranked_art);
+    assert((ranked == std::vector<HeroMapEntry>{{11, 21, 1, 90}, {7, 22, 1, 10}}));
     assert(collect_map_heroes(*snapshot(), 3, names, art).empty());
     actors[2].dead = true; actors[3].delete_pending = true;
     assert((collect() == std::vector<HeroMapEntry>{{11, 21, 1}}));
@@ -686,7 +801,28 @@ void hero_map_collection_is_local_stable_and_live() {
     const auto transit = collect_map_heroes(*gc::GalacticSnapshot::native_view(base, std::move(travelling)), 1, names, art);
     assert((transit == std::vector<HeroMapEntry>{{7, 23, 1}})); // Parked duplicate remains; no transit destination invented.
 }
+void scheduled_hero_map_uses_published_frames() {
+    namespace gc = eawr::sim::galactic;
+    struct Look { bool named_hero{}; std::string icon; bool hero{named_hero}; std::int64_t hero_rank{25}; };
+    const std::map<gc::TypeId, std::string> names{{7, "hero"}, {8, "foreign"}, {9, "generic"}, {10, "no_icon"}};
+    const std::map<std::string, Look> art{{"hero", {true, "hero.tga", true, 90}},
+        {"foreign", {true, "foreign.tga"}}, {"generic", {false, "generic.tga", true}}, {"no_icon", {true, ""}}};
+    const std::vector<gc::HeroReturnView> returns{{7, 1, 1, 10, 50}, {7, 1, 1, 20, 70},
+        {8, 2, 3, 10, 50}, {9, 1, 1, 10, 50}, {10, 1, 1, 10, 50}};
+    const auto collect = [&](std::uint64_t frame) {
+        gc::GalacticClock clock; clock.galactic_frame = frame;
+        const gc::GalacticSnapshot snapshot(0, clock, {}, {{1, {}, 1}, {3, {}, 2}}, {}, {}, {});
+        return collect_map_heroes(snapshot, 1, names, art, returns);
+    };
+    const auto entries = collect(20);
+    assert(entries.size() == 1 && entries[0].scheduled && entries[0].actor == 0);
+    assert(entries[0].rank == 90 && entries[0].start_frame == 10 && entries[0].deadline == 50);
+    assert(entries[0].completion == 0.25);
+    assert(collect(9)[0].completion == 0.0 && collect(40)[0].completion == 0.75);
+    assert(collect(50)[0].completion == 1.0 && collect(51)[0].completion == 0.0);
+}
 int main() {
+    scheduled_hero_map_uses_published_frames();
     hero_map_collection_is_local_stable_and_live();
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
     rectangle_and_widget_drop_order(); wheel_radar_and_typed_commands();

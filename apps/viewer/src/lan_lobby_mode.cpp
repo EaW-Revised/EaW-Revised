@@ -75,6 +75,7 @@ constexpr double default_wait_seconds = 60.0;
     output << "{\"rectangles\": " << shot.rectangles << ", \"page\": " << json(shot.page) << ", \"name\": " << json(shot.name) << ", \"colour\": " << shot.colour
            << ", \"host\": " << (shot.host ? "true" : "false") << ", \"map\": " << json(shot.map)
            << ", \"drawn_map\": " << json(shot.drawn_map) << ", \"settings\": " << strings_json(shot.settings)
+           << ", \"disabled_maps\": " << strings_json(shot.disabled_maps)
            << ", \"preview_visible\": " << (shot.preview_visible ? "true" : "false")
            << ", \"settings_read_only\": " << (shot.settings_read_only ? "true" : "false")
            << ", \"status\": " << json(shot.status) << ", \"start\": {\"caption\": " << json(shot.start_caption)

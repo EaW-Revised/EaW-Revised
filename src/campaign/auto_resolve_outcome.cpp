@@ -161,10 +161,13 @@ core::Result<AutoResolveOutcomeApplication> plan_auto_resolve_outcome(const Conf
         a.result.retreat_player = conflict.invader;
     // WGM-201: ordinary land losses gather surface survivors only. WAR-57's
     // losing raid is the separate orbital-retreat exception.
+    const bool retained_raid = losing_raid && std::any_of(roster.fleets.begin(), roster.fleets.end(),
+        [&](const auto& row) { return row.fleet.owner == conflict.invader && row.fleet.raid_destination == conflict.planet; });
     if (a.result.retreat_player && (!a.land || losing_raid)) {
         for (auto it = roster.orbit_fleets.rbegin(); it != roster.orbit_fleets.rend(); ++it) {
             const auto row = fleets.find(*it);
             if (row != fleets.end() && row->second->fleet.owner == *a.result.retreat_player && !dead.contains(*it)
+                && (!retained_raid || row->second->fleet.raid_destination == conflict.planet)
                 && std::any_of(row->second->fleet.members.begin(), row->second->fleet.members.end(), [&](const auto& member) { return !dead.contains(member.id); }))
                 a.retreat_fleets.push_back(*it);
         }

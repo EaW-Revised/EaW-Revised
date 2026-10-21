@@ -75,6 +75,7 @@ void test_input_default_ledger();
 // camera_binding_event_tests.cpp
 void test_ambiguous_chords();
 void test_activation_is_atomic();
+void test_camera_key_presets();
 void test_held_repeat_and_pressed_triggers();
 void test_focus_loss_requires_fresh_press();
 void test_capture_lock_suppresses_everything();

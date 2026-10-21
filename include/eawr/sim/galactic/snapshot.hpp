@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/galactic/events.hpp"
+#include "eawr/sim/galactic/history.hpp"
 #include "eawr/sim/galactic/black_market_views.hpp"
 #include "eawr/sim/galactic/corruption_views.hpp"
 #include "eawr/sim/galactic/hero_action_views.hpp"
@@ -97,11 +98,15 @@ struct NativeSnapshotChanges {
     std::shared_ptr<const std::vector<CensusObject>> originals{}, actors{};
     std::optional<std::uint64_t> observer_generation{};
     std::shared_ptr<const EconomyInputGeneration> economy_generation{};
+    std::shared_ptr<const std::vector<AbilityActorState>> ability_services{};
 };
 
 // Sections the session shares between consecutive publications while their inputs are unchanged. A set pointer
 // replaces the matching by-value constructor argument; contents are what that argument would have been.
 struct SharedSnapshotSections {
+    std::shared_ptr<const HistorySnapshot> history{};
+    // Observer-local display facts only; excluded from canonical/checkpoint encoding.
+    std::shared_ptr<const std::vector<AbilityActorState>> ability_services{};
     std::shared_ptr<const std::vector<GalacticPlayer>> players{};
     std::shared_ptr<const std::vector<Planet>> planets{};
     std::shared_ptr<const std::vector<Route>> routes{};
@@ -155,7 +160,12 @@ public:
         // The session's published production state, shared by pointer while unchanged; when set it replaces `production`.
         std::shared_ptr<const std::optional<ProductionSetup>> shared_production = {},
         // Sections shared with the previous publication; each replaces its by-value argument above.
-        SharedSnapshotSections shared_sections = {});
+        SharedSnapshotSections shared_sections = {}, PlayerId view_player = 0);
+
+    [[nodiscard]] PlayerId view_player() const noexcept { return native_base_ ? native_base_->view_player() : view_player_; }
+    [[nodiscard]] const HistorySnapshot* history() const noexcept {
+        return native_base_ ? native_base_->history() : history_.get();
+    }
 
     [[nodiscard]] std::span<const CensusType> sale_types() const noexcept {
         if (native_base_) return native_base_->sale_types();
@@ -331,11 +341,24 @@ public:
         if (native_base_) return native_base_->ability_results();
         return ability_results_ ? std::span<const AbilityResult>(*ability_results_) : std::span<const AbilityResult>{};
     }
+    [[nodiscard]] std::span<const AbilityActorState> ability_services() const noexcept {
+        if (native_base_) {
+            // Native overlays inherit the base view context. A different canonical
+            // observer policy cannot relabel its inherited service publication.
+            const auto* changes = native_column(NativeColumn::ability_services);
+            const auto& scope = changes && changes->observer ? changes->observer : native_base_->observer();
+            if (observer() && (!scope || observer()->human_observers != scope->human_observers
+                || observer()->solo_reference_human != scope->solo_reference_human)) return {};
+            if (changes) return *changes->ability_services;
+            return native_base_->ability_services();
+        }
+        return ability_services_ ? std::span<const AbilityActorState>(*ability_services_) : std::span<const AbilityActorState>{};
+    }
     // WGP-19/47: committed transitions admitted for this publication's observer.
     [[nodiscard]] std::span<const LiveCorruptionTransition> corruption_transitions() const noexcept {
         if (native_base_) {
             if (!observer() || !native_base_->observer()
-                || observer()->local_player != native_base_->observer()->local_player) return {};
+                || observer()->human_observers != native_base_->observer()->human_observers) return {};
             return native_base_->corruption_transitions();
         }
         return corruption_transitions_ ? std::span<const LiveCorruptionTransition>(*corruption_transitions_)
@@ -345,8 +368,11 @@ public:
     [[nodiscard]] std::string sha256() const;
 
 private:
+    std::shared_ptr<const HistorySnapshot> history_;
     GalacticSnapshot() = default;
+    PlayerId view_player_{}; // publication context, excluded from canonical bytes
     std::shared_ptr<const std::vector<AbilityResult>> ability_results_;
+    std::shared_ptr<const std::vector<AbilityActorState>> ability_services_;
     std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions_;
     std::uint64_t completed_tick_{};
     GalacticClock clock_{};
@@ -389,7 +415,7 @@ private:
     std::shared_ptr<const NativePlanetRevisions> native_planet_revisions_{};
     std::shared_ptr<const NativeSnapshotChanges> native_changes_{};
     // Flattened immutable column owners: no predecessor snapshot recursion.
-    enum class NativeColumn : std::size_t { fleets, events, fleet_control, movement, economy, production, control, population, observer, victory, production_offers, observations, economy_forecast, originals, actors, observer_generation, economy_generation, count };
+    enum class NativeColumn : std::size_t { fleets, events, fleet_control, movement, economy, production, control, population, observer, victory, production_offers, observations, economy_forecast, originals, actors, observer_generation, economy_generation, ability_services, count };
     std::array<std::shared_ptr<const NativeSnapshotChanges>, static_cast<std::size_t>(NativeColumn::count)> native_columns_{};
     [[nodiscard]] const NativeSnapshotChanges* native_column(NativeColumn column) const noexcept {
         return native_columns_[static_cast<std::size_t>(column)].get();

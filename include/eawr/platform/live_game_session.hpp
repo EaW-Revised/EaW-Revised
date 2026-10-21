@@ -4,6 +4,7 @@
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
+#include "eawr/sim/galactic/hero_return.hpp"
 #include "eawr/campaign/conflict.hpp"
 #include "eawr/campaign/invasion_offer.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
@@ -33,6 +34,8 @@ namespace eawr::platform {
 
 struct CampaignServiceConfiguration;
 struct PreparedCampaignBattle;
+struct PreparedLiveAgreement;
+struct AgreedCampaignAccess;
 class PreparedLiveRestore;
 
 // #3035: the authored campaign a save belongs to, stored in unhashed checkpoint section 0x8002
@@ -117,10 +120,18 @@ public:
         const units::GalacticTypeTable&, std::string_view campaign,
         campaign::CampaignSetupOptions, std::string_view difficulty, bool install_native_ai = false,
         std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1});
+    // Initialize an already agreed multiplayer plan, including native AI, before its tick-zero hash.
+    [[nodiscard]] static core::Result<std::unique_ptr<PreparedLiveCampaign>> from_plan(
+        std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
+        const units::GalacticTypeTable&, campaign::CampaignSetupPlan, std::string_view difficulty,
+        bool install_native_ai = true,
+        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1});
+    [[nodiscard]] std::shared_ptr<const CampaignServiceConfiguration> services() const noexcept;
     ~PreparedLiveCampaign();
     [[nodiscard]] const campaign::CampaignSetupPlan& plan() const noexcept;
     [[nodiscard]] const sim::galactic::GalacticSetup& layout() const noexcept;
     [[nodiscard]] std::shared_ptr<const sim::galactic::GalacticSnapshot> snapshot() const;
+    [[nodiscard]] std::shared_ptr<const sim::galactic::GalacticSnapshot> snapshot(sim::galactic::SeatId) const;
     // Confirmed startup fact from the prepared owner, before its live thread starts.
     [[nodiscard]] bool native_ai_installed() const noexcept;
     // The AI players the runtime actually selected (player and authored AI player type).
@@ -128,6 +139,7 @@ public:
     [[nodiscard]] const std::vector<NativeAiPlayer>& native_ai_players() const noexcept;
 private:
     friend class LiveGameSession;
+    friend struct AgreedCampaignAccess;
     class Impl;
     explicit PreparedLiveCampaign(std::unique_ptr<Impl>) noexcept;
     std::unique_ptr<Impl> impl_;
@@ -213,6 +225,7 @@ struct LiveGameFrame {
     sim::EntityId summary_hold{};
     sim::EntityId summary_closed{};
     sim::galactic::SeatId summary_closed_seat{};
+    std::shared_ptr<const std::vector<sim::galactic::HeroReturnView>> hero_returns{};
 };
 [[nodiscard]] std::optional<CampaignTacticalView> campaign_tactical_view_for_observer(
     const LiveGameFrame&, sim::galactic::SeatId);
@@ -349,6 +362,9 @@ public:
 
     [[nodiscard]] static core::Result<std::unique_ptr<LiveGameSession>> start(
         const sim::galactic::GalacticSetup& setup, Options options);
+    // Retain the exact agreed tick-zero owner. No setup or service configuration is rerun.
+    [[nodiscard]] static core::Result<std::unique_ptr<LiveGameSession>> start(
+        std::shared_ptr<PreparedLiveAgreement>, Options options);
     // WGS-03/68: retain the complete initialized root and its existing game.
     // This transfer creates no second GameSession and does not rerun startup.
     [[nodiscard]] static core::Result<std::unique_ptr<LiveGameSession>> start(
@@ -390,6 +406,7 @@ public:
     [[nodiscard]] LiveSaveMenuFacts save_menu_facts() const;
     [[nodiscard]] std::optional<LiveSaveOutcome> terminal_save_outcome(std::uint64_t token) const;
     [[nodiscard]] LiveGalacticEvents galactic_events_after(std::uint64_t cursor) const;
+    [[nodiscard]] LiveGalacticEvents galactic_events_after(std::uint64_t cursor, sim::galactic::SeatId) const;
     // Returns a conflict-scoped feed. Stale feeds cannot start or command a later child.
     // Readiness belongs to the live pacer; it never enters GameSession's state or replay.
     [[nodiscard]] std::shared_ptr<TacticalFeed> battle_feed(sim::EntityId conflict, sim::galactic::SeatId seat);

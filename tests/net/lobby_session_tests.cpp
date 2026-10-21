@@ -29,9 +29,10 @@ struct Room {
     bool mismatch{}, perturb{}, invalid_start{}, fail_provider{}, team_rules{}, fail_credential_offer{};
     // Online room mesh hooks (N4): the Start gate and the Lock before the commitment. Off unless `gate` is set.
     bool gate{}, mesh_ok{true}, lock_ok{true};
-    unsigned contexts{}, builds{}, locks{};
-    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {})
-        : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr) {
+    unsigned contexts{}, builds{}, locks{}, lock_polls{};
+    bool async_lock{}, async_confirm{}, async_refuse{}, early_lock{};
+    explicit Room(unsigned count = 2, std::size_t workers = 1, net::LobbyLimits limits = {}, bool early = false)
+        : network(count), executor(std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers)), streams(count, nullptr), early_lock(early) {
         for (unsigned peer = 0; peer < count; ++peer) transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
         sessions.push_back(require(net::LobbySession::host(*transports[0], "test-room", std::min(count, net::max_lobby_seats),
             selection(0), 1, {"data/art/maps/test.ted", {0}}, hooks(0), limits)));
@@ -97,6 +98,16 @@ struct Room {
         value.mesh_complete = [this] {
             return gate && !mesh_ok ? Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "synthetic incomplete mesh"))
                 : Result<void>::success();
+        };
+        value.lock_at_start = early_lock && peer == 0;
+        value.lock_room_progress = [this] {
+            if (!async_lock) return Result<bool>::success(true);
+            ++lock_polls;
+            if (async_refuse) {
+                auto error = net::lobby_diagnostic(net::LobbyReason::mesh_incomplete, "Start raced a player joining.");
+                error.code = "EAWR-NET-1774"; return Result<bool>::failure(std::move(error));
+            }
+            return Result<bool>::success(async_confirm);
         };
         value.lock_room = [this] {
             if (gate) ++locks;
@@ -768,9 +779,56 @@ void credential_delivery_retry() {
     for (const auto& session : room.sessions) expect(session.snapshot().phase == net::LobbyPhase::committed,
         "the same room starts after every player accepts the fresh attempt");
 }
+void asynchronous_roster_lock() {
+    for (const bool refuse : {false, true}) {
+        Room room; room.async_lock = true; room.propose();
+        require(room.client().accept_setup());
+        for (unsigned i = 0; i < 50 && room.lock_polls == 0; ++i) room.round();
+        expect(room.lock_polls != 0 && room.host().snapshot().phase == net::LobbyPhase::starting,
+            "setup readiness alone does not commit an unconfirmed roster lock");
+        room.rounds(5);
+        expect(!room.host().result_ready() && !room.client().result_ready(), "pending service confirmation keeps every peer frozen");
+        room.async_confirm = !refuse; room.async_refuse = refuse;
+        room.rounds(30);
+        if (refuse) {
+            expect(room.host().snapshot().phase == net::LobbyPhase::staging && room.client().snapshot().phase == net::LobbyPhase::staging,
+                "a refused lock returns every peer to staging");
+            expect(room.host().notice() && room.host().notice()->message == "Start raced a player joining.", "the refusal keeps its named race reason");
+        } else expect(room.host().result_ready() && room.client().result_ready(), "only confirmed roster lock commits on all peers");
+    }
+}
+void cancellation_during_roster_confirmation() {
+    for (const bool kick : {false, true}) {
+        Room room; room.async_lock = true; room.propose(); require(room.client().accept_setup());
+        for (unsigned i = 0; i < 50 && room.lock_polls == 0; ++i) room.round();
+        expect(room.lock_polls != 0, "the service Lock is pending before cancellation");
+        if (kick) require(room.host().kick(1, room.revision()));
+        else require(room.client().request(net::LobbyAction::unready, room.revision()));
+        room.rounds(3);
+        expect(room.host().snapshot().phase == net::LobbyPhase::closed && room.client().snapshot().phase == net::LobbyPhase::closed,
+            "cancelling an uncertain remote Lock never reopens a potentially service-locked room");
+        expect(room.host().notice() && room.host().notice()->message.find("create a new room") != std::string::npos,
+            "late cancellation explains how to continue");
+    }
+}
+void early_freeze_cancellation() {
+    Room room(2, 1, {}, true); room.async_lock = true; room.all_ready();
+    require(room.host().start(room.revision()));
+    expect(room.lock_polls == 1 && room.host().snapshot().phase == net::LobbyPhase::starting,
+        "Opt-in native roster freezes before publishing the Start snapshot");
+    room.network.open[1] = false;
+    static_cast<void>(room.host().pump(++room.network.round));
+    expect(room.host().snapshot().phase == net::LobbyPhase::closed && !room.host().result_ready(),
+        "A guest lost between early freeze and native mesh-open closes without half commitment");
+    Room refused(2, 1, {}, true); refused.async_lock = refused.async_refuse = true; refused.all_ready();
+    const auto before = refused.host().snapshot();
+    const auto start = refused.host().start(refused.revision());
+    expect(!start && start.error().code == "EAWR-NET-1774" && refused.host().snapshot() == before,
+        "Proved admission race leaves the exact staging revision editable");
+}
 int main() {
     try {
-        credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
+        early_freeze_cancellation(); cancellation_during_roster_confirmation(); asynchronous_roster_lock(); credential_delivery_retry(); atomic_game_configuration(); codec(); authority_and_revisions(); chat_contracts(); recovery_and_budgets(); send_failures_and_envelopes();
         admission_kick_close(); concurrent_staging_departures(); cancel_send_failure(); editable_team_rules(); start_races(); guest_waits_for_own_barrier(); committed_guest_barrier_failure_is_typed(); mesh_refusal_and_start_gate();
         std::string baseline, nine_baseline, close_three_baseline, close_nine_baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {

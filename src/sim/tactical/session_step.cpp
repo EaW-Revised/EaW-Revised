@@ -50,7 +50,7 @@ session_detail::Tick::Tick(TacticalSession& session, Impl* impl, const Partition
       named_ability_locks_(impl->named_ability_locks),
       projectile_defence_order_(impl->projectile_defence_order) {
     // FC-R02 / WR-58: one active-mode prefix sample; save-only/paused parent barriers never call step().
-    if (pending_retreat_.phase == RetreatPhase::escaping
+    if (impl_->setup.domain == BattleDomain::space && pending_retreat_.phase == RetreatPhase::escaping
         && pending_retreat_.cinematic_frame < pending_retreat_.cinematic_duration)
         ++pending_retreat_.cinematic_frame;
 }

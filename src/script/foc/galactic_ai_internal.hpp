@@ -26,8 +26,15 @@ struct Manager::Impl {
         std::uint64_t revision{1}, built_revision{};
         std::shared_ptr<const TemplatePolicy> snapshot;
     };
-    std::map<gc::PlayerId, PolicyCache> policy_cache;
-    PolicySnapshotStats policy_stats;
+    struct PlayerState {
+        PolicyCache policy;
+        PolicySnapshotStats policy_stats;
+        core::RecordDigest records;
+        std::vector<ServiceTrace> traces;
+    };
+    std::map<gc::PlayerId, PlayerState> player_state;
+    void reset_records();
+    void publish_traces(gc::PlayerId);
     void policy_changed(gc::PlayerId);
     void policy_restored();
     [[nodiscard]] std::shared_ptr<const TemplatePolicy> policy_snapshot(const PlayerLifecycle&);

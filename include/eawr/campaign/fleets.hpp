@@ -21,6 +21,10 @@ struct MovementTypeBinding {
     bool transport{};
 };
 struct MovementPlayerBinding { sim::galactic::PlayerId id{}; std::string faction; };
+struct RaidFactionBinding { sim::galactic::FactionId id{}; std::string faction; };
+[[nodiscard]] core::Result<std::optional<sim::galactic::RaidSetup>> build_raid_inputs(
+    const units::GalacticTypeTable&, const data::galactic::GalacticData&,
+    std::span<const FleetTypeBinding>, std::span<const RaidFactionBinding>);
 struct MovementInputs {
     std::vector<sim::galactic::MovementType> types;
     std::vector<sim::galactic::MovementPlayer> players;

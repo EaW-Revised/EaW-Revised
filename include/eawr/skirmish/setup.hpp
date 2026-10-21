@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/skirmish/start.hpp"
+#include "eawr/sim/seat.hpp"
 
 #include <memory>
 
@@ -50,6 +51,8 @@ struct SetupSelection final {
     std::vector<LobbySlot> slots{{1, "Rebel", 0, true, {}}, {2, "Empire", 1, false, {}}};
     std::optional<MatchOptions> match{};
     bool custom_options{};
+    // Network staging distinguishes an Open vacancy from a Closed absent row.
+    std::vector<std::uint32_t> open_slots{};
 };
 
 struct SetupOptionsEdit final {
@@ -60,7 +63,8 @@ struct SetupOptionsEdit final {
 void reset_setup_options(SetupOptionsEdit& edit, const MatchOptions& defaults);
 void accept_setup_options(SetupSelection& selection, const SetupOptionsEdit& edit);
 
-inline constexpr std::uint32_t local_setup_rows = 8; // WSS-08: local ninth row stays hidden.
+// R-SETUP-01: local and network setup share the engine's seat limit.
+inline constexpr std::uint32_t local_setup_rows = static_cast<std::uint32_t>(sim::max_match_seats);
 
 [[nodiscard]] std::uint32_t setup_row_count(const SetupMap& map, bool local_controls = true) noexcept;
 // WSS-08/09: remove excess records, relocate invalid rows and clamp teams on map change.

@@ -402,6 +402,8 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
     context.u64(static_cast<std::uint64_t>(session.galaxy().clock().tactical_speed.raw()));
     blob(context, state[0]); blob(context, replay.value());
     detail::write_history_base(context, recorded.value().base);
+    context.u8(recorded.value().multiplayer_vote_timeout ? 1 : 0);
+    if (recorded.value().multiplayer_vote_timeout) context.u64(*recorded.value().multiplayer_vote_timeout);
     context.u32(static_cast<std::uint32_t>(recorded.value().load_fixups.size()));
     for (const auto& command : recorded.value().load_fixups) {
         context.u64(command.key.tick); context.u32(command.key.seat.value); context.u64(command.key.sequence);
@@ -530,7 +532,7 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
 } // namespace
 
 Identities game_identities(const gc::GalacticSetup& setup) {
-    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = 3;
+    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = 10;
     out.content = setup.content_identity; out.campaign = setup.campaign_identity;
     return out;
 }
@@ -596,6 +598,13 @@ core::Result<void> decode_checkpoint_child(const auto* child_state, const auto* 
 }
 
 core::Result<void> decode_checkpoint_fixups(detail::Reader& context, campaign::GameRecording& recording, std::string_view path) {
+    const auto vote_timeout = context.u8();
+    if (vote_timeout > 1) return fail<void>("invalid multiplayer vote timeout flag", path);
+    if (vote_timeout) {
+        const auto ticks = context.u64();
+        if (ticks >= gc::galactic_max_ticks) return fail<void>("invalid multiplayer vote timeout", path);
+        recording.multiplayer_vote_timeout = ticks;
+    }
     const auto fixups = context.u32();
     if (fixups > gc::galactic_max_commands || fixups > context.remaining() / 35) return fail<void>("section session: invalid prologue count", path);
     for (std::uint32_t i = 0; i < fixups; ++i) {
@@ -666,7 +675,13 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
         if (roles) initial.seats = entry.conflict.seats;
         if (entry.conflict != initial || entry.entry_tick >= completed) return false;
         const auto elapsed = completed - entry.entry_tick - 1;
-        if (roles) return elapsed >= child_log->completed_tick;
+        // Agreed multiplayer pauses advance the parent frontier while holding the child clock.
+        // Exact saved sections are still checked after direct owner restoration below.
+        const auto& setup = recording.commands.setup;
+        // Match GalacticSession::multiplayer() before constructing the restored world.
+        const bool multiplayer = setup.victory ? setup.victory->context.multiplayer
+            : setup.economy_corruption && setup.economy_corruption->multiplayer;
+        if (roles || multiplayer) return elapsed >= child_log->completed_tick;
         // Save barriers before the history base left with their history (#4058): only the upper bound is checkable.
         if (entry.entry_tick < recording.base.at.tick) return elapsed >= child_log->completed_tick;
         std::uint64_t save_barriers{};
@@ -713,7 +728,10 @@ core::Result<void> bind_checkpoint_services(campaign::GameSession& session, cons
     if (!direct) session.begin_native_reconstruction();
     session.set_result_applier(options.apply_result); session.set_child_configurator(options.configure_child);
     session.set_auto_resolve_outcome_services(options.auto_resolve_outcomes);
-    session.set_auto_resolver(options.auto_resolve); session.set_vote_progress(options.vote_progress);
+    session.set_auto_resolver(options.auto_resolve);
+    // A recording may already have installed the canonical MP policy. An absent
+    // legacy callback must not erase it before the saved vote owner is imported.
+    if (options.vote_progress) session.set_vote_progress(options.vote_progress);
     session.set_conflict_gate(options.conflict_gate);
     if (options.conflict_service) session.set_conflict_service(options.conflict_service, options.content, options.scripts, options.script_requirement);
     if (options.configure_session) {
@@ -721,13 +739,11 @@ core::Result<void> bind_checkpoint_services(campaign::GameSession& session, cons
         if (!configured) return core::Result<void>::failure(configured.error());
     }
     if (prepared_runtime && prepared_runtime->child_parent_queries) {
-        for (const auto layer : {campaign::BattleLayer::space, campaign::BattleLayer::land}) {
-            auto bound = session.add_conflict_parent_queries(layer, prepared_runtime->child_parent_queries);
-            if (!bound) return core::Result<void>::failure(bound.error());
-        }
+        auto bound = session.add_conflict_parent_queries(campaign::BattleLayer::space, prepared_runtime->child_parent_queries);
+        if (!bound) return core::Result<void>::failure(bound.error());
     }
     if (prepared_runtime && prepared_runtime->child_scripts) {
-        auto configured = session.set_child_script_services(prepared_runtime->child_scripts, prepared_runtime->configure_child);
+        auto configured = session.set_child_script_services(campaign::BattleLayer::space, prepared_runtime->child_scripts, prepared_runtime->configure_child);
         if (!configured) return core::Result<void>::failure(configured.error());
     }
     return core::Result<void>::success();

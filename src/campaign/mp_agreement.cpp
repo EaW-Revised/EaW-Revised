@@ -68,6 +68,7 @@ struct Derived {
     CampaignSetupOptions options;
     std::shared_ptr<const CampaignSetupPlan> plan;
     std::shared_ptr<GameSession> session;
+    std::shared_ptr<const void> runtime_services;
     Digest tick_zero{};
     std::vector<std::vector<std::uint8_t>> ai_configuration;
 };
@@ -125,7 +126,15 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
     if (!planned) return Result::failure(planned.error());
     out.plan = std::make_shared<const CampaignSetupPlan>(std::move(planned).value());
     std::string hex;
-    if (local.services) {
+    if (local.prepare_session) {
+        auto prepared = local.prepare_session(*out.plan, roster.difficulty);
+        if (!prepared) return Result::failure(prepared.error());
+        out.session = std::move(prepared.value().session);
+        out.runtime_services = std::move(prepared.value().runtime_services);
+        if (!out.session || out.session->completed_tick() != 0)
+            return refuse<Derived>("campaign preparation did not return a tick-zero session");
+        hex = out.session->state_sha256();
+    } else if (local.services) {
         auto services = local.services(*out.plan);
         if (!services) return Result::failure(services.error());
         // The root owns the session and the setup context; the shared pointer keeps the root alive with it.
@@ -192,7 +201,7 @@ Digest resolver_digest(const MpLocalContent& local, const data::galactic::Campai
 }
 Digest rules_digest(const MpLocalContent& local) {
     const auto abi = script::numeric::numeric_abi();
-    Writer out("eawr-gc-rules-v1");
+    Writer out("eawr-gc-rules-v4");
     out.integer(gc::galactic_rules_version); out.integer(gc::galactic_frames_per_second);
     out.integer(sim::math::Fixed::fractional_bits);
     out.text(abi.name); out.integer(abi.version);
@@ -268,6 +277,7 @@ core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const
     out.ai_configuration = std::move(value.ai_configuration);
     out.plan = std::move(value.plan);
     out.session = std::move(value.session);
+    out.runtime_services = std::move(value.runtime_services);
     return Result::success(std::move(out));
 }
 

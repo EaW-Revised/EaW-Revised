@@ -158,6 +158,9 @@ struct Host {
             {"BUDGET", "Variable_Self.BudgetFractionToBuild {Parameter_Type=\"TYPE500\"}"},
             {"CATEGORY", "Variable_Self.BudgetFractionToBuild {Parameter_Type=\"TYPE500\",Parameter_Category=7}"},
             {"ACTIVE", "Variable_Self.BudgetFractionToBuild {Parameter_Type=\"TYPE300\"}"},
+            {"FOREIGNBUDGET", "Variable_Enemy.BudgetFractionToBuild {Parameter_Type=\"TYPE500\"}"},
+            {"FOREIGNCATEGORY", "Variable_Enemy.BudgetFractionToBuild {Parameter_Type=\"TYPE500\",Parameter_Category=7}"},
+            {"FOREIGNACTIVE", "Variable_Enemy.BudgetFractionToBuild {Parameter_Type=\"TYPE300\"}"},
             {"TIMELINE", "Game.Timeline"}, {"NESTEDTIMELINE", "Function_TIMELINE.Evaluate"}, {"TIMELINEBASES", "Function_TIMELINE.Evaluate + Function_MAXG.Evaluate"}, {"FOREIGN", "Variable_Enemy.StructureCount {Parameter_Type=\"TYPE100\"}"},
             {"UNKNOWN", "Variable_Target.StructureCount"}};
         std::string xml = "<Equations>";
@@ -174,6 +177,91 @@ struct Host {
     }
     std::optional<ai::Real> query(std::string_view name) { return world->evaluate(engine, name, 1, engine.target_of_object(10)); }
 };
+
+// Owner projection removes only rows the budget equations cannot consume. Check real active-head math,
+// foreign evaluators, all status branches and the exact full/filtered values before the engine uses that view.
+std::string budget_owner_projection(unsigned workers) {
+    eawr::platform::ThreadWorkerAdapter executor(workers);
+    Host host;
+    const auto generation = std::make_shared<gc::EconomyInputGeneration>();
+    must(host.world->bind(snapshot(0, generation), {}, executor, 0, 200));
+    std::uint64_t sequence{}; must(host.engine.before_service(*host.world, host.scripts, sequence, &executor));
+    std::string trace;
+    using Build = ai::GalacticBudgetBuild;
+    const std::array names{"BUDGET", "CATEGORY", "ACTIVE", "FOREIGNBUDGET", "FOREIGNCATEGORY", "FOREIGNACTIVE"};
+    for (const auto owner : {gc::PlayerId{1}, gc::PlayerId{2}}) {
+        ai::PlayerAi player; player.player = owner;
+        auto context = host.world->goal_context(player, host.engine.target_of_object(10));
+        context.enemy = owner == 1 ? 2U : 1U;
+        for (const auto status : {Build::Status::unassigned, Build::Status::salvage, Build::Status::goal, Build::Status::finished}) {
+            auto full = std::make_shared<ai::GalacticEconomyRuntime>(*ai::fresh_economy_runtime(setup().players));
+            for (auto& budget : full->budgets) { budget.income = real(10); budget.categories[7] = {real(5), real(20)}; }
+            full->build_tasks_complete = true;
+            full->builds = {{10, 300, status, real(40), real(5), real(1), 1, gc::ProductionDomain::ground, 80},
+                {20, 300, status, real(30), real(7), real(2), 2, gc::ProductionDomain::ground, 81},
+                {11, 500, status, real(20), real(3), real(3), 3, gc::ProductionDomain::space, 82}};
+            must(host.world->bind_economy_runtime(full));
+            std::vector<std::optional<ai::Real>> before;
+            for (const auto name : names) before.push_back(host.world->evaluate_read_only(host.engine, name, context));
+            if (owner == 1 && status == Build::Status::goal)
+                expect(before[2] == real(25) / real(10), "owner projection reference reaches the actual active-head budget branch");
+            for (std::size_t i = 3; i < names.size(); ++i)
+                expect(before[i] == real(0), "foreign budget forms are defined zero even when their real build row is published");
+            auto filtered = std::make_shared<ai::GalacticEconomyRuntime>(*full);
+            std::erase_if(filtered->builds, [owner](const auto& row) { return row.builder != owner; });
+            must(host.world->bind_economy_runtime(filtered));
+            for (std::size_t i = 0; i < names.size(); ++i) {
+                const auto after = host.world->evaluate_read_only(host.engine, names[i], context);
+                expect(after == before[i], "every budget equation keeps exactly the full-publication value after owner filtering");
+                trace += after ? std::to_string(after->repr) : "none"; trace += ';';
+            }
+        }
+    }
+    return trace;
+}
+
+
+// A mod can ask for another player's equations inside its own chain. The reader can be human and
+// therefore have no native AI state; the query must still get its real active build budget.
+void budget_query_reader() {
+    eawr::platform::ThreadWorkerAdapter executor(1);
+    Host host;
+    const auto generation = std::make_shared<gc::EconomyInputGeneration>();
+    must(host.world->bind(snapshot(0, generation, false, false, true, [](auto& production) {
+        production.planets.back().queues[0] = {{300, 2, 84, whole(60), whole(2), whole(1)}};
+        production.planets.back().queues[0].front().duration_frames = 60;
+    }), {}, executor, 0, 200));
+    std::uint64_t sequence{}; must(host.engine.before_service(*host.world, host.scripts, sequence, &executor));
+    auto full = std::make_shared<ai::GalacticEconomyRuntime>(*ai::fresh_economy_runtime(setup().players));
+    for (auto& budget : full->budgets) budget.income = real(10);
+    full->build_tasks_complete = true;
+    full->builds = {{20, 300, ai::GalacticBudgetBuild::Status::goal, real(40), real(5), real(1), 2, gc::ProductionDomain::ground, 84}};
+    must(host.world->bind_economy_runtime(full));
+    const auto expected = host.world->evaluate_read_only(host.engine, "ACTIVE", 2, host.engine.target_of_object(20));
+    expect(expected == real(25) / real(10), "foreign evaluator reference reaches its own actual active build head");
+    std::vector<gc::PlayerId> requested;
+    host.world->bind_economy_supplier([&] {
+        const auto reader = host.engine.build_budget_reader(); requested.push_back(reader);
+        auto copy = std::make_shared<ai::GalacticEconomyRuntime>(*full);
+        if (reader) std::erase_if(copy->builds, [reader](const auto& row) { return row.builder != reader; });
+        return eawr::core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>>::success(std::move(copy));
+    });
+    {
+        const ai::Engine::BuildBudgetReads caller(host.engine, 1);
+        expect(host.world->evaluate_read_only(host.engine, "ACTIVE", 2, host.engine.target_of_object(20)) == expected,
+            "an explicit human evaluator overrides the calling AI player's budget projection");
+        expect(requested == std::vector<gc::PlayerId>{2} && host.engine.build_budget_reader() == 1,
+            "the evaluator selects its own publication and restores the caller's reader scope");
+        {
+            const auto frozen = host.world->partitioned_reads();
+            expect(requested == std::vector<gc::PlayerId>({2, 0}), "a mixed-player prepass requests all owners even inside a caller scope");
+            expect(host.world->evaluate_read_only(host.engine, "ACTIVE", 2, host.engine.target_of_object(20)) == expected,
+                "the mixed-player frozen publication retains the other evaluator's actual build budget");
+        }
+    }
+    expect(host.engine.build_budget_reader() == 0, "the outer budget reader scope is restored");
+    host.world->bind_economy_supplier({});
+}
 
 // WGEP-149: identity selection precedes admission and never falls through a tie.
 std::string next_technology(unsigned workers) {
@@ -511,7 +599,7 @@ void installed() {
     cp::CampaignSetupOptions options; options.seed = 42;
     for (const auto& faction : data.factions) {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1); options.players.push_back({{id, id, 0}, faction.name, true});
-        const bool human = faction.name == "Rebel"; if (human) options.local_observer = id;
+        const bool human = faction.name == "Rebel"; if (human) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id, human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
     }
     std::vector<std::string> names; for (const auto& type : types.types) names.push_back(type.name); std::sort(names.begin(), names.end());
@@ -605,6 +693,10 @@ int case_galactic_ai_economy_tokens_tests(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures ? 1 : 0; }
         if (argc != 1) throw std::runtime_error("economy contracts accept only --installed");
+        budget_query_reader();
+        const auto projection = budget_owner_projection(1);
+        for (const auto workers : {2U, 4U, 8U}) expect(budget_owner_projection(workers) == projection,
+            "full/owner-filtered budget values are equal on 1/2/4/8 workers");
         const auto baseline = contracts(1);
         for (const auto workers : {2U, 4U, 8U}) expect(contracts(workers) == baseline, "1/2/4/8 source token and save equality");
         const auto next_baseline = next_technology(1);

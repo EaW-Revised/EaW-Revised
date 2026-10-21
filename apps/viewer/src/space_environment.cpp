@@ -1,5 +1,6 @@
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
+#include "settings_store.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -125,6 +126,12 @@ void SpaceEnvironment::camera_event(const viewer::camera_input::RawEvent& event)
     if (!state.bridge) return;
     if (state.options.camera_terminal_baseline_test || state.options.camera_terminal_hold_test
         || state.options.camera_terminal_release_test) return;
+    if (const auto* saved = ActiveSettings::get()) {
+        if (auto bound = state.bridge->set_camera_keys(saved->camera_wasd); !bound) {
+            state.failure = core::format_diagnostic(bound.error());
+            return;
+        }
+    }
     if (auto handled = state.bridge->handle(event); !handled) state.failure = core::format_diagnostic(handled.error());
 }
 

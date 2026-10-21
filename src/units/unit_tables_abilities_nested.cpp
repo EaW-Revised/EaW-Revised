@@ -124,6 +124,9 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                 } else if (ability.type == "REPLENISH_WINGMEN" && iequals(child.name, "Particle_Effect")) {
                     data::tag_trace::used(child);
                     ability.replenish_particle = value;
+                } else if (ability.type == "CONCENTRATE_FIRE" && iequals(child.name, "Particle_Effect")) {
+                    data::tag_trace::used(child);
+                    ability.concentrate_particle = value;
                 } else if (ability.type == "LURE" && iequals(child.name, "Target_Types")) {
                     // WLU-04: exact type names, in authored order (the service looks each one up).
                     data::tag_trace::used(child);

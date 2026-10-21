@@ -330,6 +330,10 @@ struct AttractRunner::State final {
             << ", \"started\": " << status.speech_started << "},\n"
             << "  \"sfx_3d\": {\"refused\": " << status.sfx_3d_refused
             << ", \"started\": " << status.sfx_3d_started << "},\n"
+            << "  \"audio_events\": {\"refused\": " << status.audio_events_refused
+            << ", \"admitted\": " << status.audio_events_admitted
+            << ", \"started\": " << status.audio_events_started
+            << ", \"deaths_2d_refused\": " << status.audio_deaths_2d_refused << "},\n"
             << "  \"buses_muted\": {\"during\": " << buses_during << ", \"after\": " << buses_after << "},\n"
             << "  \"session_freed\": " << (freed ? "true" : "false") << ",\n"
             << "  \"failure\": " << json(failure) << "\n}\n";

@@ -275,6 +275,13 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
         for (const auto& ability : type.abilities)
             if (ability.type == "REPLENISH_WINGMEN") looks.replenish_particle = ability.replenish_particle;
             else if (ability.type == "LURE") looks.lure_particle = ability.lure_particle;
+            else if (ability.type == "CONCENTRATE_FIRE") {
+                looks.concentrate_particle = ability.concentrate_particle;
+                if (const auto particle = catalog_->resolve(looks.concentrate_particle, data::Category::game_object); particle) {
+                    const auto authored_scale = numbers(tag(particle.value(), "Scale_Factor"));
+                    if (!authored_scale.empty()) looks.concentrate_scale = authored_scale.front();
+                }
+            }
         const tactical::CombatProfile* profile = combat.find(battle::type_id(type.id));
         const auto ability_projectile = ability_projectiles.find(type.id);
         // The shot's frame step (Max_Speed per frame), for where its flight meets a shield (BP-19).
@@ -521,7 +528,7 @@ void BattleEffects::prewarm_effect_programs() {
         }
         for (const auto* name : {&looks.death_explosion, &looks.spin_explosion, &looks.leech_effect,
                 &looks.energy_owner_particle, &looks.replenish_particle, &looks.corrupt_target_particle,
-                &looks.corrupt_owner_particle, &looks.lure_particle, &looks.blast_charging_particle,
+                &looks.corrupt_owner_particle, &looks.lure_particle, &looks.concentrate_particle, &looks.blast_charging_particle,
                 &looks.blast_charged_particle}) warm(*name);
         for (const auto* names : {&looks.hardpoint_explosions, &looks.damage_hits,
                 &looks.shield_hits, &looks.asteroid_hits}) {

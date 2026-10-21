@@ -120,7 +120,8 @@ class LanLobbyStructure(unittest.TestCase):
         screen = source_text("apps/viewer/src/lan_lobby_screen.cpp")
         self.assertIn("network_row_count(*map)", screen)
         self.assertIn("std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U)", screen)
-        self.assertIn("row.kind != model::RowKind::human && row.kind != model::RowKind::open", screen)
+        self.assertIn("if (impl.host && row.kind != model::RowKind::human)", screen)
+        self.assertNotIn("name->set_item_disabled(1, true)", screen)
         self.assertNotIn("Human side", screen)
         self.assertNotIn('" human seats)"', screen)
         self.assertNotIn("human_team_splits(", screen)
@@ -315,13 +316,14 @@ def command(cache, name, directory, picture, *extra, resolution="1280x720"):
             "--eawr-report", str(directory / f"{name}.json"), "--eawr-capture", str(picture), *isolated, *extra]
 
 
-def load(test, directory, name, completed):
+def load(test, directory, name, completed, failed_actions=()):
     report = directory / f"{name}.json"
     test.assertTrue(report.is_file(), completed)
     result = json.loads(report.read_text(encoding="utf-8"))
-    test.assertEqual(result["failure"], "", result["actions"])
-    test.assertEqual(result["status"], "ok", result["failure"])
-    test.assertTrue(all(action.endswith(" ok") for action in result["actions"]), result["actions"])
+    test.assertEqual(result["failure"], "action failed: " + failed_actions[-1] if failed_actions else "", result["actions"])
+    test.assertEqual(result["status"], "failed" if failed_actions else "ok", result["failure"])
+    test.assertEqual([action for action in result["actions"] if not action.endswith(" ok")],
+                     [action + " FAILED" for action in failed_actions], result["actions"])
     return result
 
 
@@ -354,7 +356,7 @@ class LanLobbyGraphical(unittest.TestCase):
                 # Windows may clamp the startup window to its usable desktop area.
                 # Resize after launch so the viewport exercises the exact requested dimensions.
                 steps = ("resize:" + resolution, "sleep:20", "source:online", "snapshot", "shot:" + name + "-online",
-                         "source:lan", "snapshot", "humans:4", "snapshot",
+                         "source:lan", "snapshot", "host_options", "snapshot",
                          "shot:" + name + "-host-options", "cancel", "join:Geometry night",
                          "wait:staging@30", "snapshot", "shot:" + name + "-joiner")
                 actions = [arg for step in steps for arg in ("--eawr-lan-do", step)]
@@ -381,7 +383,7 @@ class LanLobbyGraphical(unittest.TestCase):
                 with self.subTest(host=host, resolution=resolution):
                     name = "online-geometry-" + ("host-" if host else "joiner-") + resolution
                     steps = ["resize:" + resolution, "sleep:20", "source:online",
-                             *(["humans:9"] if host else []),
+                             *(["host_options"] if host else []),
                              "host:Geometry night" if host else "join:Geometry night",
                              "wait:staging@30", "sleep:10", "snapshot", "shot:" + name]
                     if resolution == "1920x1080":
@@ -628,25 +630,33 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(lan["source"], "lan")
         self.assertEqual(lan["chat"], [], "no online chat leaks into the LAN window")
 
-    def test_host_nine_human_count_and_individual_open_rows(self):
-        name = "host-human-rows"
-        steps = ("humans:9", "shot:host-human-count-closed", "host_dropdown:humans",
-                 "shot:host-human-count-open", "humans:3", "humans:9", "host:Nine player night",
-                 "snapshot", "shot:host-nine-rows", "leave")
+    def test_vacant_seat_controls_change_count_inside_lobby(self):
+        name = "lobby-seat-controls"
+        steps = ("host_options", "shot:host-options-without-count", "host:Seat controls",
+                 "snapshot", "shot:seats-before",
+                 "seat:1:hard", "snapshot", "shot:seats-hard-ai", "seat:1:closed", "snapshot",
+                 "shot:seats-closed", "seat:1:open", "snapshot", "shot:seats-open",
+                 "staging_dropdown:NAME:1", "shot:open-seat-menu", "leave")
         actions = [arg for step in steps for arg in ("--eawr-lan-do", step)]
-        completed = subprocess.run(
-            command(self.cache, name, self.pictures, self.pictures / f"{name}.png",
-                    "--eawr-lan-name", "Row host", "--eawr-lan-fake", "host_waiting",
-                    "--eawr-lighting", "sh", "--eawr-shadows", "on",
-                    "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), *actions),
+        completed = subprocess.run(command(
+            self.cache, name, self.pictures, self.pictures / f"{name}.png", "--eawr-lan-name", "Row host",
+            "--eawr-lan-game-port", "0", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+            "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), *actions),
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
-        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
-        staging = load(self, self.pictures, name, completed.stdout)["snapshots"][0]
-        self.assertEqual([row["kind"] for row in staging["rows"]], ["human"] + ["open"] * 8)
-        self.assertTrue(all(row["visible"] for row in staging["rows"]))
-        self.assertEqual(staging["rows"][0]["name"], "Row host")
-        self.assertEqual(len({row["colour"] for row in staging["rows"]}), 9)
-        for capture in ("host-human-count-closed", "host-human-count-open", "host-nine-rows"):
+        self.assertEqual(completed.returncode, 0, completed.stdout[-5000:])
+        before, ai, closed, opened = load(self, self.pictures, name, completed.stdout)["snapshots"]
+        self.assertEqual(before["rows"][0]["kind"], "human")
+        self.assertTrue(all(row["kind"] == "open" for row in before["rows"][1:] if row["visible"]))
+        self.assertEqual(ai["rows"][1]["kind"], "ai")
+        self.assertEqual(ai["rows"][1]["name"], "TEXT_HARD_AI_PLAYER")
+        self.assertEqual(sum(row["kind"] in ("human", "ai") for row in ai["rows"]), 2)
+        self.assertEqual(closed["rows"][1]["kind"], "none")
+        self.assertEqual(opened["rows"][1]["kind"], "open")
+        self.assertEqual(sum(row["kind"] in ("human", "ai") for row in opened["rows"]), 1)
+        self.assertTrue(opened["rows"][1]["enabled"])
+        self.assertEqual(opened["rows"][1]["faction"], "")
+        self.assertEqual(opened["rows"][1]["team"], "")
+        for capture in ("host-options-without-count", "seats-before", "open-seat-menu", "seats-hard-ai", "seats-closed", "seats-open"):
             self.assertTrue((self.pictures / f"{capture}.png").is_file())
 
     def test_nine_seat_online_staging_connections(self):
@@ -655,7 +665,7 @@ class LanLobbyGraphical(unittest.TestCase):
                      "--eawr-online-room", "Nine night|Host|Kessel|TEXT_GAME_TYPE_TEAM_SPACE|1/9",
                      "--eawr-lighting", "sh", "--eawr-shadows", "on",
                      "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0])]
-        for step in ("source:online", "humans:9", "host:Nine night", "wait:staging@30", "wait:hosting:hosted@30",
+        for step in ("source:online", "host:Nine night", "wait:staging@30", "wait:hosting:hosted@30",
                      "snapshot", "shot:online-nine-staging", "connections", "snapshot",
                      "shot:online-nine-connections", "connections", "snapshot", "leave"):
             arguments += ["--eawr-lan-do", step]
@@ -666,6 +676,16 @@ class LanLobbyGraphical(unittest.TestCase):
         staging, opened, closed = load(self, self.pictures, name, completed.stdout)["snapshots"]
         self.assertEqual(staging["source"], "online")
         self.assertEqual(staging["page"], "staging")
+        # Retain #4446's nine-row font and geometry regression coverage after
+        # moving skirmish player count from the host form into staging rows.
+        combos = {item["id"]: item for item in staging["rectangles"]["combos"]}
+        for field in ("NAME", "FACTION", "COLOR", "TEAM"):
+            template = combos[f"IDC_PLAYER_{field}_0"]
+            for row in range(9):
+                control = combos[f"IDC_PLAYER_{field}_{row}"]
+                for key in ("kind", "font", "font_size", "font_color", "outline_size"):
+                    self.assertEqual(control[key], template[key], (field, row, key))
+                self.assertEqual(control["rect"][2:], template["rect"][2:], (field, row, "size"))
         self.assertFalse(staging["start"]["enabled"], "connecting/failed pairs keep Start unavailable")
         self.assertIn("connections between players", staging["start"]["reason"])
         self.assertTrue(staging["map"], "the shared map list remains available with nine humans")
@@ -724,7 +744,7 @@ class LanLobbyGraphical(unittest.TestCase):
                 game_port = available.getsockname()[1]
             prefix = "four-human" if count == 4 else "two-human"
             scripts = [
-                [f"humans:{count}", "host:" + game,
+                ["host:" + game,
                  *["wait:room_player:" + player + "@180" for player in names[1:]],
                  # Admissions invalidate edits. One host barrier starts a guest completion
                  # chain, keeping host chat below the four-message burst limit.
@@ -785,7 +805,10 @@ class LanLobbyGraphical(unittest.TestCase):
                     "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1",
                     "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
                     "--eawr-lan-do", "snapshot", "--eawr-lan-do", "shot:alone-lobby",
-                    "--eawr-lan-do", "host:Lonely night", "--eawr-lan-do", "ai:2", "--eawr-lan-do", "snapshot",
+                    "--eawr-lan-do", "host:Lonely night", "--eawr-lan-do", "map:data/art/maps/_mp_space_coruscant.ted",
+                    "--eawr-lan-do", "ai:2:easy", "--eawr-lan-do", "snapshot",
+                    "--eawr-lan-do", "ai:2:hard", "--eawr-lan-do", "snapshot",
+                    "--eawr-lan-do", "ai:2:medium", "--eawr-lan-do", "snapshot",
                     "--eawr-lan-do", "shot:alone-staging", "--eawr-lan-do", "start", "--eawr-lan-do", "snapshot",
                     "--eawr-lan-do", "ai:8", "--eawr-lan-do", "snapshot",
                     "--eawr-lan-do", "chat:anyone there", "--eawr-lan-do", "snapshot",
@@ -797,7 +820,12 @@ class LanLobbyGraphical(unittest.TestCase):
         report = json.loads((self.pictures / "alone.json").read_text(encoding="utf-8"))
         self.assertTrue(any(action.startswith("start") and action.endswith("FAILED") for action in report["actions"]),
                         report["actions"])
-        lobby, staging, after_start, refused_edit, after_chat = report["snapshots"]
+        lobby, easy, hard, staging, after_start, refused_edit, after_chat = report["snapshots"]
+        for snapshot, label in ((easy, "TEXT_EASY_AI_PLAYER"), (hard, "TEXT_HARD_AI_PLAYER"),
+                                (staging, "TEXT_MEDIUM_AI_PLAYER")):
+            self.assertEqual(snapshot["rows"][2]["name"], label)
+            self.assertTrue(snapshot["rows"][2]["enabled"])
+            self.assertEqual(sum(row["kind"] == "ai" for row in snapshot["rows"]), 1)
         self.assertEqual(lobby["page"], "lobby")
         self.assertEqual(lobby["players"], ["Solo"])
         self.assertEqual(staging["page"], "staging")
@@ -948,8 +976,11 @@ class LanLobbyGraphical(unittest.TestCase):
     def test_joiner_reviews_map_and_options_before_accept(self):
         host_port, join_port = free_udp_ports(2)
         scripts = {
-            "host": ["host:Review night", "wait:room_player:Reviewer@120", "snapshot", "wait:chat:reviewed@120"],
+            "host": ["host:Review night", "wait:room_player:Reviewer@120", "wait:chat:moved to seven@120",
+                     "snapshot", "map:data/art/maps/_mp_space_hypori.ted", "snapshot", "shot:sparse-map-refusal",
+                     "chat:map checked", "wait:chat:reviewed@120"],
             "join": ["wait:game:Review night@120", "join:Review night", "wait:room_player:Reviewer@120",
+                     "slot:7", "sleep:20", "chat:moved to seven", "wait:chat:map checked@120",
                      "snapshot", "shot:joiner-map-options", "chat:reviewed"],
         }
         processes, logs = [], []
@@ -977,8 +1008,16 @@ class LanLobbyGraphical(unittest.TestCase):
         reports = {}
         for side, process in zip(scripts, processes):
             output = (self.pictures / f"review-{side}.log").read_text(encoding="utf-8")
-            self.assertEqual(process.returncode, 0, output[-6000:])
-            reports[side] = load(self, self.pictures, f"review-{side}", output)["snapshots"][0]
+            self.assertEqual(process.returncode, 2 if side == "host" else 0, output[-6000:])
+            report = load(self, self.pictures, f"review-{side}", output,
+                          ("map:data/art/maps/_mp_space_hypori.ted",) if side == "host" else ())
+            reports[side] = report["snapshots"][0]
+            if side == "host":
+                before, after = report["snapshots"]
+                self.assertIn("data/art/maps/_mp_space_hypori.ted", before["disabled_maps"])
+                self.assertEqual(before["map"], after["map"])
+                self.assertEqual(before["rows"], after["rows"], "a refused four-row map cannot renumber rows one and seven")
+                self.assertEqual([i + 1 for i, row in enumerate(after["rows"]) if row["kind"] == "human"], [1, 7])
         host, join = reports["host"], reports["join"]
         self.assertTrue(join["map"], "selected logical map id arrives before Accept")
         self.assertEqual(join["drawn_map"], host["map"], "draw the locally resolved name, not the logical path")
@@ -998,7 +1037,7 @@ class LanLobbyGraphical(unittest.TestCase):
         common_host = ["--eawr-lan-broadcast-port", str(host_port), "--eawr-lan-broadcast-extra", str(join_port),
                        "--eawr-lan-game-port", "0"]
         common_join = ["--eawr-lan-broadcast-port", str(join_port), "--eawr-lan-broadcast-extra", str(host_port)]
-        host_script = ["name:" + host_name, "colour:2", "host:" + game, "wait:room_player:" + join_name + "@120", "snapshot",
+        host_script = ["name:" + host_name, "colour:2", "host:" + game, "ai:2:hard", "wait:room_player:" + join_name + "@120", "snapshot",
                        "shot:two-host-staging", "ready", "wait:ready:all@180", "snapshot", "shot:two-host-ready",
                        "chat:ready from host", "wait:chat:ready from joiner@120", "name:Alice Prime", "sleep:10",
                        "snapshot", "chat:name-only", "wait:unready@120", "snapshot", "shot:two-host-reset",
@@ -1044,17 +1083,27 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(lobby["page"], "lobby")
         self.assertEqual(len(lobby["games"]), 1, lobby["games"])
         self.assertTrue(lobby["games"][0].startswith(game + " | "), lobby["games"])
-        self.assertIn(" | 1/2 | ", lobby["games"][0])
         self.assertIn(host_name, lobby["players"] + [host_name])
 
         host_staging = host["snapshots"][0]
         join_staging = join["snapshots"][1]
+        capacity = sum(row["visible"] and row["kind"] in ("human", "open") for row in host_staging["rows"])
+        self.assertRegex(lobby["games"][0], r" \| 1/\d+ \| ", "discovery sees the host before the guest joins")
+        # The first broadcast can precede the host's AI edit. Check the updated
+        # capacity after the exchange, once that edit has propagated over UDP.
+        self.assertIn(f" | 1/{capacity} | ", join["snapshots"][-1]["games"][0],
+                      "discovery updates to humans plus Open rows after the host's AI edit")
         for staging in (host_staging, join_staging):
             self.assertEqual(staging["page"], "staging")
             names = [row["name"] for row in staging["rows"][:2]]
             self.assertEqual(names, [host_name, join_name], staging["rows"][:2])
             self.assertTrue(all(row["kind"] == "human" for row in staging["rows"][:2]))
         self.assertTrue(host_staging["host"] and not join_staging["host"])
+        for staging in (host_staging, join_staging):
+            self.assertEqual(staging["rows"][2]["kind"], "ai")
+            self.assertEqual(staging["rows"][2]["name"], "TEXT_HARD_AI_PLAYER")
+        self.assertTrue(host_staging["rows"][2]["enabled"])
+        self.assertFalse(join_staging["rows"][2]["enabled"], "the guest's AI row is read-only")
         self.assertLessEqual(host["final"]["chat"].count(host_staging["status"]), 4,
                              "preparation status changes do not flood the bounded chat every frame")
         self.assertFalse(host_staging["start"]["enabled"], "connection alone never enables Start")

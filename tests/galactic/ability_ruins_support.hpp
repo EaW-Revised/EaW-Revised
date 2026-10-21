@@ -90,7 +90,7 @@ inline gc::GalacticSetup ruins_setup(bool with_companion) {
     economy.planets[0].siphon = {true, 2, gc::corruption_fixture::one, 1000000};
     s.fiscal->planets[0].credits = f(100);
     host.ruined_income = {{planet, f(10)}};
-    auto& observer = s.observer.emplace(); observer.local_player = 2;
+    auto& observer = s.observer.emplace(); observer.human_observers = {2}; observer.solo_reference_human = 2;
     for (const auto& who : s.players) observer.players.push_back({who.player_id, false, false, 0, 0, {}});
     observer.types = {{1000, false, false, false}, {3000, false, false, false}, {companion_type, false, false, false}};
     for (const auto& p : s.planets) {

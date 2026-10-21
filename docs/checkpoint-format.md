@@ -11,7 +11,9 @@ knows sections as bytes; each section's owner encodes and validates its own. Tes
 `tests/galactic/checkpoint/`.
 
 All integers are fixed-width little-endian. The payload is canonical and uncompressed: one
-encoding per state, no padding, no floating values. Compression and chunking are transport
+encoding per state and no padding. History's sourced economy/military samples
+retain IEEE binary32 interchange bits; their arithmetic uses the integer-only
+authoritative backend (GREF-26), without host floating operations. Compression and chunking are transport
 details. A checkpoint over 64 MiB fails the save; nothing is ever truncated.
 
 ## Header: exactly 304 bytes
@@ -334,6 +336,15 @@ elapsed accumulator and last-seen time, tech-level primed flag and inactivity st
 upper-case, ascending). The plot definitions are never saved: a load installs the same plots from the campaign data first and
 the saved state must match them name for name (a renamed sub-plot or event, or a save with plots loaded into a session without
 them, is refused). WST-60..62.
+
+GCMP-06 uses galaxy section version **41**, state encoding **9**, and campaign owner format **4**.
+GREF-24..26 History archives add authoritative state section 22 and use galaxy section version **42**, state encoding **10** and galactic snapshot schema **7**; older data is refused.
+Immediately after the session history base, a u8 presence flag carries the optional multiplayer
+battle-vote timeout (u64 session ticks). The owner archives that timeout and the optional vote-start
+tick next to its ordered side-vote map. The pending-state digest includes the timeout, start and
+current session tick, so a paused strategic clock does not hide countdown progress. Restore binds
+the vote service before importing the saved barrier; it does not restart the timer. No command was
+added: explicit choices retain session opcode 8 and the existing command/replay tag.
 
 Old galaxy section versions are refused with `EAWR-CKP-0102`, naming the found and expected version.
 

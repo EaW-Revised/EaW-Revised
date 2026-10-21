@@ -254,7 +254,7 @@ The table below is an exact intersection of this walk's owned/interface tag path
 | `Capture_Point_Radius` | SecondaryStructure, SpaceBuildable | todo: economy tag support (legacy EAWR-654) |
 | `Capture_Point_Transition_Time_Seconds` | SecondaryStructure, SpaceBuildable | todo: economy tag support (legacy EAWR-654) |
 | `Collidable_By_Projectile_Living` | SecondaryStructure, SpaceBuildable, SpaceStructure, SpaceUnit | partial movement tag coverage (legacy EAWR-649): live capture/UC types; other types deferred |
-| `Credit_Multiplier` | Difficulty_Adjustment | todo station purchasing and reinforcements (legacy EAWR-530) |
+| `Credit_Multiplier` | Difficulty_Adjustment | applied to positive AI credits (WPR-12, WTA-45) |
 | `Destroy_Previous_Upgrade_Level` | UpgradeObject | todo: economy tag support (legacy EAWR-654) |
 | `Destroy_When_Child_Dies` | SpaceBuildable | applied: matching child-death callback, WBP-27/28 |
 | `Energy_Capacity` | SecondaryStructure, SpaceBuildable, SpaceStructure | todo: economy tag support (legacy EAWR-654) |
@@ -286,7 +286,7 @@ The table below is an exact intersection of this walk's owned/interface tag path
 | `Shield_Refresh_Rate` | SecondaryStructure, SpaceBuildable, SpaceStructure | todo: combat tag support (legacy EAWR-650) |
 | `Show_In_Sidebar_When_Complete` | UpgradeObject | todo: presentation tag support (legacy EAWR-653) |
 | `Show_In_Sidebar_While_Building` | UpgradeObject | todo: economy tag support (legacy EAWR-654) |
-| `Space_Build_Time_Multiplier` | Difficulty_Adjustment | todo: AI difficulty tag support (legacy EAWR-737) |
+| `Space_Build_Time_Multiplier` | Difficulty_Adjustment | applied (WTA-45, WBP-15) |
 | `Space_Capture_Allowed_Countdown_Seconds` | GameConstants | todo: economy tag support (legacy EAWR-654) |
 | `Space_FOW_Reveal_Range` | SecondaryStructure, SpaceBuildable, SpaceStructure, Squadron | todo: presentation tag support (legacy EAWR-653) |
 | `Space_Layer` | SpaceStructure | todo: movement tag support (legacy EAWR-649) |

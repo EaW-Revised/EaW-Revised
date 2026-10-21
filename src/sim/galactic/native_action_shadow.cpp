@@ -1,3 +1,4 @@
+#include "eawr/sim/galactic/raid.hpp"
 #include "session_impl.hpp"
 #include "native_action_shadow_data.hpp"
 #include "native_force_validation.hpp"
@@ -8,6 +9,7 @@
 #include "native_population_projection.hpp"
 #include "native_victory_projection.hpp"
 #include "eawr/sim/galactic/production.hpp"
+#include "eawr/sim/galactic/control.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "eawr/core/gc_profile.hpp"
 
@@ -17,6 +19,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <stdexcept>
 #include <type_traits>
 #include <variant>
 
@@ -141,6 +144,13 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::NativeActionShadow::Dat
         if (!changes.control) changes.control = *inherited->control();
         for (const auto& [id, row] : control_rows) { (void)id; patch(changes.control->planets, row, [](const auto& item) { return item.planet; }); }
     }
+    if (!actor_rows.empty() && inherited->control() && !inherited->control()->ability_types.empty()) {
+        if (!changes.control) changes.control = *inherited->control();
+        for (const auto& [id, row] : actor_rows) {
+            if (row) update_control_actor(*changes.control, *row);
+            else erase_control_actor(*changes.control, id);
+        }
+    }
     if (!observer_rows.empty() && inherited->observer()) {
         changes.observer = *inherited->observer();
         for (const auto& [id, row] : observer_rows) { (void)id; patch(changes.observer->planets, row, [](const auto& item) { return item.planet; }); }
@@ -175,7 +185,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::NativeActionShadow::Dat
             const auto fleets = changes.fleets ? std::span<const Fleet>(*changes.fleets) : inherited->fleets();
             const auto actors = changes.actors ? std::span<const CensusObject>(*changes.actors) : inherited->actor_records();
             changes.observations = std::make_shared<const std::vector<ObservedPlanet>>(
-                observed_planets(changes.observer ? *changes.observer : *inherited->observer(), fleets, movement ? movement.get() : inherited->movement(), actors));
+                observed_planets(changes.observer ? *changes.observer : *inherited->observer(), fleets, {}, movement ? movement.get() : inherited->movement(), actors));
         }
     }
     // Generations are derived invalidation keys, excluded from canonical bytes.
@@ -300,7 +310,7 @@ public:
                 const auto* row = owner.data_.fleet(id);
                 ++owner.data_.work.copied_fleet_rows;
                 at = owner.loaded_.emplace(id, session_detail::FleetData{row->owner, row->orbit, row->members,
-                    row->orbit_slot, row->motion}).first;
+                    row->orbit_slot, row->motion, row->raid_destination}).first;
             }
             return at->second;
             }
@@ -358,10 +368,16 @@ public:
           clock(data.base->clock()), next_id(data.next_id), live_object_count(data.live_objects),
           movement_inputs(data.movement),
           graph(data.graph.get()), native_movement_listener(data.movement_listener), registry{*this}, fleets{*this, {}}, planets{*data.base}, detached_units(data) {}
+    bool raid_qualified(FleetId id, PlanetId destination) const {
+        const auto view = data_.view(); const auto* fleet = data_.fleet(id);
+        return fleet && view->movement() && view->control() && qualifies_raid(*fleet, destination,
+            *view->movement(), *view->control(), view->actor_records(), view->planet_access());
+    }
     const Seat* seat(SeatId id) const {
         const auto at = std::find_if(seats.begin(), seats.end(), [id](const auto& row) { return row.seat_id == id; });
         return at != seats.end() ? &*at : nullptr;
     }
+    const CensusObject* movement_actor(EntityId id) const { return data_.actor(id); }
     std::vector<Planet> sorted_planets() const { return {data_.base->planets().begin(), data_.base->planets().end()}; }
     std::vector<Route> sorted_routes() const { return {data_.base->routes().begin(), data_.base->routes().end()}; }
     void invalidate_observer_projection() { ++data_.observer_generation; }
@@ -415,7 +431,7 @@ public:
             }
             motion.orbit_entry = latest + 1;
         }
-        loaded_[row.id] = {row.owner, row.orbit, row.members, row.orbit_slot, std::move(motion)};
+        loaded_[row.id] = {row.owner, row.orbit, row.members, row.orbit_slot, std::move(motion), row.raid_destination};
     }
     void refresh_fleet_combat_skip(FleetId id) {
         if (!data_.base->production() || !data_.base->production()->fleet_blockers || !fleets.contains(id)) return;
@@ -489,12 +505,14 @@ public:
             ? std::optional<std::span<const CensusObject>>(records) : std::nullopt, *movement_inputs, &contents);
     }
     void finish() {
+        if (data_.independent_player && data_.next_id > data_.range_end)
+            throw std::runtime_error("native player identity block exhausted");
         for (auto& [id, row] : loaded_) {
             const auto* previous = data_.fleet(id);
             if (previous && previous->owner == row.owner && previous->orbit == row.orbit
-                && previous->members == row.members && previous->orbit_slot == row.orbit_slot && previous->motion == row.motion)
+                && previous->members == row.members && previous->orbit_slot == row.orbit_slot && previous->motion == row.motion && previous->raid_destination == row.raid_destination)
                 continue;
-            data_.fleet_rows[id] = Fleet{id, row.owner, row.orbit, std::move(row.members), row.orbit_slot, std::move(row.motion)};
+            data_.fleet_rows[id] = Fleet{id, row.owner, row.orbit, std::move(row.members), row.orbit_slot, std::move(row.motion), row.raid_destination};
         }
         for (const auto id : removed_) data_.fleet_rows[id] = std::nullopt;
         detached_units.finish();
@@ -531,6 +549,7 @@ public:
     } actor_records;
     bool native_invasions_enabled{}, native_applying{};
     std::uint64_t& next_native_invasion;
+    const std::uint64_t native_invasion_range_end;
     std::size_t& native_invasion_transport_count;
     std::vector<std::uint64_t>& native_invasion_queue;
     struct Invasions {
@@ -542,7 +561,9 @@ public:
     } native_invasions;
     ControlOwner(Data& data, std::span<const PlanetId> selected)
         : FleetOwner(data), input_(data.view()), completed_tick(data.base->completed_tick()), actor_records(data), native_invasions_enabled(data.invasions_enabled),
-          next_native_invasion(data.next_invasion), native_invasion_transport_count(data.invasion_transports),
+          next_native_invasion(data.next_invasion),
+          native_invasion_range_end(data.independent_player ? data.invasion_range_end : std::numeric_limits<std::uint64_t>::max()),
+          native_invasion_transport_count(data.invasion_transports),
           native_invasion_queue(data.new_invasion_queue), native_invasions{data} {
         if (const auto& schema = input_->control()) {
             control.emplace(ControlView{schema->max_ground_forces, schema->players, schema->relations, schema->types, {}, schema->state});
@@ -573,18 +594,27 @@ public:
             for (auto& row : observer->planets) data_.observer_rows.insert_or_assign(row.planet, std::move(row));
     }
 };
+core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::NativeActionShadow::admit_invasion(
+    PlayerId player, FleetId fleet, std::span<const EntityId> transports, bool pending) {
+    if (!data_->player || (!data_->tail && !data_->prelude && data_->player != player) || data_->work.requests >= data_->max_requests)
+        return invalid<NativeInvasionReceipt>("invalid native invasion layer request or exhausted budget");
+    const auto published = snapshot(); const auto* row = this->fleet(fleet);
+    const std::array<PlanetId, 1> selected{row ? row->orbit : PlanetId{}};
+    detach(); Data::ControlOwner owner(*data_, selected);
+    auto result = session_detail::admit_native_invasion_rows(owner, player, fleet, transports, pending);
+    owner.finish(); data_->publication = published; // invasion records have no snapshot publication
+    if (!result) return result;
+    ++data_->work.requests;
+    data_->record_request(Data::InvasionRequest{
+        false, player, fleet, std::vector<EntityId>(transports.begin(), transports.end()), pending, result.value(), 0});
+    return result;
+}
 core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::stage_native_invasion(
     NativeActionShadow& shadow, PlayerId player, FleetId fleet, std::span<const EntityId> transports, bool pending) {
     using Result = core::Result<NativeInvasionReceipt>;
-    const auto published = shadow.snapshot(); const auto* row = shadow.fleet(fleet);
-    const std::array<PlanetId, 1> selected{row ? row->orbit : PlanetId{}};
-    shadow.detach(); NativeActionShadow::Data::ControlOwner owner(*shadow.data_, selected);
-    auto result = session_detail::admit_native_invasion_rows(owner, player, fleet, transports, pending);
-    owner.finish(); shadow.data_->publication = published; // invasion records have no snapshot publication
+    auto result = shadow.admit_invasion(player, fleet, transports, pending);
     if (!result || !result.value().admitted) return result;
     const auto& receipt = result.value();
-    shadow.data_->action_requests.emplace_back(NativeActionShadow::Data::InvasionRequest{
-        false, player, fleet, std::vector<EntityId>(transports.begin(), transports.end()), pending, receipt, 0});
     std::vector<std::uint8_t> bytes;
     for (const auto word : std::array<std::uint64_t, 9>{1, transports.empty() ? 1U : 4U, player, fleet,
         static_cast<std::uint64_t>(pending), static_cast<std::uint64_t>(receipt.admitted), receipt.request,
@@ -625,7 +655,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
         if (event.kind == GalacticEventKind::command_executed) { receipt.admitted = true; receipt.object = event.subject; }
     }
     owner.finish(); ++data_->work.requests;
-    data_->action_requests.emplace_back(Data::FleetRequest{player, payload, pending_local_conflict, receipt});
+    data_->record_request(Data::FleetRequest{player, payload, pending_local_conflict, receipt});
     return core::Result<NativeFleetReceipt>::success(receipt);
 }
 core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionShadow::launch_transport(
@@ -661,7 +691,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
     owner.finish(); data_->last_admission_ran = admission_ran; data_->last_published = admission_ran;
     if (!launched) return launched;
     if (!admission_ran) data_->publication = before;
-    data_->action_requests.emplace_back(Data::ControlRequest{Data::ControlRequest::Kind::launch,
+    data_->record_request(Data::ControlRequest{Data::ControlRequest::Kind::launch,
         player, id, target, pending_local_conflict, {}, launched.value(), false});
     return launched;
 }
@@ -689,7 +719,7 @@ core::Result<void> GalacticSession::NativeActionShadow::recheck_orbit(PlayerId p
         if (data_->movement_listener) data_->movement_listener(data_->events.back());
     }
     owner.finish();
-    data_->action_requests.emplace_back(Data::OrbitRecheckRequest{player, id});
+    data_->record_request(Data::OrbitRecheckRequest{player, id});
     return core::Result<void>::success();
 }
 core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionShadow::land_transports(
@@ -707,7 +737,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
     data_->last_published = landed.value().published;
     if (!landed.value().published) data_->publication = before;
     const auto receipt = landed.value().receipt;
-    data_->action_requests.emplace_back(Data::ControlRequest{Data::ControlRequest::Kind::fleet_land,
+    data_->record_request(Data::ControlRequest{Data::ControlRequest::Kind::fleet_land,
         player, id, 0, pending_local_conflict, {}, receipt, false});
     return core::Result<NativeFleetReceipt>::success(receipt);
 }
@@ -725,7 +755,7 @@ core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::Na
     data_->last_published = landed.value().published;
     if (!landed.value().published) data_->publication = before;
     const auto receipt = landed.value().receipt;
-    data_->action_requests.emplace_back(Data::ControlRequest{Data::ControlRequest::Kind::actor_land,
+    data_->record_request(Data::ControlRequest{Data::ControlRequest::Kind::actor_land,
         player, actor, planet, pending_local_conflict, live_landed, receipt.event, receipt.linked});
     return core::Result<NativeTransportLandingReceipt>::success(receipt);
 }
@@ -769,7 +799,7 @@ core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::NativeAc
     const auto& prepared = checked.value();
     if (!prepared.offer || prepared.admission != ProductionAdmission::allowed) {
         const NativeProductionReceipt receipt{prepared.admission, 0, prepared.offer ? prepared.offer->price : math::Fixed{}};
-        data_->action_requests.emplace_back(Data::ProductionRequest{request, receipt});
+        data_->record_request(Data::ProductionRequest{request, receipt});
         return Result::success(receipt);
     }
     if (!notify) return invalid<NativeProductionReceipt>("native production requires its ledger handler");
@@ -777,6 +807,8 @@ core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::NativeAc
         || request.mark_cost->raw() % math::Fixed::scale != 0)
         return invalid<NativeProductionReceipt>("native mark requires the resolved null-location integer type cost");
     const auto& offer = *prepared.offer; const auto id = data_->next_id;
+    if (data_->independent_player && id >= data_->range_end)
+        return invalid<NativeProductionReceipt>("native player identity block exhausted");
     if (auto marked = notify({NativeProductionNotice::Kind::marked, request.player, id, *request.mark_cost, offer.price, offer.seconds, prepared.owner}); !marked)
         return Result::failure(marked.error());
     auto row = current->production()->planets[prepared.planet_index];
@@ -786,7 +818,7 @@ core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::NativeAc
     data_->population_stale = true; data_->publication.reset();
     data_->events.push_back({data_->base->completed_tick(), GalacticEventKind::production_started, {}, request.planet, id, request.type, GalacticRejectReason::none});
     const NativeProductionReceipt receipt{ProductionAdmission::allowed, id, offer.price};
-    data_->action_requests.emplace_back(Data::ProductionRequest{request, receipt});
+    data_->record_request(Data::ProductionRequest{request, receipt});
     return Result::success(receipt);
 }
 void GalacticSession::NativeActionShadow::detach() {
@@ -798,10 +830,17 @@ void GalacticSession::NativeActionShadow::detach() {
     data_->publication.reset();
 }
 EntityId GalacticSession::NativeActionShadow::next_entity_id() const noexcept { return data_->next_id; }
+std::uint64_t GalacticSession::NativeActionShadow::next_native_invasion_id() const noexcept { return data_->next_invasion; }
 PlayerId GalacticSession::NativeActionShadow::player() const noexcept { return data_->player; }
+const GalacticSession::NativeActionShadow::IntentSink& GalacticSession::NativeActionShadow::intent_sink() const noexcept {
+    return data_->intent_sink;
+}
+std::span<const GalacticSession::NativeActionShadow::IntentRecord> GalacticSession::NativeActionShadow::intents() const noexcept {
+    return data_->action_requests;
+}
 core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionShadow::for_player(
     PlayerId player, std::size_t max_requests) const {
-    if (data_->tail || !data_->player || !player || player <= data_->player || !max_requests || max_requests > galactic_max_objects
+    if (data_->independent_player || data_->tail || !data_->player || !player || player <= data_->player || !max_requests || max_requests > galactic_max_objects
         || std::none_of(data_->base->players().begin(), data_->base->players().end(),
             [player](const auto& row) { return row.player_id == player; }))
         return invalid<NativeActionShadow>("native player layers require ascending known players and bounded requests");
@@ -817,8 +856,36 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionS
     state->production_projection = data_->production_projection; state->population_projection = data_->population_projection;
     state->observer_generation = data_->observer_generation; state->population_stale = data_->population_stale;
     state->invasion_records = data_->invasion_records; state->invasion_transports = data_->invasion_transports;
-    state->next_invasion = data_->next_invasion; state->invasions_enabled = data_->invasions_enabled;
+    state->first_invasion = state->next_invasion = data_->next_invasion; state->invasions_enabled = data_->invasions_enabled;
     state->publication = data_->view(); // freeze the predecessor publication before sharing it
+    if (state->publication->victory()) state->victory = std::shared_ptr<const VictoryState>(state->publication, &*state->publication->victory());
+    return core::Result<NativeActionShadow>::success(NativeActionShadow(std::move(state)));
+}
+core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionShadow::fork_player(
+    PlayerId player, EntityId first_id, std::size_t max_requests, std::optional<std::uint64_t> first_invasion, IntentSink sink) const {
+    const auto invasion = first_invasion.value_or(data_->next_invasion);
+    if (data_->independent_player || data_->tail || !data_->player || !player || !max_requests || max_requests > galactic_max_objects
+        || first_id < data_->next_id || first_id >= std::numeric_limits<EntityId>::max() - galactic_max_objects
+        || invasion < data_->next_invasion || invasion >= std::numeric_limits<std::uint64_t>::max() - galactic_max_objects
+        || std::none_of(data_->base->players().begin(), data_->base->players().end(),
+            [player](const auto& row) { return row.player_id == player; }))
+        return invalid<NativeActionShadow>("native root forks require known players, bounded requests and a reserved identity block");
+    auto state = std::make_shared<Data>();
+    state->owner = data_->owner; state->base = data_->base; state->parent = data_;
+    state->inherit_reads(data_);
+    state->player = player; state->first_id = state->next_id = first_id;
+    state->range_end = first_id + galactic_max_objects; state->independent_player = true;
+    state->live_objects = data_->live_objects; state->max_requests = max_requests;
+    state->can_create = data_->can_create; state->victory = data_->victory;
+    state->graph = data_->graph; state->movement = data_->movement; state->movement_listener = data_->movement_listener;
+    state->population_schema = data_->population_schema; state->income_schema = data_->income_schema;
+    state->fiscal_schema = data_->fiscal_schema; state->base_income = data_->base_income; state->income_edges = data_->income_edges;
+    state->production_projection = data_->production_projection; state->population_projection = data_->population_projection;
+    state->observer_generation = data_->observer_generation; state->population_stale = data_->population_stale;
+    state->invasion_records = data_->invasion_records; state->invasion_transports = data_->invasion_transports;
+    state->first_invasion = state->next_invasion = invasion; state->intent_sink = std::move(sink); state->invasion_range_end = invasion + galactic_max_objects;
+    state->invasions_enabled = data_->invasions_enabled;
+    state->publication = data_->view();
     if (state->publication->victory()) state->victory = std::shared_ptr<const VictoryState>(state->publication, &*state->publication->victory());
     return core::Result<NativeActionShadow>::success(NativeActionShadow(std::move(state)));
 }
@@ -888,7 +955,7 @@ core::Result<math::Fixed> GalacticSession::NativeActionShadow::add_credits(Playe
     data_->victory = std::move(staged_victory);
     if (victory_pending) data_->events.push_back({data_->base->completed_tick(), GalacticEventKind::victory_pending, {}, id, 0,
         static_cast<std::uint64_t>(VictoryKind::credits), GalacticRejectReason::none});
-    if (data_->player && !data_->immediate_batch && !data_->suppress_cash_request) data_->action_requests.emplace_back(Data::CashRequest{id, delta, multiplier, actual.value()});
+    if (data_->player && (!data_->immediate_batch || data_->independent_player) && !data_->suppress_cash_request) data_->record_request(Data::CashRequest{id, delta, multiplier, actual.value()});
     return actual;
 }
 core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_force(const NativeProductionRequest& request,
@@ -990,6 +1057,8 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
         base.control()->max_ground_forces, *location->orbit, *location->contents, skip_reader};
     auto made = builder(view, data_->next_id);
     if (!made) return Result::failure(made.error());
+    if (data_->independent_player && made.value().next_id > data_->range_end)
+        return invalid<std::vector<EntityId>>("native player identity block exhausted");
     auto actors = validate_native_force(request, made.value(), data_->next_id, data_->live_objects,
         *base.production()->nested_creation, [&](EntityId id) {
             const auto* private_actor = created_object(id);
@@ -1067,7 +1136,7 @@ core::Result<std::vector<EntityId>> GalacticSession::NativeActionShadow::create_
     const auto births = ordered_births(placement.originals).value();
     data_->actor_changes.insert(data_->actor_changes.end(), births.begin(), births.end());
     data_->forces.push_back(std::make_shared<const Data::Force>(Data::Force{request, std::move(made).value()}));
-    if (data_->player && !data_->immediate_batch) data_->action_requests.emplace_back(Data::ForceRequest{data_->forces.back(), actors.value()});
+    if (data_->player && (!data_->immediate_batch || data_->independent_player)) data_->record_request(Data::ForceRequest{data_->forces.back(), actors.value()});
     data_->publication.reset();
     return actors;
 }

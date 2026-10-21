@@ -221,6 +221,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
 }
 
 core::Result<void> session_detail::Tick::station_upgrades() {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     auto& minds = craft_prep_.value().minds.value();
     auto& ledgers = staging_.value().ledgers.value();
     auto& earners = staging_.value().earners.value();

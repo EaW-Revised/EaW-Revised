@@ -76,9 +76,11 @@ void production_names_localize_once(const data::Catalog& catalog) {
     // P-1/P-2: the shared resolver preserves an untranslated line's slot.
     assert(art.at("Crusader_Gunship").encyclopedia == "Line one\n\nLine two");
     assert(art.at("Modded_Ship").text == "Modded_Ship" && art.at("Modded_Ship").encyclopedia.empty());
+    assert(art.at("Modded_Ship").hero_rank == 25);
     const auto& inherited = art.at("Modded_Variant");
     assert(inherited.text == "Crusader Gunship" && inherited.text_id == "TEXT_UNIT_GUNSHIP");
     assert(inherited.icon == "i_variant.tga" && inherited.gui_row == 7);
+    assert(inherited.hero_rank == 90 && art.at("Crusader_Gunship").hero_rank == 90);
     assert(inherited.encyclopedia == "Line one\n\nLine two");
     assert(inherited.encyclopedia_looks.name == "Crusader Gunship"
         && inherited.encyclopedia_looks.icon == "i_variant.tga"
@@ -108,7 +110,7 @@ void campaign_art_is_data_driven() {
       <Planet_Ability_Icon>mod_bonus.tga</Planet_Ability_Icon></Planet>
       <SpaceUnit Name="Crusader_Gunship"><Icon_Name>i_gunship.tga</Icon_Name><Text_ID>TEXT_UNIT_GUNSHIP</Text_ID>
       <Encyclopedia_Text>TEXT_ENC_GUNSHIP_1, TEXT_ENC_MISSING TEXT_ENC_GUNSHIP_2</Encyclopedia_Text>
-      <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text></SpaceUnit>
+      <MP_Encyclopedia_Text>TEXT_ENC_MULTIPLAYER</MP_Encyclopedia_Text><Ranking_In_Category>90</Ranking_In_Category></SpaceUnit>
       <SpaceUnit Name="Modded_Ship"><Text_ID>TEXT_MISSING</Text_ID></SpaceUnit>
       <SpaceUnit Name="Modded_Variant"><Variant_Of_Existing_Type>Crusader_Gunship</Variant_Of_Existing_Type>
       <Icon_Name>i_variant.tga</Icon_Name><GUI_Row>7</GUI_Row></SpaceUnit>

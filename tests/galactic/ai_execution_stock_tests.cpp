@@ -1027,7 +1027,7 @@ std::string installed_actions(const cp::CampaignSetupPlan& plan, const cp::Campa
     for (const auto& binding : plan.type_bindings()) if (const auto* type = plan.original_type(binding.id); type && type->name == "Victory_Destroyer") request.type = binding.id;
     if (!request.target || !request.type) throw std::runtime_error("retail-qualified Normal native magic bindings absent");
     auto magic = take(actions.admit(request));
-    expect(magic.admitted && actions.created().size() == 1 && magic.request >= before_magic && credits() == Fixed{},
+    expect(magic.admitted && actions.created(player).size() == 1 && magic.request >= before_magic && credits() == Fixed{},
         "retail-qualified Normal location directly creates one real stock ship at zero cash without paid queues");
     bool owner{};
     for (const auto& fleet : world.snapshot()->fleets()) for (const auto& member : fleet.members) if (member.id == magic.request)
@@ -1079,7 +1079,7 @@ void installed() {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == source->starting_active_player;
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
     }
@@ -1105,7 +1105,7 @@ void installed() {
         host->setup.players.push_back({binding.player.player_id, foc::detail::upper(binding.faction), false, true, {}, false});
         if (binding.faction == "Empire") player = binding.player.player_id;
     }
-    if (!player || options.local_observer == player) throw std::runtime_error("stock Empire AI player missing");
+    if (!player || options.solo_reference_human == player) throw std::runtime_error("stock Empire AI player missing");
     for (const auto& row : host->setup.players) host->players.emplace(row.player, &row);
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {

@@ -58,7 +58,7 @@ struct Installed {
             const bool local = faction.name == source->starting_active_player;
             options.players.push_back({{id, id, 0}, faction.name, true});
             options.seats.push_back({gc::SeatId{id}, id, local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
-            if (local) options.local_observer = id;
+            if (local) options.solo_reference_human = id;
         }
         std::vector<std::string> originals;
         for (const auto& type : types.types) originals.push_back(type.name);

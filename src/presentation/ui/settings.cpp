@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <limits>
 #include <string>
 #include <system_error>
 
@@ -60,6 +61,7 @@ constexpr int speed_last = speed_step_count - 1;
 constexpr int scroll_last = scroll_stop_count - 1;
 
 const IntField fields[] = {
+    EAWR_SETTINGS_FIELD("keyboard.camera_wasd", camera_wasd, 0, 1),
     EAWR_SETTINGS_FIELD("audio.master", audio.master_percent, 0, 100),
     EAWR_SETTINGS_FIELD("audio.sfx", audio.sfx_percent, 0, 100),
     EAWR_SETTINGS_FIELD("audio.speech", audio.speech_percent, 0, 100),
@@ -71,6 +73,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("video.window_height", video.window_height, display_size_minimum, display_size_maximum),
     EAWR_SETTINGS_FIELD("video.windowed", video.windowed, 0, 1),
     EAWR_SETTINGS_FIELD("video.vsync", video.vsync, 0, 1),
+    EAWR_SETTINGS_FIELD("video.frame_rate_limit", video.frame_rate_limit, -1, std::numeric_limits<int>::max()),
     EAWR_SETTINGS_FIELD("video.detail_level", video.detail_level, 0, detail_level_maximum),
     EAWR_SETTINGS_FIELD("video.texture_mip_drop", video.texture_mip_drop, 0, 4),
     EAWR_SETTINGS_FIELD("video.gamma_permille", video.gamma_permille, 0, 4000),
@@ -233,6 +236,7 @@ struct KeyFact final {
 
 // The keys the project's battle input binds to a retail command (OR-01, G-1, overview).
 constexpr KeyFact key_facts[] = {
+    {"IDC_EDIT_WAYPOINT", "W"},
     {"IDC_EDIT_GUARD", "G"},
     {"IDC_EDIT_ATTACK", "A"},
     {"IDC_EDIT_MOVE", "M"},
@@ -253,6 +257,35 @@ constexpr KeyFact key_facts[] = {
 };
 
 } // namespace
+
+// All other bare defaults in the sourced map (ST-K3), including interface and
+// ability keys. Validate the preset before any event can be dispatched.
+static_assert([] {
+    constexpr std::string_view occupied = "FGMERTBKCIP";
+    for (std::size_t i = 0; i < camera_key_moves.size(); ++i) {
+        const char key = camera_key_moves[i].wasd;
+        if (occupied.find(key) != std::string_view::npos
+            || std::string_view("WASD").find(key) != std::string_view::npos) return false;
+        for (std::size_t j = 0; j < i; ++j) if (key == camera_key_moves[j].wasd) return false;
+    }
+    return true;
+}());
+
+char camera_command_key(const char physical, const bool camera_wasd) noexcept {
+    if (!camera_wasd) return physical;
+    for (const auto& move : camera_key_moves) if (physical == move.wasd) return move.retail;
+    for (const auto& move : camera_key_moves) if (physical == move.retail) return '\0';
+    return physical;
+}
+
+std::string_view project_key_for(const std::string_view control, const bool camera_wasd) noexcept {
+    if (camera_wasd) {
+        if (control == "IDC_EDIT_WAYPOINT") return "U";
+        if (control == "IDC_EDIT_ATTACK") return "X";
+        if (control == "IDC_EDIT_STOP") return "V";
+    }
+    return project_key_for(control);
+}
 
 std::optional<core::Diagnostic> validate_online_settings(const NetworkSettings& settings, const bool require_service) {
     const auto failure = [](const char* code, const char* message) {

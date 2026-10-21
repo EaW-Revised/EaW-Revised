@@ -34,7 +34,7 @@ inline std::shared_ptr<const sim::galactic::GalacticSnapshot> black_market_fixtu
     account.credits = name == "market-poor" ? f(1) : f(1000);
     if (name == "market-fractional") account.credits = sim::math::Fixed::from_decimal("250.3").value();
     economy.players.push_back(account);
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     g::ObservedPlanet row; row.player = local; row.planet = 101; row.discovered = true;
     return std::make_shared<const g::GalacticSnapshot>(0, g::GalacticClock{}, std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{}, std::vector<g::Route>{}, std::vector<g::Fleet>{}, std::vector<g::GalacticEvent>{},

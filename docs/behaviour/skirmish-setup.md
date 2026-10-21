@@ -21,8 +21,9 @@ and skin data. Private research extracts are kept outside the published tree.
 Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
 
 - **R-SETUP-01:** The space lobby offers a map list with a preview and player
-  rows carrying faction, team and controller. WSS-08 bounds local rows by the
-  lesser of authored capacity and eight; the host stays in row one and other
+  rows carrying faction, team and controller. The project bounds local rows by
+  the lesser of authored capacity and the shared engine seat limit; the host
+  stays in row one and other
   rows offer AI or Open. Open rows have no faction/team/colour record (WSS-14/15),
   and their faction and team captions are blank in the retail lobby capture.
   Map changes remove excess records, relocate surviving out-of-range rows and
@@ -30,6 +31,11 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   displayed from one while stored from zero. Start requires at least two
   occupied teams, each with one faction; opposing teams may use the same
   faction (WSS-16–18). Network humans remain a separate staging path.
+  The owner-requested local ninth seat extends retail WSS-08, whose local
+  dialog stops at eight. Missing row controls extend the last authored row
+  geometry and retain its skin. When a map needs the additional controls, its
+  rows fit within the authored rows area, preserving the status band. Smaller
+  maps restore the authored rectangles and hide the additional idle controls.
   Uneven splits within total map capacity are allowed; the lobby does not
   limit teammates to their side's spawn-marker count (WSS-54). A teammate
   beyond that count gets no starting fleet or marker-derived camera/facing;
@@ -137,7 +143,7 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   a tooltip, the map's unavailable reason, the LAN status and summary text and the peer's
   default name. The game-type list shows land and
   land control disabled, with the database's "Unavailable" and the project's reason as
-  the tooltip; space is selected. All eight rows stay on screen: rows beyond the map's
+  the tooltip; space is selected. All supported rows stay on screen: rows beyond the map's
   capacity are blank and disabled, as in the retail capture. The name column is the row's
   controller (the local player's name in row one, Open or AI below), as in the retail
   dialog. The colour column shows its swatch only. Faction names come from each

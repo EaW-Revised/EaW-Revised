@@ -41,6 +41,7 @@
 #include "ui/theme_builder.hpp"
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/button.hpp>
 #include "galactic_audio.hpp"
 #include "battle_dialog.hpp"
 #include "campaign_score_dialog.hpp"
@@ -243,9 +244,18 @@ struct GalacticMode::State final {
     std::uint64_t begin_wait_frames{}, begin_wait_last_tick{};
     std::uint64_t submitted_orders{};
     galactic_view::PauseToggleGuard pause_guard;
+    galactic_view::LanNoticeModel lan_notice_model;
+    std::string lan_notice_text;
+    std::uint64_t lan_clock_refusal_seen{};
+    godot::Label* lan_notice_label{};
+    std::array<godot::Button*, 4> lan_clock_buttons{};
+    void service_lan_hud();
+    void service_lan_acceptance_battle();
+    std::uint64_t acceptance_next_battle_order{};
     std::optional<galactic_view::SceneContent> content;
     std::map<galactic_view::ObjectId, galactic_view::Affiliation> affiliations;
     godot::Control* hud{};
+    godot::Control* world_overlays{};
     std::unique_ptr<ReferencePages> reference_pages;
     EawrTacticalHud* command_bar{};
     std::optional<assets::MegaTextureAtlas> command_atlas;
@@ -282,8 +292,9 @@ struct GalacticMode::State final {
     std::map<const EawrHudText*, HudTextStyleKey> hud_text_styles;
     // Keep dependency keys beside their consumers. Immutable publications are
     // retained so their addresses cannot be recycled underneath a cached HUD.
+    // #4331: the bar is keyed by what it reads of a publication (the economy readouts, the selected planet's view and
+    // colours, the fiscal pip, the fast-forward state), not by the publication: most publications change none of it.
     struct HudCommandKey final {
-        std::shared_ptr<const sim::galactic::GalacticSnapshot> publication;
         galactic_view::ObjectId selection{};
         bool space_tab{}, levels{}, income{}, clock_enabled{}, paused{};
         std::size_t page{};
@@ -291,9 +302,19 @@ struct GalacticMode::State final {
         galactic_view::CameraState tier{};
         presentation::ui::ShellPlacement placement;
         std::uint32_t height{};
+        std::uint64_t economy_revision{}, view_revision{};
+        std::optional<std::size_t> pip;
+        bool at_speed{};
+        std::optional<galactic_view::Rgb> selected_colour;
+        std::optional<galactic_view::PlayerId> selected_owner;
+        // The pressed state of the toggle buttons as the player left them: a click that the model refuses or has not
+        // published yet leaves a button pressed that the update would release, and the next publication must see that.
+        std::uint32_t toggles{};
         friend bool operator==(const HudCommandKey&, const HudCommandKey&) = default;
     };
     std::optional<HudCommandKey> hud_command_key;
+    std::uint64_t hud_economy_revision{}, hud_view_revision{};
+    std::uint64_t hud_view_fact_revision{}, hud_view_rebuilds{};
     struct HudLabelKey final {
         std::shared_ptr<const sim::galactic::GalacticSnapshot> publication;
         std::array<float, 3> eye{}, target{}, up{};
@@ -391,6 +412,8 @@ struct GalacticMode::State final {
     [[nodiscard]] bool destruction_source(galactic_view::ObjectId) const;
     bool drop_destruction(galactic_view::ObjectId, bool);
     bool drop_hero_ability(galactic_view::ObjectId, bool);
+    bool drop_raid(galactic_view::ObjectId, galactic_view::ObjectId, bool);
+    [[nodiscard]] std::optional<galactic_view::AbilityDrop> hero_ability_drop(galactic_view::ObjectId, galactic_view::ObjectId target = 0) const;
     void write_destruction_report(std::ostream&) const;
     WeaponActionHudState weapon_menu;
     BlackMarketHudState market_menu;
@@ -410,6 +433,7 @@ struct GalacticMode::State final {
     std::array<EawrHudButton*, 6> hero_map_buttons{};
     std::vector<galactic_view::HeroMapEntry> hero_map_entries;
     std::shared_ptr<const sim::galactic::GalacticSnapshot> hero_map_publication;
+    std::shared_ptr<const std::vector<sim::galactic::HeroReturnView>> published_hero_returns, hero_map_returns;
     std::uint64_t hero_map_clicks{};
     sim::galactic::TypeId hero_map_selected_type{};
     [[nodiscard]] bool build_hero_map_bar();
@@ -451,7 +475,7 @@ struct GalacticMode::State final {
     void build_command_bar_choices(const pugi::xml_document& document);
     void build_command_bar_queues();
     void finish_command_bar_controls();
-    void update_command_bar_economy(const sim::galactic::GalacticClock& clock, bool fiscal_available);
+    [[nodiscard]] bool update_command_bar_economy(const sim::galactic::GalacticClock& clock, bool fiscal_available);
     void update_command_bar_labels(const presentation::ui::ShellPlacement& placement,
         const std::map<galactic_view::ObjectId, galactic_view::PlanetHudFacts>::iterator selected);
     void update_command_bar_allegiance(const presentation::ui::ShellPlacement& placement,
@@ -666,6 +690,31 @@ struct GalacticMode::State final {
     bool base_levels_visible{}; // Local filter adapter; callback/default remains unverified.
     godot::TextureRect* allegiance_icon{};
     void refresh_hud_facts();
+    void refresh_hud_facts_pass();
+    // --eawr-galactic-hud-verify: a pass that ignores every retained fact, and the counters of the comparison.
+    bool hud_facts_cold{};
+    std::uint64_t hud_verify_checks{}, hud_verify_mismatches{}, hud_fact_changes{};
+    [[nodiscard]] std::map<std::string, std::uint64_t> command_bar_fingerprint() const;
+    std::string hud_verify_detail; // the first difference a verification run found
+    [[nodiscard]] std::uint64_t weapon_action_fingerprint() const;
+    // #4331: the local player's offer rows of a publication, each with its type's name and art, in the order the facts
+    // consume them. The rows are an immutable column the session shares by pointer while its admission inputs are
+    // unchanged, so the index is rebuilt only when the displayed column is another one (hud_offers_owner keeps the
+    // indexed column alive, so an equal address is the same column). production_names and production_art are fixed after
+    // the view is built, so a type's name and art are looked up once.
+    struct HudOffer final {
+        const sim::galactic::ObservedProductionOffer* row{};
+        const std::string* name{};
+        const galactic_view::ProductionArt* art{};
+    };
+    struct HudOfferType final { const std::string* name{}; const galactic_view::ProductionArt* art{}; };
+    std::unordered_map<sim::galactic::TypeId, std::optional<HudOfferType>> hud_offer_types;
+    std::vector<HudOffer> hud_offers;
+    std::shared_ptr<const sim::galactic::GalacticSnapshot> hud_offers_owner;
+    const sim::galactic::ObservedProductionOffer* hud_offers_data{};
+    std::size_t hud_offers_size{};
+    galactic_view::PlayerId hud_offers_player{};
+    std::uint64_t hud_offer_index_builds{};
     void update_planet_levels(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     void update_planet_status_icons(galactic_view::ObjectId id, godot::Vector2 anchor, float scale, float alpha);
     std::optional<data::ui::CommandBarComponent> planet_name_style;
@@ -679,7 +728,7 @@ struct GalacticMode::State final {
     std::uint64_t animation_updates{};
     // Opt-in main-thread attribution. The main/animation/camera totals include
     // their nested phases; these are CPU enqueue times, not GPU completion.
-    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, count };
+    enum class FramePhase : std::size_t { main, snapshot, instances, animation, sample, bind, material_clock, corruption, camera, submit, routes, hud_facts, hud_commands, hud_fleets, hud_ground, hud_orbit, hud_radar, hud_labels, hud_weapon, count };
     struct FramePhaseCost final { double milliseconds{}, worst_call_ms{}; std::uint64_t calls{}; };
     std::array<FramePhaseCost, static_cast<std::size_t>(FramePhase::count)> frame_phase_costs{};
     struct FramePhaseMeasure final {

@@ -31,6 +31,12 @@ inline constexpr std::string_view campaign = "gc-campaign", content = "gc-conten
     rules = "gc-rules", tick_zero = "gc-tick-zero";
 } // namespace mp_domains
 
+struct MpPreparedSession {
+    std::shared_ptr<GameSession> session;
+    // Opaque platform services belonging to this exact prepared owner. Not simulation state.
+    std::shared_ptr<const void> runtime_services;
+};
+
 struct MpLocalContent {
     const data::galactic::GalacticData* data{};
     const units::GalacticTypeTable* types{};
@@ -47,6 +53,9 @@ struct MpLocalContent {
     // faction, difficulty and the two digests above, so differing AI content or difficulty yields differing bytes.
     std::function<core::Result<std::vector<std::uint8_t>>(std::string_view faction, sim::galactic::PlayerId player,
         std::string_view difficulty)> ai_configuration;
+    // Optional production owner, fully configured before computing the tick-zero claim.
+    // The aliasing shared pointer retains the initialized root and all runtime services.
+    std::function<core::Result<MpPreparedSession>(const CampaignSetupPlan&, std::string_view difficulty)> prepare_session{};
     // Production prepares the stock placement services so tick zero includes the starting forces; absent, tick
     // zero is the session built from the planned galaxy alone.
     std::function<core::Result<CampaignSetupServices>(const CampaignSetupPlan&)> services;
@@ -63,6 +72,7 @@ struct MpAgreement {
     std::vector<std::vector<std::uint8_t>> ai_configuration; // per roster faction (empty for humans), local
     std::shared_ptr<const CampaignSetupPlan> plan;
     std::shared_ptr<GameSession> session;      // at tick zero, never stepped here; the adapter takes it over
+    std::shared_ptr<const void> runtime_services{}; // travels with that owner across re-offers
 };
 
 // Fills the host's claims from local content: the AI controller configuration of every non-human faction and

@@ -50,7 +50,7 @@ gc::GalacticSetup fixture() {
     control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
     control.types = {{100, 0, false, false}};
     for (const auto& a : control.players) for (const auto& b : control.players) control.relations.push_back({a.player, b.player, a.player == b.player});
-    s.observer.emplace(); auto& observer = *s.observer; observer.local_player = 2;
+    s.observer.emplace(); auto& observer = *s.observer; observer.human_observers = {2}; observer.solo_reference_human = 2;
     observer.reveal_delay_seconds = f(1000); observer.automatic_reveal_range = f(0);
     observer.players = {{1, true, false, 0, 100, {}}, {2, false, false, 0, 100, {}}, {3, false, false, 0, 100, {}}};
     observer.types = {{100, false, false, false}};
@@ -983,6 +983,59 @@ void connecting_capacity(unsigned workers) {
     expect(take(provider.capture()).components == before.components && provider.work().edges <= 3 * 14 * 13,
         "capacity refusal is bounded and leaves producer native state unchanged");
 }
+std::string multiplayer_view_independence(unsigned workers, bool fog) {
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    auto config = fixture();
+    config.seats.push_back({{4}, 3, gc::SeatKind::human, 3, true, 3});
+    config.observer->human_observers = {2, 3}; config.observer->solo_reference_human = 0;
+    for (auto& row : config.observer->records) {
+        row.discovered = row.player != 1;
+        row.mask = row.player == 2 ? gc::all_intelligence : 0;
+    }
+    auto session = take(world_session(config));
+    auto setup = perception(fog); auto immutable = content(setup);
+    Host host(setup), reference(setup);
+    for (auto* value : {&host, &reference}) done(value->world.bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+    cp::GalacticAiUsabilityProvider cached(immutable), clean(immutable); clean.set_incremental(false);
+    const auto before = take(cached.connectivity(session, host.world, host.engine, executor));
+    const auto native = take(cached.capture());
+    const auto perception_state = take(host.world.capture());
+    const auto owner_hash = session.snapshot()->sha256();
+    for (const auto player : {2U, 3U, 2U, 3U}) {
+        const auto publication = session.view_snapshot({player});
+        expect(publication && publication->view_player() == player, "MP view switch resolves each canonical human");
+        const auto decision = take(cached.connectivity(session, host.world, host.engine, executor));
+        expect(trace(decision) == trace(before) && take(cached.capture()).components == native.components,
+            "MP AI decisions and native caches ignore UI context selection");
+    }
+    const auto movement = take(cached.movement(1, *session.snapshot(), host.world, host.engine, executor));
+    for (const auto& row : movement.access)
+        expect(!row.revealed && row.ai_usable, "MP AI uses its own canonical discovery and preserves the MP usability override");
+    const auto independent = take(clean.connectivity(session, reference.world, reference.engine, executor));
+    expect(trace(independent) == trace(before) && take(clean.capture()).components == native.components,
+        "MP cache-on and cache-off decisions and archived bytes agree");
+    cp::GalacticAiUsabilityProvider restored(immutable); Host loaded(setup);
+    done(loaded.world.bind(session.snapshot(), {}, executor, 0, session.next_entity_id()));
+    done(loaded.world.restore(perception_state)); done(restored.restore(native));
+    (void)session.view_snapshot({3});
+    const auto reconstructed = take(restored.connectivity(session, loaded.world, loaded.engine, executor));
+    // WGA-262/329 intentionally omits policy 4's site list while saving its TTL.
+    // Normalize only that sourced load behavior; every other output field and
+    // all native bytes must still match across the UI view switch.
+    auto loaded_expected = before; loaded_expected.goal_reach.clear();
+    for (auto row : before.goal_reach) {
+        if (row.policy == "Single_Hop_Disconnected") row.production_sites.clear();
+        loaded_expected.goal_reach.push_back(std::move(row));
+    }
+    expect(trace(reconstructed) == trace(loaded_expected),
+        "MP reconstruction differs only in the native-unsaved policy-4 site list");
+    expect(take(restored.capture()).components == native.components,
+        "MP reconstruction preserves every archived native cache byte across a view switch");
+    expect(session.snapshot()->sha256() == owner_hash,
+        "MP save reconstruction and view selection preserve canonical observer state");
+    return trace(before);
+}
+
 void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
     const auto config = fixture(); auto game = take(cp::GameSession::create(config));
     auto access = *game.galaxy().snapshot()->planet_access(); ++access.generation;
@@ -1006,7 +1059,7 @@ int case_galactic_ai_usability_tests() {
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;
-            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + incremental_equals_clean(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
+            for (const unsigned workers : {1U, 2U, 4U, 8U}) { indigenous(workers); connecting_capacity(workers); const auto result = multiplayer_view_independence(workers, fog) + route_publications(workers, fog) + equal_connecting_routes(workers) + deadline_projection(workers, fog) + stealth_publication(workers, fog) + discovery_counter_reuse(workers, fog) + pending_access_restore(workers) + pending_site_restore(workers) + negative_connecting_hops(workers) + refreshed_force_clock(workers) + expired_connectivity(workers, fog) + reconstruction(workers, fog) + contracts(workers, fog) + expiry_only_replay(workers, fog) + incremental_equals_clean(workers, fog) + partitioned_supplier(workers, fog); if (reference.empty()) reference = result; else expect(result == reference, "provider output and native/world hashes equal on 1/2/4/8"); }
         }
         for (const bool fog : {false, true}) expect(partitioned_supplier(16, fog) == partitioned_supplier(1, fog), "usability supplier contract 1/16 equality");
         eawr::sim::InlineExecutor executor; access_checkpoint(executor);

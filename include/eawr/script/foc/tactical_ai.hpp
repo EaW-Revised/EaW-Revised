@@ -150,6 +150,9 @@ struct AiDifficultyAdjustment {
     numeric::LuaNumber credit{1};            // Credit_Multiplier
     numeric::LuaNumber space_contrast{1};    // Space_AI_Contrast_Multiplier
     numeric::LuaNumber space_goal_cycle_sleep{0}; // Space_AI_Goal_Cycle_Sleep_Duration, seconds
+    numeric::LuaNumber land_build_time{1};   // Land_Build_Time_Multiplier (#3780)
+    numeric::LuaNumber land_contrast{1};     // Land_AI_Contrast_Multiplier
+    numeric::LuaNumber land_goal_cycle_sleep{0}; // Land_AI_Goal_Cycle_Sleep_Duration, seconds
 };
 
 // The AI player types' Difficulty_Adjustments (level -> entry name) and the difficulty entries of
@@ -262,6 +265,8 @@ struct AiJournal {
 };
 
 struct AiSetup {
+    // #3780: selects the goal mode, plan directory, templates and freestore tag; space is the default.
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
     AiContent content;
     std::vector<AiPlayer> players; // every session player
     AiPerception perception;
@@ -292,6 +297,7 @@ struct AiSetup {
 
 // The AI XML files the goal system reads (#449), as logical paths.
 [[nodiscard]] std::vector<std::string> required_xml();
+[[nodiscard]] std::vector<std::string> required_xml(sim::tactical::BattleDomain domain);
 
 // The Lua files the host loads, as logical paths: the freestore and its
 // library chain, and the plan library that holds the contrast weights.
@@ -325,6 +331,9 @@ struct PreparedAiSession {
 [[nodiscard]] std::vector<std::string> selected_plans();
 // PL-02: candidates from the frozen mounted script inventory, in logical order.
 [[nodiscard]] std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules);
+// The same discovery for a mode's plan directory (space: SpaceMode, land: LandMode).
+[[nodiscard]] std::vector<std::string> selected_plans(const std::map<std::string, std::string>& modules,
+    sim::tactical::BattleDomain domain);
 [[nodiscard]] std::vector<std::string> plan_library_modules();
 
 // One selected plan after its definition load: the goal category its Definitions() sets and

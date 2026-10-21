@@ -130,6 +130,7 @@ later tickets that add systems to the per-unit phases and events to the stream.
 | `EAWR-SIM-0308` | invalid command payload: empty or unordered unit list, ID zero, negative damage |
 | `EAWR-SIM-0309` | warning: unit orders of a command were rejected at execution |
 | `EAWR-SIM-0310` | unsupported worker count, executor or system failure |
+| `EAWR-SIM-0311` | land tactical provider unavailable: land setup/replay parses, but session creation requires the land terrain field (L1) |
 
 ## Workers and the phase map
 

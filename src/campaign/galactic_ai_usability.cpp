@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
@@ -185,8 +186,8 @@ core::Result<bool> GalacticAiUsabilityProvider::usability(gc::PlayerId player,
     if (access->restricted) return core::Result<bool>::success(false);
     if (facts->automatic_reveal) return core::Result<bool>::success(true);
     if (access->local_revealed) return core::Result<bool>::success(*access->local_revealed);
-    // WGA-127/264: use the recorded session local observer, independent of the AI.
-    const auto key = std::pair{snapshot.observer()->local_player, planet};
+    // WGA-127/264: the canonical solo reference human is independent of the UI view.
+    const auto key = std::pair{snapshot.observer()->solo_reference_human, planet};
     const auto* record = find(snapshot.observer()->records, key,
         [](const auto& row) { return std::pair{row.player, row.planet}; });
     if (!record) return refuse<bool>("WGA-127: recorded local reveal predicate is absent");
@@ -265,34 +266,44 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
         }
         ++work_.access_reuses;
     }
+    const auto knowledge_player = multiplayer(snapshot) ? owner : snapshot.observer()->solo_reference_human;
+    if (!knowledge_player) return refuse<const Cache*>("solo reference human is absent");
     if (!replay_rows) {
-    auto prepared = executor.execute_phase("galactic-ai-usability", sim::tick_partition_count, [&](std::size_t part) {
-        const auto range = sim::partition_range(part, snapshot.planets().size());
-        for (auto index = range.begin; index < range.end; ++index) {
-            const auto id = snapshot.planets()[index].id;
-            const auto* facts = find(snapshot.observer()->planets, id, [](const auto& row) { return row.planet; });
-            const auto usable = usability(owner, snapshot, id);
-            if (!usable) { errors[index] = usable.error(); continue; }
-            if (!facts) { errors[index] = refuse<void>("B live planetary observer facts are absent").error(); continue; }
-            auto& row = next.movement.access[index]; row.id = id; row.ai_usable = usable.value();
-            row.owner_visible = false;
-            row.relation = relation(facts->allegiance); row.corrupted = facts->corrupted;
-            const auto* local = find(snapshot.observer()->records, std::pair{snapshot.observer()->local_player, id},
-                [](const auto& at) { return std::pair{at.player, at.planet}; });
-            row.revealed = local && local->discovered;
-            for (const auto& knowledge : snapshot.observations())
-                if (knowledge.player == snapshot.observer()->local_player && knowledge.planet == id) {
-                    row.owner_visible = knowledge.knowledge.ownership;
-                    row.fleet_presence_visible = knowledge.knowledge.fleet_presence; break;
-                }
-            if (facts->space_level != 0) row.starbase_relation = relation(facts->space_owner);
-            for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == id && !fleet.motion.transit && !allied(fleet.owner))
-                row.nonallied_fleet = true;
-
+        // Solo already publishes this reference human; MP AI needs its own knowledge.
+        std::vector<gc::ObservedPlanet> projected_knowledge;
+        std::span<const gc::ObservedPlanet> knowledge = snapshot.observations();
+        if (knowledge_player != snapshot.view_player()) {
+            projected_knowledge = gc::observed_planets(*snapshot.observer(), snapshot.fleets(),
+                {knowledge_player}, snapshot.movement(), snapshot.actor_records());
+            knowledge = projected_knowledge;
         }
-    });
-    if (!prepared) return core::Result<const Cache*>::failure(prepared.error());
-    for (const auto& error : errors) if (error) return core::Result<const Cache*>::failure(*error);
+        auto prepared = executor.execute_phase("galactic-ai-usability", sim::tick_partition_count, [&](std::size_t part) {
+            const auto range = sim::partition_range(part, snapshot.planets().size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                const auto id = snapshot.planets()[index].id;
+                const auto* facts = find(snapshot.observer()->planets, id, [](const auto& row) { return row.planet; });
+                const auto usable = usability(owner, snapshot, id);
+                if (!usable) { errors[index] = usable.error(); continue; }
+                if (!facts) { errors[index] = refuse<void>("B live planetary observer facts are absent").error(); continue; }
+                auto& row = next.movement.access[index]; row.id = id; row.ai_usable = usable.value();
+                row.owner_visible = false;
+                row.relation = relation(facts->allegiance); row.corrupted = facts->corrupted;
+                const auto* local = find(snapshot.observer()->records, std::pair{knowledge_player, id},
+                    [](const auto& at) { return std::pair{at.player, at.planet}; });
+                row.revealed = local && local->discovered;
+                for (const auto& observation : knowledge)
+                    if (observation.player == knowledge_player && observation.planet == id) {
+                        row.owner_visible = observation.knowledge.ownership;
+                        row.fleet_presence_visible = observation.knowledge.fleet_presence; break;
+                    }
+                if (facts->space_level != 0) row.starbase_relation = relation(facts->space_owner);
+                for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == id && !fleet.motion.transit && !allied(fleet.owner))
+                    row.nonallied_fleet = true;
+
+            }
+        });
+        if (!prepared) return core::Result<const Cache*>::failure(prepared.error());
+        for (const auto& error : errors) if (error) return core::Result<const Cache*>::failure(*error);
     }
     // Perception mutates remembered bindings and upstream lazy engine caches.
     // Keep the bulk access preparation parallel; query tokens on the owner in

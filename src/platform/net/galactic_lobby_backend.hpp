@@ -4,6 +4,8 @@
 #include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/net/galactic_lobby.hpp"
 
+#include "eawr/platform/live_game_session.hpp"
+
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -25,10 +27,8 @@ struct GalacticLobbyContent {
 using GalacticLobbyLoader = std::function<core::Result<GalacticLobbyContent>()>;
 
 // The viewer's loader body: the mounted galactic data, the type table, the Lua and XML closure digests and the
-// production campaign planner (plan_live_campaign_setup). Not supplied, by design, until the galactic lockstep driver
-// (GCMP-03) lands: the stock placement services (`local.services`, so tick zero holds the starting forces) and the
-// selected AI player type per faction (`local.ai_configuration`). Without them every peer derives the same smaller
-// tick zero from the planned galaxy and a digest-bound AI configuration, which is what the barrier compares.
+// production campaign planner (plan_live_campaign_setup). Production prepares the retained root, stock placement,
+// conflict services and native AI before the offer computes its tick-zero claim.
 [[nodiscard]] core::Result<GalacticLobbyContent> load_galactic_lobby_content(const vfs::Vfs& filesystem,
     const eawr::data::Catalog& catalog, std::shared_ptr<const void> keepalive);
 
@@ -59,6 +59,8 @@ public:
     void set_adapter_factory(AdapterFactory factory) { adapter_factory_ = std::move(factory); }
     // Whether a campaign match can be built here (the GCMP-03 driver installed its adapter factory).
     [[nodiscard]] bool can_start() const noexcept { return static_cast<bool>(adapter_factory_); }
+    // Qualification only, set before opening a room. The ordinary offer retains its default cap.
+    void acceptance_final_tick(std::uint64_t tick) { acceptance_final_tick_ = tick; }
 
     // Lobby hooks (net::LobbyHooks::validate / offer) for a room in Galactic Conquest mode.
     [[nodiscard]] core::Result<void> validate(const net::LobbySnapshot&, bool starting) const;
@@ -68,6 +70,7 @@ public:
     [[nodiscard]] core::Result<std::unique_ptr<net::SessionAdapter>> build(const net::SetupOffer&);
     // The agreement the last identify derived on this peer, or null: the session the adapter takes over.
     [[nodiscard]] std::shared_ptr<const campaign::MpAgreement> agreement() const;
+    [[nodiscard]] std::shared_ptr<const platform::CampaignServiceConfiguration> runtime_services() const;
 
 private:
     // Runs the loader once. False when the content is unavailable (the error is kept).
@@ -79,6 +82,7 @@ private:
     mutable std::optional<core::Diagnostic> load_error_;
     mutable bool loaded_{};
     AdapterFactory adapter_factory_;
+    std::uint64_t acceptance_final_tick_{};
     mutable std::mutex mutex_;
     std::shared_ptr<campaign::MpAgreement> agreement_;
 };

@@ -173,10 +173,21 @@ std::string galactic_fleet_move_event(std::span<const std::vector<Field>> member
                 unit.categories.push_back(category);
         units.push_back(std::move(unit));
     }
-    const auto chosen = speaker(units, rankings);
+    auto chosen = speaker(units, rankings);
     if (!chosen) return {};
     auto event = field(members[*chosen], "SFXEvent_Fleet_Move");
     if (event.empty()) event = field(members[*chosen], "SFXEvent_Move");
+    if (!event.empty()) return event;
+    // WGP-181: a silent top-ranked member falls back to an event-bearing
+    // member; that fallback prefers the ordinary move response.
+    std::erase_if(units, [&](const RankedUnit& unit) {
+        return field(members[unit.index], "SFXEvent_Move").empty()
+            && field(members[unit.index], "SFXEvent_Fleet_Move").empty();
+    });
+    chosen = speaker(units, rankings);
+    if (!chosen) return {};
+    event = field(members[*chosen], "SFXEvent_Move");
+    if (event.empty()) event = field(members[*chosen], "SFXEvent_Fleet_Move");
     return event;
 }
 

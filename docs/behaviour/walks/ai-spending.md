@@ -233,8 +233,8 @@ generic production closure applies the values.
 
 | Tag | Registry classes | Status | Boundary |
 |---|---|---|---|
-| `Credit_Multiplier` | Difficulty_Adjustment | todo | G3; registry's foundation ticket is historical |
-| `Space_Build_Time_Multiplier` | Difficulty_Adjustment | partial | pads applied; station consumer G4 |
+| `Credit_Multiplier` | Difficulty_Adjustment | applied | WPR-12, WTA-45, WGEP-16; skirmish and campaign AI credit changes |
+| `Space_Build_Time_Multiplier` | Difficulty_Adjustment | applied | WTA-45, WBP-15; ship/station build frames and pad seconds |
 | `Base_Level` | SecondaryStructure, StarBase | partial | allied station input exists; other types remain registry scope |
 | `AI_Combat_Power` | Container; TransportUnit | deferred; todo | shared selection data closure, outside these stock purchase choices |
 | `Tech_Level` | Container, SecondaryStructure, Squadron; TransportUnit | todo | ranking metadata versus tactical availability are distinct |

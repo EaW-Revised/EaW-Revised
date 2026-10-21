@@ -301,12 +301,17 @@ bool decode_row(Reader& in, ProductionSetup& v) {
 
 } // namespace
 void encode_census(std::vector<std::uint8_t>& bytes, const PopulationCensus& census) {
-    put_u8(bytes, 1); // GHUD-S93..94: census sale facts and retained actual costs
+    put_u8(bytes, 2); // WGP-191: typed History combat-power inputs
     put_u32(bytes, static_cast<std::uint32_t>(census.types.size()));
     for (const auto& row : census.types) {
         put_u64(bytes, row.type); put_i64(bytes, row.population.raw()); put_i64(bytes, row.additional_capacity);
         put_i64(bytes, row.authored_price.raw()); put_u8(bytes, row.sale_policy);
         put_u8(bytes, row.named_hero ? 1 : 0); put_u8(bytes, row.superweapon ? 1 : 0);
+        put_u8(bytes, row.history ? 1 : 0);
+        if (row.history) {
+            put_i64(bytes, row.history->power.raw()); put_u8(bytes, row.history->fleet ? 1 : 0);
+            put_u8(bytes, row.history->transport ? 1 : 0); put_u8(bytes, row.history->squadron ? 1 : 0);
+        }
     }
     put_u32(bytes, static_cast<std::uint32_t>(census.players.size()));
     for (const auto& row : census.players) {
@@ -341,7 +346,7 @@ void encode_census(std::vector<std::uint8_t>& bytes, const PopulationCensus& cen
 }
 std::optional<PopulationCensus> decode_census(std::span<const std::uint8_t> bytes) {
     Reader in(bytes); PopulationCensus census; std::uint8_t census_version{};
-    if (!in.read_u8(census_version) || census_version != 1) return std::nullopt;
+    if (!in.read_u8(census_version) || census_version != 2) return std::nullopt;
     const auto count = [&](std::uint32_t& size, std::size_t width) {
         return in.read_u32(size) && size <= galactic_max_objects && size <= in.remaining() / width;
     };
@@ -352,6 +357,12 @@ std::optional<PopulationCensus> decode_census(std::span<const std::uint8_t> byte
         if (!in.read_u64(row.type) || !decode_row(in, row.population) || !in.read_i64(row.additional_capacity)
             || !decode_row(in, row.authored_price) || !in.read_u8(row.sale_policy) || row.sale_policy > 2
             || !decode_row(in, row.named_hero) || !decode_row(in, row.superweapon)) return std::nullopt;
+        bool history{}; if (!decode_row(in, history)) return std::nullopt;
+        if (history) {
+            row.history.emplace();
+            if (!decode_row(in, row.history->power) || !decode_row(in, row.history->fleet)
+                || !decode_row(in, row.history->transport) || !decode_row(in, row.history->squadron)) return std::nullopt;
+        }
         census.types.push_back(row);
     }
     if (std::adjacent_find(census.types.begin(), census.types.end(), [](const auto& a, const auto& b) {

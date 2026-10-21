@@ -34,7 +34,7 @@ namespace eawr::viewer::galactic {
     if (!truth || !truth->observer()) return truth;
     auto observer = *truth->observer();
     for (auto& record : observer.records) {
-        if (record.player != observer.local_player) continue;
+        if (record.player != truth->view_player()) continue;
         record.discovered = true;
         record.mask = sim::galactic::all_intelligence;
     }
@@ -43,7 +43,7 @@ namespace eawr::viewer::galactic {
     for (auto& type : observer.types) type.stealth_object = type.stealth_hero = false;
     sim::galactic::NativeSnapshotChanges changes;
     changes.observations = std::make_shared<const std::vector<sim::galactic::ObservedPlanet>>(
-        sim::galactic::observed_planets(observer, truth->fleets(), truth->movement(), truth->actor_records()));
+        sim::galactic::observed_planets(observer, truth->fleets(), {truth->view_player()}, truth->movement(), truth->actor_records()));
     changes.observer = std::move(observer);
     return sim::galactic::GalacticSnapshot::native_view(std::move(truth), std::move(changes));
 }

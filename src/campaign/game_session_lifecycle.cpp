@@ -47,7 +47,7 @@ core::Result<tactical::PlayerCommand> decode_order(const galactic::TacticalLayer
 template <class A, class T> void checkpoint_game_owner(A& a, T& v) {
     a(v.tick, v.pending, v.last, v.executed, v.ended, v.last_battle,
         v.conflict_services, v.admission, v.queued_admissions, v.waiting_admissions,
-        v.admissions, v.replay_admissions, v.votes, v.withdrawing_player, v.conflict_pause,
+        v.admissions, v.replay_admissions, v.votes, v.multiplayer_vote_timeout, v.vote_started, v.withdrawing_player, v.conflict_pause,
         v.conflicts, v.load_fixups, v.replay_fixups, v.replay_conflicts, v.replay_selected, v.history,
         v.timelines->galaxy, v.timelines->child, v.timelines->historical,
         v.interactive_seat.value, v.summary_conflict);
@@ -62,6 +62,8 @@ core::Result<void> GameSession::stage_battle(ConflictRecord record, const tactic
 }
 core::Result<void> GameSession::stage_battle(ConflictRecord record, const tactical::TacticalContent& content,
     authoritative::ScriptScheduler scripts) {
+    if (auto allowed = impl_->tactical_selection(record, true, true); !allowed)
+        return core::Result<void>::failure(allowed.error());
     if (impl_->failure || impl_->child || impl_->staged || record.id == 0 || impl_->ended.contains(record.id))
         return fail<void>("a conflict needs a fresh ID and an idle, healthy game session");
     if (record.forces.size() > galactic::galactic_max_objects || record.seats.size() > galactic::galactic_max_seats)
@@ -160,7 +162,7 @@ core::Result<void> GameSession::queue_conflict(ConflictRecord record, Arbitratio
 core::Result<void> GameSession::Impl::queue_conflict(ConflictRecord record, Arbitration arbitration) {
     auto& impl = *this;
     if (impl.failure || impl.child || impl.staged || impl.queued_admissions.size() + impl.waiting_admissions.size() >= galactic::galactic_max_objects
-        || !impl.services(record).content || !impl.conflict_services
+        || (!impl.services(record).content && impl.services(record).tactical_refusal.empty()) || !impl.conflict_services
         || !record.id || impl.ended.contains(record.id)
         || record.id < impl.world().next_entity_id() || !record.tactical.first_free_entity_id
         || *record.tactical.first_free_entity_id <= record.id || record.invader == record.defender
@@ -198,12 +200,10 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
     auto& impl = *impl_;
     if (!impl.admission) return fail<void>("no pending conflict");
     const auto& entry = *impl.admission;
-    if (fight && entry.conflict.layer == BattleLayer::land) {
-        // M3 scope (gc-tactical evaluation boundary): land uses the solver seam.
-        // A sourced forcing story/tutorial restriction cannot be silently bypassed.
-        if (entry.arbitration.forced_tactical) return fail<void>("forced land tactical selection requires the M4 entry service");
-        fight = false;
-    }
+    auto selection = impl.tactical_selection(entry.conflict, fight,
+        entry.arbitration.forced_tactical || impl.replay_selected.contains(entry.conflict.id));
+    if (!selection) return core::Result<void>::failure(selection.error());
+    fight = selection.value();
     if (fight) {
         auto conflict = entry.conflict;
         const auto selected = impl.replay_selected.find(conflict.id);
@@ -233,6 +233,9 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
             return fail<void>("entry resolver changed the admitted conflict identity or seats");
         auto staged = stage_battle(conflict, prepared.value().content);
         if (!staged) return staged;
+        // Published only for an entry that staged: a failed staging must not leak notes into the next step.
+        impl.entry_notes.insert(impl.entry_notes.end(), std::make_move_iterator(prepared.value().notes.begin()),
+            std::make_move_iterator(prepared.value().notes.end()));
         if (recorded_selection) impl.replay_selected.erase(selected);
     } else {
         if (!impl.auto_resolver) return core::Result<void>::success(); // #2023/2024 solver/return seam
@@ -258,7 +261,7 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
         if (impl.conflict_pause) { auto resumed = impl.world().adjust_conflict_pause(false); if (!resumed) return resumed; }
         impl.conflict_pause = false;
     }
-    impl.admission.reset(); impl.votes.clear(); impl.withdrawing_player = 0;
+    impl.admission.reset(); impl.votes.clear(); impl.vote_started.reset(); impl.withdrawing_player = 0;
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::submit(const galactic::GameCommand& command) {
@@ -285,7 +288,7 @@ core::Result<void> GameSession::submit(const galactic::GameCommand& command) {
             return fail<void>("no matching battle or this seat has no commandable battle side");
         auto decoded = decode_order(*input, impl_->child->conflict.tactical, {0, player, 1});
         if (!decoded) return core::Result<void>::failure(decoded.error());
-        if (impl_->world().seat_control() && issuer->kind == galactic::SeatKind::human
+        if ((impl_->world().seat_control() || impl_->world().multiplayer()) && issuer->kind == galactic::SeatKind::human
             && !tactical::human_wire_payload(decoded.value().payload, impl_->reserve_admission(player))) return fail<void>("human battle seat cannot issue engine-only orders");
     } else if ((std::holds_alternative<galactic::DebugSetPlanetOwner>(command.payload)
         || std::holds_alternative<galactic::DebugSetFleetOrbit>(command.payload)) && !impl_->world().setup().debug_commands)
@@ -359,6 +362,8 @@ struct GameSession::StepContext {
     bool controls_applied{};
     bool has_tick_input{};
     bool save_only{true};
+    bool agreed_child_pacing{};
+    std::vector<galactic::GameCommand> routed_battle_input;
 };
 
 core::Result<void> GameSession::process_session_commands(StepContext& tick_context, const sim::PartitionExecutor& executor) {
@@ -369,7 +374,10 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
     auto& controls_applied = tick_context.controls_applied;
     auto& has_tick_input = tick_context.has_tick_input;
     auto& save_only = tick_context.save_only;
-    while (!impl.pending.empty() && impl.pending.begin()->first.tick == impl.tick) {
+    // Agreed pause may retain tactical input at its original stamp. Session controls must still reach resume.
+    std::vector<galactic::GameCommand> held;
+    while (!impl.pending.empty() && (impl.pending.begin()->first.tick == impl.tick
+        || (tick_context.agreed_child_pacing && impl.pending.begin()->first.tick < impl.tick))) {
         auto command = std::move(impl.pending.begin()->second);
         impl.pending.erase(impl.pending.begin());
         has_tick_input = true;
@@ -390,6 +398,10 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 if (!controlled) return controlled;
             }
         } else if (const auto* order = std::get_if<galactic::TacticalLayerCommand>(&command.payload)) {
+            if (tick_context.agreed_child_pacing && child_paused()) {
+                held.push_back(std::move(command));
+                continue;
+            }
             const auto player = impl.player(command.key.seat);
             const auto* issuer = impl.seat(command.key.seat);
             if (!impl.child || impl.role_pending() || !issuer || !issuer->active || order->conflict != impl.child->conflict.id || player == 0)
@@ -398,16 +410,22 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 auto decoded = decode_order(*order, impl.child->conflict.tactical,
                     {impl.child->session.completed_tick(), player, ++impl.child->sequences[player]});
                 if (!decoded) out.diagnostics.push_back(decoded.error());
-                else if (impl.world().seat_control() && issuer->kind == galactic::SeatKind::human
+                else if ((impl.world().seat_control() || tick_context.agreed_child_pacing) && issuer->kind == galactic::SeatKind::human
                     && !tactical::human_wire_payload(decoded.value().payload, impl.reserve_admission(player)))
                     out.diagnostics.push_back(fail<void>("human battle seat cannot issue engine-only orders").error());
-                else inputs.push_back(std::move(decoded).value());
+                else {
+                    inputs.push_back(std::move(decoded).value());
+                    if (tick_context.agreed_child_pacing) {
+                        tick_context.routed_battle_input.push_back(std::move(command));
+                        continue;
+                    }
+                }
             }
         } else if (const auto* choice = std::get_if<galactic::BattleChoice>(&command.payload)) {
             const auto diagnostics_before = out.diagnostics.size();
             const auto* issuer = impl.seat(command.key.seat);
             const auto human_side = [&](auto player) {
-                return std::any_of(impl.world().setup().seats.begin(), impl.world().setup().seats.end(), [&](const auto& seat) {
+                return std::any_of(impl.world().seats().begin(), impl.world().seats().end(), [&](const auto& seat) {
                     return seat.active && seat.kind == galactic::SeatKind::human && seat.player == player;
                 });
             };
@@ -418,19 +436,20 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 || (issuer->player != impl.admission->conflict.invader && issuer->player != impl.admission->conflict.defender)
                 || (!choice->tactical && impl.admission->arbitration.forced_tactical))
                 out.diagnostics.push_back(fail<void>("battle choice does not belong to this pending conflict or side").error());
-            else if (human_side(impl.admission->conflict.invader) && human_side(impl.admission->conflict.defender)
+            else if ((impl.multiplayer_vote_timeout || (human_side(impl.admission->conflict.invader) && human_side(impl.admission->conflict.defender)))
                 && impl.votes.contains(issuer->player))
-                // WGM-176/177: a side that already voted waits for its opponent. Decided here from the recorded votes,
+                // WGM-176/177: a side that already voted waits for its opponent (a co-op teammate's later choice is
+                // refused: the first choice of a side is that side's vote). Decided here from the recorded votes,
                 // the same on every peer, not from a local alert publication at submit time.
                 out.diagnostics.push_back(fail<void>("battle choice is unavailable while waiting for the opponent").error());
             else {
                 impl.votes[issuer->player] = choice->tactical;
                 const auto& conflict = impl.admission->conflict;
                 std::optional<bool> selected;
-                if (human_side(conflict.invader) && human_side(conflict.defender)) {
-                    // The manager's vote progression/timeout owner decides; do not invent a
-                    // majority rule or derive wall-clock time from logical frames (WGM-47).
-                    if (impl.vote_progress) {
+                if (impl.multiplayer_vote_timeout || (human_side(conflict.invader) && human_side(conflict.defender))) {
+                    // Legacy callers supply their qualified owner. GCMP-06 services MP
+                    // votes once in the agreed conflict tail, including ticks with no input.
+                    if (impl.vote_progress && !impl.multiplayer_vote_timeout) {
                         auto progress = impl.vote_progress(conflict, impl.votes);
                         if (!progress) { impl.failure = progress.error(); return core::Result<void>::failure(*impl.failure); }
                         selected = progress.value();
@@ -441,7 +460,9 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                     selected.reset();
                 }
                 if (selected) {
-                    if (!*selected || (conflict.layer == BattleLayer::land && !impl.admission->arbitration.forced_tactical))
+                    auto route = impl.tactical_selection(conflict, *selected, impl.admission->arbitration.forced_tactical);
+                    if (!route) out.diagnostics.push_back(route.error());
+                    else if (!route.value())
                         impl.admission->arbitration.route = ConflictRoute::instant_auto;
                     else {
                         auto selection = select_pending_battle(true, executor);
@@ -467,6 +488,12 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 out.diagnostics.push_back(fail<void>("withdrawal is unavailable for this conflict").error());
             else impl.withdrawing_player = issuer->player;
         } else if (impl.child) {
+            if (tick_context.agreed_child_pacing && std::holds_alternative<galactic::ResumeGalaxy>(command.payload)
+                && impl.child->owns_pause && impl.world().clock().pause_depth <= 1) {
+                out.diagnostics.push_back(fail<void>("the active child owns the remaining galactic pause").error());
+                impl.executed.push_back(std::move(command));
+                continue;
+            }
             if (std::holds_alternative<galactic::PauseGalaxy>(command.payload)
                 || std::holds_alternative<galactic::ResumeGalaxy>(command.payload)
                 || std::holds_alternative<galactic::SetSpeed>(command.payload)
@@ -489,7 +516,11 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
         }
         impl.executed.push_back(std::move(command));
     }
+    for (auto& command : held) impl.pending.emplace(command.key, std::move(command));
     return core::Result<void>::success();
+}
+bool GameSession::child_paused() const noexcept {
+    return impl_->child && impl_->world().clock().pause_depth > (impl_->child->owns_pause ? 1U : 0U);
 }
 core::Result<void> GameSession::step_child(StepContext& tick_context, const sim::PartitionExecutor& executor) {
     auto& impl = *impl_;
@@ -499,10 +530,35 @@ core::Result<void> GameSession::step_child(StepContext& tick_context, const sim:
     auto& controls_applied = tick_context.controls_applied;
     auto& has_tick_input = tick_context.has_tick_input;
     auto& save_only = tick_context.save_only;
+    // A later pause in this same sealed tick must not discard earlier tactical orders.
+    // Retain their session stamps; they route at the next unpaused child tick.
+    for (std::size_t index = 0; index < tick_context.routed_battle_input.size(); ++index) {
+        auto& command = tick_context.routed_battle_input[index];
+        if (child_paused()) {
+            const auto player = inputs[index].key.player_id;
+            if (--impl.child->sequences[player] == 0) impl.child->sequences.erase(player);
+            impl.pending.emplace(command.key, std::move(command));
+        }
+        else {
+            // The nested replay key's sequence is producer metadata only (decode_order replaced its gameplay key).
+            const auto& body = std::get<galactic::TacticalLayerCommand>(command.payload).body;
+            if (body.size() < 20) {
+                impl.failure = fail<void>("routed tactical input has a truncated producer key").error();
+                return core::Result<void>::failure(*impl.failure);
+            }
+            std::uint64_t producer_sequence{};
+            for (unsigned byte = 0; byte < 8; ++byte)
+                producer_sequence |= static_cast<std::uint64_t>(body[12 + byte]) << (8U * byte);
+            out.tactical_input_executions.push_back({command.key.seat, producer_sequence, inputs[index].key.tick});
+            impl.executed.push_back(std::move(command));
+        }
+    }
+    if (tick_context.agreed_child_pacing && child_paused()) inputs.clear();
     if (controls_applied) for (const auto& event : impl.world().snapshot()->events())
         if (event.kind == galactic::GalacticEventKind::save_requested || event.kind == galactic::GalacticEventKind::save_rejected)
             out.save_events.push_back(event);
-    if (impl.restoring_child || impl.role_pending() || (has_tick_input && save_only)) {
+    if (impl.restoring_child || impl.role_pending() || (has_tick_input && save_only)
+        || (tick_context.agreed_child_pacing && child_paused())) {
         // Recorded SaveRequest-only barriers reproduce paused-child saves without
         // advancing the child world or hosted Lua. Outer controls retain their tick.
         out.battle = impl.child->session.world().snapshot();
@@ -582,7 +638,7 @@ core::Result<void> GameSession::reconcile_child_return(StepContext& tick_context
     auto replay = impl.child->session.record();
     auto reconciled = impl.world().reconcile_battle(impl.child->session.world().next_entity_id(),
         impl.tick + 1, impl.child->session.completed_tick());
-    if (reconciled && impl.world().setup().control && !impl.child->conflict.raid && !impl.child->conflict.corruption_mission) {
+    if (reconciled && impl.world().setup().control && !impl.child->conflict.corruption_mission) {
         const auto& conflict = impl.child->conflict;
         const auto parties = resolve_conflict_parties(nullptr, {.admitted = &conflict});
         // WGM-57: a space return without a tactical station clears the stored base.
@@ -612,7 +668,7 @@ core::Result<void> GameSession::reconcile_child_return(StepContext& tick_context
     if (reconciled && context.corruption_mission) reconciled = impl.world().finish_corruption_mission(context.corruption_request,
         out.result->winner == context.invader ? galactic::CorruptionMissionState::succeeded : galactic::CorruptionMissionState::failed);
     if (reconciled && !context.corruption_mission) reconciled = apply_tactical_return(impl.world(), context, planned.value(), impl.return_state, executor);
-    if (reconciled && !context.corruption_mission && impl.services(context).apply) reconciled = impl.services(context).apply(impl.world(), *out.result);
+    if (reconciled && !context.corruption_mission && impl.services(context).apply) reconciled = impl.services(context).apply(impl.world(), context, *out.result);
     if (reconciled && !context.corruption_mission) reconciled = impl.world().finish_native_invasion(context.id, out.result->winner);
     if (!reconciled) { impl.failure = reconciled.error(); return core::Result<void>::failure(*impl.failure); }
     if (!context.corruption_mission) out.result->invasion_offers = tactical_invasion_offers(context, *out.result, *impl.world().snapshot());
@@ -737,12 +793,28 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
         if (!impl.admission && !impl.waiting_admissions.empty()) {
             impl.admission = std::move(impl.waiting_admissions.front());
             impl.waiting_admissions.erase(impl.waiting_admissions.begin());
+            if (impl.multiplayer_vote_timeout) {
+                const auto& conflict = impl.admission->conflict;
+                const auto human = [&](auto owner) {
+                    return std::any_of(impl.world().seats().begin(), impl.world().seats().end(), [&](const auto& seat) {
+                        return seat.active && seat.kind == galactic::SeatKind::human && seat.player == owner;
+                    });
+                };
+                // GCMP D10 (owner update 10-21): every conflict with a human side votes
+                // Begin / Auto-Resolve; the AI side never votes. BF-5's layer capability owns D3's refusal.
+                const bool invader_human = human(conflict.invader), defender_human = human(conflict.defender);
+                auto tactical = impl.tactical_selection(conflict, true, impl.admission->arbitration.forced_tactical);
+                if (!tactical) { impl.failure = tactical.error(); return core::Result<void>::failure(*impl.failure); }
+                impl.admission->arbitration.route = !tactical.value() || (!invader_human && !defender_human)
+                    ? ConflictRoute::instant_auto : ConflictRoute::vote;
+            }
         }
         if (impl.admission && impl.tick > impl.admission->entry_tick && !impl.conflict_pause
             && (!impl.conflict_gate || impl.conflict_gate(*impl.world().snapshot()))) {
             auto paused = impl.world().adjust_conflict_pause(true);
             if (!paused) { impl.failure = paused.error(); return core::Result<void>::failure(*impl.failure); }
             impl.conflict_pause = true;
+            if (impl.multiplayer_vote_timeout) impl.vote_started = impl.tick;
             const auto& conflict = impl.admission->conflict;
             out.pending_alerts.emplace(conflict.id, PendingConflictAlert{
                 conflict.invader, conflict.defender, conflict.layer == BattleLayer::land});
@@ -750,6 +822,43 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
                 impl.admission->conflict.id, 0, impl.admission->conflict.planet, galactic::GalacticRejectReason::none});
         }
         if (impl.admission && impl.conflict_pause) {
+            if (impl.multiplayer_vote_timeout) {
+                // GCMP-09/D10: the completed tick's live seat policy decides
+                // participation. A queued leave/rejoin must precede selection;
+                // neither the network roster nor the voter map binds a child.
+                auto& record = impl.admission->conflict;
+                record.seats.clear();
+                for (const auto& seat : impl.world().seats()) {
+                    if (!seat.active) continue;
+                    const auto player = seat.player == record.invader || seat.player == record.defender ? seat.player : 0;
+                    if (seat.kind != galactic::SeatKind::human && !player) continue;
+                    record.seats.push_back({seat.seat_id, player});
+                }
+                const auto human = [&](auto owner) {
+                    return std::any_of(impl.world().seats().begin(), impl.world().seats().end(), [&](const auto& seat) {
+                        return seat.active && seat.kind == galactic::SeatKind::human && seat.player == owner;
+                    });
+                };
+                const bool invader_human = human(record.invader), defender_human = human(record.defender);
+                // Admission may wait before selection. D3/D10 use the current
+                // controllers for every route, including an initially one-human battle.
+                auto tactical = impl.tactical_selection(record, true, impl.admission->arbitration.forced_tactical);
+                if (!tactical) { impl.failure = tactical.error(); return core::Result<void>::failure(*impl.failure); }
+                impl.admission->arbitration.route = !tactical.value() || (!invader_human && !defender_human)
+                    ? ConflictRoute::instant_auto : ConflictRoute::vote;
+                if (impl.admission->arbitration.route == ConflictRoute::vote) {
+                    // WGM-176: equality still waits. The session frontier advances
+                    // while the strategic clock is paused; no peer wall clock participates.
+                    if (impl.vote_started && impl.tick - *impl.vote_started > *impl.multiplayer_vote_timeout) {
+                        if (invader_human) impl.votes.try_emplace(record.invader, true);
+                        if (defender_human) impl.votes.try_emplace(record.defender, true);
+                    }
+                    auto progress = impl.vote_progress(record, impl.votes);
+                    if (!progress) return core::Result<void>::failure(progress.error());
+                    if (progress.value()) impl.admission->arbitration.route = *progress.value()
+                        ? ConflictRoute::tactical : ConflictRoute::instant_auto;
+                }
+            }
             const auto route = impl.admission->arbitration.route;
             const auto automatic = route == ConflictRoute::instant_auto || route == ConflictRoute::dialog_auto;
             if (automatic || route == ConflictRoute::tactical) {
@@ -800,7 +909,8 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
         }
         if (impl.conflict_pause) out.conflict_events.push_back({impl.tick, galactic::GalacticEventKind::child_battle_selected,
             {}, impl.child->conflict.id, 0, impl.child->conflict.planet, galactic::GalacticRejectReason::none});
-        auto role = impl.world().begin_battle_roles(impl.child->conflict.id, impl.child->conflict.invader, impl.child->conflict.defender);
+        auto role = impl.world().begin_battle_roles(impl.child->conflict.id, impl.child->conflict.invader, impl.child->conflict.defender,
+            impl.multiplayer_vote_timeout.has_value());
         if (!role) { impl.failure = role.error(); return core::Result<void>::failure(*impl.failure); }
         if (auto refreshed = impl.refresh_battle_seats(); !refreshed) { impl.failure = refreshed.error(); return core::Result<void>::failure(*impl.failure); }
         impl.child->galaxy_hash = impl.galaxy_hash().value();
@@ -825,6 +935,26 @@ core::Result<void> GameSession::apply_pending_returns(StepContext& tick_context,
         auto committed = impl.world().commit_outcome(entry, [&](const auto&) {
             auto applied = apply_auto_resolve_outcome(impl.world(), application.value(), impl.outcome_services);
             if (!applied) return applied;
+            // Space automatic outcomes retain their existing application path.
+            // Land shares its return writer with the tactical child dispatcher.
+            if (application.value().land) {
+                const auto& value = application.value();
+                ConflictRecord fallback; fallback.id = entry.conflict; fallback.planet = value.planet;
+                fallback.layer = BattleLayer::land; fallback.invader = value.invader; fallback.defender = value.defender;
+                const auto admitted = std::find_if(impl.admissions.begin(), impl.admissions.end(),
+                    [&](const auto& row) { return row.conflict.id == entry.conflict; });
+                if (admitted != impl.admissions.end()) {
+                    const auto& conflict = admitted->conflict;
+                    if (conflict.layer != fallback.layer || conflict.planet != fallback.planet
+                        || conflict.invader != fallback.invader || conflict.defender != fallback.defender)
+                        return fail<void>("land return does not match its admitted context");
+                }
+                const auto& context = admitted == impl.admissions.end() ? fallback : admitted->conflict;
+                if (impl.services(context).apply) {
+                    applied = impl.services(context).apply(impl.world(), context, value.result);
+                    if (!applied) return applied;
+                }
+            }
             return impl.world().finish_native_invasion(entry.conflict, application.value().result.winner);
         }, executor);
         if (!committed) { impl.failure = committed.error(); return core::Result<void>::failure(*impl.failure); }
@@ -872,6 +1002,11 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
     if (parent_mode_serviced && !impl.child && impl.world().victory()) impl.world().finish_victory_frame();
     if (parent_mode_serviced && (impl.conflict_services || impl.world().victory()) && !impl.child) impl.world().finish_conflict_frame_timer();
     ++impl.tick; out.completed_tick = impl.tick; out.galaxy = impl.world().snapshot();
+    // The tick carries canonical human publications; the platform selects the requested seat.
+    if (out.galaxy->observer()) for (const auto player : out.galaxy->observer()->human_observers) {
+        auto rows = galactic::local_hero_returns(impl.return_state.heroes, player);
+        out.hero_returns.insert(out.hero_returns.end(), rows.begin(), rows.end());
+    }
     gc_profile::Scope profile_scope(gc_profile::Phase::frame_end_hash_wall);
     if (impl.child) out.battle_seats = impl.child->conflict.seats;
     if (impl.child) {
@@ -942,6 +1077,10 @@ core::Result<GameTick> GameSession::finish_step(StepContext& tick_context) {
         core::Diagnostic line; line.code = "EAWR-STORY-0001"; line.severity = core::Severity::info; line.message = "story: " + std::move(note);
         out.diagnostics.push_back(std::move(line));
     }
+    for (auto& note : std::exchange(impl.entry_notes, {})) { // a passenger left out of a space entry (#4563)
+        core::Diagnostic line; line.code = "EAWR-ENTRY-0001"; line.severity = core::Severity::warning; line.message = "space entry: " + std::move(note);
+        out.diagnostics.push_back(std::move(line));
+    }
     // #4058: an accepted SaveRequest is a history boundary on every peer, whether or not this peer writes the file.
     // A recording that cannot be sealed keeps its base; the capture would refuse it as well.
     if (std::any_of(out.save_events.begin(), out.save_events.end(),
@@ -962,9 +1101,17 @@ core::Result<GameTick> GameSession::step(const sim::PartitionExecutor& executor)
     impl.executor = &executor; // rewards of the plot engine apply inside this step (#683)
     const struct ExecutorScope { GameSession::Impl& owner; ~ExecutorScope() { owner.executor = nullptr; } } executor_scope{impl};
     StepContext context; context.out.mode = mode();
+    context.agreed_child_pacing = impl.world().multiplayer();
     impl.story_notices.clear();
     if (auto applied = apply_restore_prologue(); !applied) return core::Result<GameTick>::failure(applied.error());
     if (const auto entry = impl.replay_conflicts.find(impl.tick); entry != impl.replay_conflicts.end()) {
+        if (auto allowed = impl.tactical_selection(entry->second, true, true); !allowed) {
+            impl.failure = allowed.error(); return core::Result<GameTick>::failure(*impl.failure);
+        }
+        if (!impl.services(entry->second).content) {
+            impl.failure = fail<void>("tactical content provider is unavailable").error();
+            return core::Result<GameTick>::failure(*impl.failure);
+        }
         auto content = impl.services(entry->second).content(entry->second);
         if (!content) { impl.failure = content.error(); return core::Result<GameTick>::failure(*impl.failure); }
         auto staged = stage_battle(entry->second, content.value());
@@ -999,6 +1146,10 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
     auto created = create(recording.commands.setup);
     if (!created) return created;
     auto& impl = *created.value().impl_;
+    if (recording.multiplayer_vote_timeout) {
+        if (auto configured = created.value().configure_multiplayer_votes(*recording.multiplayer_vote_timeout); !configured)
+            return core::Result<GameSession>::failure(configured.error());
+    }
     // A bounded recording starts at its base (#4058): numbered from 1 within the window, after the dropped journal.
     if (recording.base.at.tick > recording.commands.final_tick_count
         || std::any_of(recording.commands.commands.begin(), recording.commands.commands.end(),
@@ -1043,10 +1194,9 @@ core::Result<GameSession> GameSession::from_recording(const GameRecording& recor
         impl.pending.emplace(command.key, command);
         impl.last.insert_or_assign(command.key.seat, std::pair{command.key.tick, command.key.sequence});
     }
-    for (auto& layer : impl.layers) {
-        layer.services.content = content; layer.services.scripts = scripts;
-        layer.services.script_requirement = requirement;
-    }
+    auto& space = impl.layer(BattleLayer::space).services;
+    space.content = std::move(content); space.scripts = std::move(scripts);
+    space.script_requirement = requirement;
     for (const auto& fixup : recording.load_fixups) {
         if (!std::holds_alternative<galactic::PostLoadFixup>(fixup.payload) || fixup.key.tick > recording.commands.final_tick_count
             || impl.seat(fixup.key.seat) == nullptr
@@ -1073,7 +1223,7 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() con
             return ChildOwner{owner->conflict, std::move(state).value(), std::move(scripts).value(),
                 owner->session.record(), owner->sequences, owner->killers, owner->owns_pause};
         };
-        Writer out; out(std::uint32_t{3}, world.value()); checkpoint_game_owner(out, *impl_);
+        Writer out; out(std::uint32_t{4}, world.value()); checkpoint_game_owner(out, *impl_);
         out(child(impl_->child), child(impl_->staged));
         std::optional<std::vector<std::uint8_t>> resolver;
         if (auto_resolve_needs_service() && impl_->auto_state_writer) {
@@ -1099,11 +1249,18 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             throw Invalid("direct restore requires a fresh private game");
         Reader in(bytes); std::vector<std::uint8_t> world;
         std::uint32_t version{}; in(version);
-        if (version != 3) throw Invalid("unsupported campaign owner format");
+        if (version != 4) throw Invalid("unsupported campaign owner format");
         in(world);
         if (auto restored = impl_->world().load_checkpoint_state(world); !restored) return restored;
         const auto recorded_base = impl_->history;
+        const auto recorded_vote_timeout = impl_->multiplayer_vote_timeout;
         checkpoint_game_owner(in, *impl_);
+        if (impl_->multiplayer_vote_timeout != recorded_vote_timeout)
+            throw Invalid("owner vote timeout differs from its recording");
+        if (impl_->multiplayer_vote_timeout && (!impl_->world().multiplayer() || !impl_->vote_progress
+            || *impl_->multiplayer_vote_timeout >= galactic::galactic_max_ticks
+            || (impl_->vote_started && (!impl_->admission || !impl_->conflict_pause || *impl_->vote_started > impl_->tick))))
+            throw Invalid("invalid multiplayer vote owner or missing vote service");
         // The recording's window and the owner's counters must agree on where the dropped history ended.
         if (impl_->history != recorded_base || impl_->history.native_dropped != impl_->world().native_dropped())
             throw Invalid("owner history base differs from the recording it restores");
@@ -1133,6 +1290,8 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             ? std::make_shared<Impl::ChildTimelinePublication>(Impl::ChildTimelinePublication{*impl_->timelines->historical, true}) : nullptr;
         const auto restore_child = [&](std::optional<ChildOwner>& saved, std::optional<Impl::Child>& owner) -> core::Result<void> {
             if (!saved) return core::Result<void>::success();
+            if (auto allowed = impl_->tactical_selection(saved->conflict, true, true); !allowed)
+                return core::Result<void>::failure(allowed.error());
             if (!impl_->services(saved->conflict).content || saved->log.setup != saved->conflict.tactical
                 || (owner.has_value()) || saved->scripts.completed_tick > impl_->tick)
                 return fail<void>("inconsistent direct child barrier");
@@ -1207,10 +1366,15 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
 core::Result<GameRecording> GameSession::checkpoint_recording() const {
     if (impl_->failure) return core::Result<GameRecording>::failure(*impl_->failure);
     auto result = recording();
+    const auto pending_begin = result.commands.commands.size();
     for (const auto& [key, command] : impl_->pending) {
         result.commands.commands.push_back(command);
         result.commands.final_tick_count = std::max(result.commands.final_tick_count, key.tick + 1);
     }
+    // Held input can predate already executed controls. Both ranges are ordered; merge them without restamping.
+    std::inplace_merge(result.commands.commands.begin(),
+        result.commands.commands.begin() + static_cast<std::ptrdiff_t>(pending_begin), result.commands.commands.end(),
+        [](const auto& a, const auto& b) { return a.key < b.key; });
     for (const auto& [tick, conflict] : impl_->replay_conflicts) result.conflicts.push_back({tick, conflict});
     for (const auto& [id, selected] : impl_->replay_selected) { (void)id; result.conflicts.push_back(selected); }
     std::sort(result.conflicts.begin(), result.conflicts.end(), [](const auto& a, const auto& b) {
@@ -1252,6 +1416,8 @@ core::Result<void> GameSession::append_recording_window(const GameRecording& win
     impl.rebase_history();
     if (window.base != impl.history || impl.history.at.tick != impl.tick || impl.child || impl.staged)
         return fail<void>("recorded window does not start at this session's history boundary", galactic::diagnostic_codes::replay_malformed);
+    if (window.multiplayer_vote_timeout != impl.multiplayer_vote_timeout)
+        return fail<void>("recorded window changes the battle vote timeout", galactic::diagnostic_codes::replay_malformed);
     const auto from = impl.tick;
     if (auto valid = galactic::validate_replay(window.commands); !valid) return valid;
     if (window.commands.final_tick_count < from) return fail<void>("recorded window ends before its boundary");
@@ -1310,6 +1476,13 @@ core::Result<void> GameSession::append_recording_window(const GameRecording& win
 }
 void GameSession::Impl::rebase_history() {
     if (!scheduled_base) return;
+    // A paused multiplayer child can still own input stamped before this checkpoint. Keep the previous
+    // history window in that case: cutting at the save would put the eventual execution before its base.
+    // A later save/load without held input can compact normally; no command is restamped or discarded.
+    if (world().multiplayer() && !pending.empty() && pending.begin()->first.tick < scheduled_base->tick) {
+        scheduled_base.reset();
+        return;
+    }
     const auto boundary = *scheduled_base; scheduled_base.reset();
     // An unfinished conflict keeps the count of its tactical envelopes (the child cursor bound reads it on restore).
     for (const auto& command : executed)

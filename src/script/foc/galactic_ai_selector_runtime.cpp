@@ -859,12 +859,15 @@ core::Result<Engine::GalacticBuildPublication> Engine::galactic_build_budgets(
     const auto funding_revision = funding.state_revision(); const auto actions_revision = actions.build_state_revision();
     // S9a: inside a player turn the revision stacks the committed counter and the staged changes of every
     // turn so far (the pass is still sequential), and the memo is the turn's own.
+    const auto reader = build_budget_reader();
     auto* turn = staged();
     const std::uint64_t task_revision = galactic_build_tasks_revision();
     const std::array key{task_revision, funding_revision, actions_revision};
     auto& memo = turn ? turn->build_cache : galactic_build_cache_;
     auto& memo_key = turn ? turn->build_cache_key : galactic_build_cache_key_;
-    if (memo && memo_key == key) return Result::success(memo);
+    // Foreign-player evaluations keep using the calling turn's scratch. A player need not own a native
+    // AI state to evaluate equations, and a query must never write another player's effects.
+    if (memo && memo_key == key && (turn ? turn->build_cache_reader : galactic_build_cache_reader_) == reader) return Result::success(memo);
     std::vector<GalacticBudgetBuild> rows;
     std::set<sim::EntityId> associated;
     for (const auto& player : players_) {
@@ -896,11 +899,15 @@ core::Result<Engine::GalacticBuildPublication> Engine::galactic_build_budgets(
                 row.spendable = numeric::from_fixed(std::min(held.value(), goal.cost));
                 row.budget_seconds = numeric::from_fixed(std::max(goal.remaining, math::Fixed{}));
             }
-            rows.push_back(row);
+            // Slice 1 keeps every association check at its original read point. Only the immutable consumer
+            // publication is projected; the shared producer read waits for the barrier-start freeze.
+            if (!reader || player.player == reader) rows.push_back(row);
         }
     }
     memo = std::make_shared<const std::vector<GalacticBudgetBuild>>(std::move(rows));
     memo_key = key;
+    if (turn) turn->build_cache_reader = reader;
+    else galactic_build_cache_reader_ = reader;
     return Result::success(memo);
 }
 

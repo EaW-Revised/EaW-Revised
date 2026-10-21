@@ -189,11 +189,13 @@ at 1/2/4/8 workers. The opaque transfer retains the prepared snapshot itself.
 Nested production completion remains the named `campaign_production_nested_completion`
 seam (legacy EAWR-2349): retained company/squadron offers are unavailable through
 the same shared admission used by commands and HUD queries. Unknown required
-provider facts refuse startup. Campaigns containing an original type with political
-protection refuse through `campaign_political_protection_sources` (legacy EAWR-2359);
-its source-keyed transfer/removal lifecycle is required before that ability can
-be retained, and startup never sets a sticky protection flag. None of the three
-single-player Equal Footing definitions starts Tarkin.
+provider facts refuse startup. Starting originals with political protection are
+placed, including authored forces, story-created types and multiplayer heroes.
+Protection stays inert while its source ledger, transfer, removal and checkpoint
+lifecycle remain pending (legacy EAWR-2359); startup never sets a sticky protection
+flag. The multiplayer hero pass requires authored production behavior at home,
+checks owned original identities and uses the shared typed placement (WGS-14).
+None of the three single-player Equal Footing definitions starts Tarkin.
 Nested payloads with economic profiles bind their retained original actor identities
 to the shared income and production-price provider (WGEP-10/31/73/74). Native actor
 writes carry their owner and location through detach, reattach, landing and transit;
@@ -222,6 +224,26 @@ explicit binding to a faction with authored `Is_Playable=true`. A non-playable
 binding such as Pirates refuses before planning or simulation-thread startup;
 AI and neutral bindings retain their existing roles. Explicit synthetic root
 services keep their separate setup contract.
+
+## Multiplayer AI project policy
+
+The following rules extend the owner's shared-seat policy (WGS-P01 in the
+[session walk](walks/gc-session-save.md#owner-policy-human-seats-and-whole-team-battle-roles));
+they are **not retail parity**. The private research receipt `out/mp4481/retail-rule.md`
+records the XML and debug-build sources: fresh players start without a native
+controller, the galactic assignment pass consumes campaign `AI_Player_Control`
+pairs, and the six stock MP campaigns omit those pairs. Tactical lobby selection
+and a solo staging branch read `Basic_AI`; those are separate retail paths.
+
+| Rule | Project policy |
+|---|---|
+| GCMP-AI-01 | In actual multiplayer setup mode, each active playable AI faction selects its own authored `Basic_AI` player type. It does not borrow a solo campaign's assignments or use the campaign's menu metadata to determine session mode. Single-player selection retains its authored campaign-pair path. |
+| GCMP-AI-02 | Resolve the one globally agreed difficulty adjustment through each selected player's authored `Difficulty_Adjustments` mapping. Faction references, controller definitions and adjustment mappings remain mod data and participate in content agreement. Selection is canonical on every peer. |
+| GCMP-AI-03 | Human and inactive players acquire no controller through this path, and Neutral remains excluded from native goal ownership. Nonplayable ambient factions retain their existing authored controller assignment or absence; missing `Basic_AI` does not manufacture one. |
+| GCMP-AI-04 | Refuse a required playable faction without `Basic_AI`, an unresolved controller type, or a missing or ambiguous selected difficulty mapping through `EAWR-GCAI-RUNTIME-0001` with the missing input named. No assumed stock player type or Normal fallback is supplied. |
+
+The current lobby agrees one global difficulty, not a per-seat difficulty.
+Per-seat difficulty would require a separate agreed-input extension.
 
 ## Fidelity list
 

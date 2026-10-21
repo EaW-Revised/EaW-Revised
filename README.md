@@ -41,7 +41,7 @@ If you enjoy the project and want to support its development, you can do so on
 
 ## Status
 
-Release v0.2.6 is an early, playable preview. Local space skirmish is playable against the AI: choose a
+Release v0.2.7 is an early, playable preview. Local space skirmish is playable against the AI: choose a
 map, factions, teams and match options, then fight with the installed starting forces. Team games and
 free-for-all games are available where the map supports them. LAN multiplayer works for up to nine
 seats, and Galactic Conquest is a partly working preview. The project targets Forces of Corruption only

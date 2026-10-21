@@ -84,7 +84,7 @@ inline void observed_corruption(
     const sim::galactic::GalacticSnapshot& snapshot, const GalaxyView& view,
     const std::string& particle_type, CorruptionPublication& result, CorruptionObservationScratch& scratch) {
     result.seat = view.local.seat; result.planets.clear(); result.effects.clear();
-    if (!snapshot.observer() || snapshot.observer()->local_player != view.local.player) return;
+    if (!snapshot.observer() || snapshot.view_player() != view.local.player) return;
     auto& sources = scratch.sources; sources.clear();
     for (const auto& planet : snapshot.observer()->planets) sources.emplace(planet.planet, &planet);
     sources.sort();

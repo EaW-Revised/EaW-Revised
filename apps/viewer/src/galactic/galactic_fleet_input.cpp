@@ -1,4 +1,5 @@
 #include "galactic_mode_internal.hpp"
+#include "ui/input_routing.hpp"
 #include "fleet_drag.hpp"
 #include "fleet_member_placement.hpp"
 #include "ui/tactical_hud_internal.hpp"
@@ -155,9 +156,17 @@ std::vector<std::uint8_t> GalacticMode::State::stack_icon_slots(const galactic_v
 
 void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
     if (!dragged_fleet) return;
+    if (hud && pointer_over_panel(*hud, point)) {
+        hide_empty_fleet_slots(*this);
+        fleet_drag_planet = 0;
+        return;
+    }
     // The pointer's planet: one of its stack icons (empty ones included, so the
     // shown targets stay while the pointer moves onto them) or its pick area.
     galactic_view::ObjectId planet{};
+    if (destruction_hud.slot && destruction_hud.slot->is_visible_in_tree()
+        && destruction_hud.slot->get_global_rect().has_point(point) && destruction_hud.drop)
+        planet = destruction_hud.drop->planet;
     for (std::size_t icon = 0; icon < fleet_empty_slots.size() && !planet; ++icon)
         if (fleet_empty_shown[icon] && fleet_empty_slots[icon]->is_visible_in_tree()
             && fleet_empty_slots[icon]->get_global_rect().has_point(point)) planet = fleet_drag_planet;
@@ -187,11 +196,14 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     if (!allowed(*this) || id != dragged_fleet) return false;
     const auto* source = local_fleet(*this, id);
     if (!source) return false; // Stable identity is revalidated at the current publication.
+    for (const auto& [planet, slot] : destruction_hud.raid_slots)
+        if (slot.button && slot.button->is_visible_in_tree() && slot.button->get_global_rect().has_point(point))
+            return drop_raid(id, planet, submit);
     // WGCH-154: the first galaxy special slot consumes its own release before
     // ordinary fleet movement. A rejection cannot fall through into the world.
     if (destruction_hud.slot && destruction_hud.slot->is_visible_in_tree()
         && destruction_hud.slot->get_global_rect().has_point(point))
-        return destruction_hud.facts
+        return destruction_source(id)
             ? source->orbit == destruction_hud.facts->planet && drop_destruction(id, submit)
             : drop_hero_ability(id, submit);
     if (fleet_organize && fleet_organize->is_visible_in_tree()) {

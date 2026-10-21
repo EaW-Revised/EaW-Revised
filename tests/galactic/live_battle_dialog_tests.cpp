@@ -318,7 +318,7 @@ void bounty_mapping() {
     setup.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}};
     setup.planets = {{1, {}, 1}, {2, {}, 2}};
     setup.observer = gc::ObserverSetup{};
-    setup.observer->local_player = 1;
+    setup.observer->human_observers = {1}; setup.observer->solo_reference_human = 1;
     setup.observer->players = {{1, false, false}, {2, false, true}};
     for (const auto& planet : setup.planets) {
         gc::ObserverPlanet row;

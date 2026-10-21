@@ -49,10 +49,36 @@ from the hook's name. Original omission defaults and nested live identities rema
 
 Membership lives in the existing fleet rows; detached identities, original traits, typed gates
 and per-fleet slots opt into GC replay extension tag 2 and state section 6. Fleet control requires
-graph rules so state sections stay contiguous. Legacy fleet rows and all legacy corpus hashes
-remain unchanged. Snapshot extension tag 2 carries the same payload. Checkpoint fleet section
-version 1 frames its existing state payload and the fleet-control payload only when enabled;
-setup/replay reconstruction verifies both. Commands are the ordered serial commit, as required
+graph rules so state sections stay contiguous. Snapshot extension tag 2 carries
+the same fleet-control payload. The current fleet row also retains its optional
+raid destination; replay and checkpoint schema changes are described in the
+galactic replay format. Setup/replay reconstruction verifies both owners. Commands are the ordered serial commit, as required
 for shared membership; no new serial per-entity service is added to ticks. Quiet ticks reuse
 the fleet-control digest. Tests cover ordered identity transfers, merge reversal, empty cleanup,
 atomic rejection, admission, replay/save reconstruction and 1/2/4/8 hash and event parity.
+
+## Overview raid orders
+
+WGM-37/84 qualify the overview raid gesture through the shared pure raid
+predicate. Effective GameConstants supply the required faction, free and limited
+category masks, hero cap and limited-object cap. Each transport is counted once
+and classified by its first living current payload; transport-stay policy,
+current owner, relations, surface access and retained story restrictions are
+revalidated before departure. The viewer offers the authored raid art and
+caption at qualified discovered destinations, ahead of hero slots. Its typed
+ability drop submits MoveFleet with raid=true through the ordinary seat inbox.
+The focused underground placeholder keeps its existing refusal.
+
+Accepted raid movement retains an optional destination on the fleet through
+transit and arrival. At that destination WGM-34/39 uses the retained explicit
+transport invasion list and land admission, bypassing the ordinary orbital
+conflict gather. The campaign record marks the land conflict as a raid, so the
+existing raid roster, autoresolve and tactical return paths consume it. Ordinary
+movement clears the retained destination; invasion completion clears any
+surviving raid fleet after return reconciliation. Arrival checks current raid
+qualification again; a stale qualification or refused invasion admission clears
+the retained destination and uses ordinary orbital conflict admission.
+
+The positive overview gesture and land-battle result were witnessed in the
+FoC debug build 3.00.045. The implementation uses WGM-37/39/84 and the retained
+transport identities; it introduces no unit-name or stock-cap checks.

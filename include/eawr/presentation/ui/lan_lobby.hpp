@@ -387,7 +387,7 @@ struct HostOptions {
 // without a gap. The count comes from the dialog the data supplies, never from a constant here.
 [[nodiscard]] std::size_t staging_row_count(std::span<const std::string> gadget_ids);
 
-enum class RowKind : std::uint8_t { none, open, human, ai };
+enum class RowKind : std::uint8_t { none, open, human, ai, closed = none };
 
 // One row as the staging shows it. `faction` is a faction id of the loaded data; `team` and
 // `colour` are the row's picks (team absent: unassigned).

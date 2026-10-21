@@ -1,4 +1,5 @@
 #include "galactic_lobby_backend.hpp"
+#include "eawr/platform/agreed_campaign.hpp"
 
 #include "eawr/campaign/setup_plan.hpp"
 #include "eawr/core/build_identity.hpp"
@@ -36,6 +37,19 @@ core::Result<GalacticLobbyContent> load_galactic_lobby_content(const vfs::Vfs& f
     content.local.planner = [&filesystem, data = content.data, types = content.types](
         const campaign::CampaignSetupOptions& options, std::string_view campaign_name, std::string_view difficulty) {
         return campaign::plan_live_campaign_setup(filesystem, *data, *types, campaign_name, options, difficulty);
+    };
+    // A fresh prepared owner for every derivation; the selected agreement retains its exact root.
+    auto files = std::shared_ptr<const vfs::Vfs>(content.keepalive, &filesystem);
+    auto installed = std::make_shared<const data::Catalog>(catalog);
+    content.local.prepare_session = [files, installed, data = content.data, types = content.types](
+        const campaign::CampaignSetupPlan& plan, std::string_view difficulty) -> core::Result<campaign::MpPreparedSession> {
+        auto built = platform::PreparedLiveCampaign::from_plan(files, *installed, *data, *types,
+            campaign::CampaignSetupPlan(plan), difficulty);
+        if (!built) return core::Result<campaign::MpPreparedSession>::failure(built.error());
+        auto prepared = std::shared_ptr<platform::PreparedLiveCampaign>(std::move(built).value());
+        return core::Result<campaign::MpPreparedSession>::success({
+            std::shared_ptr<campaign::GameSession>(prepared, &platform::AgreedCampaignAccess::session(*prepared)),
+            prepared->services()});
     };
     return Result::success(std::move(content));
 }
@@ -98,7 +112,9 @@ core::Result<net::SetupOffer> GalacticLobbyBackend::offer(const net::LobbySnapsh
     auto derived = campaign::derive_mp_agreement(local_, sealed.value(), terms);
     if (!derived) return Result::failure(derived.error());
     const sim::MatchAgreement identity{std::string(core::build_identity()), derived.value().content};
-    return net::make_galactic_lobby_offer(options.value(), sealed.value(), identity, seats);
+    auto offer = net::make_galactic_lobby_offer(options.value(), sealed.value(), identity, seats);
+    if (offer && acceptance_final_tick_) offer.value().final_tick_count = acceptance_final_tick_;
+    return offer;
 }
 
 core::Result<sim::MatchAgreement> GalacticLobbyBackend::identify(const net::SetupOffer& offer) {
@@ -133,6 +149,11 @@ core::Result<std::unique_ptr<net::SessionAdapter>> GalacticLobbyBackend::build(c
 std::shared_ptr<const campaign::MpAgreement> GalacticLobbyBackend::agreement() const {
     const std::lock_guard lock(mutex_);
     return agreement_;
+}
+
+std::shared_ptr<const platform::CampaignServiceConfiguration> GalacticLobbyBackend::runtime_services() const {
+    const auto current = agreement();
+    return current ? std::static_pointer_cast<const platform::CampaignServiceConfiguration>(current->runtime_services) : nullptr;
 }
 
 } // namespace eawr::presentation::godot_backend

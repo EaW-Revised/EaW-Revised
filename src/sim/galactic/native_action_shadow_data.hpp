@@ -21,25 +21,16 @@ struct GalacticSession::NativeActionShadow::Data {
         std::shared_ptr<const std::vector<Fleet>> orbit;
         std::shared_ptr<const std::vector<MovementContents>> contents;
     };
-    struct Force { NativeProductionRequest request; NativeForcePlacement placement; };
-    struct FleetRequest { PlayerId player{}; CommandPayload payload; bool pending{}; NativeFleetReceipt receipt; };
-    struct ControlRequest {
-        enum class Kind { launch, fleet_land, actor_land } kind{};
-        PlayerId player{};
-        EntityId object{}, target{};
-        bool pending{};
-        std::optional<std::uint32_t> live_landed;
-        NativeFleetReceipt receipt;
-        bool linked{};
-    };
-    struct CashRequest { PlayerId player{}; math::Fixed delta, multiplier, actual; };
-    struct ForceRequest { std::shared_ptr<const Force> force; std::vector<EntityId> actors; };
-    struct FinishRequest { EntityId build{}; bool salvage{}; math::Fixed multiplier; };
-    struct ProductionRequest { NativeProductionRequest request; NativeProductionReceipt receipt; };
-    struct InvasionRequest { bool retire{}; PlayerId player{}; FleetId fleet{}; std::vector<EntityId> transports;
-        bool pending{}; NativeInvasionReceipt receipt; std::uint64_t number{}; };
-    struct JournalRequest { NativeEffectKind kind{}; std::vector<std::uint8_t> payload; NativeEffectPhase phase{}; };
-    struct OrbitRecheckRequest { PlayerId player{}; FleetId fleet{}; };
+    using Force = NativeActionShadow::Force;
+    using FleetRequest = NativeActionShadow::FleetRequest;
+    using ControlRequest = NativeActionShadow::ControlRequest;
+    using CashRequest = NativeActionShadow::CashRequest;
+    using ForceRequest = NativeActionShadow::ForceRequest;
+    using FinishRequest = NativeActionShadow::FinishRequest;
+    using ProductionRequest = NativeActionShadow::ProductionRequest;
+    using InvasionRequest = NativeActionShadow::InvasionRequest;
+    using JournalRequest = NativeActionShadow::JournalRequest;
+    using OrbitRecheckRequest = NativeActionShadow::OrbitRecheckRequest;
     std::map<FleetId, std::optional<Fleet>> fleet_rows;
     std::map<EntityId, std::optional<CensusObject>> actor_rows;
     std::map<EntityId, std::optional<DetachedUnit>> detached_rows;
@@ -57,7 +48,16 @@ struct GalacticSession::NativeActionShadow::Data {
     using ObserverPlanet = decltype(ObserverSetup{}.planets)::value_type;
     std::map<PlanetId, ObserverPlanet> observer_rows;
     bool population_stale{};
-    std::vector<std::variant<FleetRequest, ControlRequest, CashRequest, ForceRequest, ProductionRequest, FinishRequest, InvasionRequest, JournalRequest, OrbitRecheckRequest>> action_requests;
+    std::vector<IntentRecord> action_requests;
+    IntentSink intent_sink;
+    template<class Request> void record_request(Request request) {
+        const auto first = action_requests.empty() ? first_id : action_requests.back().next_id;
+        const auto first_request = action_requests.empty() ? first_invasion : action_requests.back().next_invasion;
+        action_requests.push_back({Intent{std::move(request)}, first, next_id, first_request, next_invasion});
+        // Immediate Lua clones retain their own records. An accepted native
+        // publication forwards them exactly once through publish_native_batch.
+        if (intent_sink && !immediate_batch) intent_sink(player, action_requests.back());
+    }
     std::shared_ptr<const session_detail::NativePopulationSchema> population_schema;
     std::shared_ptr<const IncomeSetup> income_schema;
     std::shared_ptr<const FiscalSetup> fiscal_schema;
@@ -84,7 +84,9 @@ struct GalacticSession::NativeActionShadow::Data {
     void inherit_reads(const std::shared_ptr<const Data>&);
     mutable std::shared_ptr<const EconomyInputGeneration> last_generation;
     PlayerId player{};
-    EntityId first_id{}, next_id{};
+    EntityId first_id{}, next_id{}, range_end{};
+    std::uint64_t first_invasion{1}, invasion_range_end{};
+    bool independent_player{};
     std::size_t live_objects{}, max_requests{};
     bool can_create{};
     std::map<PlayerId, math::Fixed> accounts;

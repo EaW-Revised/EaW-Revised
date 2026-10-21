@@ -63,15 +63,15 @@ void test_online_settings() {
 
 void test_defaults() {
     const ui::PlayerSettings defaults;
-    // ST-A1: the four volume sliders start at 0.75; subtitles are on.
-    expect(defaults.audio.master_percent == 75 && defaults.audio.sfx_percent == 75
+    // ST-A1: the owner-requested quieter master keeps the retail channel balance.
+    expect(defaults.audio.master_percent == 37 && defaults.audio.sfx_percent == 75
                && defaults.audio.speech_percent == 75 && defaults.audio.music_percent == 75
                && defaults.audio.subtitles,
-           "ST-A1: volumes default to 75 percent, subtitles on");
-    // ST-V1: 800x600 full screen and windowed, windowed off, vsync off, hardware cursor on, gamma 1.
+           "ST-A1: master defaults to 37 percent, channels 75 percent, subtitles on");
+    // ST-V1: retail video defaults, with the owner-requested ST-V5 vsync-on default.
     expect(defaults.video.fullscreen_width == 800 && defaults.video.fullscreen_height == 600
                && defaults.video.window_width == 800 && defaults.video.window_height == 600
-               && !defaults.video.windowed && !defaults.video.vsync && defaults.video.hardware_cursor
+               && !defaults.video.windowed && defaults.video.vsync && defaults.video.hardware_cursor
                && defaults.video.gamma_permille == 1000 && defaults.video.detail_level == 2,
            "ST-V1: the video defaults");
     expect(std::all_of(defaults.video.detail.begin(), defaults.video.detail.end(),
@@ -99,6 +99,68 @@ void test_defaults() {
     expect(ui::GameplaySettings{.scroll_stop = 0}.scroll_speed() == 0.0
                && ui::GameplaySettings{.scroll_stop = 9}.scroll_speed() == 3.0,
            "ST-G2: scroll speed spans 0..3 over ten stops");
+}
+
+void test_camera_keys() {
+    ui::PlayerSettings settings;
+    expect(!settings.camera_wasd, "ST-K3: retail arrows are the fresh default");
+    for (const bool wasd : {false, true}) {
+        settings.camera_wasd = wasd;
+        settings.video.vsync = false;
+        settings.audio.master_percent = 81;
+        settings.keys["GUARD"] = "Ctrl+G";
+        const auto loaded = ui::parse_settings(ui::serialize_settings(settings));
+        expect(loaded.notes.empty() && loaded.settings == settings,
+               "ST-K3: camera preset round trips with all stored profile choices");
+    }
+    const auto old = ui::parse_settings("eawr-settings 1\nvideo.vsync=0\naudio.master=81\n");
+    expect(!old.settings.camera_wasd && !old.settings.video.vsync && old.settings.audio.master_percent == 81,
+           "ST-K3: missing preset adds only its default");
+    expect(ui::project_key_for("IDC_EDIT_ATTACK", true) == "X"
+        && ui::project_key_for("IDC_EDIT_STOP", true) == "V"
+        && ui::project_key_for("IDC_EDIT_WAYPOINT", true) == "U", "ST-K3: keyboard help uses moved keys");
+    for (const auto& move : ui::camera_key_moves) {
+        expect(ui::camera_command_key(move.retail, false) == move.retail
+            && ui::camera_command_key(move.retail, true) == '\0'
+            && ui::camera_command_key(move.wasd, true) == move.retail,
+            "ST-K3: a bare physical chord belongs to exactly one camera or command action");
+    }
+    expect(ui::camera_command_key('Q', true) == 'Q' && ui::camera_command_key('Z', true) == 'Z',
+           "ST-K3: layout letters are not additional physical pan positions");
+}
+
+void test_frame_pacing() {
+    ui::VideoSettings video;
+    video.vsync = false;
+    expect(video.frame_rate_limit == 120, "ST-P2: fresh render cap is 120 FPS");
+    expect(ui::frame_rate_cap(video, 144, false, true) == 120, "battle uses selected cap");
+    expect(ui::frame_rate_cap(video, 144, true, true) == 60, "demo and menu use 60 FPS");
+    expect(ui::frame_rate_cap(video, 144, false, false) == 30, "unfocused battle uses 30 FPS");
+    video.frame_rate_limit = 30;
+    expect(ui::frame_rate_cap(video, 144, true, true) == 30, "lower selected cap wins in menus");
+    video.frame_rate_limit = 0;
+    expect(ui::frame_rate_cap(video, 144, false, true) == 0, "Off allows uncapped focused battle");
+    expect(ui::frame_rate_cap(video, 144, true, false) == 30, "Off still limits background menus");
+    video.vsync = true;
+    expect(ui::frame_rate_cap(video, 144, false, true) == 144, "vsync limits an otherwise uncapped battle");
+    video.frame_rate_limit = 120;
+    expect(ui::frame_rate_cap(video, 60, false, true) == 60, "vsync and explicit limit combine lower wins");
+    video.vsync = false;
+    video.frame_rate_limit = -1;
+    expect(ui::frame_rate_cap(video, 165, false, true) == 165, "refresh selection follows the current display");
+    expect(ui::frame_rate_cap(video, -1, false, true) == 60, "unknown refresh safely uses 60 FPS");
+    video.frame_rate_limit = 1;
+    expect(ui::frame_rate_cap(video, 144, false, true) == 30, "render floor allows the 30 Hz tick clock");
+    for (int fps : {0, -1, 30, 60, 90, 120, 144, 165, 240, 360}) {
+        ui::PlayerSettings stored;
+        stored.video.frame_rate_limit = fps;
+        const auto loaded = ui::parse_settings(ui::serialize_settings(stored));
+        expect(loaded.notes.empty() && loaded.settings.video.frame_rate_limit == fps,
+               "stored FPS choices survive loading without default replacement");
+    }
+    const auto old = ui::parse_settings("eawr-settings 1\nvideo.vsync=0\naudio.master=81\n");
+    expect(!old.settings.video.vsync && old.settings.audio.master_percent == 81
+           && old.settings.video.frame_rate_limit == 120, "missing FPS field adds the default and keeps stored settings");
 }
 
 void test_round_trip() {
@@ -148,7 +210,7 @@ void test_garbage() {
                "ST-S1: a file that is not a settings file loads as the defaults");
     }
     const ui::SettingsLoad other = ui::parse_settings("eawr-settings 99\naudio.master=5\n");
-    expect(other.defaulted && other.settings.audio.master_percent == 75 && has_note(other, "version 99"),
+    expect(other.defaulted && other.settings.audio.master_percent == 37 && has_note(other, "version 99"),
            "ST-S2: another version loads as the defaults, with a note");
 
     const ui::SettingsLoad mixed = ui::parse_settings(
@@ -169,7 +231,7 @@ void test_garbage() {
         "key.bad name=Y\r\n"
         "audio.speech=60\r\n");
     expect(!mixed.defaulted, "a damaged body is not a default file");
-    expect(mixed.settings.audio.master_percent == 75, "a malformed number keeps the default");
+    expect(mixed.settings.audio.master_percent == 37, "a malformed number keeps the default");
     expect(mixed.settings.audio.sfx_percent == 75, "trailing text is a malformed number");
     expect(mixed.settings.audio.music_percent == 100, "an out-of-range volume is clamped");
     expect(mixed.settings.audio.speech_percent == 60, "valid lines after damage still load");
@@ -266,9 +328,15 @@ void test_session_values() {
     // The start-up apply and a battle read the saved record through one mapping: each volume
     // slider reaches its own bus and the tactical speed reaches the speed step.
     const ui::SessionValues defaults = ui::session_values(ui::PlayerSettings{});
-    expect(defaults.master_gain == 0.75 && defaults.sfx_gain == 0.75 && defaults.speech_gain == 0.75
+    expect(defaults.master_gain == 0.37 && defaults.sfx_gain == 0.75 && defaults.speech_gain == 0.75
                && defaults.music_gain == 0.75 && defaults.speed_step == 2,
-           "the defaults reach a battle as 0.75 on every bus and speed step 2");
+           "the defaults reach a battle as master 0.37, channels 0.75 and speed step 2");
+    const ui::SettingsLoad existing = ui::parse_settings(
+        "eawr-settings 1\naudio.master=75\naudio.sfx=80\naudio.speech=65\naudio.music=90\nvideo.vsync=0\n");
+    expect(!existing.defaulted && existing.settings.audio.master_percent == 75
+               && existing.settings.audio.sfx_percent == 80 && existing.settings.audio.speech_percent == 65
+               && existing.settings.audio.music_percent == 90 && !existing.settings.video.vsync,
+           "stored sliders and disabled vsync keep their values, including former defaults");
     const ui::SettingsLoad saved = ui::parse_settings(
         "eawr-settings 1\naudio.master=30\naudio.sfx=40\naudio.speech=55\naudio.music=100\n"
         "gameplay.tactical_speed=4\n");
@@ -287,6 +355,8 @@ void test_session_values() {
 int main() {
     test_online_settings();
     test_defaults();
+    test_camera_keys();
+    test_frame_pacing();
     test_round_trip();
     test_garbage();
     test_clamping();

@@ -70,7 +70,8 @@ struct PlanetSpy {
     friend bool operator==(const PlanetSpy&, const PlanetSpy&) = default;
 };
 struct ObserverSetup {
-    std::uint32_t local_player{}; // WGUI-12 compatibility exception, explicit session input
+    std::vector<std::uint32_t> human_observers; // canonical, ascending roster player IDs
+    std::uint32_t solo_reference_human{}; // WGA-127/264; zero in multiplayer, never a UI selection
     math::Fixed reveal_delay_seconds{};
     math::Fixed automatic_reveal_range{};
     std::vector<ObserverPlayer> players;
@@ -79,6 +80,7 @@ struct ObserverSetup {
     std::vector<ObserverRecord> records; // complete player/planet Cartesian table
     std::uint32_t logical_fps{30}; // current synchronized discovery rate, ADR-013 / WGUI-02
     std::vector<PlanetSpy> planet_spies; // WGUI-101 registered planet-self abilities; no polling.
+    std::vector<std::uint32_t> history_players; // GREF-01: configured good/evil/corrupt faction players
     friend bool operator==(const ObserverSetup&, const ObserverSetup&) = default;
 };
 

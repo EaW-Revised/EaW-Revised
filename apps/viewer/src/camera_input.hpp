@@ -326,6 +326,9 @@ public:
     // Parses `json` and, only if it is fully valid, replaces the active table
     // and cancels all input. On failure the prior table (or no table) remains.
     [[nodiscard]] core::Result<void> activate(std::string_view json);
+    // ST-K3: build the optional physical pan preset before dispatch. Existing
+    // fixture tables retain their own bindings until a player scheme is supplied.
+    [[nodiscard]] core::Result<void> set_camera_keys(bool wasd);
     [[nodiscard]] bool has_table() const noexcept { return table_.has_value(); }
     [[nodiscard]] const BindingTable* table() const noexcept {
         return table_ ? &*table_ : nullptr;
@@ -385,6 +388,8 @@ private:
     Context context_;
     camera::InputReducer reducer_;
     std::optional<BindingTable> table_;
+    std::optional<BindingTable> configured_table_;
+    std::optional<bool> camera_wasd_;
     // Physical control -> index of the binding its press matched, so a release
     // after a modifier change still releases what was pressed.
     std::map<PhysicalControl, std::size_t> pressed_;

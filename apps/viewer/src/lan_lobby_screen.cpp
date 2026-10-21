@@ -352,6 +352,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
     if (gadget == "IDC_GAME_TYPE_LIST") {
         if (index >= 0 && static_cast<std::size_t>(index) < std::size(game_types)) {
             impl_->host_options.game_type = game_types[index].name;
+            fill_host_seats();
             if (auto* description = EAWR_CONTROL(EawrUiLabel, "IDC_GAME_TYPE_DESCRIPTION_TEXT")) {
                 description->set_text(resolved(resources_->text, game_types[index].description));
             }
@@ -380,7 +381,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
     if (gadget == "IDC_STAGING_MAP_LIST") {
         if (index >= 0 && static_cast<std::size_t>(index) < impl.listed.size()) {
             const auto chosen = impl.listed[static_cast<std::size_t>(index)];
-            if (network_row_count(resources.maps[chosen]) < impl.human_owners.size()) {
+            if (!lan_map_supports_rows(resources.maps[chosen], impl.selection.slots)) {
                 note_chat(model::ChatKind::error, "Choose a map with a player row for every human.");
                 if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) {
                     const auto previous = std::find(impl.listed.begin(), impl.listed.end(), static_cast<std::size_t>(impl.map_index));
@@ -428,15 +429,13 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
             impl.rows_signature.clear();
             return;
         }
-        if (slot < 3) return;
-        if (id_value == 0) {
-            if (record != impl.selection.slots.end()) impl.selection.slots.erase(record);
-        } else if (id_value == 3 && record == impl.selection.slots.end()) {
-            if (auto added = append_lan_ai_row(impl.selection, map, slot, resources.palette.size()); !added) {
-                note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice, added.error().message)));
-                impl.rows_signature.clear();
-                return;
-            }
+        const auto kind = id_value == 0 ? LanSeatKind::closed : id_value == 1 ? LanSeatKind::open : LanSeatKind::ai;
+        if (id_value < 0 || id_value > 4) return;
+        const auto level = id_value == 2 ? sim::tactical::AiLevel::easy
+            : id_value == 4 ? sim::tactical::AiLevel::hard : sim::tactical::AiLevel::normal;
+        if (auto changed = select_lan_seat_kind(impl.selection, map, slot, resources.palette.size(), kind, level); !changed) {
+            note_chat(model::ChatKind::error, core::format_diagnostic(changed.error()));
+            impl.rows_signature.clear(); return;
         }
     } else if (record != impl.selection.slots.end()) {
         if (field == "IDC_PLAYER_FACTION") {
@@ -456,6 +455,7 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
         }
     }
     static_cast<void>(publish_staging_selection());
+    announce();
     impl.rows_signature.clear();
 }
 
@@ -715,6 +715,12 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
         if (shot.chat_shown > 0) shot.chat_last_shown = utf8(list->get_item_text(list->get_item_count() - 1));
     }
     shot.rows = impl.row_states;
+    if (state_ && impl.host && page_ == Page::staging) {
+        if (const auto* maps = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST"))
+            for (int item = 0; item < maps->get_item_count() && static_cast<std::size_t>(item) < impl.listed.size(); ++item)
+                if (maps->is_item_disabled(item) && !maps->is_item_selectable(item))
+                    shot.disabled_maps.push_back(resources_->maps[impl.listed[static_cast<std::size_t>(item)]].path);
+    }
     if (state_ && page_ == Page::staging) {
         if (const auto* list = EAWR_CONTROL(EawrUiList, "EAWR_ONLINE_CONNECTIONS_LIST")) {
             shot.connections_open = list->is_visible();

@@ -216,6 +216,7 @@ struct Faction {
     std::optional<std::int64_t> base_population_capacity;
     std::optional<bool> ai_uses_galactic_pop_cap;
     std::vector<std::string> allies, enemies; // WGS-85: directional fresh player relations
+    std::string basic_ai; // GCMP-AI-01: authored controller for playable multiplayer AI factions.
 };
 
 // A galactic GameConstants value: its text, and its number when it reads as one.

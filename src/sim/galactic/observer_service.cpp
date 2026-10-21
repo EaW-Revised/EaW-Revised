@@ -157,7 +157,7 @@ void GalacticSession::Impl::refresh_observers_for_load(const std::uint64_t frame
     // restoration. Pacing and presentation clocks do not participate.
     observer->logical_fps = logical_fps;
     for (std::size_t i = 0; i < observer->records.size(); ++i) {
-        if (observer->records[i].player != observer->local_player) continue;
+        if (!std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), observer->records[i].player)) continue;
         od::refresh(observer->records[i], observer->players[i / observer->planets.size()],
             observer->planets[i % observer->planets.size()], table, frame, true);
     }

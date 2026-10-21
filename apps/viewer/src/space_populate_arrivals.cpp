@@ -135,6 +135,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
         live_decisions_.clear(); hull_surface_assets_.clear(); live_models_.clear(); live_shown_.clear();
         live_defend_.clear(); live_stealth_.clear(); live_blast_charging_.clear(); live_blast_charged_.clear();
         live_clips_.clear(); turret_bindings_.clear(); live_alternate_clips_.clear(); live_retired_.clear();
+        hardpoint_turret_bindings_.clear();
         live_death_clone_.clear(); live_alternates_.clear(); live_alternate_counts_.clear();
         live_bounds_.clear(); live_transforms_.clear(); backdrop_ships_.clear();
         hardpoint_states_.clear();
@@ -151,6 +152,7 @@ void SpacePopulation::prepare_compose_slots(bool appending) {
     live_clips_.resize(options_.placed_ships.size(), std::nullopt);
     contact_bones_.resize(options_.placed_ships.size());
     turret_bindings_.resize(options_.placed_ships.size(), std::nullopt);
+    hardpoint_turret_bindings_.resize(options_.placed_ships.size());
     live_alternate_clips_.resize(options_.placed_ships.size(), std::nullopt);
     live_retired_.resize(options_.placed_ships.size(), false);
     live_death_clone_.resize(options_.placed_ships.size(), false);
@@ -608,21 +610,52 @@ void SpacePopulation::compose_hardpoint_pieces(ComposeContext& context, ComposeB
             }
             pose = bind_poses.emplace(placement.model_path, std::move(bones)).first;
         }
-        const std::size_t bone_index = static_cast<std::size_t>(bone - model->bones.begin());
+        const std::size_t attachment_index = static_cast<std::size_t>(bone - model->bones.begin());
         // The attached model's root sits at the bone's bind frame. Every
         // FoC Model_To_Attach is authored about its own root, also those
         // whose skeleton repeats owner bone names; an identity frame
         // stacked them at the hull origin (#136; docs/asset-formats.md,
         // "Hardpoint state art").
         std::optional<sim::math::Mat3x4> frame;
-        if (pose->second && bone_index < pose->second->size()) {
-            frame = particles::fixed_model_frame((*pose->second)[bone_index].model_asset, scene::fixed_from_binary32);
+        if (pose->second && attachment_index < pose->second->size()) {
+            frame = particles::fixed_model_frame((*pose->second)[attachment_index].model_asset, scene::fixed_from_binary32);
         }
         const auto placed = frame ? sim::math::compose(placement.transform->matrix, *frame)
                                   : core::Result<sim::math::Mat3x4>::failure({});
         if (!placed) {
             decision.missing.push_back(who + "attachment bone " + hardpoint.bone + " has no bind frame");
             continue;
+        }
+        // WAD-40: the manual cannon is an authored hardpoint, not an object turret.
+        // Bind its own model skeleton once, reusing the ordinary procedural pose path.
+        if (live_ship) {
+            const auto definition = resolve(hardpoint.hardpoint, data::Category::hardpoint);
+            const auto text = [&](std::string_view tag) {
+                const auto* value = definition ? definition->value(tag) : nullptr;
+                return value ? core::trim_view(value->value.raw_text, core::xml_whitespace) : std::string_view{};
+            };
+            const auto bone_index = [&](std::string_view name) -> std::optional<std::size_t> {
+                if (name.empty()) return std::nullopt;
+                for (std::size_t index = 0; index < attached->bones.size(); ++index)
+                    if (ieq(attached->bones[index].name, name)) return index;
+                return std::nullopt;
+            };
+            if (const auto turret = bone_index(text("Turret_Bone_Name"))) {
+                if (auto player = animation::Player::create(*attached)) {
+                    TurretBinding binding;
+                    binding.turret = *turret;
+                    binding.attachment_frame = *frame;
+                    binding.barrel = bone_index(text("Barrel_Bone_Name"));
+                    binding.muzzle = bone_index(text("Fire_Bone_A"));
+                    binding.player = std::make_shared<const animation::Player>(std::move(player.value()));
+                    if (auto sampled = binding.player->sample({})) {
+                        binding.pose = std::move(sampled.value());
+                        binding.bind_bones = binding.pose.bones;
+                        hardpoint_turret_bindings_[*live_ship].emplace(static_cast<std::uint32_t>(hardpoint_index),
+                            std::move(binding));
+                    }
+                }
+            }
         }
         for (std::uint32_t mesh_index = 0; mesh_index < attached->meshes.size(); ++mesh_index) {
             const assets::Mesh& mesh = attached->meshes[mesh_index];

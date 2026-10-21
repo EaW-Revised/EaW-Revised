@@ -10,9 +10,11 @@
 // primary proof waits for the lifecycle, execution and persistence providers.
 #include "galactic_support.hpp"
 #include "../../src/script/foc/galactic_ai_funding.hpp"
+#include "../../src/script/foc/galactic_ai_decision_journal.hpp"
 #include "../../src/script/foc/galactic_ai_world.hpp"
 #include "../../src/script/foc/tactical_ai_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "../support/reverse_partition_executor.hpp"
 
 #include <array>
 #include <limits>
@@ -343,6 +345,193 @@ void failed_funding_equations() {
     ai::GalacticFunding restored; take(restored.restore(manager->state()));
     expect(restored.state() == manager->state(), "funding failure shares round trip through the retained owner");
 }
+std::string owner_funding_writes(const eawr::sim::PartitionExecutor& executor) {
+    ai::GalacticFunding funding;
+    const std::array players{galactic::PlayerId{1}, galactic::PlayerId{2}};
+    for (const auto player : players) take(funding.initialize(player, std::array{policy()}, f(100)));
+    const auto other_revision = funding.state_revision(players[1]);
+    const auto aggregate = funding.state_revision();
+    take(funding.apply_template(players[0], policy()));
+    expect(funding.state_revision(players[1]) == other_revision && funding.state_revision() == aggregate + 1,
+        "funding owner revisions are independent while the serial aggregate retains every write");
+    take(executor.execute_phase("galactic-ai-test-funding-owners", players.size(), [&](std::size_t index) {
+        for (unsigned step = 0; step < 16; ++step) take(funding.apply_template(players[index], policy()));
+    }));
+    expect(funding.record_sync_hash() == funding.record_sync_hash(true), "funding owner record folds equal the independent cold digest");
+    ai::GalacticFunding restored; take(restored.restore(funding.state()));
+    expect(restored.record_sync_hash() == funding.record_sync_hash(), "funding shard records rebuild identically after restore");
+    return funding.record_sync_hash() + ":" + std::to_string(funding.state_revision());
+}
+void funding_owner_partitions() {
+    eawr::sim::InlineExecutor inline_executor;
+    const auto reference = owner_funding_writes(inline_executor);
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(owner_funding_writes(executor) == reference, "funding owner writes are equal at every determinism worker count");
+    }
+    eawr::test_support::ReverseOrderExecutor reverse(8);
+    expect(owner_funding_writes(reverse) == reference, "funding owner writes are equal in reverse partition order");
+}
+void frozen_funding_frontiers() {
+    const eawr::sim::InlineExecutor executor;
+    const std::array players{galactic::PlayerId{1}, galactic::PlayerId{2}};
+    ai::GalacticFunding funding;
+    for (const auto player : players) take(funding.initialize(player, std::array{policy()}, f(100)));
+    take(funding.reserve(1, {7, 1, f(20), f(1), {}, {}}));
+    const auto root = funding.state();
+    using Credit = galactic::GalacticSession::CreditNotification;
+    const Credit ten{Credit::Kind::windfall, 2, f(110), f(10), {}};
+    const Credit twenty{Credit::Kind::windfall, 2, f(120), f(20), {}};
+    take(funding.prepare_player_frontiers(executor, players));
+    {
+        auto first = funding.player_frontier(1);
+        take(funding.notify(ten)); take(funding.remove_goal(1, 7)); take(funding.set_timeline(2));
+        const auto own = funding.state();
+        {
+            auto second = funding.player_frontier(2);
+            expect(funding.state() == root, "funding foreign reads keep the barrier root");
+            take(funding.notify(twenty)); take(funding.mark_spending(1, 7, f(1)));
+            take(funding.set_timeline(0)); // successful no-op remains an ordered intent
+            bool published{};
+            expect(!funding.commit_rows({}, [&] { published = true; return eawr::core::Result<void>::success(); }) && !published,
+                "a funding frontier never retains or invokes an untyped native publication callback");
+            expect(!funding.restore(root), "funding restore cannot replace an active frontier");
+        }
+        expect(funding.state() == own, "nested funding scopes restore the preceding private ledger");
+    }
+    expect(funding.state() == root, "private funding writes do not mutate the canonical root");
+    expect(take(funding.commit_player_frontiers()) == 1,
+        "a goal removed by an earlier owner refuses a later frozen spending intent once");
+    ai::GalacticFunding expected;
+    take(expected.restore(root)); take(expected.notify(ten)); take(expected.remove_goal(1, 7));
+    take(expected.set_timeline(2)); take(expected.notify(twenty)); take(expected.set_timeline(0));
+    expect(funding.state() == expected.state() && funding.record_sync_hash() == expected.record_sync_hash()
+        && funding.record_sync_hash() == funding.record_sync_hash(true),
+        "ordered funding intents retain both windfalls and the later no-op setter without replacing foreign rows");
+    expect(!funding.commit_player_frontiers(), "funding intents cannot publish twice");
+    take(funding.prepare_player_frontiers(executor, players));
+    { auto first = funding.player_frontier(1); take(funding.notify(ten)); }
+    take(funding.set_timeline(1));
+    const auto changed = funding.state();
+    expect(!funding.commit_player_frontiers() && funding.state() == changed,
+        "stale funding roots refuse before publishing any private intents");
+    take(funding.prepare_player_frontiers(executor, players));
+    { auto first = funding.player_frontier(1); expect(funding.state() == changed, "the next barrier resets private funding state"); }
+    expect(take(funding.commit_player_frontiers()) == 0, "empty funding frontiers publish no stale intents");
+    const std::array reversed{players[1], players[0]};
+    expect(!funding.prepare_player_frontiers(executor, reversed), "funding preparation requires canonical owner order");
+}
+void private_native_funding_rows() {
+    const eawr::sim::InlineExecutor executor;
+    const std::array players{galactic::PlayerId{1}, galactic::PlayerId{2}};
+    ai::GalacticFunding funding;
+    for (const auto player : players) take(funding.initialize(player, std::array{policy()}, f(100)));
+    const auto root = funding.state();
+    expect(!funding.prepare_private_rows({}), "native private row publication cannot replace canonical funding");
+    take(funding.prepare_player_frontiers(executor, players));
+    std::optional<ai::GalacticFunding::PrivateRows> foreign, stale, old_barrier;
+    {
+        auto first = funding.player_frontier(1);
+        ai::GalacticFunding::State rows;
+        rows.emplace(1, take(ai::funding::windfall(*funding.ledger(1), f(10))));
+        const auto expected = rows.at(1);
+        auto prepared = take(funding.prepare_private_rows(rows));
+        expect(funding.state() == root, "preparing native ledger rows has no private or canonical side effect");
+        take(funding.publish_private_rows(std::move(prepared)));
+        expect(*funding.ledger(1) == expected && *funding.ledger(2) == root.at(2)
+            && funding.record_sync_hash() == funding.record_sync_hash(true),
+            "accepted immediate rows update only the private ledger and its warm digest");
+        expect(!funding.publish_private_rows(std::move(prepared)), "a native row token is consumed exactly once");
+        foreign.emplace(take(funding.prepare_private_rows({})));
+        stale.emplace(take(funding.prepare_private_rows({})));
+        old_barrier.emplace(take(funding.prepare_private_rows({})));
+        ai::GalacticFunding::State unknown; unknown.emplace(99, expected);
+        expect(!funding.prepare_private_rows(std::move(unknown)), "unknown private ledger rows fail before world publication");
+    }
+    {
+        auto second = funding.player_frontier(2);
+        const auto before = funding.state();
+        expect(!funding.publish_private_rows(std::move(*foreign)) && funding.state() == before,
+            "a token cannot publish through a different physical player frontier");
+    }
+    {
+        auto first = funding.player_frontier(1);
+        // A native callback updates projection rows without appending another intent.
+        auto suppressed = funding.suspend_player_intents();
+        take(funding.set_timeline(1));
+        const auto before = funding.state();
+        expect(!funding.publish_private_rows(std::move(*stale)) && funding.state() == before,
+            "changed private funding invalidates a prepared row token");
+    }
+    expect(funding.state() == root && take(funding.commit_player_frontiers()) == 0 && funding.state() == root,
+        "callback-derived private rows never become whole-ledger canonical replay operations");
+    take(funding.prepare_player_frontiers(executor, players));
+    {
+        auto first = funding.player_frontier(1);
+        expect(!funding.publish_private_rows(std::move(*old_barrier)) && funding.state() == root,
+            "the next barrier invalidates old row tokens even when it reuses the same physical frontier");
+    }
+    expect(take(funding.commit_player_frontiers()) == 0, "rejected old row tokens leave no canonical intent");
+}
+void ordered_funding_and_native_intents() {
+    const eawr::sim::InlineExecutor executor;
+    const std::array players{galactic::PlayerId{1}, galactic::PlayerId{2}};
+    ai::GalacticFunding funding;
+    for (const auto player : players) take(funding.initialize(player, std::array{policy()}, f(100)));
+    const auto root = funding.state();
+    eawr::script::foc::galactic_ai::DecisionIntentJournal journal;
+    take(journal.prepare(players));
+    take(funding.prepare_player_frontiers(executor, players, [&](auto player, ai::GalacticFunding::Replay replay) {
+        journal.append(player, [&, replay = std::move(replay)] {
+            return eawr::core::Result<bool>::success(bool(replay(funding)));
+        });
+    }));
+    // Arrival order differs from canonical player order, as with partitions.
+    { auto second = funding.player_frontier(2); take(funding.set_timeline(0)); }
+    const galactic::GalacticSession::CreditNotification cash{
+        galactic::GalacticSession::CreditNotification::Kind::windfall, 1, f(110), f(10), {}};
+    std::shared_ptr<const ai::funding::Ledger> own;
+    unsigned native_calls{};
+    {
+        auto first = funding.player_frontier(1);
+        {
+            auto native_callback = funding.suspend_player_intents();
+            take(funding.notify(cash)); // the private native callback is not a second intent
+        }
+        journal.append(1, [&, cash] {
+            ++native_calls;
+            auto changed = funding.notify(cash);
+            return changed ? eawr::core::Result<bool>::success(true)
+                : eawr::core::Result<bool>::failure(changed.error());
+        });
+        // WGA-85 windfalls update cash; maintenance makes that cash available.
+        take(funding.begin_maintenance(1, {}));
+        take(funding.reserve(1, {7, 1, f(55), f(1), {}, {}}));
+        take(funding.set_timeline(2)); own = funding.ledger(1);
+    }
+    expect(funding.state() == root && !funding.commit_player_frontiers(),
+        "joint funding intents leave the root frozen and cannot publish through the component log");
+    expect(take(journal.commit()) == 0 && native_calls == 1 && *funding.ledger(1) == *own
+        && funding.state().timeline == 0,
+        "native cash precedes its owner reservation exactly once, while later owner setters commit last");
+    ai::GalacticFunding reordered; take(reordered.restore(root));
+    take(reordered.begin_maintenance(1, {}));
+    expect(!reordered.reserve(1, {7, 1, f(55), f(1), {}, {}}),
+        "the category's initial 50 credits cannot reserve the 55-credit goal before native cash arrives");
+    take(reordered.notify(cash));
+    expect(*reordered.ledger(1) != *own, "the fixture detects a whole-component replay that moves native cash after funding");
+    expect(!journal.commit() && native_calls == 1, "a completed joint journal never retries native admission");
+    take(journal.prepare(players));
+    unsigned published{};
+    journal.append(1, [&] { ++published; return eawr::core::Result<bool>::success(false); });
+    journal.append(1, [] {
+        eawr::core::Diagnostic error; error.code = "test"; error.message = "canonical owner failure";
+        return eawr::core::Result<bool>::failure(std::move(error));
+    });
+    journal.append(2, [&] { published += 100; return eawr::core::Result<bool>::success(true); });
+    expect(!journal.commit() && published == 1 && !journal.commit(),
+        "a fatal canonical publication preserves preceding output and prevents both continuation and retry");
+}
 void fresh_category_failed_initial_equation() {
     ai::AiData data;
     data.equations = take(ai::EquationSet::parse({{"funding.xml", "<Equations><Positive>3</Positive><Failed>Variable_Self.Unavailable_Field</Failed></Equations>"}}, {}));
@@ -377,7 +566,7 @@ void fresh_category_failed_initial_equation() {
 }
 }
 int main() {
-    try { live_fiscal(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); }
+    try { live_fiscal(); windfalls_and_failure(); zero_income_and_refusal(); retained_transactions(); template_untrigger(); orphan_aggregate(); over_cost_mark(); failed_funding_equations(); fresh_category_failed_initial_equation(); funding_owner_partitions(); frozen_funding_frontiers(); private_native_funding_rows(); ordered_funding_and_native_intents(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

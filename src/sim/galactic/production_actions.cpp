@@ -9,10 +9,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
+#include <stdexcept>
 #include <type_traits>
 #include <variant>
 
@@ -36,6 +39,7 @@ void GalacticSession::Impl::record_actor(CensusObject row, NativeActorChange::Ki
         || at->second.current_type != row.current_type || at->second.dead != row.dead || at->second.delete_pending != row.delete_pending))
         ++ability_input_generation;
     actor_records.insert_or_assign(row.id, row);
+    refresh_control_actor(row);
     refresh_ability_actor(row);
     update_victory_actor(row); // WGS-24: sparse qualified lifecycle/current-type write.
     published_actor_records.reset();
@@ -72,6 +76,7 @@ void GalacticSession::Impl::lose_actor(EntityId id) {
             for (const auto& child : at->children) lose_actor(child.id);
     }
     if (!actor_records.erase(id)) return;
+    lose_control_actor(id);
     lose_ability_actor(id);
     remove_victory_actor(id); // A loss is removal, never proof of an attributed leader kill.
     published_actor_records.reset(); dirty[static_cast<std::size_t>(StateSection::census)] = true;
@@ -215,7 +220,10 @@ core::Result<void> GalacticSession::restore_actor_representations(std::span<cons
         ++existing;
     }
     // All references validate before mutation; restoration never dispatches births.
-    for (const auto& row : census->objects) impl.actor_records.at(row.id) = row;
+    for (const auto& row : census->objects) {
+        impl.actor_records.at(row.id) = row;
+        impl.refresh_control_actor(row);
+    }
     impl.published_actor_records.reset();
     impl.invalidate_observer_projection();
     impl.dirty[static_cast<std::size_t>(StateSection::census)] = true;
@@ -480,7 +488,22 @@ struct GalacticSession::NativeActionBarrier::State {
     std::size_t max_requests{}, actions{}, journal_entries{};
     std::optional<NativeEffectPhase> last_phase;
     bool prelude{true}, tail{}, finished{};
+    std::map<PlayerId, std::shared_ptr<State>> independent_players;
+    std::recursive_mutex mutex;
+    std::atomic<bool> closing{};
+    bool independent_committed{};
     ~State() { while (!segments.empty()) segments.pop_back(); }
+};
+struct GalacticSession::NativeActionBarrier::PlayerScope {
+    std::shared_ptr<State> parent, selected;
+    std::weak_ptr<void> previous;
+    std::unique_lock<std::recursive_mutex> lock;
+    PlayerScope(std::shared_ptr<State> owner, std::shared_ptr<State> player)
+        : parent(std::move(owner)), selected(std::move(player)), previous(native_action_barrier_context), lock(selected->mutex) {
+        if (parent->closing.load(std::memory_order_acquire)) throw std::logic_error("native player contexts are closed for canonical commit");
+        native_action_barrier_context = selected;
+    }
+    ~PlayerScope() { native_action_barrier_context = previous; }
 };
 GalacticSession::NativeActionBarrier::NativeActionBarrier(std::shared_ptr<State> state) : state_(std::move(state)) {}
 GalacticSession::NativeActionBarrier::~NativeActionBarrier() {
@@ -500,6 +523,10 @@ GalacticSession::NativeActionShadow* GalacticSession::native_shadow() const noex
     assert((state || !impl_->native_barrier_active.load(std::memory_order_acquire))
         && "native barrier reads and writes require its decision thread");
     return state && !state->segments.empty() ? state->segments.back().get() : nullptr;
+}
+std::uint64_t GalacticSession::next_native_invasion_id() const noexcept {
+    if (const auto* shadow = native_shadow()) return shadow->next_native_invasion_id();
+    return impl_->next_native_invasion;
 }
 core::Result<std::unique_ptr<GalacticSession::NativeActionBarrier>> GalacticSession::begin_native_barrier(
     std::span<const PlayerId> players, std::size_t max_requests) {
@@ -532,9 +559,113 @@ core::Result<void> GalacticSession::NativeActionBarrier::begin_players() {
     state_->prelude = false;
     return state_->world->advance_native_segment(false, 0);
 }
+core::Result<void> GalacticSession::NativeActionBarrier::begin_independent_players(
+    const PartitionExecutor& executor, NativeActionShadow::IntentSink sink) {
+    if (!state_ || state_->finished || !state_->prelude || !sink || !state_->independent_players.empty()
+        || native_action_barrier_context.lock().get() != state_.get())
+        return invalid<void>("independent players require the owning prelude and a joint decision sink");
+    auto& world = *state_->world;
+    const auto fail = [&](const core::Diagnostic& error) {
+        world.impl_->failed = true; state_->finished = true;
+        native_action_barrier_context.reset(); world.impl_->native_barrier_active.store(false, std::memory_order_release);
+        return core::Result<void>::failure(error);
+    };
+    std::vector<NativeActionShadow> prelude; prelude.reserve(state_->segments.size());
+    for (const auto& segment : state_->segments) prelude.push_back(*segment);
+    // Prelude callbacks have already updated their canonical owners. Settle the
+    // world once before freezing any sibling; old layers must not be inherited.
+    native_action_barrier_context.reset(); world.impl_->native_barrier_active.store(false, std::memory_order_release);
+    if (auto settled = world.commit_native_actions(prelude, true, true); !settled) return fail(settled.error());
+    auto opened = world.begin_native_actions(state_->players.front(), std::min<std::size_t>(state_->max_requests, galactic_max_objects));
+    if (!opened) return fail(opened.error());
+    auto root = std::move(opened).value();
+    root.data_->movement_listener = world.impl_->native_movement_listener;
+    static_cast<void>(root.snapshot()); // freeze lazy publication before sharing any reads
+    const auto first = root.next_entity_id(), first_invasion = root.next_native_invasion_id();
+    const auto count = state_->players.size();
+    const auto room = std::numeric_limits<std::uint64_t>::max() - galactic_max_objects;
+    if (first >= room || first_invasion >= room || count - 1 > (room - 1 - first) / galactic_max_objects
+        || count - 1 > (room - 1 - first_invasion) / galactic_max_objects)
+        return fail(invalid<void>("native player identity blocks exceed the identity frontier").error());
+    std::vector<std::shared_ptr<State>> children(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        auto child = std::make_shared<State>(); child->world = &world; child->owner = state_->owner;
+        child->players = {state_->players[index]}; child->max_requests = state_->max_requests;
+        child->prelude = false;
+        if (!world.impl_->native_effects.empty() && world.impl_->native_effects.back().frontier == world.impl_->completed_tick)
+            child->last_phase = world.impl_->native_effects.back().phase;
+        children[index] = std::move(child);
+    }
+    std::vector<std::optional<core::Diagnostic>> failures(count);
+    auto prepared = executor.execute_phase("galactic-native-player-frontiers", tick_partition_count, [&](std::size_t partition) {
+        const auto range = partition_range(partition, count);
+        for (auto index = range.begin; index < range.end; ++index) {
+            auto fork = root.fork_player(state_->players[index], first + index * galactic_max_objects,
+                std::min<std::size_t>(state_->max_requests, galactic_max_objects), first_invasion + index * galactic_max_objects, sink);
+            if (!fork) { failures[index] = fork.error(); continue; }
+            fork.value().data_->max_requests = state_->max_requests;
+            children[index]->segments.push_back(std::make_unique<NativeActionShadow>(std::move(fork).value()));
+        }
+    });
+    if (!prepared) return fail(prepared.error());
+    for (const auto& error : failures) if (error) return fail(*error);
+    for (std::size_t index = 0; index < count; ++index) state_->independent_players.emplace(state_->players[index], std::move(children[index]));
+    while (!state_->segments.empty()) state_->segments.pop_back();
+    state_->segments.push_back(std::make_unique<NativeActionShadow>(std::move(root)));
+    state_->prelude = false; state_->actions = state_->journal_entries = 0;
+    native_action_barrier_context = state_; world.impl_->native_barrier_active.store(true, std::memory_order_release);
+    return core::Result<void>::success();
+}
+core::Result<std::shared_ptr<void>> GalacticSession::NativeActionBarrier::player_scope(PlayerId player) {
+    using Result = core::Result<std::shared_ptr<void>>;
+    if (!state_ || state_->closing.load(std::memory_order_acquire))
+        return invalid<std::shared_ptr<void>>("native player scope requires an open independent barrier");
+    const auto found = state_->independent_players.find(player);
+    if (found == state_->independent_players.end()) return invalid<std::shared_ptr<void>>("native player scope names an unprepared owner");
+    try { return Result::success(std::make_shared<PlayerScope>(state_, found->second)); }
+    catch (const std::exception& error) { return invalid<std::shared_ptr<void>>(error.what()); }
+}
+core::Result<void> GalacticSession::NativeActionBarrier::finish_independent_players(
+    const std::function<core::Result<void>()>& commit) {
+    if (!state_ || state_->finished || state_->independent_players.empty() || !commit
+        || native_action_barrier_context.lock().get() != state_.get() || state_->closing.exchange(true, std::memory_order_acq_rel))
+        return invalid<void>("native independent join requires its owning barrier, joined players and one ordered commit");
+    std::vector<std::unique_lock<std::recursive_mutex>> locks;
+    std::size_t actions{}, journal_entries{};
+    for (const auto& [player, child] : state_->independent_players) {
+        static_cast<void>(player); locks.emplace_back(child->mutex);
+        actions += child->actions; journal_entries += child->journal_entries;
+    }
+    auto& world = *state_->world;
+    const auto fail = [&](const core::Diagnostic& error) {
+        world.impl_->failed = true; state_->finished = true;
+        native_action_barrier_context.reset(); world.impl_->native_barrier_active.store(false, std::memory_order_release);
+        return core::Result<void>::failure(error);
+    };
+    if (actions > state_->max_requests || journal_entries >= std::numeric_limits<std::uint64_t>::max() - world.impl_->native_sequence)
+        return fail(invalid<void>("native independent decisions exceeded the shared retention bound").error());
+    native_action_barrier_context.reset(); world.impl_->native_barrier_active.store(false, std::memory_order_release);
+    try {
+        if (auto committed = commit(); !committed) return fail(committed.error());
+    } catch (const std::exception& error) {
+        return fail(invalid<void>(error.what()).error());
+    }
+    auto opened = world.begin_native_actions(state_->players.back(), std::min<std::size_t>(state_->max_requests, galactic_max_objects));
+    if (!opened) return fail(opened.error());
+    auto tail = std::move(opened).value(); tail.data_->tail = true; tail.data_->max_requests = state_->max_requests;
+    tail.data_->movement_listener = world.impl_->native_movement_listener;
+    while (!state_->segments.empty()) state_->segments.pop_back();
+    state_->segments.push_back(std::make_unique<NativeActionShadow>(std::move(tail)));
+    for (const auto& [player, child] : state_->independent_players) { static_cast<void>(player); child->finished = true; }
+    state_->independent_committed = true; state_->tail = true; state_->actions = actions; state_->journal_entries = 0;
+    if (!world.impl_->native_effects.empty() && world.impl_->native_effects.back().frontier == world.impl_->completed_tick)
+        state_->last_phase = world.impl_->native_effects.back().phase;
+    native_action_barrier_context = state_; world.impl_->native_barrier_active.store(true, std::memory_order_release);
+    return core::Result<void>::success();
+}
 core::Result<void> GalacticSession::NativeActionBarrier::select_player(PlayerId player) {
     if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
-        || !std::binary_search(state_->players.begin(), state_->players.end(), player))
+        || !state_->independent_players.empty() || !std::binary_search(state_->players.begin(), state_->players.end(), player))
         return invalid<void>("native barrier selection requires its admitted player and owning thread");
     if (auto started = begin_players(); !started) return started;
     if (state_->tail || state_->segments.back()->player() == player) return core::Result<void>::success();
@@ -545,7 +676,8 @@ core::Result<void> GalacticSession::NativeActionBarrier::select_player(PlayerId 
     return core::Result<void>::success();
 }
 core::Result<void> GalacticSession::NativeActionBarrier::begin_tail() {
-    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get())
+    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
+        || (!state_->independent_players.empty() && !state_->independent_committed))
         return invalid<void>("native tail requires its active barrier and owning thread");
     if (state_->tail) return core::Result<void>::success();
     if (auto started = begin_players(); !started) return started;
@@ -554,7 +686,8 @@ core::Result<void> GalacticSession::NativeActionBarrier::begin_tail() {
 }
 core::Result<void> GalacticSession::NativeActionBarrier::commit() {
     gc_profile::Scope profile_scope(gc_profile::Phase::barrier_commit);
-    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get())
+    if (!state_ || state_->finished || native_action_barrier_context.lock().get() != state_.get()
+        || (!state_->independent_players.empty() && !state_->independent_committed))
         return invalid<void>("native commit requires its active barrier and owning thread");
     std::vector<NativeActionShadow> layers; layers.reserve(state_->segments.size());
     for (const auto& segment : state_->segments) layers.push_back(*segment);
@@ -569,6 +702,10 @@ GalacticSession::NativeActionBarrier::Work GalacticSession::NativeActionBarrier:
     if (!state_) return result;
     result.layers = state_->segments.size();
     for (const auto& segment : state_->segments) result.read_checkpoints += segment->data_->read_checkpoints;
+    for (const auto& [player, child] : state_->independent_players) {
+        static_cast<void>(player); result.layers += child->segments.size();
+        for (const auto& segment : child->segments) result.read_checkpoints += segment->data_->read_checkpoints;
+    }
     return result;
 }
 core::Result<GalacticSession::NativeActionShadow> GalacticSession::continue_native_actions(
@@ -579,6 +716,8 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::continue_nati
     data->owner = before.owner; data->base = before.base; data->parent = previous.data_; data->player = before.player;
     data->inherit_reads(previous.data_);
     data->first_id = data->next_id = before.next_id; data->live_objects = before.live_objects; data->max_requests = max_requests;
+    data->independent_player = before.independent_player; data->range_end = before.range_end;
+    data->invasion_range_end = before.invasion_range_end;
     data->can_create = before.can_create; data->continuation = true; data->prelude = native_barrier() && native_barrier()->prelude; data->immediate_batch = immediate; data->tail = tail;
     data->graph = before.graph; data->movement = before.movement; data->observer_generation = before.observer_generation;
     data->population_schema = before.population_schema; data->income_schema = before.income_schema; data->fiscal_schema = before.fiscal_schema;
@@ -586,7 +725,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::continue_nati
     data->production_projection = before.production_projection; data->population_projection = before.population_projection;
     data->population_stale = before.population_stale;
     data->invasion_records = before.invasion_records; data->invasion_transports = before.invasion_transports;
-    data->next_invasion = before.next_invasion; data->invasions_enabled = before.invasions_enabled;
+    data->first_invasion = data->next_invasion = before.next_invasion; data->intent_sink = before.intent_sink; data->invasions_enabled = before.invasions_enabled;
     data->publication = before.view();
     if (data->publication->victory()) data->victory = std::shared_ptr<const VictoryState>(data->publication, &*data->publication->victory());
     return core::Result<NativeActionShadow>::success(NativeActionShadow(std::move(data)));
@@ -618,7 +757,7 @@ core::Result<void> GalacticSession::deliver_native_shadow_changes(const NativeAc
     if (!delivered) impl_->failed = true;
     return delivered;
 }
-core::Result<void> GalacticSession::publish_native_batch(const NativeActionShadow& shadow, bool actors_prepared) {
+core::Result<void> GalacticSession::publish_native_batch(const NativeActionShadow& shadow, bool actors_prepared, bool deliver_intents) {
     auto* state = native_barrier(); const auto* previous = native_shadow();
     if (!state || !previous || !shadow.data_->immediate_batch || !shadow.data_->continuation
         || shadow.data_->owner != impl_.get() || shadow.data_->base != impl_->snapshot
@@ -633,6 +772,8 @@ core::Result<void> GalacticSession::publish_native_batch(const NativeActionShado
     // The ordinary immediate owner always publishes, even for an empty batch.
     shadow.data_->publication.reset();
     state->segments.push_back(std::make_unique<NativeActionShadow>(shadow));
+    if (deliver_intents && shadow.data_->intent_sink)
+        for (const auto& intent : shadow.data_->action_requests) shadow.data_->intent_sink(shadow.player(), intent);
     if (auto continued = advance_native_segment(false, requests); !continued) return continued;
     return actors_prepared ? core::Result<void>::success() : deliver_native_shadow_changes(shadow, 0);
 }
@@ -737,7 +878,7 @@ core::Result<void> GalacticSession::stage_native_production_finish(NativeActionS
     shadow.data_->production_rows.insert_or_assign(row.planet, std::move(row)); shadow.data_->population_stale = true;
     shadow.data_->events.push_back({shadow.data_->base->completed_tick(), GalacticEventKind::production_cancelled, {},
         refund_view->production()->planets[prepared.planet_index].planet, prepared.entry.build_id, prepared.entry.type, GalacticRejectReason::none});
-    shadow.data_->action_requests.emplace_back(NativeActionShadow::Data::FinishRequest{build, salvage, multiplier});
+    shadow.data_->record_request(NativeActionShadow::Data::FinishRequest{build, salvage, multiplier});
     if (impl_->native_production_outcome_handler)
         impl_->native_production_outcome_handler({prepared.entry.builder, prepared.entry.build_id, 0, false});
     shadow.data_->publication.reset();
@@ -757,7 +898,7 @@ core::Result<std::vector<EntityId>> GalacticSession::stage_native_force(
 core::Result<void> GalacticSession::stage_native_effect(
     NativeActionShadow& shadow, NativeEffectKind kind, std::vector<std::uint8_t> payload, NativeEffectPhase phase) {
     auto* state = native_barrier();
-    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::story_reward
+    if (!state || impl_->failed || impl_->native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::identity_reservation
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl_->native_dropped + impl_->native_effects.size() + state->journal_entries + impl_->executed_dropped + impl_->executed.size() + impl_->pending.size() >= galactic_max_commands
         || state->journal_entries >= std::numeric_limits<std::uint64_t>::max() - impl_->native_sequence) {
@@ -769,7 +910,7 @@ core::Result<void> GalacticSession::stage_native_effect(
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::command_order, "native journal phase rewound"));
     }
     const auto published = shadow.data_->publication;
-    shadow.detach(); shadow.data_->action_requests.emplace_back(NativeActionShadow::Data::JournalRequest{kind, std::move(payload), phase});
+    shadow.detach(); shadow.data_->record_request(NativeActionShadow::Data::JournalRequest{kind, std::move(payload), phase});
     shadow.data_->publication = published; // journaling never publishes private rows
     ++state->journal_entries; state->last_phase = phase;
     return core::Result<void>::success();
@@ -797,7 +938,7 @@ core::Result<void> GalacticSession::stage_native_retire_invasion(NativeActionSha
         shadow.data_->invasion_rows[number] = std::nullopt; --shadow.data_->invasion_records;
     } else shadow.data_->invasion_rows[number] = std::move(request);
     shadow.data_->publication = published;
-    shadow.data_->action_requests.emplace_back(NativeActionShadow::Data::InvasionRequest{true, 0, 0, {}, false, {}, number});
+    shadow.data_->record_request(NativeActionShadow::Data::InvasionRequest{true, 0, 0, {}, false, {}, number});
     std::vector<std::uint8_t> bytes; for (const auto word : std::array<std::uint64_t, 3>{1, 3, number}) detail::put_u64(bytes, word);
     if (auto saved = append_native_effect(NativeEffectKind::invasion, std::move(bytes)); !saved) return saved;
     return advance_native_segment();
@@ -829,6 +970,8 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::begin_native_
     state->population_schema = impl_->native_population_schema; state->income_schema = impl_->native_income_schema;
     state->observer_generation = state->base->observer_input_generation();
     state->first_id = state->next_id = impl_->next_id;
+    state->first_invasion = state->next_invasion = impl_->next_native_invasion; state->invasions_enabled = impl_->native_invasions_enabled;
+    state->invasion_records = impl_->native_invasions.size(); state->invasion_transports = impl_->native_invasion_transport_count;
     state->live_objects = impl_->live_object_count; state->max_requests = max_requests;
     state->can_create = impl_->setup.census.has_value(); state->population_stale = impl_->population_stale;
     state->publication = state->base;
@@ -859,9 +1002,293 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::begin_native_
     shadow.value().data_->graph = impl_->graph ? std::make_shared<const PlanetGraph>(*impl_->graph) : nullptr;
     return shadow;
 }
-core::Result<void> GalacticSession::commit_native_actions(const NativeActionShadow& shadow, bool actor_changes_prepared) {
-    if (native_shadow()) return publish_native_batch(shadow, actor_changes_prepared);
+core::Result<void> GalacticSession::commit_native_actions(const NativeActionShadow& shadow, bool actor_changes_prepared, bool deliver_intents) {
+    if (native_shadow()) return publish_native_batch(shadow, actor_changes_prepared, deliver_intents);
+    if (!deliver_intents) return invalid<void>("manual native intent delivery requires an immediate player transaction");
     return commit_native_actions(std::span<const NativeActionShadow>(&shadow, 1), actor_changes_prepared);
+}
+core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::readmit_native_fleet(
+    const NativeActionShadow::IntentRecord& intent) {
+    if (!std::holds_alternative<NativeActionShadow::FleetRequest>(intent.request))
+        return invalid<NativeFleetReceipt>("fleet reconciliation requires a fleet intent");
+    auto result = readmit_native_movement(intent);
+    if (!result) return core::Result<NativeFleetReceipt>::failure(result.error());
+    return core::Result<NativeFleetReceipt>::success(result.value().event);
+}
+core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::readmit_native_control(
+    const NativeActionShadow::IntentRecord& intent) {
+    if (!std::holds_alternative<NativeActionShadow::ControlRequest>(intent.request))
+        return invalid<NativeTransportLandingReceipt>("control reconciliation requires a control intent");
+    return readmit_native_movement(intent);
+}
+core::Result<GalacticSession::NativeTransportLandingReceipt> GalacticSession::readmit_native_movement(
+    const NativeActionShadow::IntentRecord& intent) {
+    using Result = core::Result<NativeTransportLandingReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::FleetRequest>(&intent.request);
+    const auto* control = std::get_if<NativeActionShadow::ControlRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || (!request && !control) || !intent.first_id || intent.next_id < intent.first_id
+        || intent.next_id == std::numeric_limits<EntityId>::max()
+        || intent.next_id - intent.first_id > galactic_max_objects || !intent.first_invasion
+        || intent.first_invasion != intent.next_invasion
+        || (intent.next_id != intent.first_id && (impl_->next_id > intent.first_id
+            || intent.next_id == std::numeric_limits<EntityId>::max())))
+        return invalid<NativeTransportLandingReceipt>("native movement reconciliation requires a valid ordered intent and the serial commit");
+    const auto& projected = request ? request->receipt : control->receipt;
+    const auto allocated = intent.next_id - intent.first_id;
+    const auto burn = [&]() -> core::Result<void> {
+        if (!allocated) return core::Result<void>::success();
+        return reserve_native_identity_frontier(impl_->next_id, intent.next_id);
+    };
+    // A private refusal has already returned to its own chain. Preserve any
+    // transient identities it consumed, but never retry that decision here.
+    if (!projected.admitted) {
+        if (auto reserved = burn(); !reserved) return Result::failure(reserved.error());
+        return Result::success({projected, false});
+    }
+    auto opened = begin_native_actions(request ? request->player : control->player, galactic_max_objects);
+    if (!opened) return Result::failure(opened.error());
+    auto candidate = std::move(opened).value();
+    // The admission probe owns only sparse rows. Listeners run once, after the
+    // accepted candidate commits, never while checking a refused candidate.
+    candidate.data_->movement_listener = {};
+    if (allocated) candidate.data_->first_id = candidate.data_->next_id = intent.first_id;
+    const auto first = candidate.next_entity_id();
+    auto checked = [&]() -> Result {
+        if (request) {
+            auto result = candidate.admit_fleet(request->player, request->payload, request->pending);
+            if (!result) return Result::failure(result.error());
+            return Result::success({result.value(), false});
+        }
+        using Kind = NativeActionShadow::ControlRequest::Kind;
+        if (control->kind == Kind::actor_land)
+            // A frozen surface count is not a live assertion after earlier players commit.
+            return candidate.land_transport(control->player, control->object, control->target, control->pending);
+        auto result = control->kind == Kind::launch
+            ? candidate.launch_transport(control->player, control->object, control->target, control->pending)
+            : candidate.land_transports(control->player, control->object, control->pending);
+        if (!result) return Result::failure(result.error());
+        return Result::success({result.value(), false});
+    }();
+    if (!checked) return checked;
+    auto receipt = checked.value();
+    if (receipt.event.admitted && (receipt.event.object != projected.object
+        || candidate.next_entity_id() - first != allocated))
+        receipt = {{false, 0, GalacticRejectReason::invalid_membership}, false};
+    if (!receipt.event.admitted) {
+        if (auto reserved = burn(); !reserved) return Result::failure(reserved.error());
+        return Result::success(receipt);
+    }
+    if (allocated) if (auto reserved = reserve_native_identity_frontier(impl_->next_id, intent.first_id); !reserved)
+        return Result::failure(reserved.error());
+    if (auto committed = commit_native_actions(candidate); !committed) {
+        impl_->failed = true; return Result::failure(committed.error());
+    }
+    return Result::success(receipt);
+}
+core::Result<GalacticSession::NativeInvasionReceipt> GalacticSession::readmit_native_invasion(
+    const NativeActionShadow::IntentRecord& intent) {
+    using Result = core::Result<NativeInvasionReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::InvasionRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || request->retire || !intent.first_id
+        || intent.first_id != intent.next_id || !intent.first_invasion
+        || intent.next_invasion < intent.first_invasion
+        || intent.next_invasion == std::numeric_limits<std::uint64_t>::max()
+        || intent.next_invasion - intent.first_invasion > 1
+        || (intent.next_invasion != intent.first_invasion && impl_->next_native_invasion > intent.first_invasion))
+        return invalid<NativeInvasionReceipt>("native invasion reconciliation requires its ordered admission intent");
+    const auto allocated = intent.next_invasion - intent.first_invasion;
+    if ((request->receipt.admitted && (allocated != 1 || request->receipt.request != intent.first_invasion))
+        || (!request->receipt.admitted && allocated))
+        return invalid<NativeInvasionReceipt>("native invasion intent has inconsistent provisional identities");
+    if (!request->receipt.admitted) return Result::success(request->receipt);
+    auto opened = begin_native_actions(request->player, galactic_max_objects);
+    if (!opened) return Result::failure(opened.error());
+    auto candidate = std::move(opened).value();
+    candidate.data_->first_invasion = candidate.data_->next_invasion = intent.first_invasion;
+    auto checked = candidate.admit_invasion(request->player, request->fleet, request->transports, request->pending);
+    if (!checked) return checked;
+    if (!checked.value().admitted) {
+        if (auto burned = reserve_native_frontiers(impl_->next_id, impl_->next_id,
+            impl_->next_native_invasion, intent.next_invasion); !burned) return Result::failure(burned.error());
+        return checked;
+    }
+    if (checked.value().request != request->receipt.request || candidate.next_native_invasion_id() != intent.next_invasion)
+        return invalid<NativeInvasionReceipt>("canonical invasion candidate changed its reserved identity span");
+    if (auto reserved = reserve_native_frontiers(impl_->next_id, impl_->next_id,
+        impl_->next_native_invasion, intent.first_invasion); !reserved) return Result::failure(reserved.error());
+    if (auto committed = commit_native_actions(candidate); !committed) {
+        impl_->failed = true; return Result::failure(committed.error());
+    }
+    return checked;
+}
+core::Result<bool> GalacticSession::readmit_native_invasion_release(const NativeActionShadow::IntentRecord& intent) {
+    const auto* request = std::get_if<NativeActionShadow::InvasionRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !request->retire || !request->number
+        || !intent.first_id || intent.first_id != intent.next_id || !intent.first_invasion
+        || intent.first_invasion != intent.next_invasion)
+        return invalid<bool>("native invasion release requires its non-allocating ordered intent");
+    // A speculative handle may have been refused, or an earlier owner already
+    // released this reader. Neither case creates a replacement request.
+    if (!native_invasion(request->number)) return core::Result<bool>::success(false);
+    if (auto released = retire_native_invasion(request->number); !released) return core::Result<bool>::failure(released.error());
+    return core::Result<bool>::success(true);
+}
+core::Result<math::Fixed> GalacticSession::readmit_native_cash(const NativeActionShadow::IntentRecord& intent) {
+    const auto* request = std::get_if<NativeActionShadow::CashRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !intent.first_id || intent.first_id != intent.next_id
+        || !intent.first_invasion || intent.first_invasion != intent.next_invasion)
+        return invalid<math::Fixed>("native cash reconciliation requires its non-allocating ordered intent");
+    // The canonical cap can change the actual windfall. Its notification runs
+    // exactly once here, and its economic journal must use this returned delta.
+    return add_credits(request->player, request->delta, request->multiplier);
+}
+core::Result<GalacticSession::NativeForceReceipt> GalacticSession::readmit_native_force(
+    const NativeActionShadow::IntentRecord& intent, const NativeReconciledForceBuilder& builder, const PartitionExecutor& executor) {
+    using Result = core::Result<NativeForceReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::ForceRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !request->force || !builder || !intent.first_id
+        || intent.next_id < intent.first_id || intent.next_id == std::numeric_limits<EntityId>::max()
+        || intent.next_id - intent.first_id > galactic_max_objects || !intent.first_invasion
+        || intent.first_invasion != intent.next_invasion
+        || (intent.next_id != intent.first_id && impl_->next_id > intent.first_id))
+        return invalid<NativeForceReceipt>("native force reconciliation requires its ordered creation intent and qualified builder");
+    const auto allocated = intent.next_id - intent.first_id;
+    const auto refuse = [&]() -> Result {
+        if (allocated) if (auto burned = reserve_native_identity_frontier(impl_->next_id, intent.next_id); !burned)
+            return Result::failure(burned.error());
+        return Result::success({false, {}});
+    };
+    if (impl_->live_object_count > galactic_max_objects - allocated) return refuse();
+    auto opened = begin_native_actions(request->force->request.player, galactic_max_objects);
+    if (!opened) return Result::failure(opened.error());
+    auto candidate = std::move(opened).value();
+    if (allocated) candidate.data_->first_id = candidate.data_->next_id = intent.first_id;
+    const auto first = candidate.next_entity_id();
+    bool ordinary_refusal{};
+    std::optional<NativeForcePlacement> placement;
+    auto checked = candidate.create_force(request->force->request, [&](const NativeForceView& view, EntityId frontier) {
+        auto made = builder(view, frontier);
+        if (!made) return core::Result<NativeForcePlacement>::failure(made.error());
+        if (!made.value()) {
+            ordinary_refusal = true;
+            return invalid<NativeForcePlacement>("native force admission refused by its current placement owner");
+        }
+        const auto next = made.value()->next_id;
+        if (next < frontier || next == std::numeric_limits<EntityId>::max() || next - frontier > galactic_max_objects)
+            return invalid<NativeForcePlacement>("canonical force builder returned an invalid identity frontier");
+        if (next - frontier != allocated) {
+            ordinary_refusal = true;
+            return invalid<NativeForcePlacement>("canonical force changed its reserved allocation shape");
+        }
+        placement = std::move(made).value();
+        return core::Result<NativeForcePlacement>::success(*placement);
+    }, executor);
+    if (ordinary_refusal) return refuse();
+    if (!checked) return Result::failure(checked.error());
+    if (checked.value() != request->actors || candidate.next_entity_id() - first != allocated) return refuse();
+    if (allocated) if (auto reserved = reserve_native_identity_frontier(impl_->next_id, intent.first_id); !reserved)
+        return Result::failure(reserved.error());
+    // Reuse the accepted immutable placement. Its builder and any actor/funding
+    // callbacks run once, rather than repeating construction or random draws.
+    auto actual = create_native_force(request->force->request, [&](const GalacticSnapshot&, EntityId) {
+        return core::Result<NativeForcePlacement>::success(*placement);
+    });
+    if (!actual || actual.value() != checked.value()) {
+        impl_->failed = true;
+        if (!actual) return Result::failure(actual.error());
+        return invalid<NativeForceReceipt>("canonical force disagrees with its admission probe");
+    }
+    return Result::success({true, std::move(actual).value()});
+}
+core::Result<GalacticSession::NativeProductionReceipt> GalacticSession::readmit_native_production(
+    const NativeActionShadow::IntentRecord& intent, const PartitionExecutor& executor, const NativeProductionPreflight& preflight) {
+    using Result = core::Result<NativeProductionReceipt>;
+    const auto* request = std::get_if<NativeActionShadow::ProductionRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !intent.first_id || intent.next_id < intent.first_id
+        || intent.next_id == std::numeric_limits<EntityId>::max() || intent.next_id - intent.first_id > 1
+        || !intent.first_invasion || intent.first_invasion != intent.next_invasion)
+        return invalid<NativeProductionReceipt>("native production reconciliation requires its ordered admission intent");
+    const bool projected = request->receipt.admission == ProductionAdmission::allowed;
+    const auto allocated = intent.next_id - intent.first_id;
+    if ((projected && (allocated != 1 || request->receipt.build != intent.first_id || impl_->next_id > intent.first_id))
+        || (!projected && (allocated || request->receipt.build)))
+        return invalid<NativeProductionReceipt>("native production intent has inconsistent provisional identities");
+    if (!projected) return Result::success(request->receipt);
+    auto opened = begin_native_actions(request->request.player, galactic_max_objects);
+    if (!opened) return Result::failure(opened.error());
+    auto candidate = std::move(opened).value();
+    candidate.data_->first_id = candidate.data_->next_id = intent.first_id;
+    // Pure admission checks current capacity, ownership and population. Its
+    // mark callback has no side effects; actual funding runs once below.
+    std::optional<NativeProductionNotice> notice;
+    auto checked = candidate.admit_production(request->request, executor, [&](const NativeProductionNotice& input) {
+        notice = input;
+        return core::Result<NativeProductionPayment>::success({});
+    }, impl_->corruption_local_unlocks(request->request.planet, request->request.player));
+    if (!checked) return checked;
+    if (checked.value().admission != ProductionAdmission::allowed) {
+        if (auto burned = reserve_native_identity_frontier(impl_->next_id, intent.next_id); !burned)
+            return Result::failure(burned.error());
+        return checked;
+    }
+    if (checked.value().build != request->receipt.build || candidate.next_entity_id() != intent.next_id)
+        return invalid<NativeProductionReceipt>("canonical production changed its reserved identity span");
+    // The Foc owner checks its current goal/ledger without applying a mark.
+    // Earlier goal removal is an ordinary refusal; malformed state is an error.
+    if (preflight) {
+        if (!notice) return invalid<NativeProductionReceipt>("canonical production probe omitted its mark notice");
+        auto funded = preflight(*notice);
+        if (!funded) return Result::failure(funded.error());
+        if (!funded.value()) {
+            if (auto burned = reserve_native_identity_frontier(impl_->next_id, intent.next_id); !burned)
+                return Result::failure(burned.error());
+            return Result::success({ProductionAdmission::credits, 0, checked.value().price});
+        }
+    }
+    if (!impl_->native_production_handler) return invalid<NativeProductionReceipt>("canonical production requires its ledger owner");
+    if (auto reserved = reserve_native_identity_frontier(impl_->next_id, intent.first_id); !reserved)
+        return Result::failure(reserved.error());
+    auto actual = admit_native_production(request->request, executor);
+    if (!actual || actual.value().admission != ProductionAdmission::allowed || actual.value().build != checked.value().build
+        || actual.value().price != checked.value().price) {
+        impl_->failed = true;
+        if (!actual) return actual;
+        return invalid<NativeProductionReceipt>("canonical production disagrees with its admission probe");
+    }
+    return actual;
+}
+core::Result<bool> GalacticSession::readmit_native_finish(const NativeActionShadow::IntentRecord& intent) {
+    const auto* request = std::get_if<NativeActionShadow::FinishRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !request->build || !intent.first_id
+        || intent.first_id != intent.next_id || !intent.first_invasion || intent.first_invasion != intent.next_invasion)
+        return invalid<bool>("native finish reconciliation requires its non-allocating ordered intent");
+    if (!impl_->production || !impl_->economy) return invalid<bool>("native finish reconciliation requires production and accounts");
+    bool present = false;
+    for (const auto& planet : impl_->production->planets) for (const auto& queue : planet.queues)
+        if (std::any_of(queue.begin(), queue.end(), [&](const auto& entry) { return entry.build_id == request->build; })) present = true;
+    // A refused speculative build never had a canonical queue entry. Its
+    // retained AI purchase owns failure/refund handling, without a fake finish.
+    if (!present) return core::Result<bool>::success(false);
+    if (auto finished = finish_native_production_task(request->build, request->salvage, request->multiplier); !finished)
+        return core::Result<bool>::failure(finished.error());
+    return core::Result<bool>::success(true);
+}
+core::Result<bool> GalacticSession::readmit_native_orbit_recheck(const NativeActionShadow::IntentRecord& intent) {
+    const auto* request = std::get_if<NativeActionShadow::OrbitRecheckRequest>(&intent.request);
+    if (impl_->failed || native_shadow() || !request || !request->player || !request->fleet || !intent.first_id
+        || intent.first_id != intent.next_id || !intent.first_invasion || intent.first_invasion != intent.next_invasion)
+        return invalid<bool>("native orbit reconciliation requires its non-allocating ordered intent");
+    if (!impl_->movement_inputs) return invalid<bool>("native orbit reconciliation requires movement");
+    const auto found = impl_->fleets.find(request->fleet);
+    // Earlier canonical work may have consumed, moved or transferred this
+    // frozen parent. Preserve that refusal and invoke no movement callbacks.
+    if (found == impl_->fleets.end()) return core::Result<bool>::success(false);
+    const auto& fleet = impl_->registry.get<session_detail::FleetData>(found->second);
+    if (fleet.owner != request->player || !fleet.orbit || fleet.motion.transit)
+        return core::Result<bool>::success(false);
+    if (auto checked = recheck_native_orbit(request->player, request->fleet); !checked)
+        return core::Result<bool>::failure(checked.error());
+    return core::Result<bool>::success(true);
 }
 core::Result<void> GalacticSession::commit_native_actions(std::span<const NativeActionShadow> shadows,
     bool actor_changes_prepared, bool native_effects_prepared) {
@@ -995,7 +1422,7 @@ core::Result<void> GalacticSession::commit_native_actions(std::span<const Native
                     return result.value().admitted == request.receipt.admitted && result.value().object == request.receipt.object
                         && result.value().reason == request.receipt.reason ? core::Result<void>::success() : disagreed();
                 }
-            }, effect);
+            }, effect.request);
             if (!applied) return applied;
         }
         }

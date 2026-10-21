@@ -1,5 +1,6 @@
 #pragma once
 #include "eawr/sim/galactic/hero_return.hpp"
+#include "eawr/sim/galactic/history.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
@@ -26,6 +27,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <variant>
 
 namespace eawr::sim::galactic {
 
@@ -54,9 +56,10 @@ enum class StateSection : std::uint16_t {
     planet_access = 19, // coordinator-reserved, authoritative AI access
     ability_host = 20, // coordinator-reserved, prepared action lifecycle
     campaign_scoring = 21, // coordinator-reserved, GHUD-S61 ledger; present only when nonempty
+    history = 22, // GREF-24..26: session-owned per-player chart archives
 };
-inline constexpr std::size_t state_section_count = 22;
-inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v1";
+inline constexpr std::size_t state_section_count = 23;
+inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v7";
 
 struct GalacticTick {
     std::uint64_t completed_tick{};
@@ -179,6 +182,13 @@ public:
     // commands ran; the session then refuses every further step (EAWR-SIM-0508).
     [[nodiscard]] core::Result<GalacticTick> step(const PartitionExecutor& executor,
         bool pending_local_conflict = false);
+    // GREF-24..26 / WGP-146: named admitted-player seam. The scripted owner
+    // defers this until all committed AI work, before story service. The tick
+    // supplied here is active galactic simulation time, never render time.
+    void defer_history_service(bool deferred) noexcept;
+    [[nodiscard]] core::Result<void> service_admitted_history(std::uint64_t active_tick,
+        const PartitionExecutor&);
+    [[nodiscard]] const HistoryArchive& history_archive() const noexcept;
     // WGS-99/142: the conflict owner opens this window for the ticks in which a pending, not yet
     // entered tactical conflict waits for its choice. Only then is a prebattle autosave admitted
     // (the galaxy is held by the conflict's own pause at that point). Derived by the owner each
@@ -384,6 +394,8 @@ public:
     };
     struct NativeProductionPayment { bool accepted{}; PlayerId payer{}; math::Fixed amount{}; };
     using NativeProductionHandler = std::function<core::Result<NativeProductionPayment>(const NativeProductionNotice&)>;
+    // Synchronous pure check of the current ledger; it must apply no mark or world write.
+    using NativeProductionPreflight = std::function<core::Result<bool>(const NativeProductionNotice&)>;
     void set_native_production_handler(NativeProductionHandler);
     // GFD-A05/07: publish the exact retained build and created actor after the
     // world commit. This notification never bills or advances a coroutine.
@@ -437,6 +449,11 @@ public:
         std::function<core::Result<bool>(const Fleet&)> combat_skip;
     };
     using NativeShadowForceBuilder = std::function<core::Result<NativeForcePlacement>(const NativeForceView&, EntityId)>;
+    // Null placement is an ordinary current-world refusal; errors retain their
+    // infrastructure/content meaning and must not be swallowed as admission.
+    using NativeReconciledForceBuilder = std::function<core::Result<std::optional<NativeForcePlacement>>(const NativeForceView&, EntityId)>;
+    // Base/presence writes may admit without allocating any returned actor.
+    struct NativeForceReceipt { bool admitted{}; std::vector<EntityId> actors; };
     // Service-local sparse shadow. Copies share the completed snapshot and
     // immutable prepared placements; only written accounts/locations detach.
     // A layer and its lazy publication belong to one decision thread. Before
@@ -444,6 +461,37 @@ public:
     // snapshot, never an unfrozen shadow. S9 must retain this freeze boundary.
     class NativeActionShadow {
     public:
+        struct Force { NativeProductionRequest request; NativeForcePlacement placement; };
+        struct FleetRequest { PlayerId player{}; CommandPayload payload; bool pending{}; NativeFleetReceipt receipt; };
+        struct ControlRequest {
+            enum class Kind { launch, fleet_land, actor_land } kind{};
+            PlayerId player{};
+            EntityId object{}, target{};
+            bool pending{};
+            std::optional<std::uint32_t> live_landed;
+            NativeFleetReceipt receipt;
+            bool linked{};
+        };
+        struct CashRequest { PlayerId player{}; math::Fixed delta, multiplier, actual; };
+        struct ForceRequest { std::shared_ptr<const Force> force; std::vector<EntityId> actors; };
+        struct FinishRequest { EntityId build{}; bool salvage{}; math::Fixed multiplier; };
+        struct ProductionRequest { NativeProductionRequest request; NativeProductionReceipt receipt; };
+        struct InvasionRequest { bool retire{}; PlayerId player{}; FleetId fleet{}; std::vector<EntityId> transports;
+            bool pending{}; NativeInvasionReceipt receipt; std::uint64_t number{}; };
+        struct JournalRequest { NativeEffectKind kind{}; std::vector<std::uint8_t> payload; NativeEffectPhase phase{}; };
+        struct OrbitRecheckRequest { PlayerId player{}; FleetId fleet{}; };
+        using Intent = std::variant<FleetRequest, ControlRequest, CashRequest, ForceRequest,
+            ProductionRequest, FinishRequest, InvasionRequest, JournalRequest, OrbitRecheckRequest>;
+        struct IntentRecord {
+            Intent request;
+            EntityId first_id{}, next_id{};
+            std::uint64_t first_invasion{}, next_invasion{};
+        };
+        // Value-owned operation records, derived barrier work only. The sink
+        // retains DTOs for canonical admission; it must not execute them here.
+        using IntentSink = std::function<void(PlayerId, IntentRecord)>;
+        [[nodiscard]] const IntentSink& intent_sink() const noexcept;
+        [[nodiscard]] std::span<const IntentRecord> intents() const noexcept;
         struct Work {
             std::uint64_t requests{}, copied_accounts{}, copied_planets{}, copied_orbital_objects{}, prepared_objects{};
             std::uint64_t copied_scene_objects{}; // always zero: no ECS/scene clone
@@ -459,6 +507,10 @@ public:
         // Sequential player passes inherit an immutable lower-ID frontier.
         // Forking does not copy any scene rows or the preceding player's writes.
         [[nodiscard]] core::Result<NativeActionShadow> for_player(PlayerId, std::size_t max_requests) const;
+        // GFS-A22: sibling decisions share this frozen root, never another player's writes. The caller
+        // assigns disjoint blocks of galactic_max_objects IDs before dispatch; snapshot() freezes reads.
+        [[nodiscard]] core::Result<NativeActionShadow> fork_player(PlayerId, EntityId first_id, std::size_t max_requests,
+            std::optional<std::uint64_t> first_invasion = {}, IntentSink = {}) const;
         [[nodiscard]] PlayerId player() const noexcept;
         // Read adapter for player layers. Legacy immediate batches keep their
         // narrow credit/creation queries and return no player publication here.
@@ -470,10 +522,13 @@ public:
             const PartitionExecutor&, const NativeProductionHandler&, std::span<const TypeId> local_unlocks = {});
         [[nodiscard]] core::Result<NativeFleetReceipt> launch_transport(PlayerId, EntityId, FleetId, bool pending_local_conflict);
         [[nodiscard]] core::Result<NativeFleetReceipt> land_transports(PlayerId, FleetId, bool pending_local_conflict);
+        [[nodiscard]] core::Result<NativeInvasionReceipt> admit_invasion(PlayerId, FleetId,
+            std::span<const EntityId>, bool pending_local_conflict);
         [[nodiscard]] core::Result<void> recheck_orbit(PlayerId, FleetId);
         [[nodiscard]] core::Result<NativeTransportLandingReceipt> land_transport(PlayerId, EntityId, PlanetId,
             bool pending_local_conflict, std::optional<std::uint32_t> live_landed = {});
         [[nodiscard]] EntityId next_entity_id() const noexcept;
+        [[nodiscard]] std::uint64_t next_native_invasion_id() const noexcept;
         [[nodiscard]] const Work& work() const noexcept;
     private:
         struct Data;
@@ -486,11 +541,30 @@ public:
     [[nodiscard]] core::Result<NativeActionShadow> begin_native_actions(PlayerId, std::size_t max_requests) const;
     // Legacy immediate batches apply prepared placements and publish once;
     // player layers follow the ordered replay contract below.
-    [[nodiscard]] core::Result<void> commit_native_actions(const NativeActionShadow&, bool actor_changes_prepared = false);
+    // An immediate transaction may deliver its intents itself, interleaved with
+    // other components, after this private publication succeeds.
+    [[nodiscard]] core::Result<void> commit_native_actions(const NativeActionShadow&, bool actor_changes_prepared = false,
+        bool deliver_intents = true);
     // Validate predecessor ownership, player order and identity frontiers before
     // applying any layer. Effects then replay in order; a replay failure can
     // leave earlier effects applied. NativeActionBarrier invalidates its session.
     [[nodiscard]] core::Result<void> commit_native_actions(std::span<const NativeActionShadow>, bool actor_changes_prepared = false, bool native_effects_prepared = false);
+    // GFS-A22: revalidate one frozen fleet/control intent against the merged world.
+    // Only an admitted candidate publishes; refused provisional IDs stay burned.
+    [[nodiscard]] core::Result<NativeFleetReceipt> readmit_native_fleet(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_control(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<NativeInvasionReceipt> readmit_native_invasion(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<bool> readmit_native_invasion_release(const NativeActionShadow::IntentRecord&);
+    // The economic journal owner records the returned actual delta, as with add_credits().
+    [[nodiscard]] core::Result<math::Fixed> readmit_native_cash(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<NativeForceReceipt> readmit_native_force(const NativeActionShadow::IntentRecord&,
+        const NativeReconciledForceBuilder&, const PartitionExecutor&);
+    [[nodiscard]] core::Result<NativeProductionReceipt> readmit_native_production(
+        const NativeActionShadow::IntentRecord&, const PartitionExecutor&, const NativeProductionPreflight& = {});
+    // Missing provisional objects are retained refusals. The caller journals
+    // a finish only when it named an actual canonical queue entry.
+    [[nodiscard]] core::Result<bool> readmit_native_finish(const NativeActionShadow::IntentRecord&);
+    [[nodiscard]] core::Result<bool> readmit_native_orbit_recheck(const NativeActionShadow::IntentRecord&);
 
     // Owns one sequential AI barrier. Private player layers are selected in
     // ascending order; deferred script commands use the final inherited tail.
@@ -503,12 +577,22 @@ public:
         NativeActionBarrier(const NativeActionBarrier&) = delete;
         NativeActionBarrier& operator=(const NativeActionBarrier&) = delete;
         [[nodiscard]] core::Result<void> begin_players();
+        // GFS-A22: settle the prelude, freeze one root and prepare disjoint
+        // player contexts. Each worker holds its opaque scope through all native
+        // and Lua work; no earlier player's overlay becomes a sibling's input.
+        [[nodiscard]] core::Result<void> begin_independent_players(const PartitionExecutor&, NativeActionShadow::IntentSink);
+        [[nodiscard]] core::Result<std::shared_ptr<void>> player_scope(PlayerId);
+        // Caller joins all player tasks first. The synchronous callback drains
+        // the joint owner-ordered journal with canonical world access, then a
+        // fresh global tail sees the actual admitted world in this same tick.
+        [[nodiscard]] core::Result<void> finish_independent_players(const std::function<core::Result<void>()>& commit);
         [[nodiscard]] core::Result<void> select_player(PlayerId);
         [[nodiscard]] core::Result<void> begin_tail();
         [[nodiscard]] core::Result<void> commit();
         [[nodiscard]] Work work() const noexcept;
     private:
         struct State;
+        struct PlayerScope;
         std::shared_ptr<State> state_;
         explicit NativeActionBarrier(std::shared_ptr<State>);
         friend class GalacticSession;
@@ -573,12 +657,20 @@ public:
     [[nodiscard]] core::Result<bool> apply_planet_destruction_victory(PlayerId actor_owner,
         PlayerId current_controller, std::span<const TypeId> landed_current_types);
     [[nodiscard]] EntityId next_entity_id() const noexcept;
+    // GFS-A22: ordered commit reserves a player's identity block before replaying its actual admissions.
+    // The expected frontier prevents stale or reordered reservations from mutating the session.
+    [[nodiscard]] core::Result<void> reserve_native_identity_frontier(EntityId expected, EntityId next);
+    [[nodiscard]] core::Result<void> reserve_native_frontiers(EntityId expected, EntityId next,
+        std::uint64_t expected_invasion, std::uint64_t next_invasion);
+    [[nodiscard]] std::uint64_t next_native_invasion_id() const noexcept;
     // The tick-zero setup the session was created from (not the current state).
     [[nodiscard]] const GalacticSetup& setup() const noexcept;
     [[nodiscard]] std::span<const Seat> seats() const noexcept;
     [[nodiscard]] const std::optional<SeatControlState>& seat_control() const noexcept;
     // Trusted conflict-service boundary, not a player action. Roles are chosen by commands.
-    [[nodiscard]] core::Result<void> begin_battle_roles(EntityId conflict, PlayerId invader, PlayerId defender);
+    // D10's MP AI battle keeps the other human team spectating until the role UI is available.
+    [[nodiscard]] core::Result<void> begin_battle_roles(EntityId conflict, PlayerId invader, PlayerId defender,
+        bool default_spectate = false);
     void end_battle_roles();
     [[nodiscard]] const PlanetGraph* graph() const noexcept;
     [[nodiscard]] std::size_t pending_command_count() const noexcept;
@@ -605,6 +697,8 @@ public:
     // Independently recompute every section on each cached-hash request.
     void set_hash_verification(bool enabled) noexcept;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> snapshot() const noexcept;
+    // Owner-thread projection. The context never enters canonical state or AI inputs.
+    [[nodiscard]] std::shared_ptr<const GalacticSnapshot> view_snapshot(ObserverViewContext) const;
     // WGA-256: trusted deterministic effects only; external story dispatch is WST-42's seam.
     [[nodiscard]] core::Result<bool> set_planet_access(PlanetId, bool restricted,
         std::optional<bool> local_revealed);
@@ -615,12 +709,13 @@ public:
 
 private:
     class Impl;
+    [[nodiscard]] core::Result<NativeTransportLandingReceipt> readmit_native_movement(const NativeActionShadow::IntentRecord&);
     [[nodiscard]] NativeActionBarrier::State* native_barrier() const noexcept;
     [[nodiscard]] NativeActionShadow* native_shadow() const noexcept;
     [[nodiscard]] core::Result<NativeActionShadow> continue_native_actions(const NativeActionShadow&,
         std::size_t, bool immediate, bool tail) const;
     [[nodiscard]] core::Result<void> advance_native_segment(bool tail = false, std::size_t actions = 1);
-    [[nodiscard]] core::Result<void> publish_native_batch(const NativeActionShadow&, bool actors_prepared);
+    [[nodiscard]] core::Result<void> publish_native_batch(const NativeActionShadow&, bool actors_prepared, bool deliver_intents);
     [[nodiscard]] core::Result<void> deliver_native_shadow_changes(const NativeActionShadow&, std::size_t first);
     [[nodiscard]] core::Result<NativeFleetReceipt> stage_native_fleet(NativeActionShadow&, PlayerId, const CommandPayload&, bool);
     [[nodiscard]] core::Result<NativeFleetReceipt> stage_native_launch(NativeActionShadow&, PlayerId, EntityId, FleetId, bool);

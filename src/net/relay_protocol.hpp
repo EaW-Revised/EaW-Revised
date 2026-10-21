@@ -24,9 +24,11 @@ enum class Kind : std::uint8_t {
     directory_opened, directory_page, directory_published, directory_admitted,
     // Page and acknowledgement layouts are selected by the outstanding request.
     directory_chat_page = directory_page, directory_ok = directory_opened,
-    // N-peer room scope (34..49, EAWR-NET-1772..1777): layouts and rules in relay_room.hpp. 48..49 stay spare.
+    // N-peer room scope (34..49, EAWR-NET-1772..1777): layouts and rules in relay_room.hpp.
     room_open = 34, room_opened, room_attach, room_attached, room_roster, room_signal, room_forwarded,
     room_leave, room_release, room_kick, room_lock, room_reattach, room_closed, room_ack,
+    // Roster-lock protocol 1; older services refuse Kind 48 with 1521.
+    room_lock_roster = 48, room_roster_locked = 49,
     // Menu channel (50..57, #3758): a room-less presence + chat channel on a connection of its own, for clients that
     // are in the online room browser and not in a room. Layouts and rules in relay_menu.hpp. 54..57 stay spare. A relay
     // that predates it answers menu_open with the legacy 1521 refusal and closes only that connection.

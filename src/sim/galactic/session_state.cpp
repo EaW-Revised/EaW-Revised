@@ -137,7 +137,7 @@ void GalacticSession::Impl::insert(const Fleet& fleet) {
     }
     const auto handle = registry.create();
     registry.emplace<StableId>(handle, fleet.id);
-    registry.emplace<FleetData>(handle, fleet.owner, fleet.orbit, fleet.members, fleet.orbit_slot, motion);
+    registry.emplace<FleetData>(handle, fleet.owner, fleet.orbit, fleet.members, fleet.orbit_slot, motion, fleet.raid_destination);
     fleets.emplace(fleet.id, handle);
 }
 
@@ -189,7 +189,7 @@ std::vector<Fleet> GalacticSession::Impl::sorted_fleets() const {
     result.reserve(fleets.size());
     for (const auto& [id, handle] : fleets) {
         const auto& data = registry.get<FleetData>(handle);
-        result.push_back({id, data.owner, data.orbit, data.members, data.orbit_slot, data.motion});
+        result.push_back({id, data.owner, data.orbit, data.members, data.orbit_slot, data.motion, data.raid_destination});
     }
     return result;
 }
@@ -217,6 +217,9 @@ GatheredObject GalacticSession::Impl::gather(const EntityId id, const ObjectKind
 std::vector<std::uint8_t> GalacticSession::Impl::encode_section(const StateSection section) const {
     std::vector<std::uint8_t> bytes;
     switch (section) {
+    case StateSection::history:
+        detail::encode_history(bytes, history_archive);
+        break;
     case StateSection::campaign_scoring:
         detail::encode_score_ledger(bytes, score_ledger);
         break;
@@ -393,7 +396,21 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::publish_native_sn
     return make_snapshot(std::move(events));
 }
 std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std::vector<GalacticEvent> events,
-    const PartitionExecutor* executor) const {
+    const PartitionExecutor* executor, ObserverViewContext view) const {
+    const auto view_player = view.player ? view.player : observer ? observer->solo_reference_human : 0;
+    auto& cache = view_publications[view.player];
+    auto& observer_projection_generation = cache.observer_projection_generation;
+    auto& observer_projection = cache.observer_projection;
+    auto& published_production_offers = cache.published_production_offers;
+    auto& published_offer_inputs = cache.published_offer_inputs;
+    auto& published_black_market_menus = cache.published_black_market_menus;
+    auto& published_ability_results = cache.published_ability_results;
+    auto& published_ability_services = cache.published_ability_services;
+    auto& published_corruption_transitions = cache.published_corruption_transitions;
+    auto& corruption_publication_key = cache.corruption_publication_key;
+    auto& published_corruption_menu = cache.published_corruption_menu;
+    auto& published_hero_action_menus = cache.published_hero_action_menus;
+    auto& black_market_publication_key = cache.black_market_publication_key;
     gc_profile::Scope profile_scope(gc_profile::Phase::make_snapshot);
     gc_profile::Scope context_scope(gc_profile::Phase::snapshot_other, gc_profile::Phase::snapshot_ai);
     std::optional<gc_profile::Scope> part(std::in_place, gc_profile::Phase::snap_sorted);
@@ -418,7 +435,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     part.emplace(gc_profile::Phase::snap_observer);
     if (observer && observer_projection_generation != observer_input_generation) {
         observer_projection = std::make_shared<const std::vector<ObservedPlanet>>(
-            observed_planets(*observer, live_fleets, movement_inputs.get(), actor_inputs()));
+            observed_planets(*observer, live_fleets, view, movement_inputs.get(), actor_inputs()));
         observer_projection_generation = observer_input_generation;
         observer_projection_records += observer->records.size();
     }
@@ -429,15 +446,24 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     math::Fixed local_credits;
     std::uint64_t local_tech{};
     if (observer && economy) for (const auto& account : economy->players)
-        if (account.player == observer->local_player) { local_credits = account.credits; local_tech = static_cast<std::uint64_t>(account.current_tech); break; }
+        if (account.player == view_player) { local_credits = account.credits; local_tech = static_cast<std::uint64_t>(account.current_tech); break; }
     const std::array<std::uint64_t, 5> market_key{ability_host ? ability_input_generation : economy_input_generation->accounts,
-        observer_input_generation, observer ? observer->local_player : 0,
+        observer_input_generation, observer ? view_player : 0,
         static_cast<std::uint64_t>(local_credits.raw()), local_tech};
     if (!published_black_market_menus || black_market_publication_key != market_key) {
         if (ability_host) ++ability_work.publications;
+        // WGCH-152: copy local live service gates on producer invalidation, never per render frame.
+        // This presentation column has no canonical/saved-state consumer.
+        std::vector<AbilityActorState> services;
+        if (ability_host && observer) for (const auto& service : ability_host->actors) {
+            const auto actor = actor_records.find(service.actor);
+            if (actor != actor_records.end() && actor->second.owner == view_player
+                && !actor->second.dead && !actor->second.delete_pending) services.push_back(service);
+        }
+        published_ability_services = std::make_shared<const std::vector<AbilityActorState>>(std::move(services));
         auto menus =
             economy_corruption && economy && observer && observer_projection
-                ? observed_black_market_menus(*economy_corruption, *economy, observer->local_player, *observer_projection)
+                ? observed_black_market_menus(*economy_corruption, *economy, view_player, *observer_projection)
                 : std::vector<ObservedBlackMarketMenu>{};
         if (ability_host) for (auto& menu : menus) {
             const auto at = std::lower_bound(ability_host->preparations.begin(), ability_host->preparations.end(), menu.buyer,
@@ -447,23 +473,24 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         published_black_market_menus = std::make_shared<const std::vector<ObservedBlackMarketMenu>>(std::move(menus));
         std::vector<AbilityResult> results;
         if (ability_host && observer && observer_projection) for (const auto& result : ability_host->results) {
-            if (result.player == observer->local_player && std::any_of(observer_projection->begin(), observer_projection->end(),
+            if (result.player == view_player && std::any_of(observer_projection->begin(), observer_projection->end(),
                 [&](const auto& row) { return row.player == result.player && row.planet == result.planet && row.discovered; }))
                 results.push_back(result); // coarse outcome only: no hidden refusal cause
         }
         published_ability_results = std::make_shared<const std::vector<AbilityResult>>(std::move(results));
         published_hero_action_menus.reset();
-        published_corruption_menu = publish_corruption_menu();
+        published_corruption_menu = publish_corruption_menu(view_player, observer_projection
+            ? std::span<const ObservedPlanet>(*observer_projection) : std::span<const ObservedPlanet>{});
         if (ability_host && observer && observer_projection) for (const auto& menu : ability_host->preparations) {
             if (!menu.open || (menu.kind != AbilityKind::technology_theft && menu.kind != AbilityKind::superweapon_hack
                 && menu.kind != AbilityKind::planet_destruction && menu.kind != AbilityKind::structure_sabotage
                 && menu.kind != AbilityKind::hero_neutralization)) continue;
             const auto actor = actor_records.find(menu.actor);
-            if (actor == actor_records.end() || actor->second.owner != observer->local_player || actor->second.dead || actor->second.delete_pending) continue;
+            if (actor == actor_records.end() || actor->second.owner != view_player || actor->second.dead || actor->second.delete_pending) continue;
             if (std::none_of(observer_projection->begin(), observer_projection->end(), [&](const auto& row) {
-                return row.player == observer->local_player && row.planet == menu.planet && row.discovered;
+                return row.player == view_player && row.planet == menu.planet && row.discovered;
             })) continue;
-            HeroActionMenus value; value.player = observer->local_player; value.actor = menu.actor;
+            HeroActionMenus value; value.player = view_player; value.actor = menu.actor;
             value.planet = menu.planet; value.preparation = menu.id;
             if (menu.kind == AbilityKind::technology_theft) value.theft.emplace();
             if (economy) for (const auto& account : economy->players) if (account.player == value.player
@@ -556,10 +583,10 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
         InlineExecutor startup_executor;
         const auto& workers = executor ? *executor : static_cast<const PartitionExecutor&>(startup_executor);
         const auto& fiscal = *setup.fiscal;
-        const auto player = std::lower_bound(fiscal.players.begin(), fiscal.players.end(), observer->local_player,
+        const auto player = std::lower_bound(fiscal.players.begin(), fiscal.players.end(), view_player,
             [](const auto& row, PlayerId id) { return row.player < id; });
         auto contributions = forecast_contributions(workers, current_planets); // cached pure fiscal provider
-        if (player != fiscal.players.end() && player->player == observer->local_player && contributions) {
+        if (player != fiscal.players.end() && player->player == view_player && contributions) {
             EconomyForecast value;
             value.player = player->player;
             if (fiscal.contributions) { value.trade_routes = math::Fixed{}; value.alignment = math::Fixed{}; }
@@ -612,13 +639,13 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     // retained values, so idle ticks share storage while the reader computes age.
     part.emplace(gc_profile::Phase::snap_corruption);
     const std::array<std::uint64_t, 3> corruption_key{ability_input_generation,
-        observer_input_generation, observer ? observer->local_player : 0};
+        observer_input_generation, observer ? view_player : 0};
     if (!published_corruption_transitions || corruption_publication_key != corruption_key) {
         std::vector<LiveCorruptionTransition> transitions;
         if (ability_host && observer && observer_projection) {
             std::set<PlanetId> discovered;
             for (const auto& seen : *observer_projection)
-                if (seen.player == observer->local_player && seen.discovered) discovered.insert(seen.planet);
+                if (seen.player == view_player && seen.discovered) discovered.insert(seen.planet);
             for (const auto& row : ability_host->transitions) {
                 if (discovered.contains(row.planet)) transitions.push_back(row);
             }
@@ -635,13 +662,13 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     // Hash verification independently recomputes every reused result.
     InlineExecutor offer_inline_executor;
     const auto& offer_workers = executor ? *executor : static_cast<const PartitionExecutor&>(offer_inline_executor);
-    auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets, current_planets);
+    auto offer_inputs = production_offer_inputs(observations_for_offers, live_fleets, current_planets, view_player);
     if (!published_production_offers || published_offer_inputs != offer_inputs) {
         published_production_offers = std::make_shared<const std::vector<ObservedProductionOffer>>(
-            observed_production_offers(offer_inputs, live_fleets, offer_workers));
+            observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player));
         published_offer_inputs = std::move(offer_inputs);
         ++production_offer_rebuilds;
-    } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers)) {
+    } else if (verify_cached_hash && *published_production_offers != observed_production_offers(offer_inputs, live_fleets, offer_workers, view_player)) {
         throw std::runtime_error("galactic cached production offers differ from an independent recomputation");
     }
     const auto offers = published_production_offers;
@@ -675,8 +702,19 @@ std::shared_ptr<const GalacticSnapshot> GalacticSession::Impl::make_snapshot(std
     share(rows.income, keys[8], generation(StateSection::income), [&] { return income; });
     share(rows.victory, keys[9], generation(StateSection::victory), [&] { return victory; });
     share(rows.economy_corruption, keys[10], generation(StateSection::economy_corruption), [&] { return economy_corruption; });
+    auto projected_rows = rows;
+    projected_rows.ability_services = published_ability_services;
+    if (observer && std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), view_player)) {
+        const std::array key{generation(StateSection::history), generation(StateSection::observer)};
+        if (!cache.history || cache.history_key != key) {
+            cache.history = std::make_shared<const HistorySnapshot>(publish_history(history_archive,
+                observer->history_players, planets.size(), setup.rules.fiscal_cycle_frames, view_player, multiplayer_flag()));
+            cache.history_key = key;
+        }
+        projected_rows.history = cache.history;
+    }
     return std::make_shared<const GalacticSnapshot>(
-        completed_tick, published, std::vector<GalacticPlayer>{}, std::vector<Planet>{}, std::vector<Route>{}, std::vector<Fleet>{}, std::move(events), setup.rules.maximum_fleet_movement_distance, std::nullopt, movement_inputs, seat_control, seats, std::nullopt, std::nullopt, std::nullopt, control_effects, population, std::nullopt, std::nullopt, std::nullopt, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, std::nullopt, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production, rows);
+        completed_tick, published, std::vector<GalacticPlayer>{}, std::vector<Planet>{}, std::vector<Route>{}, std::vector<Fleet>{}, std::move(events), setup.rules.maximum_fleet_movement_distance, std::nullopt, movement_inputs, seat_control, seats, std::nullopt, std::nullopt, std::nullopt, control_effects, population, std::nullopt, std::nullopt, std::nullopt, std::vector<ObservedProductionOffer>{}, observer_projection, std::move(forecast), published_production_originals, std::nullopt, std::nullopt, std::nullopt, planet_access, observer_input_generation, economy_input_generation, published_actor_records, published_black_market_menus, published_ability_results, published_hero_action_menus, published_corruption_menu, published_sale_types, published_corruption_transitions, offers, published_production, projected_rows, view_player);
 }
 
 GalacticSession::GalacticSession(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
@@ -694,10 +732,14 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
     if (setup.fiscal) impl->native_fiscal_schema = std::make_shared<const FiscalSetup>(*setup.fiscal);
     if (setup.census) for (const auto& row : setup.census->objects) impl->actor_records.emplace(row.id, row);
     impl->economy = setup.player_economy;
+    for (const auto& player : setup.players) impl->history_archive.emplace(player.player_id, std::vector<HistorySample>{});
     impl->victory = setup.victory;
     // WGS-24: initialize the sparse leader projection once, in active object order.
     if (setup.census) for (const auto& row : setup.census->objects) impl->update_victory_actor(row);
     impl->control = setup.control;
+    if (impl->control) for (const auto& [id, row] : impl->actor_records) {
+        (void)id; impl->refresh_control_actor(row);
+    }
     if (impl->control && impl->control->state.empty())
         for (const auto& planet : setup.planets) {
             PlanetControl row; row.planet = planet.id; row.current_player = planet.owner;

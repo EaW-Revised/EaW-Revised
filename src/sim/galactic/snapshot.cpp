@@ -46,6 +46,7 @@ std::shared_ptr<const GalacticSnapshot> GalacticSnapshot::native_view(
     if (view->native_changes_->actors) view->native_columns_[static_cast<std::size_t>(NativeColumn::actors)] = view->native_changes_;
     if (view->native_changes_->observer_generation) view->native_columns_[static_cast<std::size_t>(NativeColumn::observer_generation)] = view->native_changes_;
     if (view->native_changes_->economy_generation) view->native_columns_[static_cast<std::size_t>(NativeColumn::economy_generation)] = view->native_changes_;
+    if (view->native_changes_->ability_services) view->native_columns_[static_cast<std::size_t>(NativeColumn::ability_services)] = view->native_changes_;
     return view;
 }
 
@@ -68,7 +69,7 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     std::shared_ptr<const std::vector<LiveCorruptionTransition>> corruption_transitions,
     std::shared_ptr<const std::vector<ObservedProductionOffer>> shared_production_offers,
     std::shared_ptr<const std::optional<ProductionSetup>> shared_production,
-    SharedSnapshotSections shared_sections)
+    SharedSnapshotSections shared_sections, const PlayerId view_player)
     : completed_tick_(completed_tick),
       clock_(clock),
       commissioned_originals_(std::move(commissioned_originals)),
@@ -96,8 +97,10 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
           : std::make_shared<const std::optional<IncomeState>>(std::move(income))),
       victory_(shared_sections.victory ? std::move(shared_sections.victory)
           : std::make_shared<const std::optional<VictoryState>>(std::move(victory))) {
+    history_ = std::move(shared_sections.history);
+    view_player_ = view_player ? view_player : *observer_ ? (*observer_)->solo_reference_human : 0;
     if (*observer_) observations_ = observations ? std::move(observations)
-        : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(**observer_, *fleets_, movement_.get(), this->actor_records()));
+        : std::make_shared<const std::vector<ObservedPlanet>>(observed_planets(**observer_, *fleets_, {view_player}, movement_.get(), this->actor_records()));
     production_ = shared_production ? std::move(shared_production)
         : std::make_shared<const std::optional<ProductionSetup>>(std::move(production));
     production_offers_ = shared_production_offers ? std::move(shared_production_offers)
@@ -111,20 +114,21 @@ GalacticSnapshot::GalacticSnapshot(const std::uint64_t completed_tick, const Gal
     live_corruption_menu_ = std::move(live_corruption_menu);
     black_market_menus_ = std::move(black_market_menus);
     ability_results_ = std::move(ability_results);
+    ability_services_ = std::move(shared_sections.ability_services);
     corruption_transitions_ = std::move(corruption_transitions);
     live_hero_action_menus_ = std::move(live_hero_action_menus);
     if (!black_market_menus_ && *economy_corruption_ && *player_economy_ && *observer_)
         black_market_menus_ = std::make_shared<const std::vector<ObservedBlackMarketMenu>>(
-            observed_black_market_menus(**economy_corruption_, **player_economy_, (*observer_)->local_player, *observations_));
-    if (corruption_menu && *observer_ && corruption_menu->player == (*observer_)->local_player
+            observed_black_market_menus(**economy_corruption_, **player_economy_, view_player_, *observations_));
+    if (corruption_menu && *observer_ && corruption_menu->player == view_player_
         && std::any_of(observations_->begin(), observations_->end(), [&](const auto& row) {
             return row.player == corruption_menu->player && row.planet == corruption_menu->planet && row.discovered;
         })) corruption_menu_ = std::move(corruption_menu);
-    if (hero_action_menus && *observer_ && hero_action_menus->player == (*observer_)->local_player
+    if (hero_action_menus && *observer_ && hero_action_menus->player == view_player_
         && std::any_of(observations_->begin(), observations_->end(), [&](const auto& row) {
             return row.player == hero_action_menus->player && row.planet == hero_action_menus->planet && row.discovered;
         })) hero_action_menus_ = std::move(hero_action_menus);
-    if (economy_forecast && *observer_ && economy_forecast->player == (*observer_)->local_player) {
+    if (economy_forecast && *observer_ && economy_forecast->player == view_player_) {
         // WGUI-13: discovered planets expose basic income; actual income
         // requires its own knowledge predicate, independently of ownership.
         std::vector<PlanetIncomeForecast> admitted;
@@ -182,7 +186,7 @@ std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
 
 std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     std::vector<std::uint8_t> bytes(detail::snapshot_magic.begin(), detail::snapshot_magic.end());
-    detail::put_u32(bytes, 3); // WGM-169/GAG-03: canonical live actor facts
+    detail::put_u32(bytes, 7); // immutable observer-authorized History publication
     detail::put_u64(bytes, completed_tick());
     detail::put_u64(bytes, clock().session_tick);
     detail::put_u64(bytes, clock().galactic_frame);
@@ -253,6 +257,8 @@ std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     PopulationCensus records;
     records.objects.assign(actor_records().begin(), actor_records().end());
     detail::encode_census(bytes, records);
+    detail::put_u8(bytes, history() ? 1 : 0);
+    if (history()) detail::encode_history_snapshot(bytes, *history());
     return bytes;
 }
 

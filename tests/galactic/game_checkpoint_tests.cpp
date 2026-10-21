@@ -931,7 +931,7 @@ void observer_load_clock() {
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         auto config = setup();
         config.seats.push_back({{99}, 1, galactic::SeatKind::script, 0, true, 0});
-        galactic::ObserverSetup observer; observer.local_player = 1; observer.logical_fps = 17;
+        galactic::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1; observer.logical_fps = 17;
         observer.players = {{1}, {2}};
         for (const auto& planet : config.planets) {
             galactic::ObserverPlanet facts; facts.planet = planet.id;
@@ -1205,7 +1205,7 @@ void direct_child_refusals() {
     (void)take(galaxy.step(executor));
     auto state = take(galaxy.save_checkpoint_state());
     archive::Reader in(state); Bytes world; std::uint32_t owner_version{};
-    in(owner_version, world); expect(owner_version == 3, "crafted refusal fixture reads the current owner format");
+    in(owner_version, world); expect(owner_version == 4, "crafted refusal fixture reads the current owner format");
     const auto offset = state.size() - in.remaining();
     state[offset] = 2; // parent tick now ahead of the galaxy clock without a child
     auto fresh = take(campaign::GameSession::create(config));

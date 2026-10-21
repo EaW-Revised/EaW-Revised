@@ -1,4 +1,12 @@
-# Galactic replay format v2 (EAWRGCR)
+# Galactic replay format v5 (EAWRGCR)
+
+Current compatibility identities are replay format 5, galactic rules 4 and state
+encoding 7; published snapshot encoding is 7. Observer extension 12 starts with payload schema 2 (`u16`), then the
+ordered human player vector and solo reference-human ID (zero in multiplayer),
+followed by its canonical policy tables and all-player records. Peer-local view
+selection and publication caches do not enter the replay. Checkpoint galaxy
+version 39 carries the same canonical observer policy and automatic control sources; older project formats
+are rejected.
 
 The replay of a galactic session: the tick-zero galaxy, every executed command in canonical
 order and the final tick. A live run records it with `GalacticSession::record()`, and
@@ -15,14 +23,22 @@ Unknown versions, flags, layers and opcodes, malformed lengths and trailing byte
 are checked against the bytes left before anything is allocated; the whole input is at most
 256 MiB.
 
+Native effect kind **21** (`identity_reservation`, GFS-A22) reserves identity frontiers before
+a player's actual admissions. Its fixed 32-byte payload contains four uint64 values: entity
+expected/next, then invasion-request expected/next. An unused pair carries expected == next.
+Reconstruction validates both expected values against the live frontiers and refuses a backward
+reservation, zero invasion identity, or an exhausted uint64 sentinel before either counter
+changes. Two unchanged frontiers emit no effect. The existing native-effect framing carries
+this kind; replay header and checkpoint layouts are unchanged.
+
 ## Header: 96 bytes
 
 | Offset | Width | Field | Rule |
 |---:|---:|---|---|
 | 0 | 8 | magic | ASCII `EAWRGCR` followed by zero |
-| 8 | 2 | format_version | 2 |
+| 8 | 2 | format_version | 5 |
 | 10 | 2 | flags | bit 0: debug commands admitted; bit 1: header extensions present; other bits zero |
-| 12 | 4 | rules_version | the galactic rules version of the build, 1 |
+| 12 | 4 | rules_version | the galactic rules version of the build, 4 |
 | 16 | 32 | content_identity | identity of the content tables the galaxy was built from |
 | 48 | 32 | campaign_identity | identity of the campaign definition |
 | 80 | 8 | seed | the session seed |
@@ -513,15 +529,26 @@ adapter's responsibility (legacy EAWR-1129).
 
 ## Political control extension (tag 8)
 
-After the legacy absent-force roster, a nonempty sourced ground-capability table
-appends tail version **1** (u8), count (u32), then each current TypeId (u64),
-Q24 combat power (i64), transport-behavior flag (u8) and stay-in-transport flag
-(u8). The count and identities exactly match the ordered control type table.
-Flags must be 0/1; unknown versions, missing/duplicate/reordered identities,
-truncation and trailing bytes refuse. No table emits no tail and preserves
-legacy bytes and supplied capability predicates. The same existing control
-state/checkpoint payload retains these facts; capability reads direct live
-movement contents ([WGM-106](behaviour/walks/gc-movement-control.md)).
+After the absent-force roster, the ground-capability table has a count (u32),
+then each current TypeId (u64), Q24 combat power (i64), transport-behavior flag
+(u8) and stay-in-transport flag (u8). A nonempty table's count and identities
+exactly match the ordered control type table; zero retains supplied capability
+predicates ([WGM-106](behaviour/walks/gc-movement-control.md)).
+
+The automatic-control profile table follows: u32 type count; each row has u64
+current TypeId and u32 ability count, then u8 protection flag, u8 initially
+enabled flag, u32 stacking-category bits and i64 Q24 direct time multiplier per
+ability. Protection ignores the numeric fields. The physical source ledger
+follows with u32 count and rows `(u64 planet, u64 actor, u64 current type, u32
+ability index, u32 owner)`, ordered by planet, actor and ability. Both counts
+are always encoded, including zero. The former planet protection Boolean is
+removed. Source eligibility and the target-player gate are
+[GPC-01/02](behaviour/walks/gc-movement-control.md).
+
+Flags must be 0/1. Unknown profiles, malformed indices, actor/location/owner
+mismatches, duplicate/reordered identities, truncation and trailing bytes refuse.
+The same state/checkpoint payload retains these facts. Replay format 5 and checkpoint
+schema 39 reject the earlier encoding rather than retaining a legacy reader.
 
 Opt-in tag 8 contains the canonical `PoliticalControlSetup` encoding from
 `src/sim/galactic/control.cpp#encode_control`: authored transition duration and
@@ -772,3 +799,31 @@ enroute fleet or an empty orbit supplies no encounter. It reuses the ordinary
 relink/gather provider and publishes conflict to the existing tail. This is the
 staged Lua adapter, with synchronous result and conflict-end wait qualified in
 [the movement walk](behaviour/walks/gc-movement-control.md).
+
+## Overview raid order
+
+Galactic opcode 5 retains the MoveFleet fleet ID, counted planet path and optional
+destination slot, followed by one mandatory uint8 raid boolean (0 or 1). Ordinary
+move producers write zero. Replay format/rules 4 and the `eawr-gc-rules-v4`
+content domain reject older project command layouts; there is no legacy reader.
+
+Fleet rows append a uint8 optional raid-destination presence and, when present,
+a uint64 planet identity. Movement inputs retain the effective raid rules and
+ordered type classifications after the transport-role table. The galaxy
+checkpoint schema is 38 and canonical state encoding is 6. Default fleet rows
+therefore gain a zero byte; this is a state-format change even without raids.
+## Ground ability travel continuation
+
+WGM-14/34 and WGCH-155..157: MoveFleet appends a mandatory uint64 original
+supplied actor/container identity after the raid byte; LaunchFleet appends the
+same field after its destination slot. Zero means ordinary movement. Accepted
+transit retains this identity only. Intermediate hops preserve it, bounce clears
+it, and final relink consumes it. Conflict relink/gather clears without dispatch.
+A successful final arrival resolves the live object and current transport contents
+in stored order after any same-owner slot merge. Missing/dead/foreign identities
+and cancelled services cannot activate. The shared host reads the authored ground
+activation group and creates any priced preparation only after arrival.
+
+Ability setup encoding v8 carries each profile's ground-activated ability kinds.
+The checkpoint galaxy section is v38; pending commands and transit state include
+the original identity. Older project recordings/checkpoints need not load.

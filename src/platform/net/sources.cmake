@@ -10,6 +10,7 @@ set(EAWR_PLATFORM_NET_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_launch.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_lifecycle.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_lobby.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/lan_match_galactic.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_online.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_recovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_match_support.cpp"

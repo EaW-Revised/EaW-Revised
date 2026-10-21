@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <set>
 
 namespace eawr::sim::galactic::session_detail {
 struct FleetData;
@@ -61,7 +62,8 @@ core::Result<void> gather_native_movement_orbit(Owner& owner, Visit visit, Fleet
     const auto defender = owner.registry.template get<PlanetData>(owner.planets.at(destination)).owner;
     core::Result<void> result = core::Result<void>::success();
     visit([&](FleetId other_id, const auto& other) {
-        if (result && other_id != id && other.motion.transit && (other.owner == attacker || other.owner == defender)
+        if (result && other_id != id && other.motion.transit && other.raid_destination != destination
+            && (other.owner == attacker || other.owner == defender)
             && other.motion.transit->path.back() == destination
             && other.motion.transit->path.at(other.motion.transit->hop + 1) == destination)
             result = link_native_movement_orbit(owner, visit, other_id, destination, tick, events);
@@ -102,10 +104,30 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     if (f.owner != (returning_player ? *returning_player : issuer->player)) return reject(GalacticRejectReason::not_authorized);
     // WGM-84: a fleet with no orbit parent cannot be redirected.
     if (f.orbit == 0 || f.motion.transit) return reject(GalacticRejectReason::movement_blocked);
+    if (move.raid && (!owner.raid_qualified(move.fleet, move.path.back()) || move.destination_slot))
+        return reject(GalacticRejectReason::movement_blocked);
     auto prepared = prepare_native_movement(
         Fleet{move.fleet, f.owner, f.orbit, f.members, f.orbit_slot, f.motion}, command, *owner.movement_inputs,
         *owner.setup.fleet_control, *owner.graph, owner.sorted_planets(), owner.sorted_routes(), owner.next_id, owner.live_object_count, bool(returning_player));
     if (prepared.reason != GalacticRejectReason::none) return reject(prepared.reason);
+    if (move.destination_actor) {
+        if (move.raid) return reject(GalacticRejectReason::unknown_value);
+        EntityId actor = move.destination_actor;
+        bool attached = false;
+        std::set<EntityId> visited;
+        while (actor && visited.insert(actor).second) {
+            const auto* live = owner.movement_actor(actor);
+            if (!live || live->dead || live->delete_pending
+                || live->owner != f.owner || live->planet != f.orbit) break;
+            if (live->container == move.fleet) {
+                attached = std::none_of(prepared.departure.left_behind.begin(), prepared.departure.left_behind.end(),
+                    [&](auto left) { return left == actor; });
+                break;
+            }
+            actor = live->container;
+        }
+        if (!attached) return reject(GalacticRejectReason::invalid_membership);
+    }
     auto motion = std::move(prepared.motion);
     // Admission is complete: commit the remnant by existing identity, then unlink/depart.
     if (!prepared.departure.left_behind.empty()) {
@@ -126,6 +148,7 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     }
     auto& departing = owner.registry.template get<session_detail::FleetData>(owner.fleets.at(move.fleet));
     departing.orbit = 0; departing.motion = std::move(motion);
+    departing.raid_destination = move.raid ? std::optional<PlanetId>{move.path.back()} : std::nullopt;
     owner.relocate_actor(move.fleet, departing.owner, 0, 0);
     for (const auto& member : departing.members) owner.relocate_actor(member.id, departing.owner, 0, move.fleet);
     owner.dirty[static_cast<std::size_t>(StateSection::fleets)] = true;

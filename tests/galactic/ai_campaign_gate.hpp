@@ -581,7 +581,7 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             }
             capture("blocked-invasion", blocked);
             capture("post-return", observed->last_tactical_return.has_value() && game.mode() == cp::SessionMode::galaxy);
-            if (snapshot->victory()) report.terminal = gc::campaign_result(*snapshot->victory(), snapshot->observer() ? snapshot->observer()->local_player : 0, false, false);
+            if (snapshot->victory()) report.terminal = gc::campaign_result(*snapshot->victory(), snapshot->observer() ? snapshot->observer()->solo_reference_human : 0, false, false);
             if (report.terminal) { report.stop_reason = "campaign_result"; break; }
         }
         if (report.stop_reason.empty()) report.stop_reason = "galactic_game_time_budget";

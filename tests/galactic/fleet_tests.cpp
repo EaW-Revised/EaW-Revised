@@ -198,7 +198,192 @@ void native_shadow_layers() {
         else expect(reference == hashes, "native player layer continuation is equal at 1/2/4/8 workers");
     }
 }
+void native_identity_reservations() {
+    const eawr::sim::InlineExecutor executor;
+    auto made = gc::GalacticSession::create(setup());
+    expect(bool(made), "identity reservation fixture constructs"); if (!made) return;
+    auto world = std::move(made).value();
+    const auto first = world.next_entity_id();
+    const auto invasion = world.next_native_invasion_id();
+    const auto initial = world.canonical_state_bytes();
+    expect(!world.reserve_native_identity_frontier(first + 1, first + 2)
+        && !world.reserve_native_identity_frontier(first, first - 1)
+        && world.canonical_state_bytes() == initial && world.record().native_effects.empty(),
+        "stale and rewinding identity reservations fail before mutating state or the journal");
+    expect(bool(world.reserve_native_identity_frontier(first, first)) && world.record().native_effects.empty(),
+        "an unchanged identity frontier does not append an effect");
+    expect(!world.reserve_native_frontiers(first, first + 1, invasion + 1, invasion + 2)
+        && !world.reserve_native_frontiers(first, first + 1, invasion, invasion - 1)
+        && world.canonical_state_bytes() == initial && world.record().native_effects.empty(),
+        "an invalid invasion pair rejects an otherwise valid entity reservation before either counter changes");
+    const auto reserved = first + gc::galactic_max_objects;
+    const auto reserved_invasion = invasion + gc::galactic_max_objects;
+    expect(bool(world.reserve_native_frontiers(first, reserved, invasion, reserved_invasion)), "ordered entity and invasion blocks reserve together");
+    expect(world.cached_state_hash().get() == world.state_sha256(), "both reserved frontiers dirty their independent state hash sections");
+    const auto created = world.admit_native_fleet(1, gc::CreateFleet{1, {40, 41}, 0}, false);
+    expect(created && created.value().admitted && created.value().object == reserved,
+        "a later player's first actual creation uses its reserved identity");
+    const auto recording = world.record();
+    expect(recording.native_effects.size() == 2
+        && recording.native_effects.front().kind == gc::NativeEffectKind::identity_reservation
+        && recording.native_effects.front().payload.size() == 32,
+        "the identity reservation precedes the actual admission in the journal");
+    const auto encoded = gc::write_replay(recording);
+    expect(bool(encoded), "identity reservation replay encodes"); if (!encoded) return;
+    const auto decoded = gc::parse_replay(encoded.value());
+    expect(decoded && decoded.value() == recording, "identity reservation replay roundtrips"); if (!decoded) return;
+    auto restored = gc::GalacticSession::from_replay(decoded.value());
+    expect(restored && restored.value().replay_native_barrier(executor)
+        && restored.value().canonical_state_bytes() == world.canonical_state_bytes()
+        && restored.value().next_native_invasion_id() == reserved_invasion
+        && restored.value().record() == recording,
+        "reconstruction restores the reserved gap before allocating the recorded object");
+    auto malformed = recording;
+    malformed.native_effects.front().payload.pop_back();
+    auto rejected = gc::GalacticSession::from_replay(malformed);
+    expect(!rejected, "a truncated reservation is refused before constructing a reconstruction session");
+    malformed = recording; malformed.native_effects.front().payload.resize(16);
+    expect(!gc::GalacticSession::from_replay(malformed), "the unreleased shorter reservation form is rejected");
+    malformed = recording; malformed.final_tick_count = 1;
+    malformed.native_effects.front().phase = gc::NativeEffectPhase::world_service;
+    expect(!gc::GalacticSession::from_replay(malformed), "identity reservations belong only to the barrier phase");
+    malformed = recording; ++malformed.native_effects.front().payload.front();
+    rejected = gc::GalacticSession::from_replay(malformed);
+    expect(rejected && !rejected.value().replay_native_barrier(executor)
+        && rejected.value().next_entity_id() == first,
+        "a stale reservation fails reconstruction before changing the frontier");
+    malformed = recording; ++malformed.native_effects.front().payload[16];
+    rejected = gc::GalacticSession::from_replay(malformed);
+    expect(rejected && !rejected.value().replay_native_barrier(executor)
+        && rejected.value().next_entity_id() == first && rejected.value().next_native_invasion_id() == invasion,
+        "a stale invasion pair fails reconstruction before changing either frontier");
+    auto only_invasion = gc::GalacticSession::create(setup()).value();
+    expect(bool(only_invasion.reserve_native_frontiers(first, first, invasion, reserved_invasion))
+        && only_invasion.next_entity_id() == first && only_invasion.next_native_invasion_id() == reserved_invasion
+        && only_invasion.cached_state_hash().get() == only_invasion.state_sha256(),
+        "an invasion-only reservation keeps the entity frontier unchanged and invalidates its own hash section");
+    auto invasion_replay = gc::GalacticSession::from_replay(only_invasion.record());
+    expect(invasion_replay && invasion_replay.value().replay_native_barrier(executor)
+        && invasion_replay.value().canonical_state_bytes() == only_invasion.canonical_state_bytes(),
+        "an unused entity pair reconstructs the invasion frontier without any admission");
+}
+
+void native_sibling_views() {
+    auto made = gc::GalacticSession::create(setup());
+    expect(bool(made), "common-root fleet fixture constructs"); if (!made) return;
+    auto world = std::move(made).value();
+    auto opened = world.begin_native_actions(1, 16);
+    expect(bool(opened), "common-root fleet layer opens"); if (!opened) return;
+    auto root = std::move(opened).value();
+    const auto frozen = root.snapshot(); const auto first = root.next_entity_id();
+    expect(!root.fork_player(0, first, 16) && !root.fork_player(3, first, 16)
+        && !root.fork_player(1, first - 1, 16) && !root.fork_player(1, first, 0),
+        "common-root forks validate player, identity and retention bounds");
+    const auto invasion = root.next_native_invasion_id();
+    expect(!root.fork_player(1, first, 16, invasion - 1), "invasion blocks cannot rewind the frozen request frontier");
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    std::vector<std::pair<gc::PlayerId, Shadow::IntentRecord>> intents;
+    const auto retain = [&](gc::PlayerId player, Shadow::IntentRecord intent) { intents.emplace_back(player, std::move(intent)); };
+    auto lower_result = root.fork_player(1, first, 16, invasion, retain);
+    auto higher_result = root.fork_player(2, first + gc::galactic_max_objects, 16, invasion + gc::galactic_max_objects, retain);
+    expect(lower_result && higher_result, "sibling owners fork from the same immutable root");
+    if (!lower_result || !higher_result) return;
+    auto lower = std::move(lower_result).value(); auto higher = std::move(higher_result).value();
+    expect(lower.next_native_invasion_id() == invasion
+        && higher.next_native_invasion_id() == invasion + gc::galactic_max_objects
+        && root.next_native_invasion_id() == invasion, "sibling invasion handles use disjoint blocks without advancing the root");
+    expect(!lower.for_player(2, 16) && !lower.fork_player(2, first + gc::galactic_max_objects, 16),
+        "an independent player cannot inherit another player's reserved identity block or become a fork root");
+    expect(bool(lower.admit_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false)), "first owner stages its own fleet edit");
+    const auto lower_creation = lower.admit_fleet(1, gc::CreateFleet{1, {40, 41}, 0}, false);
+    expect(lower_creation && lower_creation.value().admitted && lower_creation.value().object == first,
+        "first owner creates from its preassigned identity block");
+    expect(higher.fleet(10)->orbit_slot == 0 && !higher.fleet(first) && root.snapshot() == frozen,
+        "a sibling sees the root even after a lower owner edits and creates fleets");
+    expect(bool(higher.admit_fleet(2, gc::RemoveFleetMembers{12, {30}}, false)), "second owner stages its own removal");
+    const auto higher_creation = higher.admit_fleet(2, gc::CreateFleet{1, {30}, 2}, false);
+    expect(higher_creation && higher_creation.value().admitted
+        && higher_creation.value().object == first + gc::galactic_max_objects,
+        "second owner creates from a disjoint identity block");
+    expect(lower.fleet(12) && root.fleet(12) && !lower.fleet(first + gc::galactic_max_objects),
+        "second-owner edits and identities never enter the first owner's view");
+    expect(intents.size() == 4 && intents[0].first == 1 && intents[2].first == 2,
+        "native owners retain concrete typed intents without publishing canonical world writes");
+    if (intents.size() == 4) {
+        const auto& edit = intents[0].second; const auto& create = intents[1].second;
+        const auto& foreign_create = intents[3].second;
+        const auto* request = std::get_if<Shadow::FleetRequest>(&create.request);
+        expect(edit.first_id == first && edit.next_id == first && create.first_id == first && create.next_id == first + 1
+            && create.first_invasion == invasion && create.next_invasion == invasion
+            && foreign_create.first_id == first + gc::galactic_max_objects
+            && foreign_create.next_id == first + gc::galactic_max_objects + 1,
+            "each retained intent owns its exact allocation span, including non-allocating operations and sibling gaps");
+        expect(request && request->payload == gc::CommandPayload{gc::CreateFleet{1, {40, 41}, 0}}
+            && request->receipt.object == first, "canonical admission receives the original request and speculative handle by value");
+    }
+    const std::array siblings{lower, higher};
+    const auto before = world.state_sha256();
+    expect(!world.commit_native_actions(siblings) && world.state_sha256() == before,
+        "legacy stacked replay refuses independent forks before applying any effect");
+}
+void native_fleet_reconciliation() {
+    const eawr::sim::InlineExecutor executor;
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    const auto capture = [&](gc::GalacticSession& world, eawr::sim::EntityId first) {
+        std::vector<Shadow::IntentRecord> intents;
+        auto root = world.begin_native_actions(1, 16).value();
+        auto own = root.fork_player(1, first, 16, {}, [&](auto, auto intent) { intents.push_back(std::move(intent)); }).value();
+        const auto result = own.admit_fleet(1, gc::CreateFleet{1, {40, 41}, 0}, false);
+        expect(result && result.value().admitted && result.value().object == first,
+            "fleet reconciliation captures an admitted provisional creation");
+        expect(own.intent_sink() && own.intents().size() == intents.size() && !root.intent_sink() && root.intents().empty(),
+            "accepted transaction adapters can inspect their local immutable intent prefix and owning sink");
+        return intents;
+    };
+    auto accepted = gc::GalacticSession::create(setup()).value();
+    {
+        auto root = accepted.begin_native_actions(1, 16).value();
+        const auto before = accepted.canonical_state_bytes();
+        expect(!accepted.commit_native_actions(root, false, false) && accepted.canonical_state_bytes() == before,
+            "manual intent delivery cannot suppress ordinary canonical native publication");
+    }
+    auto intents = capture(accepted, accepted.next_entity_id());
+    expect(intents.size() == 1, "one concrete fleet request feeds canonical admission"); if (intents.size() != 1) return;
+    const auto admitted = accepted.readmit_native_fleet(intents.front());
+    expect(admitted && admitted.value().admitted && fleet(*accepted.snapshot(), admitted.value().object)
+        && accepted.record().native_effects.size() == 1,
+        "an admitted candidate publishes its actual object and journal exactly once");
+    const auto after = accepted.canonical_state_bytes();
+    expect(!accepted.readmit_native_fleet(intents.front()) && accepted.canonical_state_bytes() == after,
+        "a reused allocated intent refuses its stale frontier before mutation");
+    auto conflicted = gc::GalacticSession::create(setup()).value();
+    const auto provisional = conflicted.next_entity_id() + gc::galactic_max_objects;
+    intents = capture(conflicted, provisional);
+    const auto earlier = conflicted.admit_native_fleet(1, gc::CreateFleet{1, {40, 41}, 0}, false);
+    expect(earlier && earlier.value().admitted, "an earlier committed effect consumes the frozen membership");
+    const auto events = conflicted.snapshot()->events().size();
+    const auto refused = conflicted.readmit_native_fleet(intents.front());
+    expect(refused && !refused.value().admitted && !fleet(*conflicted.snapshot(), provisional)
+        && conflicted.next_entity_id() == provisional + 1 && conflicted.snapshot()->events().size() == events,
+        "a late refusal discards the sparse candidate, burns its Lua handle and publishes no speculative world events");
+    const auto recording = conflicted.record();
+    expect(std::count_if(recording.native_effects.begin(), recording.native_effects.end(), [](const auto& effect) {
+        return effect.kind == gc::NativeEffectKind::fleet;
+    }) == 1 && recording.native_effects.back().kind == gc::NativeEffectKind::identity_reservation,
+        "the journal retains the actual admission and burned gap, never the frozen admission receipt");
+    auto restored = gc::GalacticSession::from_replay(recording);
+    expect(restored && restored.value().replay_native_barrier(executor)
+        && restored.value().canonical_state_bytes() == conflicted.canonical_state_bytes(),
+        "actual-only fleet admission and refused handle gaps reconstruct identically");
+    expect(bool(conflicted.admit_native_fleet(1, gc::RemoveFleetMembers{11, {22}}, false)), "another actor becomes available after refusal");
+    const auto later = conflicted.admit_native_fleet(1, gc::CreateFleet{1, {22}, 0}, false);
+    expect(later && later.value().admitted && later.value().object > provisional
+        && !fleet(*conflicted.snapshot(), provisional), "a refused speculative handle never aliases a later real object");
+}
 void contracts() {
+    native_identity_reservations();
+    native_sibling_views();
+    native_fleet_reconciliation();
     const auto r = replay();
     const auto bytes = gc::write_replay(r).value();
     const auto parsed = gc::parse_replay(bytes);

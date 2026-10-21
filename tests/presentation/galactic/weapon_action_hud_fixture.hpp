@@ -32,7 +32,7 @@ namespace eawr::viewer::galactic {
     g::HackMenuPreparation hack{{10,101,1002,f(250)},20};
     if (name == "hack-fractional") hack.prepared.prepared_price = h::Fixed::from_raw(f(250).raw()+h::Fixed::scale*3/4);
     auto menus = g::observed_hero_action_menus(world,local,row,10,nullptr,nullptr,&hack);
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     return std::make_shared<const g::GalacticSnapshot>(0, g::GalacticClock{}, std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{}, std::vector<g::Route>{}, std::vector<g::Fleet>{}, std::vector<g::GalacticEvent>{},
         std::nullopt, std::nullopt, nullptr, std::nullopt, std::vector<g::Seat>{}, std::nullopt, std::nullopt,

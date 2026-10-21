@@ -176,6 +176,7 @@ private:
     void prewarm_effect_programs();
     template <typename SampleOf>
     bool update_corrupt_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of);
+    bool update_concentrate_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units);
     template <typename SampleOf>
     bool update_lure_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of);
     template <typename SampleOf>
@@ -241,6 +242,8 @@ private:
         } defence;
         std::string energy_owner_particle;
         std::string replenish_particle;
+        std::string concentrate_particle;
+        float concentrate_scale{1.0F};
         std::string corrupt_target_particle, corrupt_owner_particle;
         std::string lure_particle; // WLU-09: the LURE craft's Particle_Effect
         std::string blast_charging_particle, blast_charged_particle;
@@ -297,6 +300,7 @@ private:
         std::uint32_t drain_from{};
         particles::EmitterFrame frame;
         sim::EntityId corrupt_target{};
+        sim::EntityId concentrate_owner{}, concentrate_target{};
         sim::EntityId lure_team{}; // WLU-09: the luring team it follows
         sim::EntityId blast_owner{};
         bool blast_charged{};

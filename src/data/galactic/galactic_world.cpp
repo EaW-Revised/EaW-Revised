@@ -120,6 +120,7 @@ void load_factions(const Catalog& catalog, GalacticData& data) {
         faction.is_neutral = record.boolean("Is_Neutral");
         faction.can_control_planets = record.boolean("Can_Control_Planets");
         faction.primary_enemy = record.text("Primary_Enemy");
+        faction.basic_ai = record.text("Basic_AI");
         faction.allies = record.names("Allies");
         faction.enemies = record.names("Enemies");
         faction.home_planet = record.text("Home_Planet");
@@ -277,6 +278,11 @@ const std::vector<std::string_view>& galactic_constant_tags() {
         "MaximumPoliticalControl",
         "Political_Control_Change_Time_Seconds",
         "Max_Ground_Forces_On_Planet",          // WGM-39
+        "Raid_Force_Required_Faction",          // WGM-37
+        "Raid_Force_Free_Object_Category_Mask",
+        "Raid_Force_Limited_Object_Category_Mask",
+        "Raid_Force_Max_Heros",
+        "Raid_Force_Max_Limited_Objects",
         "TradeRouteMovementFactor",
         "MaximumFleetMovementDistance",
         "AIUsesFogOfWarGalactic",              // WGA-08/266
@@ -319,7 +325,8 @@ void load_constants(const vfs::Vfs& filesystem, GalacticData& data) {
         Constant constant{std::string(tag), trim(node->raw_text), std::nullopt};
         if (tag != "Good_Side_Name" && tag != "Evil_Side_Name" && tag != "Corrupt_Side_Name"
             && tag != "Strategic_Queue_Tactical_Battles" && tag != "Political_Income_Curve"
-            && tag != "AIUsesFogOfWarGalactic") {
+            && tag != "AIUsesFogOfWarGalactic" && tag != "Raid_Force_Required_Faction"
+            && tag != "Raid_Force_Free_Object_Category_Mask" && tag != "Raid_Force_Limited_Object_Category_Mask") {
             constant.number = record.number(tag);
         }
         data.constants.push_back(std::move(constant));

@@ -220,6 +220,21 @@ class SetupEscapeContract(unittest.TestCase):
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "requires the viewer GPU lane and installed game data")
 class FrontEndGpu(unittest.TestCase):
+    def test_gpu_diagnostics_keep_the_menu_usable(self):
+        with tempfile.TemporaryDirectory(prefix="front-end-gpu-diagnostics-") as temporary:
+            output = Path(temporary).resolve()
+            result, _ = run_front_end(output, "gpu-diagnostics",
+                ("--eawr-report", str(output / "report.json"), "--eawr-gpu-labels",
+                 "--eawr-diagnostic-vsync", "1", "--eawr-diagnostic-max-fps", "60"),
+                engine=("--accurate-breadcrumbs", "--verbose", "--max-fps", "60"), with_capture=False)
+            self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            self.assertIn("EAWR diagnostic observed: vsync=1; max_fps=60", result.stdout)
+            self.assertNotIn("ERROR:", result.stdout)
+            report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "ok")
+            self.assertIs(report["front_end_ready"], True)
+            self.assertEqual(report["exit_reason"], "clean_quit")
+
     def test_front_end_writes_its_own_report_on_both_quit_routes(self):
         # The engine-driven preview and the menu's Exit both report to the same UTF-8 path flag.
         with tempfile.TemporaryDirectory(prefix="front-end-report-") as temporary:
@@ -251,8 +266,21 @@ class FrontEndGpu(unittest.TestCase):
             output = Path(temporary).resolve()
             result, _ = run_front_end(output, "online-service-routes",
                                       ("--eawr-front-end-test-online", "--eawr-settings-file", str(output / "settings.cfg"),
-                                       "--eawr-attract", "off"))
+                                       "--eawr-lighting", "sh"))
             self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            self.assertEqual(SCREEN_LINE.findall(result.stdout)[:5],
+                             ["main_menu", "multiplayer", "online_setup", "main_menu", "multiplayer"])
+            seen = {label: rest for label, *rest in ATTRACT_LINE.findall(result.stdout)}
+            behind = {label: (scene.lower(), int(sampled), int(differing), int(distinct))
+                      for label, scene, sampled, differing, distinct in BEHIND_LINE.findall(result.stdout)}
+            self.assertEqual(behind["online_setup"][0], "false")
+            scene, sampled, differing, distinct = behind["online_cancel"]
+            self.assertEqual(scene, "true")
+            self.assertGreater(differing / sampled, 0.5)
+            self.assertGreater(distinct, 8, "Internet Cancel restores a rendered battle")
+            self.assertIn("online_setup", seen)
+            self.assertIn("online_cancel", seen)
+            self.assertGreater(int(seen["online_cancel"][3]), int(seen["online_setup"][3]))
             self.assertIn("EAWR online service lobby source: online", result.stdout)
             self.assertIn("EAWR online service network page: network", result.stdout)
             self.assertIn("EAWR online service options page: network", result.stdout)
@@ -283,7 +311,7 @@ class FrontEndGpu(unittest.TestCase):
         screens = SCREEN_LINE.findall(log)
         self.assertEqual(screens, [
             "main_menu", "single_player", "skirmish_setup", "single_player", "main_menu",
-            "multiplayer", "lan_setup", "multiplayer", "main_menu", "options", "main_menu",
+            "multiplayer", "lan_setup", "main_menu", "multiplayer", "main_menu", "options", "main_menu",
             "load_game", "main_menu", "single_player",
             *(("campaign_setup", "single_player") if stock else ()), "main_menu"], screens)
         states = menus(log)
@@ -395,6 +423,21 @@ class FrontEndGpu(unittest.TestCase):
                 self.assertGreater(int(units), 10, label)
             self.assertEqual((hud.lower(), battle_input.lower()), ("false", "false"), label)
         self.assertRegex(log, r"EAWR front end attract skirmish_setup: running true")
+        # MAT-14: selector and both main-menu return paths show the live battle.
+        behind = {label: (scene.lower(), int(sampled), int(differing), int(distinct))
+                  for label, scene, sampled, differing, distinct in BEHIND_LINE.findall(log)}
+        previous = int(seen["main_menu"][3])
+        for label in ("multiplayer", "lan_cancel", "selector_back"):
+            self.assertIn(label, behind)
+            scene, sampled, differing, distinct = behind[label]
+            self.assertEqual(scene, "true", label)
+            self.assertGreater(sampled, 1000, label)
+            self.assertGreater(differing / sampled, 0.5, label)
+            self.assertGreater(distinct, 8, label + " shows a battle instead of a flat backing")
+            self.assertIn(label, seen)
+            updates = int(seen[label][3])
+            self.assertGreater(updates, previous, label + " keeps the camera running")
+            previous = updates
         # #3168: the single-player staging leaves the battle visible behind its controls; the LAN
         # connection (a multiplayer menu) hides it. Read from the rendered frame with the dialog's own
         # controls hidden: the battle's frame differs from the flat backing nearly everywhere, the
@@ -410,6 +453,9 @@ class FrontEndGpu(unittest.TestCase):
         scene, sampled, differing, _ = behind["lan_setup"]
         self.assertEqual(scene, "false")
         self.assertLess(differing / sampled, 0.02, "the multiplayer staging hides the battle")
+        self.assertIn("lan_setup", seen)
+        self.assertGreater(int(seen["lan_cancel"][3]), int(seen["lan_setup"][3]))
+        self.assertEqual(log.count("EAWR front end attract started"), 1, "menus keep the same battle alive")
         # The camera is alive: by the settings screen its eye left the first update's.
         eye = [float(value) for value in seen["options"][4:7]]
         first = [float(value) for value in seen["options"][7:10]]

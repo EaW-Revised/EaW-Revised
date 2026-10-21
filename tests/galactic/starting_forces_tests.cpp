@@ -90,6 +90,40 @@ struct Fixture {
         return cp::place_starting_force(inputs, request(type), next, galaxy, context);
     }
 };
+void reconciled_placement_contracts() {
+    Fixture fixture;
+    auto inputs = std::make_shared<const cp::StartingForceInputs>(fixture.inputs);
+    const auto creation = cp::prepare_nested_creation(*inputs);
+    expect(bool(creation), "reconciliation fixture has qualified constructor facts");
+    if (!creation) return;
+    const gc::Planet planet{1, {}, 1};
+    const auto view = [&] {
+        return gc::GalacticSession::NativeForceView{planet, fixture.context.control.planets[0], fixture.context.production.planets[0],
+            creation.value(), fixture.context.control.max_ground_forces, fixture.galaxy.fleets, fixture.context.movement.contents, {}};
+    };
+    const gc::GalacticSession::NativeProductionRequest request{1, 1, 12, {}};
+    const auto legacy = cp::stock_native_force_shadow_builder(inputs, request);
+    const auto reconcile = cp::stock_native_force_reconciliation_builder(inputs, request);
+    auto old = legacy(view(), 100); auto accepted = reconcile(view(), 100);
+    expect(old && accepted && accepted.value() && accepted.value()->next_id == old.value().next_id
+        && accepted.value()->structures == old.value().structures && accepted.value()->originals == old.value().originals,
+        "typed reconciliation placement preserves successful constructor output");
+    fixture.context.production.planets[0].ground_slots = 0;
+    const auto refused_before = legacy(view(), 100);
+    const auto ordinary = reconcile(view(), 100);
+    const auto refused_after = legacy(view(), 100);
+    expect(!refused_before && !refused_after && ordinary && !ordinary.value()
+        && refused_before.error().code == std::string(gc::diagnostic_codes::invalid_setup)
+        && refused_after.error().code == refused_before.error().code && refused_after.error().message == refused_before.error().message,
+        "ordinary slot refusal is typed only in reconciliation and leaves public error bytes unchanged");
+    const auto missing = cp::stock_native_force_reconciliation_builder(inputs, {1, 1, 99999, {}})(view(), 100);
+    expect(!missing && missing.error().code == std::string(gc::diagnostic_codes::invalid_setup),
+        "unbound constructor content remains an error rather than an ordinary refusal");
+    fixture.context.production.planets[0].ground_slots = 3;
+    const auto base = cp::stock_native_force_reconciliation_builder(inputs, {1, 1, 13, {}})(view(), 100);
+    expect(base && base.value() && base.value()->next_id == 100 && base.value()->starbase,
+        "a zero-allocation base write remains an admitted placement");
+}
 void allocation_and_identity() {
     Fixture fixture;
     auto ship = fixture.place(7);
@@ -982,6 +1016,7 @@ int case_galactic_starting_forces_tests() {
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "full galactic hash verifier enabled");
 #endif
     native_actor_change_rollback();
+    reconciled_placement_contracts();
     duplicate_authored_starbases();
     allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
     return galactic_test::failures ? 1 : 0;

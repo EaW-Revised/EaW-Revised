@@ -111,6 +111,21 @@ public:
         room_->roster.state = GnsRoomState::locked; ++room_->roster.revision;
         return core::Result<void>::success();
     }
+    core::Result<bool> lock_roster(std::uint32_t active, std::uint64_t revision) override {
+        std::lock_guard guard(room_->mutex);
+        if (auto checked = host_check(); !checked) return core::Result<bool>::failure(checked.error());
+        std::uint32_t attached{};
+        bool joining = false;
+        for (PeerIndex p = 0; p < room_->roster.capacity; ++p) {
+            joining = joining || room_->roster.slots[p].state == GnsRoomSlotState::reserved;
+            if (room_->roster.slots[p].state == GnsRoomSlotState::attached) attached |= 1U << p;
+        }
+        if (room_->roster.state != GnsRoomState::open || room_->roster.revision != revision || joining
+            || attached != active || (active & 1U) == 0 || active == 1U)
+            return core::Result<bool>::failure(room_error("EAWR-NET-1764", "Start raced a player joining or leaving. Wait for the player list and accept again."));
+        room_->roster.state = GnsRoomState::locked; ++room_->roster.revision;
+        return core::Result<bool>::success(true);
+    }
 private:
     bool valid() const { return room_->healthy() && generation_ == room_->generation[seat_]
         && room_->roster.slots[seat_].state == GnsRoomSlotState::attached; }

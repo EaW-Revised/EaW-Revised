@@ -479,8 +479,8 @@ void corpus_contracts() {
     // Unmatched names are counted once across both sections; the catalogue
     // audit lists them per section.
     expect(levels[data::OverrideLevel::dialog] == 22U && levels[data::OverrideLevel::control] == 269U
-               && levels[data::OverrideLevel::none] == 302U && theme.unmatched.size() == 28U,
-           "22 dialog and 269 control variations, 302 chained, 28 unmatched entry names");
+               && levels[data::OverrideLevel::none] == 304U && theme.unmatched.size() == 28U,
+           "22 dialog and 269 control variations, 304 chained, 28 unmatched entry names");
     expect(theme.diagnostics.empty(), "the retail skin builds without theme diagnostics");
     expect(origins[model::TextureOrigin::atlas] == 86U && origins[model::TextureOrigin::standalone] == 1U
                && theme.defaults.texture("Scanlines")->origin == model::TextureOrigin::standalone,
@@ -571,7 +571,76 @@ void jpeg_limit_contracts() {
     expect(!model::jpeg_refusal(not_jpeg).empty(), "data without SOI is refused");
 }
 
+namespace {
+void staging_name_font_contracts() {
+    for (const std::string dialog_name : {"IDD_LAN_STAGING_DIALOG", "IDD_INTERNET_STAGING_DIALOG"}) {
+        Fixture fixture;
+        auto dialog = fixture.catalog.script.dialogs.back();
+        dialog.name = dialog_name;
+        dialog.controls.clear();
+        for (int row = 0; row < 9; ++row) {
+            data::DialogControl control;
+            control.statement = "COMBOBOX";
+            control.id_name = "IDC_PLAYER_NAME_" + std::to_string(row);
+            dialog.controls.push_back(control);
+            if (row < 8) {
+                auto font = fixture.catalog.skin.font_overrides.back();
+                font.name = control.id_name;
+                fixture.catalog.skin.font_overrides.push_back(std::move(font));
+            }
+        }
+        auto texture = fixture.catalog.skin.texture_overrides.front();
+        texture.name = "IDC_PLAYER_NAME_8";
+        fixture.catalog.skin.texture_overrides.push_back(texture);
+        fixture.catalog.script.dialogs.push_back(dialog);
+        const auto space = model::reference_space({1024, 768});
+        const auto theme = fixture.build(space);
+        const auto* first = theme.font(theme.variation(dialog, &dialog.controls.front()), data::FontRole::combo_box);
+        expect(first != nullptr, "staging template has a font");
+        for (const auto& control : dialog.controls) {
+            const auto* font = theme.font(theme.variation(dialog, &control), data::FontRole::combo_box);
+            expect(font && first && font->face == first->face && font->point_size == first->point_size
+                       && font->top_color == first->top_color && font->outline == first->outline,
+                   "all nine staging name controls share the template font");
+        }
+        const auto ninth_style = theme.variation(dialog, &dialog.controls.back());
+        const auto* retained = theme.texture(ninth_style, "Frame_Background");
+        expect(retained && retained->texture == "i_menu_bg.tga", "a row's texture override is retained");
+        auto other = dialog;
+        other.name = "IDD_PLAIN";
+        const auto* unrelated = theme.font(theme.variation(other, &other.controls.back()), data::FontRole::combo_box);
+        expect(unrelated && unrelated->face != first->face, "the staging fallback does not restyle other dialogs");
+        Fixture dialog_fonts = fixture;
+        std::erase_if(dialog_fonts.catalog.skin.font_overrides, [](const data::FontSet& set) {
+            return set.name.starts_with("IDC_PLAYER_NAME_") && set.name != "IDC_PLAYER_NAME_0";
+        });
+        data::FontSet outer_font;
+        outer_font.name = dialog_name;
+        outer_font.roles.push_back({data::FontRole::combo_box, *fixture.catalog.skin.font_overrides.back().spec});
+        outer_font.roles.back().spec.size = 23;
+        dialog_fonts.catalog.skin.font_overrides.push_back(outer_font);
+        const auto inherited = dialog_fonts.build(space);
+        const auto* named = inherited.font(inherited.variation(dialog, &dialog.controls.front()), data::FontRole::combo_box);
+        expect(named && named->point_size == first->point_size, "the first row retains its explicit mod font");
+        for (std::size_t row = 1; row < dialog.controls.size(); ++row) {
+            const auto* inherited_font = inherited.font(inherited.variation(dialog, &dialog.controls[row]), data::FontRole::combo_box);
+            expect(inherited_font && inherited_font->point_size == 23,
+                   "rows without a font override retain the mod's dialog combo font");
+        }
+        auto explicit_font = fixture.catalog.skin.font_overrides.back();
+        explicit_font.name = "IDC_PLAYER_NAME_8";
+        explicit_font.spec->size = 17;
+        fixture.catalog.skin.font_overrides.push_back(explicit_font);
+        const auto custom = fixture.build(space);
+        const auto* font = custom.font(custom.variation(dialog, &dialog.controls.back()), data::FontRole::combo_box);
+        expect(font && font->point_size == 17, "an explicit ninth-row mod font wins");
+    }
+}
+
+} // namespace
+
 void theme_contracts() {
+    staging_name_font_contracts();
     jpeg_limit_contracts();
     const Fixture fixture;
     slot_table_contracts();

@@ -4,10 +4,13 @@
 #include "eawr/platform/live_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/math/geometry.hpp"
+#include "eawr/sim/tactical/motion.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
 #include <filesystem>
 #include <iostream>
 #include <map>
@@ -562,6 +565,93 @@ void crusader_probe(const std::filesystem::path& root) {
         content->content.motion, content->content.combat, content->victory, content->content.fog, content->content.abilities,
         content->economy, content->content.map_box);
     expect(replayed && replayed.value() == runs.front().world_hashes, "WLD-10: the Crusader battle replays without the script");
+}
+
+// #4466: installed capital geometry, three ships closing on one held target.
+// No durability keeps the target alive; no scripts or economy can replace the attack.
+int capital_avoidance_probe(const std::filesystem::path& root) {
+    namespace math = eawr::sim::math;
+    using math::Fixed;
+    auto content = load(root, false, false, {}, false, std::nullopt,
+        {"Home_One", "Home_One", "Home_One"}, {"Star_Destroyer"});
+    if (!content) return 1;
+    const auto capital = skirmish::type_id("Home_One");
+    const auto target_type = skirmish::type_id("Star_Destroyer");
+    const auto whole = [](const std::int64_t n) { return Fixed::from_raw(n * Fixed::scale); };
+    const auto number = [](const Fixed value) { return static_cast<double>(value.raw()) / Fixed::scale; };
+    const auto& motion = content->content.motion;
+    const auto& combat = content->content.combat;
+    std::vector<tactical::SensorProfile> sensors{{capital, whole(10000)}, {target_type, whole(10000)}};
+    std::sort(sensors.begin(), sensors.end(), [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+    const auto* footprint = motion.footprint(capital);
+    const auto* limits = motion.find(capital);
+    const auto* profile = combat.find(capital);
+    expect(footprint && limits && profile && profile->max_attack_distance, "4466: installed capital profiles exist");
+    if (!footprint || !limits || !profile || !profile->max_attack_distance) return 1;
+    std::cout << "capital geometry " << number(footprint->x_extent) << ',' << number(footprint->y_extent)
+              << ',' << number(footprint->radius) << " speed " << number(limits->max_speed)
+              << " turn " << number(limits->rate_of_turn) << " range " << number(*profile->max_attack_distance) << '\n';
+    const auto* target_footprint = combat.footprint(target_type);
+    expect(target_footprint != nullptr, "4466: target geometry exists");
+    if (!target_footprint) return 1;
+    const auto reach = number(*profile->max_attack_distance) + number(target_footprint->radius);
+    std::cout << "capital target soft radius " << number(target_footprint->radius) << " approach reach " << reach << '\n';
+    for (const std::int64_t spacing : {200, 500, 800}) {
+        tactical::TacticalReplay replay;
+        replay.setup.seed = 4466;
+        replay.setup.content_identity.fill(0x46);
+        replay.setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+        const math::Vec3 target{whole(3000), {}, whole(-290)};
+        for (std::uint32_t id = 1; id <= 3; ++id) {
+            replay.setup.units.push_back({id, capital, 1, {{}, whole((static_cast<std::int64_t>(id) - 2) * spacing), target.z},
+                tactical::yaw_rotation({}).value(), {}});
+            replay.commands.push_back({{30, 1, id - 1}, {id}, tactical::AttackPayload{4, tactical::attack_hull}});
+        }
+        replay.setup.units.push_back({4, target_type, 2, target, tactical::yaw_rotation(whole(180)).value(), {}});
+        replay.final_tick_count = 3600;
+        auto created = tactical::TacticalSession::from_replay(replay, sensors, {}, motion, std::nullopt, combat);
+        expect(static_cast<bool>(created), "4466: capital approach session starts");
+        if (!created) { std::cerr << created.error().message << '\n'; return 1; }
+        auto session = std::move(created).value();
+        const eawr::sim::InlineExecutor executor;
+        std::array<std::uint64_t, 3> away{}, longest{};
+        std::array<bool, 3> reached{};
+        std::array<double, 3> final_distance{};
+        std::cout << "spacing,tick,unit,x,y,heading,distance,goal_x,goal_y,destination_x,destination_y,separation_x,separation_y\n";
+        for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
+            const auto stepped = session.step(executor);
+            if (!stepped) { std::cerr << stepped.error().message << '\n'; return 1; }
+            for (const auto& unit : session.units()) {
+                if (unit.entity_id > 3) continue;
+                const auto index = static_cast<std::size_t>(unit.entity_id - 1);
+                const auto x = static_cast<double>(unit.position.x.raw()) / Fixed::scale;
+                const auto y = static_cast<double>(unit.position.y.raw()) / Fixed::scale;
+                const auto dx = 3000.0 - x, dy = -y;
+                const auto gap = std::hypot(dx, dy);
+                final_distance[index] = gap;
+                const auto heading = tactical::yaw_degrees(unit.rotation).value();
+                const auto radians = number(heading) * 3.14159265358979323846 / 180.0;
+                const auto dot = std::cos(radians) * dx + std::sin(radians) * dy;
+                if (tick >= 30 && gap > reach && dot < 0) ++away[index];
+                else away[index] = 0;
+                longest[index] = std::max(longest[index], away[index]);
+                reached[index] = reached[index] || gap <= reach;
+                const auto plan = session.motion_state(unit.entity_id);
+                std::cout << spacing << ',' << tick << ',' << unit.entity_id << ',' << x << ',' << y << ','
+                    << number(heading) << ',' << gap << ',' << dx << ',' << dy << ','
+                    << (plan && plan->kind == tactical::MotionKind::path ? number(plan->target.x) : x) << ',' << (plan && plan->kind == tactical::MotionKind::path ? number(plan->target.y) : y) << ",0,0\n";
+            }
+        }
+        for (std::size_t index = 0; index < reached.size(); ++index) {
+            std::cout << "capital result spacing=" << spacing << " unit=" << index + 1 << " reached=" << reached[index]
+                      << " longest_opposite=" << longest[index] << '\n';
+            expect(reached[index], "4466: every capital closes to weapon range");
+            // The matched debug-build capture also retreats temporarily. Recovery and
+            // arrival are the observable contract, not a ban on opposite headings.
+            expect(final_distance[index] <= reach, "4466: every capital finishes within weapon reach by 120 seconds");
+        }
+    }
+    return failures == 0 ? 0 : 1;
 }
 
 } // namespace foc_ai_test_support

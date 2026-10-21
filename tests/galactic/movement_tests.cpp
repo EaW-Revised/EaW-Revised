@@ -692,13 +692,17 @@ void transports() {
                         unordered[first_type + 32 + byte] = bytes[first_type + byte];
                     }
                     expect(!gc::parse_replay(unordered), "unordered movement types refuse before transport-tail lookup");
-                    const auto tail = offset + 6 + size - 13; // one transport ID
+                    const auto tail = offset + 6 + size - 14; // one transport ID, then absent raid policy
+                    expect(bytes[tail] == 1 && integer(tail + 1, 4) == 1 && bytes[offset + 6 + size - 1] == 0,
+                        "located the movement transport table before the raid-policy flag");
                     auto corrupt = bytes; corrupt[tail] = 2;
                     expect(!gc::parse_replay(corrupt), "unknown movement transport-tail version refuses");
                     corrupt = bytes; corrupt[tail + 1] = 0;
-                    expect(!gc::parse_replay(corrupt), "empty movement transport-tail count refuses");
+                    expect(!gc::parse_replay(corrupt), "transport count omitting the encoded ID refuses");
                     corrupt = bytes; corrupt[tail + 5] = 99;
                     expect(!gc::parse_replay(corrupt), "unknown movement transport type refuses");
+                    corrupt = bytes; corrupt[offset + 6 + size - 1] = 2;
+                    expect(!gc::parse_replay(corrupt), "non-boolean movement raid-policy flag refuses");
                 }
                 offset += 6 + size;
             }

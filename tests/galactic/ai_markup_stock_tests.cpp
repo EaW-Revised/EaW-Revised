@@ -65,7 +65,7 @@ std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
             selected.push_back({id, faction.name == "Empire" ? "BASICEMPIRE" : "BASICREBEL", "NORMAL", {}, {}});
         }
         if (faction.name == authored->starting_active_player) {
-            human = id; options.local_observer = id;
+            human = id; options.solo_reference_human = id;
             options.seats.push_back({gc::SeatId{id}, id, gc::SeatKind::human, id - 1, true, 1});
         }
     }

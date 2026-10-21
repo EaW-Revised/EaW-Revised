@@ -60,6 +60,7 @@ void installed_commanders(const campaign::CampaignSetupPlan& plan, const units::
     const data::galactic::GalacticData& authored, const std::shared_ptr<const campaign::StockSpaceEntry>& provider);
 void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalog,
     data::galactic::GalacticData authored, const units::GalacticTypeTable& types,
-    campaign::CampaignSetupOptions options);
-void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false, bool superweapon_only = false);
+    campaign::CampaignSetupOptions options, bool multiplayer_difficulty = false);
+void installed(bool garrison_only = false, bool population_only = false, bool commander_only = false, bool superweapon_only = false,
+    bool layers_only = false, bool multiplayer_difficulty = false, bool orphan_only = false);
 } // namespace space_entry_test

@@ -19,16 +19,30 @@ public:
     void close() { if (tcp_) tcp_->close(); else gns_->close(); }
     bool online() const { return static_cast<bool>(gns_); }
     bool closed() const { return tcp_ ? tcp_->closed() : gns_->closed(); }
+    bool has_pending_output() const {
+        if (tcp_) return tcp_->has_pending_output();
+        for (net::PeerIndex peer = 0; peer < gns_->peer_count(); ++peer)
+            if (peer != gns_->self() && gns_->queue_progress(peer).outbound_frames != 0) return true;
+        return false;
+    }
     bool listening() const { return tcp_ && tcp_->listening(); }
     core::Result<void> close_peer(net::PeerIndex peer) {
         if (tcp_) return tcp_->close_peer(peer);
         return gns_->close_peer(peer);
     }
-    // Online room mesh (N-peer slice N2/N4). The TCP stream is no mesh: it reports itself complete and has nothing to lock.
+    // Service mesh operations stay separate from opt-in TCP staging.
     bool mesh() const { return gns_ && gns_->mesh(); }
     bool mesh_complete() const { return !mesh() || gns_->mesh_complete(); }
+    bool staging_capacity() const { return tcp_ && tcp_->staging_capacity(); }
+    bool staging_mesh_ready() const { return !tcp_ || tcp_->staging_mesh_ready(); }
+    bool mesh_complete(std::uint32_t active) const {
+        return staging_capacity() ? tcp_->staging_roster_ready(active) : !mesh() || gns_->mesh_complete(active);
+    }
     bool room_locked() const { return gns_ && gns_->room_locked(); }
     core::Result<void> lock_room() { return mesh() ? gns_->lock_room() : core::Result<void>::success(); }
+    core::Result<bool> lock_roster(std::uint32_t active) {
+        return staging_capacity() ? tcp_->lock_staging_roster(active) : mesh() ? gns_->lock_roster(active) : core::Result<bool>::success(true);
+    }
     core::Result<void> commit_room() { return mesh() ? gns_->commit_room() : core::Result<void>::success(); }
     std::optional<net::GnsMeshEvent> take_mesh_event() { return mesh() ? gns_->take_event() : std::nullopt; }
     net::GnsPairDiagnostic pair(net::PeerIndex peer) const { return gns_ ? gns_->pair(peer) : net::GnsPairDiagnostic{}; }

@@ -72,6 +72,10 @@ struct GalacticLobbyOptions {
 [[nodiscard]] core::Result<LobbyGame> encode_galactic_lobby_game(const GalacticLobbyOptions& options);
 [[nodiscard]] core::Result<GalacticLobbyOptions> decode_galactic_lobby_game(const LobbyGame& game);
 
+// The one place a host draws a session seed: random, and 32-bit because the AI perception seed is (the world-generation
+// seed rule). Every host path (lobby screen, acceptance run) uses it, so none can hand out a seed the AI setup refuses.
+[[nodiscard]] std::uint64_t draw_galactic_session_seed();
+
 // The options a host starts a room with: the campaign's factions as rows (the first two playable ones human
 // when `two_sides`, else the first), stock custom settings off. Fails when the campaign has no playable faction.
 [[nodiscard]] core::Result<GalacticLobbyOptions> default_galactic_lobby_options(

@@ -5,6 +5,9 @@ config_version=5
 config/name="EAWR Viewer"
 run/main_scene="res://main.tscn"
 
+[debug]
+file_logging/max_log_files=30
+
 [display]
 window/size/viewport_width=1280
 window/size/viewport_height=720

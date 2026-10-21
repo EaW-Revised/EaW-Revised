@@ -94,7 +94,7 @@ ViewResult build_live_view(const sim::galactic::GalacticSnapshot& snapshot,
     planet_owners.reserve(snapshot.planets().size());
     for (const auto& row : snapshot.planets()) planet_owners.emplace(row.id, row.owner);
     const auto* observer = snapshot.observer() ? &*snapshot.observer() : nullptr;
-    const bool local_observer = observer && observer->local_player == local;
+    const bool local_observer = observer && snapshot.view_player() == local;
     std::map<sim::galactic::TypeId, const sim::galactic::ObserverType*> types;
     std::map<ObjectId, const sim::galactic::MovementContents*> contents;
     if (observer) for (const auto& row : observer->types) types.emplace(row.type, &row);

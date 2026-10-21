@@ -59,6 +59,9 @@ void frames() {
     std::vector<Bytes> expected{{}, {0}, {1}, {6}, {255}, Bytes(1024 * 1024, 173)};
     for (unsigned i = 0; i < 1000; ++i) expected.push_back({static_cast<std::uint8_t>(i), static_cast<std::uint8_t>(i >> 8)});
     for (const auto& bytes : expected) require(static_cast<bool>(pair.host->send(1, bytes)), "Queue host frame");
+    require(pair.host->has_pending_output(), "Queued application output prevents ownership handover");
+    (void)pair.host->poll();
+    require(pair.host->has_pending_output(), "One bounded poll cannot flush a megabyte queue");
     std::size_t received = 0;
     until([&] {
         require(!pair.host->poll(), "No application data returned to sender");
@@ -66,7 +69,7 @@ void frames() {
             require(frame->from == 0 && received < expected.size() && frame->frame == expected[received], "Whole ordered host frame");
             ++received;
         }
-        return received == expected.size();
+        return received == expected.size() && !pair.host->has_pending_output();
     }, 5000ms);
 }
 void roundtrip() {
@@ -683,9 +686,98 @@ void repair_retry() {
     pair.open();
 }
 
+void staging_capacity_roster() {
+    auto config = options(); config.peers = 9; config.staging_capacity = true;
+    auto hosted = TcpTransport::host("127.0.0.1", 0, config);
+    require(bool(hosted), "Create capacity-based staging host"); auto host = std::move(hosted).value();
+    auto first = config; first.seat = 2;
+    auto second = config; second.seat = 6;
+    auto a = TcpTransport::connect("127.0.0.1", host->port(), first);
+    auto b = TcpTransport::connect("127.0.0.1", host->port(), second);
+    require(bool(a) && bool(b), "Create sparse staging guests");
+    auto left = std::move(a).value(); auto right = std::move(b).value();
+    const auto pump = [&] { (void)host->poll(); (void)left->poll(); (void)right->poll(); };
+    until([&] { pump(); return host->link(2) == LinkState::open && host->link(6) == LinkState::open
+        && left->link(0) == LinkState::open && right->link(0) == LinkState::open; });
+    require(left->self() == 2 && right->self() == 6 && !host->staging_mesh_ready(), "Vacant capacity does not block assigned host links");
+    require(bool(left->send(0, Bytes{42})), "Staging guest sends before full mesh");
+    std::optional<Received> frame;
+    until([&] { (void)left->poll(); (void)right->poll(); frame = host->poll(); return frame.has_value(); });
+    require(frame->from == 2 && frame->frame == Bytes{42}, "Verified staging stream carries exact identity");
+    auto raced = host->lock_staging_roster(5U);
+    require(!raced && raced.error().code == "EAWR-NET-1774" && !host->staging_mesh_ready(), "Unadmitted attachment prevents roster freeze");
+    auto frozen = host->lock_staging_roster(69U);
+    require(bool(frozen) && !frozen.value(), "Start freezes only three sparse admitted peers");
+    require(bool(right->send(0, Bytes{91})), "Queue an application frame behind the frozen native barrier");
+    (void)right->poll();
+    require(!host->poll() && !host->staging_mesh_ready(), "Frozen application input cannot reach setup before every guest pair opens");
+    until([&] { pump(); return host->staging_mesh_ready() && left->staging_mesh_ready() && right->staging_mesh_ready(); });
+    require(host->lock_staging_roster(69U).value(), "Native mesh confirms the frozen roster");
+    require(left->link(6) == LinkState::open && right->link(2) == LinkState::open && left->link(1) == LinkState::closed,
+        "Only active guest pairs open without compacting sparse native indices");
+    require(bool(right->send(2, Bytes{87})), "Frozen guest-to-guest path sends");
+    until([&] { (void)host->poll(); (void)right->poll(); frame = left->poll(); return frame.has_value(); });
+    require(frame->from == 6 && frame->frame == Bytes{87}, "Frozen guest pair preserves its sparse identity");
+    auto late_config = options(); late_config.staging_capacity = true;
+    auto late_result = TcpTransport::connect("127.0.0.1", host->port(), late_config);
+    require(bool(late_result), "Dial the retained late-join refusal listener"); auto late = std::move(late_result).value();
+    until([&] { pump(); (void)late->poll(); return late->diagnostic().has_value(); });
+    require(late->diagnostic()->code == "EAWR-NET-1305" && !host->diagnostic(), "Late join is named and cannot alter the running roster");
+}
+void staging_refill_and_join_race() {
+    auto config = options(); config.peers = 9; config.staging_capacity = true;
+    auto guest = options(); guest.staging_capacity = true;
+    Pair pair(config, guest);
+    until([&] { (void)pair.host->poll(); (void)pair.client->poll(); return pair.host->link(1) == LinkState::open && pair.client->link(0) == LinkState::open; });
+    const auto old_identity = pair.host->edge_identity(1);
+    pair.client->cancel();
+    until([&] { (void)pair.host->poll(); return pair.host->link(1) == LinkState::closed; });
+    require(!pair.host->diagnostic(), "A staging departure does not fail the host room");
+    require(bool(pair.host->close_peer(1)), "Lobby releases the departed native identity after removing its human row");
+    (void)pair.host->poll();
+    auto replacement = TcpTransport::connect("127.0.0.1", pair.host->port(), guest);
+    require(bool(replacement), "Dial an available staging row"); auto refill = std::move(replacement).value();
+    until([&] { (void)pair.host->poll(); (void)refill->poll(); return pair.host->link(1) == LinkState::open && refill->link(0) == LinkState::open; });
+    require(refill->self() == 1 && pair.host->edge_identity(1) != old_identity, "Refill reuses the released index with a fresh verified identity");
+    const auto raw = socket::connect("127.0.0.1", pair.host->port());
+    require(raw != socket::invalid, "Queue a connection racing Start");
+    until([&] { return socket::connected(raw) == socket::Status::ready; });
+    auto raced = pair.host->lock_staging_roster(3U);
+    require(!raced && raced.error().code == "EAWR-NET-1774", "An in-flight admission prevents Start without freezing the room");
+    socket::close(raw); (void)pair.host->poll();
+    auto joining = TcpTransport::connect("127.0.0.1", pair.host->port(), guest);
+    require(bool(joining), "Retry the aborted join"); auto next = std::move(joining).value();
+    until([&] { (void)pair.host->poll(); (void)refill->poll(); (void)next->poll(); return pair.host->link(2) == LinkState::open && next->link(0) == LinkState::open; });
+    auto frozen = pair.host->lock_staging_roster(7U);
+    require(bool(frozen), "The fresh admitted revision can freeze after the join race");
+    until([&] { (void)pair.host->poll(); (void)refill->poll(); (void)next->poll(); return pair.host->staging_mesh_ready() && refill->staging_mesh_ready() && next->staging_mesh_ready(); });
+}
+void staging_freeze_departure_and_bootstrap() {
+    auto config = options(); config.peers = 9; config.staging_capacity = true;
+    auto guest = options(); guest.staging_capacity = true;
+    Pair pair(config, guest);
+    until([&] { (void)pair.host->poll(); (void)pair.client->poll(); return pair.host->link(1) == LinkState::open && pair.client->link(0) == LinkState::open; });
+    require(pair.client->peer_count() == 9, "Direct join learns host capacity rather than browser vacancy count");
+    auto frozen = pair.host->lock_staging_roster(3U);
+    require(bool(frozen) && !frozen.value(), "Freeze precedes guest readiness");
+    pair.client->cancel();
+    until([&] { (void)pair.host->poll(); return pair.host->diagnostic().has_value(); });
+    require(pair.host->diagnostic()->code == "EAWR-NET-1301" && !pair.host->staging_mesh_ready(),
+        "Guest departure between freeze and mesh-open fails by name without commitment");
+    auto legacy = options(); legacy.lobby_bootstrap = true;
+    Pair campaign(legacy, guest); campaign.open();
+    require(!campaign.host->staging_capacity() && !campaign.client->staging_capacity(), "Verified campaign hello preserves legacy two-seat transport");
+    auto mismatch = options(); mismatch.lobby_bootstrap = true;
+    Pair old(options(), mismatch);
+    until([&] { (void)old.host->poll(); (void)old.client->poll(); return old.host->diagnostic().has_value() || old.client->diagnostic().has_value(); });
+    require((old.host->diagnostic() && old.host->diagnostic()->code == "EAWR-NET-1306")
+        || (old.client->diagnostic() && old.client->diagnostic()->code == "EAWR-NET-1306"), "Incompatible lobby bootstrap receives a typed refusal");
+}
+
 }
 int main() {
     try {
+        staging_capacity_roster(); staging_refill_and_join_race(); staging_freeze_departure_and_bootstrap();
         authenticated_repair(); close_unproved_repair(); repair_retry();
         join_endpoints(); resolved_loopback(); resolution_errors(); text_contracts(); open_probe_refusals(); stale_probe_echoes(); frames(); roundtrip(); link_measurement(); probe_under_backpressure(); crossing_probe_close(); mismatch(false); mismatch(true); lifecycle(); backpressure(); receive_capacity();
         unread_close(); host_lifecycle(); close_failed_join(); fixed_port_rehost(); slow_frame(); invalid_options();

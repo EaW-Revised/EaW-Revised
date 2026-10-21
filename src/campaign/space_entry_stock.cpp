@@ -10,6 +10,7 @@
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../script/foc/ai_data.hpp"
 
 #include <algorithm>
 #include <map>
@@ -277,6 +278,8 @@ struct StockSpaceEntry::Impl {
     std::map<gc::PlanetId, std::vector<std::string>> global_upgrades;
     std::vector<std::string> nonfirst_upgrades;
     std::map<std::string, std::string, std::less<>> ai_xml;
+    std::string multiplayer_difficulty;
+    std::map<std::string, script::foc::ai::PlayerType, std::less<>> multiplayer_ai_players;
     std::map<std::string, std::string> ai_modules;
     std::map<std::string, core::Diagnostic> ai_module_refusals;
     struct Briefing { gc::PlayerId player{}; SpaceBriefingContent attacker, defender; };
@@ -295,7 +298,7 @@ StockSpaceEntry::StockSpaceEntry(std::shared_ptr<const Impl> impl) : impl_(std::
 
 core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(const vfs::Vfs& filesystem,
     const data::Catalog& catalog, const data::galactic::GalacticData& data,
-    const units::GalacticTypeTable& galactic, const CampaignSetupPlan& plan) {
+    const units::GalacticTypeTable& galactic, const CampaignSetupPlan& plan, const std::string_view multiplayer_difficulty) {
     using Result = core::Result<std::shared_ptr<const StockSpaceEntry>>;
     auto impl = std::make_shared<StockSpaceEntry::Impl>(plan); impl->galactic = galactic;
     auto relations = prepare_initial_campaign_relations(data, plan.player_bindings());
@@ -453,6 +456,20 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
     if (!modules) return Result::failure(modules.error());
     impl->ai_xml = std::move(ai.xml);
     impl->ai_modules = std::move(modules).value();
+    if (plan.mode() == CampaignSetupMode::multiplayer && !multiplayer_difficulty.empty()) {
+        // D10: freeze authored mappings, but resolve only actual AI participants.
+        // A human or inactive faction need not declare a tactical AI player type.
+        std::vector<std::string> paths;
+        for (const auto& [path, xml] : impl->ai_xml) {
+            (void)xml;
+            if (key(path).starts_with("DATA/XML/AI/PLAYERS/")) paths.push_back(path);
+        }
+        auto players = script::foc::ai::load_ai_data_files(impl->ai_xml,
+            [](auto, auto) { return std::optional<script::foc::ai::Real>{}; }, paths);
+        if (!players) return Result::failure(players.error());
+        impl->multiplayer_ai_players = std::move(players.value().players);
+        impl->multiplayer_difficulty = key(multiplayer_difficulty);
+    }
     // SOS-01/40/45: freeze candidate attachment bytes along with the campaign
     // tables. Each child selects only its reachable types below, including
     // companions, reserves and types created after entry. Keep failures per
@@ -515,6 +532,10 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     const auto map = impl_->maps.find(path.value());
     if (map == impl_->maps.end()) return fail<ResolvedConflictEntry>("selected planet map was not prepared");
     SpaceEntryInputs input; input.map = map->second.inputs; input.types = impl_->types; input.sides = impl_->sides;
+    if (impl_->plan.mode() == CampaignSetupMode::multiplayer) for (auto& side : input.sides)
+        side.human = std::any_of(snapshot.seats().begin(), snapshot.seats().end(), [&](const auto& seat) {
+            return seat.active && seat.kind == gc::SeatKind::human && seat.player == side.player;
+        });
     input.relations = impl_->relations;
     // WGT-123/WGS-89: copy authoritative live tables when the session supplies
     // them; prepared XML relationships are the frozen setup, never host policy.
@@ -724,6 +745,28 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     input.map.tables = &selected.value();
     auto entry = build_space_entry(conflict, input, first_free, impl_->plan.galaxy().seed);
     if (!entry) return core::Result<ResolvedConflictEntry>::failure(entry.error());
+    if (!impl_->multiplayer_difficulty.empty() && entry.value().conflict.tactical.skirmish) {
+        for (auto& slot : entry.value().conflict.tactical.skirmish->slots) {
+            if (slot.human) continue;
+            const auto side = std::find_if(input.sides.begin(), input.sides.end(), [&](const auto& row) { return row.player == slot.player; });
+            if (side == input.sides.end()) return fail<ResolvedConflictEntry>("missing MP tactical AI side");
+            const auto faction = std::find_if(input.map.factions.begin(), input.map.factions.end(),
+                [&](const auto& row) { return key(row.name) == key(side->faction); });
+            if (faction == input.map.factions.end() || !faction->playable || faction->neutral) continue;
+            const auto type = impl_->multiplayer_ai_players.find(key(faction->basic_ai));
+            if (type == impl_->multiplayer_ai_players.end()) return fail<ResolvedConflictEntry>("missing MP tactical AI player type");
+            std::optional<tt::AiLevel> level;
+            for (const auto candidate : {tt::AiLevel::easy, tt::AiLevel::normal, tt::AiLevel::hard}) {
+                const auto mapping = type->second.difficulty.find(key(tt::to_string(candidate)));
+                if (mapping != type->second.difficulty.end() && key(mapping->second) == impl_->multiplayer_difficulty) {
+                    if (level) return fail<ResolvedConflictEntry>("ambiguous MP tactical AI difficulty");
+                    level = candidate;
+                }
+            }
+            if (!level) return fail<ResolvedConflictEntry>("missing MP tactical AI difficulty");
+            slot.difficulty = *level;
+        }
+    }
     entry.value().conflict.upgrades = record.upgrades;
     if (!snapshot.player_economy()) return fail<ResolvedConflictEntry>("missing live campaign ledger");
     SpaceRuleInputs rules;
@@ -782,11 +825,17 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
     if (auto bound = impl_->returning.bind(entry.value().conflict, entry.value().content); !bound)
         return core::Result<ResolvedConflictEntry>::failure(bound.error());
     entry.value().start.setup = entry.value().conflict.tactical;
+    if (!impl_->multiplayer_difficulty.empty()) for (auto& player : entry.value().start.players) {
+        const auto& slots = entry.value().conflict.tactical.skirmish->slots;
+        const auto slot = std::find_if(slots.begin(), slots.end(), [&](const auto& row) { return row.player == player.player.player_id; });
+        if (!player.human && slot != slots.end()) player.difficulty = slot->difficulty;
+    }
     {
         const std::lock_guard lock(impl_->presentation_mutex);
         impl_->presentation_start = entry.value().start;
     }
-    return core::Result<ResolvedConflictEntry>::success({std::move(entry.value().conflict), std::move(entry.value().content)});
+    return core::Result<ResolvedConflictEntry>::success({std::move(entry.value().conflict), std::move(entry.value().content),
+        std::move(entry.value().notes)});
 }
 
 core::Result<tt::TacticalContent> StockSpaceEntry::content(const ConflictRecord& record) const {
@@ -820,7 +869,7 @@ core::Result<void> StockSpaceEntry::decorate_result(const ConflictRecord& record
     auto returned = space_rule_return(record.tactical, tables.value(), battle.snapshot()->economy());
     if (!returned) return core::Result<void>::failure(returned.error());
     result.credits = std::move(returned.value().credits);
-    if (const auto local = impl_->plan.local_observer()) {
+    if (const auto local = impl_->plan.solo_reference_human()) {
         const auto account = std::find_if(battle.ledgers().begin(), battle.ledgers().end(),
             [&](const auto& row) { return row.player == *local; });
         if (account != battle.ledgers().end()) result.bounty = account->collected_bounty;
@@ -861,6 +910,7 @@ core::Result<script::foc::PreparedAiSession> StockSpaceEntry::prepare_ai(const C
         battle::StartPlayer p; p.player = player; p.faction = faction->name;
         const auto slot = std::find_if(record.tactical.skirmish->slots.begin(), record.tactical.skirmish->slots.end(), [&](const auto& row) { return row.player == player.player_id; });
         p.lobby = slot != record.tactical.skirmish->slots.end(); p.human = p.lobby && slot->human;
+        if (p.lobby && !p.human) p.difficulty = slot->difficulty;
         start.players.push_back(std::move(p));
     }
     auto setup = skirmish::ai_setup(start, inputs, tables.value());
@@ -926,6 +976,7 @@ core::Result<battle::BattleStart> space_entry_presentation_start(
             [&](const auto& row) { return row.player == player.player_id; });
         visual.lobby = slot != record.tactical.skirmish->slots.end();
         visual.human = visual.lobby && slot->human;
+        if (visual.lobby && !visual.human) visual.difficulty = slot->difficulty;
         start.players.push_back(std::move(visual));
     }
     auto names = skirmish::map_object_type_names(inputs.placements);
@@ -996,7 +1047,7 @@ core::Result<std::shared_ptr<const platform::PreparedCampaignBattle>> StockSpace
         std::sort(briefing.available_persistent_types.begin(), briefing.available_persistent_types.end());
         briefing.available_persistent_types.erase(std::unique(briefing.available_persistent_types.begin(), briefing.available_persistent_types.end()), briefing.available_persistent_types.end());
         briefing.intro.local_attacker = declaration.player == record.invader;
-        briefing.intro.conflict_lead = impl_->plan.local_observer() == declaration.player;
+        briefing.intro.conflict_lead = impl_->plan.solo_reference_human() == declaration.player;
         briefing.intro.network = std::count_if(impl_->plan.galaxy().seats.begin(), impl_->plan.galaxy().seats.end(), [](const auto& seat) { return seat.active && seat.kind == gc::SeatKind::human; }) > 1;
         // Runtime cinematic settings/admission remain E's explicit gate inputs.
         view->briefings.push_back(std::move(briefing));

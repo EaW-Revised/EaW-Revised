@@ -85,7 +85,7 @@ int run(std::uint64_t frames) {
         setup.players.push_back({{id, id, 0}, faction.name, true});
         // The viewer's full seat layout: one human, every other faction an AI seat.
         setup.seats.push_back({gc::SeatId{id}, id, is_local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, is_local ? id : 0});
-        if (is_local) { setup.local_observer = id; human = {id}; local = id; }
+        if (is_local) { setup.solo_reference_human = id; human = {id}; local = id; }
     }
     expect(human.value != 0, "installed campaign has a local human seat");
     std::vector<std::string> originals;

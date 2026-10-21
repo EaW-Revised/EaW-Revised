@@ -10,14 +10,14 @@
 #include <string_view>
 #include <vector>
 
-// The galactic replay, EAWRGCR v1 (docs/galactic-replay-format.md): the tick-zero galaxy with its
+// The galactic replay, EAWRGCR v3 (docs/galactic-replay-format.md): the tick-zero galaxy with its
 // identities, seed, players, seats and options, every executed GameCommand in canonical
 // (tick, seat, sequence) order, and the final tick. A recorded live run replays itself headless
 // with identical per-tick hashes.
 namespace eawr::sim::galactic {
 
-inline constexpr std::uint16_t galactic_replay_format_version = 2;
-inline constexpr std::uint32_t galactic_rules_version = 1;
+inline constexpr std::uint16_t galactic_replay_format_version = 5;
+inline constexpr std::uint32_t galactic_rules_version = 4;
 inline constexpr std::size_t galactic_replay_max_bytes = 256U * 1024U * 1024U;
 inline constexpr std::size_t galactic_replay_max_payload = 64U * 1024U;
 
@@ -33,7 +33,8 @@ enum class NativeEffectKind : std::uint16_t {
     planet_ruins = 17, // coordinator-reserved: shared live ruins adapter
     income_block = 18, // coordinator-reserved: WGEP-163 source-scoped income blockers
     production_lock = 19, // coordinator-reserved: story production lock (#683)
-    story_reward = 20 // coordinator-reserved: story spawn and credits (#683); its replayer is registered by the campaign owner
+    story_reward = 20, // coordinator-reserved: story spawn and credits (#683); its replayer is registered by the campaign owner
+    identity_reservation = 21 // coordinator-reserved: S9b entity/invasion ID frontiers (GFS-A22)
 };
 struct NativeEffect {
     std::uint64_t frontier{}, sequence{};

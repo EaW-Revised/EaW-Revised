@@ -157,10 +157,10 @@ core::Result<void> session_detail::Tick::PlanLanes::land(const PlanJob& job) {
     }
     const auto inputs = phase.impl_->path_inputs(live, found->second.max_speed);
     if (!inputs) return core::Result<void>::failure(inputs.error());
-    if (inputs.value() == found->second.inputs && found->second.search.ended()) {
-        auto plan = found->second.search.result();
+    if (inputs.value() == found->second.inputs && SpacePathService::ended(found->second.search)) {
+        auto plan = SpacePathService::result(found->second.search);
         if (!plan) return core::Result<void>::failure(plan.error());
-        if (found->second.search.exhausted()) {
+        if (SpacePathService::exhausted(found->second.search)) {
             Impl::retain_path_failure(live, job.destination, frame, inputs.value().limits.max_speed);
         } else {
             Impl::take_plan(live, std::move(plan).value());
@@ -198,26 +198,18 @@ core::Result<void> session_detail::Tick::PlanLanes::land(const PlanJob& job) {
 std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanLanes::plan_pending() {
     const auto& frame = phase.tracked_.value().frame.value();
     auto& staged = phase.tracked_.value().staged.value();
-    const auto& table = phase.impl_->motion;
     core::tick_profile::Scope pending_scope("serial.commands.plan-pending");
-    const auto budget = table.avoidance->search_budget;
-    std::array<std::vector<std::size_t>, 4> lanes;
-    for (std::size_t index = 0; index < pending.size(); ++index) lanes[pending[index].layer].push_back(index);
-    std::array<std::size_t, 4> next{};
+    SpacePathService::Lanes<4>::Schedule schedule(pending, [](const PlanJob& job) { return job.layer; });
     while (true) {
-        std::vector<std::size_t> round;
-        for (std::size_t layer = 0; layer < lanes.size(); ++layer) {
-            if (next[layer] < lanes[layer].size()) round.push_back(lanes[layer][next[layer]++]);
-        }
+        auto round = schedule.next();
         if (round.empty()) break;
-        std::sort(round.begin(), round.end());
         const std::size_t count = round.size();
         // Which jobs search now, each within the rest of its layer's budget.
         std::vector<char> searches(count);
         std::vector<std::size_t> searching;
         for (std::size_t index = 0; index < count; ++index) {
             const auto& job = pending[round[index]];
-            searches[index] = !job.landing && spent[job.layer] < budget ? 1 : 0;
+            searches[index] = !job.landing && paths.remaining(job.layer) != 0 ? 1 : 0;
             if (searches[index] != 0) searching.push_back(index);
         }
         std::vector<CollisionWorld> worlds(count);
@@ -235,7 +227,7 @@ std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanL
             const auto& job = pending[round[index]];
             core::tick_profile::JobScope path_job_scope("job.pending-search", job.unit);
             auto result = phase.impl_->plan_path_within(*units[index], job.destination, frame, &worlds[index], job.max_speed,
-                &work[index], budget - spent[job.layer]);
+                &work[index], paths.remaining(job.layer));
             if (!result) {
                 errors[index] = result.error();
                 return;
@@ -261,7 +253,7 @@ std::optional<std::pair<EntityId, core::Diagnostic>> session_detail::Tick::PlanL
                 continue;
             }
             if (searches[index] != 0) {
-                spent[job.layer] += work[index].expansions;
+                paths.charge(job.layer, work[index].expansions);
                 if (planned[index] != 0) {
                     auto& live = *units[index];
                     if (live.formation && live.formation->failure_frame) {
@@ -568,16 +560,16 @@ core::Result<void> session_detail::Tick::PlanLanes::prepare_paths() {
             for (auto index = range.begin; index < range.end; ++index) {
                 auto& search = running[index]->second;
                 core::tick_profile::JobWork job_work;
-                const auto limit = search.frame <= frame ? std::numeric_limits<std::uint64_t>::max() : slice;
+                const auto limit = SpacePathService::slice_limit(frame, search.frame, slice);
                 if (core::tick_profile::active_jobs) {
-                    job_work.before = search.search.expansions(); job_work.deadline = search.frame; job_work.limit = limit;
+                    job_work.before = SpacePathService::expansions(search.search); job_work.deadline = search.frame; job_work.limit = limit;
                 }
                 core::tick_profile::JobScope sliced_job_scope(search.frame <= frame ? "job.sliced-landing" : "job.sliced-slice",
                     running[index]->first, &job_work);
                 PathSearchStats job_stats;
-                static_cast<void>(search.search.run(limit, core::tick_profile::active_jobs ? &job_stats : nullptr));
+                static_cast<void>(SpacePathService::step(search.search, limit, core::tick_profile::active_jobs ? &job_stats : nullptr));
                 if (core::tick_profile::active_jobs) {
-                    job_work.after = search.search.expansions(); job_work.children = job_stats.children;
+                    job_work.after = SpacePathService::expansions(search.search); job_work.children = job_stats.children;
                     job_work.queries = job_stats.queries; job_work.leaves = job_stats.leaves; job_work.narrow = job_stats.narrow;
                 }
             }
@@ -587,10 +579,10 @@ core::Result<void> session_detail::Tick::PlanLanes::prepare_paths() {
         // as FoC's plan would be there from the frame it was made (PC-02); its unit still takes
         // it at the landing. In ascending unit ID.
         for (auto& [unit_id, search] : phase.impl_->searches) {
-            if (search.plan || !search.search.ended()) continue;
+            if (search.plan || !SpacePathService::ended(search.search)) continue;
             const auto found = staged.find(unit_id);
             if (found == staged.end() || !found->second.formation || !found->second.formation->sliced) continue;
-            auto plan = search.search.result();
+            auto plan = SpacePathService::result(search.search);
             if (!plan) continue; // the landing reports it
             search.plan = std::move(plan).value();
             if (auto published = publish(unit_id, found->second, search); !published) {
@@ -1130,7 +1122,7 @@ core::Result<void> session_detail::Tick::PlanLanes::apply_retreat(const PlayerCo
     auto& events = phase.impacts_.value().events.value();
     auto& diagnostics = phase.commands_.value().diagnostics.value();
     auto refusal = RetreatRefusal::wrong_mode;
-    if (phase.impl_->retreat) {
+    if (phase.impl_->setup.domain == BattleDomain::space && phase.impl_->retreat) {
         auto gate = phase.impl_->retreat_gate(issuer); gate.battle_decided = phase.pending_outcome_.has_value();
         if (retreat->action == RetreatAction::auto_resolve) diagnostics.push_back(detail::diagnostic(
             diagnostic_codes::command_rejected, "mid-battle solve requires the native interleaved death service (WAR-41/45)", {}, core::Severity::warning));

@@ -379,7 +379,7 @@ docs-only walk changes no status to applied.
 | `Corruption_N_Type`, `Corruption_N_Credit_Cost`, `Corruption_N_Required_Unit_Type/Count`, `Corruption_N_Required_Mission_Type/Count`, `Corruption_N_Required_Planets`, mission mode/map/script, briefing and success/failure speech/hologram tags | 04..10 | Planet authored slots predominantly `land-or-galactic`; dynamically indexed reader names need loader/registry expansion where no exact row exists. |
 | `Destroy_When_Used_As_Corruption_Prereq`, `Corruption_N_Success_Credit_Bonus`, `Corruption_N_Success_Tactical_Upgrade_Type`, `Corruption_N_Success_Unlock_Unit_Type`, `Automatic_Planetary_Corruption_Upgrade_Type` | 06/13..17 | HeroUnit/Planet/Faction `land-or-galactic` where present; absent exact authored rows are not proof of an ignored reader. |
 | Removal nested name/style/enabled/despawn/audio; `Corruption_Removal_Cost_Multiplier`, `Corruption_Removal_Time_In_Secs`; `Planet_Corruption_Removal_Base_Cost` | 18/19 | HeroUnit/UniqueUnit common fields `todo` (legacy EAWR-760); cost/time overrides and Planet base `land-or-galactic`. |
-| Neutralization `Cost_Mod_By_Base_Level`, `Cost_Mod_By_Previous_Neutralizations`, `General_Minor_Hero_Cost_Mod`, `General_Major_Hero_Cost_Mod`, `Can_Neutralize_Minor_Heroes`, `Can_Neutralize_Major_Heroes`, actor/target respawn ranges | 20..26 | GenericHeroUnit/HeroUnit `todo` (legacy EAWR-760); corruption cost curve `land-or-galactic`. |
+| Neutralization `Cost_Mod_By_Base_Level`, `Cost_Mod_By_Previous_Neutralizations`, `General_Minor_Hero_Cost_Mod`, `General_Major_Hero_Cost_Mod`, `Can_Neutralize_Minor_Heroes`, `Can_Neutralize_Major_Heroes`, actor/target respawn ranges | 20..26 | GenericHeroUnit neutralization flags and actor/target absence ranges are applied by `prepare_neutralization` (WGCH-52/21); HeroUnit authoring retains its existing scope. Other listed fields keep their individual registry status. |
 | `Neutralization_Cost`, `Can_Be_Neutralized_By_Major_Heroes`, `Can_Be_Neutralized_By_Minor_Heroes`, `Planet_Auto_Capture_Minor_Heroes` | 22/25/34/39 | Class-specific deferrals/todos; targeting and auto-capture application missing for GC. |
 | Sabotage nested flags, `Sabotage_Cost_Increase_Factor`, target `Sabotage_Cost_Credits`/`Tutorial_Sabotage_Cost_Credits`, `Sabotage_Particle_Effect` | 27..31 | Ability common fields and GenericHeroUnit `Abilities/Galactic_Sabotage_Ability/Sabotage_Cost_Increase_Factor` are `todo` (legacy EAWR-760); target cost rows scope-deferred; common reader rejects ordinary cost below one. |
 | Slicer price/chance affinity, base/difficulty/availability curves, min/max respawn arrays; `Slice_Cost_Credits`, `Planet_Slice_Affinity_Types`, planet tech/difficulty ratings | 32..36 | HeroUnit affinity/base/timer fields `todo` (legacy EAWR-760); difficulty/availability curves `land-or-galactic`; type/planet rows require GC loaders. |
@@ -388,8 +388,8 @@ docs-only walk changes no status to applied.
 | Spy `Duration_In_Secs`, `Causes_Despawn`, `Activation_Style`, `Initially_Enabled`, `See_*`; stealth `Evade_Detection_Chance` | 41/42 | Spy common/duration fields `todo` (legacy EAWR-760), visibility fields and galactic stealth scope-deferred; sensors owns visibility readers. |
 | Named/generic hero flags, containing company/squadron types, `Respawn_Tied_To_Structure`, `Respawn_Whole_Team_When_Killed`, `Default_Hero_Respawn_Time`, `SFXEvent_Hero_Respawned` | 43..47, WGM-78..80 | Existing WGM registry inventory applies; no exact active structure-backed example proves stock enablement. Due-record service remains missing. |
 | `Corruption_Choice_Income_Percentage`, faction corruption production factors and `Corruption_Hyperspace_Bonus` | Linked WGEP/WGM rules | `land-or-galactic`; reuse the existing economy/movement gaps. |
-| `Planet_Retains_Residual_Influence`, `Build_Initially_Locked`, `Can_Be_Unlocked_By_Slicer`, `Piracy_Value` | 48/54/60 | Planet/type scope-deferred; GC eligibility, unlock discovery and departure accrual missing. |
-| `Hack_Super_Weapon_Ability`, `Planet_Destruction_Ability`, `Political_Control_Protection_Ability` common nested lifecycle fields; `Activated_Hack_Super_Weapon_Ability_Names` | 57..59 | HeroUnit/SpaceUnit nested fields `todo` (legacy EAWR-760); GameConstants routing `todo` (legacy EAWR-653). Galactic action host and called-service effects missing. |
+| `Planet_Retains_Residual_Influence`, `Build_Initially_Locked`, `Can_Be_Unlocked_By_Slicer`, `Piracy_Value` | 48/54/60 | Planet residual influence is applied by `calculate_planet_control` (WGM-67); other type fields retain their individual registry scope and gaps. |
+| `Hack_Super_Weapon_Ability`, `Planet_Destruction_Ability`, `Political_Control_Protection_Ability` common nested lifecycle fields; `Activated_Hack_Super_Weapon_Ability_Names` | 57..59 | HeroUnit/SpaceUnit nested fields `todo` (legacy EAWR-760); GameConstants routing `todo` (legacy EAWR-653). The galactic action host routes authored activation names in `install_live_ability_services`; remaining class-specific gaps retain their individual registry status. |
 | Corruption particles, line growth/radius/offset, icon/encyclopedia/hologram/speech fields | Presentation interfaces | Scope-deferred; no simulation outcome is derived from their appearance. |
 
 The old `Corrupt_Planet_Ability` example in the saboteur XML is commented out;
@@ -1134,3 +1134,31 @@ choices that remain unverified.
 | WGCH-183 | The host reads `Activated_Destroy_Planet_Ability_Names` as an authored routing list; a type's destruction ability binds only when its authored name is in that list, and its service starts enabled unless the authored flag says otherwise (WGCH-170). The command carries the ORIGINAL supplied object and the planet only; the bearer is resolved afresh at execution (WGCH-155/156), so a transport's contents may change between preparation and drop without a pinned identity going stale. | project rule; WGCH-137/155/156/170 |
 | WGCH-184 | Execution order: ability gate and planetary services (WGCH-113/137/138), then the contested-orbit refusal (WGCH-158) when the actor's flag is armed, then the pending leader-kill victory request (WGCH-58/114), then the shared ruins request (WGCH-177). The contested-space flag defaults to armed and is changed only by the journaled authored bracket (WGCH-160). A refusal settles a typed `refused` receipt that carries no fleet identity, type or count. The ruins plan is prepared against copied inputs before any mutation, so an unresolved named seam refuses before the victory request. | project rule; WGCH-58/113/158/160/177 |
 | WGCH-185 | Destruction moves no credits, consumes no actor, locks no weapon type, destroys no orbital fleet, clears no starbase and changes no ownership (WGCH-115); it owns no price, so a priced payload is never a destruction capability. A direct execute with no retained preparation is admitted (the queued drop carries no host-issued menu). The target effect, model refresh and sound consumers stay named seams. | project rule; WGCH-115/155/156 |
+
+### Map preview integration (legacy EAWR-3899)
+
+The shared producer applies WGCH-152/153 to the dragged fleet's stored breakdown:
+lowest original-type rank, first on ties, then the supported kind precedence.
+An ineligible top actor does not fall through to another actor. Current service
+enabled/cancelled flags are copied for the local observer on producer invalidation;
+this immutable display column is excluded from canonical bytes and checkpoints.
+Target qualification retains the distinct allegiance, corruption, technology,
+special-structure and exact-current-type weapon predicates above. Prices,
+contested orbit and leader victory remain execution facts. Transport contents are
+visited in stored order using current identities; typed menu orders name the live
+bearer, while destruction retains the supplied container for its existing host.
+
+The stock XML inventory has ten relevant ability tags. Seven existing runtimes
+are connected here: destruction, theft, black market, sabotage, neutralization,
+corruption and hacking. Spy/siphon remain (legacy EAWR-1143) and corruption removal remains
+(legacy EAWR-1141). Raw per-target tutorial/story producers remain (legacy EAWR-2042); the selector accepts
+explicit supplied restriction/override facts without fabricating those producers.
+
+A controlled debug-build capture (3.00.045, stamp 2-3-2026 13:37:30) observed corruption
+for a lone defiler; adding a rank-100 destruction ship suppressed the mixed
+fleet's slot, and adding a rank-0 destruction ship restored destruction. Equal-rank
+tie behavior remains the WGCH-152 static qualification, not a new runtime claim.
+Remote corruption slots and travel from Coruscant before the Byss dialog were
+also observed. Remote slot rendering and destination-actor travel remain (legacy EAWR-4471):
+the current receive path stays at the parked planet until the multiplayer command
+and checkpoint work is admitted. No retail image or fixture is committed.

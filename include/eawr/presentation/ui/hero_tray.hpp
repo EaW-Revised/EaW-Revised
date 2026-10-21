@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <vector>
 
@@ -83,5 +84,16 @@ struct HeroCollectInput {
 // dropped). Each side is ordered newest first (descending hero id: slot 0 is next to the screen edge,
 // WHE-72) and cut to the policy capacity, which leaves the oldest out.
 void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy, HeroRoster& out);
+
+// WHE-47/48/75/76: input resolves the old icon identity against the current snapshot.
+// `scratch` may still contain a previously drawn roster; every dispatch recollects it.
+// The provider maps a represented craft to its ordinary selection/command container
+// (identity when absent). Only validated live objects reach the existing effect paths.
+using HeroEntityResolver = std::function<sim::EntityId(sim::EntityId)>;
+using HeroSelection = std::function<void(const sim::tactical::TacticalInstance&, bool focus)>;
+using HeroTarget = std::function<void(const sim::tactical::TacticalInstance&)>;
+void dispatch_hero_click(const HeroCollectInput& input, const HeroTrayPolicy& policy, HeroRoster& scratch,
+                         sim::EntityId hero, bool hostile, bool right, bool double_click,
+                         const HeroEntityResolver& resolve, const HeroSelection& select, const HeroTarget& target);
 
 } // namespace eawr::presentation::ui

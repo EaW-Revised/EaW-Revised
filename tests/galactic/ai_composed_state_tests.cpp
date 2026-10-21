@@ -405,6 +405,40 @@ ai::GalacticPerceptionSetup fixture_perception(const galactic::GalacticSetup& se
     for (const auto& planet : setup.planets) perception.planets.push_back({planet.id, "P" + std::to_string(planet.id), 0, {}, {}, {}, {}, {}});
     return perception;
 }
+void native_action_frontiers() {
+    const eawr::sim::InlineExecutor executor;
+    auto galaxy = must(galactic::GalacticSession::create(fixture()));
+    RealOwners owners(galaxy, fixture_lifecycle(), fixture_perception(galaxy.setup()), {}, executor);
+    auto& actions = *owners.production;
+    const std::array players{galactic::PlayerId{1}, galactic::PlayerId{2}};
+    const auto root = must(actions.state_hash());
+    const auto revision = actions.state_revision();
+    must(actions.prepare_player_frontiers(executor, players));
+    {
+        auto first = actions.player_frontier(1);
+        must(actions.qualified_freestore().initialize(1, {}));
+        const auto own = must(actions.state_hash());
+        const auto own_revision = actions.state_revision();
+        expect(own != root && own_revision != revision, "native private freestore writes own their physical epoch");
+        {
+            auto second = actions.player_frontier(2);
+            expect(must(actions.state_hash()) == root && actions.state_revision() == revision,
+                "native foreign freestore reads and epochs retain the frozen root");
+            expect(!actions.qualified_freestore().initialized(1), "native foreign membership ignores earlier private initialization");
+            must(actions.qualified_freestore().initialize(2, {}));
+            expect(must(actions.record_sync_hash()) == must(actions.record_sync_hash(true)),
+                "native private record sums retain the independent cold oracle");
+        }
+        expect(must(actions.state_hash()) == own && actions.state_revision() == own_revision,
+            "nested native scopes restore both private state and its epoch");
+    }
+    expect(must(actions.state_hash()) == root && actions.state_revision() == revision,
+        "native private writes leave the canonical state and epoch unchanged");
+    must(actions.prepare_player_frontiers(executor, players));
+    { auto first = actions.player_frontier(1); expect(must(actions.state_hash()) == root, "next native barrier resets physical frontiers"); }
+    const std::array reversed{players[1], players[0]};
+    expect(!actions.prepare_player_frontiers(executor, reversed), "native frontier preparation requires canonical owner order");
+}
 void real_boundaries() {
     std::vector<std::string> reference;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
@@ -576,7 +610,7 @@ void installed(bool measure = false) {
         const auto id = static_cast<galactic::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == source->starting_active_player;
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({{id}, id, human ? galactic::SeatKind::human : galactic::SeatKind::ai, id - 1, true, human ? id : 0});
     }
     std::vector<std::string> originals; for (const auto& type : types.types) originals.push_back(type.name);
@@ -667,7 +701,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
         else if (argc == 2 && std::string_view(argv[1]) == "--benchmark") installed(true);
-        else { record_sum_contracts(); sync_contracts(); contracts(); real_boundaries(); world_hash_boundaries(); }
+        else { record_sum_contracts(); sync_contracts(); contracts(); real_boundaries(); world_hash_boundaries(); native_action_frontiers(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures ? 1 : 0;
 }

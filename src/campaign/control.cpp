@@ -1,4 +1,5 @@
 #include "eawr/campaign/control.hpp"
+#include "eawr/core/text.hpp"
 
 #include <limits>
 #include <algorithm>
@@ -33,6 +34,8 @@ core::Result<sim::galactic::PoliticalControlSetup> prepare_initial_control(
         error.message = "initial political control requires fresh placement presence";
         return core::Result<Out>::failure(std::move(error));
     }
+    presence.ability_sources.clear();
+    if (galaxy.census) for (const auto& actor : galaxy.census->objects) gc::update_control_actor(presence, actor);
     auto candidate = galaxy;
     candidate.control = presence;
     if (auto valid = gc::validate_control_setup(candidate); !valid)
@@ -82,6 +85,7 @@ core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
     presence.change_seconds = *duration->number;
     presence.max_ground_forces = static_cast<std::uint32_t>(limit->number->trunc_to_integer());
     presence.types.clear();
+    presence.ability_types.clear(); presence.ability_sources.clear();
     sim::galactic::TypeId previous{};
     for (const auto& binding : objects) {
         const auto resolved = units::resolve_initial_galactic_type(types, binding.original_type);
@@ -92,6 +96,24 @@ core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
             return fail(binding.original_type + ": missing or invalid orbital Political_Control", type ? type->file : std::string{});
         previous = binding.id;
         presence.types.push_back({binding.id, static_cast<std::uint8_t>(type->political_control->trunc_to_integer()), binding.skips_combat, binding.ground_capable});
+        sim::galactic::ControlAbilityType abilities; abilities.type = binding.id;
+        for (const auto& ability : type->control_abilities) {
+            if (!ability.initially_enabled || !core::iequals(ability.activation_style, "Galactic_Automatic"))
+                return fail(binding.original_type + ": automatic_control_activation_unqualified", type->file);
+            sim::galactic::ControlAbility row;
+            row.protection = ability.protection; row.enabled = *ability.initially_enabled;
+            if (!row.protection) {
+                if (!ability.multiplier || !ability.category || *ability.category < std::numeric_limits<std::int32_t>::min()
+                    || *ability.category > std::numeric_limits<std::int32_t>::max())
+                    return fail(binding.original_type + ": missing or invalid political transition ability quantity", type->file);
+                // WGM-197: this tag is a direct time multiplier; invalid ranges become zero.
+                row.multiplier = *ability.multiplier >= sim::math::Fixed{} && *ability.multiplier < sim::math::Fixed::from_raw(sim::math::Fixed::scale)
+                    ? *ability.multiplier : sim::math::Fixed{};
+                row.category = static_cast<std::uint32_t>(*ability.category);
+            }
+            abilities.abilities.push_back(row);
+        }
+        if (!abilities.abilities.empty()) presence.ability_types.push_back(std::move(abilities));
     }
     if (planets.size() != presence.planets.size() || routes.size() != presence.routes.size())
         return fail("control planet/route bindings must cover runtime presence");

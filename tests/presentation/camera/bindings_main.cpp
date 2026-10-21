@@ -196,6 +196,7 @@ int main() {
     test_binding_field_rejections();
     test_ambiguous_chords();
     test_activation_is_atomic();
+    test_camera_key_presets();
     test_held_repeat_and_pressed_triggers();
     test_focus_loss_requires_fresh_press();
     test_capture_lock_suppresses_everything();

@@ -150,7 +150,7 @@ private:
     void ask_quit();
     void on_confirm_result(int64_t result);
     void close_screen();
-    void apply_committed();
+    void apply_committed(const presentation::ui::VideoSettings& previous_video);
 
     std::unique_ptr<Resources> resources_;
     std::unique_ptr<PageState> state_;

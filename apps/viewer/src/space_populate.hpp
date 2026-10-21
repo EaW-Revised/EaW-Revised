@@ -173,6 +173,8 @@ public:
         sim::EntityId entity{};
         struct TurretPose { sim::math::Fixed yaw{}, pitch{}; bool xy_only{}, barrel{}; };
         std::optional<TurretPose> turret{};
+        struct HardpointTurretPose { std::uint32_t hardpoint{}; TurretPose angles{}; };
+        std::vector<HardpointTurretPose> hardpoint_turrets{};
     };
     // Moves every live ship's pieces to its pose and hides the live ships
     // `poses` does not list, then refreshes instances(). False (failure()
@@ -476,9 +478,14 @@ private:
         animation::Pose pose;
         std::vector<animation::BonePose> bind_bones;
         std::size_t turret{};
-        std::optional<std::size_t> barrel, idle;
+        std::optional<std::size_t> barrel, idle, muzzle;
+        std::optional<LivePose::TurretPose> applied;
+        // Keep the uploaded attachment frame for reports written after render teardown.
+        sim::math::Mat3x4 attachment_frame{sim::math::identity_matrix()};
     };
     std::vector<std::optional<TurretBinding>> turret_bindings_;
+    // Each attached model owns its own skeleton; hardpoint indices follow HardPoints.
+    std::vector<std::map<std::uint32_t, TurretBinding>> hardpoint_turret_bindings_;
     std::vector<AnimatedInstance> animated_instances_;
     std::map<std::string, animation::IdlePlayback> idle_playbacks_;
     // Object id -> the Idle_Anim_00_Rate_Mod text that did not parse (rate 1 kept).

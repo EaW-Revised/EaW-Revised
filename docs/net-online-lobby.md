@@ -47,8 +47,8 @@ opposing human owners using loaded faction/team rows. The viewer resolves offere
 faction IDs through names from the mounted catalog, including mods.
 `GnsTransport::peer_count()` remains **2** and its options require two peers.
 `live_session_config.cpp` parses faction/player rows, not command seats; its
-`skirmish::local_setup_rows = 8` bound describes the local dialog's hidden ninth
-row and stays separate from online capacity. The production LAN lobby validates
+`skirmish::local_setup_rows` bound now aliases the shared engine seat limit;
+the owner-requested local setup extension exposes the ninth authored seat. The production LAN lobby validates
 up to three host-planned human owner rows and offers coop, two-side and three-side
 rosters with up to nine shared command seats, bounded by the loaded map rows.
 Owner rows show their admitted controllers and readiness; guests cannot claim AI

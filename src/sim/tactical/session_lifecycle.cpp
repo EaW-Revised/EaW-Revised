@@ -350,6 +350,10 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
     const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
     auto valid = validate_setup(setup);
+    if (valid && setup.domain == BattleDomain::land) {
+        return core::Result<TacticalSession>::failure(detail::diagnostic(
+            diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
+    }
     if (valid && (setup.campaign.has_value() != economy.campaign
         || (setup.campaign && setup.campaign->players != economy.players)))
         valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign setup and economy binding differ"));
@@ -392,6 +396,10 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
     const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
     auto valid = validate_replay(replay);
+    if (valid && replay.setup.domain == BattleDomain::land) {
+        return core::Result<TacticalSession>::failure(detail::diagnostic(
+            diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
+    }
     if (valid && (replay.setup.campaign.has_value() != economy.campaign
         || (replay.setup.campaign && replay.setup.campaign->players != economy.players)))
         valid = core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "campaign replay and economy binding differ"));
@@ -446,6 +454,10 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
 }
 
 core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup, const TacticalContent& content) {
+    if (setup.domain != content.domain) {
+        return core::Result<TacticalSession>::failure(detail::diagnostic(
+            diagnostic_codes::invalid_setup, "tactical setup and content battle domains differ"));
+    }
     auto resolved = setup;
     if (auto valid = validate_setup(resolved); !valid) return core::Result<TacticalSession>::failure(valid.error());
     if (content.retreat) resolve_cinematic_seats(resolved, content.economy.players);

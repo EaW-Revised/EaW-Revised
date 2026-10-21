@@ -274,6 +274,36 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
         }
         for (const auto* abilities : ability_blocks(layers)) {
             for (const auto& ability : abilities->children) {
+                if (equal(ability.name, "Political_Control_Protection_Ability")
+                    || equal(ability.name, "Political_Transition_Bonus_Ability")) {
+                    relevant = true;
+                    GalacticControlAbility initial;
+                    initial.protection = equal(ability.name, "Political_Control_Protection_Ability");
+                    data::tag_trace::used_attribute(ability, "Name");
+                    for (const auto& attribute : ability.attributes)
+                        if (equal(attribute.name, "Name")) initial.name = attribute.value;
+                    for (const auto& child : ability.children) {
+                        if (data::retail::is_placeholder(child.raw_text)) continue;
+                        if (equal(child.name, "Initially_Enabled")) {
+                            data::tag_trace::used(child);
+                            initial.initially_enabled = data::retail::boolean(child.raw_text);
+                            if (!initial.initially_enabled) table.issues.push_back({IssueKind::bad_value, child.source.logical_path,
+                                child.source.line, type.name, "Abilities/" + ability.name + "/Initially_Enabled",
+                                trim(child.raw_text), "invalid automatic control enabled flag"});
+                        } else if (equal(child.name, "Activation_Style")) {
+                            data::tag_trace::used(child); initial.activation_style = trim(child.raw_text);
+                        } else if (!initial.protection && equal(child.name, "Time_Reduction_Percentage")) {
+                            data::tag_trace::used(child); initial.multiplier = number(table, type, child);
+                        } else if (!initial.protection && equal(child.name, "Stacking_Category")) {
+                            data::tag_trace::used(child);
+                            const auto value = number(table, type, child);
+                            initial.category.reset();
+                            if (value && value->raw() % Fixed::scale == 0) initial.category = value->trunc_to_integer();
+                            else issue(table, type, child, IssueKind::bad_value, "expected whole control stacking category");
+                        }
+                    }
+                    type.control_abilities.push_back(std::move(initial));
+                }
                 if (equal(ability.name, "Galactic_Stealth_Ability")) {
                     relevant = true; GalacticInitialStealth initial;
                     for (const auto& child : ability.children) {
@@ -409,6 +439,15 @@ std::array<std::uint8_t, 32> galactic_content_identity(const GalacticTypeTable& 
             out.encode(bonus.enhancement); out.byte(bonus.defense ? 1 : 0);
         }
         // Authored stealth contributes a nonempty extension in this domain.
+        if (!type.control_abilities.empty()) {
+            out.text("automatic-control-v1");
+            out.integer(static_cast<std::int64_t>(type.control_abilities.size()));
+            for (const auto& ability : type.control_abilities) {
+                out.text(ability.name); out.byte(ability.protection ? 1 : 0);
+                out.encode(ability.initially_enabled); out.text(ability.activation_style);
+                out.encode(ability.multiplier); out.encode(ability.category);
+            }
+        }
         if (!type.initial_stealth.empty()) {
             out.integer(static_cast<std::int64_t>(type.initial_stealth.size()));
             for (const auto& ability : type.initial_stealth) {

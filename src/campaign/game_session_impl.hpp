@@ -66,6 +66,7 @@ public:
     std::vector<galactic::story::Triggered> story_triggers; // current publication only
     galactic::GalacticSession::TechnologyNoticeHandler technology_handler; // caller's, run after the story saw the notice
     std::vector<std::string> story_notes; // published once as diagnostics of the next step
+    std::vector<std::string> entry_notes; // passengers an entry left out; same publication, never saved or hashed
     StoryRewardApplier story_rewards;
     const sim::PartitionExecutor* executor{}; // the running step's, for rewards applied inside it
     std::set<std::string> story_reported;     // refusal texts already published (diagnostics only, never saved)
@@ -121,6 +122,7 @@ public:
     const Layer& layer(BattleLayer value) const;
     bool assembling_layers();
     ConflictLayerServices& services(const ConflictRecord& value);
+    core::Result<bool> tactical_selection(const ConflictRecord&, bool requested, bool forced) const;
     core::Result<authoritative::ScriptScheduler> scripts_for(const ConflictRecord& record,
         ScriptRequirement requirement = ScriptRequirement::required);
     std::optional<Child> child, staged;
@@ -152,6 +154,7 @@ public:
     std::vector<RecordedAdmission> admissions;
     std::multimap<std::uint64_t, RecordedAdmission> replay_admissions;
     std::map<galactic::PlayerId, bool> votes;
+    std::optional<std::uint64_t> multiplayer_vote_timeout, vote_started;
     galactic::PlayerId withdrawing_player{};
     bool conflict_pause{};
     galactic::SeatId interactive_seat{};
@@ -166,6 +169,7 @@ public:
     std::map<std::uint64_t, ConflictRecord> replay_conflicts;
     std::map<sim::EntityId, RecordedConflict> replay_selected;
     const galactic::Seat* seat(const galactic::SeatId id) const;
+    bool human_side(const galactic::PlayerId owner) const;
     tactical::PlayerId player(const galactic::SeatId id) const;
     tactical::CampaignReserveAdmission reserve_admission(const tactical::PlayerId owner) const;
     core::Result<void> refresh_battle_seats();

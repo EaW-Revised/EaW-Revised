@@ -48,6 +48,7 @@ public:
     // contract's text-sharpness probe: a part that was hidden while the window was sized).
     [[nodiscard]] godot::BaseButton* lan_host_button() const;
     [[nodiscard]] std::shared_ptr<LanMatch> lan_match() const;
+    [[nodiscard]] const std::filesystem::path& gc_acceptance_directory() const;
     void show(std::string message = {});
     void hide();
     // MNU-21: the staging's Cancel button. A shell that owns the screen calls route_cancel() once and then

@@ -113,6 +113,8 @@ struct FixtureOptions final {
     std::optional<std::uint64_t> seed;
     std::optional<sim::tactical::VictoryCondition> victory_condition{};
     std::optional<MatchOptions> match{};
+    // Editable network staging only. Vacancies never become simulation players.
+    std::vector<std::uint32_t> open_slots{};
 };
 
 // Reads and validates the selected space map and binds its actual SHA-256.

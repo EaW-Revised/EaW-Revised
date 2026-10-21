@@ -27,7 +27,7 @@ struct CampaignCustomOptions {
     friend bool operator==(const CampaignCustomOptions&, const CampaignCustomOptions&) = default;
 };
 struct CampaignSetupOptions {
-    std::optional<sim::galactic::PlayerId> local_observer; // explicit caller identity, not faction ordinal
+    std::optional<sim::galactic::PlayerId> solo_reference_human; // canonical WGA-127/264 policy, only for single-player setups
     std::uint64_t seed{};
     std::optional<std::uint64_t> forced_seed;
     std::vector<CampaignPlayerBinding> players; // strictly ascending player IDs
@@ -88,7 +88,8 @@ public:
     [[nodiscard]] const sim::galactic::GalacticSetup& galaxy() const noexcept { return galaxy_; }
     [[nodiscard]] CampaignSetupMode mode() const noexcept { return mode_; }
     [[nodiscard]] std::span<const CampaignPlayerBinding> player_bindings() const noexcept { return player_bindings_; }
-    [[nodiscard]] std::optional<sim::galactic::PlayerId> local_observer() const noexcept { return local_observer_; }
+    [[nodiscard]] std::optional<sim::galactic::PlayerId> solo_reference_human() const noexcept { return solo_reference_human_; }
+    [[nodiscard]] std::span<const sim::galactic::PlayerId> human_observers() const noexcept { return human_observers_; }
     [[nodiscard]] std::optional<sim::math::Fixed> observer_reveal_delay() const noexcept { return observer_reveal_delay_; }
     [[nodiscard]] std::optional<bool> observer_auto_reveal() const noexcept { return observer_auto_reveal_; }
     [[nodiscard]] std::span<const CampaignLocation> locations() const noexcept { return locations_; }
@@ -115,7 +116,8 @@ private:
     sim::galactic::GalacticSetup galaxy_;
     CampaignSetupMode mode_{CampaignSetupMode::single_player};
     std::vector<CampaignPlayerBinding> player_bindings_;
-    std::optional<sim::galactic::PlayerId> local_observer_;
+    std::optional<sim::galactic::PlayerId> solo_reference_human_;
+    std::vector<sim::galactic::PlayerId> human_observers_;
     std::optional<sim::math::Fixed> observer_reveal_delay_;
     std::optional<bool> observer_auto_reveal_;
     std::string campaign_name_;

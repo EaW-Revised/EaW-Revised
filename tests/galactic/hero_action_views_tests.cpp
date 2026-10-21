@@ -27,7 +27,7 @@ h::Fixture fixture() {
     return world;
 }
 g::GalacticSnapshot snapshot(const std::optional<g::HeroActionMenus>& menus, g::ObservedPlanet row, unsigned local = 1) {
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     auto observations = std::make_shared<const std::vector<g::ObservedPlanet>>(std::vector{row});
     return g::GalacticSnapshot(0, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, observer,
         {}, {}, {}, observations, {}, {}, menus);

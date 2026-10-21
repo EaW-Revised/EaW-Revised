@@ -111,6 +111,8 @@ public:
     void refresh_heroes(const LiveSessionView& live);
     [[nodiscard]] const ui::HeroRoster& hero_roster() const noexcept { return hero_roster_; }
     [[nodiscard]] std::uint64_t hero_revision() const noexcept { return hero_revision_; }
+    void hero_click(sim::EntityId hero, bool hostile, bool right, bool double_click,
+                    LiveSessionView& live, SpaceEnvironment& space);
     // A left release on the card in `slot` (FoC's Component_Logic_Tactical_Select): Shift deselects.
     // True when the selection changed.
     bool card_click(std::size_t slot, bool shift, const LiveSessionView& live);
@@ -213,6 +215,7 @@ private:
                      std::optional<sim::math::Vec3> destination = std::nullopt);
     [[nodiscard]] bool local_order_selection(const LiveSessionView& live) const;
     void refresh_cards(const LiveSessionView& live);
+    void refresh_hero_types(const units::UnitTables* tables);
     void follow(const LiveSessionView& live, SpaceEnvironment& space);
 
     godot::Node3D* host_{};

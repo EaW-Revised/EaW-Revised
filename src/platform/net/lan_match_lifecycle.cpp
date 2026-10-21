@@ -88,7 +88,11 @@ void TcpLanMatch::host(std::uint16_t port)  {
         if (roster_error_) { set_failure(*roster_error_); return; }
         net::TcpOptions options; options.build_identity = core::build_identity();
         options.peers = static_cast<std::uint32_t>(owners_.size());
-        if (lobby_builder_) options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
+        if (lobby_builder_) {
+            options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
+            options.lobby_bootstrap = true;
+            options.staging_capacity = capacity_staging_;
+        }
         // Loading is synchronous in Godot. Preserve the stream through a bounded load.
         options.timeout = std::chrono::milliseconds(180'000);
         auto opened = net::TcpTransport::host("0.0.0.0", port, options);
@@ -120,7 +124,13 @@ void TcpLanMatch::join(std::string endpoint)  {
         endpoint = std::move(parsed).value().host;
         net::TcpOptions options; options.build_identity = core::build_identity(); options.timeout = std::chrono::milliseconds(180'000);
         options.peers = static_cast<std::uint32_t>(owners_.size());
-        if (lobby_builder_) options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
+        if (lobby_builder_) {
+            options.max_frame_size = static_cast<std::uint32_t>(net::max_lobby_frame_bytes);
+            options.lobby_bootstrap = true;
+            // The verified host hello selects its mode and capacity, independent
+            // of the browser's current humans + Open vacancy count.
+            options.staging_capacity = true;
+        }
         auto opened = net::TcpTransport::connect(std::move(endpoint), port, options);
         if (!opened) { set_failure(opened.error()); return; }
         io_->transport.tcp = std::make_unique<MatchTransport>(std::move(opened).value());

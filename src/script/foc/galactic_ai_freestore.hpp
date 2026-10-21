@@ -5,6 +5,8 @@
 #include "galactic_ai_selection_content.hpp"
 
 #include <set>
+#include <stdexcept>
+#include <type_traits>
 
 namespace eawr::script::foc::galactic_ai {
 // WGA-300..302/307/312: authoritative actor state, not tactical mobility.
@@ -28,8 +30,38 @@ struct FreestoreFacts {
 // Updating raw facts never silently rebuilds membership. The owner is nested
 // in NativeActions' production envelope, not a seventh native contributor.
 class QualifiedFreestore final {
+    struct Operation;
 public:
     using Changed = std::function<void()>;
+    using Replay = std::function<core::Result<void>(QualifiedFreestore&)>;
+    using IntentSink = std::function<void(Replay)>;
+    // Install only on the selected decision frontier. clone() never inherits
+    // this sink: abandoned Lua transactions must publish no tentative intent.
+    void set_intent_sink(IntentSink sink) {
+        if (!track_operations_) throw std::logic_error("freestore intent sink requires a tracked decision frontier");
+        intent_sink_ = std::move(sink);
+    }
+    [[nodiscard]] const IntentSink& intent_sink() const noexcept { return intent_sink_; }
+    class SuspendIntents {
+    public:
+        SuspendIntents(const SuspendIntents&) = delete;
+        SuspendIntents& operator=(const SuspendIntents&) = delete;
+        ~SuspendIntents() { --owner_.mutation_depth_; }
+    private:
+        friend class QualifiedFreestore;
+        explicit SuspendIntents(QualifiedFreestore& owner) : owner_(owner) { ++owner_.mutation_depth_; }
+        QualifiedFreestore& owner_;
+    };
+    [[nodiscard]] SuspendIntents suspend_intents() { return SuspendIntents(*this); }
+    class OperationCursor {
+    private:
+        friend class QualifiedFreestore;
+        OperationCursor(std::shared_ptr<const Operation> prefix, std::string base)
+            : prefix_(std::move(prefix)), base_(std::move(base)) {}
+        std::shared_ptr<const Operation> prefix_;
+        std::string base_;
+    };
+    [[nodiscard]] OperationCursor operation_cursor() const { return {operations_, overlay_base_hash_}; }
     explicit QualifiedFreestore(Changed changed = {}) : changed_(std::move(changed)) {}
     [[nodiscard]] core::Result<void> update(FreestoreFacts);
     [[nodiscard]] core::Result<void> initialize(gc::PlayerId, std::span<const sim::EntityId> offers);
@@ -37,14 +69,21 @@ public:
     [[nodiscard]] core::Result<void> owner_changed(FreestoreFacts, bool new_manager_initialized);
     void lost(sim::EntityId);
     // WGA-300/163: delete-pending notification retains raw facts until loss.
-    void remove_membership(gc::PlayerId player, sim::EntityId actor) { remove(player, actor); }
+    void remove_membership(gc::PlayerId player, sim::EntityId actor);
     [[nodiscard]] core::Result<void> prevent_ai_usage(gc::PlayerId, sim::EntityId, bool prevent);
     [[nodiscard]] core::Result<void> set_prefer_ground(sim::EntityId, bool);
     [[nodiscard]] bool contains(gc::PlayerId, sim::EntityId) const noexcept;
     [[nodiscard]] bool initialized(gc::PlayerId player) const noexcept { return stores_.contains(player); }
     [[nodiscard]] std::uint64_t object_count(gc::PlayerId, std::optional<bool> nontransport = {}) const;
-    [[nodiscard]] QualifiedFreestore clone() const;
+    [[nodiscard]] QualifiedFreestore clone(Changed changed = {}, bool track_operations = false) const;
     void replace(const QualifiedFreestore&);
+    // GFS-A22: validate the immutable operation prefix first, then re-admit only this overlay's new intents.
+    // The return value counts refusals; earlier admissions remain applied and no intent is retried.
+    [[nodiscard]] core::Result<std::size_t> commit_overlay(const QualifiedFreestore& base, const QualifiedFreestore& overlay);
+    // Value-owned, chronological delta for an accepted immediate transaction.
+    // Exporting never executes an operation or publishes a tentative clone.
+    [[nodiscard]] core::Result<std::vector<Replay>> operations_since(const QualifiedFreestore& base) const;
+    [[nodiscard]] core::Result<std::vector<Replay>> operations_since(const OperationCursor&) const;
     [[nodiscard]] core::Result<bool> reserve(gc::PlayerId, sim::EntityId, std::uint64_t plan);
     void release(gc::PlayerId, std::uint64_t plan);
     void release_object(gc::PlayerId, sim::EntityId, std::uint64_t plan);
@@ -64,6 +103,52 @@ public:
     [[nodiscard]] core::Result<void> restore(std::span<const std::uint8_t>, sim::EntityId next_id,
         std::span<const gc::GalacticPlayer> players);
 private:
+    struct Operation {
+        mutable std::shared_ptr<const Operation> previous;
+        Replay replay;
+        ~Operation() {
+            // A bounded barrier can still carry many intents; release its private tail iteratively.
+            while (previous && previous.use_count() == 1) {
+                auto parent = std::move(previous->previous);
+                previous.reset(); previous = std::move(parent);
+            }
+        }
+    };
+    std::shared_ptr<const Operation> operations_;
+    std::string overlay_base_hash_;
+    bool track_operations_{};
+    IntentSink intent_sink_;
+    std::size_t mutation_depth_{};
+    template<class Body, class Factory> auto mutate(Body body, Factory factory) {
+        const bool capture = track_operations_ && mutation_depth_ == 0;
+        Replay replay = capture ? factory() : Replay{};
+        struct Depth { std::size_t& value; ~Depth() { --value; } } depth{mutation_depth_};
+        ++mutation_depth_;
+        auto result = body();
+        if (capture && result) {
+            bool admitted = true;
+            if constexpr (std::is_same_v<decltype(result), core::Result<bool>>) admitted = result.value();
+            if constexpr (std::is_same_v<decltype(result), core::Result<FreestoreAssignment>>)
+                admitted = result.value() == FreestoreAssignment::assigned;
+            if (admitted) {
+                operations_ = std::make_shared<Operation>(Operation{operations_, std::move(replay)});
+                if (intent_sink_) intent_sink_(operations_->replay);
+            }
+        }
+        return result;
+    }
+    [[nodiscard]] core::Result<void> update_impl(FreestoreFacts);
+    [[nodiscard]] core::Result<void> initialize_impl(gc::PlayerId, std::span<const sim::EntityId>);
+    [[nodiscard]] core::Result<bool> offer_impl(gc::PlayerId, sim::EntityId);
+    [[nodiscard]] core::Result<void> owner_changed_impl(FreestoreFacts, bool);
+    void lost_impl(sim::EntityId);
+    [[nodiscard]] core::Result<void> prevent_ai_usage_impl(gc::PlayerId, sim::EntityId, bool);
+    [[nodiscard]] core::Result<void> set_prefer_ground_impl(sim::EntityId, bool);
+    [[nodiscard]] core::Result<bool> reserve_impl(gc::PlayerId, sim::EntityId, std::uint64_t);
+    void release_impl(gc::PlayerId, std::uint64_t);
+    void release_object_impl(gc::PlayerId, sim::EntityId, std::uint64_t);
+    [[nodiscard]] FreestoreAssignment assign_impl(gc::PlayerId, sim::EntityId, std::uint64_t);
+    [[nodiscard]] core::Result<void> consume_additions_impl(gc::PlayerId, std::size_t);
     struct Store {
         std::set<sim::EntityId> members;
         std::map<sim::EntityId, std::uint64_t> reservations;

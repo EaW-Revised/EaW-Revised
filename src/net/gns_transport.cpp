@@ -356,6 +356,56 @@ bool GnsTransport::mesh_complete() const {
 #endif
     return false;
 }
+bool GnsTransport::mesh_complete(std::uint32_t active) const {
+#if EAWR_HAS_GNS
+    if (!mesh_ || mesh_->failure || (active & 1U) == 0 || active == 1U
+        || active >= (1U << mesh_->peers)) return false;
+    const auto roster = mesh_->room->roster();
+    std::uint32_t attached{};
+    for (PeerIndex p = 0; p < roster.capacity; ++p) {
+        if (roster.slots[p].state == GnsRoomSlotState::reserved) return false;
+        if (roster.slots[p].state == GnsRoomSlotState::attached) {
+            if (roster.slots[p].identity != mesh_->slot[p].identity) return false;
+            attached |= 1U << p;
+        }
+    }
+    return attached == active && (!mesh_->host() || mesh_->formation->occupied() == active)
+        && (mesh_->connected_seats() & active) == active;
+#else
+    static_cast<void>(active); return false;
+#endif
+}
+core::Result<bool> GnsTransport::lock_roster(std::uint32_t active) {
+#if EAWR_HAS_GNS
+    const auto fail = [](std::string message) { return core::Result<bool>::failure(error(1764, std::move(message))); };
+    if (!mesh_ || !mesh_->host() || mesh_->failure) return fail("Only the room host can lock the roster.");
+    if (!mesh_->roster_lock) {
+        if (!mesh_complete(active)) return fail("Start raced a player joining or leaving. Wait for the player list and connections, then accept again.");
+        // Capture and check the SAME roster whose revision goes to the service.
+        // Its worker can publish a same-index replacement between earlier reads.
+        const auto roster = mesh_->room->roster();
+        std::uint32_t attached{};
+        for (PeerIndex p = 0; p < roster.capacity; ++p) {
+            if (roster.slots[p].state == GnsRoomSlotState::reserved)
+                return fail("Start raced a player joining. Wait for the player list and accept again.");
+            if (roster.slots[p].state == GnsRoomSlotState::attached) {
+                if (roster.slots[p].identity != mesh_->slot[p].identity)
+                    return fail("Start raced a player replacement. Wait for the player list and accept again.");
+                attached |= 1U << p;
+            }
+        }
+        if (attached != active) return fail("Start raced a player joining or leaving. Wait for the player list and accept again.");
+        mesh_->roster_lock = std::pair{roster.revision, active};
+    }
+    if (mesh_->roster_lock->second != active) return fail("The agreed player list changed during Start.");
+    auto result = mesh_->room->lock_roster(active, mesh_->roster_lock->first);
+    if (!result) mesh_->roster_lock.reset();
+    else if (result.value()) mesh_->locked = true;
+    return result;
+#else
+    static_cast<void>(active); return core::Result<bool>::failure(error(1500, "This build has GNS disabled"));
+#endif
+}
 bool GnsTransport::room_locked() const {
 #if EAWR_HAS_GNS
     return mesh_ && mesh_->locked;

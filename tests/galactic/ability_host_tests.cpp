@@ -125,6 +125,42 @@ void unrelated_actor_write() {
     expect(lookup() == before, "unrelated sparse actor facts do not reset retained buyer pricing/lifetime facts");
 }
 
+void multiplayer_service_views(const eawr::sim::PartitionExecutor& pool) {
+    auto config = setup(false);
+    auto& observer = ability_fixture::add_observer(config, 1, {1000});
+    observer.human_observers = {1, 2}; observer.solo_reference_human = 0;
+    config.seats[1].kind = gc::SeatKind::human; config.seats[1].human_side_id = 2;
+    auto game = take(eawr::campaign::GameSession::create(config));
+    const auto first_actor = config.fleets[0].members[0].id;
+    const auto second_actor = config.fleets[1].members[0].id;
+    const auto canonical = game.galaxy().snapshot()->canonical_bytes();
+    const auto first = game.galaxy().view_snapshot({1});
+    const auto second = game.galaxy().view_snapshot({2});
+    expect(first && second && first->ability_services().size() == 1 && second->ability_services().size() == 1,
+        "each MP observer receives its own ability service row");
+    if (!first || !second || first->ability_services().size() != 1 || second->ability_services().size() != 1) return;
+    expect(first->ability_services()[0].actor == first_actor && second->ability_services()[0].actor == second_actor,
+        "private ability service facts follow the requested human, not the last publication");
+    for (const auto player : {1U, 2U, 1U, 2U}) {
+        const auto view = game.galaxy().view_snapshot({player});
+        const auto& previous = player == 1 ? first : second;
+        expect(view->ability_services().data() == previous->ability_services().data(),
+            "a cached view reuses its own immutable ability services after a seat switch");
+    }
+    expect(game.galaxy().snapshot()->canonical_bytes() == canonical,
+        "private service publications do not change canonical state");
+    take(game.set_ability_lifecycle(second_actor, false, true));
+    (void)take(game.step(pool));
+    const auto updated_first = game.galaxy().view_snapshot({1});
+    const auto updated_second = game.galaxy().view_snapshot({2});
+    expect(updated_first->ability_services().size() == 1 && updated_first->ability_services()[0].enabled
+        && updated_second->ability_services().size() == 1 && !updated_second->ability_services()[0].enabled
+        && updated_second->ability_services()[0].cancelled,
+        "ability producer invalidation rebuilds each owner's service gates independently");
+    expect(first->ability_services()[0].enabled && second->ability_services()[0].enabled,
+        "older private service publications stay immutable after lifecycle changes");
+}
+
 void representations(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     for (const auto& [initial, target] : {std::pair<gc::TypeId, gc::TypeId>{1000, 1001}, {1001, 1000}, {1000, 1002}}) {
         auto config = setup(false); const auto actor = buyer(config);
@@ -178,10 +214,10 @@ void representations(const eawr::sim::PartitionExecutor& pool, std::vector<std::
 int case_galactic_ability_host_tests() {
     try {
         std::vector<std::string> baseline;
-        eawr::platform::ThreadWorkerAdapter one(1); contracts(one, &baseline); representations(one, baseline);
+        eawr::platform::ThreadWorkerAdapter one(1); contracts(one, &baseline); representations(one, baseline); multiplayer_service_views(one);
         for (std::size_t workers : {2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes;
-            contracts(pool, &hashes); representations(pool, hashes); expect(hashes == baseline, "market/restore hashes equal on 1/2/4/8 workers");
+            contracts(pool, &hashes); representations(pool, hashes); multiplayer_service_views(pool); expect(hashes == baseline, "market/restore hashes equal on 1/2/4/8 workers");
         }
         cancellation_and_stale(); lifecycle(); unrelated_actor_write();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

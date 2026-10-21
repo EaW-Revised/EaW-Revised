@@ -139,16 +139,32 @@ std::vector<std::uint8_t> lifecycle_record(const LifecycleState& state, std::str
     return {bytes.begin(), bytes.end()};
 }
 }
-void Manager::Impl::update_record(gc::PlayerId player) { records.set(player, 0, 0, lifecycle_record(state, configuration_digest, player)); }
+void Manager::Impl::update_record(gc::PlayerId player) {
+    auto& slice = player ? player_state.at(player).records : records;
+    slice.set(player, 0, 0, lifecycle_record(state, configuration_digest, player));
+}
+void Manager::Impl::reset_records() {
+    records = {}; update_record();
+    for (auto& [player, slice] : player_state) { slice.records = {}; slice.traces.clear(); update_record(player); }
+}
 core::RecordDigest Manager::Impl::rebuild_records() const {
     core::RecordDigest rebuilt; rebuilt.set(0, 0, 0, lifecycle_record(state, configuration_digest, 0));
     for (const auto& row : state.players) rebuilt.set(row.selected.player, 0, 0, lifecycle_record(state, configuration_digest, row.selected.player));
     return rebuilt;
 }
-std::size_t Manager::record_byte_upper_bound() const noexcept { return impl_->records.byte_size() + 1024; }
+std::size_t Manager::record_byte_upper_bound() const noexcept {
+    auto bytes = impl_->records.byte_size() + 1024;
+    for (const auto& [player, slice] : impl_->player_state) { static_cast<void>(player); bytes += slice.records.byte_size(); }
+    return bytes;
+}
 core::Result<std::string> Manager::record_sync_hash(bool cold) const {
     if (impl_->failure) return core::Result<std::string>::failure(*impl_->failure);
-    return core::Result<std::string>::success(cold ? impl_->rebuild_records().digest(component_domain) : impl_->records.digest(component_domain));
+    if (cold) return core::Result<std::string>::success(impl_->rebuild_records().digest(component_domain));
+    auto sums = impl_->records.shards();
+    for (const auto& [player, slice] : impl_->player_state) {
+        static_cast<void>(player); core::RecordDigest::merge_shards(sums, slice.records.shards());
+    }
+    return core::Result<std::string>::success(core::RecordDigest::digest_of(component_domain, sums));
 }
 std::string lifecycle_configuration_digest(const LifecycleSetup& setup, const ai::AiData& data, std::span<const PlanInput> plans) {
     std::string bytes; text(bytes, "eawr-galactic-ai-lifecycle-configuration-v1");

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity type="win32" name="EaW-Revised.Launcher" version="0.2.6.0" processorArchitecture="*"/>
+  <assemblyIdentity type="win32" name="EaW-Revised.Launcher" version="0.2.7.0" processorArchitecture="*"/>
   <description>Empire at War Revised launcher</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>

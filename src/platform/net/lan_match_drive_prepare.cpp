@@ -16,6 +16,24 @@ std::optional<DriverResult> TcpLanMatch::drive_prepare(const tactical::TacticalS
             return DriverResult::success(false);
         }
         if (!io_->transport.tcp) return fail<bool>("LAN transport is unavailable.");
+        if (lobby_ && io_->transport.tcp->staging_capacity() && !io_->transport.tcp->staging_mesh_ready()) {
+            // Freeze first, then establish only the admitted native mesh. Never
+            // bind tick-zero publication while guest-to-guest links are pending.
+            if (auto raw = io_->transport.tcp->poll()) {
+                constexpr auto limit = 8U * 1024U * 1024U;
+                if (io_->transport.pending.size() >= 256 || io_->transport.pending_bytes > limit
+                    || raw->frame.size() > limit - io_->transport.pending_bytes)
+                    return lobby_fail<bool>(net::LobbyReason::resource_limit, "Ordered setup input exceeds the staging handover budget.");
+                io_->transport.pending_bytes += raw->frame.size();
+                io_->transport.pending.push_back(std::move(*raw));
+            }
+            if (const auto& error = io_->transport.tcp->diagnostic()) {
+                static_cast<void>(lobby_->pump(lobby_clock_));
+                set_failure(*error);
+                return DriverResult::failure(*error);
+            }
+            if (!io_->transport.tcp->staging_mesh_ready()) return DriverResult::success(false);
+        }
         current_context_ = &context;
         gate_.advance_allowed = context.advance_allowed;
         queued_.insert(queued_.end(), commands.begin(), commands.end());

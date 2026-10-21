@@ -179,6 +179,12 @@ core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type
         return core::Result<gc::CensusType>::failure(std::move(d));
     }
     gc::CensusType result{id, population, additional_capacity};
+    const auto behaves = [&](std::string_view name) {
+        return std::find(type.behavior.begin(), type.behavior.end(), name) != type.behavior.end();
+    };
+    // WGP-191: resolved galactic type metric, without tactical team-size scaling.
+    result.history = gc::HistoryType{type.ai_combat_power.value_or(sim::math::Fixed{}),
+        behaves("FLEET") || behaves("SQUADRON"), behaves("TRANSPORT"), behaves("SQUADRON") || behaves("DUMMY_SPACE_FIGHTER_SQUADRON")};
     const auto normalized = [](std::string text) {
         for (auto& c : text) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
         return text;
@@ -229,13 +235,19 @@ core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type
     }
     return core::Result<gc::CensusType>::success(std::move(result));
 }
-core::Result<gc::CensusType> prepare_census_planet(const data::galactic::Planet& planet, gc::TypeId id) {
+core::Result<gc::CensusType> prepare_census_planet(const data::galactic::Planet& planet, gc::TypeId id,
+    std::optional<sim::math::Fixed> combat_power) {
     units::GalacticType original;
     auto population = sim::math::Fixed::from_integer(planet.population_value.value_or(0));
     if (!population) return core::Result<gc::CensusType>::failure(population.error());
     original.population_value = population.value();
     original.additional_population_capacity = planet.additional_population_capacity;
-    return prepare_census_type(original, id);
+    auto result = prepare_census_type(original, id);
+    if (result) {
+        if (combat_power) result.value().history->power = *combat_power;
+        else result.value().history.reset();
+    }
+    return result;
 }
 gc::CensusPlayer prepare_census_player(const data::galactic::Faction& faction, gc::PlayerId id,
     std::vector<gc::PlanetId> unusable_planets) {
@@ -715,7 +727,12 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
         return invalid<CampaignSetupPlan>("selected definition does not admit custom campaign options", campaign->file);
     CampaignSetupPlan plan;
     plan.player_bindings_ = options.players;
-    plan.local_observer_ = options.local_observer;
+    if (options.mode == CampaignSetupMode::single_player) plan.solo_reference_human_ = options.solo_reference_human;
+    for (const auto& seat : options.seats) if (seat.active && seat.kind == gc::SeatKind::human)
+        plan.human_observers_.push_back(seat.player);
+    std::sort(plan.human_observers_.begin(), plan.human_observers_.end());
+    plan.human_observers_.erase(std::unique(plan.human_observers_.begin(), plan.human_observers_.end()), plan.human_observers_.end());
+    if (plan.human_observers_.empty() && plan.solo_reference_human_) plan.human_observers_.push_back(*plan.solo_reference_human_);
     plan.mode_ = options.mode;
     // GOBS-01 / WGS-04: campaign definition construction defaults auto-reveal true.
     plan.observer_auto_reveal_ = campaign->planet_auto_reveal.value_or(true);
@@ -739,8 +756,8 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
         plan.galaxy_.players.push_back(binding.player);
     }
     if (neutral == 0) return invalid<CampaignSetupPlan>("root needs one active neutral player", campaign->file);
-    if (options.local_observer && std::none_of(options.players.begin(), options.players.end(), [&](const auto& binding) {
-            return binding.active && binding.player.player_id == *options.local_observer;
+    if (options.solo_reference_human && std::none_of(options.players.begin(), options.players.end(), [&](const auto& binding) {
+            return binding.active && binding.player.player_id == *options.solo_reference_human;
         })) return invalid<CampaignSetupPlan>("local observer is not an active bound player", campaign->file);
     for (const auto& seat : options.seats) {
         const auto player = std::find_if(options.players.begin(), options.players.end(),
@@ -881,7 +898,7 @@ core::Result<void> initialize_layout_observer(const data::galactic::GalacticData
     if (local == plan.player_bindings().end()) return invalid<void>("layout observer requires an active bound local player");
     if (!plan.observer_reveal_delay() || !setup.rules.maximum_fleet_movement_distance || !plan.observer_auto_reveal())
         return invalid<void>("layout observer requires authored reveal delay, range and auto-reveal policy");
-    gc::ObserverSetup observer; observer.local_player = local_player;
+    gc::ObserverSetup observer; observer.human_observers = {local_player}; observer.solo_reference_human = local_player;
     observer.reveal_delay_seconds = *plan.observer_reveal_delay();
     observer.automatic_reveal_range = *setup.rules.maximum_fleet_movement_distance;
     for (const auto& binding : plan.player_bindings()) {
@@ -927,7 +944,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         return invalid<CampaignRoot>("unimplemented location/control/credit-cap/home setup provider");
     if (!plan.tech().empty() && !services.assign_tech)
         return invalid<CampaignRoot>("unimplemented tech/story/production setup provider");
-    if (!plan.multiplayer_heroes().empty() && (!services.home_has_production || !services.owned_original_types || !services.place_hero))
+    if (!plan.multiplayer_heroes().empty() && !services.stock_starting_forces && (!services.home_has_production || !services.owned_original_types || !services.place_hero))
         return invalid<CampaignRoot>("unimplemented multiplayer hero/home-production provider");
     if (!plan.initial_placements().empty() && !services.mark_initial_placement && !services.stock_starting_forces)
         return invalid<CampaignRoot>("unimplemented initial-placement setup provider");
@@ -1084,22 +1101,46 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
     // Keep duplicate authored records; a newly live original type guards later repeats.
     std::map<gc::PlayerId, std::set<gc::TypeId>> created_originals;
     for (const auto& hero : plan.multiplayer_heroes()) {
-        auto production = services.home_has_production(hero.home);
-        if (!production) return core::Result<CampaignRoot>::failure(production.error());
-        if (!production.value()) continue;
-        auto owned = services.owned_original_types(hero.player, setup);
-        if (!owned) return core::Result<CampaignRoot>::failure(owned.error());
-        if (created_originals[hero.player].contains(hero.original_type_id)
-            || std::find(owned.value().begin(), owned.value().end(), hero.original_type_id) != owned.value().end()) continue;
-        auto placed = services.place_hero(hero, next, setup);
-        if (!placed) return core::Result<CampaignRoot>::failure(placed.error());
         const StartingForceRequest context{hero.home, hero.player, hero.original_type_id, hero.original_type, false, {}};
+        if (services.home_has_production) {
+            auto production = services.home_has_production(hero.home);
+            if (!production) return core::Result<CampaignRoot>::failure(production.error());
+            if (!production.value()) continue;
+        }
+        if (services.stock_starting_forces) {
+            // WGS-14: home_has_production above qualifies authored production behavior.
+            // production.planets holds every location; census retains placed original identities.
+            const auto& producers = placement_context->production.planets;
+            if (std::none_of(producers.begin(), producers.end(), [&](const auto& row) { return row.planet == hero.home; })) continue;
+            const auto& originals = placement_context->census.objects;
+            if (std::any_of(originals.begin(), originals.end(), [&](const auto& row) {
+                return row.owner == hero.player && row.original_type == hero.original_type_id;
+            })) continue;
+            placement_context->control = *setup.control;
+        } else {
+            auto owned = services.owned_original_types(hero.player, setup);
+            if (!owned) return core::Result<CampaignRoot>::failure(owned.error());
+            if (std::find(owned.value().begin(), owned.value().end(), hero.original_type_id) != owned.value().end()) continue;
+        }
+        if (created_originals[hero.player].contains(hero.original_type_id)) continue;
+        const auto first_free = next;
+        auto placed = services.stock_starting_forces
+            ? place_starting_force(*services.stock_starting_forces, context, next, setup, *placement_context)
+            : services.place_hero(hero, next, setup);
+        if (!placed) return core::Result<CampaignRoot>::failure(placed.error());
         auto frontier = placement_frontier(placed.value(), next, context, setup, plan);
         if (!frontier) return core::Result<CampaignRoot>::failure(frontier.error());
         next = frontier.value();
         setup.fleets.insert(setup.fleets.end(), placed.value().fleets.begin(), placed.value().fleets.end());
         auto& detached = setup.fleet_control->detached_units;
         detached.insert(detached.end(), placed.value().detached_units.begin(), placed.value().detached_units.end());
+        if (services.stock_starting_forces) {
+            if (placed.value().originals.size() != next - first_free)
+                return invalid<CampaignRoot>("stock hero placement requires original metadata for every allocation");
+            if (auto applied = apply_starting_force_placement(*services.stock_starting_forces, context,
+                placed.value(), setup, *placement_context); !applied)
+                return core::Result<CampaignRoot>::failure(applied.error());
+        }
         std::sort(setup.fleets.begin(), setup.fleets.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         std::sort(detached.begin(), detached.end(), [](const auto& a, const auto& b) { return a.member.id < b.member.id; });
         if (auto valid = gc::validate_setup(setup); !valid) return core::Result<CampaignRoot>::failure(valid.error());
@@ -1159,6 +1200,11 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         if (!prepared) return core::Result<CampaignRoot>::failure(prepared.error());
         setup.census = std::move(prepared).value();
     }
+    // GPC-01: the control pass above runs before the census exists, so the live actors seed the source ledger here.
+    if (setup.control && setup.census) {
+        setup.control->ability_sources.clear();
+        for (const auto& actor : setup.census->objects) gc::update_control_actor(*setup.control, actor);
+    }
     if (services.income) {
         auto prepared = services.income(plan, setup);
         if (!prepared) return core::Result<CampaignRoot>::failure(prepared.error());
@@ -1175,19 +1221,22 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         setup.ability_host = std::move(prepared).value();
     }
     if (services.observer) {
-        if (!plan.local_observer()) return invalid<CampaignRoot>("campaign observer requires explicit local player identity");
+        if (plan.human_observers().empty()) return invalid<CampaignRoot>("campaign observer requires a human roster");
         auto prepared = services.observer(plan, setup);
         if (!prepared) return core::Result<CampaignRoot>::failure(prepared.error());
         setup.observer = std::move(prepared).value();
-        setup.observer->local_player = *plan.local_observer();
+        setup.observer->human_observers.assign(plan.human_observers().begin(), plan.human_observers().end());
+        setup.observer->solo_reference_human = plan.solo_reference_human().value_or(0);
         if (plan.observer_reveal_delay()) setup.observer->reveal_delay_seconds = *plan.observer_reveal_delay();
         setup.observer->automatic_reveal_range = *setup.rules.maximum_fleet_movement_distance;
         if (plan.observer_auto_reveal()) for (auto& planet : setup.observer->planets)
             planet.automatic_reveal = *plan.observer_auto_reveal();
-        const auto home = std::find_if(plan.homes().begin(), plan.homes().end(), [&](const auto& row) {
-            return row.player == *plan.local_observer();
-        });
-        auto initialized = gc::initialize_campaign_observer(setup, home == plan.homes().end() ? std::nullopt : home->planet);
+        std::vector<gc::ObserverHome> homes;
+        for (const auto human : plan.human_observers()) {
+            const auto home = std::find_if(plan.homes().begin(), plan.homes().end(), [&](const auto& row) { return row.player == human; });
+            homes.push_back({human, home == plan.homes().end() ? std::nullopt : home->planet});
+        }
+        auto initialized = gc::initialize_campaign_observers(setup, homes);
         if (!initialized) return core::Result<CampaignRoot>::failure(initialized.error());
     }
     if (auto valid = gc::validate_setup(setup); !valid) return core::Result<CampaignRoot>::failure(valid.error());

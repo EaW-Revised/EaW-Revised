@@ -65,7 +65,22 @@ struct ApplyTargets final {
 // battle's. The buses are opened if the run has none yet; a battle made later takes the same
 // values from ActiveSettings.
 void apply_audio(const presentation::ui::AudioSettings& audio, ApplyReport& report);
+// Also checks the current engine state: startup and menu commits never repeat a display setter.
 void apply_video(const presentation::ui::VideoSettings& video, const ApplyTargets& targets, ApplyReport& report);
+// A missing, damaged or foreign-version record uses fresh defaults without replacing launch geometry.
+void apply_startup_video(const presentation::ui::SettingsLoad& loaded, ApplyTargets targets, ApplyReport& report);
+
+// Main-thread counters of our display calls that may request swapchain recreation.
+// Compare snapshots around menu gestures; the engine's internal recreations are not counted.
+struct VideoApplyCounts final {
+    std::uint64_t vsync{};
+    std::uint64_t window_mode{};
+    std::uint64_t window_size{};
+};
+[[nodiscard]] VideoApplyCounts video_apply_counts() noexcept;
+
+// ST-P2: update only when the effective cap changes; menu includes the demo battle.
+void update_frame_pacing(const presentation::ui::VideoSettings& video, bool menu);
 
 // The profile a render-profile setting stands for in this run: the setting when explicit, else
 // `fallback` (the run's own default).
@@ -85,5 +100,9 @@ struct DisplayFacts final {
     bool vsync{};
 };
 [[nodiscard]] DisplayFacts display_facts();
+
+// ST-K3: match physical positions but show the active layout's letter.
+[[nodiscard]] std::string keyboard_key_label(std::string_view physical_chord);
+[[nodiscard]] std::string camera_keys_help(bool wasd);
 
 } // namespace eawr::presentation::godot_backend

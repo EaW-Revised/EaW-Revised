@@ -34,6 +34,9 @@ public:
     // Called once on the simulation thread when the live loop exits, including on failure.
     // No further step calls belong to this live session; release borrowed session references.
     virtual void session_ended() noexcept {}
+    // Executing-tick clock refusals, borrowed until the next step (simulation-thread only).
+    // The live owner releases local pending pause hints; this never decides simulation state.
+    [[nodiscard]] virtual std::span<const sim::SeatId> clock_refusals() const noexcept { return {}; }
     // The completed parent tick, or nothing while the frontier holds it. A failure ends the live session.
     virtual core::Result<std::optional<campaign::GameTick>> step(
         LiveGameStepContext& context, std::span<const LiveGameOrder> orders, std::uint64_t now_ms) = 0;

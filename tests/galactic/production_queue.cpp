@@ -134,7 +134,7 @@ void offer_projection() {
     config.fiscal->players.push_back({2, true, f(1)});
     config.production->players.push_back({2, false, true, false, f(50), f(0), {}, {}, {}});
     galactic::ObserverSetup observer;
-    observer.local_player = 1; observer.reveal_delay_seconds = f(1);
+    observer.human_observers = {1}; observer.solo_reference_human = 1; observer.reveal_delay_seconds = f(1);
     observer.players = {{1, false, false, 0, 1, {}}, {2, true, false, 0, 1, {}}};
     observer.types = {{1000, false, false, false}};
     for (const auto& planet : config.planets) {
@@ -168,7 +168,7 @@ void offer_projection() {
         expect(tick.work.observer_projection_records == observer.records.size(),
             "production offer publication rebuilds the observer projection only once");
         const auto fresh = galactic::observed_planets(*tick.snapshot->observer(),
-            tick.snapshot->fleets(), tick.snapshot->movement());
+            tick.snapshot->fleets(), {}, tick.snapshot->movement());
         expect(std::ranges::equal(tick.snapshot->observations(), fresh),
             "production admission consumes the current observer projection");
         const auto after = game.snapshot()->production_offers();
@@ -176,6 +176,33 @@ void offer_projection() {
         expect(initial->production_offers().front().already_in_production == false, "older publication immutable");
         if (baseline.empty()) baseline.assign(after.begin(), after.end());
         else expect(std::equal(after.begin(), after.end(), baseline.begin(), baseline.end()), "offer projection equal on 1/2/4/8 workers");
+    }
+    {
+        auto multiplayer = config;
+        multiplayer.seats.push_back({{2}, 2, galactic::SeatKind::human, 1, true, 2});
+        multiplayer.observer->human_observers = {1, 2}; multiplayer.observer->solo_reference_human = 0;
+        multiplayer.production->players[1].human = true;
+        multiplayer.production->players[1].pay_as_you_go = false;
+        multiplayer.production->players[1].uses_population_cap = true;
+        multiplayer.observer->players[1].ai = false;
+        multiplayer.planets[1].owner = 2;
+        auto& foreign = multiplayer.production->planets[1];
+        foreign.target_owner = foreign.starbase_owner = foreign.ground_occupier = 2;
+        auto& facts = multiplayer.observer->planets[1];
+        facts.allegiance = facts.target_owner = facts.current_owner = facts.current_controller = 2;
+        auto game = take(galactic::GalacticSession::create(multiplayer));
+        const auto canonical = game.snapshot()->sha256();
+        const auto host = game.view_snapshot({1}); const auto guest = game.view_snapshot({2});
+        expect(!host->production_offers().empty() && !guest->production_offers().empty(),
+            "both human contexts receive their own production menus");
+        for (const auto& row : host->production_offers()) expect(row.player == 1 && row.planet != 2,
+            "host menu excludes the guest's secret producer");
+        for (const auto& row : guest->production_offers()) expect(row.player == 2 && row.planet == 2,
+            "guest menu contains only its admitted producer");
+        expect(game.view_snapshot({1})->production_offers().data() == host->production_offers().data()
+            && game.view_snapshot({2})->production_offers().data() == guest->production_offers().data()
+            && game.snapshot()->sha256() == canonical,
+            "alternating menu queries reuse player caches without changing canonical state");
     }
     {
         auto active = config;
@@ -420,7 +447,7 @@ void orbit_completion_shares_slot_card() {
     auto config = setup();
     config.production->planets[0].offers[0].domain = galactic::ProductionDomain::space;
     galactic::ObserverSetup observer;
-    observer.local_player = 1; observer.reveal_delay_seconds = f(1);
+    observer.human_observers = {1}; observer.solo_reference_human = 1; observer.reveal_delay_seconds = f(1);
     observer.players = {{1, false, false, 0, 1, {}}};
     observer.types = {{1000, false, false, false}};
     for (const auto& planet : config.planets) {

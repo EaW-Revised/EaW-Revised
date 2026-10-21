@@ -9,7 +9,25 @@ namespace eawr::script::foc::galactic_ai {
 // Ordered native adapter. Default Lua transactions stage commands; the bounded
 // immediate host exposes private cash/placement writes and publishes at the barrier.
 class NativeActions final : public Actions, public TrackedStateContributor {
+    struct BoundState;
 public:
+    [[nodiscard]] core::Result<void> prepare_player_frontiers(const sim::PartitionExecutor&,
+        std::span<const gc::PlayerId>);
+    class PlayerFrontier {
+    public:
+        PlayerFrontier(const PlayerFrontier&) = delete;
+        PlayerFrontier& operator=(const PlayerFrontier&) = delete;
+        ~PlayerFrontier();
+    private:
+        friend class NativeActions;
+        PlayerFrontier(NativeActions&, gc::PlayerId);
+        const NativeActions* previous_owner_{};
+        BoundState* previous_frontier_{};
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+    [[nodiscard]] PlayerFrontier player_frontier(gc::PlayerId player) { return PlayerFrontier(*this, player); }
+    [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return bound().revision; }
+    void mark_state_changed() const noexcept { if (++bound().revision == 0) std::terminate(); }
     struct Purchase {
         gc::PlayerId player{};
         std::uint64_t goal{};
@@ -27,8 +45,11 @@ public:
     using BaseCost = std::function<core::Result<sim::math::Fixed>(gc::TypeId)>;
     using Placement = std::function<core::Result<gc::GalacticSession::NativeForcePlacement>(const ActionRequest&, const gc::GalacticSnapshot&, sim::EntityId)>;
     using ShadowPlacement = std::function<core::Result<gc::GalacticSession::NativeForcePlacement>(const ActionRequest&, const gc::GalacticSession::NativeForceView&, sim::EntityId)>;
+    using ReconciliationPlacement = std::function<core::Result<std::optional<gc::GalacticSession::NativeForcePlacement>>(
+        const ActionRequest&, const gc::GalacticSession::NativeForceView&, sim::EntityId)>;
+    void bind_reconciliation_placement(ReconciliationPlacement placement) { reconciliation_placement_ = std::move(placement); }
     [[nodiscard]] std::shared_ptr<authoritative::ImmediateEffectHost> immediate_host(ShadowPlacement, std::size_t max_requests);
-    [[nodiscard]] const gc::GalacticSession::NativeActionShadow::Work& immediate_work() const noexcept { return immediate_work_; }
+    [[nodiscard]] const gc::GalacticSession::NativeActionShadow::Work& immediate_work() const noexcept { return bound().immediate_work_; }
     NativeActions(gc::GalacticSession&, std::shared_ptr<ai::GalacticFunding>,
         Placement, std::map<gc::PlayerId, sim::math::Fixed> multipliers, GoalResolver = {}, const sim::PartitionExecutor* = nullptr, BaseCost = {});
     ~NativeActions() override;
@@ -44,6 +65,17 @@ public:
         const sim::PartitionExecutor&)>;
     void bind_freestore_births(FreestoreBirths callback) { freestore_births_ = std::move(callback); }
     void set_executor(const sim::PartitionExecutor* executor) noexcept { executor_ = executor; }
+    // A decision chain selects its inline adapter without changing the barrier's shared adapter.
+    class ExecutorScope {
+    public:
+        ExecutorScope(const NativeActions*, const sim::PartitionExecutor*) noexcept;
+        ExecutorScope(const ExecutorScope&) = delete;
+        ExecutorScope& operator=(const ExecutorScope&) = delete;
+        ~ExecutorScope();
+    private:
+        const NativeActions* previous_owner_{};
+        const sim::PartitionExecutor* previous_executor_{};
+    };
     // Reconstruction only: installed before world replay, then replaced by the
     // restored native owner's bind_handlers. Does not initialize or service AI.
     static void bind_economic_replay_owners(gc::GalacticSession&, Placement = {});
@@ -120,8 +152,8 @@ public:
     // WGA-405..416: immutable cached frontier, partitioned decisions, ordered links.
     [[nodiscard]] core::Result<void> service_freestore_landing(gc::PlayerId,
         const FreestorePool&, const sim::PartitionExecutor&);
-    [[nodiscard]] std::uint64_t freestore_move_refusals() const noexcept { return freestore_move_refusals_; }
-    [[nodiscard]] const std::map<std::uint64_t, Movement>& movements() const noexcept { return movements_; }
+    [[nodiscard]] std::uint64_t freestore_move_refusals() const noexcept { return bound().freestore_move_refusals_; }
+    [[nodiscard]] const std::map<std::uint64_t, Movement>& movements() const noexcept { return bound().movements_; }
     // Completed owner identities for TaskForce formation/launch, independent
     // of tactical scene parents and the copied perception generation.
     [[nodiscard]] std::optional<gc::FleetId> containing_fleet(gc::PlayerId, sim::EntityId) const;
@@ -153,33 +185,30 @@ public:
     [[nodiscard]] core::Result<void> restore(const NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return records_.byte_size() + freestore_->record_byte_upper_bound() + 1024; }
-    [[nodiscard]] std::uint64_t build_state_revision() const noexcept { return build_revision_; }
-    [[nodiscard]] const std::map<sim::EntityId, Purchase>& purchases() const noexcept { return purchases_; }
-    [[nodiscard]] QualifiedFreestore& qualified_freestore() noexcept { return *freestore_; }
-    [[nodiscard]] const QualifiedFreestore& qualified_freestore() const noexcept { return *freestore_; }
-    [[nodiscard]] std::weak_ptr<QualifiedFreestore> freestore_owner() const noexcept { return freestore_; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return bound().records_.byte_size() + bound().freestore_->record_byte_upper_bound() + 1024; }
+    [[nodiscard]] std::uint64_t build_state_revision() const noexcept { return bound().build_revision_; }
+    [[nodiscard]] const std::map<sim::EntityId, Purchase>& purchases() const noexcept { return bound().purchases_; }
+    [[nodiscard]] QualifiedFreestore& qualified_freestore() noexcept { return *bound().freestore_; }
+    [[nodiscard]] const QualifiedFreestore& qualified_freestore() const noexcept { return *bound().freestore_; }
+    [[nodiscard]] std::weak_ptr<QualifiedFreestore> freestore_owner() const noexcept { return bound().freestore_; }
     using FreestoreRestoreValidator = std::function<core::Result<void>(const QualifiedFreestore&)>;
     void bind_freestore_validation(FreestoreRestoreValidator validator) { freestore_validation_ = std::move(validator); }
     [[nodiscard]] bool qualified_freestore_available() const noexcept { return static_cast<bool>(freestore_validation_); }
-    [[nodiscard]] std::span<const sim::EntityId> created() const noexcept { return created_; }
+    [[nodiscard]] std::span<const sim::EntityId> created(gc::PlayerId) const noexcept;
 private:
     void update_record(std::uint32_t kind, std::uint64_t id);
     void update_metadata_record();
     [[nodiscard]] core::RecordDigest rebuild_records() const;
-    core::RecordDigest records_;
     struct RecordWrite {
         NativeActions& owner; std::uint32_t kind{}; std::uint64_t id{};
         ~RecordWrite() { owner.update_record(kind, id); }
     };
     void mark_build_state_changed() const noexcept {
-        if (++build_revision_ == 0) std::terminate();
+        if (++bound().build_revision_ == 0) std::terminate();
         mark_state_changed();
     }
-    mutable std::uint64_t build_revision_{}; // derived; quiet movement cannot dirty task publications
     struct ImmediateState;
     struct ImmediateHost;
-    gc::GalacticSession::NativeActionShadow::Work immediate_work_;
     [[nodiscard]] core::Result<gc::GalacticSession::NativeProductionPayment> notice(const gc::GalacticSession::NativeProductionNotice&);
     [[nodiscard]] core::Result<gc::GalacticSession::NativeProductionPayment> notice_unrecorded(const gc::GalacticSession::NativeProductionNotice&);
     [[nodiscard]] core::Result<void> advance_movement(Movement&, bool taskforce_has_members = true);
@@ -190,16 +219,17 @@ private:
     gc::GalacticSession& world_;
     std::shared_ptr<ai::GalacticFunding> funding_;
     Placement placement_;
+    ReconciliationPlacement reconciliation_placement_;
     std::map<gc::PlayerId, sim::math::Fixed> multipliers_;
-    std::map<sim::EntityId, Purchase> purchases_;
-    std::optional<ActionRequest> pending_;
-    std::uint64_t pending_goal_{};
     GoalResolver goal_resolver_;
     BaseCost base_cost_;
-    std::vector<sim::EntityId> created_; // returned by the current admission, derived
     const sim::PartitionExecutor* executor_{};
+    static thread_local const NativeActions* executor_owner_;
+    static thread_local const sim::PartitionExecutor* scoped_executor_;
+    [[nodiscard]] const sim::PartitionExecutor* current_executor() const noexcept {
+        return executor_owner_ == this ? scoped_executor_ : executor_;
+    }
     std::shared_ptr<NativeActions*> lifetime_;
-    std::shared_ptr<QualifiedFreestore> freestore_;
     FreestoreRestoreValidator freestore_validation_;
     ActorChanges actor_changes_;
     FreestoreBirths freestore_births_;
@@ -214,11 +244,37 @@ private:
     ConflictPending admission_pending_;
     NoHop no_hop_;
     BribeHop bribe_hop_;
-    std::map<std::uint64_t, Movement> movements_;
-    std::map<sim::EntityId, std::uint64_t> freestore_requests_; // derived registered-request index
-    std::uint64_t freestore_move_refusals_{}; // saved project seam counter, silent Lua false
-    std::uint64_t next_movement_{1};
-    std::vector<gc::PlanetId> landing_stage_; // derived reusable disjoint staging
-    std::vector<FreestoreSurface> landing_surfaces_; // ordered live capacity frontier
+    struct PlayerScratch {
+        std::optional<ActionRequest> pending;
+        std::uint64_t pending_goal{};
+        std::vector<sim::EntityId> created;
+        std::vector<gc::PlanetId> landing_stage;
+        std::vector<FreestoreSurface> landing_surfaces;
+    };
+    // Physical retained state selected by the decision owner. Callbacks remain
+    // on this facade and resolve the same scope as ordinary adapter calls.
+    struct BoundState {
+        mutable std::uint64_t revision{1};
+        core::RecordDigest records_;
+        mutable std::uint64_t build_revision_{}; // derived; quiet movement cannot dirty task publications
+        gc::GalacticSession::NativeActionShadow::Work immediate_work_;
+        std::map<sim::EntityId, Purchase> purchases_;
+        std::shared_ptr<QualifiedFreestore> freestore_;
+        std::map<std::uint64_t, Movement> movements_;
+        std::map<sim::EntityId, std::uint64_t> freestore_requests_; // derived registered-request index
+        std::uint64_t freestore_move_refusals_{}; // saved project seam counter, silent Lua false
+        std::uint64_t next_movement_{1};
+        std::map<gc::PlayerId, PlayerScratch> player_scratch_;
+    };
+    mutable BoundState root_;
+    struct Frontier { BoundState state; std::recursive_mutex mutex; };
+    std::map<gc::PlayerId, Frontier> frontiers_;
+    std::vector<gc::PlayerId> prepared_players_;
+    static thread_local const NativeActions* frontier_owner_;
+    static thread_local BoundState* active_frontier_;
+    [[nodiscard]] BoundState& bound() const noexcept {
+        return frontier_owner_ == this ? *active_frontier_ : root_;
+    }
+    [[nodiscard]] bool pending_admission() const noexcept;
 };
 } // namespace eawr::script::foc::galactic_ai

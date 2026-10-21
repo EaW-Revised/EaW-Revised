@@ -78,6 +78,12 @@ struct NetworkGnsRoom::Impl {
     std::deque<GnsRoomSignal> inbound;
     std::size_t outbound_bytes{}, inbound_bytes{};
     std::uint64_t dropped{};
+    struct RosterLock {
+        std::uint32_t seats{}, revision{};
+        std::optional<unsigned> reason;
+        Clock::time_point deadline;
+    };
+    std::optional<RosterLock> roster_lock;
     std::string last_refusal;
     std::pair<std::uint64_t, std::string> renewal_failure;
     bool renew_wanted{};
@@ -166,12 +172,19 @@ struct NetworkGnsRoom::Impl {
         if (kind == Kind::error || kind == Kind::room_closed) {
             const auto number = reader.u32();
             if (!reader.done() || !room_error_number(number)) malformed();
-            else if (!failure) failure = error(number, kind == Kind::error ? "Relay service rejected the room request" : "The room was closed by the service");
+            else if (!failure) failure = roster_lock && number == 1521
+                ? error(1764, "The relay does not support roster-lock protocol 1. Update the relay service before starting this build.")
+                : error(number, kind == Kind::error ? "Relay service rejected the room request" : "The room was closed by the service");
         } else if (!admitted) {
             const auto expected = request_kind == Kind::room_open ? Kind::room_opened : Kind::room_attached;
             if (kind == expected) admission(reader); else malformed();
         } else if (kind == Kind::room_roster) {
             roster_frame(reader);
+        } else if (kind == Kind::room_roster_locked) {
+            const auto revision = reader.u32(), seats = reader.u32(), reason = reader.u32();
+            if (!reader.done() || !roster_lock || revision != roster_lock->revision || seats != roster_lock->seats
+                || (reason && !room_error_number(reason))) malformed();
+            else roster_lock->reason = reason;
         } else if (kind == Kind::room_forwarded) {
             const auto from = reader.u32();
             auto identity = reader.string(gns_identity_max_bytes);
@@ -386,6 +399,41 @@ core::Result<void> NetworkGnsRoom::kick(PeerIndex slot) {
 core::Result<void> NetworkGnsRoom::lock() {
     if (local_slot() != 0) return core::Result<void>::failure(error(room_capability, "Only the host starts the match"));
     return impl_->queue(message(Kind::room_lock));
+}
+core::Result<bool> NetworkGnsRoom::lock_roster(std::uint32_t seats, std::uint64_t revision) {
+    using Result = core::Result<bool>;
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->failure) return Result::failure(*impl_->failure);
+    if (impl_->slot != 0 || !impl_->admitted || impl_->leaving || revision == 0 || revision > UINT32_MAX)
+        return Result::failure(error(room_capability, "Only an attached host can lock the roster."));
+    if (!impl_->roster_lock) {
+        auto bytes = message(Kind::room_lock_roster); u32(bytes, static_cast<std::uint32_t>(revision)); u32(bytes, seats);
+        if (impl_->outbound.size() >= impl_->options.queue_frames || bytes.size() > impl_->options.queue_bytes - impl_->outbound_bytes)
+            return Result::failure(error(1526, "Relay client send queue is full"));
+        impl_->roster_lock = Impl::RosterLock{seats, static_cast<std::uint32_t>(revision), {}, Clock::now() + impl_->options.timeout};
+        impl_->outbound_bytes += bytes.size(); impl_->outbound.push_back(std::move(bytes));
+    }
+    auto& pending = *impl_->roster_lock;
+    if (pending.seats != seats || pending.revision != revision)
+        return Result::failure(error(1764, "A different roster lock is still pending."));
+    if (pending.reason) {
+        if (*pending.reason) {
+            const auto reason = *pending.reason;
+            impl_->roster_lock.reset();
+            return Result::failure(error(reason, "Start raced a player joining or leaving. Wait for the player list and connections, then accept again."));
+        }
+        std::uint32_t attached{};
+        for (PeerIndex p = 0; p < impl_->roster.capacity; ++p)
+            if (impl_->roster.slots[p].state == GnsRoomSlotState::attached) attached |= 1U << p;
+        if (impl_->roster.state != GnsRoomState::locked || attached != seats || impl_->roster.revision <= revision)
+            return Result::failure(error(1764, "The relay confirmed a different player list for Start."));
+        return Result::success(true);
+    }
+    if (Clock::now() >= pending.deadline) {
+        impl_->failure = error(1764, "Timed out confirming the locked player list with the relay.");
+        return Result::failure(*impl_->failure);
+    }
+    return Result::success(false);
 }
 std::pair<std::uint64_t, std::string> NetworkGnsRoom::renewal_failure() const {
     std::lock_guard lock(impl_->mutex); return impl_->renewal_failure;

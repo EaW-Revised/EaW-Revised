@@ -99,30 +99,38 @@ void EawrLanLobby::build_staging_rows(Impl& impl, Resources& resources, const La
         auto authoritative = decode_lan_lobby_game(room->snapshot);
         if (authoritative) {
             impl.offered = authoritative.value();
-            if (impl.host) { impl.selection.map = *authoritative.value().map; impl.selection.slots = *authoritative.value().slots; impl.selection.match = authoritative.value().match; }
+            if (impl.host) { impl.selection.map = *authoritative.value().map; impl.selection.slots = *authoritative.value().slots; impl.selection.open_slots = authoritative.value().open_slots; impl.selection.match = authoritative.value().match; }
             for (std::size_t i = 0; i < resources.maps.size(); ++i) if (resources.maps[i].path == room->snapshot.game.map) {
                 map = &resources.maps[i]; impl.map_index = static_cast<int>(i);
             }
             if (map) visible = model::visible_staging_rows(network_row_count(*map), dialog_rows);
-            auto planned_snapshot = room->snapshot; planned_snapshot.seats.clear();
-            const auto planned = decode_lan_lobby_game(planned_snapshot);
+            for (const auto slot : authoritative.value().open_slots) if (slot > 0 && slot <= dialog_rows)
+                rows[slot - 1].kind = lan_seat_kind(authoritative.value(), slot);
             for (const auto& slot : *authoritative.value().slots) {
                 if (slot.slot == 0 || slot.slot > dialog_rows) continue;
-                auto& row = rows[slot.slot - 1]; row.kind = model::RowKind::ai;
-                if (planned && room->snapshot.seats.size() < room->snapshot.capacity && std::any_of(planned.value().slots->begin(), planned.value().slots->end(), [&](const auto& desired) { return desired.slot == slot.slot && desired.human; })) row.kind = model::RowKind::open;
+                auto& row = rows[slot.slot - 1]; row.kind = lan_seat_kind(authoritative.value(), slot.slot);
+                row.name = lan_ai_label(slot.difficulty);
                 row.faction = slot.faction; row.team = slot.team; row.colour = slot.colour_index.value_or(slot.slot - 1); row.accepted = row.kind == model::RowKind::ai;
                 bool first = true;
                 for (const auto& seat : room->snapshot.seats) if (seat.selection.slot == slot.slot) {
+                    if (first) row.name.clear();
                     row.kind = model::RowKind::human; row.name += (first ? "" : ", ") + seat.selection.name;
                     row.local = row.local || seat.peer == view.seat;
                     row.accepted = first ? seat.ready : row.accepted && seat.ready; first = false;
                 }
+                if (row.kind == model::RowKind::open) row.name.clear();
             }
         }
         const auto local = std::find_if(room->snapshot.seats.begin(), room->snapshot.seats.end(), [&](const auto& seat) { return seat.peer == view.seat; });
         if (!room->identity_pending && local != room->snapshot.seats.end() && (impl.name != local->selection.name || impl.colour != local->selection.colour)) {
             impl.name = local->selection.name; impl.colour = local->selection.colour;
             emit_signal("profile_changed", text(impl.name), static_cast<int64_t>(impl.colour));
+        }
+        if (impl.host) if (auto* maps = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) {
+            for (int item = 0; item < maps->get_item_count() && static_cast<std::size_t>(item) < impl.listed.size(); ++item) {
+                const bool fits = lan_map_supports_rows(resources.maps[impl.listed[static_cast<std::size_t>(item)]], impl.selection.slots);
+                maps->set_item_disabled(item, !fits); maps->set_item_selectable(item, fits);
+            }
         }
         impl.room_revision = room->snapshot.revision;
         for (const auto& chat : room->chat) if (view.phase != LanPhase::ended && chat.sequence > impl.room_chat_sequence) {
@@ -186,13 +194,15 @@ void EawrLanLobby::build_staging_rows(Impl& impl, Resources& resources, const La
         }
         if (map != nullptr) visible = model::visible_staging_rows(network_row_count(*map), dialog_rows);
         if (impl.host) {
-            // Each planned human has its own row; pending members remain Open.
+            for (const auto slot : impl.selection.open_slots) if (slot > 0 && slot <= dialog_rows)
+                rows[slot - 1].kind = model::RowKind::open;
+            // Occupied rows share the staging control model.
             for (const skirmish::LobbySlot& slot : impl.selection.slots) {
                 if (slot.slot == 0 || slot.slot > dialog_rows) continue;
                 model::StagingRow& row = rows[slot.slot - 1];
-                const auto seats = std::count(impl.human_owners.begin(), impl.human_owners.end(), slot.slot);
-                row.kind = seats > 0 ? (slot.slot == 1 || (slot.slot == 2 && connected) ? model::RowKind::human : model::RowKind::open) : model::RowKind::ai;
+                row.kind = slot.human ? model::RowKind::human : model::RowKind::ai;
                 row.name = row.kind != model::RowKind::human ? std::string{} : slot.slot == 1 ? impl.name : remote_name;
+                if (row.kind == model::RowKind::ai) row.name = lan_ai_label(slot.difficulty);
                 row.faction = slot.faction;
                 row.team = slot.team;
                 row.colour = slot.colour_index.value_or(slot.slot - 1);
@@ -222,7 +232,7 @@ void EawrLanLobby::build_staging_rows(Impl& impl, Resources& resources, const La
                     row.local = slot.human && slot.slot == view.player;
                     row.accepted = !slot.human || view.phase == LanPhase::barrier || view.phase == LanPhase::running;
                     if (slot.slot == 1) row.accepted = true;
-                    if (!slot.human) row.name.clear();
+                    if (!slot.human) row.name = lan_ai_label(slot.difficulty);
                     else if (row.local) row.name = impl.name;
                     else if (slot.slot == 1) row.name = impl.host_name.empty() ? "Host" : impl.host_name;
                     row.faction = slot.faction;
@@ -282,6 +292,7 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
     // Refill the combos only when what they show changed: a refill closes an open drop-down.
     std::string signature = std::string(impl.host ? "H" : "J") + std::to_string(impl.map_index) + "|"
         + std::to_string(visible) + "|" + (connected ? "c" : "-");
+    if (room) signature += "|" + std::to_string(static_cast<unsigned>(room->snapshot.phase));
     for (const model::StagingRow& row : rows) {
         signature += "|" + std::to_string(static_cast<int>(row.kind)) + "," + row.name + "," + row.faction + ","
             + (row.team ? std::to_string(*row.team) : std::string("-")) + "," + std::to_string(row.colour) + ","
@@ -308,24 +319,24 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
             auto* faction = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_FACTION_" + suffix);
             auto* colour = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_COLOR_" + suffix);
             auto* team = EAWR_CONTROL(EawrUiCombo, "IDC_PLAYER_TEAM_" + suffix);
-            const bool editable = impl.host && row.kind == model::RowKind::ai;
+            const bool editable = impl.host && row.kind != model::RowKind::human
+                && (!room || room->snapshot.phase == net::LobbyPhase::staging);
             const bool choices_editable = row.occupied() && (impl.host || (room && row.local))
                 && (!room || room->snapshot.phase == net::LobbyPhase::staging);
             if (name != nullptr) {
                 name->clear();
                 name->set_visible(shown);
-                if (impl.host && index >= 2 && row.kind != model::RowKind::human && row.kind != model::RowKind::open) {
-                    // Unplanned rows offer none or AI; unavailable AI levels stay disabled.
-                    // Planned human/open rows retain their individual name controls.
+                if (impl.host && row.kind != model::RowKind::human) {
+                    // LLB-18: the host controls every vacant row, including Open.
                     name->add_item(resolved(resources.text, "TEXT_NO_PLAYER"), 0);
                     name->add_item(resolved(resources.text, "TEXT_OPEN_PLAYER"), 1);
                     name->add_item(resolved(resources.text, "TEXT_EASY_AI_PLAYER"), 2);
                     name->add_item(resolved(resources.text, "TEXT_MEDIUM_AI_PLAYER"), 3);
                     name->add_item(resolved(resources.text, "TEXT_HARD_AI_PLAYER"), 4);
-                    for (const int item : {1, 2, 4}) name->set_item_disabled(item, true);
-                    name->set_tooltip_text("AI rows use the selected AI level. Set alliances with each row's Team.");
-                    name->select(row.kind == model::RowKind::ai ? 3 : 0);
-                    name->set_disabled(false);
+                    name->set_tooltip_text("Choose Open for a player to join, Closed, or an AI level. Set alliances with Team.");
+                    name->select(row.kind == model::RowKind::open ? 1 : row.kind != model::RowKind::ai ? 0 : row.name == "TEXT_EASY_AI_PLAYER" ? 2
+                        : row.name == "TEXT_HARD_AI_PLAYER" ? 4 : 3);
+                    name->set_disabled(room && room->snapshot.phase != net::LobbyPhase::staging);
                 } else {
                     std::string label = row.name.empty()
                         ? (row.kind == model::RowKind::open ? std::string("TEXT_OPEN_PLAYER")
@@ -371,7 +382,7 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
                     if (combo_shown) { name->set_position(rect.position + Vector2(rect.size.x * 0.7F, 0)); name->set_size(Vector2(rect.size.x * 0.3F, rect.size.y)); }
                 }
             } else if (rename) rename->set_visible(false);
-            const bool filled = shown && (row.occupied() || !impl.host);
+            const bool filled = shown && row.occupied();
             if (faction != nullptr) {
                 faction->clear();
                 faction->set_visible(filled);
@@ -534,6 +545,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "chat") return action_chat(argument);
     if (verb == "sort") return action_sort(impl, argument);
     if (verb == "filter") return action_filter(impl, argument, number);
+    if (verb == "host_options" && page_ == Page::lobby) { open_host_options(); return page_ == Page::host_options; }
     if (verb == "humans" && (page_ == Page::lobby || page_ == Page::host_options)) return action_humans(argument, number);
     if (verb == "host_dropdown" && page_ == Page::host_options) return action_host_dropdown(argument);
 
@@ -551,7 +563,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "leave") return action_leave();
     if (page_ != Page::staging) return false;
     if (verb == "map" && impl.host) return action_map(impl, argument);
-    if (verb == "ai" && impl.host) return action_ai(argument, number);
+    if ((verb == "ai" || verb == "seat") && impl.host) return action_ai(argument, number);
     if (verb == "team" && page_ == Page::staging) return action_team(argument, number);
     if ((verb == "ready" || verb == "unready") && page_ == Page::staging && match_->lobby_state()) return action_ready(verb);
     if (verb == "kick" && impl.host && page_ == Page::staging) return action_kick(argument, number);
@@ -657,7 +669,7 @@ bool EawrLanLobby::action_staging_dropdown(const std::string& argument,
     const auto field_separator = argument.find(':');
     if (field_separator == std::string::npos) return false;
     const std::string field = argument.substr(0, field_separator);
-    if (field != "COLOR" && field != "FACTION" && field != "TEAM") return false;
+    if (field != "COLOR" && field != "FACTION" && field != "TEAM" && field != "NAME") return false;
     std::uint32_t row{};
     if (!number(argument.substr(field_separator + 1), row) || row >= state_->dialog_rows) return false;
     for (const auto& entry : state_->controls) {
@@ -766,7 +778,7 @@ bool EawrLanLobby::action_leave() {
 bool EawrLanLobby::action_map(Impl& impl, const std::string& argument) {
     for (std::size_t item = 0; item < impl.listed.size(); ++item) {
         if (resources_->maps[impl.listed[item]].name == argument || resources_->maps[impl.listed[item]].path == argument) {
-            if (network_row_count(resources_->maps[impl.listed[item]]) < impl.human_owners.size()) return false;
+            if (!lan_map_supports_rows(resources_->maps[impl.listed[item]], impl.selection.slots)) return false;
             if (auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST")) list->select(static_cast<int>(item));
             on_item_selected(static_cast<int64_t>(item), "IDC_STAGING_MAP_LIST");
             return true;
@@ -776,13 +788,17 @@ bool EawrLanLobby::action_map(Impl& impl, const std::string& argument) {
 }
 
 bool EawrLanLobby::action_ai(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&)) {
+    const auto split = argument.find_first_of(":=");
     std::uint32_t row{};
-    if (!number(argument, row) || row < 2) return false;
+    if (!number(argument.substr(0, split), row)) return false;
+    const std::string level = split == std::string::npos ? "normal" : argument.substr(split + 1);
+    const int item = level == "closed" ? 0 : level == "open" ? 1 : level == "easy" ? 2 : level == "normal" || level == "medium" ? 3 : level == "hard" ? 4 : -1;
+    if (item < 0) return false;
     const std::string id = "IDC_PLAYER_NAME_" + std::to_string(row);
     auto* combo = EAWR_CONTROL(EawrUiCombo, id);
-    if (combo == nullptr || combo->get_item_count() < 4) return false;
-    combo->select(3);
-    on_item_selected(3, text(id));
+    if (combo == nullptr || combo->get_item_count() < 5 || combo->is_disabled()) return false;
+    combo->select(item);
+    on_item_selected(item, text(id));
     return true;
 }
 

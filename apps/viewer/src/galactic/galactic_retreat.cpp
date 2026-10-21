@@ -78,7 +78,7 @@ void GalacticMode::State::request_retreat(sim::tactical::RetreatAction action) {
 
 void GalacticMode::State::service_retreat_controls() {
     if (!retreat_dialog || !game || !galaxy) return;
-    const auto frame = game->frame();
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
     const auto observed = platform::campaign_tactical_view_for_observer(frame, sim::SeatId{galaxy->local.seat});
     if (!observed || !frame.battle || !frame.conflict || frame.conflict->id != conflict) {
         retreat_view.reset(); retreat_snapshot.reset(); retreat_dialog_open = false;

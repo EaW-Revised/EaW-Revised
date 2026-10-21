@@ -30,6 +30,7 @@ struct TacticalContent {
     EconomyRules economy;
     MapBox map_box;
     std::optional<RetreatConfig> retreat;
+    BattleDomain domain{BattleDomain::space};
 };
 
 } // namespace eawr::sim::tactical

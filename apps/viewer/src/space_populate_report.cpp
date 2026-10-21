@@ -162,6 +162,37 @@ void SpacePopulation::write_report(std::ostream& output) const {
         }
         output << "}}";
     }
+    output << ", \"hardpoint_turrets\": [";
+    bool first_turret = true;
+    for (std::size_t ship = 0; ship < hardpoint_turret_bindings_.size(); ++ship) {
+        if (!live_transforms_[ship] || !live_shown_[ship] || live_retired_[ship]) continue;
+        for (const auto& [hardpoint, binding] : hardpoint_turret_bindings_[ship]) {
+            if (!binding.applied || !binding.muzzle) continue;
+            const auto frame = sim::math::compose(*live_transforms_[ship], binding.attachment_frame);
+            if (!frame) continue;
+            const auto& muzzle = binding.pose.bones[*binding.muzzle].model_asset;
+            output << (first_turret ? "" : ", ") << "{\"entity\": " << options_.placed_ships[ship].live_entity
+                   << ", \"hardpoint\": " << hardpoint
+                   << ", \"yaw\": " << static_cast<double>(binding.applied->yaw.raw()) / sim::math::Fixed::scale
+                   << ", \"pitch\": " << static_cast<double>(binding.applied->pitch.raw()) / sim::math::Fixed::scale;
+            // Actual uploaded skeleton, placed through the same attachment/ship frame.
+            for (const bool direction : {false, true}) {
+                output << (direction ? ", \"forward\": [" : ", \"muzzle\": [");
+                for (std::size_t row = 0; row < 3; ++row) {
+                    double value = direction ? 0.0 : static_cast<double>(frame.value().rows[row][3].raw())
+                        / sim::math::Fixed::scale;
+                    for (std::size_t axis = 0; axis < 3; ++axis)
+                        value += static_cast<double>(frame.value().rows[row][axis].raw()) / sim::math::Fixed::scale
+                            * muzzle[(direction ? 0U : 12U) + axis];
+                    output << (row == 0 ? "" : ", ") << value;
+                }
+                output << "]";
+            }
+            output << "}";
+            first_turret = false;
+        }
+    }
+    output << "]";
     output
            << ",\n    \"classification\": \"scene::classify_space_placements: catalog markers (Is_Marker or the Marker "
               "element) are never drawn; nebula and background objects (Is_Nebula, In_Background) are left to the "

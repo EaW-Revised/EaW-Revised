@@ -75,6 +75,7 @@ core::Result<void> NetworkGnsRoom::leave() { return core::Result<void>::failure(
 core::Result<void> NetworkGnsRoom::release(PeerIndex) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::kick(PeerIndex) { return core::Result<void>::failure(relay_disabled()); }
 core::Result<void> NetworkGnsRoom::lock() { return core::Result<void>::failure(relay_disabled()); }
+core::Result<bool> NetworkGnsRoom::lock_roster(std::uint32_t, std::uint64_t) { return core::Result<bool>::failure(relay_disabled()); }
 std::pair<std::uint64_t, std::string> NetworkGnsRoom::renewal_failure() const { return {}; }
 #endif
 } // namespace eawr::net

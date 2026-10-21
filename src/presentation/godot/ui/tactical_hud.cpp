@@ -70,6 +70,13 @@ void TacticalHud::set_order_mode(const std::string_view active) {
     }
 }
 
+void TacticalHud::set_order_shortcut(const std::string_view order, const std::string_view caption) {
+    const auto found = state_->order_buttons.find(order);
+    if (found == state_->order_buttons.end()) return;
+    const String tooltip = String::utf8(caption.data(), static_cast<int64_t>(caption.size()));
+    if (found->second->get_tooltip_text() != tooltip) found->second->set_tooltip_text(tooltip);
+}
+
 void TacticalHud::set_special_weapon_handler(std::function<void()> handler) { state_->special_handler = std::move(handler); }
 void TacticalHud::set_special_weapon(const model::SpecialWeaponButton& view) {
     auto& state = *state_;

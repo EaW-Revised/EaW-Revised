@@ -7,6 +7,9 @@
 
 #include "galactic_lobby_backend.hpp"
 #include "lan_match.hpp"
+#include "galactic_launch_options.hpp"
+#include "eawr/platform/agreed_campaign.hpp"
+#include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/campaign/mp_agreement.hpp"
 #include "eawr/campaign/mp_lobby_catalog.hpp"
 #include "eawr/net/galactic_lobby.hpp"
@@ -14,13 +17,24 @@
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/sim/world.hpp"
 #include "eawr/skirmish/start.hpp"
+#include "eawr/data/xml.hpp"
+#include "eawr/platform/sim_workers.hpp"
+#include "eawr/platform/live_game_session.hpp"
+#include "../support/env.hpp"
+#include "../support/temp_dir.hpp"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <functional>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <sstream>
 #include <iostream>
+#include <optional>
 #include <set>
+#include <stdexcept>
 #include <thread>
 
 namespace {
@@ -115,8 +129,23 @@ void codec_and_mode() {
 
     auto custom = options;
     custom.custom = true; custom.credits = 12000; custom.starting_tech = 2; custom.maximum_tech = 4; custom.allow_heroes = false;
-    custom.auto_resolve = 3; custom.rows[1].dropout = gc::FactionControl::passive; custom.seed = std::uint64_t{1} << 63;
+    custom.auto_resolve = 3; custom.rows[1].dropout = gc::FactionControl::passive; custom.seed = 0xFFFFFFFFULL;
     expect(require(net::decode_galactic_lobby_game(require(net::encode_galactic_lobby_game(custom)))) == custom, "custom options round trip");
+
+    // The AI perception seed is 32-bit: a wider seed is refused by name on every entry point.
+    auto wide = options;
+    wide.seed = (std::uint64_t{1} << 32U) + 5U;
+    const auto wide_encoded = net::encode_galactic_lobby_game(wide);
+    expect(!wide_encoded && wide_encoded.error().message.find("32 bits") != std::string::npos, "a seed above 32 bits is refused when encoding");
+    const auto wide_default = net::default_galactic_lobby_options(local.catalog().front(), difficulty, wide.seed);
+    expect(!wide_default && wide_default.error().message.find("32 bits") != std::string::npos, "default options refuse a seed above 32 bits");
+    auto wide_game = game;
+    const std::string narrow = std::to_string(options.seed), widened = std::to_string(wide.seed);
+    std::string wide_bytes(wide_game.options.begin(), wide_game.options.end());
+    wide_bytes.replace(wide_bytes.find(' ' + narrow + ' ') + 1, narrow.size(), widened);
+    wide_game.options.assign(wide_bytes.begin(), wide_bytes.end());
+    const auto wide_decoded = net::decode_galactic_lobby_game(wide_game);
+    expect(!wide_decoded && wide_decoded.error().message.find("32 bits") != std::string::npos, "decoding refuses a seed above 32 bits by name");
 
     // Versioning: a newer tag is refused by name, never read as the current one.
     auto future = game;
@@ -181,8 +210,8 @@ void skirmish_bytes_pinned() {
     options.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 1, true, {}, 0}, {2, "Empire", 2, false, {}, 1}};
     const auto game = require(viewer::encode_lan_lobby_game(options, 3));
     const std::string text(game.options.begin(), game.options.end());
-    expect(text == "1 3 1 7 1 1 1 0 1 0 1 12345 2 5 30 3 2 99 \"WC\" \"SW\" 2 1 \"Rebel\" 1 1 0 0 2 \"Empire\" 2 0 1 0",
-        "skirmish options text v1 bytes are unchanged: " + text);
+    expect(text == "3 3 1 7 1 1 1 0 1 0 1 12345 2 5 30 3 2 99 \"WC\" \"SW\" 2 1 \"Rebel\" 1 2 0 0 0 2 \"Empire\" 2 3 0 1 0 0",
+        "skirmish options text v3 includes each row's AI level: " + text);
     expect(game.map == "data/art/maps/test.ted" && net::lobby_game_mode(game) == net::LobbyGameMode::skirmish,
         "a skirmish room stays a skirmish room");
     expect(!net::decode_galactic_lobby_game(game), "the GC codec never reads skirmish bytes");
@@ -493,7 +522,7 @@ std::string hex(const Digest& digest) {
     return out;
 }
 
-void check_committed(GcRoom& room, const std::string& label, std::size_t humans) {
+void check_committed(GcRoom& room, const std::string& label, std::size_t humans, std::uint64_t seed = match_seed) {
     std::vector<net::LobbyResult> results;
     for (auto& session : room.sessions) results.push_back(require(session.take_result()));
     const auto& first = results.front().setup().offer();
@@ -503,7 +532,7 @@ void check_committed(GcRoom& room, const std::string& label, std::size_t humans)
         auto& setup = results[peer].setup();
         expect(setup.adapter().completed_tick() == 0, label + ": the barrier never steps tick one");
         expect(setup.adapter().state_hash() == hex(payload.roster.tick_zero), label + ": every peer's own tick-zero digest equals the agreed one");
-        expect(setup.offer().seats == first.seats && setup.offer().seed == first.seed && setup.offer().seed == match_seed, label + ": seats and seed agreed");
+        expect(setup.offer().seats == first.seats && setup.offer().seed == first.seed && setup.offer().seed == seed, label + ": seats and seed agreed");
         expect(room.peers[peer].builds == 1, label + ": each peer built from its own derivation once");
         expect(room.peers[peer].agreement()->content == room.peers[0].agreement()->content, label + ": identical derived identities");
     }
@@ -537,6 +566,42 @@ void two_peer_room() {
     expect(!room.host().set_game(net::LobbyGame{"Multiplayer", {'1', ' ', '3'}}, room.revision()), "skirmish bytes are not GC options");
     room.commit();
     check_committed(room, "two peers", 2);
+}
+
+// The host switches a playable row Open <-> AI; a joined peer sees each edit and cannot be left on an AI row.
+void host_toggles_row_open_ai() {
+    auto locals = locals_of(2);
+    const auto options = two_side_options(*locals[0]);
+    GcRoom room(locals, options, 1);
+    room.admit(1, 1, "guest");
+    const auto toggled = [&](bool human) {
+        auto edited = require(net::decode_galactic_lobby_game(room.host().snapshot().game));
+        edited.rows[1].human = human; // EMPIRE
+        return edited;
+    };
+    require(room.host().set_game(require(net::encode_galactic_lobby_game(toggled(false))), room.revision())); room.rounds(3);
+    expect(!require(net::decode_galactic_lobby_game(room.sessions[1].snapshot().game)).rows[1].human, "the guest sees the Empire row switched to AI");
+    require(room.host().set_game(require(net::encode_galactic_lobby_game(toggled(true))), room.revision())); room.rounds(3);
+    expect(require(net::decode_galactic_lobby_game(room.sessions[1].snapshot().game)).rows[1].human, "AI -> Open frees the row again");
+    // A guest holding the row blocks the switch to AI.
+    auto other = locals_of(2);
+    GcRoom held(other, two_side_options(*other[0]), 1);
+    held.admit(1, 2, "guest");
+    expect(!held.host().set_game(require(net::encode_galactic_lobby_game([&] {
+        auto edited = require(net::decode_galactic_lobby_game(held.host().snapshot().game)); edited.rows[1].human = false; return edited; }())),
+        held.revision()), "a row a guest holds cannot become AI");
+    // Both humans on Rebel, Empire host-toggled to AI, on the highest seed the AI perception accepts: the peers agree on the AI setup.
+    auto fresh = locals_of(2);
+    auto start = two_side_options(*fresh[0]);
+    start.seed = std::numeric_limits<std::uint32_t>::max();
+    GcRoom ai_room(fresh, start, 1);
+    ai_room.admit(1, 1, "guest");
+    auto ai_empire = require(net::decode_galactic_lobby_game(ai_room.host().snapshot().game));
+    ai_empire.rows[1].human = false;
+    require(ai_room.host().set_game(require(net::encode_galactic_lobby_game(ai_empire)), ai_room.revision())); ai_room.rounds(3);
+    ai_room.all_ready();
+    ai_room.commit();
+    check_committed(ai_room, "highest 32-bit seed", 2, std::numeric_limits<std::uint32_t>::max());
 }
 
 void nine_seat_room() {
@@ -596,6 +661,78 @@ void content_mismatch_returns_to_staging() {
 
 // ---- the viewer's own match (what the lobby screen drives) over real loopback TCP ----
 
+void reoffer_keeps_agreed_services() {
+    auto local = std::make_shared<Local>();
+    using Services = eawr::platform::CampaignServiceConfiguration;
+    std::vector<std::pair<std::shared_ptr<cp::GameSession>, std::shared_ptr<Services>>> prepared;
+    local->content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        auto session = std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy())));
+        auto services = std::make_shared<Services>();
+        prepared.emplace_back(session, services);
+        return eawr::core::Result<cp::MpPreparedSession>::success({session, services});
+    };
+    viewer::GalacticLobbyBackend backend(local->content);
+    auto options = two_side_options(*local);
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    const auto offer_a = require(backend.offer(snapshot, seats));
+    auto changed = options; changed.seed += 1;
+    snapshot.game = require(net::encode_galactic_lobby_game(changed));
+    const auto offer_b = require(backend.offer(snapshot, seats));
+    require(backend.identify(offer_a));
+    const auto agreed_a = backend.agreement();
+    const auto services_a = prepared.back().second;
+    expect(agreed_a->session == prepared.back().first && agreed_a->runtime_services == services_a,
+        "agree A retains A's session and matching runtime services after a re-offer");
+    require(backend.offer(snapshot, seats));
+    expect(backend.agreement() == agreed_a && backend.runtime_services() == services_a,
+        "a later re-offer cannot replace the agreed root's services");
+    require(backend.identify(offer_b));
+    expect(backend.agreement()->session != agreed_a->session && backend.runtime_services() != services_a,
+        "a new agreement switches owner and services together");
+    expect(agreed_a->runtime_services == services_a, "a retained launch still owns A's services");
+}
+
+// The same projection used by ViewerHost, compiled without Godot.
+struct LaunchOptions {
+    std::shared_ptr<viewer::GalacticLanMatch> lan_match;
+    std::shared_ptr<viewer::GalacticLaunch> lan_start;
+    std::vector<eawr::viewer::galactic::LanPlayer> lan_players;
+    std::string campaign;
+    std::uint32_t seat{};
+};
+void verify_launch(const std::vector<std::shared_ptr<viewer::GalacticLaunch>>& launches) {
+    using Live = eawr::platform::LiveGameSession;
+    std::vector<std::unique_ptr<Live>> games;
+    for (std::size_t peer = 0; peer < launches.size(); ++peer) {
+        const auto& launch = launches[peer];
+        LaunchOptions options;
+        eawr::viewer::galactic::apply_lobby_launch(options, launch);
+        expect(options.lan_match && options.lan_start == launch && options.campaign == "Multiplayer"
+            && options.seat == launch->seat, "viewer options retain the agreed campaign, local seat and match");
+        expect(options.lan_players.size() == launches.size(), "one LAN HUD identity per human seat");
+        for (std::size_t i = 0; i < options.lan_players.size(); ++i) {
+            const auto& player = options.lan_players[i];
+            const auto& seat = launch->roster.seats[i];
+            expect(player.peer == i && player.seat == seat.seat && player.player == seat.selection.name
+                && player.faction == seat.selection.faction, "LAN HUD identities follow the dense agreed seat order");
+        }
+        expect(options.lan_match->local_seat().value == launch->seat, "driver and viewer use the same local seat");
+        expect(launch->owner->session && launch->owner->session->completed_tick() == 0,
+            "launch keeps the derived tick-zero session");
+        Live::Options live; live.pacing = Live::Pacing::driven; live.workers = peer % 2 == 0 ? 1 : 4;
+        games.push_back(require(launch->start(std::move(live))));
+    }
+    constexpr std::uint64_t ticks = 12;
+    for (auto& game : games) game->advance_to(ticks);
+    for (auto& game : games) expect(game->wait_for(ticks, std::chrono::seconds(20)), "committed GC lobby advances agreed ticks");
+    for (auto& game : games) game->stop();
+    const auto hashes = games.front()->tick_hashes();
+    expect(hashes.size() >= ticks, "all agreed tick hashes were recorded");
+    for (const auto& game : games) expect(game->tick_hashes() == hashes, "lobby-launched peers have equal state hashes on every tick");
+}
+
 void viewer_staging_room() {
     Local host_content, guest_content;
     auto host_backend = std::make_shared<viewer::GalacticLobbyBackend>(host_content.content);
@@ -614,7 +751,7 @@ void viewer_staging_room() {
         auto plain = viewer::make_lan_match();
         plain->configure_seats({1, 2}); plain->configure_lobby("Plain", 0, {}, builder); plain->configure_galactic(host_backend);
         plain->host(0);
-        expect(!plain->galactic_room() && !plain->set_galactic_game(net::GalacticLobbyOptions{}), "no GC options, no GC room (and empty options are refused)");
+        expect(!plain->galactic_room() && !plain->take_galactic_launch() && !plain->set_galactic_game(net::GalacticLobbyOptions{}), "no GC options, no GC room (and empty options are refused)");
         plain->cancel();
     }
     host->host(0);
@@ -631,7 +768,16 @@ void viewer_staging_room() {
             host->pump_setup(none);
             guest->pump_setup(none);
             if (predicate()) return;
-            expect(std::chrono::steady_clock::now() < deadline, "galactic staging deadline at " + milestone);
+            if (std::chrono::steady_clock::now() >= deadline) {
+                const auto describe = [](const auto& peer) {
+                    const auto state = peer->lobby_state();
+                    const auto start = peer->galactic_start();
+                    return "room=" + std::to_string(state ? static_cast<int>(state->snapshot.phase) : -1)
+                        + " setup=" + std::to_string(start && start->room->setup_phase()
+                            ? static_cast<int>(*start->room->setup_phase()) : -1) + " " + peer->view().message;
+                };
+                expect(false, "galactic staging deadline at " + milestone + "; host " + describe(host) + "; guest " + describe(guest));
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     };
@@ -675,22 +821,10 @@ void viewer_staging_room() {
     expect(guest->lobby_select(choice), "the guest moves back to the second faction");
     wait([&] { return synchronized() && host->lobby_state()->snapshot.seats[1].selection.slot == 2 && host->lobby_state()->snapshot.seats[1].player == 2; });
 
-    // Ready is accepted by the room's own rules; Start waits for the galactic driver's adapter (the GCMP-03 seam).
     expect(host->lobby_ready(true) && guest->lobby_ready(true), "both players ready the campaign setup");
     milestone = "ready";
     wait([&] { return host->lobby_state()->snapshot.seats[0].ready && host->lobby_state()->snapshot.seats[1].ready; });
-    {
-        const auto state = host->lobby_state();
-        expect(!state->start_enabled && state->start_reason.find("galactic lockstep driver") != std::string::npos,
-            "Start stays off until a driver installs its adapter: " + state->start_reason);
-        expect(!host_backend->can_start() && !host->galactic_start(), "no Start seam before the driver");
-    }
-    for (const auto& backend : {host_backend, guest_backend}) {
-        backend->set_adapter_factory([](const net::SetupOffer&, const cp::MpAgreement& agreement)
-            -> eawr::core::Result<std::unique_ptr<net::SessionAdapter>> {
-            return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::success(std::make_unique<TickZeroAdapter>(agreement.session));
-        });
-    }
+    expect(host_backend->can_start() && !host->galactic_start(), "production adapter is installed, but no launch precedes Start");
     milestone = "Start enabled";
     wait([&] { return host->lobby_state()->start_enabled; });
     host->start(none);
@@ -702,24 +836,372 @@ void viewer_staging_room() {
     expect(host_start.room->snapshot().phase == net::LobbyPhase::starting && guest_start.room->snapshot().frozen_revision != 0
         && guest_start.room->snapshot().frozen_revision == host_start.room->snapshot().frozen_revision,
         "the frozen revision is the same on both peers");
-    wait([&] { return guest_start.room->setup_phase() == net::SetupPhase::reviewing_offer; });
+    std::shared_ptr<viewer::GalacticLaunch> host_launch, guest_launch;
+    milestone = "committed launch";
+    wait([&] {
+        if (!host_launch) host_launch = host->take_galactic_launch();
+        if (!guest_launch) guest_launch = guest->take_galactic_launch();
+        return host_launch && guest_launch;
+    });
+    expect(!host->take_galactic_launch() && !guest->take_galactic_launch(), "a committed launch is taken exactly once");
+    verify_launch({host_launch, guest_launch});
+    host_launch.reset(); guest_launch.reset();
     host->cancel(); guest->cancel();
+}
+
+void viewer_many_seat_launch(std::size_t count) {
+    std::vector<std::shared_ptr<Local>> locals;
+    std::vector<std::shared_ptr<viewer::LanMatch>> peers;
+    std::vector<gc::PlayerId> owners;
+    for (unsigned i = 1; i <= count; ++i) owners.push_back(i);
+    for (std::size_t i = 0; i < count; ++i) {
+        locals.push_back(std::make_shared<Local>());
+        auto match = viewer::make_lan_match();
+        match->configure_seats(owners);
+        match->configure_lobby("Player " + std::to_string(i + 1), 0, {}, [](const auto&) {
+            eawr::core::Diagnostic error; error.code = "EAWR-TEST-0002"; error.message = "GC never builds tactical setup";
+            return eawr::core::Result<eawr::sim::tactical::TacticalSetup>::failure(error);
+        });
+        match->configure_galactic(std::make_shared<viewer::GalacticLobbyBackend>(locals.back()->content));
+        peers.push_back(std::move(match));
+    }
+    peers[0]->host(0);
+    expect(peers[0]->set_galactic_game(two_side_options(*locals[0])), "open nine-seat campaign room");
+    const eawr::skirmish::FixtureOptions none{};
+    peers[0]->pump_setup(none);
+    for (std::size_t i = 1; i < count; ++i) peers[i]->join("127.0.0.1:" + std::to_string(peers[0]->view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    const auto wait = [&](const auto& predicate) {
+        while (true) {
+            for (const auto& peer : peers) peer->pump_setup(none);
+            if (predicate()) return;
+            for (const auto& peer : peers) expect(peer->view().phase != viewer::LanPhase::ended,
+                "nine-seat campaign connection refused: " + peer->view().message);
+            expect(std::chrono::steady_clock::now() < deadline, "nine-seat GC launch deadline");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    };
+    wait([&] {
+        for (const auto& peer : peers) {
+            const auto state = peer->lobby_state();
+            if (!state || state->snapshot.seats.size() != count || state->identity_pending) return false;
+        }
+        return true;
+    });
+    if (count == 9) {
+        // The room can stage nine peers, but the agreed GC roster permits at most eight humans.
+        for (const auto& peer : peers) {
+            expect(!peer->lobby_ready(true), "a ninth human is refused before Start");
+            expect(peer->lobby_state()->ready_reason.find("at most 8 human seats") != std::string::npos,
+                "the nine-human refusal names the existing roster limit");
+            expect(!peer->take_galactic_launch(), "a refused nine-human room cannot launch a solo or mismatched campaign");
+        }
+        // Display identities have no authority to bypass that roster rule; qualify the nine-row projection independently.
+        eawr::testing::FakeNetwork network(static_cast<std::uint32_t>(count));
+        const auto snapshot = peers[0]->lobby_state()->snapshot;
+        for (std::size_t i = 0; i < count; ++i) {
+            eawr::testing::FakeTransport transport(network, static_cast<net::PeerIndex>(i));
+            viewer::GalacticLanOptions roster;
+            for (const auto& seat : snapshot.seats) roster.seats.push_back({seat.seat, true});
+            auto launch = std::make_shared<viewer::GalacticLaunch>();
+            launch->options = two_side_options(*locals[0]); launch->roster = snapshot;
+            launch->seat = snapshot.seats[i].seat.value;
+            launch->match = std::make_shared<viewer::GalacticLanMatch>(transport, std::move(roster));
+            LaunchOptions projected;
+            eawr::viewer::galactic::apply_lobby_launch(projected, launch);
+            expect(projected.lan_match && projected.lan_match->local_seat().value == projected.seat
+                && projected.lan_players.size() == count, "nine-row projection retains the match and local seat");
+            for (std::size_t row = 0; row < count; ++row)
+                expect(projected.lan_players[row].peer == row && projected.lan_players[row].seat == snapshot.seats[row].seat
+                    && projected.lan_players[row].player == snapshot.seats[row].selection.name
+                    && projected.lan_players[row].faction == snapshot.seats[row].selection.faction,
+                    "nine-row projection follows every agreed display identity");
+        }
+        for (const auto& peer : peers) peer->cancel();
+        return;
+    }
+    for (const auto& peer : peers) expect(peer->lobby_ready(true), "multi-seat ready");
+    wait([&] { return peers[0]->lobby_state()->start_enabled; });
+    peers[0]->start(none);
+    std::vector<std::shared_ptr<viewer::GalacticLaunch>> launches(count);
+    wait([&] {
+        bool all = true;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!launches[i]) launches[i] = peers[i]->take_galactic_launch();
+            all = all && static_cast<bool>(launches[i]);
+        }
+        return all;
+    });
+    verify_launch(launches);
+    launches.clear();
+    for (const auto& peer : peers) peer->cancel();
+}
+
+void installed_stock_native_ai_agreement(const cp::MpLocalContent& local,
+    const gc::MpLobbyCampaign& campaign, std::uint64_t seed) {
+    // The real AI perception setup must accept every seed the lobby can hand out. The default rows are the owner's
+    // layout: two human sides (Rebel host, Empire guest) and the remaining stock faction (Underworld) as AI.
+    auto options = require(net::default_galactic_lobby_options(campaign, difficulty, seed));
+    expect(options.seed == seed, "the lobby options carry the host's seed");
+    options.custom = true; options.credits = 10000; options.allow_heroes = false;
+    options.starting_tech = 2; options.maximum_tech = 5;
+    std::vector<gc::PlayerId> humans;
+    for (const auto& row : options.rows) if (row.human) humans.push_back(row.player);
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, humans.at(0), "host"),
+        seat_of(1, 2, options, humans.at(1), "guest")});
+    for (auto& seat : snapshot.seats) seat.ready = true;
+    viewer::GalacticLobbyBackend backend(local);
+    const auto offered = backend.offer(snapshot, {{0, {1}, humans.at(0)}, {1, {2}, humans.at(1)}});
+    if (!offered) throw std::runtime_error(campaign.name + ": " + eawr::core::format_diagnostic(offered.error()));
+    const auto& offer = offered.value();
+    const auto identity = require(backend.identify(offer));
+    const auto first = backend.agreement();
+    expect(first && first->session && first->session->native_ai_installed(),
+        "stock MP campaign prepares native AI through the real lobby loader: " + campaign.name);
+    std::vector<std::string> baseline;
+    std::vector<std::shared_ptr<const gc::GalacticSnapshot>> baseline_views;
+    // Two independent peers per stock map, reusing the host's actual preparation.
+    // The authored observer case below retains the full 1/2/4/8-by-view matrix.
+    for (const auto workers : {1U, 8U}) {
+        const std::size_t peer_index = workers == 1 ? 0 : 1;
+        viewer::GalacticLobbyBackend peer(local);
+        auto agreement = first;
+        if (workers != 1) {
+            expect(require(peer.identify(offer)).content == identity.content, "stock peers independently agree all content domains");
+            agreement = peer.agreement();
+        }
+        expect(agreement && agreement->tick_zero == first->tick_zero, "stock peers agree tick-zero digest");
+        auto& session = *agreement->session;
+        expect(session.native_ai_installed(), "each stock peer installs native AI before tick zero");
+        const auto native = require(session.save_galactic_ai());
+        expect(native.state && native.state->components.contains("galactic-ai-lifecycle"),
+            "stock preparation includes the selected native AI lifecycle in canonical state");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes{session.state_sha256()};
+        const auto check_view = [&](std::size_t tick) {
+            const auto player = humans.at(peer_index);
+            const auto view = session.galaxy().view_snapshot({player});
+            expect(view && view->view_player() == player, "stock peer publishes its own human view");
+            expect(!view->observations().empty(), "stock human view contains observer rows");
+            for (const auto& row : view->observations())
+                expect(row.player == player, "stock view filters foreign private observer rows");
+            for (const auto& row : view->production_offers())
+                expect(row.player == player, "stock view filters foreign private production offers");
+            if (const auto* forecast = view->economy_forecast())
+                expect(forecast->player == player, "stock view filters foreign economy forecast");
+            if (peer_index == 0) baseline_views.push_back(view);
+            else {
+                const auto& other = *baseline_views.at(tick);
+                const auto same_rows = [](const auto a, const auto b) {
+                    return std::equal(a.begin(), a.end(), b.begin(), b.end());
+                };
+                expect(view->completed_tick() == other.completed_tick() && view->clock() == other.clock()
+                    && same_rows(view->players(), other.players()) && same_rows(view->planets(), other.planets())
+                    && same_rows(view->routes(), other.routes()) && same_rows(view->fleets(), other.fleets()),
+                    "stock peer views agree shared state at every tick while private rows remain observer-local");
+            }
+        };
+        check_view(0);
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            hashes.push_back(require(session.step(executor)).state_hash.get());
+            check_view(tick + 1);
+        }
+        if (baseline.empty()) baseline = hashes;
+        else expect(hashes == baseline, "stock campaign agrees every tick across both peers at 1 and 8 workers");
+        std::cout << "stock native AI agreement campaign=" << campaign.name << " workers=" << workers
+            << " peer=" << peer_index << " ticks=12 tick_zero=" << hashes.front() << " digest=" << hashes.back() << '\n';
+    }
+}
+
+void installed_observer_agreement(bool stock_only = false) {
+    const auto root = eawr::testing::game_root();
+    if (!root) {
+        std::cout << (stock_only ? "SKIPPED: stock multiplayer AI installed data not requested\n"
+                                : "installed observer campaign not requested\n");
+        return;
+    }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(require(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data")).mount);
+    const auto files = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    const auto catalog = require(eawr::data::load_catalog(*files, eawr::data::Profile::foc));
+    auto loaded = require(viewer::load_galactic_lobby_content(*files, catalog.catalog, files));
+    // The real viewer loader owns the fiscal planner, stock placement, conflict services and native AI.
+    loaded.local.data = loaded.data.get(); loaded.local.types = loaded.types.get();
+    auto campaigns = cp::list_mp_lobby_campaigns(*loaded.data);
+    std::sort(campaigns.begin(), campaigns.end(), [](const auto& a, const auto& b) { return a.name < b.name; });
+    expect(!campaigns.empty(), "installed data contains a multiplayer campaign");
+    if (stock_only) {
+        const std::array stock_names{
+            "Multiplayer_Sandbox_Clusters", "Multiplayer_Sandbox_Equal_Footing", "Multiplayer_Sandbox_Gateways",
+            "Multiplayer_Sandbox_Heart_Of_The_Maw", "Multiplayer_Sandbox_Origin", "Multiplayer_Sandbox_Rim_Worlds"};
+        expect(campaigns.size() == stock_names.size(), "all six stock MP campaigns exercise native AI agreement");
+        for (const auto* name : stock_names) {
+            const auto* campaign = cp::find_mp_lobby_campaign(campaigns, name);
+            expect(campaign != nullptr, "stock native AI campaign exists: " + std::string(name));
+            if (!campaign) continue;
+            // The seed a host really draws, and (once) the widest one the lobby accepts.
+            const auto drawn = net::draw_galactic_session_seed();
+            expect(drawn <= std::numeric_limits<std::uint32_t>::max(), "a drawn host seed fits in 32 bits");
+            installed_stock_native_ai_agreement(loaded.local, *campaign, drawn);
+            if (name == stock_names.front()) installed_stock_native_ai_agreement(loaded.local, *campaign, std::numeric_limits<std::uint32_t>::max());
+        }
+        return;
+    }
+
+    // Author a three-home campaign using installed identifiers, leaving all production
+    // loaders, placement, services, AI and lobby agreement callbacks untouched.
+    // Stock MP native AI and inert starting protection have their own batch-only CTest entry.
+    const auto* source = loaded.data->campaign("Sandbox_Equal_Footing_Empire");
+    if (!source) throw std::runtime_error("installed fixture identifier source missing");
+    struct FixtureDirectory {
+        std::filesystem::path root;
+        ~FixtureDirectory() { eawr::testing::remove_temp_directory(root); }
+    } fixture{std::filesystem::temp_directory_path() / ("eawr-observer-campaign-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))};
+    std::filesystem::create_directories(fixture.root / "XML");
+    const auto xml_name = [](std::string_view name) {
+        if (name.empty() || name.find_first_of("<>&\"'") != std::string_view::npos)
+            throw std::runtime_error("fixture identifier needs XML escaping");
+        return std::string(name);
+    };
+    std::ostringstream authored;
+    authored << "<Campaigns><Campaign Name=\"Observer_Agreement_Test\">"
+        "<Is_Listed>Yes</Is_Listed><Is_Multiplayer>Yes</Is_Multiplayer>"
+        "<Supports_Custom_Settings>Yes</Supports_Custom_Settings>"
+        "<Min_Custom_Tech_Level>1</Min_Custom_Tech_Level><Max_Custom_Tech_Level>5</Max_Custom_Tech_Level>"
+        "<Is_Story_Campaign>No</Is_Story_Campaign><Planet_Auto_Reveal>No</Planet_Auto_Reveal>"
+        "<Starting_Active_Player>Empire</Starting_Active_Player>";
+    std::set<std::string> homes;
+    for (const auto* faction : {"Empire", "Rebel", "Underworld"}) {
+        const auto force = std::find_if(source->starting_forces.begin(), source->starting_forces.end(), [&](const auto& row) {
+            const auto* type = loaded.types->find(row.type);
+            return row.faction == faction && type && type->object_class == "SpaceUnit"
+                && type->can_hyperspace_without_ability.value_or(true) && !type->named_hero.value_or(false);
+        });
+        if (force == source->starting_forces.end()) throw std::runtime_error("fixture needs an installed ordinary ship");
+        const auto home = std::find_if(source->home_locations.begin(), source->home_locations.end(),
+            [&](const auto& row) { return row.faction == faction; });
+        const auto planet = home == source->home_locations.end() ? force->location : home->name;
+        expect(homes.insert(planet).second, "fixture factions have distinct secret home planets");
+        authored << "<Home_Location>" << faction << ',' << xml_name(planet) << "</Home_Location>"
+            << "<Starting_Forces>" << faction << ',' << xml_name(planet) << ',' << xml_name(force->type) << "</Starting_Forces>"
+            << "<Starting_Credits>" << faction << ",10000</Starting_Credits>"
+            << "<Starting_Tech_Level>" << faction << ",2</Starting_Tech_Level>"
+            << "<Max_Tech_Level>" << faction << ",5</Max_Tech_Level>";
+        // The solo observer reference needs explicit campaign pairs. Derive these
+        // from faction data; MP selection itself does not consume those pairs.
+        const auto* definition = loaded.data->faction(faction);
+        if (!definition || definition->basic_ai.empty()) throw std::runtime_error("fixture needs an authored faction Basic_AI");
+        authored << "<AI_Player_Control>" << faction << ',' << xml_name(definition->basic_ai) << "</AI_Player_Control>";
+    }
+    authored << "<Locations>";
+    for (const auto& home : homes) authored << xml_name(home) << ",";
+    authored << "</Locations></Campaign></Campaigns>";
+    const auto write = [&](const char* name, const std::string& text) {
+        std::ofstream output(fixture.root / "XML" / name); output << text;
+        if (!output) throw std::runtime_error("cannot write authored observer campaign");
+    };
+    write("CampaignFiles.xml", "<Campaign_Files><File>Observer_Test_Campaign.xml</File></Campaign_Files>");
+    write("Observer_Test_Campaign.xml", authored.str());
+    mounts.insert(mounts.begin(), eawr::vfs::MountSpec{"observer-test", fixture.root, "data", {}});
+    const auto fixture_files = std::make_shared<const eawr::vfs::Vfs>(require(eawr::vfs::Vfs::mount(mounts)));
+    const auto fixture_catalog = require(eawr::data::load_catalog(*fixture_files, eawr::data::Profile::foc));
+    loaded = require(viewer::load_galactic_lobby_content(*fixture_files, fixture_catalog.catalog, fixture_files));
+    loaded.local.data = loaded.data.get(); loaded.local.types = loaded.types.get();
+    campaigns = cp::list_mp_lobby_campaigns(*loaded.data);
+    expect(campaigns.size() == 1 && campaigns.front().name == "Observer_Agreement_Test", "real XML loader selects the authored fixture");
+    const auto& selected = campaigns.front();
+    auto options = require(net::default_galactic_lobby_options(selected, difficulty, match_seed));
+    options.custom = true; options.credits = 10000; options.allow_heroes = false;
+    options.starting_tech = 2; options.maximum_tech = 5;
+    const auto human = std::find_if(options.rows.begin(), options.rows.end(), [](const auto& row) { return row.human; });
+    cp::CampaignSetupOptions solo; solo.forced_seed = match_seed; solo.solo_reference_human = human->player;
+    solo.custom = cp::CampaignCustomOptions{options.credits, options.starting_tech, options.maximum_tech, false};
+    for (const auto& faction : selected.factions) {
+        solo.players.push_back({{faction.player, faction.faction_id, faction.flags}, faction.name, true});
+        if (!faction.neutral) solo.seats.push_back({{faction.player}, faction.player,
+            faction.player == *solo.solo_reference_human ? gc::SeatKind::human : gc::SeatKind::ai,
+            faction.player, true, faction.player == *solo.solo_reference_human ? faction.player : 0});
+    }
+    std::vector<std::string> type_names;
+    for (const auto& type : loaded.types->types) type_names.push_back(type.name);
+    std::sort(type_names.begin(), type_names.end());
+    for (const auto& name : type_names) solo.types.push_back({solo.types.size() + 1, name});
+    const auto solo_prepared = require(eawr::platform::PreparedLiveCampaign::create(fixture_files,
+        fixture_catalog.catalog, *loaded.data, *loaded.types, selected.name, std::move(solo), difficulty, true));
+    expect(solo_prepared->native_ai_installed(), "same authored campaign prepares the real solo native AI path");
+    std::cout << "authored observer campaign=" << options.campaign << " allow_heroes=false solo_prepare=passed\n";
+    std::vector<gc::PlayerId> humans;
+    for (const auto& row : options.rows) if (row.human) humans.push_back(row.player);
+    expect(humans.size() == 2, "installed campaign offers two different human factions");
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, humans.at(0), "host"),
+        seat_of(1, 2, options, humans.at(1), "guest")});
+    for (auto& seat : snapshot.seats) seat.ready = true;
+    viewer::GalacticLobbyBackend host(loaded.local);
+    const auto offer = require(host.offer(snapshot, {{0, {1}, humans.at(0)}, {1, {2}, humans.at(1)}}));
+    const auto identity = require(host.identify(offer));
+    const auto first = host.agreement();
+    expect(first && first->session->native_ai_installed() && first->runtime_services,
+        "real prepared lobby path installs native AI before tick zero");
+    expect(std::any_of(first->plan->galaxy().seats.begin(), first->plan->galaxy().seats.end(),
+        [](const auto& row) { return row.active && row.kind == gc::SeatKind::ai; }),
+        "installed observer campaign retains an active AI faction alongside the two humans");
+    expect(first->plan->human_observers().size() == 2 && !first->plan->solo_reference_human(),
+        "multiplayer plan has canonical human contexts and no solo reference");
+    std::vector<std::string> baseline;
+    std::vector<std::uint8_t> replay;
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const auto seat : {1U, 2U}) {
+        viewer::GalacticLobbyBackend peer(loaded.local);
+        expect(require(peer.identify(offer)).content == identity.content, "prepared peers agree all content domains");
+        const auto agreement = peer.agreement();
+        expect(agreement->tick_zero == first->tick_zero, "prepared peers agree tick-zero digest");
+        auto& session = *agreement->session;
+        const auto player = humans.at(seat - 1);
+        const auto view = session.galaxy().view_snapshot({player});
+        expect(view && view->view_player() == player, "peer resolves its own agreed human context");
+        for (const auto& row : view->observations()) expect(row.player == player, "prepared view excludes foreign observer rows");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes{session.state_sha256()};
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            (void)session.galaxy().view_snapshot({player});
+            hashes.push_back(require(session.step(executor)).state_hash.get());
+        }
+        const auto bytes = require(gc::write_replay(session.record()));
+        if (baseline.empty()) { baseline = hashes; replay = bytes; }
+        else expect(hashes == baseline && bytes == replay,
+            "real prepared lobby campaign agrees each tick and replay on both views and 1/2/4/8 workers");
+        std::cout << "prepared observer agreement campaign=" << options.campaign << " workers=" << workers << " seat=" << seat
+            << " ticks=12 digest=" << hashes.back() << '\n';
+    }
 }
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--stock-ai") {
+            installed_observer_agreement(true);
+            viewer::shutdown_lan_drains();
+            std::cout << "stock galactic lobby AI contracts passed\n";
+            return 0;
+        }
+        if (argc != 1) throw std::runtime_error("usage: net_galactic_lobby_tests [--stock-ai]");
         codec_and_mode();
         skirmish_bytes_pinned();
         campaign_list();
         staging_validation();
         roster_draft();
         two_peer_room();
+        host_toggles_row_open_ai();
         nine_seat_room();
         two_sides_with_extra_ai();
         content_mismatch_returns_to_staging();
+        reoffer_keeps_agreed_services();
         viewer_staging_room();
+        viewer_many_seat_launch(9);
+        viewer_many_seat_launch(8);
+        installed_observer_agreement();
         viewer::shutdown_lan_drains();
         std::cout << "galactic lobby contracts passed: gc1 codec and versioning, campaign list, staging refusals, two-peer and nine-seat rooms, skirmish bytes pinned\n";
         return 0;

@@ -25,7 +25,7 @@ namespace sim = eawr::sim;
 namespace tactical = sim::tactical;
 
 namespace viewer_lan_test {
-void missing_planned_owner_is_refused() {
+void capacity_does_not_create_players() {
     stage = "three owners on a two-row loaded map";
     auto initial = setup();
     eawr::skirmish::FixtureOptions selected;
@@ -39,9 +39,10 @@ void missing_planned_owner_is_refused() {
         return eawr::core::Result<tactical::TacticalSetup>::success(initial);
     });
     host->host(0); host->pump_setup(selected);
-    expect(host->view().phase == viewer::LanPhase::ended
-        && host->view().diagnostic_code == net::lobby_diagnostic(net::LobbyReason::invalid_choice, "").code,
-        "missing planned third owner is a typed refusal before any room or partial roster can start");
+    expect(host->lobby_state().has_value(), "transport capacity need not be filled by the map's players");
+    const auto decoded = require(viewer::decode_lan_lobby_game(host->lobby_state()->snapshot));
+    expect(decoded.slots->size() == 1 && decoded.open_slots == std::vector<std::uint32_t>{2},
+        "the vacant human row stays Open and transport capacity creates no extra AI player");
     host->cancel();
 }
 
@@ -116,9 +117,7 @@ void nine_seat_staging(const std::vector<tactical::PlayerId>& owners) {
         auto& guest = *matches.back();
         auto choice = std::find_if(before.seats.begin(), before.seats.end(), [&](const auto& seat) { return seat.peer == guest.view().seat; })->selection;
         choice.slot = 3;
-        expect(guest.lobby_select(choice), "crafted guest AI-row select reaches the host validator");
-        milestone = "AI row refusal";
-        wait([&] { return guest.lobby_state()->notice && guest.lobby_state()->notice->reason == net::LobbyReason::invalid_choice; });
+        expect(!guest.lobby_select(choice), "a guest cannot take an AI row until the host opens it");
         expect(host.lobby_state()->snapshot == before, "host refuses guest takeover of an unplanned AI row without a revision change");
     }
     for (auto& match : matches) expect(match->lobby_ready(true), "all command seats explicitly ready");
@@ -172,6 +171,9 @@ void editable_staging_team_rules() {
         && join->lobby_state() && join->lobby_state()->snapshot == host->lobby_state()->snapshot
         && !join->lobby_state()->identity_pending; });
     auto edited = require(viewer::decode_lan_lobby_game(host->lobby_state()->snapshot));
+    // An Open row takes the loaded team's default on admission. Author the
+    // mixed-faction case explicitly rather than relying on a vacant row's old choice.
+    edited.slots->at(1).faction = "Empire";
     edited.slots->at(1).team = 0;
     expect(host->lobby_game(edited), "host can publish mixed-faction teammates");
     wait([&] { return join->lobby_state()->snapshot == host->lobby_state()->snapshot; });
@@ -323,6 +325,271 @@ void advanced_options_three_peers() {
     for (auto& match : matches) match->cancel();
 }
 
+void ai_difficulty_two_peers() {
+    for (const int item : {2, 4, 3}) {
+        stage = "two-peer AI difficulty Start: " + std::to_string(item);
+        const auto level = item == 2 ? tactical::AiLevel::easy : item == 4 ? tactical::AiLevel::hard : tactical::AiLevel::normal;
+        eawr::skirmish::SetupMap map; map.path = setup().skirmish->map;
+        map.metadata.capacity = 3; map.metadata.new_markers = true; map.metadata.start_positions.emplace(3);
+        map.teams = {{0, {"Rebel"}, 1}, {1, {"Empire"}, 2}};
+        eawr::skirmish::SetupSelection selection; selection.map = map.path;
+        selection.match = setup().skirmish->match;
+        selection.match->pre_built_base = selection.match->free_starting_units = false;
+        selection.slots = {{1, "Rebel", 0, true, {}, 0}, {2, "Empire", 1, true, {}, 1}};
+        require(viewer::select_lan_ai_level(selection, map, 3, 8, 3));
+        auto current = require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)));
+        current.seed = 84;
+        const viewer::LanLobbyBuilder builder = [](const eawr::skirmish::FixtureOptions& options) {
+            eawr::units::UnitTables tables;
+            eawr::skirmish::Fixture fixture;
+            fixture.map = *options.map; fixture.map_sha256 = std::string(64, 'a'); fixture.seed = options.seed.value_or(0);
+            fixture.match = options.match; fixture.slots = *options.slots;
+            eawr::skirmish::StartInputs inputs; inputs.map = fixture.map; inputs.map_sha256 = fixture.map_sha256;
+            inputs.tables = &tables; inputs.lobby_colours.resize(8);
+            for (unsigned team = 0; team < 2; ++team) {
+                eawr::skirmish::StartFaction faction; faction.name = team == 0 ? "Rebel" : "Empire"; faction.playable = true;
+                inputs.factions.push_back(std::move(faction));
+                eawr::skirmish::MapPlacement marker; marker.record = team;
+                marker.type = "Team_0" + std::to_string(team) + "_Spawn_Point_Marker";
+                marker.marker = true; marker.position = sim::math::Vec3{}; marker.orientation_degrees = sim::math::Vec3{};
+                inputs.placements.push_back(std::move(marker));
+            }
+            auto prepared = viewer::prepare_skirmish(fixture, std::move(tables), std::move(inputs));
+            if (!prepared) return eawr::core::Result<tactical::TacticalSetup>::failure(prepared.error());
+            return eawr::core::Result<tactical::TacticalSetup>::success(viewer::lan_recording_setup(fixture, prepared.value().start));
+        };
+        const auto normal = require(net::encode_skirmish_setup(require(builder(current))));
+        auto host = make_match(), guest = make_match();
+        host->configure_lobby("Level host", 0, {map}, builder); guest->configure_lobby("Level guest", 1, {map}, builder);
+        host->host(0); host->pump_setup(current);
+        guest->join("127.0.0.1:" + std::to_string(host->view().port));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        const auto synced = [&] {
+            return host->lobby_state() && guest->lobby_state() && host->lobby_state()->snapshot.seats.size() == 2
+                && host->lobby_state()->snapshot == guest->lobby_state()->snapshot && !guest->lobby_state()->identity_pending;
+        };
+        const auto wait = [&](const auto& predicate) {
+            do {
+                host->pump_setup(current); guest->pump_setup({});
+                if (predicate()) return;
+                expect(std::chrono::steady_clock::now() < deadline, "AI level staging deadline");
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            } while (true);
+        };
+        wait(synced);
+        require(viewer::select_lan_ai_level(selection, map, 3, 8, item));
+        auto edited = require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)));
+        edited.seed = current.seed;
+        const auto before = host->lobby_state()->snapshot;
+        expect(!guest->lobby_game(edited) && host->lobby_state()->snapshot == before, "guest cannot publish an AI level");
+        current = edited;
+        expect(host->lobby_game(current), "host publishes the AI level");
+        wait([&] { return synced() && guest->offered_setup() && guest->offered_setup()->slots->back().difficulty == level; });
+        expect(require(viewer::decode_lan_lobby_game(guest->lobby_state()->snapshot)).slots->back().difficulty == level,
+            "guest reads the authoritative AI level from the snapshot");
+        expect(host->lobby_ready(true) && guest->lobby_ready(true), "both humans ready the selected AI level");
+        wait([&] { return host->view().start_enabled; });
+        host->start(current);
+        wait([&] { return host->lobby_state()->snapshot.phase == net::LobbyPhase::starting
+            && guest->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
+        std::vector<Bytes> encoded;
+        std::vector<sim::MatchIdentity> digests;
+        for (const auto& match : {host, guest}) {
+            const auto start = match->take_start();
+            expect(start && start->slots->back().difficulty == level, "each peer starts with the chosen level");
+            const auto built = require(builder(*start));
+            expect(built.skirmish->slots.back().difficulty == level, "production preparation preserves the level in the agreed setup");
+            encoded.push_back(require(net::encode_skirmish_setup(built)));
+            digests.push_back(*built.match_identity);
+        }
+        expect(encoded.front() == encoded.back(), "both peers have byte-identical setup and difficulty identity");
+        expect(digests.front() == digests.back(), "the staging-to-SKSU content digests match on both peers");
+        expect((encoded.front() == normal) == (level == tactical::AiLevel::normal), "only Normal preserves the default setup bytes");
+        host->cancel(); guest->cancel();
+    }
+}
+
+void seat_controls_three_peers(bool drop_during_formation) {
+    stage = "Open Closed AI Human three-peer staging and launch";
+    {
+        eawr::skirmish::SetupMap small; small.metadata.capacity = 4; small.metadata.new_markers = true;
+        small.metadata.start_positions.emplace(4);
+        auto large = small; large.metadata.capacity = 8; large.metadata.start_positions.emplace(8);
+        const std::vector<eawr::skirmish::LobbySlot> sparse{{1, "Rebel", 0, true, {}}, {7, "Empire", 1, true, {}}};
+        expect(!viewer::lan_map_supports_rows(small, sparse) && viewer::lan_map_supports_rows(large, sparse),
+            "Rows one and seven cannot be renumbered onto a four-row map");
+        expect(sparse.front().slot == 1 && sparse.back().slot == 7 && sparse.front().human && sparse.back().human,
+            "Map eligibility does not mutate the authoritative rows");
+        auto ai = sparse; ai.back().human = false;
+        expect(!viewer::lan_map_supports_rows(small, ai), "High occupied AI rows also constrain map capacity");
+    }
+    eawr::skirmish::SetupMap map; map.path = setup().skirmish->map;
+    map.metadata.capacity = 6; map.metadata.new_markers = true; map.metadata.start_positions.emplace(6);
+    map.teams = {{0, {"Rebel", "Empire"}, 3}, {1, {"Empire", "Rebel"}, 3}};
+    eawr::skirmish::SetupSelection selection; selection.map = map.path;
+    selection.match = setup().skirmish->match;
+    selection.match->pre_built_base = selection.match->free_starting_units = false;
+    selection.slots = {{1, "Rebel", 0, true, {}, 0}};
+    selection.open_slots = {2, 3, 4, 5, 6};
+    const auto options = [&] {
+        eawr::skirmish::FixtureOptions result; result.map = selection.map; result.slots = selection.slots;
+        result.open_slots = selection.open_slots; result.match = selection.match; result.seed = 84;
+        return result;
+    };
+    const viewer::LanLobbyBuilder builder = [](const eawr::skirmish::FixtureOptions& chosen) {
+        eawr::units::UnitTables tables;
+        eawr::skirmish::Fixture fixture; fixture.map = *chosen.map; fixture.map_sha256 = std::string(64, 'a');
+        fixture.seed = chosen.seed.value_or(0); fixture.match = chosen.match; fixture.slots = *chosen.slots;
+        eawr::skirmish::StartInputs inputs; inputs.map = fixture.map; inputs.map_sha256 = fixture.map_sha256;
+        inputs.tables = &tables; inputs.lobby_colours.resize(9);
+        for (unsigned team = 0; team < 2; ++team) {
+            eawr::skirmish::StartFaction faction; faction.name = team == 0 ? "Rebel" : "Empire"; faction.playable = true;
+            inputs.factions.push_back(std::move(faction));
+            eawr::skirmish::MapPlacement marker; marker.record = team;
+            marker.type = "Team_0" + std::to_string(team) + "_Spawn_Point_Marker";
+            marker.marker = true; marker.position = sim::math::Vec3{}; marker.orientation_degrees = sim::math::Vec3{};
+            inputs.placements.push_back(std::move(marker));
+        }
+        auto prepared = viewer::prepare_skirmish(fixture, std::move(tables), std::move(inputs));
+        if (!prepared) return eawr::core::Result<tactical::TacticalSetup>::failure(prepared.error());
+        return eawr::core::Result<tactical::TacticalSetup>::success(viewer::lan_recording_setup(fixture, prepared.value().start));
+    };
+    std::vector<std::shared_ptr<viewer::LanMatch>> matches;
+    for (unsigned peer = 0; peer < 3; ++peer) {
+        auto match = make_match(); match->configure_seats({1, 2, 3, 4, 5, 6});
+        match->configure_staging_capacity(true);
+        match->configure_lobby("Seat test " + std::to_string(peer), peer, {map}, builder);
+        matches.push_back(std::move(match));
+    }
+    auto& host = *matches.front(); host.host(0); host.pump_setup(options());
+    for (const auto kind : {viewer::LanSeatKind::ai, viewer::LanSeatKind::closed, viewer::LanSeatKind::open, viewer::LanSeatKind::ai}) {
+        require(viewer::select_lan_seat_kind(selection, map, 2, 9, kind, tactical::AiLevel::hard));
+        expect(host.lobby_game(options()), "host switches vacant row 2 through every control");
+        expect(viewer::lan_seat_kind(require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot)), 2) == kind,
+            "row 2 control survives publication");
+    }
+    require(viewer::select_lan_seat_kind(selection, map, 5, 9, viewer::LanSeatKind::closed));
+    expect(host.lobby_game(options()), "host closes a row inside staging");
+    matches[1]->join("127.0.0.1:" + std::to_string(host.view().port));
+    matches[2]->join("127.0.0.1:" + std::to_string(host.view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto wait = [&](const auto& predicate) {
+        do {
+            for (auto& match : matches) match->pump_setup(options());
+            if (predicate()) return;
+            expect(std::chrono::steady_clock::now() < deadline, "seat controls three-peer deadline");
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (true);
+    };
+    const auto synced = [&] {
+        return std::all_of(matches.begin(), matches.end(), [&](const auto& match) {
+            return match->lobby_state() && match->lobby_state()->snapshot == host.lobby_state()->snapshot
+                && !match->lobby_state()->identity_pending;
+        });
+    };
+    wait([&] { return host.lobby_state()->snapshot.seats.size() == 3 && synced(); });
+    auto chosen_host = host.lobby_state()->snapshot.seats.front().selection;
+    chosen_host.faction = "Empire"; // Explicitly choose something other than team 0's loaded default.
+    expect(host.lobby_select(chosen_host), "human chooses a non-default faction");
+    wait([&] { return host.lobby_state()->snapshot.seats.front().selection == chosen_host && synced(); });
+    auto current = require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot));
+    expect(current.slots->size() == 4 && current.open_slots == std::vector<std::uint32_t>{6},
+        "two arrivals take distinct Open rows and neither AI nor Closed rows");
+    for (const auto& match : matches) {
+        const auto decoded = require(viewer::decode_lan_lobby_game(match->lobby_state()->snapshot));
+        expect(require(viewer::encode_lan_lobby_game(decoded)) == require(viewer::encode_lan_lobby_game(current)),
+            "all peers derive the same final seat list and player count");
+    }
+    const auto human_choices = host.lobby_state()->snapshot.seats;
+    selection.slots = *current.slots; selection.open_slots = current.open_slots;
+    for (const auto kind : {viewer::LanSeatKind::ai, viewer::LanSeatKind::closed, viewer::LanSeatKind::open}) {
+        require(viewer::select_lan_seat_kind(selection, map, 6, 9, kind));
+        expect(host.lobby_game(options()), "host changes another vacant row after humans choose factions");
+        wait(synced);
+        for (const auto& match : matches) expect(match->lobby_state()->snapshot.seats == human_choices,
+            "other row Open AI Closed edits preserve every human's chosen faction team and colour on all peers");
+    }
+    current = require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot));
+    const auto before = host.lobby_state()->snapshot;
+    auto retyped = current; retyped.slots->front().human = false;
+    expect(!host.lobby_game(retyped) && host.lobby_state()->snapshot == before, "occupied host cannot become AI");
+    auto choice = matches[1]->lobby_state()->snapshot.seats[1].selection; choice.slot = 2;
+    expect(!matches[1]->lobby_select(choice), "guest cannot replace an AI directly");
+    choice.slot = 5;
+    expect(!matches[1]->lobby_select(choice), "guest cannot take Closed");
+    // Host explicitly opens the AI, then a guest moves there; the old human row becomes Open.
+    selection.slots = *current.slots; selection.open_slots = current.open_slots;
+    require(viewer::select_lan_seat_kind(selection, map, 2, 9, viewer::LanSeatKind::open));
+    expect(host.lobby_game(options()), "host makes an AI seat available to a player");
+    wait(synced);
+    const auto old_slot = matches[1]->lobby_state()->snapshot.seats[1].selection.slot;
+    choice = matches[1]->lobby_state()->snapshot.seats[1].selection; choice.slot = 2;
+    expect(matches[1]->lobby_select(choice), "guest takes the newly Open former AI row");
+    wait([&] { return host.lobby_state()->snapshot.seats[1].selection.slot == 2 && synced(); });
+    current = require(viewer::decode_lan_lobby_game(host.lobby_state()->snapshot));
+    expect(viewer::lan_seat_kind(current, old_slot) == viewer::LanSeatKind::open && current.slots->size() == 3,
+        "moving a human leaves Open and removes the replaced AI from match player count");
+    for (auto& match : matches) expect(match->lobby_ready(true), "three humans accept the final rows");
+    wait([&] { return host.view().start_enabled; });
+    host.start(current);
+    expect(!host.take_start(), "Host keeps polling native formation before synchronous scene handover");
+    if (drop_during_formation) {
+        matches[2]->cancel();
+        wait([&] { return host.view().phase == viewer::LanPhase::ended; });
+        expect(host.view().diagnostic_code == "EAWR-NET-1301", "A guest lost before mesh-open has a named formation failure");
+        for (const auto& match : matches) expect(!match->take_start(), "Formation failure cannot hand stale choices to any scene loader");
+        for (auto& match : matches) match->cancel();
+        return;
+    }
+    wait([&] { return std::all_of(matches.begin(), matches.end(), [](const auto& match) {
+        return match->lobby_state()->snapshot.phase == net::LobbyPhase::starting;
+    }); });
+    std::vector<Bytes> bytes;
+    for (const auto& match : matches) {
+        const auto start = match->take_start(); expect(start && start->slots->size() == 3, "launch uses occupied rows only");
+        const auto built = require(builder(*start));
+        expect(built.players.size() == 3 && built.skirmish->slots.size() == 3,
+            "closed and vacant Open rows create no match players");
+        bytes.push_back(require(net::encode_skirmish_setup(built)));
+    }
+    expect(bytes[0] == bytes[1] && bytes[1] == bytes[2], "three peers launch byte-identical three-player matches from six-row staging");
+    const auto canonical = require(builder(current));
+    sim::InlineExecutor executor;
+    std::array<tactical::TacticalSession, 3> worlds{
+        require(tactical::TacticalSession::create(canonical, content())),
+        require(tactical::TacticalSession::create(canonical, content())),
+        require(tactical::TacticalSession::create(canonical, content()))};
+    std::array<eawr::platform::LiveStepContext, 3> contexts;
+    std::array<eawr::platform::LiveStepDriver, 3> drivers{
+        matches[0]->driver(canonical), matches[1]->driver(canonical), matches[2]->driver(canonical)};
+    for (std::size_t peer = 0; peer < 3; ++peer) {
+        auto& context = contexts[peer]; context.advance_allowed = false;
+        context.completed_tick = [&, peer] { return worlds[peer].completed_tick(); };
+        context.state_hash = [&, peer] { return worlds[peer].state_sha256(); };
+        context.canonical_state = [&, peer] { return worlds[peer].canonical_state_bytes(); };
+        context.install = [&, peer](std::span<const tactical::PlayerCommand> commands) {
+            for (const auto& command : commands) require(worlds[peer].submit(command));
+            return eawr::core::Result<void>::success();
+        };
+        context.step = [&, peer] { require(worlds[peer].step(executor)); return eawr::core::Result<void>::success(); };
+        context.snapshot = [&, peer] { return worlds[peer].snapshot(); };
+    }
+    const auto clock = [] { return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count()); };
+    for (unsigned round = 0; round < 20; ++round)
+        for (std::size_t peer = 0; peer < 3; ++peer) require(drivers[peer](contexts[peer], {}, clock()));
+    for (const auto& world : worlds) expect(world.completed_tick() == 0, "Three-peer live load holds tick zero until every native pair is open");
+    for (auto& context : contexts) context.advance_allowed = true;
+    wait([&] {
+        for (std::size_t peer = 0; peer < 3; ++peer)
+            if (worlds[peer].completed_tick() < 10) require(drivers[peer](contexts[peer], {}, clock()));
+        return std::all_of(worlds.begin(), worlds.end(), [](const auto& world) { return world.completed_tick() == 10; });
+    });
+    expect(worlds[0].state_sha256() == worlds[1].state_sha256() && worlds[1].state_sha256() == worlds[2].state_sha256(),
+        "Three actual humans commit and advance identical state below six-seat native capacity with Closed rows");
+    for (auto& match : matches) match->cancel();
+}
+
 void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during_start) {
     stage = "authoritative viewer staging";
     auto initial = setup();
@@ -351,6 +618,12 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         return eawr::core::Result<tactical::TacticalSetup>::success(std::move(built));
     };
     auto host = make_match(), join = make_match();
+    if (play && !end_during_start) {
+        // Exercise native roster freeze and the live tick-zero gate below
+        // transport capacity; the other variants retain legacy timing.
+        host->configure_seats({1, 2, 3, 4, 5, 6});
+        host->configure_staging_capacity(true);
+    }
     map.name = "Staging test map";
     const std::vector loaded_maps{map};
     host->configure_lobby("Alice", 4, loaded_maps, builder); join->configure_lobby("Bob", 5, loaded_maps, builder);
@@ -453,7 +726,11 @@ void authoritative_staging(bool play, std::optional<net::LobbyReason> end_during
         && host->lobby_state()->snapshot.phase == net::LobbyPhase::staging, "unsupported recovery is a distinct refusal before Start mutates the room");
     host->set_recovery_policy({});
     host->start(edited);
-    if (!end_during_start) expect(host->take_start().has_value(), "host hands frozen choices to the live loader");
+    if (!end_during_start) {
+        std::optional<eawr::skirmish::FixtureOptions> handover;
+        wait([&] { pump(); handover = host->take_start(); return handover.has_value(); });
+        expect(handover.has_value(), "host hands frozen choices to the live loader after native formation");
+    }
     // Pump the outer stream without core/tick-zero publication until the live bind.
     wait([&] { host->pump_setup(edited); join->pump_setup({}); return join->lobby_state()->snapshot.phase == net::LobbyPhase::starting; });
     expect(join->take_start().has_value(), "joiner hands frozen choices to the same live loader");

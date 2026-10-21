@@ -118,6 +118,12 @@
     "constant": "replay_extension_object_turn",
     "name": "OBJT",
     "documented": true
+   },
+   {
+    "tag": 17,
+    "constant": "replay_extension_battle_domain",
+    "name": "battle domain",
+    "documented": true
    }
   ],
   "opcodes": [

@@ -48,6 +48,8 @@ struct ProductionArt final {
     // The shared content's population (negative usage), for the fleet
     // encyclopedia header total (WGUI-166).
     std::int32_t population{};
+    // WGUI-89: authored rank, with the shared type default established by BA-20.
+    std::int64_t hero_rank{25};
 };
 // Cache shared object content once, selecting non-multiplayer encyclopedia
 // text. GC ordering and authoritative prices remain caller-owned.

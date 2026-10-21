@@ -106,7 +106,7 @@ void populated_catalog() {
     require(!source.metadata("Missing"), "unresolved metadata stays absent instead of a cached default");
     require(source.metadata("Fixture_Mine")->mining_facility && source.metadata("Fixture_Mine")->icon.icon == "mine.tga",
         "mining classification and icon come from the owned data source");
-    sim::ObserverSetup observer; observer.local_player = 7;
+    sim::ObserverSetup observer; observer.human_observers = {7}; observer.solo_reference_human = 7;
     sim::ObservedPlanet known; known.player = 7; known.planet = 1; known.discovered = true; known.known_owner = 7;
     known.knowledge.ownership = known.knowledge.structures = true;
     auto observations = std::make_shared<std::vector<sim::ObservedPlanet>>(1, known);
@@ -159,6 +159,23 @@ void history() {
     require(!page::history_view(facts, page::HistoryMetric::economy).available, "each faction needs two real samples");
     facts.factions.resize(1); facts.factions[0].samples[0].economy = -1; facts.factions[0].samples[1].economy = 0;
     require(page::history_view(facts, page::HistoryMetric::economy).maximum == 1, "nonpositive maximum becomes one");
+    // Published MP facts contain no foreign line. Scales are copied separately.
+    const auto recorded = [](std::int64_t n) { return sim::HistoryValue::from_fixed(eawr::sim::math::Fixed::from_raw(n * eawr::sim::math::Fixed::scale)); };
+    sim::HistoryArchive archives{{7, {{30,2,1,recorded(20),recorded(4)},{60,3,2,recorded(40),recorded(8)}}},
+        {8, {{0,5,3,recorded(100),recorded(20)},{90,6,4,recorded(200),recorded(40)}}}};
+    const std::array<sim::PlayerId, 2> present{7,8};
+    facts.published = sim::publish_history(archives, present, 9, 30, 7, true);
+    facts.factions = {{7, "Local", {1,0,0}, {{30,2,1,20,4},{60,3,2,40,8}}}};
+    const auto published = page::history_view(facts, page::HistoryMetric::economy);
+    require(published.available && published.lines.size() == 1 && published.maximum == 200
+        && published.end_cycle == 4 && std::abs(published.lines[0].points[0][0]-1.0/3) < .00001,
+        "authorized local line uses published global frame domain and maximum without foreign samples");
+    require(page::history_view(facts, page::HistoryMetric::military).maximum == 40
+        && page::history_view(facts, page::HistoryMetric::planets).maximum == 9,
+        "published military and planetary-object scales remain global");
+    facts.published->available = false;
+    require(!page::history_view(facts, page::HistoryMetric::economy).available,
+        "published archive unavailability is not reconstructed from the visible line");
 }
 void tree() {
     page::TreeFacts facts; facts.technology = 2;
@@ -231,7 +248,7 @@ void summary() {
     require(!page::economy_row(missing).total, "missing provider components never become zero");
 }
 void publication() {
-    sim::ObserverSetup observer; observer.local_player = 7;
+    sim::ObserverSetup observer; observer.human_observers = {7}; observer.solo_reference_human = 7;
     sim::ObserverPlayer local; local.player = 7; local.allies = {9}; observer.players = {local};
     auto observations = std::make_shared<std::vector<sim::ObservedPlanet>>();
     sim::ObservedPlanet known; known.player = 7; known.planet = 1; known.discovered = true;

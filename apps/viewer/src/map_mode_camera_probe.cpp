@@ -332,14 +332,14 @@ void MapMode::State::camera_selftest_tick() {
             Node::NOTIFICATION_APPLICATION_FOCUS_IN);
         check("focus established before input", map_camera->adapter().focused()
             && map_camera_focus_notifications > 0);
-        inject_map_key(KEY_D, true);
+        inject_map_key(KEY_RIGHT, true);
         break;
     case 2:
         // A declared one-second test step makes the clamp independent of how
         // quickly the graphical runner schedules its warmup frames.
         static_cast<void>(map_camera->step(1.0F));
         break;
-    case 3: inject_map_key(KEY_D, false); break;
+    case 3: inject_map_key(KEY_RIGHT, false); break;
     case 4:
         check("pan reaches authored X clamp", locked ? unchanged()
             : map_camera->frame().target[0] == map_camera->controller().render_bounds().max_x);
@@ -546,13 +546,13 @@ void MapMode::State::camera_selftest_tick() {
     // terminal capture must follow a complete settled draw at this pose.
     const std::uint32_t terminal = options.warmup_frames + options.timed_frames;
     if (!locked && options.capture_path.empty()) {
-        if (tick == terminal + 1U) inject_map_key(KEY_D, true);
+        if (tick == terminal + 1U) inject_map_key(KEY_RIGHT, true);
         if (tick == terminal + 2U) {
             if (auto moved = map_camera->step(1.0F); !moved) {
                 failure = core::format_diagnostic(moved.error());
             }
         }
-        if (tick == terminal + 3U) inject_map_key(KEY_D, false);
+        if (tick == terminal + 3U) inject_map_key(KEY_RIGHT, false);
     }
 }
 

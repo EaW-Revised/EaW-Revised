@@ -1,5 +1,6 @@
 #include "../support/result.hpp"
 #include "../support/env.hpp"
+#include "../support/reverse_partition_executor.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/control.hpp"
 #include "eawr/campaign/auto_resolve_outcome.hpp"
@@ -10,6 +11,7 @@
 #include "eawr/sim/galactic/observer.hpp"
 #include "eawr/vfs/vfs.hpp"
 #include "galactic/planet_hud.hpp"
+#include "../../src/script/foc/galactic_ai_economic_replay.hpp"
 
 #include <algorithm>
 #include <array>
@@ -440,12 +442,13 @@ void categories() {
     expect(calculate(c, p, prior, {}, s.routes).state.target == f(2), "trade needs BOTH endpoints at allegiance at least one");
 }
 void transitions() {
-    const auto s = setup(); const auto c = *s.control; auto p = c.planets[0]; auto prior = state(1, 1, 2);
-    p.ground_base = {2, 1}; p.protected_control = true;
+    const auto s = setup(); auto c = *s.control; auto p = c.planets[0]; auto prior = state(1, 1, 2);
+    c.ability_types = {{1, {{true, true, 0, {}}}}}; c.ability_sources = {{1, 20, 1, 0, 2}};
+    p.ground_base = {2, 1};
     auto result = calculate(c, p, prior);
     expect(result.owner_changed && result.stop_production && result.state.current_player == 2 && result.state.current == Fixed{},
         "WGM-72/74 target-player reset happens before degrading protection; threshold drop stops production");
-    p.protected_control = false; result = calculate(c, p, prior);
+    c.ability_sources.clear(); result = calculate(c, p, prior);
     const auto delta = Fixed::from_ratio(1, 210).value();
     expect(result.state.current == delta && result.state.target == f(1), "WGM-73 rate is one point per authored duration, not whole-planet ETA");
     prior = result.state;
@@ -457,10 +460,185 @@ void transitions() {
     p.transition_modifiers[0].expires_frame = 5;
     expect(calculate(c, p, prior, {}, {}, 6).state.current < calculate(c, p, prior, {}, {}, 5).state.current,
         "expired fastest modifier leaves slower same-category source");
-    p.protected_control = true; p.ground_base.level = 1; prior = state(1, 1, 3);
+    c.ability_sources = {{1, 20, 1, 0, 1}}; p.ground_base.level = 1; prior = state(1, 1, 3);
     expect(calculate(c, p, prior).state.current == f(3), "political protection suppresses same-player degradation");
     p.ground_base.level = 5;
     expect(calculate(c, p, prior).state.current > f(3), "political protection does not suppress gains");
+    // WGM-U11 capture (retail debug build, stock Coruscant): a gain took 7.07 s per point without Tarkin and 1.73 s with him
+    // (authored Time_Reduction_Percentage 0.25 as a direct multiplier), and the decay stayed held while he was present.
+    auto hero = c; hero.ability_types = {{1, {{true, true, 0, {}}, {false, true, 0, Fixed::from_ratio(1, 4).value()}}}};
+    p.ground_base = {2, 1};
+    const auto frames_to_target = [&](const std::vector<gc::ControlAbilitySource>& sources) {
+        hero.ability_sources = sources;
+        auto now = state(1, 1, 2);
+        now = calculate(hero, p, now).state;  // the target player flips to 2: current restarts from zero and takes its first step
+        int frames = 1;
+        while (now.current != f(1) && frames < 1000) { now = calculate(hero, p, now).state; ++frames; }
+        return frames;
+    };
+    expect(frames_to_target({}) == 210, "no source: one point takes seven seconds (210 service frames)");
+    expect(frames_to_target({{1, 20, 1, 1, 2}}) == 53, "transition source: one point takes 1.75 seconds (53 service frames)");
+    expect(frames_to_target({{1, 20, 1, 0, 2}}) == 211, "protection source alone does not speed the gain (one held service at the owner flip)");
+    expect(frames_to_target({{1, 20, 1, 0, 2}, {1, 20, 1, 1, 2}}) == 54, "both abilities of one hero: the held flip service, then the faster gain");
+    expect(frames_to_target({{1, 20, 1, 1, 1}}) == 210, "a transition source of the other player does not speed the gain");
+    hero.ability_sources = {{1, 20, 1, 0, 1}, {1, 20, 1, 1, 1}}; p.ground_base = {1, 1};
+    expect(calculate(hero, p, state(1, 1, 3)).state.current == f(3), "decay stays held while the hero is present");
+    hero.ability_sources.clear();
+    expect(calculate(hero, p, state(1, 1, 3)).state.current < f(3), "decay resumes when the hero leaves");
+}
+void protection_lifecycle() {
+    auto initial = setup();
+    initial.planets[1].owner = 1; initial.planets[2].owner = 2;
+    for (std::size_t i = 0; i < 3; ++i) initial.control->planets[i].ground_base = {initial.planets[i].owner, 1};
+    initial.control->state = {state(1, 1, 5), state(2, 1, 5), state(3, 2, 1)};
+    initial.control->types[2].political_control = 0; initial.control->routes[0].political_gain = {};
+    initial.control->ability_types = {{3, {{true, true, 0, {}}, {true, false, 0, {}}}}};
+    initial.fleets[0].members = {{21, 2}};
+    initial.movement->types[1].transport = true;
+    initial.movement->contents = {{21, {{30, 3}, {31, 3}}}};
+    initial.player_economy.emplace(); initial.fiscal.emplace(); initial.fiscal->credit_cap_per_planet = f(1000);
+    for (const auto& player : initial.players) {
+        initial.player_economy->players.push_back({player.player_id, {}, f(1000), 0, 5});
+        initial.fiscal->players.push_back({player.player_id, false, f(1)});
+    }
+    for (const auto& planet : initial.planets) initial.fiscal->planets.push_back({planet.id, {}});
+    enable_production(initial);
+    initial.census = gc::PopulationCensus{{{1, {}, 0}, {2, {}, 0}, {3, {}, 0}},
+        {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+        {{21, 2, 1, 1, 10, false, false, 2}, {22, 1, 2, 3, 11, false, false, 1},
+         {30, 3, 1, 1, 21, false, false, 3}, {31, 3, 1, 1, 21, false, false, 3}}};
+    qualify_census_roles(*initial.census, {21});
+    auto bad = initial; bad.control->ability_sources = {{1, 999, 3, 0, 1}};
+    expect(!gc::validate_control_setup(bad), "unbound protection source refuses setup");
+    const auto delta = Fixed::from_ratio(1, 210).value();
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto made = eawr::campaign::GameSession::create(initial);
+        if (!made) throw std::runtime_error(made.error().message);
+        auto game = std::move(made).value();
+        const auto sources = [&]() -> const auto& { return game.galaxy().snapshot()->control()->ability_sources; };
+        expect(sources().size() == 2 && sources()[0].actor == 30 && sources()[1].actor == 31,
+            "nested actor sources register separately; disabled sibling is absent");
+        auto step = game.step(executor).value(); std::vector<std::string> hashes{step.state_hash.get()};
+        expect(step.galaxy->control()->state[0].current == f(5) && step.galaxy->control()->state[0].target == f(1),
+            "capture parity: present source holds current5 against target1");
+        const auto identities = cp::game_identities(initial);
+        const auto saved = cp::save_game_checkpoint(game, identities).value();
+        auto restored = cp::load_game_checkpoint(saved, identities, {}, executor).value();
+        expect(restored.session.galaxy().snapshot()->control()->ability_sources == sources()
+            && cp::save_game_checkpoint(restored.session, identities).value() == saved,
+            "checkpoint retains the exact sources and canonical bytes");
+        galactic_test::mark_saved(game);
+        for (int tick = 0; tick < 3; ++tick)
+            expect(game.step(executor).value().state_hash.get() == restored.session.step(executor).value().state_hash.get(),
+                "restored protection continuation matches");
+        // A GameSession hands the galaxy's loss path only to its owners, so deaths run on the galaxy itself.
+        const std::array<eawr::sim::EntityId, 1> first{30}, second{31};
+        auto lost = gc::GalacticSession::create(initial).value();
+        const auto lost_control = [&]() -> const auto& { return *lost.snapshot()->control(); };
+        auto lost_tick = lost.step(executor).value(); hashes.push_back(lost_tick.state_hash.get());
+        lost.apply_battle_losses(first).value();
+        expect(lost_control().ability_sources.size() == 1 && lost_control().ability_sources[0].actor == 31,
+            "death removes only its own source");
+        lost_tick = lost.step(executor).value(); hashes.push_back(lost_tick.state_hash.get());
+        expect(lost_control().state[0].current == f(5), "overlapping surviving source holds control");
+        lost.apply_battle_losses(second).value();
+        expect(lost_control().ability_sources.empty(), "last source death removes protection immediately");
+        for (int tick = 0; tick < 841; ++tick) {
+            lost_tick = lost.step(executor).value(); hashes.push_back(lost_tick.state_hash.get());
+            if (tick == 96) expect(lost_control().state[0].current == Fixed::from_raw(f(5).raw() - 97 * delta.raw()),
+                "97 service frames follow one point per seven active seconds");
+        }
+        expect(lost_control().state[0].current == f(1), "capture parity: absent source settles at1");
+        // Fleet management and a battle return move or remove actors; each source follows only its own actor.
+        // A detached unit becomes a second fleet at the source planet, so the transport can merge into it and split out again.
+        auto reshaped_setup = initial; reshaped_setup.fleet_control->detached_units = {{{23, 1}, 1, 1}};
+        reshaped_setup.census->objects.insert(reshaped_setup.census->objects.begin() + 2, {23, 1, 1, 1, 0, false, false, 1});
+        qualify_census_roles(*reshaped_setup.census, {21});
+        const auto require = [](const auto& result, std::string_view what) {
+            if (!result) throw std::runtime_error(std::string(what) + ": " + result.error().message);
+        };
+        auto made_reshaped = gc::GalacticSession::create(reshaped_setup);
+        require(made_reshaped, "reshaped session");
+        auto reshaped = std::move(made_reshaped).value();
+        const auto held = [&]() -> const auto& { return reshaped.snapshot()->control()->ability_sources; };
+        const auto before = held();
+        const auto fleet_of = [&](eawr::sim::EntityId member) {
+            for (const auto& row : reshaped.snapshot()->fleets())
+                for (const auto& entry : row.members) if (entry.id == member) return row.id;
+            return gc::FleetId{};
+        };
+        const auto held_at_five = [&] { return held() == before && reshaped.snapshot()->control()->state[0].current == f(5); };
+        require(reshaped.submit({{0, gc::SeatId{1}, 1}, gc::CreateFleet{1, {23}, 0}}), "reshape submit 1");
+        { const auto stepped = reshaped.step(executor); require(stepped, "reshape step 1"); }
+        const auto anchor = fleet_of(23);
+        expect(anchor != 0 && anchor != 10, "detached unit forms a second fleet");
+        require(reshaped.submit({{reshaped.snapshot()->completed_tick(), gc::SeatId{1}, 2}, gc::MergeFleets{10, anchor}}), "reshape submit 2");
+        { const auto stepped = reshaped.step(executor); require(stepped, "reshape step 2"); }
+        expect(fleet_of(21) == anchor, "fleet merge moves the transport into the target fleet");
+        expect(held_at_five(), "fleet merge keeps the carried sources");
+        require(reshaped.submit({{reshaped.snapshot()->completed_tick(), gc::SeatId{1}, 3}, gc::RemoveFleetMembers{anchor, {21}}}), "reshape submit 3");
+        { const auto stepped = reshaped.step(executor); require(stepped, "reshape step 3"); }
+        expect(fleet_of(21) == 0, "fleet split detaches the transport");
+        expect(held_at_five(), "fleet split keeps the carried sources");
+        auto returned = gc::GalacticSession::create(initial).value();
+        gc::ControlBattleReturn battle; battle.planet = 1; battle.invader = 2; battle.defender = 1; battle.winner = 1;
+        require(returned.apply_control_battle(battle), "battle return 1");
+        expect(returned.snapshot()->control()->ability_sources == before, "battle return without losses keeps every source");
+        battle.destroyed = {30};
+        require(returned.apply_control_battle(battle), "battle return 2");
+        const auto& left = returned.snapshot()->control()->ability_sources;
+        expect(left.size() == 1 && left[0].actor == 31, "battle return removes only the destroyed actor's source");
+        auto traveling = eawr::campaign::GameSession::create(initial).value();
+        traveling.submit({{0, gc::SeatId{1}, 1}, gc::MoveFleet{10, {1, 2}, {}}}).value();
+        bool arrived{};
+        for (unsigned tick = 0; tick < 500; ++tick) {
+            const auto moved = traveling.step(executor).value(); hashes.push_back(moved.state_hash.get());
+            const auto& rows = moved.galaxy->control()->ability_sources;
+            if (tick == 0) expect(rows.empty() && moved.galaxy->control()->state[0].current < f(5),
+                "departing carried sources cease protection while in transit");
+            if (rows.empty()) continue;
+            expect(rows.size() == 2 && rows[0].planet == 2 && rows[1].planet == 2, "arrival transfers both sources to destination");
+            expect(traveling.step(executor).value().galaxy->control()->state[1].current == moved.galaxy->control()->state[1].current,
+                "arriving source freezes destination degradation");
+            arrived = true; break;
+        }
+        expect(arrived, "source movement reaches destination");
+        if (workers == 1) baseline = hashes; else expect(hashes == baseline, "protection lifecycle equal on1/2/4/8 workers");
+    }
+    auto inputs = *initial.control; auto actor = initial.census->objects[2];
+    auto planet = inputs.planets[0]; auto prior = state(1, 1, 5);
+    gc::update_control_actor(inputs, actor);
+    expect(calculate(inputs, planet, prior).state.current == f(5), "source ownership protects its target player");
+    actor.owner = 2; gc::update_control_actor(inputs, actor);
+    expect(calculate(inputs, planet, prior).state.current < f(5), "captured source ceases old-owner protection");
+    planet.ground_base.owner = 2;
+    expect(calculate(inputs, planet, prior).state.current == Fixed{}, "protection does not prevent target-player reset during capture");
+    actor.dead = true; gc::update_control_actor(inputs, actor);
+    expect(inputs.ability_sources.empty(), "dead actor cannot supply protection");
+    actor.dead = false; actor.delete_pending = true; gc::update_control_actor(inputs, actor);
+    expect(inputs.ability_sources.empty(), "delete-pending actor cannot supply protection");
+    actor.delete_pending = false; actor.planet = 0; gc::update_control_actor(inputs, actor);
+    expect(inputs.ability_sources.empty(), "in-transit actor has no protection target");
+    actor.planet = 1; actor.owner = 1; gc::update_control_actor(inputs, actor);
+    actor.current_type = 1; gc::update_control_actor(inputs, actor);
+    expect(inputs.ability_sources.empty(), "type change removes the former ability");
+    inputs.ability_types = {{3, {{false, true, 0, Fixed::from_ratio(1, 4).value()},
+        {false, true, 0, Fixed::from_ratio(1, 2).value()}, {false, true, 1, Fixed::from_ratio(1, 2).value()}}}};
+    actor.current_type = 3; gc::update_control_actor(inputs, actor); planet.ground_base = {1, 1};
+    expect(calculate(inputs, planet, prior).state.current == Fixed::from_raw(f(5).raw() - Fixed::from_ratio(4, 105).value().raw()),
+        "automatic time bonuses use category minimum then product, without subtracting from one");
+    inputs.ability_types[0].abilities[0].multiplier = {};
+    expect(calculate(inputs, planet, prior).state.current == f(1), "zero authored time completes in one service");
+    // Integer categories are signed in the sourced modifier service. Three
+    // inexact Q24 multipliers expose an unsigned-order rounding difference.
+    inputs.ability_types[0].abilities = {{false, true, std::numeric_limits<std::uint32_t>::max(), Fixed::from_raw(1000001)},
+        {false, true, 0, Fixed::from_raw(2000003)}, {false, true, 1, Fixed::from_raw(9600006)}};
+    // Signed-order product rounds to raw 68213 (unsigned order: 68212), so the service rate is 1/(7 s * 30 * product).
+    const auto signed_delta = Fixed::from_raw(19649583);
+    expect(calculate(inputs, planet, prior).state.current == eawr::sim::math::subtract(f(5), signed_delta).value(),
+        "negative mod stacking categories multiply in signed order before positive categories");
 }
 gc::GalacticReplay replay() {
     gc::GalacticReplay r; r.setup = setup(); r.final_tick_count = 240;
@@ -471,7 +649,7 @@ gc::GalacticReplay replay() {
 }
 void replay_checkpoint_and_hooks() {
     auto r = replay();
-    r.setup.observer.emplace(); auto& observer = *r.setup.observer; observer.local_player = 1;
+    r.setup.observer.emplace(); auto& observer = *r.setup.observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
     for (const auto& player : r.setup.players) observer.players.push_back({player.player_id, false, false, 0});
     for (const auto& planet : r.setup.planets) {
         gc::ObserverPlanet row; row.planet = planet.id;
@@ -572,7 +750,6 @@ void political_fiscal_deadline() {
     s.control->planets[1].ground_base = {1, 1};
     s.control->planets[2].ground_base = {2, 1};
     s.planets[1].owner = 1; s.planets[2].owner = 2;
-    s.control->planets[0].protected_control = true;
     // Delay the target-owner change until a landing exactly at the deadline.
     s.control->planets[0].ground_base = {};
     s.control->planets[0].retains_residual = true;
@@ -589,6 +766,12 @@ void political_fiscal_deadline() {
             gc::FactionControl::ai, {}, {}});
     s.control->planets[0].starbase = {1, 1};
     enable_production(s);
+    s.control->ability_types = {{2, {{true, true, 0, {}}}}};
+    s.census = gc::PopulationCensus{{{1, {}, 0}, {2, {}, 0}, {3, {}, 0}},
+        {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+        {{20, 1, 1, 1, 10, false, false, 1}, {21, 2, 1, 1, 10, false, false, 2},
+         {22, 2, 2, 1, 11, false, false, 2}}};
+    qualify_census_roles(*s.census);
     gc::ProductionOffer space; space.type = 1; space.domain = gc::ProductionDomain::space;
     space.price = f(4); space.seconds = Fixed::from_ratio(1, 10).value();
     space.affiliated = true; space.direct_build_allowed = true;
@@ -964,7 +1147,7 @@ void landfleet_observer_roster() {
         s.fleets[0].orbit = 2; s.fleets[0].members = {{21, 2}, {31, 2}};
         s.planets[1].owner = 1;
         s.control->planets[1].ground_base = {};
-        gc::ObserverSetup o; o.local_player = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
+        gc::ObserverSetup o; o.human_observers = {1}; o.solo_reference_human = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
         o.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
         for (const auto& p : s.planets) {
             o.planets.push_back({p.id, p.owner, p.owner, 0, 0, 0, 0, false, false, false, false, {}});
@@ -1036,7 +1219,7 @@ void capture_build_and_ground_views() {
                 {5, 0, false, false, {1, 2}}};
             s.production->planets[1].offers = {offer, enemy, shared};
             s.production->planets[1].objects = {{40, 3, 2, f(5), gc::ProductionDomain::ground, gc::ProductionKind::structure}};
-            gc::ObserverSetup o; o.local_player = 1;
+            gc::ObserverSetup o; o.human_observers = {1}; o.solo_reference_human = 1;
             o.players = {{1, false, false, 0}, {2, true, false, 0}, {3, true, false, 0}};
             o.types = {{1, false, false, false}, {2, false, false, false}, {3, false, false, false}};
             for (std::size_t index = 0; index < s.planets.size(); ++index) {
@@ -1076,6 +1259,13 @@ void capture_build_and_ground_views() {
             content.victory.humans = {1}; content.victory.relevant_types = {2}; content.victory.countdown_frames = 2;
             cp::GameLoadOptions load; load.script_requirement = eawr::campaign::ScriptRequirement::none;
             load.content = [content](const auto&) { return eawr::core::Result<tactical::TacticalContent>::success(content); };
+            // BF-5: this fixture supplies its own synthetic land child, including on restore.
+            load.configure_session = [resolve = load.content](auto& target) {
+                campaign::GameSession::ConflictLayerServices land;
+                land.content = resolve; land.script_requirement = campaign::ScriptRequirement::none;
+                return target.install_conflict_layer(campaign::BattleLayer::land, std::move(land));
+            };
+            capture_checked(load.configure_session(game));
             load.auto_resolve_outcomes.control = [](auto& galaxy, const auto& application) {
                 gc::ControlBattleReturn returned; returned.planet = application.planet;
                 returned.invader = application.invader; returned.defender = application.defender;
@@ -1095,7 +1285,7 @@ void capture_build_and_ground_views() {
                 capture_checked(game.stage_auto_resolve_outcome(a));
             } else {
                 // M3 menu admission routes land to the solver; direct staging exercises the child return itself.
-                game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none).value(); (void)capture_checked(game.step(executor));
+                capture_checked(game.stage_battle(conflict, content, eawr::campaign::ScriptRequirement::none)); (void)capture_checked(game.step(executor));
                 tactical::TacticalReplay damage; damage.setup.players = conflict.tactical.players; damage.final_tick_count = 1;
                 damage.commands.push_back({{0, 1, 1}, {22}, tactical::DamagePayload{f(1000)}});
                 const auto bytes = capture_checked(tactical::write_replay(damage));
@@ -1183,7 +1373,7 @@ void captured_planet_observer_facts() {
         auto s = setup();
         s.fleets[0].orbit = 2; s.planets[1].owner = 2; s.control->planets[1].ground_base = {2, 1};
         s.control->planets[1].starbase = {2, 2};
-        gc::ObserverSetup o; o.local_player = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
+        gc::ObserverSetup o; o.human_observers = {1}; o.solo_reference_human = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
         o.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
         for (const auto& p : s.planets) {
             o.planets.push_back({p.id, p.owner, p.owner, 0, 0, 0, 0, false, false, false, false, {}});
@@ -1221,52 +1411,56 @@ void captured_planet_observer_facts() {
     }
 }
 // #2970: every surface add publishes to the observer roster and every surface removal un-publishes from it.
+gc::GalacticSetup native_control_fixture() {
+    auto config = setup(); config.planets[1].owner = 1;
+    config.movement->types[1].transport = true;
+    config.fleets[0].orbit = 2; config.fleets[0].members = {{20, 1}, {21, 2}, {31, 2}};
+    config.fleets[1].members = {{22, 2}}; config.control->planets[1].ground_base = {1, 1};
+    config.player_economy.emplace(); config.fiscal.emplace(); config.fiscal->credit_cap_per_planet = f(1000);
+    config.census.emplace(); config.census->types = {{1, f(1), 0}, {2, {}, 0}, {3, f(1), 0}};
+    for (const auto& player : config.players) {
+        config.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+        config.fiscal->players.push_back({player.player_id, true, f(1)});
+        config.census->players.push_back({player.player_id, 100, true, {}});
+    }
+    for (const auto& planet : config.planets) config.fiscal->planets.push_back({planet.id, f(1)});
+    enable_production(config);
+    config.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
+    for (const auto& force : config.control->planets[1].landed) {
+        gc::CensusObject actor; actor.id = force.id; actor.original_type = actor.current_type = force.type;
+        actor.owner = force.owner; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::transport;
+        config.census->objects.push_back(actor); config.movement->contents.push_back({actor.id, {}});
+    }
+    for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) {
+        gc::CensusObject actor; actor.id = member.id; actor.original_type = actor.current_type = member.type;
+        actor.owner = fleet.owner; actor.planet = fleet.orbit; actor.container = fleet.id;
+        actor.combat_role = member.type == 2 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
+        config.census->objects.push_back(actor);
+        if (member.type == 2) config.movement->contents.push_back({member.id, {}});
+    }
+    std::sort(config.census->objects.begin(), config.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    std::sort(config.movement->contents.begin(), config.movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
+    gc::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1; observer.reveal_delay_seconds = f(1); observer.automatic_reveal_range = f(1);
+    observer.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
+    for (const auto& planet : config.planets) {
+        observer.planets.push_back({planet.id, planet.owner, planet.owner, 0, 0, 0, 0, false, false, false, false, {}});
+        observer.planets.back().current_owner = observer.planets.back().current_controller = planet.owner;
+        for (const auto& surface : config.control->planets) if (surface.planet == planet.id)
+            for (const auto& force : surface.landed) observer.planets.back().landed_transports.push_back({force.id, force.owner, false, false});
+    }
+    observer.types = {{1, false, false, false}, {2, false, false, false}, {3, false, false, false}};
+    for (const auto& player : config.players) for (const auto& planet : config.planets)
+        observer.records.push_back({player.player_id, planet.id, false, 0, 0, 0, {}});
+    config.observer = std::move(observer);
+    return config;
+}
 void native_action_barrier_control() {
     const auto require = [](const auto& result) { if (!result) throw std::runtime_error(result.error().message); };
     const auto same = [](const auto& a, const auto& b) { return a.admitted == b.admitted && a.object == b.object && a.reason == b.reason; };
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
-        auto config = setup(); config.planets[1].owner = 1;
-        config.movement->types[1].transport = true;
-        config.fleets[0].orbit = 2; config.fleets[0].members = {{20, 1}, {21, 2}, {31, 2}};
-        config.fleets[1].members = {{22, 2}}; config.control->planets[1].ground_base = {1, 1};
-        config.player_economy.emplace(); config.fiscal.emplace(); config.fiscal->credit_cap_per_planet = f(1000);
-        config.census.emplace(); config.census->types = {{1, f(1), 0}, {2, {}, 0}, {3, f(1), 0}};
-        for (const auto& player : config.players) {
-            config.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
-            config.fiscal->players.push_back({player.player_id, true, f(1)});
-            config.census->players.push_back({player.player_id, 100, true, {}});
-        }
-        for (const auto& planet : config.planets) config.fiscal->planets.push_back({planet.id, f(1)});
-        enable_production(config);
-        config.control->planets[1].landed = {{50, 2, 2}, {51, 2, 1}, {52, 2, 3}};
-        for (const auto& force : config.control->planets[1].landed) {
-            gc::CensusObject actor; actor.id = force.id; actor.original_type = actor.current_type = force.type;
-            actor.owner = force.owner; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::transport;
-            config.census->objects.push_back(actor); config.movement->contents.push_back({actor.id, {}});
-        }
-        for (const auto& fleet : config.fleets) for (const auto& member : fleet.members) {
-            gc::CensusObject actor; actor.id = member.id; actor.original_type = actor.current_type = member.type;
-            actor.owner = fleet.owner; actor.planet = fleet.orbit; actor.container = fleet.id;
-            actor.combat_role = member.type == 2 ? gc::ActorCombatRole::transport : gc::ActorCombatRole::ordinary;
-            config.census->objects.push_back(actor);
-            if (member.type == 2) config.movement->contents.push_back({member.id, {}});
-        }
-        std::sort(config.census->objects.begin(), config.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-        std::sort(config.movement->contents.begin(), config.movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
-        gc::ObserverSetup observer; observer.local_player = 1; observer.reveal_delay_seconds = f(1); observer.automatic_reveal_range = f(1);
-        observer.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
-        for (const auto& planet : config.planets) {
-            observer.planets.push_back({planet.id, planet.owner, planet.owner, 0, 0, 0, 0, false, false, false, false, {}});
-            observer.planets.back().current_owner = observer.planets.back().current_controller = planet.owner;
-            for (const auto& surface : config.control->planets) if (surface.planet == planet.id)
-                for (const auto& force : surface.landed) observer.planets.back().landed_transports.push_back({force.id, force.owner, false, false});
-        }
-        observer.types = {{1, false, false, false}, {2, false, false, false}, {3, false, false, false}};
-        for (const auto& player : config.players) for (const auto& planet : config.planets)
-            observer.records.push_back({player.player_id, planet.id, false, 0, 0, 0, {}});
-        config.observer = std::move(observer);
+        auto config = native_control_fixture();
         auto staged_result = gc::GalacticSession::create(config); auto direct_result = gc::GalacticSession::create(config);
         require(staged_result); require(direct_result);
         auto staged = std::move(staged_result).value(); auto direct = std::move(direct_result).value();
@@ -1346,6 +1540,554 @@ void native_action_barrier_control() {
         if (workers == 1) reference = hashes; else expect(reference == hashes, "native control barrier continuation is equal at 1/2/4/8 workers");
     }
 }
+
+void native_control_reconciliation() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto capture = [&](gc::GalacticSession& world, auto first, auto action) {
+        std::vector<Shadow::IntentRecord> intents;
+        auto root = take(world.begin_native_actions(1, 32));
+        auto own = take(root.fork_player(1, first, 32, {},
+            [&](auto, auto intent) { intents.push_back(std::move(intent)); }));
+        action(own);
+        return intents;
+    };
+    auto landed = take(gc::GalacticSession::create(native_control_fixture()));
+    auto oracle = take(gc::GalacticSession::create(native_control_fixture()));
+    auto intents = capture(landed, landed.next_entity_id(), [&](auto& own) {
+        expect(take(own.land_transports(1, 10, false)).admitted, "frozen fleet landing admits");
+    });
+    expect(intents.size() == 1, "fleet landing retains one typed control intent");
+    if (intents.size() != 1) return;
+    const auto actual = take(landed.readmit_native_control(intents.front()));
+    const auto direct = take(oracle.land_native_transports(1, 10));
+    expect(actual.event.admitted == direct.admitted && actual.event.object == direct.object
+        && landed.canonical_state_bytes() == oracle.canonical_state_bytes() && landed.record() == oracle.record(),
+        "canonical fleet landing publishes the live state and actual journal exactly once");
+
+    auto conflicted = take(gc::GalacticSession::create(native_control_fixture()));
+    const auto provisional = conflicted.next_entity_id() + gc::galactic_max_objects;
+    intents = capture(conflicted, provisional, [&](auto& own) {
+        const auto launch = take(own.launch_transport(1, 51, 0, false));
+        expect(launch.admitted && launch.object == provisional, "frozen launch uses its assigned handle");
+    });
+    expect(take(conflicted.launch_native_transport(1, 51, 10)).admitted, "earlier admission consumes the surface actor");
+    const auto before_events = conflicted.snapshot()->events().size();
+    const auto before_effects = conflicted.record().native_effects.size();
+    const auto refused = take(conflicted.readmit_native_control(intents.front()));
+    expect(!refused.event.admitted && conflicted.next_entity_id() == provisional + 1
+        && conflicted.snapshot()->events().size() == before_events
+        && conflicted.record().native_effects.size() == before_effects + 1
+        && conflicted.record().native_effects.back().kind == gc::NativeEffectKind::identity_reservation,
+        "late launch refusal burns its dead handle without speculative events or journal admission");
+
+    auto relink = take(gc::GalacticSession::create(native_control_fixture()));
+    expect(take(relink.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}, false)).admitted,
+        "actor landing fixture detaches its transport");
+    intents = capture(relink, relink.next_entity_id(), [&](auto& own) {
+        const auto projected = take(own.land_transport(1, 31, 2, false, 3));
+        expect(projected.event.admitted && projected.linked, "private actor landing observes its frozen surface count");
+    });
+    expect(take(relink.land_native_transport(1, 31, 2)).linked, "earlier admission consumes the detached link");
+    const auto revised = take(relink.readmit_native_control(intents.front()));
+    expect(revised.event.admitted && !revised.linked,
+        "canonical actor landing reads the current surface count and retains the actual link result");
+    const eawr::sim::InlineExecutor executor;
+    for (const auto* world : {&landed, &conflicted, &relink}) {
+        auto replayed = take(gc::GalacticSession::from_replay(world->record()));
+        if (auto replay = replayed.replay_native_barrier(executor); !replay) throw std::runtime_error(replay.error().message);
+        expect(replayed.canonical_state_bytes() == world->canonical_state_bytes(),
+            "reconciled control effects and reserved gaps reconstruct identically");
+    }
+}
+
+void native_invasion_cash_reconciliation() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    namespace ga = eawr::script::foc::galactic_ai;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    auto config = native_control_fixture(); config.control->planets[1].ground_base.owner = 2;
+    const auto capture = [&](gc::GalacticSession& world, auto action) {
+        std::vector<Shadow::IntentRecord> intents;
+        auto root = take(world.begin_native_actions(1, 32));
+        auto own = take(root.fork_player(1, root.next_entity_id(), 32,
+            root.next_native_invasion_id() + gc::galactic_max_objects,
+            [&](auto, auto intent) { intents.push_back(std::move(intent)); }));
+        action(own);
+        return intents;
+    };
+    auto accepted = take(gc::GalacticSession::create(config)); accepted.enable_native_invasions(true);
+    auto oracle = take(gc::GalacticSession::create(config)); oracle.enable_native_invasions(true);
+    const std::array<eawr::sim::EntityId, 1> transports{31};
+    const auto invade = [&](auto& own) {
+        expect(take(own.admit_invasion(1, 10, transports, false)).admitted, "frozen invasion retains its selected transport");
+    };
+    const auto intents = capture(accepted, invade);
+    expect(intents.size() == 1, "invasion emits one typed admission intent"); if (intents.size() != 1) return;
+    const auto first = intents.front().first_invasion;
+    const auto admission = take(accepted.readmit_native_invasion(intents.front()));
+    require(oracle.reserve_native_frontiers(oracle.next_entity_id(), oracle.next_entity_id(), oracle.next_native_invasion_id(), first));
+    const auto direct = take(oracle.admit_native_invasion(1, 10, transports, false));
+    expect(admission == direct && admission.queued && accepted.canonical_state_bytes() == oracle.canonical_state_bytes()
+        && accepted.record() == oracle.record(), "canonical invasion retains its reserved handle and actual-only journal");
+    const auto before = accepted.canonical_state_bytes();
+    expect(!accepted.readmit_native_invasion(intents.front()) && accepted.canonical_state_bytes() == before,
+        "an allocated invasion intent cannot replay over its consumed frontier");
+    auto release = intents.front();
+    release.first_invasion = release.next_invasion = accepted.next_native_invasion_id();
+    release.request = Shadow::InvasionRequest{true, 0, 0, {}, false, {}, admission.request};
+    expect(take(accepted.readmit_native_invasion_release(release)) && accepted.native_invasion(admission.request)->reader_released,
+        "canonical reader release updates the actual queued invasion");
+
+    auto conflicted = take(gc::GalacticSession::create(config)); conflicted.enable_native_invasions(true);
+    const auto refused_intents = capture(conflicted, invade);
+    expect(take(conflicted.admit_native_fleet(1, gc::RemoveFleetMembers{10, {31}}, false)).admitted,
+        "earlier canonical action removes the frozen invasion selection");
+    const auto effects = conflicted.record().native_effects.size();
+    const auto refused = take(conflicted.readmit_native_invasion(refused_intents.front()));
+    expect(!refused.admitted && !conflicted.native_invasion(first) && conflicted.next_native_invasion_id() == first + 1
+        && conflicted.record().native_effects.size() == effects + 1
+        && conflicted.record().native_effects.back().kind == gc::NativeEffectKind::identity_reservation,
+        "late invasion refusal burns its retained reader handle without a speculative invasion effect");
+    release.first_invasion = release.next_invasion = conflicted.next_native_invasion_id();
+    expect(!take(conflicted.readmit_native_invasion_release(release)), "releasing a refused speculative reader is a retained refusal");
+
+    auto cash = take(gc::GalacticSession::create(config));
+    const auto cash_intents = capture(cash, [&](auto& own) {
+        expect(take(own.add_credits(1, f(500), f(1))) == f(500), "private cash sees the frozen account cap");
+    });
+    expect(cash_intents.size() == 1, "cash emits one typed non-allocating intent"); if (cash_intents.size() != 1) return;
+    const auto earlier = take(cash.add_credits(1, f(10000), f(1)));
+    require(cash.append_native_effect(gc::NativeEffectKind::cash, ga::economic_replay::cash(1, f(10000), f(1), earlier)));
+    unsigned notifications{}; Fixed notified;
+    cash.set_credit_notification_handler([&](const auto& notice) {
+        ++notifications; notified = notice.amount;
+        return eawr::core::Result<void>::success();
+    });
+    const auto delta = take(cash.readmit_native_cash(cash_intents.front()));
+    expect(delta == Fixed{} && notifications == 1 && notified == delta,
+        "canonical cash recomputes its capped actual delta and notifies funding exactly once");
+    require(cash.append_native_effect(gc::NativeEffectKind::cash, ga::economic_replay::cash(1, f(500), f(1), delta)));
+    const eawr::sim::InlineExecutor executor;
+    for (const auto* world : {&accepted, &conflicted, &cash}) {
+        auto replayed = take(gc::GalacticSession::from_replay(world->record()));
+        ga::NativeActions::bind_economic_replay_owners(replayed);
+        require(replayed.replay_native_barrier(executor));
+        expect(replayed.canonical_state_bytes() == world->canonical_state_bytes(),
+            "actual invasion/cash outcomes and reserved gaps reconstruct identically");
+    }
+}
+gc::GalacticSetup native_force_fixture() {
+    auto config = native_control_fixture();
+    config.production->nested_creation.emplace(); auto& nested = *config.production->nested_creation;
+    nested.fleet_type = 1;
+    for (const auto id : {1U, 2U, 3U}) {
+        gc::NestedCreationType type; type.type = id; type.combat_role = gc::ActorCombatRole::ordinary;
+        nested.types.push_back(type);
+    }
+    for (const auto& relation : config.control->relations) nested.relations.push_back({relation.player, relation.other, !relation.allied});
+    return config;
+}
+void native_force_reconciliation() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    using Placement = gc::GalacticSession::NativeForcePlacement;
+    using OptionalPlacement = eawr::core::Result<std::optional<Placement>>;
+    namespace ga = eawr::script::foc::galactic_ai;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const auto config = native_force_fixture();
+    const gc::GalacticSession::NativeProductionRequest input{1, 2, 1, {}};
+    const auto place = [](eawr::sim::EntityId first, const auto& special) {
+        Placement result; result.next_id = first + 1; result.special_control = special;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor); return result;
+    };
+    const eawr::sim::InlineExecutor executor;
+    const auto capture = [&](gc::GalacticSession& world, bool empty = false) {
+        std::vector<Shadow::IntentRecord> intents;
+        auto root = take(world.begin_native_actions(1, 32));
+        auto own = take(root.fork_player(1, root.next_entity_id() + gc::galactic_max_objects, 32, {},
+            [&](auto, auto intent) { intents.push_back(std::move(intent)); }));
+        static_cast<void>(take(own.create_force(input, [&](const auto& view, auto first) {
+            auto result = place(first, view.presence.special_control);
+            if (empty) { result = {}; result.next_id = first; result.starbase = gc::ControlBase{1, 2}; result.starbase_type = 1; }
+            return eawr::core::Result<Placement>::success(std::move(result));
+        }, executor)));
+        return intents;
+    };
+    auto accepted = take(gc::GalacticSession::create(config)); auto oracle = take(gc::GalacticSession::create(config));
+    const auto intents = capture(accepted); expect(intents.size() == 1, "private force emits its exact actor/allocation intent");
+    if (intents.size() != 1) return;
+    unsigned builders{}, notices{};
+    accepted.set_native_actor_changes_handler([&](const auto&, auto changes) {
+        ++notices; expect(changes.size() == 1, "canonical force emits its actual actor birth once");
+        return eawr::core::Result<void>::success();
+    });
+    const auto actual = take(accepted.readmit_native_force(intents.front(), [&](const auto& view, auto first) {
+        ++builders; return OptionalPlacement::success(place(first, view.presence.special_control));
+    }, executor));
+    require(oracle.reserve_native_identity_frontier(oracle.next_entity_id(), intents.front().first_id));
+    const auto direct = take(oracle.create_native_force(input, [&](const auto& snapshot, auto first) {
+        return eawr::core::Result<Placement>::success(place(first, snapshot.control()->planets[1].special_control));
+    }));
+    ga::ActionRequest action; action.kind = ga::ActionKind::magic; action.player = 1; action.target = 2; action.type = 1;
+    require(accepted.append_native_effect(gc::NativeEffectKind::magic, ga::economic_replay::magic(action, actual.actors)));
+    require(oracle.append_native_effect(gc::NativeEffectKind::magic, ga::economic_replay::magic(action, direct)));
+    expect(actual.admitted && actual.actors == direct && builders == 1 && notices == 1
+        && accepted.canonical_state_bytes() == oracle.canonical_state_bytes() && accepted.record() == oracle.record(),
+        "canonical force probes current inputs once and constructs exactly the retained actors with actual-only journal");
+    auto replay = take(gc::GalacticSession::from_replay(accepted.record()));
+    ga::NativeActions::bind_economic_replay_owners(replay, [&](const auto&, const auto& snapshot, auto first) {
+        return eawr::core::Result<Placement>::success(place(first, snapshot.control()->planets[1].special_control));
+    });
+    require(replay.replay_native_barrier(executor));
+    expect(replay.canonical_state_bytes() == accepted.canonical_state_bytes(), "actual force constructor and its reserved gap reconstruct identically");
+    const auto before = accepted.canonical_state_bytes();
+    expect(!accepted.readmit_native_force(intents.front(), [](const auto&, auto) { return OptionalPlacement::success({}); }, executor)
+        && accepted.canonical_state_bytes() == before, "consumed force spans cannot be admitted twice");
+    for (const bool shape : {false, true}) {
+        auto refused = take(gc::GalacticSession::create(config)); const auto projected = capture(refused);
+        const auto receipt = take(refused.readmit_native_force(projected.front(), [&](const auto& view, auto first) {
+            if (!shape) return OptionalPlacement::success({});
+            auto result = place(first, view.presence.special_control); ++result.next_id;
+            return OptionalPlacement::success(std::move(result));
+        }, executor));
+        expect(!receipt.admitted && receipt.actors.empty() && refused.next_entity_id() == projected.front().next_id
+            && !refused.snapshot()->current_type(projected.front().first_id)
+            && refused.record().native_effects.size() == 1 && refused.record().native_effects.back().kind == gc::NativeEffectKind::identity_reservation,
+            "ordinary or changed-shape force refusal burns exactly the provisional span without actor birth or fake magic effect");
+    }
+    auto failed = take(gc::GalacticSession::create(config)); const auto projected = capture(failed);
+    const auto stable = failed.canonical_state_bytes();
+    const auto error = failed.readmit_native_force(projected.front(), [](const auto&, auto) {
+        eawr::core::Diagnostic diagnostic; diagnostic.code = "test.force"; diagnostic.message = "missing constructor facts";
+        return OptionalPlacement::failure(std::move(diagnostic));
+    }, executor);
+    expect(!error && error.error().code == "test.force" && failed.canonical_state_bytes() == stable,
+        "programming/content failures retain their error instead of being swallowed as ordinary refusal");
+    auto zero = take(gc::GalacticSession::create(config)); const auto zero_intents = capture(zero, true); const auto first = zero.next_entity_id();
+    const auto base = take(zero.readmit_native_force(zero_intents.front(), [](const auto&, auto frontier) {
+        Placement result; result.next_id = frontier; result.starbase = gc::ControlBase{1, 2}; result.starbase_type = 1;
+        return OptionalPlacement::success(std::move(result));
+    }, executor));
+    expect(base.admitted && base.actors.empty() && zero.next_entity_id() == first
+        && zero.snapshot()->control()->planets[1].starbase == gc::ControlBase{1, 2},
+        "zero-allocation force writes admit without burning an unused owner identity block");
+}
+void wide_galactic_lua_handles() {
+    namespace auth = eawr::script::authoritative;
+    namespace foc = eawr::script::foc;
+    namespace ga = foc::galactic_ai;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    constexpr auto high = (std::uint64_t{1} << 60) + 123;
+    auto world = take(gc::GalacticSession::create(native_force_fixture()));
+    require(world.reserve_native_identity_frontier(world.next_entity_id(), high));
+    ga::NativeActions actions(world, {}, {}, {});
+    const auto host = actions.immediate_host([](const auto&, const auto& view, auto first) {
+        gc::GalacticSession::NativeForcePlacement result;
+        result.next_id = first + 1; result.special_control = view.presence.special_control;
+        result.structures.push_back({first, 1, 1, {}, gc::ProductionDomain::ground, gc::ProductionKind::structure});
+        gc::CensusObject actor; actor.id = first; actor.original_type = actor.current_type = 1;
+        actor.owner = 1; actor.planet = actor.container = 2; actor.combat_role = gc::ActorCombatRole::ordinary;
+        result.originals.push_back(actor);
+        return eawr::core::Result<gc::GalacticSession::NativeForcePlacement>::success(std::move(result));
+    }, 8);
+    auto pending = take(host->capture());
+    const auto values = take(pending->apply("galactic.magic_force", {
+        auth::Value{auth::Handle{foc::handle_player, 1}}, auth::Value{auth::Handle{foc::handle_game_object, 2}},
+        auth::Value{auth::ValueList{auth::Value{auth::Handle{foc::handle_type, 1}}}}}));
+    const auto actor = std::get<auth::Handle>(std::get<auth::ValueList>(values.at(0).data).at(0).data);
+    expect(actor == auth::Handle{foc::handle_game_object, high}, "GC magic preserves identities above binary64 integer precision");
+    require(host->publish(std::move(pending)));
+    expect(take(world.snapshot()->current_type(high)) == 1 && world.next_entity_id() == high + 1,
+        "wide GC handle retains its exact published world actor");
+    auth::ModuleManifest manifest;
+    require(manifest.add("Wide.lua", "Saved = Wide() Alias = Saved Values = {Saved} function Check() assert(Saved == Alias and Saved == Values[1]) end"));
+    auth::SessionConfig config; config.tick_duration = {1, 30};
+    auto scripts = take(auth::ScriptScheduler::create(config, std::move(manifest)));
+    require(scripts.register_binding("Wide", [actor](auth::BindingContext&, const auth::ValueList&) {
+        return eawr::core::Result<auth::ValueList>::success({auth::Value{actor}});
+    }));
+    require(scripts.create_instance(1, "Wide.lua"));
+    const auto saved = take(scripts.save()); require(scripts.load(saved));
+    const auto restored = take(scripts.read_global(1, "Saved"));
+    expect(restored && std::get<auth::Handle>(restored->data) == actor && take(scripts.save()) == saved,
+        "wide GC Lua handles round-trip through canonical save bytes without truncation");
+    auth::ScriptEvent event; event.key = {1, auth::first_simulation_producer, 1, 0};
+    event.target = 1; event.kind = auth::ScriptEvent::Kind::call; event.name = "Check";
+    require(scripts.submit_event(std::move(event)));
+    expect(take(scripts.service(eawr::sim::InlineExecutor{})).diagnostics.empty(),
+        "wide GC Lua handle aliases preserve identity after save/restore");
+}
+void independent_native_barrier() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    namespace ga = eawr::script::foc::galactic_ai;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    const std::array players{gc::PlayerId{1}, gc::PlayerId{2}};
+    const auto run = [&](const eawr::sim::PartitionExecutor& executor) {
+        auto world = take(gc::GalacticSession::create(native_control_fixture()));
+        auto barrier = take(world.begin_native_barrier(players, 64));
+        const auto prelude = take(world.add_credits(1, f(5), f(1)));
+        require(world.append_native_effect(gc::NativeEffectKind::cash, ga::economic_replay::cash(1, f(5), f(1), prelude)));
+        std::array<std::vector<Shadow::IntentRecord>, 2> intents;
+        require(barrier->begin_independent_players(executor, [&](auto player, auto intent) {
+            intents.at(player - 1).push_back(std::move(intent));
+        }));
+        expect(!barrier->select_player(1) && !barrier->begin_tail() && !barrier->commit(),
+            "independent decisions require scoped selection and canonical join before the global tail");
+        expect(!barrier->player_scope(0), "only prepared native owners can enter a player scope");
+        const auto first = world.next_entity_id();
+        require(executor.execute_phase("test-native-player-decisions", eawr::sim::tick_partition_count, [&](std::size_t partition) {
+            const auto range = eawr::sim::partition_range(partition, players.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                auto scope = take(barrier->player_scope(players[index]));
+                const auto before = world.snapshot()->player_economy()->players[0].credits;
+                if (before != f(105)) throw std::runtime_error("native sibling read inherited another player's cash or lost the prelude");
+                static_cast<void>(take(world.add_credits(1, f(static_cast<int>((index + 1) * 10)), f(1))));
+                const auto fleet = index ? 11U : 10U, actor = index ? 22U : 20U, planet = index ? 3U : 2U;
+                if (!take(world.admit_native_fleet(players[index], gc::RemoveFleetMembers{fleet, {actor}}, false)).admitted)
+                    throw std::runtime_error("native independent member removal refused");
+                const auto created = take(world.admit_native_fleet(players[index], gc::CreateFleet{planet, {actor}, 0}, false));
+                if (!created.admitted || created.object != first + index * gc::galactic_max_objects)
+                    throw std::runtime_error("native independent scope lost its reserved entity block");
+            }
+        }));
+        {
+            auto first_scope = take(barrier->player_scope(1));
+            expect(world.snapshot()->player_economy()->players[0].credits == f(115), "first native scope retains its own writes after worker join");
+            {
+                auto second_scope = take(barrier->player_scope(2));
+                expect(world.snapshot()->player_economy()->players[0].credits == f(125), "second native scope retains only its frozen-root writes");
+            }
+            expect(world.snapshot()->player_economy()->players[0].credits == f(115), "nested native scopes restore the preceding physical player context");
+        }
+        expect(world.snapshot()->player_economy()->players[0].credits == f(105), "the canonical native root remains frozen until ordered reconciliation");
+        unsigned commits{};
+        require(barrier->finish_independent_players([&]() -> eawr::core::Result<void> {
+            ++commits;
+            for (const auto& stream : intents) {
+                std::optional<gc::NativeEffect> fleet_effect;
+                for (const auto& intent : stream) {
+                    if (fleet_effect && !std::holds_alternative<Shadow::JournalRequest>(intent.request))
+                        throw std::runtime_error("native fleet intent lost its following derived journal row");
+                    if (const auto* cash = std::get_if<Shadow::CashRequest>(&intent.request)) {
+                        const auto actual = take(world.readmit_native_cash(intent));
+                        require(world.append_native_effect(gc::NativeEffectKind::cash,
+                            ga::economic_replay::cash(cash->player, cash->delta, cash->multiplier, actual)));
+                    } else if (std::holds_alternative<Shadow::FleetRequest>(intent.request)) {
+                        const auto before_effects = world.record().native_effects.size();
+                        const auto actual = take(world.readmit_native_fleet(intent));
+                        if (!actual.admitted) return eawr::core::Result<void>::failure(eawr::core::Diagnostic{});
+                        if (world.record().native_effects.size() <= before_effects)
+                            throw std::runtime_error("native fleet admission omitted its actual journal row");
+                        fleet_effect = world.record().native_effects.back();
+                    } else if (const auto* journal = std::get_if<Shadow::JournalRequest>(&intent.request)) {
+                        // Readmission already journals the actual receipt. This fixture's
+                        // disjoint actions must match their derived private receipt;
+                        // appending it again would replay each fleet command twice.
+                        if (!fleet_effect || journal->kind != gc::NativeEffectKind::fleet
+                            || journal->kind != fleet_effect->kind || journal->phase != fleet_effect->phase
+                            || journal->payload != fleet_effect->payload)
+                            throw std::runtime_error("native derived fleet journal differs from its actual admission");
+                        fleet_effect.reset();
+                    } else {
+                        throw std::runtime_error("unexpected intent in independent native barrier fixture");
+                    }
+                }
+                if (fleet_effect) throw std::runtime_error("native fleet stream ended before its derived journal row");
+            }
+            return eawr::core::Result<void>::success();
+        }));
+        expect(!barrier->player_scope(1) && !barrier->finish_independent_players([&] { ++commits; return eawr::core::Result<void>::success(); })
+            && commits == 1, "closed player contexts and the canonical journal cannot run twice");
+        expect(world.snapshot()->player_economy()->players[0].credits == f(135), "the fresh global tail sees every actual same-tick admission");
+        const auto tail = take(world.add_credits(1, f(7), f(1)));
+        require(world.append_native_effect(gc::NativeEffectKind::cash, ga::economic_replay::cash(1, f(7), f(1), tail)));
+        require(barrier->commit());
+        expect(world.snapshot()->player_economy()->players[0].credits == f(142), "global tail writes publish after the joined players");
+        auto replay = take(gc::GalacticSession::from_replay(world.record())); ga::NativeActions::bind_economic_replay_owners(replay);
+        require(replay.replay_native_barrier(executor));
+        expect(replay.canonical_state_bytes() == world.canonical_state_bytes(), "independent native contexts reconstruct their actual journal and burnt ID gaps");
+        return world.canonical_state_bytes();
+    };
+    const eawr::sim::InlineExecutor serial;
+    const auto expected = run(serial);
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(run(executor) == expected, "independent native contexts agree across worker counts");
+    }
+    const eawr::test_support::ReverseOrderExecutor reverse(8);
+    expect(run(reverse) == expected, "independent native contexts agree in reverse partition order");
+}
+void native_production_reconciliation() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    auto config = native_control_fixture();
+    config.production->players[0].human = false; config.production->players[0].pay_as_you_go = true;
+    config.seats[0].kind = gc::SeatKind::ai; config.seats[0].human_side_id = 0;
+    config.production->maximum_human_queue = 1;
+    gc::ProductionOffer offer; offer.type = 1; offer.domain = gc::ProductionDomain::space;
+    offer.population = f(1);
+    offer.price = f(4); offer.seconds = f(10); offer.affiliated = true; offer.direct_build_allowed = true;
+    config.production->planets[1].offers = {offer};
+    const gc::GalacticSession::NativeProductionRequest request{1, 2, 1, f(4)};
+    const eawr::sim::InlineExecutor executor;
+    const auto no_mark = [](const auto&) { return eawr::core::Result<gc::GalacticSession::NativeProductionPayment>::success({}); };
+    const auto capture = [&](gc::GalacticSession& world) {
+        std::vector<Shadow::IntentRecord> intents;
+        auto root = take(world.begin_native_actions(1, 32));
+        auto own = take(root.fork_player(1, root.next_entity_id() + gc::galactic_max_objects, 32, {},
+            [&](auto, auto intent) { intents.push_back(std::move(intent)); }));
+        static_cast<void>(take(own.admit_production(request, executor, no_mark)));
+        return intents;
+    };
+    auto accepted = take(gc::GalacticSession::create(config)); auto oracle = take(gc::GalacticSession::create(config));
+    unsigned marks{};
+    accepted.set_native_production_handler([&](const auto& notice) {
+        ++marks; expect(notice.kind == gc::GalacticSession::NativeProductionNotice::Kind::marked && notice.amount == f(4),
+            "canonical admission marks the actual resolved request once"); return no_mark(notice);
+    });
+    oracle.set_native_production_handler(no_mark);
+    const auto intents = capture(accepted); expect(intents.size() == 1, "private production emits its typed request");
+    if (intents.size() != 1) return;
+    unsigned preflights{};
+    const auto actual = take(accepted.readmit_native_production(intents.front(), executor, [&](const auto& notice) {
+        ++preflights;
+        expect(notice.build == intents.front().first_id && notice.amount == f(4) && notice.price == f(4),
+            "pure funding preflight receives the actual reserved mark notice");
+        return eawr::core::Result<bool>::success(true);
+    }));
+    require(oracle.reserve_native_identity_frontier(oracle.next_entity_id(), intents.front().first_id));
+    const auto direct = take(oracle.admit_native_production(request, executor));
+    expect(actual.admission == gc::ProductionAdmission::allowed && actual.build == direct.build && actual.price == direct.price
+        && preflights == 1 && marks == 1 && accepted.canonical_state_bytes() == oracle.canonical_state_bytes() && accepted.record() == oracle.record(),
+        "canonical production preserves its reserved build and invokes the real ledger owner only once");
+    const auto before = accepted.canonical_state_bytes();
+    expect(!accepted.readmit_native_production(intents.front(), executor) && accepted.canonical_state_bytes() == before && marks == 1,
+        "consumed production allocation cannot replay or duplicate its mark");
+
+    auto conflicted = take(gc::GalacticSession::create(config)); conflicted.set_native_production_handler(no_mark);
+    const auto frozen = capture(conflicted);
+    const auto earlier = take(conflicted.admit_native_production(request, executor));
+    expect(earlier.admission == gc::ProductionAdmission::allowed, "earlier canonical production fills the queue");
+    unsigned late_marks{}; conflicted.set_native_production_handler([&](const auto& notice) { ++late_marks; return no_mark(notice); });
+    const auto effects = conflicted.record().native_effects.size();
+    const auto refused = take(conflicted.readmit_native_production(frozen.front(), executor));
+    expect(refused.admission == gc::ProductionAdmission::queue_full && !refused.build && late_marks == 0
+        && conflicted.next_entity_id() == frozen.front().next_id && conflicted.record().native_effects.size() == effects + 1
+        && conflicted.record().native_effects.back().kind == gc::NativeEffectKind::identity_reservation,
+        "late production refusal burns the provisional build without a speculative mark or build effect");
+    const auto private_refusal = capture(conflicted);
+    require(conflicted.finish_native_production_task(earlier.build, false, f(1)));
+    const auto no_retry = take(conflicted.readmit_native_production(private_refusal.front(), executor));
+    expect(no_retry.admission == gc::ProductionAdmission::queue_full && !no_retry.build && late_marks == 0,
+        "a private production refusal is retained after an earlier canonical finish frees capacity");
+    auto unfunded = take(gc::GalacticSession::create(config)); const auto unfunded_intents = capture(unfunded);
+    unsigned unfunded_marks{};
+    unfunded.set_native_production_handler([&](const auto& notice) { ++unfunded_marks; return no_mark(notice); });
+    const auto no_goal = take(unfunded.readmit_native_production(unfunded_intents.front(), executor, [](const auto&) {
+        return eawr::core::Result<bool>::success(false);
+    }));
+    expect(no_goal.admission == gc::ProductionAdmission::credits && !no_goal.build && !unfunded_marks
+        && unfunded.next_entity_id() == unfunded_intents.front().next_id && unfunded.record().native_effects.size() == 1
+        && unfunded.record().native_effects.front().kind == gc::NativeEffectKind::identity_reservation,
+        "a goal lost at canonical funding preflight retains failure and burns its build without applying a mark");
+    auto broken = take(gc::GalacticSession::create(config)); const auto broken_intents = capture(broken);
+    broken.set_native_production_handler(no_mark); const auto stable = broken.canonical_state_bytes();
+    const auto bad_ledger = broken.readmit_native_production(broken_intents.front(), executor, [](const auto&) {
+        eawr::core::Diagnostic error; error.code = "test.funding"; error.message = "malformed ledger";
+        return eawr::core::Result<bool>::failure(std::move(error));
+    });
+    expect(!bad_ledger && bad_ledger.error().code == "test.funding" && broken.canonical_state_bytes() == stable,
+        "malformed canonical funding remains an error without consuming identities or marking spending");
+}
+void native_finish_orbit_reconciliation() {
+    using Shadow = gc::GalacticSession::NativeActionShadow;
+    const auto take = [](auto result) {
+        if (!result) throw std::runtime_error(result.error().message);
+        return std::move(result).value();
+    };
+    const auto require = [](auto result) { if (!result) throw std::runtime_error(result.error().message); };
+    auto world = take(gc::GalacticSession::create(native_control_fixture()));
+    auto oracle = take(gc::GalacticSession::create(native_control_fixture()));
+    std::vector<Shadow::IntentRecord> intents;
+    auto root = take(world.begin_native_actions(1, 32));
+    auto own = take(root.fork_player(1, root.next_entity_id(), 32, {},
+        [&](auto, auto intent) { intents.push_back(std::move(intent)); }));
+    require(own.recheck_orbit(1, 10));
+    expect(intents.size() == 1, "private orbit recheck emits its non-allocating typed intent");
+    if (intents.size() != 1) return;
+    expect(take(world.readmit_native_orbit_recheck(intents.front())), "live owned orbit recheck admits");
+    require(oracle.recheck_native_orbit(1, 10));
+    expect(world.canonical_state_bytes() == oracle.canonical_state_bytes() && world.record() == oracle.record(),
+        "orbit recheck uses canonical world effects and journal");
+    const auto replacement = take(world.launch_native_transport(1, 51, 0)).object;
+    expect(take(world.admit_native_fleet(1, gc::MergeFleets{10, replacement}, false)).admitted,
+        "earlier canonical merge consumes the frozen orbit parent");
+    auto before = world.canonical_state_bytes(); auto effects = world.record().native_effects.size();
+    expect(!take(world.readmit_native_orbit_recheck(intents.front())) && world.canonical_state_bytes() == before
+        && world.record().native_effects.size() == effects, "missing speculative orbit parent refuses without callbacks or journal");
+    auto malformed = intents.front(); ++malformed.next_id;
+    expect(!world.readmit_native_orbit_recheck(malformed) && world.canonical_state_bytes() == before,
+        "allocating orbit intent is rejected before mutation");
+
+    auto config = native_control_fixture();
+    config.production->players[0].human = false; config.production->players[0].pay_as_you_go = true;
+    config.seats[0].kind = gc::SeatKind::ai; config.seats[0].human_side_id = 0;
+    gc::ProductionOffer offer; offer.type = 1; offer.domain = gc::ProductionDomain::space;
+    offer.population = f(1);
+    offer.price = f(4); offer.seconds = f(10); offer.affiliated = true; offer.direct_build_allowed = true;
+    config.production->planets[1].offers = {offer};
+    auto production = take(gc::GalacticSession::create(config));
+    production.set_native_production_handler([](const auto&) {
+        return eawr::core::Result<gc::GalacticSession::NativeProductionPayment>::success({true, 1, {}});
+    });
+    const eawr::sim::InlineExecutor executor;
+    const auto build = take(production.admit_native_production({1, 2, 1, f(4)}, executor));
+    expect(build.admission == gc::ProductionAdmission::allowed && build.build, "finish fixture admits a real canonical build");
+    if (!build.build) return;
+    unsigned outcomes{}, refunds{};
+    production.set_native_production_outcome_handler([&](const auto& notice) {
+        ++outcomes; expect(notice.build == build.build && !notice.completed, "actual finish delivers its ordinary failed-build outcome");
+    });
+    production.set_credit_notification_handler([&](const auto&) {
+        ++refunds; return eawr::core::Result<void>::success();
+    });
+    Shadow::IntentRecord finish{Shadow::FinishRequest{build.build, false, f(1)},
+        production.next_entity_id(), production.next_entity_id(), production.next_native_invasion_id(), production.next_native_invasion_id()};
+    expect(take(production.readmit_native_finish(finish)) && outcomes == 1 && refunds == 1,
+        "actual finish uses the normal cancellation/refund callbacks exactly once");
+    before = production.canonical_state_bytes(); effects = production.record().native_effects.size();
+    expect(!take(production.readmit_native_finish(finish)) && outcomes == 1 && refunds == 1
+        && production.canonical_state_bytes() == before && production.record().native_effects.size() == effects,
+        "a missing provisional build retains failure without refunding or journaling a fake finish");
+    malformed = finish; ++malformed.next_invasion;
+    expect(!production.readmit_native_finish(malformed) && production.canonical_state_bytes() == before,
+        "allocating finish intent is rejected before mutation");
+}
 void surface_roster_paths() {
     using Roster = std::vector<std::pair<eawr::sim::EntityId, gc::PlayerId>>;
     std::vector<std::string> reference;
@@ -1358,7 +2100,7 @@ void surface_roster_paths() {
             s.planets[1].owner = 1;
             s.control->planets[1].ground_base = {};
             edit(s);
-            gc::ObserverSetup o; o.local_player = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
+            gc::ObserverSetup o; o.human_observers = {1}; o.solo_reference_human = 1; o.reveal_delay_seconds = f(1); o.automatic_reveal_range = f(1);
             o.players = {{1, false, false, 0, 0, {}}, {2, false, false, 0, 0, {}}, {3, false, false, 0, 0, {}}};
             for (std::size_t i = 0; i < s.planets.size(); ++i) {
                 const auto& p = s.planets[i];
@@ -1672,7 +2414,11 @@ void adapter() {
     data.planets[1].planet_retains_residual_influence = false;
     data.planets[2].planet_retains_residual_influence = true;
     eawr::data::galactic::TradeRoute route; route.name = "Route"; route.political_control_gain = f(2); data.trade_routes = {route};
-    eawr::units::GalacticTypeTable types; eawr::units::GalacticType type; type.name = "Ship"; type.political_control = f(1); types.types = {type};
+    eawr::units::GalacticTypeTable types; eawr::units::GalacticType type; type.name = "Ship"; type.political_control = f(1);
+    eawr::units::GalacticControlAbility protection; protection.name = "Mod_Protection"; protection.protection = true;
+    eawr::units::GalacticControlAbility transition; transition.name = "Mod_Transition";
+    transition.multiplier = Fixed::from_ratio(3, 8).value(); transition.category = 7;
+    type.control_abilities = {protection, transition}; types.types = {type};
     const std::vector<eawr::campaign::ControlTypeBinding> objects{{1, "Ship", false, false}};
     const std::vector<eawr::campaign::ControlObjectBinding> planets{{1, "A"}, {2, "B"}, {3, "C"}}, routes{{4, "Route"}};
     auto bound = eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes);
@@ -1680,6 +2426,13 @@ void adapter() {
         && bound.value().routes[0].political_gain == f(2), "control rules and rewards follow authored values, never stock literals");
     expect(bound && bound.value().planets[0].retains_residual && !bound.value().planets[1].retains_residual
         && bound.value().planets[2].retains_residual, "residual influence uses sourced true default and explicit authored overrides");
+    expect(bound && bound.value().ability_types.size() == 1 && bound.value().ability_types[0].abilities.size() == 2
+        && bound.value().ability_types[0].abilities[0].protection
+        && bound.value().ability_types[0].abilities[1].multiplier == Fixed::from_ratio(3, 8).value()
+        && bound.value().ability_types[0].abilities[1].category == 7,
+        "automatic control profiles bind authored mod types and direct transition time values");
+    types.types[0].control_abilities[0].activation_style = "Galactic_Activated";
+    expect(!eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes), "unsupported control activation style refuses explicitly");
     data.constants.clear(); expect(!eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes), "omitted transition constants do not acquire guessed defaults");
 }
 void generate(const std::filesystem::path& directory) {
@@ -1731,11 +2484,12 @@ int main(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
+        if (argc == 2 && std::string_view(argv[1]) == "--protection") { protection_lifecycle(); adapter(); transitions(); return galactic_test::failures == 0 ? 0 : 1; }
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        authored_mixed_surface_owners();
-        native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); capture_structure_cleanup(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
+        authored_mixed_surface_owners(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
+        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); capture_structure_cleanup(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

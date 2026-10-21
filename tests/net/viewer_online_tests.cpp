@@ -31,6 +31,7 @@ int main(int argc, char** argv) {
         const bool leave_case = role.find("-leave") != std::string::npos;
         const bool replacement = role.find("-new-") != std::string::npos;
         const bool nine = role.find("-nine") != std::string::npos || role.find("-leave9") != std::string::npos;
+        const bool partial = role.ends_with("-partial");
         const bool multi = nine || leave_case;
         const auto participant = multi && !host ? static_cast<unsigned>(std::stoul(role.substr(role.rfind('-') + 1))) : 0U;
         const std::uint32_t seat_count = nine ? 9U : leave_case ? 3U : 2U;
@@ -68,7 +69,7 @@ int main(int argc, char** argv) {
         if (role == "host-no-code") options.require_short_code = true;
         if (host && !directory_room) {
             // The host publishes a plain directory room and its match opens the signalling scope on it (no bridge invitation).
-            rooms = viewer::host_standalone_room(options, "Bridge", seat_count);
+            rooms = viewer::host_standalone_room(options, "Bridge", partial ? 9U : seat_count);
             expect(static_cast<bool>(rooms), "standalone room source configures");
         }
         if (role == "host-silent") {
@@ -143,7 +144,7 @@ int main(int argc, char** argv) {
         };
         match->configure_factions({"Rebel", "Empire", "Underworld"});
         // Guests deliberately keep the default two-seat placeholder: the attached roster must supply nine, including code joins.
-        if (nine && host) match->configure_seats({1, 2, 3, 4, 5, 6, 7, 8, 9});
+        if ((nine || partial) && host) match->configure_seats({1, 2, 3, 4, 5, 6, 7, 8, 9});
         else if (leave_case && host) match->configure_seats({1, 2, 3});
         if (nine && participant == 8) match->configure_seats({1, 1}); // A previous invalid host selection cannot poison a new join.
         if (nine && host) {
@@ -208,7 +209,8 @@ int main(int argc, char** argv) {
                 initial.skirmish->slots[i].human, {}, nine ? static_cast<unsigned>(i) : std::array{4U, 5U, 1U}[i]});
         }
         if (multi) selected.slots->back().human = true;
-        eawr::skirmish::SetupMap map; map.path = *selected.map; map.metadata.capacity = nine ? 9 : 3;
+        eawr::skirmish::SetupMap map; map.path = *selected.map; map.metadata.capacity = nine || partial ? 9 : 3;
+        if (partial) selected.open_slots = {4}; // Remaining loaded rows are Closed.
         map.metadata.new_markers = true; map.metadata.start_positions.emplace(4);
         const auto markers = nine ? 3U : 1U;
         map.teams = {{1, {"Rebel"}, markers}, {2, {"Empire"}, markers}, {3, {"Underworld"}, markers}};
@@ -480,6 +482,8 @@ int main(int argc, char** argv) {
                 ready_revision = state->snapshot.revision;
             }
             if (host && view.start_enabled) {
+                if (partial) expect(!view.invitation_consumed && !view.invitation_code.empty(),
+                    "a partial-capacity room keeps its invitation while staging");
                 report_host("Start begin", true);
                 match->start(selected);
                 report_host("Start return", true);
@@ -489,6 +493,8 @@ int main(int argc, char** argv) {
         }
         expect(saw_snapshot, "online setup starts only after an authoritative staging snapshot");
         expect(match->view().invitation_consumed && match->view().invitation_code.empty(), "pairing consumes displayed invitation");
+        if (partial) expect(selected.slots->size() == 3 && match->view().online_capacity == 9,
+            "a nine-capacity online room starts only its two humans and one AI, excluding Open and Closed rows");
         auto canonical = require(builder(selected));
         auto world = require(tactical::TacticalSession::create(canonical, content()));
         const auto workers = nine ? std::array{1U, 2U, 4U, 8U}[participant % 4] : 1U;

@@ -79,6 +79,35 @@ template<class T, class Key> bool ordered(const std::vector<T>& rows, Key get) {
 }
 } // namespace
 
+bool erase_control_actor(PoliticalControlSetup& inputs, EntityId actor) {
+    return std::erase_if(inputs.ability_sources, [actor](const auto& row) { return row.actor == actor; }) != 0;
+}
+bool update_control_actor(PoliticalControlSetup& inputs, const CensusObject& actor) {
+    if (inputs.ability_types.empty() && inputs.ability_sources.empty()) return false;
+    std::vector<ControlAbilitySource> desired;
+    const auto* profile = find_row(inputs.ability_types, actor.current_type, [](const auto& row) { return row.type; });
+    if (profile && actor.planet && !actor.dead && !actor.delete_pending) {
+        for (std::size_t i = 0; i < profile->abilities.size(); ++i)
+            if (profile->abilities[i].enabled)
+                desired.push_back({actor.planet, actor.id, actor.current_type, static_cast<std::uint32_t>(i), actor.owner});
+    }
+    std::vector<ControlAbilitySource> previous;
+    for (const auto& row : inputs.ability_sources) if (row.actor == actor.id) previous.push_back(row);
+    if (previous == desired) return false;
+    erase_control_actor(inputs, actor.id);
+    inputs.ability_sources.insert(inputs.ability_sources.end(), desired.begin(), desired.end());
+    std::sort(inputs.ability_sources.begin(), inputs.ability_sources.end(), [](const auto& a, const auto& b) {
+        return std::tuple{a.planet, a.actor, a.ability} < std::tuple{b.planet, b.actor, b.ability};
+    });
+    return true;
+}
+void GalacticSession::Impl::refresh_control_actor(const CensusObject& actor) {
+    if (control && update_control_actor(*control, actor)) dirty[static_cast<std::size_t>(StateSection::control)] = true;
+}
+void GalacticSession::Impl::lose_control_actor(EntityId actor) {
+    if (control && erase_control_actor(*control, actor)) dirty[static_cast<std::size_t>(StateSection::control)] = true;
+}
+
 core::Result<bool> has_ground_capability(const PoliticalControlSetup& inputs,
     FleetMember object, const MovementSetup* movement) {
     if (!object.id) return core::Result<bool>::success(false);
@@ -124,6 +153,31 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
     const auto known = [&](PlayerId id) {
         return find_row(setup.players, id, [](const auto& r) { return r.player_id; }) != nullptr;
     };
+    if (s.ability_types.size() > galactic_max_objects || s.ability_sources.size() > galactic_max_objects
+        || !ordered(s.ability_types, [](const auto& r) { return r.type; })
+        || !ordered(s.ability_sources, [](const auto& r) { return std::tuple{r.planet, r.actor, r.ability}; })
+        || (!s.ability_sources.empty() && !setup.census))
+        return invalid<void>("automatic political abilities require canonical profiles and live actors");
+    std::size_t ability_count{};
+    for (const auto& profile : s.ability_types) {
+        if (!profile.type || !type(s, profile.type) || profile.abilities.empty())
+            return invalid<void>("invalid automatic political ability type");
+        ability_count += profile.abilities.size();
+        for (const auto& ability : profile.abilities)
+            // WGM-197: the authored time reduction is a direct multiplier in [0, 1); 0.25 is captured (WGM-U11).
+            if (ability.multiplier < Fixed{} || ability.multiplier > one)
+                return invalid<void>("invalid automatic political transition multiplier");
+    }
+    if (ability_count > galactic_max_objects) return invalid<void>("political ability profiles exceed object budget");
+    for (const auto& source : s.ability_sources) {
+        const auto* profile = find_row(s.ability_types, source.type, [](const auto& r) { return r.type; });
+        const auto* actor = setup.census ? find_row(setup.census->objects, source.actor, [](const auto& r) { return r.id; }) : nullptr;
+        if (!profile || source.ability >= profile->abilities.size() || !profile->abilities[source.ability].enabled
+            || !actor || actor->current_type != source.type || actor->planet != source.planet || !source.planet
+            || actor->owner != source.owner || actor->dead || actor->delete_pending || !known(source.owner)
+            || !find_row(setup.planets, source.planet, [](const auto& r) { return r.id; }))
+            return invalid<void>("political ability source differs from live actor presence");
+    }
     std::size_t neutrals = 0;
     for (std::size_t i = 0; i < s.players.size(); ++i) {
         if (s.players[i].player != setup.players[i].player_id || s.players[i].faction != setup.players[i].faction_id
@@ -312,21 +366,43 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
         // WGM-72: a changed target player resets CURRENT player and amount before protection/service.
         if (controller != prior_target) { state.current_player = controller; state.current = Fixed{}; }
     }
-    if (!degrading || !p.protected_control) {
-        std::map<std::uint32_t, Fixed> modifiers;
+    std::vector<const ControlAbility*> automatic;
+    if (!p.destroyed) {
+        const auto first = std::lower_bound(s.ability_sources.begin(), s.ability_sources.end(), p.planet,
+            [](const auto& row, auto id) { return row.planet < id; });
+        for (auto it = first; it != s.ability_sources.end() && it->planet == p.planet; ++it) {
+            // GPC-01: target allegiance owns appropriateness, never previous current control.
+            if (it->owner != state.target_player) continue;
+            const auto* profile = find_row(s.ability_types, it->type, [](const auto& row) { return row.type; });
+            if (!profile || it->ability >= profile->abilities.size()) return invalid<ControlStep>("unbound political ability source");
+            const auto& ability = profile->abilities[it->ability];
+            if (ability.enabled) automatic.push_back(&ability);
+        }
+    }
+    const bool protected_control = std::any_of(automatic.begin(), automatic.end(), [](const auto* ability) { return ability->protection; });
+    if (!degrading || !protected_control) {
+        std::map<std::int32_t, Fixed> modifiers;
         for (const auto& row : p.transition_modifiers) {
             // WGM-C06: a deadline remains active at equality; expiry is strict.
             if (row.expires_frame && frame > row.expires_frame) continue;
-            const auto it = modifiers.find(row.category);
-            if (it == modifiers.end()) modifiers.emplace(row.category, row.multiplier);
+            const auto category = static_cast<std::int32_t>(row.category);
+            const auto it = modifiers.find(category);
+            if (it == modifiers.end()) modifiers.emplace(category, row.multiplier);
             else it->second = std::min(it->second, row.multiplier);
+        }
+        for (const auto* ability : automatic) if (!ability->protection) {
+            const auto [it, inserted] = modifiers.emplace(static_cast<std::int32_t>(ability->category), ability->multiplier);
+            if (!inserted) it->second = std::min(it->second, ability->multiplier);
         }
         Fixed multiplier = one, denominator{}, delta{};
         for (const auto& [category, value] : modifiers) {
             (void)category;
             if (!math::try_multiply(multiplier, value, multiplier)) return invalid<ControlStep>("transition multiplier overflow");
         }
-        if (!math::try_multiply(s.change_seconds, multiplier, denominator)
+        if (multiplier == Fixed{}) {
+            // WGM-197: zero authored time completes this service without dividing by zero.
+            delta = five;
+        } else if (!math::try_multiply(s.change_seconds, multiplier, denominator)
             || !math::try_multiply(denominator, Fixed::from_raw(30 * Fixed::scale), denominator)
             || !math::try_divide(one, denominator, delta) || delta.raw() <= 0)
             return invalid<ControlStep>("invalid political transition service rate");
@@ -754,6 +830,12 @@ core::Result<void> GalacticSession::dispatch_native_invasion(std::uint64_t numbe
         std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
         const auto effects_before = impl.control_effects.size();
         if (auto completed = impl.complete_undefended_invasion(*request, events); !completed) return completed;
+        if (const auto fleet = impl.fleets.find(request->fleet); fleet != impl.fleets.end()) {
+            auto& row = impl.registry.get<session_detail::FleetData>(fleet->second);
+            if (row.raid_destination == request->planet) {
+                row.raid_destination.reset(); impl.dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+            }
+        }
         impl.native_invasion_transport_count -= request->transports.size(); request->transports.clear();
         if (impl.control_handler && impl.control_effects.size() != effects_before) {
             const auto planets = impl.sorted_planets();
@@ -774,11 +856,19 @@ core::Result<void> GalacticSession::finish_native_invasion(EntityId conflict, Pl
     if (request.state != NativeInvasion::State::conflict || request.conflict != conflict) return core::Result<void>::success();
     if (winner != request.invader && winner != request.defender) return invalid<void>("native invasion completion has no matching actual winner");
     request.state = NativeInvasion::State::completed; request.success = winner == request.invader;
+    if (const auto at = impl.fleets.find(request.fleet); at != impl.fleets.end()) {
+        auto& fleet = impl.registry.get<session_detail::FleetData>(at->second);
+        if (fleet.raid_destination == request.planet) {
+            fleet.raid_destination.reset();
+            impl.dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+        }
+    }
     impl.native_invasion_transport_count -= request.transports.size(); request.transports.clear();
     impl.native_invasion_queue.erase(impl.native_invasion_queue.begin());
     const auto number = request.request;
     if (request.reader_released) impl.native_invasions.erase(number);
     impl.dirty[static_cast<std::size_t>(StateSection::native_invasions)] = true;
+    impl.snapshot = impl.make_snapshot(std::vector<GalacticEvent>(impl.snapshot->events().begin(), impl.snapshot->events().end()));
     // The trusted world outcome/child journal already records this actual winner.
     return core::Result<void>::success();
 }
@@ -1016,7 +1106,7 @@ void GalacticSession::Impl::execute_launch_fleet(const GameCommand& command, con
         cancel(GalacticRejectReason::movement_blocked);
         return;
     }
-    execute_movement({command.key, MoveFleet{id, order.path, order.destination_slot}}, tick, events, pending_local_conflict);
+    execute_movement({command.key, MoveFleet{id, order.path, order.destination_slot, false, order.destination_actor}}, tick, events, pending_local_conflict);
 }
 
 core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::launch_native_transport(PlayerId player,
@@ -1228,7 +1318,7 @@ void encode_control(std::vector<std::uint8_t>& bytes, const PoliticalControlSetu
     count(s.planets.size());
     for (const auto& p : s.planets) {
         put_u64(bytes, p.planet); put_u64(bytes, p.type);
-        flag(p.surface_accessible); flag(p.retains_residual); flag(p.destroyed); flag(p.protected_control);
+        flag(p.surface_accessible); flag(p.retains_residual); flag(p.destroyed);
         base(p.ground_base); base(p.starbase);
         count(p.landed.size());
         for (const auto& r : p.landed) { put_u64(bytes, r.id); put_u64(bytes, r.type); put_u32(bytes, r.owner); }
@@ -1257,11 +1347,21 @@ void encode_control(std::vector<std::uint8_t>& bytes, const PoliticalControlSetu
     count(s.captured_types.size());
     for (const auto& r : s.captured_types) { put_u32(bytes, r.player); put_u64(bytes, r.type); }
     count(s.absent_forces.size()); for (auto id : s.absent_forces) put_u64(bytes, id);
-    if (!s.ground_capability_types.empty()) {
-        put_u8(bytes, 1); count(s.ground_capability_types.size());
-        for (const auto& row : s.ground_capability_types) {
-            put_u64(bytes, row.type); fixed(row.combat_power); flag(row.transport); flag(row.stays_in_transport);
+    count(s.ground_capability_types.size());
+    for (const auto& row : s.ground_capability_types) {
+        put_u64(bytes, row.type); fixed(row.combat_power); flag(row.transport); flag(row.stays_in_transport);
+    }
+    count(s.ability_types.size());
+    for (const auto& profile : s.ability_types) {
+        put_u64(bytes, profile.type); count(profile.abilities.size());
+        for (const auto& ability : profile.abilities) {
+            flag(ability.protection); flag(ability.enabled); put_u32(bytes, ability.category); fixed(ability.multiplier);
         }
+    }
+    count(s.ability_sources.size());
+    for (const auto& row : s.ability_sources) {
+        put_u64(bytes, row.planet); put_u64(bytes, row.actor); put_u64(bytes, row.type);
+        put_u32(bytes, row.ability); put_u32(bytes, row.owner);
     }
 }
 
@@ -1291,7 +1391,7 @@ core::Result<PoliticalControlSetup> decode_control(const std::span<const std::ui
     for (std::uint32_t i = 0; i < n; ++i) {
         ControlPlanet p; std::uint32_t nested{};
         if (!in.read_u64(p.planet) || !in.read_u64(p.type) || !flag(p.surface_accessible) || !flag(p.retains_residual)
-            || !flag(p.destroyed) || !flag(p.protected_control) || !base(p.ground_base) || !base(p.starbase) || !count(nested, 20)) return fail();
+            || !flag(p.destroyed) || !base(p.ground_base) || !base(p.starbase) || !count(nested, 20)) return fail();
         for (std::uint32_t j = 0; j < nested; ++j) {
             SurfaceForce r; if (!in.read_u64(r.id) || !in.read_u64(r.type) || !in.read_u32(r.owner)) return fail(); p.landed.push_back(r);
         }
@@ -1329,15 +1429,33 @@ core::Result<PoliticalControlSetup> decode_control(const std::span<const std::ui
     for (std::uint32_t i = 0; i < n; ++i) { CapturedPlanetType r; if (!in.read_u32(r.player) || !in.read_u64(r.type)) return fail(); s.captured_types.push_back(r); }
     if (!count(n, 8)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) { EntityId id{}; if (!in.read_u64(id)) return fail(); s.absent_forces.push_back(id); }
-    if (in.remaining()) {
-        std::uint8_t version{};
-        if (!in.read_u8(version) || version != 1 || !count(n, 18) || !n || n != s.types.size()) return fail();
-        for (std::uint32_t i = 0; i < n; ++i) {
-            GroundCapabilityType row;
-            if (!in.read_u64(row.type) || row.type != s.types[i].type || !fixed(row.combat_power)
-                || !flag(row.transport) || !flag(row.stays_in_transport)) return fail();
-            s.ground_capability_types.push_back(row);
+    if (!count(n, 18) || (n && n != s.types.size())) return fail();
+    for (std::uint32_t i = 0; i < n; ++i) {
+        GroundCapabilityType row;
+        if (!in.read_u64(row.type) || row.type != s.types[i].type || !fixed(row.combat_power)
+            || !flag(row.transport) || !flag(row.stays_in_transport)) return fail();
+        s.ground_capability_types.push_back(row);
+    }
+    if (!count(n, 12)) return fail();
+    std::size_t abilities{};
+    for (std::uint32_t i = 0; i < n; ++i) {
+        ControlAbilityType profile; std::uint32_t nested{};
+        if (!in.read_u64(profile.type) || !count(nested, 14)) return fail();
+        abilities += nested;
+        if (abilities > galactic_max_objects) return fail();
+        for (std::uint32_t j = 0; j < nested; ++j) {
+            ControlAbility ability;
+            if (!flag(ability.protection) || !flag(ability.enabled) || !in.read_u32(ability.category) || !fixed(ability.multiplier)) return fail();
+            profile.abilities.push_back(ability);
         }
+        s.ability_types.push_back(std::move(profile));
+    }
+    if (!count(n, 32)) return fail();
+    for (std::uint32_t i = 0; i < n; ++i) {
+        ControlAbilitySource row;
+        if (!in.read_u64(row.planet) || !in.read_u64(row.actor) || !in.read_u64(row.type)
+            || !in.read_u32(row.ability) || !in.read_u32(row.owner)) return fail();
+        s.ability_sources.push_back(row);
     }
     if (in.remaining()) return fail();
     return core::Result<PoliticalControlSetup>::success(std::move(s));

@@ -301,6 +301,9 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
         out.execution_input = [setup, usable = query.usability](auto player, const auto& snapshot, const auto& world, const auto& engine, const auto* reconstruction) {
             return copy_stock_execution_input(*setup, player, snapshot, world, engine, usable, reconstruction);
         };
+        out.execution_input_read_only = [setup, usable = query.usability](auto player, const auto& snapshot, const auto& world, const auto& engine) {
+            return copy_stock_execution_input(*setup, player, snapshot, world, engine, usable, nullptr, true);
+        };
         out.prepare_connectivity = std::move(query.connectivity);
         out.prepare_connectivity_publication = std::move(query.connectivity_publication);
         out.placement = [starting](const auto& request, const auto& snapshot, auto first_free) {
@@ -308,6 +311,9 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
         };
         out.shadow_placement = [starting](const auto& request, const auto& view, auto first_free) {
             return stock_native_force_shadow_builder(starting, {request.player, request.target, request.type, {}})(view, first_free);
+        };
+        out.reconciliation_placement = [starting](const auto& request, const auto& view, auto first_free) {
+            return stock_native_force_reconciliation_builder(starting, {request.player, request.target, request.type, {}})(view, first_free);
         };
         out.prepare_fresh_freestore = [reader = query.freestore_actor_facts]
             (auto& actions, const auto& snapshot, const auto& executor) -> core::Result<void> {

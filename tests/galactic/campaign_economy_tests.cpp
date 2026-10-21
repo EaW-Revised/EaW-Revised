@@ -59,6 +59,7 @@ cp::CampaignSetupOptions options(gc::PlayerId human = 1) {
     out.players = {{{1, 1, 0}, "REBEL", true}, {{2, 2, 0}, "EMPIRE", true}, {{3, 3, 0}, "UNDERWORLD", true}, {{4, 4, 0}, "NEUTRAL", true}};
     for (gc::PlayerId id = 1; id <= 3; ++id)
         out.seats.push_back({gc::SeatId{id}, id, id == human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, id == human ? 1U : 0U});
+    out.solo_reference_human = human;
     out.types = {{7, "Ship"}, {8, "Hero"}}; return out;
 }
 struct Trace { std::vector<std::string> calls; bool production{true}; bool original_exists{}; bool created{true}; };
@@ -406,8 +407,12 @@ void persistence(const std::filesystem::path& fixtures) {
             for (const auto& entry : std::filesystem::recursive_directory_iterator(directory.path())) {
                 if (entry.path().extension() != ".eawr-gcreplay") continue;
                 std::ifstream file(entry.path(), std::ios::binary); const std::vector<std::uint8_t> old{std::istreambuf_iterator<char>(file), {}};
-                const auto parsed = gc::parse_replay(old).value();
-                expect(!parsed.setup.player_economy && gc::write_replay(parsed).value() == old, "legacy GC replay bytes unchanged when economy absent");
+                const auto parsed = gc::parse_replay(old);
+                if (parsed) expect(!parsed.value().setup.player_economy && gc::write_replay(parsed.value()).value() == old,
+                    "current-rules economy-absent corpus bytes round trip");
+                else expect(parsed.error().code == gc::diagnostic_codes::replay_version
+                    && parsed.error().message == "recorded under galactic rules version 1, this build runs 2",
+                    "stale rules-1 economy-absent corpus is refused explicitly until batch regeneration");
                 ++legacy_count;
             }
         }
@@ -417,10 +422,14 @@ void persistence(const std::filesystem::path& fixtures) {
             if (!entry.is_regular_file() || entry.path().extension() != ".eawr-gcreplay") continue;
             std::ifstream production_file(entry.path(), std::ios::binary);
             const std::vector<std::uint8_t> production_bytes{std::istreambuf_iterator<char>(production_file), {}};
-            const auto production = gc::parse_replay(production_bytes).value();
-            expect(production.setup.player_economy && production.setup.production,
-                "production replay carries both economy and production extensions");
-            expect(gc::write_replay(production).value() == production_bytes, "production replay bytes round trip canonically");
+            const auto production = gc::parse_replay(production_bytes);
+            if (production) {
+                expect(production.value().setup.player_economy && production.value().setup.production,
+                    "production replay carries both economy and production extensions");
+                expect(gc::write_replay(production.value()).value() == production_bytes, "production replay bytes round trip canonically");
+            } else expect(production.error().code == gc::diagnostic_codes::replay_version
+                && production.error().message == "recorded under galactic rules version 1, this build runs 2",
+                "stale rules-1 production corpus is refused explicitly until batch regeneration");
             ++production_count;
         }
         expect(production_count >= 3, "all three production fixtures checked");

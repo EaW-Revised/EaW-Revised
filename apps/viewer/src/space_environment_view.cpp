@@ -1,4 +1,5 @@
 #include "space_environment_internal.hpp"
+#include "settings_store.hpp"
 
 #include <cstring>
 #include "eawr/core/load_profile.hpp"
@@ -502,6 +503,12 @@ void EnvironmentView::camera_event(const viewer::camera_input::RawEvent& event) 
         }
     }
     if (bridge_) {
+        if (const auto* saved = ActiveSettings::get()) {
+            if (auto bound = bridge_->set_camera_keys(saved->camera_wasd); !bound) {
+                failure_ = core::format_diagnostic(bound.error());
+                return;
+            }
+        }
         if (auto handled = bridge_->handle(event); !handled) failure_ = core::format_diagnostic(handled.error());
     }
 }

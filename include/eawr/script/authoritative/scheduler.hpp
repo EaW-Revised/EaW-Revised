@@ -69,7 +69,7 @@ inline constexpr std::string_view authoritative_state_identity = "eawr-authorita
 
 struct Handle {
     std::uint32_t kind{};
-    std::uint64_t id{}; // object identities stay below 2^37; a host kind may pack all 64 bits
+    std::uint64_t id{}; // full-width host identity; object attachment registries impose their own limits
     friend bool operator==(const Handle&, const Handle&) = default;
 };
 
@@ -302,6 +302,11 @@ struct ServiceOptions {
     // in ascending ID over a shadow of their own, one chain after another in ascending key with key 0 (no owner)
     // last, and each chain publishes its changes before the next chain captures. Empty: one chain in ID order.
     std::function<std::uint64_t(std::uint64_t instance)> chain_of;
+    // Select an owning host frontier before capturing each chain (zero selects the unowned tail).
+    // A selected frontier always captures afresh, even when the preceding chain made no writes.
+    // The returned token owns that selection through publication (and the last chain's census).
+    // It is released before selecting another chain and on every failure path.
+    std::function<core::Result<std::shared_ptr<void>>(std::uint64_t owner)> begin_chain;
     // GC profile: GetCurrentTime reads this mode frame at 1/30 s.
     // Absent, it reads the last set_galactic_frame value. Native timers and
     // random keys retain the scheduler's invocation tick domain.

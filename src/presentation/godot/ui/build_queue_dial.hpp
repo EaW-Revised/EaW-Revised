@@ -1,5 +1,7 @@
 #pragma once
 
+#include "gpu_debug_labels.hpp"
+
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -51,6 +53,7 @@ public:
         mesh_.instantiate();
         mesh_->add_surface_from_arrays(godot::Mesh::PRIMITIVE_TRIANGLES, arrays);
         shader_.instantiate();
+        name_canvas_shader(*shader_.ptr(), "EAWR/UI/BuildQueueDial");
         shader_->set_code(R"(shader_type canvas_item;
 render_mode blend_add;
 uniform float completion_percent = 100.0;

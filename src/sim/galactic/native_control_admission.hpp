@@ -130,9 +130,11 @@ template<class Owner> core::Result<GalacticSession::NativeInvasionReceipt> admit
     using Result = core::Result<NativeInvasionReceipt>;
     if (retained_transports.size() > (galactic_replay_max_payload - 72) / 8)
         return native_control_error<NativeInvasionReceipt>("retained invasion selection exceeds the journal budget");
-    if (native_owner.failed || (!native_owner.native_invasions_enabled && !native_owner.native_applying)) return native_control_error<NativeInvasionReceipt>("native invasion requires its campaign conflict owner");
     const auto fleet_at = native_owner.fleets.find(id);
     const auto planet = fleet_at == native_owner.fleets.end() ? PlanetId{} : native_owner.registry.template get<session_detail::FleetData>(fleet_at->second).orbit;
+    const bool raid = fleet_at != native_owner.fleets.end()
+        && native_owner.registry.template get<session_detail::FleetData>(fleet_at->second).raid_destination == planet;
+    if (native_owner.failed || (!raid && !native_owner.native_invasions_enabled && !native_owner.native_applying)) return native_control_error<NativeInvasionReceipt>("native invasion requires its campaign conflict owner");
     if (const auto reason = validate_native_landing(native_owner, player, id, planet, pending_local_conflict); reason != GalacticRejectReason::none) return Result::success({false, 0, false, reason});
     const auto& fleet = native_owner.registry.template get<session_detail::FleetData>(fleet_at->second);
     NativeInvasion request; request.invader = player; request.fleet = id; request.planet = planet;
@@ -149,6 +151,10 @@ template<class Owner> core::Result<GalacticSession::NativeInvasionReceipt> admit
     }
     if (request.transports.empty()) return Result::success({false, 0, false, GalacticRejectReason::invalid_membership});
     if (native_owner.native_invasions.size() >= galactic_max_objects || native_owner.next_native_invasion == std::numeric_limits<std::uint64_t>::max()) return native_control_error<NativeInvasionReceipt>("native invasion identity budget exhausted");
+    if constexpr (requires { native_owner.native_invasion_range_end; }) {
+        if (native_owner.next_native_invasion >= native_owner.native_invasion_range_end)
+            return native_control_error<NativeInvasionReceipt>("native player invasion identity block exhausted");
+    }
     const auto* surface = native_find_row(native_owner.control->planets, planet, [](const auto& row) { return row.planet; });
     // WGS-186: sparse adapters select the target state by planet identity.
     const auto* state = native_find_row(native_owner.control->state, planet, [](const auto& row) { return row.planet; });

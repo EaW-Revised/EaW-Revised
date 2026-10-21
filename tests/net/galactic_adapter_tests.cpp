@@ -128,6 +128,7 @@ std::optional<galactic::CommandPayload> intent(const galactic::GalacticSetup& se
 struct Rig {
     struct Options {
         std::uint64_t delay{3}, final_tick{60};
+        net::GalacticClockPolicy clock_policy{net::GalacticClockPolicy::unrestricted};
         std::uint64_t completeness_timeout_ms{100'000};
         std::vector<std::size_t> workers{1};
         std::optional<eawr::testing::WanProfile> wan;
@@ -149,7 +150,9 @@ struct Rig {
             executors.push_back(std::make_unique<eawr::platform::ThreadWorkerAdapter>(options.workers[peer % options.workers.size()]));
             games.push_back(std::make_unique<GameSession>(require(GameSession::create(setup))));
             if (peer != 0) games.back()->set_state_hasher(std::make_shared<eawr::platform::ThreadStateHasher>());
-            adapters.push_back(std::make_unique<net::GalacticSessionAdapter>(*games.back(), *executors.back()));
+            net::GalacticAdapterOptions adapter_options;
+            adapter_options.clock_policy = options.clock_policy;
+            adapters.push_back(std::make_unique<net::GalacticSessionAdapter>(*games.back(), *executors.back(), adapter_options));
             transports.push_back(std::make_unique<FakeTransport>(network, peer));
             net::DesyncMonitor* monitor = nullptr;
             if (options.monitor) {
@@ -249,7 +252,9 @@ void classification_and_codec() {
     const auto setup = versus_setup();
     GameSession game = require(GameSession::create(setup));
     const eawr::sim::InlineExecutor executor;
-    const net::GalacticSessionAdapter adapter(game, executor);
+    net::GalacticAdapterOptions galaxy_only;
+    galaxy_only.child_battle_commands = false;
+    const net::GalacticSessionAdapter adapter(game, executor, galaxy_only);
     const auto stamp = [](std::uint32_t seat, std::uint64_t tick = 5) { return eawr::sim::SeatCommandKey{tick, {seat}, 1}; };
     const auto planet = setup.planets.front().id;
     const auto accepted = [&](std::uint32_t seat, const galactic::CommandPayload& payload) {
@@ -277,9 +282,9 @@ void classification_and_codec() {
     expect(!ai && ai.error().code == net::session_errors::admission, "an AI seat cannot send human wire input");
     const auto unbound = accepted(77, galactic::PauseGalaxy{});
     expect(!unbound && unbound.error().code == net::session_errors::admission, "an unbound seat is refused");
-    // The child battle barrier is explicitly disabled (GCMP-05).
+    // A caller can explicitly disable child command admission.
     const auto tactical = accepted(1, galactic::TacticalLayerCommand{1, 5, {}});
-    expect(!tactical && tactical.error().code == net::session_errors::admission, "tactical-layer commands stay off until the barrier lands");
+    expect(!tactical && tactical.error().code == net::session_errors::admission, "a galaxy-only adapter refuses tactical-layer commands");
     // Debug commands follow the agreed setup flag.
     auto plain = setup;
     plain.debug_commands = false;
@@ -328,6 +333,44 @@ void classification_and_codec() {
     expect(!input.empty(), "canonical input records the executed command");
 }
 
+void child_hash_and_execution_refusal() {
+    const auto setup = versus_setup();
+    auto game = require(GameSession::create(setup));
+    const eawr::sim::InlineExecutor executor;
+    net::GalacticAdapterOptions options;
+    options.child_battle_commands = true;
+    net::GalacticSessionAdapter adapter(game, executor, options);
+    eawr::campaign::ConflictRecord entry;
+    entry.id = game.galaxy().next_entity_id(); entry.planet = setup.planets.front().id;
+    entry.invader = 1; entry.defender = 2;
+    entry.tactical.content_identity = setup.content_identity;
+    entry.tactical.first_free_entity_id = entry.id + 1;
+    entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+    entry.seats = {{{1}, 1}, {{2}, 2}};
+    require(game.stage_battle(entry, {}, eawr::campaign::ScriptRequirement::none));
+    require(adapter.install({}));
+    const auto begin = require(adapter.step());
+    expect(begin.completed_tick == 1 && game.battle() && game.battle()->completed_tick() == 0,
+        "the sealed galaxy tick is the child's Begin barrier");
+    expect(begin.state_sha256 == game.state_sha256() && begin.state_sha256 != game.galaxy().state_sha256(),
+        "the adapter digest is the whole game, including child context at Begin");
+    const eawr::sim::SeatCommandKey key{1, {1}, 1};
+    const net::SeatInput stale{key, require(net::encode_galactic_input(key,
+        galactic::TacticalLayerCommand{entry.id + 10, 5, {}}))};
+    require(adapter.validate(stale)); // active conflict is never a wire/admission fact
+    require(adapter.install(std::array{stale}));
+    const auto battle = require(adapter.step());
+    expect(adapter.refused().size() == 1 && battle.completed_tick == 2,
+        "another conflict's tactical command is refused at execution without ending lockstep");
+    const auto tick = adapter.take_tick();
+    expect(tick && tick->diagnostics.size() == 1 && tick->diagnostics.front().message == adapter.refused().front().message,
+        "execution refusal is published with its completed tick");
+    const auto input = require(adapter.canonical_input());
+    expect(input.size() > 4 && input.front() == 1, "canonical input retains the refused tactical envelope");
+    expect(battle.state_sha256 == game.state_sha256() && battle.state_sha256 != game.galaxy().state_sha256(),
+        "battle ticks keep the whole-game digest");
+}
+
 void loopback(const std::string& name, const galactic::GalacticSetup& setup, const std::optional<eawr::testing::WanProfile> wan) {
     std::optional<std::vector<std::string>> first_hashes;
     std::optional<Bytes> first_state;
@@ -360,6 +403,65 @@ void loopback(const std::string& name, const galactic::GalacticSetup& setup, con
             const auto& clock = rig.games[0]->galaxy().clock();
             expect(clock.pause_depth == 0, where + "the scripted resume released the pause");
         }
+    }
+}
+
+void shared_clock_limit_at_execution() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        Rig::Options options;
+        options.final_tick = 40;
+        options.workers = {1, workers};
+        options.clock_policy = net::GalacticClockPolicy::two_per_45_seconds;
+        Rig rig(versus_setup(), options);
+        const auto send = [&](net::PeerIndex peer, const galactic::CommandPayload& payload) {
+            return require(rig.sessions[peer].submit([&](auto key) { return net::encode_galactic_input(key, payload); }));
+        };
+        const auto pause = send(0, galactic::PauseGalaxy{});
+        const auto speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
+        const auto refused_speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(2 * math::Fixed::scale)});
+        const auto other_resume = send(1, galactic::ResumeGalaxy{});
+        expect(pause.tick == speed.tick && speed.tick == refused_speed.tick && other_resume.tick == pause.tick,
+            "pause/speed requests are stamped at the same agreed frontier");
+        std::array<bool, 2> observed{};
+        for (std::uint64_t round = 0; round < 20'000; ++round) {
+            rig.network.round = round;
+            for (net::PeerIndex peer = 0; peer < 2; ++peer) {
+                if (rig.monitors[peer]->agreed_end()) continue;
+                const auto pumped = require(rig.sessions[peer].pump(round));
+                if (!pumped.completed) continue;
+                const auto& completed = *pumped.completed;
+                rig.hashes[peer].push_back(completed.state_sha256);
+                rig.inputs[peer].push_back(require(rig.adapters[peer]->canonical_input()));
+                const auto published = rig.adapters[peer]->take_tick();
+                expect(published && published->state_sha256 == completed.state_sha256
+                    && published->state_hash.get() == completed.state_sha256
+                    && rig.adapters[peer]->state_hash() == completed.state_sha256,
+                    "published, current and completed hashes all include the clock history");
+                if (completed.completed_tick == pause.tick + 1) {
+                    observed[peer] = true;
+                    expect(rig.games[peer]->galaxy().clock().pause_depth == 0,
+                        "another human may resume at the agreed tick with its own budget");
+                    expect(rig.games[peer]->galaxy().clock().strategic_speed.raw() == math::Fixed::scale / 2,
+                        "strategic speed applies on the same completed tick on both peers");
+                    expect(rig.adapters[peer]->refused().size() == 1,
+                        "third clock request is refused during execution, not while receiving");
+                    const eawr::sim::SeatCommandKey probe{20, rig.humans[0], 99};
+                    expect(bool(rig.adapters[peer]->validate({probe, require(net::encode_galactic_input(probe, galactic::PauseGalaxy{}))})),
+                        "wire admission does not depend on the already exhausted execution budget");
+                }
+            }
+            if (rig.monitors[0]->agreed_end() && rig.monitors[1]->agreed_end()) break;
+        }
+        expect(observed[0] && observed[1] && rig.hashes[0].size() == options.final_tick,
+            "both peers execute the complete clock fixture");
+        expect(rig.hashes[0] == rig.hashes[1] && rig.inputs[0] == rig.inputs[1],
+            "clock acceptance/refusal produces equal digests and canonical input on 1/2/4/8 workers");
+        expect(rig.adapters[0]->refused().size() == 1 && rig.adapters[1]->refused().size() == 1
+            && rig.adapters[0]->refused()[0].message == rig.adapters[1]->refused()[0].message,
+            "the third request is refused identically on both peers");
+        const net::GalacticSessionAdapter unrestricted(*rig.games[0], *rig.executors[0]);
+        expect(unrestricted.state_hash() != rig.adapters[0]->state_hash(),
+            "the named clock policy/history participate in the agreed state hash");
     }
 }
 
@@ -768,9 +870,11 @@ void multiple_survivors_keep_confirmation_policy() {
 int main() {
     try {
         classification_and_codec();
+        child_hash_and_execution_refusal();
         loopback("versus", versus_setup(), std::nullopt);
         loopback("versus-wan", versus_setup(), eawr::testing::wan_profiles[1]);
         loopback("coop-4-seats", coop_setup(), std::nullopt);
+        shared_clock_limit_at_execution();
         pause_progress_and_no_local_ticks();
         held_and_duplicate_transport();
         racing_inputs_are_canonical();

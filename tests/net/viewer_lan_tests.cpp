@@ -704,9 +704,9 @@ int main(int argc, char** argv) {
             invalid->view().message.find("hostname") != std::string::npos, "invalid endpoint has clear corrective error text");
         recovery_presentation_contract();
         lan_ai_defaults_follow_authored_constraints(); lan_overflow_human_keeps_its_seat(); lobby_refusal_and_placeholder_contracts(); shared_builder_matches_former_live_encoding(); terminal_lobby_commands_are_inert();
-        close_one_mesh_edge(); editable_staging_team_rules(); advanced_options_three_peers(); authoritative_staging(false); authoritative_staging(true);
+        close_one_mesh_edge(); editable_staging_team_rules(); advanced_options_three_peers(); ai_difficulty_two_peers(); seat_controls_three_peers(); seat_controls_three_peers(true); authoritative_staging(false); authoritative_staging(true);
         authoritative_staging(true, net::LobbyReason::kicked); authoritative_staging(true, net::LobbyReason::host_closed);
-        missing_planned_owner_is_refused();
+        capacity_does_not_create_players();
         nine_seat_staging({1, 2, 3, 4, 5, 6, 7, 8, 9});
         nine_seat_staging({1, 2});
         staging_ingress_bounds();

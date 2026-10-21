@@ -148,6 +148,27 @@ void GalacticMode::State::update_weapon_action_hud() {
     auto& surface = weapon_menu.surfaces[0];
     const auto* choice = weapon_menu.facts && weapon_menu.facts->hack ? &*weapon_menu.facts->hack : nullptr;
     const bool available = choice && surface.panel && surface.close && surface.choices.size() == 1;
+    // #4331: the controls below depend on this key alone (the anchors, labels and wording are fixed after the build), so a
+    // publication that changed none of it - the common case: no menu open - writes none of them again.
+    const WeaponActionHudKey key{available, enabled, weapon_menu.closed, choice != nullptr, choice && choice->affordable,
+        choice && choice->live_prepared.has_value(), choice ? choice->prepared.prepared_price.raw() : 0,
+        camera.width, camera.height, surface.panel ? std::optional(surface.panel->placement()) : std::nullopt};
+    const bool unchanged = weapon_menu.applied == key;
+    if (unchanged && !options.hud_verify) return;
+    // Verification (--eawr-galactic-hud-verify): an unchanged key still writes the controls, and they must not change.
+    struct Verify final {
+        State& state; bool on; std::uint64_t drawn;
+        ~Verify() {
+            if (!on) return;
+            ++state.hud_verify_checks;
+            if (state.weapon_action_fingerprint() != drawn) {
+                ++state.hud_verify_mismatches;
+                if (state.hud_verify_detail.empty()) state.hud_verify_detail = "weapon action";
+            }
+        }
+    } verify{*this, unchanged, unchanged ? weapon_action_fingerprint() : std::uint64_t{}};
+    weapon_menu.applied = key;
+    if (!unchanged) ++weapon_menu.writes;
     weapon_menu.blocker->set_visible(available && enabled && !weapon_menu.closed);
     if (!surface.panel) return;
     surface.panel->set_visible(available);
@@ -206,6 +227,29 @@ void GalacticMode::State::update_weapon_action_hud() {
             text("hack_text_0"+std::to_string(index),lines[index]);
     }
 }
+std::uint64_t GalacticMode::State::weapon_action_fingerprint() const {
+    galactic_view::HudDigest digest;
+    const auto control = [&digest](const Control* value) {
+        digest.add(value != nullptr);
+        if (!value) return;
+        digest.add(value->is_visible());
+        if (!value->is_visible()) return; // a hidden control's place is rewritten before it is shown
+        const auto position = value->get_position(), size = value->get_size();
+        digest.add(position.x); digest.add(position.y); digest.add(size.x); digest.add(size.y);
+    };
+    control(weapon_menu.blocker);
+    const auto& surface = weapon_menu.surfaces[0];
+    control(surface.panel);
+    for (const auto& [name, label] : surface.labels) {
+        digest.add(std::string_view(name)); control(label);
+        if (label) digest.add(std::string_view(galactic_detail::utf8(label->get_text())));
+    }
+    for (const auto& [name, button] : surface.choices) {
+        digest.add(std::string_view(name)); control(button); if (button) digest.add(button->is_disabled());
+    }
+    control(surface.close); if (surface.close) digest.add(surface.close->is_disabled());
+    return digest.value();
+}
 void GalacticMode::State::write_weapon_action_report(std::ostream& output) const {
     using galactic_detail::json;
     const auto* choice=weapon_menu.facts && weapon_menu.facts->hack ? &*weapon_menu.facts->hack : nullptr;
@@ -214,7 +258,7 @@ void GalacticMode::State::write_weapon_action_report(std::ostream& output) const
         << ", \"result_seam\": \"weapon-action result publication (legacy #1144)\", \"destruction_binding_seam\": \"strategic ability widget binding (legacy #2311)\""
         << ", \"active\": " << (weapon_menu.blocker && weapon_menu.blocker->is_visible_in_tree() ? "true" : "false")
         << ", \"rebuilds\": " << weapon_menu.rebuilds << ", \"choices_accepted\": " << weapon_menu.choices_accepted
-        << ", \"closes\": " << weapon_menu.closes << ", \"actor\": " << (choice ? choice->prepared.actor : 0)
+        << ", \"closes\": " << weapon_menu.closes << ", \"writes\": " << weapon_menu.writes << ", \"actor\": " << (choice ? choice->prepared.actor : 0)
         << ", \"planet\": " << (choice ? choice->prepared.planet : 0) << ", \"weapon\": " << (choice ? choice->weapon : 0)
         << ", \"price_raw\": " << (choice ? choice->prepared.prepared_price.raw() : 0)
         << ", \"affordable\": " << (choice && choice->affordable ? "true" : "false")

@@ -256,7 +256,10 @@ core::Result<AutoResolveRoster> collect_live_auto_resolve_roster(const ConflictR
     if (conflict.layer == BattleLayer::space && out.planet.base_type.empty() && conflict.station_type) {
         const auto* base = bound(plan, types, conflict.station_type); if (!base) return fail<AutoResolveRoster>("unbound conflict base"); out.planet.base_type = base->name; out.planet.owner = parties.station_side;
     }
-    if (conflict.raid) for (const auto& force : conflict.forces) if (force.owner == parties.invader) out.raid_entries.push_back(force.id);
+    if (conflict.raid) {
+        for (const auto& force : conflict.forces) if (force.owner == parties.invader) out.raid_entries.push_back(force.id);
+        out.invader_entries = out.raid_entries;
+    }
     for (auto& [id, object] : objects) { (void)id; out.objects.push_back(std::move(object)); }
     return core::Result<AutoResolveRoster>::success(std::move(out));
 }
@@ -323,6 +326,7 @@ AutoResolveAttackServices attacks(const std::shared_ptr<Prepared>& p, const Auto
 }
 AutoResolveOutcomeInputs outcome_inputs(const std::shared_ptr<Prepared>& p, AutoResolveRoster roster, gc::PlanetId planet) {
     AutoResolveOutcomeInputs inputs; inputs.planet_type = p->planet_types.at(planet);
+    inputs.raid_destination_entries = roster.raid_entries;
     inputs.lethal_closure = [p, roster](const AutoResolveAllocation& allocation) -> core::Result<std::vector<sim::EntityId>> {
         std::vector<sim::EntityId> pending{allocation.id}, dead; std::set<sim::EntityId> seen;
         while (!pending.empty()) {
@@ -418,6 +422,8 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
     std::pair<GameSession::AutoResolveStateWriter, GameSession::AutoResolveStateReader>* checkpoint) {
     auto p = std::make_shared<Prepared>(plan); p->catalog = catalog; p->data = data; p->types = types; p->originals.assign(originals.begin(), originals.end());
     auto rules = auto_resolve_round_rules(data); if (!rules) return core::Result<LiveConflictAdapters>::failure(rules.error()); p->rules = rules.value();
+    // WGM-44 / WAR-01: MP arbitration has no auto-resolve display countdown.
+    if (plan.mode() == CampaignSetupMode::multiplayer) p->rules.display_seconds = Fixed{};
     auto relations = prepare_initial_campaign_relations(data, plan.player_bindings());
     if (!relations) return core::Result<LiveConflictAdapters>::failure(relations.error());
     p->relations = std::move(relations).value().placement;
@@ -533,9 +539,14 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
     };
     result.outcomes.retreat = [](gc::GalacticSession& galaxy, const AutoResolveOutcomeApplication& a) {
         if (!a.result.retreat_player) return core::Result<void>::success();
-        auto destination = retreat_destination(*galaxy.snapshot(), a.planet, *a.result.retreat_player, a.land);
+        const auto snapshot = galaxy.snapshot();
+        const bool orbital_raid = std::any_of(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) {
+            return fleet.raid_destination == a.planet && std::find(a.retreat_fleets.begin(), a.retreat_fleets.end(), fleet.id) != a.retreat_fleets.end();
+        });
+        const bool surface = a.land && !orbital_raid;
+        auto destination = retreat_destination(*snapshot, a.planet, *a.result.retreat_player, surface);
         if (!destination) return core::Result<void>::failure(destination.error());
-        return galaxy.apply_retreat_return(*a.result.retreat_player, a.planet, destination.value(), a.land, a.retreat_fleets, a.destroyed);
+        return galaxy.apply_retreat_return(*a.result.retreat_player, a.planet, destination.value(), surface, a.retreat_fleets, a.destroyed);
     };
     result.access = [p](const gc::GalacticSnapshot& snapshot, const sim::PartitionExecutor& executor) -> core::Result<std::vector<gc::MovementAccess>> {
         if (!snapshot.movement() || !snapshot.control()) return fail<std::vector<gc::MovementAccess>>("runtime access requires current presence");
@@ -618,6 +629,11 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         const auto parties = resolve_conflict_parties(&snapshot, {.arrival = &event, .presence = &presence.value(), .invasion = explicit_invasion});
         record.invader = parties.invader; record.defender = parties.defender; record.station_level = presence.value().starbase_level;
         record.station_owner = parties.station_owner;
+        if (land && explicit_invasion) {
+            const auto fleet = std::find_if(snapshot.fleets().begin(), snapshot.fleets().end(),
+                [&](const auto& row) { return row.id == explicit_invasion->fleet; });
+            record.raid = fleet != snapshot.fleets().end() && fleet->raid_destination == record.planet;
+        }
         record.tactical.first_free_entity_id = first_free + 1;
         record.tactical.content_identity = p->plan.galaxy().content_identity;
         record.forces = live_conflict_force_manifest(record, presence.value());
@@ -628,9 +644,9 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         ArbitrationInputs inputs; inputs.layer = record.layer;
         const auto human = [&](gc::PlayerId owner) { return std::any_of(snapshot.seats().begin(), snapshot.seats().end(), [&](const auto& seat) { return seat.active && seat.player == owner && seat.kind == gc::SeatKind::human; }); };
         if (const auto* queue = p->data.constant("Strategic_Queue_Tactical_Battles")) inputs.queue_tactical = data::retail::boolean(queue->text).value_or(false);
-        inputs.multiplayer = std::count_if(snapshot.seats().begin(), snapshot.seats().end(), [](const auto& seat) { return seat.active && seat.kind == gc::SeatKind::human; }) > 1;
+        inputs.multiplayer = p->plan.mode() == CampaignSetupMode::multiplayer;
         inputs.invader_human = human(record.invader); inputs.defender_human = human(record.defender);
-        inputs.local_involved = p->plan.local_observer() && (*p->plan.local_observer() == record.invader || *p->plan.local_observer() == record.defender);
+        inputs.local_involved = p->plan.solo_reference_human() && (*p->plan.solo_reference_human() == record.invader || *p->plan.solo_reference_human() == record.defender);
         const auto* campaign = p->data.campaign(p->plan.campaign_name()); if (!campaign) return fail<std::optional<RecordedAdmission>>("missing campaign admission rules");
         inputs.tutorial_disables_auto = campaign->tutorial.value_or(false);
         inputs.story_restricts_auto = campaign->is_autoresolve_allowed == false || std::any_of(campaign->autoresolve_exclusion_locations.begin(), campaign->autoresolve_exclusion_locations.end(), [&](const auto& name) { return key(name) == key(location->second); });
@@ -651,6 +667,17 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, const CampaignSetupPlan& plan, GameSession::ContentResolver content,
     AutoResolveTimeProvider time, std::shared_ptr<const StockSpaceEntry> space) {
+    if (plan.mode() == CampaignSetupMode::multiplayer) {
+        const auto* authored = data.constant("Battle_Pending_Timeout_Seconds");
+        const auto seconds = authored ? data::retail::leading_number(authored->text) : std::nullopt;
+        if (!seconds || seconds->value.raw() < 0)
+            return fail<void>("missing or invalid multiplayer battle vote timeout");
+        // WGM-47 / D9: convert authored seconds once to the agreed 30 Hz frontier.
+        const auto ticks = sim::math::multiply(seconds->value, Fixed::from_integer(gc::galactic_frames_per_second).value());
+        if (!ticks) return core::Result<void>::failure(ticks.error());
+        if (auto configured = game.configure_multiplayer_votes(static_cast<std::uint64_t>(ticks.value().trunc_to_integer())); !configured)
+            return configured;
+    }
     bind_story_identities(game, plan); // also rebuilt for fresh checkpoint owners
     // WGS-07/WGS-140: the campaign's plots for its active players, installed before the first step (a checkpoint
     // restore fills the saved plot state afterwards). Missing files only log (the loader's notes).
@@ -692,14 +719,10 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     layer.admission = std::move(adapters.value().admission);
     layer.content = std::move(content);
     layer.native_admission = std::move(adapters.value().native_admission);
-    // Preserve the former shared hooks for both layers. Land selection still
-    // has its existing entry capability checks; registration does not invent one.
-    auto land = layer;
-    if (space) {
-        auto ai = space_entry_script_services(space, game.conflict_parent_queries(BattleLayer::land));
-        land.scripts = std::move(ai.scripts);
-        land.configure = std::move(ai.bind);
-    }
+    GameSession::ConflictLayerServices land;
+    land.admission = layer.admission;
+    land.native_admission = std::move(layer.native_admission);
+    land.tactical_refusal = "land tactical provider is unavailable";
     if (auto installed = game.install_conflict_layer(BattleLayer::space, std::move(layer)); !installed) return installed;
     return game.install_conflict_layer(BattleLayer::land, std::move(land));
 }

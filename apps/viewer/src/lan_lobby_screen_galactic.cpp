@@ -2,6 +2,7 @@
 
 #include "galactic_lobby_backend.hpp"
 
+#include <cstdlib>
 #include <random>
 
 // GCMP-07 (#4363): the Galactic Conquest mode of the LAN/online staging. The host picks it with the retail "Campaign"
@@ -13,6 +14,10 @@ namespace eawr::presentation::godot_backend {
 namespace {
 // SK-42/WGEP-16 default difficulty. The lobby has no difficulty control yet; the codec carries any XML difficulty name.
 constexpr const char* galactic_difficulty = "Normal_Default";
+
+// Item ids of the host's Open / AI choice on a playable, unheld row (kick entries use 10000 + peer).
+constexpr int galactic_row_open_id = 20000;
+constexpr int galactic_row_ai_id = 20001;
 
 std::string row_label(const model::StagingRow& row) {
     if (!row.name.empty()) return row.name;
@@ -39,8 +44,7 @@ std::optional<std::string> EawrLanLobby::host_galactic_game() {
     const auto& campaigns = impl.galactic_backend->campaigns();
     if (campaigns.empty()) return std::string("No multiplayer campaign is installed.");
     // The seed is the host's choice and travels with the options, so every peer derives the same galaxy from it.
-    std::random_device device;
-    const std::uint64_t seed = (static_cast<std::uint64_t>(device()) << 32U) | device();
+    const std::uint64_t seed = net::draw_galactic_session_seed();
     auto options = net::default_galactic_lobby_options(campaigns.front(), galactic_difficulty, seed, options_.input_delay);
     if (!options) return options.error().message;
     if (!match_->set_galactic_game(std::move(options).value())) return std::string("The campaign room could not be opened.");
@@ -144,10 +148,22 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             name->clear();
             name->set_visible(shown);
             if (shown) {
-                name->add_item(resolved(resources.text, row_label(row)), 0);
+                const bool open_row = row.kind == model::RowKind::open;
+                // A planned row nobody takes at Start becomes an AI faction, so an open row says so.
+                const std::string open_label = utf8(resolved(resources.text, "TEXT_OPEN_PLAYER")) + " - AI if empty";
+                name->add_item(open_row ? text(open_label) : resolved(resources.text, row_label(row)), 0);
                 name->select(0);
                 name->set_tooltip_text(text(row.name));
                 name->set_disabled(true);
+                // The host switches a playable, unheld row between Open (a human may take it) and AI (the campaign difficulty).
+                if (impl.host && staging && (open_row || row.kind == model::RowKind::ai) && campaign && index < campaign->factions.size()
+                    && campaign->factions[index].playable) {
+                    name->clear();
+                    name->add_item(text(open_label), galactic_row_open_id);
+                    name->add_item(resolved(resources.text, "TEXT_MEDIUM_AI_PLAYER"), galactic_row_ai_id);
+                    name->select(open_row ? 0 : 1);
+                    name->set_disabled(false);
+                }
                 // The host removes a guest from a row with its kick entry, as in a skirmish room.
                 if (impl.host && room && row.kind == model::RowKind::human) {
                     for (const auto& seat : room->snapshot.seats) {
@@ -275,7 +291,21 @@ bool EawrLanLobby::galactic_item_selected(const int64_t index, const std::string
     if (combo == nullptr) return true;
     if (field == "IDC_PLAYER_NAME") {
         const int id_value = combo->get_item_id(static_cast<int>(index));
-        if (id_value >= 10000 && impl.host) (void)match_->lobby_kick(static_cast<net::PeerIndex>(id_value - 10000));
+        if (id_value == galactic_row_open_id || id_value == galactic_row_ai_id) {
+            // Host-only: re-publish the options with this row's human flag toggled; every peer sees the same row.
+            const std::size_t row = static_cast<std::size_t>(std::strtoul(gadget.c_str() + split + 1, nullptr, 10));
+            if (impl.host && row < impl.galactic_options->rows.size()
+                && impl.galactic_options->rows[row].human != (id_value == galactic_row_open_id)) {
+                auto edited = *impl.galactic_options;
+                edited.rows[row].human = id_value == galactic_row_open_id;
+                if (!match_->lobby_galactic_game(edited)) {
+                    if (const auto lobby = match_->lobby_state(); lobby && lobby->notice) note_chat(model::ChatKind::error, lobby->notice->message);
+                }
+            }
+            impl.rows_signature.clear();
+            return true;
+        }
+        if (id_value >= 10000 && id_value < galactic_row_open_id && impl.host) (void)match_->lobby_kick(static_cast<net::PeerIndex>(id_value - 10000));
         return true;
     }
     if (field == "IDC_PLAYER_FACTION" && local != room->snapshot.seats.end()) {

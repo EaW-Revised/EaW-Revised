@@ -59,20 +59,20 @@ std::size_t GalacticSession::Impl::corruption_unit_count(std::span<const TypeId>
     }
     return identities.size();
 }
-std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_menu() const {
-    if (!ability_host || !observer || !observer_projection || !economy) return {};
+std::shared_ptr<const CorruptionMenu> GalacticSession::Impl::publish_corruption_menu(const PlayerId local, std::span<const ObservedPlanet> observations) const {
+    if (!ability_host || !observer || !local || !economy) return {};
     for (const auto& menu : ability_host->preparations) {
         if (!menu.open || menu.kind != AbilityKind::corruption) continue;
         const auto actor = actor_records.find(menu.actor);
-        if (actor == actor_records.end() || actor->second.owner != observer->local_player || actor->second.dead || actor->second.delete_pending) continue;
-        if (std::none_of(observer_projection->begin(), observer_projection->end(), [&](const auto& row) {
-            return row.player == observer->local_player && row.planet == menu.planet && row.discovered;
+        if (actor == actor_records.end() || actor->second.owner != local || actor->second.dead || actor->second.delete_pending) continue;
+        if (std::none_of(observations.begin(), observations.end(), [&](const auto& row) {
+            return row.player == local && row.planet == menu.planet && row.discovered;
         })) continue;
         const auto* location = find(setup.ability_host->corruption_planets, menu.planet, [](const auto& r) { return r.planet; });
-        const auto* account = find(economy->players, observer->local_player, [](const auto& r) { return r.player; });
-        const auto* usage = find(ability_host->corruption_usage, observer->local_player, [](const auto& r) { return r.player; });
+        const auto* account = find(economy->players, local, [](const auto& r) { return r.player; });
+        const auto* usage = find(ability_host->corruption_usage, local, [](const auto& r) { return r.player; });
         if (!location || !account || !usage) continue;
-        CorruptionMenu result; result.player = observer->local_player; result.actor = menu.actor; result.planet = menu.planet; result.preparation = menu.id;
+        CorruptionMenu result; result.player = local; result.actor = menu.actor; result.planet = menu.planet; result.preparation = menu.id;
         for (std::uint32_t i = 0; i < menu.corruption_choices.size(); ++i) {
             const auto& prepared = menu.corruption_choices[i]; const auto& choice = location->slots[prepared.slot];
             ObservedCorruptionChoice row; row.slot = prepared.slot + 1U; row.live_prepared = prepared_ability(menu, i); row.live_choice = choice;
@@ -243,11 +243,10 @@ core::Result<void> GalacticSession::Impl::apply_corruption_completion(PlanetId p
         [&](const auto& p) { return recipient ? p.player == *recipient : p.benefits; }); // WGCH-161: current first beneficiary, never retained actor owner
     // WGP-54/WGCH-75: a due completion voices the local owner first, otherwise
     // the designated beneficiary if local. Startup and ruins cleanup are silent.
-    if (preceding_events && feedback_notice_handler && observer && observer->local_player) {
+    if (preceding_events && feedback_notice_handler && observer) {
         const auto location = planets.find(planet);
         const auto owner = location == planets.end() ? 0 : registry.get<session_detail::PlanetData>(location->second).owner;
-        const auto local = observer->local_player;
-        if (owner == local || (beneficiary != economy_corruption->players.end() && beneficiary->player == local))
+        for (const auto local : observer->human_observers) if (owner == local || (beneficiary != economy_corruption->players.end() && beneficiary->player == local))
             feedback_notice_handler({next == CorruptionType::none ? GalacticFeedbackNotice::Kind::corruption_removed
                 : GalacticFeedbackNotice::Kind::planet_corrupted, local, planet, *preceding_events});
     }

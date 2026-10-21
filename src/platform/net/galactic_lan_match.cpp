@@ -1,7 +1,10 @@
 #include "galactic_lan_match.hpp"
+#include "eawr/platform/live_game_lockstep.hpp"
 
 #include "eawr/net/desync_monitor.hpp"
 #include "eawr/net/galactic_adapter.hpp"
+#include "eawr/net/lobby_session.hpp"
+#include "galactic_acceptance.hpp"
 
 #include <algorithm>
 #include <optional>
@@ -54,6 +57,19 @@ public:
     State(net::MessageTransport& transport, GalacticLanOptions options)
         : transport_(transport), options_(std::move(options)) {}
 
+    State(net::MessageTransport& transport, GalacticLanOptions options, std::shared_ptr<net::LobbyResult> result,
+        net::DesyncMonitor& monitor, std::function<void(bool)> cadence, std::shared_ptr<void> lifetime)
+        : transport_(transport), options_(std::move(options)), lifetime_(std::move(lifetime)),
+          admission_(std::move(result)), external_cadence_(std::move(cadence)) {
+        monitor_ = &monitor;
+        adapter_ = dynamic_cast<net::GalacticSessionAdapter*>(&admission_->setup().adapter());
+        session_ = &admission_->setup().session();
+        session_->enable_departures([](sim::SeatCommandKey key) {
+            return net::encode_galactic_input(key, galactic::SeatLeave{});
+        });
+        if (!adapter_) failed_ = make_diagnostic(net::session_errors::options, "The campaign lobby adapter is not galactic.");
+    }
+
     [[nodiscard]] sim::SeatId local_seat() const {
         return transport_.self() < options_.seats.size() ? options_.seats[transport_.self()].seat : sim::SeatId{};
     }
@@ -85,6 +101,21 @@ public:
                 return Tick::success(std::nullopt);
             }
         }
+        if (&adapter_->game() != &context.game)
+            return end_with_failure(make_diagnostic(net::session_errors::options,
+                "The live campaign differs from the agreed lobby owner."));
+        if (acceptance_ && !acceptance_ready_) {
+            acceptance_->initialize(context.game, local_seat());
+            acceptance_->delay = options_.input_delay;
+            session_->set_stage_observer([this](std::string_view event, const net::SeatInput& input, std::uint64_t tick) {
+                acceptance_->event(event, input, tick);
+            });
+            acceptance_ready_ = true;
+        }
+        adapter_->bind_executor(context.executor);
+        if (acceptance_) acceptance_->script(context.game, local_seat(), context.game.completed_tick(), [&](const auto& payload) {
+            submit(context, platform::LiveGameOrder{local_seat(), payload, {}});
+        });
         for (const auto& order : orders) submit(context, order);
         // The engine-side source (GC AI) is borrowed for this call only: it runs inside the gated step on every peer.
         if (context.command_source)
@@ -92,6 +123,8 @@ public:
                 return core::Result<std::vector<galactic::GameCommand>>::success(context.command_source(tick));
             });
         gate_.advance_allowed = context.advance_allowed;
+        if (external_cadence_) external_cadence_(context.advance_allowed);
+        const auto started = acceptance_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         auto pumped = session_->pump(now);
         adapter_->set_engine_source({});
         if (!pumped) return end_with_failure(pumped.error());
@@ -100,15 +133,62 @@ public:
             tick = adapter_->take_tick();
             if (!tick) return end_with_failure(make_diagnostic(net::session_errors::simulation,
                 "the galaxy adapter completed a tick without publishing it"));
+            if (acceptance_) acceptance_->observe(context.game, *tick,
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count());
         }
+        if (acceptance_) {
+            acceptance_->stall(context.advance_allowed && session_->waiting_for() && !session_->waiting_for()->peers.empty());
+            if (!acceptance_->healthy()) return end_with_failure(make_diagnostic(net::session_errors::options,
+                "Cannot write GC acceptance evidence."));
+        }
+        if (tick && tick->galaxy) {
+            const std::lock_guard lock(mutex_);
+            const auto& game = adapter_->game();
+            view_.clock_paused = game.battle() ? game.child_paused() : game.galaxy().clock().pause_depth != 0;
+            for (const auto seat_id : adapter_->clock_refusals()) {
+                const auto at = std::find_if(view_.clock_refusals.begin(), view_.clock_refusals.end(),
+                    [&](const auto& row) { return row.seat == seat_id; });
+                if (at == view_.clock_refusals.end()) view_.clock_refusals.push_back({seat_id, tick->completed_tick});
+                else at->completed_tick = tick->completed_tick;
+            }
+            if (tick->galaxy != clock_snapshot_) for (const auto& event : tick->galaxy->events()) {
+                using Kind = galactic::GalacticEventKind;
+                std::string action;
+                if (event.kind == Kind::galaxy_paused) action = "paused";
+                else if (event.kind == Kind::galaxy_resumed) action = "resumed";
+                else if (event.kind == Kind::speed_changed) action = "changed speed";
+                const bool human = std::any_of(options_.seats.begin(), options_.seats.end(),
+                    [&](const auto& seat) { return seat.may_submit && seat.seat == event.producer; });
+                if (!action.empty() && human) {
+                    view_.clock_actor = event.producer; view_.clock_action = std::move(action);
+                    view_.clock_change_tick = tick->completed_tick;
+                }
+            }
+        }
+        if (tick) clock_snapshot_ = tick->galaxy;
         refresh(pumped.value(), context.advance_allowed, now);
         return Tick::success(std::move(tick));
     }
 
+    [[nodiscard]] std::span<const sim::SeatId> clock_refusals() const noexcept {
+        return adapter_ ? adapter_->clock_refusals() : std::span<const sim::SeatId>{};
+    }
+
     void session_ended() noexcept {
+        if (acceptance_) {
+            try { acceptance_->finish(monitor_ && monitor_->agreed_end()); } catch (...) { /* Missing receipt fails verification. */ }
+        }
         session_ended_ = true;
-        session_.reset();
-        adapter_.reset();
+        session_ = nullptr;
+        adapter_ = nullptr;
+        owned_session_.reset();
+        owned_adapter_.reset();
+        // The admitted adapter no longer borrows the live worker executor after stop.
+        if (admission_) {
+            static const sim::InlineExecutor stopped_executor;
+            if (auto* adapter = dynamic_cast<net::GalacticSessionAdapter*>(&admission_->setup().adapter()))
+                adapter->bind_executor(stopped_executor);
+        }
     }
 
 private:
@@ -119,9 +199,13 @@ private:
         net::DesyncOptions monitor_options;
         monitor_options.input_delay = options_.input_delay;
         monitor_options.exchange_every = options_.exchange_every;
-        monitor_.emplace(transport_, monitor_options);
-        gate_.monitor = &*monitor_;
-        adapter_.emplace(context.game, context.executor);
+        owned_monitor_.emplace(transport_, monitor_options);
+        monitor_ = &*owned_monitor_;
+        gate_.monitor = monitor_;
+        net::GalacticAdapterOptions adapter_options;
+        adapter_options.clock_policy = options_.clock_policy;
+        owned_adapter_.emplace(context.game, context.executor, adapter_options);
+        adapter_ = &*owned_adapter_;
         net::SessionOptions session_options;
         session_options.input_delay = options_.input_delay;
         session_options.final_tick_count = options_.final_tick_count;
@@ -129,7 +213,8 @@ private:
         session_options.unconfirmed_departure = net::UnconfirmedDeparture::continue_alone; // D5 configured fallback; D8 no rejoin
         auto created = net::LockstepSession::create(*adapter_, transport_, options_.seats, session_options, &gate_);
         if (!created) return core::Result<void>::failure(created.error());
-        session_.emplace(std::move(created).value());
+        owned_session_.emplace(std::move(created).value());
+        session_ = &*owned_session_;
         // GCMP-09: SeatLeave applies WGS-P02/P04 at the agreed tick; D5 keeps the campaign running with its fallback.
         session_->enable_departures([](sim::SeatCommandKey key) {
             return net::encode_galactic_input(key, galactic::SeatLeave{});
@@ -147,6 +232,10 @@ private:
             return net::encode_galactic_input(key, order.payload);
         });
         if (!stamped) context.reject(stamped.error());
+        else if (acceptance_) {
+            auto encoded = net::encode_galactic_input(stamped.value(), order.payload);
+            if (encoded) acceptance_->event("input", {stamped.value(), std::move(encoded).value()}, context.game.completed_tick());
+        }
     }
 
     Tick end_with_failure(core::Diagnostic error) {
@@ -165,6 +254,8 @@ private:
     void refresh(const net::PumpResult& pumped, bool due, std::uint64_t now) {
         const std::lock_guard lock(mutex_);
         view_.completed_tick = adapter_->completed_tick();
+        const auto& game = adapter_->game();
+        view_.clock_paused = game.battle() ? game.child_paused() : game.galaxy().clock().pause_depth != 0;
         for (const auto& event : pumped.departure_events) {
             view_.departed.push_back(event.key.seat);
             if (event.key.seat == local_seat()) {
@@ -202,7 +293,7 @@ private:
             if (peer != transport_.self() && transport_.link(peer) == net::LinkState::connecting) connected = false;
         view_.waiting_for.clear();
         if (!connected) view_.phase = GalacticLanPhase::connecting;
-        else if (!wait_peers_.empty() && now >= wait_since_ && now - wait_since_ >= options_.waiting_notice_ms) {
+        else if (!wait_peers_.empty() && now >= wait_since_ && now - wait_since_ > options_.waiting_notice_ms) {
             view_.phase = GalacticLanPhase::waiting_for_peer;
             view_.waiting_for = wait_peers_;
         } else if (!view_.departed.empty()) view_.phase = GalacticLanPhase::departed;
@@ -211,21 +302,37 @@ private:
 
     net::MessageTransport& transport_;
     GalacticLanOptions options_;
+public:
+    std::unique_ptr<GalacticAcceptance> acceptance_;
+private:
+    bool acceptance_ready_{};
     mutable std::mutex mutex_;
     GalacticLanView view_;
+    std::shared_ptr<const galactic::GalacticSnapshot> clock_snapshot_;
     std::optional<core::Diagnostic> failed_;
     bool session_ended_{};
     // Declaration order is destruction order reversed: the session goes before the adapter, gate and monitor it uses.
-    std::optional<net::DesyncMonitor> monitor_;
+    std::shared_ptr<void> lifetime_;
+    std::shared_ptr<net::LobbyResult> admission_;
+    std::function<void(bool)> external_cadence_;
+    std::optional<net::DesyncMonitor> owned_monitor_;
     CadenceGate gate_;
-    std::optional<net::GalacticSessionAdapter> adapter_;
-    std::optional<net::LockstepSession> session_;
+    std::optional<net::GalacticSessionAdapter> owned_adapter_;
+    std::optional<net::LockstepSession> owned_session_;
+    net::DesyncMonitor* monitor_{};
+    net::GalacticSessionAdapter* adapter_{};
+    net::LockstepSession* session_{};
     std::vector<net::PeerIndex> wait_peers_;
     std::uint64_t wait_since_{};
 };
 
 GalacticLanMatch::GalacticLanMatch(net::MessageTransport& transport, GalacticLanOptions options)
     : state_(std::make_shared<State>(transport, std::move(options))) {}
+GalacticLanMatch::GalacticLanMatch(net::MessageTransport& transport, GalacticLanOptions options,
+    std::shared_ptr<net::LobbyResult> result, net::DesyncMonitor& monitor,
+    std::function<void(bool)> cadence, std::shared_ptr<void> lifetime)
+    : state_(std::make_shared<State>(transport, std::move(options), std::move(result), monitor,
+        std::move(cadence), std::move(lifetime))) {}
 GalacticLanMatch::~GalacticLanMatch() = default;
 
 std::shared_ptr<platform::LiveGameStepDriver> GalacticLanMatch::driver() {
@@ -237,6 +344,7 @@ std::shared_ptr<platform::LiveGameStepDriver> GalacticLanMatch::driver() {
             return state_->drive(context, orders, now_ms);
         }
         void session_ended() noexcept override { state_->session_ended(); }
+        std::span<const sim::SeatId> clock_refusals() const noexcept override { return state_->clock_refusals(); }
     private:
         std::shared_ptr<State> state_;
     };
@@ -244,5 +352,8 @@ std::shared_ptr<platform::LiveGameStepDriver> GalacticLanMatch::driver() {
 }
 GalacticLanView GalacticLanMatch::view() const { return state_->view(); }
 sim::SeatId GalacticLanMatch::local_seat() const { return state_->local_seat(); }
+void GalacticLanMatch::configure_acceptance(std::filesystem::path directory, std::string campaign, bool stock) {
+    if (!directory.empty()) state_->acceptance_ = std::make_unique<GalacticAcceptance>(std::move(directory), std::move(campaign), stock);
+}
 
 } // namespace eawr::presentation::godot_backend

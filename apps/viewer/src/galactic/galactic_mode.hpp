@@ -1,6 +1,7 @@
 #pragma once
 
 #include "map_input.hpp"
+#include "galactic_lan_hud.hpp"
 
 #include "eawr/platform/campaign_end_view.hpp"
 #include "eawr/presentation/ui/front_end.hpp"
@@ -13,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace eawr::presentation::godot_backend {
 
@@ -30,10 +32,15 @@ namespace eawr::presentation::godot_backend {
 // selects, double-click toggles planet focus, wheel enters/leaves focus or the
 // advanced-map state, Home restores overview (project bindings).
 class GalacticHudFixture;
+struct GalacticLaunch;
 
 class GalacticMode final {
 public:
     struct Options final {
+        std::shared_ptr<GalacticLanMatch> lan_match;
+        std::shared_ptr<GalacticLaunch> lan_start;
+        std::vector<viewer::galactic::LanPlayer> lan_players;
+        std::filesystem::path lan_acceptance_directory;
         std::string campaign;
         std::optional<presentation::ui::CampaignStartRequest::Economy> custom_economy{};
         std::filesystem::path game_root;
@@ -57,6 +64,10 @@ public:
         bool native_ai_invalid{};
         bool galactic_reveal{}; // --eawr-galactic-reveal on|off: draw-only fog reveal, default off (#3931).
         bool galactic_reveal_invalid{};
+        // --eawr-galactic-hud-verify yes (#4331): after every publication the HUD facts are rebuilt from nothing and compared with
+        // the retained ones, and an unchanged command bar or weapon-action key still runs its full update and must change nothing.
+        // Mismatches are counted in the report. Qualification only; it costs the work the retained state saves.
+        bool hud_verify{};
         bool all_ai_capture{}; // Capture-only: preserve the camera perspective, replace simulation human seats.
         bool proof_options_invalid{};
         std::optional<std::uint64_t> capture_seed{};

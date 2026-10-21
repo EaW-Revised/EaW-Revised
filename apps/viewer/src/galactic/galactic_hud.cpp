@@ -62,6 +62,16 @@ void set_command_bar_text(EawrHudText& label, const String& value) {
     if (label.get_text() != value) label.set_text(value);
 }
 
+// The fiscal pip lit for this clock: the tenth of the fiscal window the galactic frame is in (none while the
+// fiscal cycle is not running).
+std::optional<std::size_t> fiscal_pip(const sim::galactic::GalacticClock& clock, const bool fiscal_available) {
+    if (!fiscal_available) return std::nullopt;
+    const double elapsed = clock.galactic_frame >= clock.fiscal_start
+        ? static_cast<double>(clock.galactic_frame - clock.fiscal_start) : 0.0;
+    return static_cast<std::size_t>(std::clamp(elapsed * 10.0
+        / static_cast<double>(clock.fiscal_end - clock.fiscal_start), 0.0, 9.0));
+}
+
 }
 
 bool GalacticMode::State::build_hud() {
@@ -95,6 +105,13 @@ bool GalacticMode::State::build_hud() {
     hud->set_z_index(1);
     hud->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     hud->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    // GUI picking follows sibling order, independently of canvas z_index.
+    // Keep every world-attached overlay below panel masks, even when created later.
+    world_overlays = memnew(Control);
+    world_overlays->set_name("GalacticWorldOverlays");
+    world_overlays->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    hud->add_child(world_overlays);
+    world_overlays->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
     return build_command_bar() && build_fleet_hud() && build_radar_hud() && build_ground_hud() && build_orbit_hud() && build_corruption_hud() && build_battle_dialog() && build_campaign_score() && build_hero_map_bar() && build_hero_action_hud() && build_weapon_action_hud() && build_destruction_hud() && build_black_market_hud();
 }
 
@@ -125,7 +142,7 @@ void GalacticMode::State::update_hud() {
     update_hero_map_bar();
     update_hero_action_hud();
     update_destruction_hud();
-    update_weapon_action_hud();
+    { const auto measured = measure_frame(FramePhase::hud_weapon); update_weapon_action_hud(); }
     update_black_market_hud();
     service_black_market_encyclopedia();
     service_selection_cursor();
@@ -273,6 +290,10 @@ void GalacticMode::State::update_planet_labels() {
     constexpr float cull_margin = 32.0F;
     const galactic_view::HudView view{static_cast<float>(camera.width), static_cast<float>(camera.height)};
     destruction_hud.projected = false;
+    for (auto& [planet, slot] : destruction_hud.raid_slots) {
+        static_cast<void>(planet); slot.projected = false;
+        if (slot.button) slot.button->hide();
+    }
     for (const auto planet_index : hud_planet_indices) {
         const auto planet = galaxy->planets.begin() + static_cast<std::ptrdiff_t>(planet_index);
         const auto observation = hud_facts.find(planet->id);
@@ -330,7 +351,7 @@ void GalacticMode::State::update_planet_labels() {
                 if (created) {
                     income = memnew(Label); income->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
                     income->set_name(String::utf8(("planet_income_" + std::to_string(planet->id)).c_str()));
-                    hud->add_child(income);
+                    world_overlays->add_child(income);
                     const auto face = hud_fonts->resolve({std::string(component->text(data::ui::Field::font_name)),
                         component->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
                     income->add_theme_font_override("font", hud_fonts->font(face));
@@ -369,7 +390,7 @@ void GalacticMode::State::update_planet_labels() {
             auto [entry, inserted] = planet_labels.try_emplace(planet->id, nullptr);
             if (inserted) {
                 entry->second = memnew(Label);
-                hud->add_child(entry->second);
+                world_overlays->add_child(entry->second);
                 entry->second->set_mouse_filter(Control::MOUSE_FILTER_PASS);
                 entry->second->set_name(String::utf8(("planet_name_" + std::to_string(planet->id)).c_str()));
             }
@@ -498,6 +519,31 @@ Ref<Texture2D> GalacticMode::State::command_texture(const std::string_view name)
 
 void GalacticMode::State::refresh_hud_facts() {
     if (!displayed_snapshot || !galaxy || hud_facts_snapshot == displayed_snapshot) return;
+    if (!options.hud_verify) { refresh_hud_facts_pass(); return; }
+    // Verification: the facts the HUD now shows against the facts rebuilt from nothing for the same publication.
+    const auto before = hud_facts;
+    refresh_hud_facts_pass();
+    for (const auto& [id, facts] : hud_facts)
+        if (const auto old = before.find(id); old == before.end() || !(old->second == facts)) ++hud_fact_changes;
+    auto shown = hud_facts;
+    hud_facts_cold = true; hud_facts_snapshot.reset(); hud_offers_owner.reset();
+    refresh_hud_facts_pass();
+    hud_facts_cold = false;
+    ++hud_verify_checks;
+    if (!(hud_facts == shown)) {
+        ++hud_verify_mismatches;
+        if (hud_verify_detail.empty()) {
+            hud_verify_detail = "facts";
+            for (const auto& [id, facts] : hud_facts)
+                if (const auto kept = shown.find(id); kept == shown.end() || !(kept->second == facts)) {
+                    hud_verify_detail += " planet " + std::to_string(id); break;
+                }
+        }
+    }
+    hud_facts = std::move(shown);
+}
+
+void GalacticMode::State::refresh_hud_facts_pass() {
     hud_facts_snapshot = displayed_snapshot;
     ++hud_fact_rebuilds;
     const bool fixture = fixture_enabled(GalacticHudFixture::Feature::intelligence);
@@ -507,7 +553,10 @@ void GalacticMode::State::refresh_hud_facts() {
         if (options.campaign != galactic_view::synthetic_campaign || !options.hud_provider) hud_facts.clear();
         return;
     }
-    hud_facts.clear();
+    // #4331: the previous publication's facts stay readable while this one is built, so a planet whose offer rows are
+    // the same column keeps the choices already copied from them.
+    std::map<galactic_view::ObjectId, galactic_view::PlanetHudFacts> previous_facts;
+    if (hud_facts_cold) hud_facts.clear(); else previous_facts.swap(hud_facts);
     // Index each publication once; planet count must not multiply scans of
     // the observation, numeric payload or presentation metadata arrays.
     std::unordered_map<galactic_view::ObjectId, const sim::galactic::ObservedPlanet*> observations;
@@ -535,30 +584,38 @@ void GalacticMode::State::refresh_hud_facts() {
     }
     // WGUI-91: admission still comes from the publication. Index its offers
     // once, retaining source order for equal authored type-manager positions.
-    // hud_facts_snapshot retains the immutable rows until this local index dies;
+    // hud_offers_owner retains the immutable rows while the index points into them (#4331);
     // the name/art maps are unchanged while the choices copy their fields.
-    struct HudOffer final {
-        const sim::galactic::ObservedProductionOffer* row{};
-        const std::string* name{};
-        const galactic_view::ProductionArt* art{};
-    };
-    std::vector<HudOffer> offers;
     const auto published_offers = displayed_snapshot->production_offers();
     hud_offer_max_rows = std::max(hud_offer_max_rows, static_cast<std::uint64_t>(published_offers.size()));
-    offers.reserve(published_offers.size());
-    for (const auto& row : published_offers) {
-        ++hud_offer_rows_visited;
-        if (row.player != galaxy->local.player) continue;
-        const auto name = production_names.find(row.type);
-        if (name == production_names.end()) continue;
-        const auto art = production_art.find(name->second);
-        if (art == production_art.end()) continue;
-        offers.push_back({&row, &name->second, &art->second});
+    const bool offers_rebuilt = !hud_offers_owner || hud_offers_data != published_offers.data()
+        || hud_offers_size != published_offers.size() || hud_offers_player != galaxy->local.player;
+    if (offers_rebuilt) {
+        ++hud_offer_index_builds;
+        hud_offers.clear();
+        hud_offers.reserve(published_offers.size());
+        for (const auto& row : published_offers) {
+            ++hud_offer_rows_visited;
+            if (row.player != galaxy->local.player) continue;
+            auto [type, inserted] = hud_offer_types.try_emplace(row.type);
+            if (inserted) {
+                const auto name = production_names.find(row.type);
+                const auto art = name == production_names.end() ? production_art.end() : production_art.find(name->second);
+                if (art != production_art.end()) type->second = HudOfferType{&name->second, &art->second};
+            }
+            if (type->second) hud_offers.push_back({&row, type->second->name, type->second->art});
+        }
+        const auto before = [](const auto& a, const auto& b) {
+            if (a.row->planet != b.row->planet) return a.row->planet < b.row->planet;
+            return a.art->type_order < b.art->type_order;
+        };
+        // The published rows usually arrive in this order already; a stable sort of a sorted run changes nothing.
+        if (!std::is_sorted(hud_offers.begin(), hud_offers.end(), before))
+            std::stable_sort(hud_offers.begin(), hud_offers.end(), before);
+        hud_offers_owner = displayed_snapshot; hud_offers_data = published_offers.data();
+        hud_offers_size = published_offers.size(); hud_offers_player = galaxy->local.player;
     }
-    std::stable_sort(offers.begin(), offers.end(), [](const auto& a, const auto& b) {
-        if (a.row->planet != b.row->planet) return a.row->planet < b.row->planet;
-        return a.art->type_order < b.art->type_order;
-    });
+    const auto& offers = hud_offers;
     for (const auto& location : displayed_snapshot->planets()) {
         sim::galactic::ObservedPlanet observation;
         observation.player = galaxy->local.player; observation.planet = location.id;
@@ -613,15 +670,25 @@ void GalacticMode::State::refresh_hud_facts() {
         if (galactic_view::publish_production_queue(facts, observation, production, options.galactic_reveal, describe_type)) {
             facts.maximum_queue = displayed_snapshot->production()->maximum_human_queue;
             // WGUI-91: admission is a sim projection, never reconstructed here.
-            const auto first = std::lower_bound(offers.begin(), offers.end(), location.id,
-                [](const auto& offer, const auto id) { return offer.row->planet < id; });
-            for (auto entry = first; entry != offers.end() && entry->row->planet == location.id; ++entry) {
-                auto choice = galactic_view::production_choice_facts(*entry->row);
-                choice.type = *entry->name;
-                choice.build_tab = entry->art->build_tab;
-                choice.base_type = entry->art->base_filter;
-                choice.gui_row = entry->art->gui_row; choice.icon = entry->art->icon;
-                facts.choices.push_back(std::move(choice));
+            // The same offer column as the last publication's facts were built from, and this planet's queue was
+            // published then too: its choices are exactly those, so they move over instead of being copied again.
+            const auto before = offers_rebuilt || fixture ? previous_facts.end() : previous_facts.find(location.id);
+            if (before != previous_facts.end() && before->second.space_queue) {
+                facts.choices = std::move(before->second.choices);
+            } else {
+                const auto first = std::lower_bound(offers.begin(), offers.end(), location.id,
+                    [](const auto& offer, const auto id) { return offer.row->planet < id; });
+                auto last = first;
+                while (last != offers.end() && last->row->planet == location.id) ++last;
+                facts.choices.reserve(static_cast<std::size_t>(last - first));
+                for (auto entry = first; entry != last; ++entry) {
+                    auto choice = galactic_view::production_choice_facts(*entry->row);
+                    choice.type = *entry->name;
+                    choice.build_tab = entry->art->build_tab;
+                    choice.base_type = entry->art->base_filter;
+                    choice.gui_row = entry->art->gui_row; choice.icon = entry->art->icon;
+                    facts.choices.push_back(std::move(choice));
+                }
             }
         }
         const auto metadata_planet = planet_metadata.find(location.id);
@@ -677,7 +744,7 @@ void GalacticMode::State::update_planet_levels(const galactic_view::ObjectId id,
             auto* image = memnew(TextureRect);
             image->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
             image->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-            hud->add_child(image);
+            world_overlays->add_child(image);
             return image;
         };
         for (auto& image : entry->second.ground) image = make();
@@ -776,7 +843,7 @@ void GalacticMode::State::update_planet_status_icons(const galactic_view::Object
             slot = memnew(TextureRect);
             slot->set_mouse_filter(build ? Control::MOUSE_FILTER_STOP : Control::MOUSE_FILTER_IGNORE);
             if (build) slot->set_name(String::utf8(("production_activity_" + std::to_string(id)).c_str()));
-            slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); hud->add_child(slot);
+            slot->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE); world_overlays->add_child(slot);
         }
         if (build) slot->set_meta("production_texture", String::utf8(name.c_str()));
         entries.push_back({slot, texture});
@@ -1013,10 +1080,23 @@ void GalacticMode::State::build_command_bar_controls(const data::ui::TextDatabas
         const auto keys = component->list(data::ui::Field::tooltip_text);
         if (text && !keys.empty()) if (const auto* entry = text->find(keys.front()))
             button->set_tooltip_text(String::utf8(data::ui::to_utf8(entry->value).c_str()));
-        button->set_texture_normal(command_texture(command_bar_token(*component, data::ui::Field::icon_texture_name)));
-        button->set_texture_hover(command_texture(command_bar_token(*component, data::ui::Field::mouse_over_texture_name)));
-        button->set_texture_pressed(command_texture(command_bar_token(*component, data::ui::Field::selected_texture_name)));
-        button->set_texture_disabled(command_texture(command_bar_token(*component, data::ui::Field::disabled_texture_name)));
+        const auto texture = [&](data::ui::Field field) { return command_texture(command_bar_token(*component, field)); };
+        if (component->flag(data::ui::Field::swap_texture)) {
+            button->setup_art({.normal = texture(data::ui::Field::icon_texture_name),
+                .hover = texture(data::ui::Field::mouse_over_texture_name),
+                .pressed = texture(data::ui::Field::selected_texture_name),
+                .disabled = texture(data::ui::Field::disabled_texture_name)});
+        } else {
+            // GCF-01/HCB-12g/TM-14: non-swapping state art overlays the retained icon.
+            // The filter rollover is translucent; replacing the icon exposes the dark shell below it.
+            const auto blank = texture(data::ui::Field::blank_texture_name);
+            button->setup_art({.normal = blank, .disabled = blank,
+                .portrait = HudButtonArt::Portrait{texture(data::ui::Field::icon_texture_name),
+                    component->flag(data::ui::Field::click_shift), false},
+                .overlays = HudButtonArt::Overlays{texture(data::ui::Field::mouse_over_texture_name),
+                    texture(data::ui::Field::selected_texture_name), texture(data::ui::Field::disabled_texture_name),
+                    !component->flag(data::ui::Field::selected_alpha), true}});
+        }
         button->set_flash_texture(command_texture(command_bar_token(*component, data::ui::Field::flash_texture_name)));
         button->set_action([this, name = std::string(name)] {
             if (name == "b_space_tab") selected_hud.space_tab = true;
@@ -1444,22 +1524,29 @@ void GalacticMode::State::configure_command_bar_text(const presentation::ui::She
         1.0F / static_cast<float>(placement.scale)); // GHUD-S66: one source raster pixel at every resolution.
 }
 
-void GalacticMode::State::update_command_bar_economy(const sim::galactic::GalacticClock& clock, bool fiscal_available) {
-    if (economy_hud_snapshot != displayed_snapshot) {
-        auto player = galactic_view::published_player_hud_facts(*displayed_snapshot, galaxy->local.player);
-        if (fiscal_available) player.fiscal_cycle = clock.fiscal_cycle;
-        player.hide_tech = command_faction == presentation::ui::HudFaction::underworld;
-        player_hud = galactic_view::player_hud_view(player, cycle_label);
-        income_tooltip = galactic_view::income_forecast_text(displayed_snapshot->economy_forecast());
-        if (const auto income = command_labels.find("Text_Day_Credits"); income != command_labels.end()) {
-            income->second->set_tooltip_text(String::utf8(income_tooltip.c_str()));
-        }
-        economy_hud_snapshot = displayed_snapshot;
-        account_text.clear();
-        if (displayed_snapshot->player_economy()) for (const auto& economy : displayed_snapshot->player_economy()->players) {
-            if (economy.player == galaxy->local.player) account_text = galactic_view::credit_balance(economy.credits);
-        }
+// True when the economy readouts (the player facts, the income tooltip, the credit balance) now differ from what the bar
+// last drew. They are derived once per publication; an unchanged result writes nothing.
+bool GalacticMode::State::update_command_bar_economy(const sim::galactic::GalacticClock& clock, bool fiscal_available) {
+    if (economy_hud_snapshot == displayed_snapshot) return false;
+    auto player = galactic_view::published_player_hud_facts(*displayed_snapshot, galaxy->local.player);
+    if (fiscal_available) player.fiscal_cycle = clock.fiscal_cycle;
+    player.hide_tech = command_faction == presentation::ui::HudFaction::underworld;
+    auto view = galactic_view::player_hud_view(player, cycle_label);
+    auto tooltip = galactic_view::income_forecast_text(displayed_snapshot->economy_forecast());
+    std::string account;
+    if (displayed_snapshot->player_economy()) for (const auto& economy : displayed_snapshot->player_economy()->players) {
+        if (economy.player == galaxy->local.player) account = galactic_view::credit_balance(economy.credits);
     }
+    const bool first = !economy_hud_snapshot;
+    economy_hud_snapshot = displayed_snapshot;
+    if (!first && view == player_hud && tooltip == income_tooltip && account == account_text) return false;
+    player_hud = std::move(view);
+    income_tooltip = std::move(tooltip);
+    if (const auto income = command_labels.find("Text_Day_Credits"); income != command_labels.end()) {
+        income->second->set_tooltip_text(String::utf8(income_tooltip.c_str()));
+    }
+    account_text = std::move(account);
+    return true;
 }
 
 void GalacticMode::State::update_command_bar_labels(const presentation::ui::ShellPlacement& placement,
@@ -1629,6 +1716,11 @@ void GalacticMode::State::update_command_bar_buttons(const presentation::ui::She
             button->set_disabled(!galactic_view::fast_forward_available(clock_controls_enabled, paused, fast_forward_factor.has_value()));
             button->set_pressed_no_signal(fast_forward_factor && clock.strategic_speed == *fast_forward_factor);
         }
+        if (!component->flag(data::ui::Field::swap_texture) && button->is_visible_in_tree()) {
+            // Programmatic toggle/disabled changes emit no button signals; update the retained layers too.
+            hud_button->set_order_selected(button->is_pressed());
+            hud_button->set_special_disabled(button->is_disabled());
+        }
     }
 }
 
@@ -1728,13 +1820,7 @@ void GalacticMode::State::update_command_bar_queues(const presentation::ui::Shel
 
 void GalacticMode::State::update_command_bar_pips(const presentation::ui::ShellPlacement& placement,
     const sim::galactic::GalacticClock& clock, bool fiscal_available) {
-    current_pip.reset();
-    if (fiscal_available) {
-        const double elapsed = clock.galactic_frame >= clock.fiscal_start
-            ? static_cast<double>(clock.galactic_frame - clock.fiscal_start) : 0.0;
-        current_pip = static_cast<std::size_t>(std::clamp(elapsed * 10.0
-            / static_cast<double>(clock.fiscal_end - clock.fiscal_start), 0.0, 9.0));
-    }
+    current_pip = fiscal_pip(clock, fiscal_available);
     const auto* pip_component = command_catalog.find("balance_pip");
     const auto* pip_anchor = command_anchors.find("Text_Day_Counter");
     if (pip_component && pip_anchor) {
@@ -1776,24 +1862,59 @@ void GalacticMode::State::update_command_bar() {
     const bool clock_enabled = !map_input.gates.tutorial_locked && map_input.gates.world_allowed()
         && galactic_view::clock_controls_admitted(static_cast<std::size_t>(std::count_if(metadata.seats.begin(), metadata.seats.end(),
             [](const auto& seat) { return seat.active && seat.human; })), bool(options.hud_provider));
-    const auto current_key = [&] {
-        return HudCommandKey{displayed_snapshot, selected_planet, selected_hud.space_tab,
-            base_levels_visible, income_layer_visible, clock_enabled, paused, choice_page,
-            fast_forward_factor, seat_flight().state(), command_bar->placement(), camera.height};
-    };
-    if (hud_command_key == current_key()) return;
-    ++hud_command_updates;
     const auto& clock = displayed_snapshot->clock();
     const bool fiscal_available = clock.fiscal_cycle >= 1 && clock.fiscal_end > clock.fiscal_start;
-    update_command_bar_economy(clock, fiscal_available);
-    const auto selected = hud_facts.find(selected_planet);
-    selected_hud = galactic_view::planet_hud_view(selected == hud_facts.end() ? nullptr : &selected->second,
-        selected_hud.space_tab, queue_buttons[1].size(), queue_buttons[0].size());
-    // WGUI-79: missing tutorial/MP profile admission (#1979) stays an explicit seam.
-    clock_controls_enabled = clock_enabled;
     // TM-03/04: a live campaign (no synthetic HUD fixture) fast-forwards at the shared 4x rule; the
     // button stays disabled with more than one human, as in retail network play.
     if (const auto live = galactic_view::live_fast_forward_factor(bool(options.hud_provider), game != nullptr)) fast_forward_factor = live;
+    // #4331: derive what the bar reads of this publication; only a result that differs from the last one moves a revision.
+    if (update_command_bar_economy(clock, fiscal_available)) ++hud_economy_revision;
+    const auto selected = hud_facts.find(selected_planet);
+    // A render frame with the same publication and input must not copy the selected planet's strings/vectors.
+    // Queue-slot capacities are fixed by build_command_bar_queues; a rebuilt bar has no retained command key.
+    if (!hud_command_key || hud_view_fact_revision != hud_fact_rebuilds
+        || hud_command_key->selection != selected_planet || hud_command_key->space_tab != selected_hud.space_tab
+        || hud_command_key->economy_revision != hud_economy_revision) {
+        ++hud_view_rebuilds;
+        if (auto view = galactic_view::planet_hud_view(selected == hud_facts.end() ? nullptr : &selected->second,
+                selected_hud.space_tab, queue_buttons[1].size(), queue_buttons[0].size()); !(view == selected_hud)) {
+            selected_hud = std::move(view); ++hud_view_revision;
+        }
+        hud_view_fact_revision = hud_fact_rebuilds;
+    }
+    if (options.hud_verify) {
+        ++hud_verify_checks;
+        if (!(galactic_view::planet_hud_view(selected == hud_facts.end() ? nullptr : &selected->second,
+                selected_hud.space_tab, queue_buttons[1].size(), queue_buttons[0].size()) == selected_hud)) {
+            ++hud_verify_mismatches;
+            if (hud_verify_detail.empty()) hud_verify_detail = "command view";
+        }
+    }
+    const auto native_toggles = [&] {
+        // This allocation-free read also sees native presses whose callback is refused (for example during a drag).
+        std::uint32_t bits{}, bit{1};
+        for (const auto& entry : command_buttons) {
+            if (entry.second->is_toggle_mode() && entry.second->is_pressed()) bits |= bit;
+            bit <<= 1;
+        }
+        return bits;
+    };
+    const auto current_key = [&] {
+        return HudCommandKey{selected_planet, selected_hud.space_tab,
+            base_levels_visible, income_layer_visible, clock_enabled, paused, choice_page,
+            fast_forward_factor, seat_flight().state(), command_bar->placement(), camera.height,
+            hud_economy_revision, hud_view_revision, fiscal_pip(clock, fiscal_available),
+            fast_forward_factor && clock.strategic_speed == *fast_forward_factor,
+            selected == hud_facts.end() ? std::nullopt : std::optional(selected->second.name_colour),
+            selected == hud_facts.end() ? std::nullopt : selected->second.observed_owner, native_toggles()};
+    };
+    const bool unchanged = hud_command_key == current_key();
+    if (unchanged && !options.hud_verify) return;
+    // Verification: an unchanged key still runs the whole update, and it must leave every control as it was.
+    const auto drawn = unchanged ? command_bar_fingerprint() : std::map<std::string, std::uint64_t>{};
+    if (!unchanged) ++hud_command_updates;
+    // WGUI-79: missing tutorial/MP profile admission (#1979) stays an explicit seam.
+    clock_controls_enabled = clock_enabled;
     const auto placement = command_bar->placement();
     update_command_bar_labels(placement, selected);
     update_command_bar_allegiance(placement, selected);
@@ -1804,6 +1925,82 @@ void GalacticMode::State::update_command_bar() {
     update_command_bar_pips(placement, clock, fiscal_available);
     // Admission may force the space tab or clamp the page during this refresh.
     hud_command_key = current_key();
+    if (unchanged) {
+        ++hud_verify_checks;
+        if (const auto now = command_bar_fingerprint(); now != drawn) {
+            ++hud_verify_mismatches;
+            if (hud_verify_detail.empty()) {
+                hud_verify_detail = "command bar";
+                for (const auto& [name, digest] : now)
+                    if (const auto was = drawn.find(name); was == drawn.end() || was->second != digest) {
+                        hud_verify_detail += " " + name; break;
+                    }
+            }
+        }
+    }
+}
+
+namespace {
+void digest_control(galactic_view::HudDigest& digest, const Control* control) {
+    digest.add(control != nullptr);
+    if (!control) return;
+    digest.add(control->is_visible());
+    const auto position = control->get_position(), size = control->get_size();
+    digest.add(position.x); digest.add(position.y); digest.add(size.x); digest.add(size.y);
+}
+void digest_texture(galactic_view::HudDigest& digest, const Ref<Texture2D>& texture) {
+    digest.add(texture.is_valid() ? static_cast<std::uint64_t>(texture->get_instance_id()) : std::uint64_t{0});
+}
+void digest_button(galactic_view::HudDigest& digest, const TextureButton* button) {
+    digest_control(digest, button);
+    if (!button) return;
+    digest.add(button->is_disabled()); digest.add(button->is_pressed());
+    digest.add(std::string_view(utf8(button->get_tooltip_text())));
+    digest_texture(digest, button->get_texture_normal()); digest_texture(digest, button->get_texture_disabled());
+}
+void digest_text(galactic_view::HudDigest& digest, const EawrHudText* label) {
+    digest_control(digest, label);
+    if (!label) return;
+    digest.add(std::string_view(utf8(label->get_text())));
+    const auto colour = label->colour();
+    digest.add(colour.r); digest.add(colour.g); digest.add(colour.b); digest.add(colour.a);
+    digest.add(static_cast<std::int64_t>(label->get_horizontal_alignment()));
+}
+}
+
+// What the command bar's controls hold, for the verification run: the text, colour, place, visibility, enabled state,
+// pressed state, tooltip and textures of every control the update writes.
+std::map<std::string, std::uint64_t> GalacticMode::State::command_bar_fingerprint() const {
+    std::map<std::string, std::uint64_t> parts;
+    for (const auto& [name, label] : command_labels) {
+        galactic_view::HudDigest digest; digest_text(digest, label); parts.emplace("label " + name, digest.value());
+    }
+    for (const auto& [name, icon] : command_label_icons) {
+        galactic_view::HudDigest digest; digest_control(digest, icon); if (icon) digest_texture(digest, icon->get_texture());
+        parts.emplace("label icon " + name, digest.value());
+    }
+    for (const auto& [name, button] : command_buttons) {
+        galactic_view::HudDigest digest; digest_button(digest, button); parts.emplace("button " + name, digest.value());
+    }
+    for (const auto& [name, price] : choice_price) {
+        galactic_view::HudDigest digest; digest_text(digest, price); parts.emplace("price " + name, digest.value());
+    }
+    for (const auto& [name, percent] : queue_percent) {
+        galactic_view::HudDigest digest; digest_text(digest, percent); parts.emplace("percent " + name, digest.value());
+    }
+    for (const auto& [name, dial] : queue_dials) {
+        galactic_view::HudDigest digest; digest_control(digest, dial); parts.emplace("dial " + name, digest.value());
+    }
+    for (std::size_t index = 0; index < fiscal_pips.size(); ++index) {
+        galactic_view::HudDigest digest; digest_button(digest, fiscal_pips[index]);
+        parts.emplace("pip " + std::to_string(index), digest.value());
+    }
+    galactic_view::HudDigest emblem; digest_control(emblem, allegiance_icon);
+    if (allegiance_icon) digest_texture(emblem, allegiance_icon->get_texture());
+    parts.emplace("allegiance", emblem.value());
+    galactic_view::HudDigest shown; shown.add(displayed_choices.size()); shown.add(displayed_queues.size());
+    parts.emplace("displayed", shown.value());
+    return parts;
 }
 
 void GalacticMode::State::enqueue_approach(sim::galactic::PlanetId planet) {

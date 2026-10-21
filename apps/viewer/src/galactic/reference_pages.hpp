@@ -33,6 +33,7 @@ struct HistoryFacts {
     std::uint64_t fiscal_frames{}, planetary_objects{};
     std::uint32_t local_player{};
     bool multiplayer{};
+    std::optional<sim::galactic::HistorySnapshot> published;
 };
 struct ChartLine { std::string name; Rgb colour; std::vector<std::array<double, 2>> points; };
 struct HistoryView {
@@ -42,6 +43,8 @@ struct HistoryView {
     std::vector<ChartLine> lines;
 };
 [[nodiscard]] HistoryView history_view(const HistoryFacts&, HistoryMetric);
+[[nodiscard]] std::optional<HistoryFacts> published_history(const sim::galactic::GalacticSnapshot&,
+    const GalaxySnapshotStub&);
 struct TreeSlot {
     std::string control;
     ReferenceIcon type;

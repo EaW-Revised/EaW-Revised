@@ -39,7 +39,7 @@ gc::GalacticSetup setup() {
     s.routes = {{5, 1, 4, f(1)}};
     s.fleets = {{10, 1, 2, {{11, 100}}, 0, {}}};
     s.debug_commands = true;
-    gc::ObserverSetup o; o.local_player = 1; o.reveal_delay_seconds = take(Fixed::from_decimal("0.5")); o.automatic_reveal_range = f(10);
+    gc::ObserverSetup o; o.human_observers = {1}; o.solo_reference_human = 1; o.reveal_delay_seconds = take(Fixed::from_decimal("0.5")); o.automatic_reveal_range = f(10);
     o.players = {{1, false, false, 0, 3, {}}, {2, true, false, gc::bit(gc::Intelligence::ownership) | gc::bit(gc::Intelligence::fleet_presence), 1, {}}, {3, false, false, 0, 1, {}}};
     for (const auto& p : s.planets) {
         o.planets.push_back({p.id, p.owner, p.owner, 0, 0, 0, 0, false, false, false, false, {}});
@@ -80,6 +80,93 @@ void campaign_home_expansion() {
         expect(!view(game, 1).discovered,
             "WGUI-107 newly revealed foreign endpoint does not recursively expand to its nearby exact-boundary neighbour");
     }
+}
+
+void solo_observer_publication() {
+    auto s = setup();
+    auto game = take(gc::GalacticSession::create(s));
+    const auto check = [&] {
+        const auto canonical = game.snapshot();
+        const auto publication = game.view_snapshot({1});
+        expect(publication && publication->view_player() == 1
+            && publication->observations().size() == s.planets.size(),
+            "solo reference publication contains only its explicit human's observations");
+        std::vector<gc::ObservedPlanet> expected;
+        for (const auto& row : canonical->observations()) if (row.player == 1) expected.push_back(row);
+        expect(std::ranges::equal(publication->observations(), expected),
+            "solo private rows preserve the canonical reference-human knowledge exactly");
+        expect(publication->native_root() == canonical.get()
+            && publication->sha256() == canonical->sha256(),
+            "solo private publication shares the completed immutable state and derived services");
+        expect(game.view_snapshot({1})->observations().data() == publication->observations().data(),
+            "unchanged solo observer inputs reuse the private row vector");
+        expect(!game.view_snapshot({2}), "solo projection still refuses a nonhuman view");
+    };
+    check();
+    submit(game, 1, effect(gc::ObserverAction::add, 0));
+    const eawr::sim::InlineExecutor executor;
+    (void)take(game.step(executor));
+    check();
+    expect(game.view_snapshot({1})->observations()[3].knowledge.fleet_contents,
+        "solo reference publication refreshes its filtered rows after an observer change");
+}
+
+void multiplayer_observer_contexts() {
+    std::vector<std::string> baseline;
+    std::vector<std::uint8_t> replay;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto s = setup();
+        s.seats[1].kind = gc::SeatKind::human; s.seats[1].human_side_id = 2;
+        s.observer->human_observers = {1, 2}; s.observer->solo_reference_human = 0;
+        s.observer->players[1].ai = false; s.observer->players[2].ai = true;
+        s.observer->records.clear(); s.fleets[0].orbit = 1;
+        const std::array<gc::ObserverHome, 2> homes{{{1, 1}, {2, 2}}};
+        require(gc::initialize_campaign_observers(s, homes));
+        auto owner = take(eawr::campaign::GameSession::create(s));
+        auto& game = owner.galaxy();
+        const auto canonical = game.snapshot()->sha256();
+        const auto host = game.view_snapshot({1});
+        const auto guest = game.view_snapshot({2});
+        expect(host && guest && host->view_player() == 1 && guest->view_player() == 2,
+            "each human queries its own view without a canonical local selector");
+        expect(host->observations().size() == s.planets.size() && guest->observations().size() == s.planets.size(),
+            "private observer publications contain only the requested player's rows");
+        expect(host->observations()[0].discovered && !host->observations()[1].discovered
+            && guest->observations()[1].discovered && !guest->observations()[0].discovered,
+            "canonical startup reveals each human's distinct home on every peer");
+        expect(game.view_snapshot({1})->observations().data() == host->observations().data()
+            && game.view_snapshot({2})->observations().data() == guest->observations().data(),
+            "seat switching reuses independent player-keyed caches");
+        expect(host->sha256() == canonical && guest->sha256() == canonical && game.snapshot()->sha256() == canonical,
+            "view context and its caches never enter canonical snapshot bytes");
+        expect(!game.view_snapshot({3}) && !game.view_snapshot({999}), "nonhuman and unknown view contexts fail closed");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes{owner.state_sha256()};
+        for (int tick = 0; tick < 8; ++tick) {
+            (void)game.view_snapshot({tick % 2 ? 1U : 2U});
+            hashes.push_back(take(owner.step(executor)).state_hash.get());
+        }
+        auto ids = eawr::checkpoint::game_identities(game.setup());
+        const auto saved = take(eawr::checkpoint::save_game_checkpoint(owner, ids));
+        auto exact = take(eawr::checkpoint::load_game_checkpoint(saved, ids, {}, executor));
+        expect(exact.session.state_sha256() == owner.state_sha256(), "resync restores all humans' canonical history exactly");
+        expect(std::ranges::equal(game.view_snapshot({2})->observations(), exact.session.galaxy().view_snapshot({2})->observations()),
+            "resync reconstructs the requesting guest's private view");
+        eawr::checkpoint::GameLoadOptions options; options.player_load = true;
+        auto loaded = take(eawr::checkpoint::load_game_checkpoint(saved, ids, options, executor));
+        const auto& records = loaded.session.galaxy().snapshot()->observer()->records;
+        for (const auto& row : records) if (row.player != 3)
+            expect(row.apparent_owner != 0, "player-load refresh visits both canonical human contexts");
+        const auto bytes = take(gc::write_replay(game.record()));
+        auto old_rules = bytes; old_rules[12] = 1;
+        expect(!gc::parse_replay(old_rules), "replays with the old observer/rules identity are explicitly rejected");
+        if (workers == 1) { baseline = hashes; replay = bytes; }
+        else expect(hashes == baseline && bytes == replay, "all-human startup, ticks and replay bytes equal on 1/2/4/8 workers");
+    }
+    auto invalid = setup(); invalid.observer->human_observers = {2, 1};
+    expect(!gc::validate_observer(invalid), "unordered canonical humans are rejected");
+    invalid = setup(); invalid.observer->human_observers = {1, 2};
+    expect(!gc::validate_observer(invalid), "multihuman policy rejects a solo reference human");
 }
 
 void predicates() {
@@ -342,7 +429,7 @@ void projection_cache() {
         "nonobserver campaign-boundary publication shares the existing projection");
     const auto parity = [](const gc::GalacticSession& session) {
         const auto snap = session.snapshot();
-        const auto expected = gc::observed_planets(*snap->observer(), snap->fleets(), snap->movement());
+        const auto expected = gc::observed_planets(*snap->observer(), snap->fleets(), {}, snap->movement());
         expect(std::ranges::equal(snap->observations(), expected), "cached projection equals fresh observer evaluation");
     };
     auto command = effect(gc::ObserverAction::add, 100);
@@ -453,7 +540,7 @@ void replay_checkpoint() {
         for (int i = 0; i < 20; ++i) {
             if (i % 3 == 0) game.scramble_storage_for_testing();
             const auto tick = take(game.step(executor)); expect(tick.state_sha256 == game.state_sha256(), "cached and from-scratch sparse section hash agree");
-            expect(std::ranges::equal(tick.snapshot->observations(), gc::observed_planets(*tick.snapshot->observer(), tick.snapshot->fleets(), tick.snapshot->movement())),
+            expect(std::ranges::equal(tick.snapshot->observations(), gc::observed_planets(*tick.snapshot->observer(), tick.snapshot->fleets(), {}, tick.snapshot->movement())),
                 "replay projection agrees with fresh computation on each worker count");
             hashes.push_back(tick.state_sha256 + game.snapshot()->sha256());
         }
@@ -545,7 +632,7 @@ void black_market_publication() {
     accounts.players[0].credits = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
     const auto overflow = gc::observed_black_market_menus(state, accounts, 1, std::span(&observation, 1));
     expect(!overflow[0].offers[0].affordability_available, "rounding overflow is unavailable, not a known denial");
-    gc::ObserverSetup observer; observer.local_player = 1;
+    gc::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
     const auto snapshot = [&](bool suppress_derived) {
         return std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{}, std::vector<gc::GalacticPlayer>{},
             std::vector<gc::Planet>{}, std::vector<gc::Route>{}, std::vector<gc::Fleet>{}, std::vector<gc::GalacticEvent>{},
@@ -765,7 +852,7 @@ int case_galactic_observer_tests() {
     if (!galactic_support_self_test()) return 1;
     black_market_publication();
     discovery_audio_publication();
-    try { capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
+    try { solo_observer_publication(); multiplayer_observer_contexts(); capture_metrics_contract(); planet_spy_non_source_budget(); planet_spy_lifecycle(); predicates(); discovery(); campaign_home_expansion(); arrival_order_and_budget(); landed_ownership(); effects(); staggered_observer_sources(); apparent_memory(); source_lifecycle(); projection_cache(); replay_checkpoint(); }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

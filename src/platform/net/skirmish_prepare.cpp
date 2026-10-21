@@ -29,7 +29,8 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
     if (!text.empty() || ids.size() < 2) {
         core::Diagnostic error;
         error.code = "EAWR-NET-1700";
-        error.message = "--eawr-skirmish-players requires two to eight increasing slot IDs";
+        error.message = "--eawr-skirmish-players requires two to " + std::to_string(skirmish::local_setup_rows)
+            + " increasing slot IDs";
         return Result::failure(std::move(error));
     }
     return Result::success(std::move(ids));
@@ -124,8 +125,15 @@ core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture
     }
     return core::Result<PreparedSkirmish>::success({std::move(tables), std::move(inputs), std::move(start).value()});
 }
+bool lan_map_supports_rows(const skirmish::SetupMap& map, std::span<const skirmish::LobbySlot> occupied) {
+    const auto rows = skirmish::setup_row_count(map, false);
+    return rows >= 2 && std::all_of(occupied.begin(), occupied.end(),
+        [rows](const auto& row) { return row.slot != 0 && row.slot <= rows; });
+}
 core::Result<skirmish::FixtureOptions> validated_lan_options(const skirmish::SetupSelection& selection, std::span<const skirmish::SetupMap> maps) {
-    return skirmish::setup_options(selection, maps, false);
+    auto result = skirmish::setup_options(selection, maps, false);
+    if (result) result.value().open_slots = selection.open_slots;
+    return result;
 }
 core::Result<void> append_lan_ai_row(skirmish::SetupSelection& selection, const skirmish::SetupMap& map,
     std::uint32_t slot, std::size_t palette_size, bool prefer_unused_team) {
@@ -153,12 +161,55 @@ core::Result<void> append_lan_ai_row(skirmish::SetupSelection& selection, const 
             added.faction = teammate == selection.slots.end() ? team.factions.front() : teammate->faction;
             auto candidate = selection; candidate.slots.push_back(std::move(added));
             std::sort(candidate.slots.begin(), candidate.slots.end(), [](const auto& a, const auto& b) { return a.slot < b.slot; });
-            auto valid = validated_lan_options(candidate, std::span<const skirmish::SetupMap>(&map, 1));
+            auto valid = skirmish::validate_setup_slots(candidate.slots, map.metadata, false, false);
             if (valid) { selection = std::move(candidate); return core::Result<void>::success(); }
             failure = valid.error();
         }
     }
     return core::Result<void>::failure(std::move(failure));
+}
+const char* lan_ai_label(sim::tactical::AiLevel level) {
+    return level == sim::tactical::AiLevel::easy ? "TEXT_EASY_AI_PLAYER"
+        : level == sim::tactical::AiLevel::hard ? "TEXT_HARD_AI_PLAYER" : "TEXT_MEDIUM_AI_PLAYER";
+}
+LanSeatKind lan_seat_kind(const skirmish::FixtureOptions& options, std::uint32_t slot) {
+    if (options.slots) for (const auto& row : *options.slots) if (row.slot == slot)
+        return row.human ? LanSeatKind::human : LanSeatKind::ai;
+    return std::find(options.open_slots.begin(), options.open_slots.end(), slot) != options.open_slots.end()
+        ? LanSeatKind::open : LanSeatKind::closed;
+}
+core::Result<void> select_lan_seat_kind(skirmish::SetupSelection& selection, const skirmish::SetupMap& map,
+    std::uint32_t slot, std::size_t palette_size, LanSeatKind kind, sim::tactical::AiLevel level) {
+    const auto bad = [] { return core::Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+        "Choose Open, Closed or an AI level for a row without a human.")); };
+    if (slot == 0 || slot > skirmish::setup_row_count(map, false)
+        || (kind != LanSeatKind::closed && kind != LanSeatKind::open && kind != LanSeatKind::ai)
+        || static_cast<unsigned>(level) > static_cast<unsigned>(sim::tactical::AiLevel::hard)) return bad();
+    auto candidate = selection;
+    auto row = std::find_if(candidate.slots.begin(), candidate.slots.end(), [&](const auto& value) { return value.slot == slot; });
+    if (row != candidate.slots.end() && row->human) return bad();
+    std::erase(candidate.open_slots, slot);
+    if (kind == LanSeatKind::ai) {
+        if (row == candidate.slots.end()) {
+            auto added = append_lan_ai_row(candidate, map, slot, palette_size);
+            if (!added) return added;
+            row = std::find_if(candidate.slots.begin(), candidate.slots.end(), [&](const auto& value) { return value.slot == slot; });
+        }
+        row->difficulty = level;
+    } else {
+        if (row != candidate.slots.end()) candidate.slots.erase(row);
+        if (kind == LanSeatKind::open) candidate.open_slots.push_back(slot);
+        std::sort(candidate.open_slots.begin(), candidate.open_slots.end());
+    }
+    selection = std::move(candidate);
+    return core::Result<void>::success();
+}
+core::Result<void> select_lan_ai_level(skirmish::SetupSelection& selection, const skirmish::SetupMap& map,
+    std::uint32_t slot, std::size_t palette_size, int item) {
+    if (item < 2 || item > 4) return core::Result<void>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+        "Choose a valid AI level."));
+    return select_lan_seat_kind(selection, map, slot, palette_size, LanSeatKind::ai,
+        item == 2 ? sim::tactical::AiLevel::easy : item == 4 ? sim::tactical::AiLevel::hard : sim::tactical::AiLevel::normal);
 }
 sim::tactical::TacticalSetup lan_recording_setup(const skirmish::Fixture& fixture, const skirmish::SkirmishStart& start) {
     auto setup = skirmish::recording_setup(fixture, start);
@@ -170,21 +221,35 @@ sim::tactical::TacticalSetup lan_recording_setup(const skirmish::Fixture& fixtur
     return setup;
 }
 core::Result<net::LobbyGame> encode_lan_lobby_game(const skirmish::FixtureOptions& options, std::uint64_t input_delay) {
-    if (!options.map || !options.slots || !options.match || options.slots->size() > net::max_match_seats || input_delay == 0 || input_delay > net::max_input_delay) {
+    if (!options.map || !options.slots || options.slots->empty() || !options.match || options.slots->size() + options.open_slots.size() > net::max_match_seats || input_delay == 0 || input_delay > net::max_input_delay) {
         return core::Result<net::LobbyGame>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "Incomplete staging options."));
     }
     std::ostringstream out; out.imbue(std::locale::classic());
     const auto& m = *options.match;
-    out << 1 << ' ' << input_delay << ' ' << options.seed.has_value() << ' ' << options.seed.value_or(0)
+    out << 3 << ' ' << input_delay << ' ' << options.seed.has_value() << ' ' << options.seed.value_or(0)
         << ' ' << options.victory_condition.has_value() << ' ' << static_cast<unsigned>(options.victory_condition.value_or(sim::tactical::VictoryCondition::none))
         << ' ' << m.allow_heroes << ' ' << m.allow_superweapons << ' ' << m.free_starting_units << ' ' << m.pre_built_base
         << ' ' << m.allow_random_events << ' ' << m.credits.raw() << ' ' << m.start_tech << ' ' << m.max_tech
         << ' ' << m.game_timer << ' ' << m.win_integer << ' ' << m.auto_resolve << ' ' << m.win_float.raw()
         << ' ' << std::quoted(m.win_condition) << ' ' << std::quoted(m.space_win_condition) << ' ' << options.slots->size();
+    std::set<std::uint32_t> rows;
+    std::uint32_t previous{};
     for (const auto& slot : *options.slots) {
-        out << ' ' << slot.slot << ' ' << std::quoted(slot.faction) << ' ' << slot.team << ' ' << slot.human
-            << ' ' << slot.colour_index.value_or(slot.slot - 1) << ' ' << slot.fleet.size();
+        if (slot.slot == 0 || slot.slot <= previous || slot.slot > net::max_match_seats
+            || !rows.insert(slot.slot).second || static_cast<unsigned>(slot.difficulty) > static_cast<unsigned>(sim::tactical::AiLevel::hard)
+            || (slot.human && slot.difficulty != sim::tactical::AiLevel::normal))
+            return core::Result<net::LobbyGame>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "Invalid AI level."));
+        out << ' ' << slot.slot << ' ' << std::quoted(slot.faction) << ' ' << slot.team << ' ' << static_cast<unsigned>(lan_seat_kind(options, slot.slot))
+            << ' ' << static_cast<unsigned>(slot.difficulty) << ' ' << slot.colour_index.value_or(slot.slot - 1) << ' ' << slot.fleet.size();
         for (const auto& type : slot.fleet) out << ' ' << std::quoted(type);
+        previous = slot.slot;
+    }
+    out << ' ' << options.open_slots.size();
+    previous = 0;
+    for (const auto slot : options.open_slots) {
+        if (slot == 0 || slot <= previous || slot > net::max_match_seats || !rows.insert(slot).second)
+            return core::Result<net::LobbyGame>::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "Invalid Open staging row."));
+        out << ' ' << slot; previous = slot;
     }
     const auto bytes = out.str();
     if (bytes.size() > net::max_lobby_payload_bytes) return core::Result<net::LobbyGame>::failure(
@@ -201,31 +266,58 @@ core::Result<skirmish::FixtureOptions> decode_lan_lobby_game(const net::LobbySna
     unsigned version{}, victory{}; bool seed_given{}, victory_given{}; std::uint64_t seed{}, delay{}; std::int64_t credits{}, win{}; std::size_t count{};
     skirmish::FixtureOptions result; result.map = snapshot.game.map; result.match.emplace();
     auto& m = *result.match;
-    if (!(in >> version >> delay >> seed_given >> seed >> victory_given >> victory >> m.allow_heroes >> m.allow_superweapons >> m.free_starting_units >> m.pre_built_base
+    if (!(in >> version)) return bad();
+    if (version != 3) return Result::failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
+        "Unsupported skirmish staging options version; all peers must use the same build."));
+    if (!(in >> delay >> seed_given >> seed >> victory_given >> victory >> m.allow_heroes >> m.allow_superweapons >> m.free_starting_units >> m.pre_built_base
         >> m.allow_random_events >> credits >> m.start_tech >> m.max_tech >> m.game_timer >> m.win_integer >> m.auto_resolve >> win
         >> std::quoted(m.win_condition) >> std::quoted(m.space_win_condition) >> count)
-        || version != 1 || delay == 0 || delay > net::max_input_delay || victory > static_cast<unsigned>(sim::tactical::VictoryCondition::all_enemy_units_destroyed)
-        || count < 2 || count > net::max_match_seats) return bad();
+        || delay == 0 || delay > net::max_input_delay || victory > static_cast<unsigned>(sim::tactical::VictoryCondition::all_enemy_units_destroyed)
+        || count == 0 || count > net::max_match_seats) return bad();
     if (seed_given) result.seed = seed;
     if (victory_given) result.victory_condition = static_cast<sim::tactical::VictoryCondition>(victory);
     m.credits = sim::math::Fixed::from_raw(credits); m.win_float = sim::math::Fixed::from_raw(win);
     result.slots.emplace();
     for (std::size_t index = 0; index < count; ++index) {
-        skirmish::LobbySlot slot; std::uint32_t colour{}; std::size_t fleet{};
-        if (!(in >> slot.slot >> std::quoted(slot.faction) >> slot.team >> slot.human >> colour >> fleet) || fleet > 4096) return bad();
+        skirmish::LobbySlot slot; std::uint32_t colour{}; std::size_t fleet{}; unsigned level{}, kind{};
+        if (!(in >> slot.slot >> std::quoted(slot.faction) >> slot.team >> kind >> level >> colour >> fleet)
+            || (kind != static_cast<unsigned>(LanSeatKind::human) && kind != static_cast<unsigned>(LanSeatKind::ai))
+            || level > static_cast<unsigned>(sim::tactical::AiLevel::hard) || fleet > 4096) return bad();
+        slot.human = kind == static_cast<unsigned>(LanSeatKind::human);
+        slot.difficulty = static_cast<sim::tactical::AiLevel>(level);
         slot.colour_index = colour;
         for (std::size_t n = 0; n < fleet; ++n) { std::string type; if (!(in >> std::quoted(type)) || type.size() > 1024) return bad(); slot.fleet.push_back(std::move(type)); }
         result.slots->push_back(std::move(slot));
     }
+    std::size_t vacancies{};
+    if (!(in >> vacancies) || vacancies > net::max_match_seats - count) return bad();
+    for (std::size_t n = 0; n < vacancies; ++n) {
+        std::uint32_t slot{}; if (!(in >> slot)) return bad(); result.open_slots.push_back(slot);
+    }
     auto canonical = encode_lan_lobby_game(result, delay);
     if (!canonical || canonical.value() != snapshot.game) return bad();
-    if (!snapshot.seats.empty()) for (auto& slot : *result.slots) slot.human = false;
+    // A departed or relocated human leaves Open. An Open vacancy is never an AI.
+    // An empty roster is the caller's explicit request for authored staging rows.
+    if (!snapshot.seats.empty()) {
+        std::erase_if(*result.slots, [&](const auto& row) {
+            if (!row.human || std::any_of(snapshot.seats.begin(), snapshot.seats.end(), [&](const auto& seat) { return seat.selection.slot == row.slot; })) return false;
+            result.open_slots.push_back(row.slot); return true;
+        });
+    }
     // Seat requests override their owner row; shared humans must agree, checked by the loaded validator.
     for (const auto& seat : snapshot.seats) {
-        const auto row = std::find_if(result.slots->begin(), result.slots->end(), [&](const auto& value) { return value.slot == seat.selection.slot; });
-        if (row == result.slots->end()) return bad();
+        auto row = std::find_if(result.slots->begin(), result.slots->end(), [&](const auto& value) { return value.slot == seat.selection.slot; });
+        if (row == result.slots->end()) {
+            if (lan_seat_kind(result, seat.selection.slot) != LanSeatKind::open) return bad();
+            skirmish::LobbySlot added; added.slot = seat.selection.slot;
+            result.slots->push_back(std::move(added)); row = std::prev(result.slots->end());
+        } else if (!row->human) return bad();
+        std::erase(result.open_slots, seat.selection.slot);
         row->faction = seat.selection.faction; row->team = seat.selection.team; row->colour_index = seat.selection.colour; row->human = true;
+        row->difficulty = sim::tactical::AiLevel::normal;
     }
+    std::sort(result.slots->begin(), result.slots->end(), [](const auto& a, const auto& b) { return a.slot < b.slot; });
+    std::sort(result.open_slots.begin(), result.open_slots.end());
     if (input_delay) *input_delay = delay;
     return Result::success(std::move(result));
 }

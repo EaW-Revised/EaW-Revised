@@ -109,6 +109,7 @@ public:
         std::string status;                  // the staging's or lobby's last message
         std::string map;
         std::string drawn_map;
+        std::vector<std::string> disabled_maps; // Host map paths disabled and not selectable in the drawn list.
         std::vector<std::string> settings;
         bool preview_visible{}, settings_read_only{};
         std::string start_caption;

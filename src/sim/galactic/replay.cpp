@@ -124,7 +124,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         std::vector<std::uint8_t> payload; detail::encode_control(payload, *replay.setup.control);
         encoded_size += 6 + payload.size();
     }
-    for (const auto& fleet : replay.setup.fleets) encoded_size += fleet.members.size() * 16;
+    for (const auto& fleet : replay.setup.fleets) encoded_size += fleet.members.size() * 16 + 1 + (fleet.raid_destination ? 8 : 0);
     for (std::size_t index = 0; index < replay.commands.size(); ++index) {
         const auto& command = replay.commands[index];
         const auto context = key_text(command.key);
@@ -173,10 +173,13 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         const auto& effect = replay.native_effects[i];
         if (effect.sequence != i + 1 || effect.frontier > replay.final_tick_count
             || effect.phase > NativeEffectPhase::world_service || effect.kind < NativeEffectKind::fleet
-            || effect.kind > NativeEffectKind::story_reward
+            || effect.kind > NativeEffectKind::identity_reservation
             || (effect.phase == NativeEffectPhase::world_service && effect.frontier == replay.final_tick_count)
             || effect.payload.size() > galactic_replay_max_payload)
             return fail<void>(diagnostic_codes::replay_order, "invalid native effect framing, phase or frontier");
+        if (effect.kind == NativeEffectKind::identity_reservation
+            && (effect.phase != NativeEffectPhase::barrier || effect.payload.size() != 32))
+            return fail<void>(diagnostic_codes::replay_order, "invalid native identity reservation framing");
         if (i && (effect.frontier < replay.native_effects[i - 1].frontier
             || (effect.frontier == replay.native_effects[i - 1].frontier && effect.phase < replay.native_effects[i - 1].phase)))
             return fail<void>(diagnostic_codes::replay_order, "native journal effects are not in owner execution order");
@@ -759,6 +762,13 @@ core::Result<void> parse_replay_objects(sim::detail::Reader& reader, GalacticSet
             FleetMember row;
             if (!reader.read_u64(row.id) || !reader.read_u64(row.type)) return malformed("truncated fleet member");
             fleet.members.push_back(row);
+        }
+        std::uint8_t raid{};
+        if (!reader.read_u8(raid) || raid > 1) return malformed("invalid fleet raid destination");
+        if (raid) {
+            PlanetId destination{};
+            if (!reader.read_u64(destination) || !destination) return malformed("invalid fleet raid target");
+            fleet.raid_destination = destination;
         }
         setup.fleets.push_back(std::move(fleet));
     }

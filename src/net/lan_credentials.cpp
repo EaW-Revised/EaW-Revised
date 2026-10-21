@@ -40,8 +40,16 @@ core::Result<ReconnectTokens> LanReconnectCredentials::provide_mesh_repair(const
     return provide_for_offer(offer, transport);
 }
 core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const SetupOffer& offer, MessageTransport& transport) {
-    if (offer.seats.size() != transport.peer_count() || transport.peer_count() < 2
-        || transport.peer_count() > max_match_seats || transport.self() >= transport.peer_count())
+    // The transport table may be wider than the admitted roster (an online room's capacity, sparse seat peers): credentials are
+    // keyed by transport slot, delivered only to the admitted seats.
+    const auto slots = transport.peer_count();
+    std::vector<bool> admitted(slots, false);
+    bool roster_valid = !offer.seats.empty() && offer.seats.size() <= slots;
+    for (const auto& seat : offer.seats) {
+        if (seat.peer >= slots || admitted[seat.peer]) { roster_valid = false; break; }
+        admitted[seat.peer] = true;
+    }
+    if (!roster_valid || slots < 2 || slots > max_match_seats || transport.self() >= slots || !admitted[transport.self()] || !admitted[0])
         return fail<ReconnectTokens>("EAWR-NET-1020", "Reconnect credential policy or roster differs.");
     auto envelope = encode_setup_offer(offer);
     if (!envelope) return core::Result<ReconnectTokens>::failure(envelope.error());
@@ -67,8 +75,9 @@ core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const S
                         return fail<ReconnectTokens>("EAWR-NET-1021", "OS reconnect keys are not distinct.");
         }
         tokens_.assign(pairs.begin(), pairs.begin() + count);
-        acknowledged_.assign(transport.peer_count(), false); acknowledged_[0] = true;
-        for (PeerIndex peer = 1; peer < transport.peer_count(); ++peer) {
+        acknowledged_.assign(transport.peer_count(), true);
+        for (PeerIndex peer = 1; peer < transport.peer_count(); ++peer) if (admitted[peer]) acknowledged_[peer] = false;
+        for (PeerIndex peer = 1; peer < transport.peer_count(); ++peer) if (admitted[peer]) {
             if (transport.link(peer) != LinkState::open) { clear(); return fail<ReconnectTokens>("EAWR-NET-1022", "Credential delivery requires an admitted seat stream."); }
             Bytes frame; frame.reserve(42 + (count - 1) * 32U);
             EraseFrame eraser{frame};
@@ -82,7 +91,7 @@ core::Result<ReconnectTokens> LanReconnectCredentials::provide_for_offer(const S
         }
         received_ = verified_ = true;
     }
-    if (!received_ || identity_ != identity || destination_ != transport.self() || tokens_.size() != offer.seats.size())
+    if (!received_ || identity_ != identity || destination_ != transport.self() || tokens_.size() != transport.peer_count())
         return fail<ReconnectTokens>("EAWR-NET-1023", "Reconnect credentials do not belong to this match and seat.");
     if (!verified_) {
         Bytes ack{lan_credentials_ack_kind}; append(ack, transport.self());

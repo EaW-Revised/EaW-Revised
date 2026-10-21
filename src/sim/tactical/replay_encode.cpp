@@ -168,7 +168,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         || !replay.setup.cinematic_seats.empty() || !identity.empty()
         || replay.setup.departure_policy.has_value() || !replay.setup.beacon_rules.empty()
         || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value()
-        || !replay.object_turns.empty();
+        || !replay.object_turns.empty() || replay.setup.domain != BattleDomain::space;
     const auto header_size = replay_header_size + (extensions ? 4U : 0U)
         + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
         + (disabled_garrisons.empty() ? 0U : 4U + 8U * disabled_garrisons.size())
@@ -181,7 +181,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         + (replay.setup.beacon_rules.empty() ? 0U : 12U + 16U * replay.setup.beacon_rules.size())
         + (replay.setup.attract_pool ? 12U + 8U * replay.setup.attract_pool->types.size() : 0U)
         + (native.empty() ? 0U : 4U + native.size())
-        + (replay.object_turns.empty() ? 0U : 12U);
+        + (replay.object_turns.empty() ? 0U : 12U)
+        + (replay.setup.domain == BattleDomain::space ? 0U : 12U);
     if (header_size > std::numeric_limits<std::uint16_t>::max()) {
         return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header exceeds the 65535-byte limit", {});
     }
@@ -235,7 +236,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
             + (replay.setup.cinematic_seats.empty() ? 0U : 1U)
             + (identity.empty() ? 0U : 1U) + (replay.setup.departure_policy ? 1U : 0U)
             + (replay.setup.beacon_rules.empty() ? 0U : 1U) + (replay.setup.attract_pool ? 1U : 0U) + (replay.setup.native_scene ? 1U : 0U)
-            + (replay.object_turns.empty() ? 0U : 1U));
+            + (replay.object_turns.empty() ? 0U : 1U)
+            + (replay.setup.domain == BattleDomain::space ? 0U : 1U));
     }
     if (replay.setup.match_policy) {
         sim::detail::append_u16(bytes, replay_extension_match_policy);
@@ -336,6 +338,12 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         sim::detail::append_u16(bytes, 8);
         sim::detail::append_u32(bytes, 1); // OBJT extension version
         sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.object_turns.size()));
+    }
+    if (replay.setup.domain != BattleDomain::space) {
+        sim::detail::append_u16(bytes, replay_extension_battle_domain);
+        sim::detail::append_u16(bytes, 8);
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(replay.setup.domain));
     }
     for (const auto& player : replay.setup.players) {
         detail::append_player(bytes, player);

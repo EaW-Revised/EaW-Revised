@@ -5,8 +5,10 @@
 // viewer (tests/presentation/renderer/test_tactical_hud.py).
 
 #include "eawr/presentation/ui/hero_tray.hpp"
+#include "eawr/presentation/ui/selection.hpp"
 #include "ui_test_support.hpp"
 
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -68,6 +70,118 @@ struct Fixture {
     }
 };
 
+// The same dispatcher BattleInput calls, with its ordinary selection/order effects.
+class ClickEffects final : public ui::CommandSink {
+public:
+    ClickEffects() {
+        const std::array<sim::EntityId, 1> previous{90};
+        static_cast<void>(selection.replace(previous));
+    }
+    core::Result<void> issue(const ui::TacticalIntent& intent) override {
+        orders.push_back(intent);
+        return core::Result<void>::success();
+    }
+    void click(Fixture& fixture, const sim::EntityId hero, const bool hostile, const bool right,
+               const bool double_click, const ui::HeroEntityResolver& resolve = {}) {
+        ui::dispatch_hero_click({fixture.instances, fixture.players_, me, fixture.visible, &fixture.types_, nullptr},
+            fixture.policy, fixture.roster, hero, hostile, right, double_click, resolve,
+            [&](const tactical::TacticalInstance& target, const bool focus) {
+                const std::array<sim::EntityId, 1> next{target.entity_id};
+                static_cast<void>(selection.replace(next));
+                if (focus) ++focuses;
+            },
+            [&](const tactical::TacticalInstance& target) {
+                ui::OrderInput input(*this);
+                input.set_selection(selection.units());
+                const auto issued = input.world_command({{}, target.entity_id, true}, ui::CommandOrigin::hud_button);
+                expect(issued && issued.value(), "an admitted hero target uses ordinary OrderInput");
+            });
+    }
+    void expect_inert(const char* context) const {
+        expect(selection.units() == std::vector<sim::EntityId>{90}, context);
+        expect(orders.empty(), context);
+        expect(focuses == 0, context);
+    }
+    ui::Selection selection;
+    std::vector<ui::TacticalIntent> orders;
+    unsigned focuses{};
+};
+
+void test_click_dispatch_recollects_a_changed_carrier() {
+    Fixture f;
+    auto old_carrier = instance(10, frigate, me);
+    old_carrier.contained = {rider(11, vader, 10)};
+    f.instances = {old_carrier};
+    f.collect(); // draw this icon, then change the snapshot without refreshing the tray
+    const auto drawn = f.roster.friendly.front();
+    old_carrier.contained.clear(); // the old carrier remains alive and selectable
+    auto new_carrier = instance(20, frigate, me);
+    new_carrier.contained = {rider(11, vader, 20)};
+    f.instances = {old_carrier, new_carrier};
+    ClickEffects effects;
+    effects.click(f, drawn.hero, false, false, false);
+    expect(effects.selection.units() == std::vector<sim::EntityId>{20},
+        "an old icon selects its current carrier, not the still-live former carrier");
+    expect(effects.orders.empty() && effects.focuses == 0, "a single carried-hero click neither orders nor focuses");
+}
+
+void test_click_dispatch_rejects_dead_and_changed_owner_carriers() {
+    Fixture f;
+    auto carrier = instance(10, frigate, me);
+    carrier.contained = {rider(11, vader, 10)};
+    f.instances = {carrier};
+    f.collect();
+    f.instances.front().durability->hull = {};
+    ClickEffects dead;
+    dead.click(f, 11, false, false, true);
+    dead.expect_inert("a drawn icon whose live carrier now has zero hull cannot select, order or focus");
+
+    f.instances = {carrier};
+    f.collect();
+    f.instances.front().owner = enemy;
+    ClickEffects changed;
+    changed.click(f, 11, false, false, true);
+    changed.expect_inert("a formerly friendly carrier now owned by an enemy cannot select, order or focus");
+
+    f.collect(); // draw the now-hostile icon, then change it back before right click
+    f.instances.front().owner = me;
+    f.visible = {10};
+    ClickEffects changed_back;
+    changed_back.click(f, 11, true, true, false);
+    changed_back.expect_inert("a stale hostile icon cannot attack a carrier now on the friendly side");
+
+    f.instances = {carrier};
+    f.collect();
+    f.instances.clear();
+    ClickEffects removed;
+    removed.click(f, 11, false, false, true);
+    removed.expect_inert("a removed carrier cannot be acted on through its old icon");
+}
+
+void test_click_dispatch_requires_sight_of_both_craft_and_command_container() {
+    Fixture f;
+    f.instances = {instance(11, vader, enemy), instance(20, gunship, enemy)};
+    const ui::HeroEntityResolver squadron = [](sim::EntityId) { return sim::EntityId{20}; };
+    for (const auto& visible : {std::vector<sim::EntityId>{11}, std::vector<sim::EntityId>{20}}) {
+        f.visible = visible;
+        f.collect();
+        ClickEffects hidden;
+        hidden.click(f, 11, true, true, false, squadron);
+        hidden.expect_inert("both the represented craft and its ordered squadron container must be visible");
+    }
+    f.visible = {11, 20};
+    ClickEffects seen;
+    seen.click(f, 11, true, true, false, squadron);
+    expect(seen.orders.size() == 1 && seen.orders.front().verb == ui::TacticalVerb::attack
+        && seen.orders.front().target == 20, "a visible hero craft targets its visible command container");
+    expect(seen.selection.units() == std::vector<sim::EntityId>{90} && seen.focuses == 0,
+        "the ordinary attack changes neither selection nor camera");
+    f.instances.back().owner = me;
+    ClickEffects changed_container;
+    changed_container.click(f, 11, true, true, false, squadron);
+    changed_container.expect_inert("an ordered container on a different side is not an enemy target");
+}
+
 void test_standalone_heroes_by_side() {
     Fixture f;
     f.instances = {instance(1, gunship, me), instance(2, vader, me, 0.5), instance(3, tyber, ally), instance(4, vader, enemy),
@@ -107,6 +221,29 @@ void test_carried_hero_stands_for_its_carrier() {
     f.policy.list_carried_heroes = false;
     f.collect();
     expect(f.roster.friendly.empty(), "the carried-hero policy switch removes the icon");
+}
+
+void test_current_roster_rebinds_and_removes_heroes() {
+    Fixture f;
+    auto first = instance(10, frigate, me);
+    first.contained = {rider(11, vader, 10)};
+    f.instances = {first};
+    f.collect();
+    const auto drawn = f.roster.friendly.front();
+    auto next = instance(20, frigate, me);
+    next.contained = {rider(11, vader, 20)};
+    f.instances = {next};
+    f.collect();
+    expect(f.roster.friendly.front().hero == drawn.hero && f.roster.friendly.front().represented == 20,
+        "WHE-47: recollecting the hero identity resolves a changed live carrier");
+    f.instances.front().owner = enemy;
+    f.collect();
+    expect(f.roster.friendly.empty() && f.roster.hostile.front().hero == drawn.hero,
+        "ownership changes invalidate a stale friendly entry");
+    f.instances.clear();
+    f.collect();
+    expect(f.roster.friendly.empty() && f.roster.hostile.empty(),
+        "a dead carrier and its hero cannot resolve from a stale drawn entry");
 }
 
 void test_nested_riders_and_contained_bar_gate() {
@@ -208,9 +345,13 @@ void test_steady_state_is_stable() {
 } // namespace
 
 int main() {
+    test_click_dispatch_recollects_a_changed_carrier();
+    test_click_dispatch_rejects_dead_and_changed_owner_carriers();
+    test_click_dispatch_requires_sight_of_both_craft_and_command_container();
     test_standalone_heroes_by_side();
     test_neutral_and_non_heroes_have_no_icon();
     test_carried_hero_stands_for_its_carrier();
+    test_current_roster_rebinds_and_removes_heroes();
     test_nested_riders_and_contained_bar_gate();
     test_fog_policy_applies_to_the_hostile_tray_only();
     test_generic_heroes_follow_the_policy();

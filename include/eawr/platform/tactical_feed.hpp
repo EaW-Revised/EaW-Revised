@@ -2,6 +2,9 @@
 
 #include "eawr/platform/live_session.hpp"
 
+#include <functional>
+#include <optional>
+
 namespace eawr::platform {
 
 // ADR-019 / A2: the battle view reads one immutable feed and sends commands.
@@ -9,7 +12,17 @@ namespace eawr::platform {
 // Neither the view nor this contract exposes mutable simulation state.
 class TacticalFeed {
 public:
+    struct AgreedPacing {
+        bool paused{};
+        std::uint32_t target_rate{}; // rate when unpaused
+    };
     virtual ~TacticalFeed() = default;
+    // Only a retained GC lockstep feed publishes this. Presentation observes the agreed clock;
+    // its local loading/Begin/end phases must not control that clock. Solo and skirmish default off.
+    [[nodiscard]] virtual std::optional<AgreedPacing> agreed_pacing() const { return {}; }
+    using ExecutionObserver = std::function<void(std::uint64_t producer_sequence, std::uint64_t tactical_tick)>;
+    // Notification after shared execution, outside owner locks; only local presentation consumes it.
+    virtual void set_execution_observer(ExecutionObserver) {}
     virtual void submit(LiveOrder order) = 0;
     // Retained feeds use ordinary queued admission; standalone recovery can
     // refuse immediately while its replacement world is staged.
@@ -43,7 +56,8 @@ public:
     // WHE-40: counts and the snapshot they were read at, taken under one lock.
     [[nodiscard]] virtual LiveSession::ProductionView production_view(sim::tactical::PlayerId player,
         sim::tactical::TypeId type) const = 0;
-    // Borrowed feeds install the seat's scheduler before opening the readiness gate.
+    // Borrowed feeds install the seat's scheduler. A GC lockstep feed drains it as untimed local seat input,
+    // before sealing; it is never an engine-side command source or a presentation-readiness barrier.
     virtual void command_source(std::function<std::vector<sim::tactical::PlayerCommand>(std::uint64_t)> source) = 0;
     // Authored base types opt into the same durable attack journal as M2.
     virtual void configure_notifications(std::vector<sim::tactical::TypeId>) {}

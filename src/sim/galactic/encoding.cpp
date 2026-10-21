@@ -118,6 +118,8 @@ void encode_fleet(std::vector<std::uint8_t>& bytes, const Fleet& fleet) {
         put_u64(bytes, member.id);
         put_u64(bytes, member.type);
     }
+    put_u8(bytes, fleet.raid_destination ? 1 : 0);
+    if (fleet.raid_destination) put_u64(bytes, *fleet.raid_destination);
 }
 
 void encode_fleet_control(std::vector<std::uint8_t>& bytes, const FleetControlSetup& control,
@@ -168,14 +170,25 @@ void encode_movement(std::vector<std::uint8_t>& bytes, const MovementSetup& s, s
         put_u32(bytes, t.hop); vec(t.desired); vec(t.velocity); vec(t.desired_facing);
         put_i64(bytes, t.base_speed.raw()); put_i64(bytes, t.speed.raw());
         count(t.packed.size()); for (const auto id : t.packed) put_u64(bytes, id);
+        put_u64(bytes, t.destination_actor);
         put_u8(bytes, t.destination_slot ? 1 : 0); if (t.destination_slot) put_u8(bytes, *t.destination_slot);
         put_u32(bytes, t.producer.value); put_u64(bytes, t.sequence);
     }
-    // Optional versioned transport-role tail. Absent roles preserve legacy bytes.
+    // Current transport-role table, followed by the optional authored raid policy.
     const auto transports = std::count_if(s.types.begin(), s.types.end(), [](const auto& t) { return t.transport; });
-    if (transports != 0) {
+    {
         put_u8(bytes, 1); count(static_cast<std::size_t>(transports));
         for (const auto& t : s.types) if (t.transport) put_u64(bytes, t.type);
+    }
+    put_u8(bytes, s.raid ? 1 : 0);
+    if (s.raid) {
+        const auto& r = s.raid->rules;
+        put_u32(bytes, r.required_faction); put_u32(bytes, r.free_categories); put_u32(bytes, r.limited_categories);
+        put_u32(bytes, r.max_heroes); put_u32(bytes, r.max_limited);
+        count(s.raid->types.size());
+        for (const auto& t : s.raid->types) {
+            put_u64(bytes, t.type); put_u32(bytes, t.categories); put_u8(bytes, t.hero); put_u8(bytes, t.stays_in_transport);
+        }
     }
 }
 
@@ -224,15 +237,15 @@ core::Result<DecodedMovement> decode_movement(std::span<const std::uint8_t> byte
             for (std::uint32_t j = 0; j < path; ++j) { PlanetId p{}; if (!in.read_u64(p)) return fail(); t.path.push_back(p); }
             if (!in.read_u32(t.hop) || t.hop >= path - 1 || !vec(t.desired) || !vec(t.velocity) || !vec(t.desired_facing) || !fixed(t.base_speed) || !fixed(t.speed) || !count(packed, 8)) return fail();
             for (std::uint32_t j = 0; j < packed; ++j) { EntityId p{}; if (!in.read_u64(p)) return fail(); t.packed.push_back(p); }
-            bool slot{}; if (!flag(slot)) return fail();
+            bool slot{}; if (!in.read_u64(t.destination_actor) || !flag(slot)) return fail();
             if (slot) { std::uint8_t v{}; if (!in.read_u8(v) || v > 2) return fail(); t.destination_slot = v; }
             if (!in.read_u32(t.producer.value) || !in.read_u64(t.sequence)) return fail();
         }
         out.fleets.emplace_back(id, std::move(m));
     }
-    if (in.remaining() != 0) {
+    {
         std::uint8_t version{};
-        if (!in.read_u8(version) || version != 1 || !count(n, 8) || n == 0) return fail();
+        if (!in.read_u8(version) || version != 1 || !count(n, 8)) return fail();
         TypeId previous{};
         for (std::uint32_t i = 0; i < n; ++i) {
             TypeId id{}; if (!in.read_u64(id) || id <= previous) return fail();
@@ -240,6 +253,19 @@ core::Result<DecodedMovement> decode_movement(std::span<const std::uint8_t> byte
             const auto at = std::lower_bound(s.types.begin(), s.types.end(), id, [](const auto& t, auto value) { return t.type < value; });
             if (at == s.types.end() || at->type != id || at->squadron || at->fleet_container) return fail();
             at->transport = true;
+        }
+    }
+    bool raid{};
+    if (!flag(raid)) return fail();
+    if (raid) {
+        s.raid.emplace(); auto& r = s.raid->rules;
+        if (!in.read_u32(r.required_faction) || !in.read_u32(r.free_categories) || !in.read_u32(r.limited_categories)
+            || !in.read_u32(r.max_heroes) || !in.read_u32(r.max_limited) || !count(n, 14)) return fail();
+        TypeId previous{};
+        for (std::uint32_t i = 0; i < n; ++i) {
+            RaidType t;
+            if (!in.read_u64(t.type) || t.type <= previous || !in.read_u32(t.categories) || !flag(t.hero) || !flag(t.stays_in_transport)) return fail();
+            previous = t.type; s.raid->types.push_back(t);
         }
     }
     if (in.remaining() != 0) return fail();

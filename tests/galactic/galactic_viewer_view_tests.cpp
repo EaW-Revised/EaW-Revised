@@ -179,7 +179,7 @@ void corruption_projection_rejects_undiscovered_and_other_observers() {
     auto setup = synthetic_live_setup();
     setup.observer.emplace();
     auto& observer = *setup.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     observer.players.push_back({1, false, false, 0, 0, {}});
     for (const auto& planet : setup.planets) {
         eawr::sim::galactic::ObserverPlanet row; row.planet = planet.id; row.corrupted = true;
@@ -270,7 +270,7 @@ void live_transit_overrides_orbit_and_synthetic_interpolation() {
     motion.facing = {whole(1), whole(2), whole(0)};
     motion.transit.emplace(); motion.transit->path = {101,102,104}; motion.transit->hop = 1;
     setup.observer.emplace();
-    setup.observer->local_player = 1;
+    setup.observer->human_observers = {1}; setup.observer->solo_reference_human = 1;
     setup.observer->players.push_back({1,false,false,0,0,{}});
     setup.observer->types.push_back({1,false,false,false});
     for (const auto& planet : setup.planets) {
@@ -401,7 +401,7 @@ void galaxy_reveal_is_a_draw_only_omniscient_view() {
     assert(observer_discovery(*truth, 1, 103) == std::optional<bool>(false));
 
     const auto revealed = reveal_snapshot(truth);
-    assert(revealed && revealed != truth && revealed->observer() && revealed->observer()->local_player == 1);
+    assert(revealed && revealed != truth && revealed->observer() && revealed->observer()->solo_reference_human == 1);
     const auto reveal_sight = live_fleet_visibility(*revealed);
     const auto shown = build_live_view(*revealed, synthetic_galaxy(), 1, synthetic_neutral_owner, {},
         {reveal_sight, {}, true, true});

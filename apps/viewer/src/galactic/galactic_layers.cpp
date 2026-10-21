@@ -1,3 +1,4 @@
+#include "gpu_debug_labels.hpp"
 #include "galactic_mode_internal.hpp"
 
 #include "eawr/core/diagnostic.hpp"
@@ -73,6 +74,7 @@ bool GalacticMode::State::build_scenes() {
             // stored RGB, so encode once to cancel the canvas conversion.
             if (RenderingServer::get_singleton()->get_rendering_device()) {
                 Ref<Shader> shader(memnew(Shader));
+                name_canvas_shader(*shader.ptr(), "EAWR/UI/GalacticLayerCanvasEncode");
                 shader->set_code(R"GODOT(shader_type canvas_item;
 void fragment() {
     vec4 colour = texture(TEXTURE, UV);

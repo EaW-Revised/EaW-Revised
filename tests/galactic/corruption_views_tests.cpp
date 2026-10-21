@@ -45,7 +45,7 @@ std::optional<g::CorruptionMenu> menu(const c::Fixture& world, g::ObservedPlanet
     return g::observed_corruption_menu(world, local, row, 10, tutorial, names);
 }
 g::GalacticSnapshot snapshot(std::optional<g::CorruptionMenu> value, g::ObservedPlanet row = observation(), unsigned local = 1) {
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     auto observations = std::make_shared<const std::vector<g::ObservedPlanet>>(std::vector{row});
     return g::GalacticSnapshot(0, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, observer,
         {}, {}, {}, observations, {}, {}, {}, std::move(value));

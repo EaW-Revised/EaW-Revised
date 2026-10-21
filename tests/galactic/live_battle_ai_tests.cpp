@@ -91,7 +91,7 @@ BattleCommands run_battle(bool native_ai, unsigned workers, std::uint64_t battle
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == "Empire";
-        if (human) { human_player = id; human_seat = gc::SeatId{id}; options.local_observer = id; }
+        if (human) { human_player = id; human_seat = gc::SeatId{id}; options.solo_reference_human = id; }
         if (faction.name == "Rebel") enemy_player = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});

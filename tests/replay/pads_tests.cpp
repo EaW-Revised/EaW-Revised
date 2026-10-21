@@ -1330,6 +1330,44 @@ void test_modifier_removal() {
     expect(termination.ledgers()[2].credits.raw() - terminated_before.raw() == 2 * low.raw() + base.raw(),
         "WBP-45 reverse termination exchanges application/removal roles");
 }
+void test_occupied_respawn() {
+    std::string baseline;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto start = setup();
+        const auto position = start.units.back().position;
+        start.units.back().owner = 1;
+        // Three stationary occupants share the authored pad position throughout the deadline.
+        start.units.front().position = position;
+        start.units[1].position = position;
+        start.units.push_back({4, 10, 1, position, m::identity_quat(), {}});
+        auto content = rules();
+        content.pads.respawn = {{20, 38 * 30}};
+        auto value = session(start, content);
+        expect(value.submit({{0, 1, 0}, {3}, t::DamagePayload{q(1000), t::attack_hull}}).has_value(),
+            "occupied respawn death admitted");
+        constexpr std::uint64_t due = 38 * 30;
+        for (std::uint64_t frame = 0; frame <= due + 1; ++frame) {
+            steps(value, frame + 1, executor);
+            const auto units = value.units();
+            for (const auto id : {1U, 2U, 4U}) {
+                const auto occupant = std::find_if(units.begin(), units.end(), [id](const auto& unit) {
+                    return unit.entity_id == id;
+                });
+                expect(occupant != units.end() && occupant->position == position,
+                    "occupants remain on the respawn position without displacement");
+            }
+            expect(value.pads().size() == (frame < due ? 0U : 1U),
+                "WNO-26/27 occupied slot creates exactly at the authored deadline");
+            if (frame == 0 || frame + 1 >= due) {
+                std::cout << "occupied-respawn workers=" << workers << " frame=" << frame
+                    << " deadline=" << due << " pads=" << value.pads().size() << '\n';
+            }
+        }
+        if (baseline.empty()) baseline = value.state_sha256();
+        expect(value.state_sha256() == baseline, "occupied respawn state is worker-count independent");
+    }
+}
 void test_respawn() {
     eawr::sim::InlineExecutor executor;
     for (const auto seconds : {38U, 45U, 80U}) {
@@ -1555,6 +1593,7 @@ int main() {
     test_ai_sale_credits();
     test_sale_victory();
     test_respawn();
+    test_occupied_respawn();
     test_bulk_child_death_work();
     test_respawn_rollback();
     test_determinism();

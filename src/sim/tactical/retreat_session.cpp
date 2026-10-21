@@ -9,6 +9,9 @@
 
 namespace eawr::sim::tactical {
 core::Result<void> TacticalSession::configure_retreat(RetreatConfig config) {
+    if (impl_->setup.domain != BattleDomain::space)
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "hyperspace retreat requires the space battle domain"));
     if (impl_->object_turn_running)
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "configure_retreat during an object-turn provider call"));

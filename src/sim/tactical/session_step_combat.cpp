@@ -161,6 +161,7 @@ core::Result<void> session_detail::Tick::special_weapons() {
 }
 
 core::Result<void> session_detail::Tick::ion_team() {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     auto& moving = gather_.value().moving.value();
     auto& minds = craft_prep_.value().minds.value();
     const auto& squadron_table = impl_->motion.squadrons;

@@ -8,12 +8,12 @@ std::optional<sim::galactic::PlanetId> GalacticWorld::markup_stage(tactical::Pla
     const auto key = upper_case(policy);
     if (key == "SINGLE_HOP_DISCONNECTED") return target;
     if (const auto id = goal_reach_policy(key)) {
-        const auto* found = goal_reach_index_->find(player, target, *id);
+        const auto* found = bound().goal_reach_index_->find(player, target, *id);
         if (!found) return {};
-        const auto& sites = connectivity_->goal_reach[found->row].production_sites;
+        const auto& sites = bound().connectivity_->goal_reach[found->row].production_sites;
         return sites.empty() ? std::nullopt : std::optional{sites.front()};
     }
-    for (const auto& row : connectivity_->goal_reach) // unrecognised spelling: only an identical row spelling can match
+    for (const auto& row : bound().connectivity_->goal_reach) // unrecognised spelling: only an identical row spelling can match
         if (row.player == player && row.source == target && upper_case(row.policy) == key)
             return row.production_sites.empty() ? std::nullopt : std::optional{row.production_sites.front()};
     return {};

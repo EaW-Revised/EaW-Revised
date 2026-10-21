@@ -51,7 +51,7 @@ gc::GalacticSetup observed() {
     auto config = setup();
     config.observer.emplace();
     auto& observer = *config.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     const auto intelligence = gc::bit(gc::Intelligence::income_breakdown);
     for (const auto& player : config.players) observer.players.push_back({player.player_id, false, false, intelligence});
     for (const auto& planet : config.planets) {
@@ -241,7 +241,7 @@ void political_source_preserved() {
         rules.factions = {{1, gc::IncomeAlignment::neutral}, {2, gc::IncomeAlignment::neutral}};
         for (const auto& planet : config.planets) {
             gc::ControlPlanet row; row.planet = planet.id; row.type = 900;
-            row.ground_base = {planet.owner, 1}; row.protected_control = true; control.planets.push_back(row);
+            row.ground_base = {planet.owner, 2}; control.planets.push_back(row);
             gc::PlanetControl state; state.planet = planet.id; state.initialized = true;
             state.current_player = state.target_player = planet.owner; state.current = state.target = f(2);
             state.political_income = f(-7); control.state.push_back(state);

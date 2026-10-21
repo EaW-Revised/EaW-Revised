@@ -124,6 +124,7 @@ void TacticalSession::set_commit_observer(std::function<void(std::string_view, b
 TacticalSession::TickWork TacticalSession::tick_work() const noexcept { return impl_->tick_work; }
 
 std::uint64_t TacticalSession::completed_tick() const noexcept { return impl_->completed_tick; }
+BattleDomain TacticalSession::domain() const noexcept { return impl_->setup.domain; }
 EntityId TacticalSession::next_entity_id() const noexcept { return impl_->next_id; }
 std::uint64_t TacticalSession::rng_state() const noexcept { return impl_->rng_state; }
 std::span<const Player> TacticalSession::players() const noexcept { return impl_->setup.players; }
@@ -260,7 +261,7 @@ TacticalSession::SlicedSearchUse TacticalSession::sliced_searches() const noexce
     SlicedSearchUse use;
     for (const auto& entry : impl_->searches) {
         ++use.searches;
-        use.bytes += entry.second.search.held_bytes();
+        use.bytes += SpacePathService::held_bytes(entry.second.search);
     }
     return use;
 }

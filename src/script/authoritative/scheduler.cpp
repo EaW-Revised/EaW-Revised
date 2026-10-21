@@ -820,6 +820,7 @@ core::Result<ServiceReport> ScriptScheduler::service(
                 [](const auto& row) { return row.first == unowned_key; }) - order.begin());
             const bool tail = owners_end < order.size() || impl_->managed_handles || order.empty();
             ::std::shared_ptr<ImmediateEffectState> shadow;
+            ::std::shared_ptr<void> chain_scope;
             bool changed = false;
             bool recapture = true;
             for (::std::size_t begin = 0;;) {
@@ -832,6 +833,13 @@ core::Result<ServiceReport> ScriptScheduler::service(
                 }
                 const bool last = owned ? end == owners_end && !tail : true;
                 if (options.chain_of && last && begin == end && !impl_->managed_handles) break;
+                if (options.begin_chain) {
+                    chain_scope.reset();
+                    auto selected = options.begin_chain(owned ? order[begin].first : 0);
+                    if (!selected) throw ::std::runtime_error(selected.error().message);
+                    chain_scope = ::std::move(selected).value();
+                    recapture = true;
+                }
                 // A shadow is copy-on-write, so one that no chain changed still equals the host: no new capture.
                 if (recapture || !shadow) {
                     auto captured = impl_->immediate_host->capture();

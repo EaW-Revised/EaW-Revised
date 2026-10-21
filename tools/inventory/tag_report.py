@@ -60,6 +60,41 @@ def totals(rows: list[dict]) -> list[str]:
     ] + [f"| **Total** | **{sum(space.values())}** | **{sum(all_counts.values())}** |"]
 
 
+def usage_summary(rows: list[dict]) -> list[str]:
+    """Keep the reader's overview tied to the same pairs as the detailed pages."""
+    status = counts(rows)
+    lines = ["## What is used and what is not", "",
+             f"The registry covers {sum(status.values()):,} class/tag pairs. "
+             f"It records {status['applied']:,} as applied and {status['partial']:,} as partly applied; "
+             f"{status['todo']:,} still need implementation. Parsing a value alone does not count as using it.", "",
+             "The remaining pairs are " + ", ".join(
+                 f"{status[name]:,} {name}" for name in STATUSES
+                 if name not in {"applied", "partial", "todo"}) + ". "
+             "Scope labels describe postponed work, not proof that the game ignores those values.", "",
+             "By area (all scopes):", ""]
+    for area in ordered(row['area'] for row in rows):
+        selected = counts([row for row in rows if row['area'] == area])
+        lines.append(f"- **{cell(area)}**: {sum(selected.values()):,} pairs; "
+                     f"{selected['applied']:,} applied, {selected['partial']:,} partial, "
+                     f"{selected['todo']:,} todo, "
+                     f"{sum(n for s, n in selected.items() if s not in {'applied', 'partial', 'todo'}):,} "
+                     "ignored, replaced, deferred or outside space skirmish.")
+    groups = defaultdict(list)
+    for row in rows:
+        if row['status'] in ('todo', 'partial'):
+            groups[(row['area'], row['status'], row.get('ticket'))].append(row)
+    largest = sorted(groups.items(), key=lambda item: (-sum(counts(item[1]).values()), str(item[0])))[:8]
+    lines += ["", "The largest outstanding groups are:", ""]
+    for (area, state, ticket), selected in largest:
+        examples = ordered(row['tag'] for row in selected)[:3]
+        tracker = f" (legacy #{ticket})" if isinstance(ticket, int) else " (no tracker recorded)"
+        lines.append(f"- **{cell(area)} / {state}**: {sum(counts(selected).values()):,} pairs, "
+                     f"including {', '.join(cell(tag) for tag in examples)}{tracker}.")
+    lines += ["", "Each area's tables below name the missing kinds, current consumers and tracking ticket. "
+              "An applied claim remains subject to consumer review; these totals are not runtime coverage.", ""]
+    return lines
+
+
 def render(registry: dict) -> dict[str, str]:
     rows = registry["rows"]
     areas = ordered(row["area"] for row in rows)
@@ -71,8 +106,9 @@ def render(registry: dict) -> dict[str, str]:
              "three classes contributes three pairs. Space skirmish excludes `land-or-galactic`,",
              "`multiplayer` and `presentation-later` rows; it includes `deferred` rows so postponed battle",
              "work remains visible. Mixed classes retain the registry's classification. This is a scope",
-             "view, not a census of tags used in a particular battle.", "", "## Status legend", "",
-             "| Status | Meaning |", "|---|---|"]
+             "view, not a census of tags used in a particular battle.", ""]
+    intro += usage_summary(rows)
+    intro += ["## Status legend", "", "| Status | Meaning |", "|---|---|"]
     intro += [f"| {status} | {meaning} |" for status, meaning in STATUSES.items()]
     intro += ["", "## Totals by status", ""] + totals(rows)
     intro += ["", "## Totals by area", "", "| Area | Space skirmish | Everything |", "|---|---:|---:|"]
@@ -123,7 +159,8 @@ def render(registry: dict) -> dict[str, str]:
                 lines.append("| " + " | ".join(cell(value) for value in values) + " |")
             lines.append("")
         result[f"{area}.md"] = "\n".join(lines).rstrip() + "\n"
-    intro += ["", "Regenerate with `python tools/inventory/tag_report.py`. Do not edit generated pages by hand.", ""]
+    intro += ["", "Regenerate with `python tools/inventory/tag_report.py --batch`, then verify with "
+              "`python tools/inventory/tag_report.py --check`. Do not edit generated pages by hand.", ""]
     result["README.md"] = "\n".join(intro)
     return result
 

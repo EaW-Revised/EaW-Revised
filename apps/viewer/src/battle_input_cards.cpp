@@ -218,22 +218,26 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     refresh_abilities(live);
 }
 
+void BattleInput::refresh_hero_types(const units::UnitTables* tables) {
+    if (heroes_tables_ == tables) return;
+    heroes_tables_ = tables;
+    heroes_snapshot_.reset();
+    hero_types_ = {};
+    if (tables != nullptr) {
+        for (const units::UnitType& type : tables->units) {
+            if (type.named_hero || type.generic_hero || type.display_contained_hero_bars)
+                hero_types_.add({battle::type_id(type.id), type.named_hero, type.generic_hero, type.display_contained_hero_bars});
+        }
+    }
+    hero_types_.finish();
+}
+
 void BattleInput::refresh_heroes(const LiveSessionView& live) {
     const auto& latest = live.battle_frame().latest;
     const units::UnitTables* tables = live.tables();
     if (heroes_snapshot_ == latest && heroes_tables_ == tables) return;
+    refresh_hero_types(tables);
     heroes_snapshot_ = latest;
-    if (heroes_tables_ != tables) {
-        heroes_tables_ = tables;
-        hero_types_ = {};
-        if (tables != nullptr) {
-            for (const units::UnitType& type : tables->units) {
-                if (type.named_hero || type.generic_hero || type.display_contained_hero_bars)
-                    hero_types_.add({battle::type_id(type.id), type.named_hero, type.generic_hero, type.display_contained_hero_bars});
-            }
-        }
-        hero_types_.finish();
-    }
     hero_next_.friendly.clear();
     hero_next_.hostile.clear();
     if (latest && tables != nullptr) {
@@ -243,6 +247,63 @@ void BattleInput::refresh_heroes(const LiveSessionView& live) {
     if (hero_next_ == hero_roster_) return;
     std::swap(hero_roster_, hero_next_);
     ++hero_revision_;
+}
+
+void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const bool right,
+                             const bool double_click, LiveSessionView& live, SpaceEnvironment& space) {
+    const auto& latest = live.battle_frame().latest;
+    if (!latest || live.tables() == nullptr) return;
+    refresh_hero_types(live.tables());
+    left_.reset();
+    right_start_.reset();
+    // WHE-45/47/48: the shared, tested dispatcher owns input-time roster, hull,
+    // ownership and visibility validation; these callbacks only apply admitted effects.
+    ui::dispatch_hero_click({latest->instances(), latest->players(), live.local_player(), live.snapshot_index().visible(),
+                             &hero_types_, live.durability()}, hero_policy_, hero_next_, hero, hostile, right, double_click,
+        [&live](const sim::EntityId represented) {
+            const auto squadron = live.squadron_of().find(represented);
+            return squadron == live.squadron_of().end() ? represented : squadron->second;
+        },
+        [&](const sim::tactical::TacticalInstance& target, const bool focus) {
+            const sim::EntityId entity = target.entity_id;
+            const std::array<sim::EntityId, 1> selected{entity};
+            const bool changed = selection_.replace(selected);
+            pad_palette_.close();
+            refresh_cards(live);
+            if (changed) acknowledge(Acknowledgement::Kind::select);
+            note("hero select " + std::to_string(hero) + " represented " + std::to_string(entity));
+            // WHE-75: sole selection, including a double click; no world type selection.
+            if (focus) {
+                const auto real = [](const sim::math::Fixed value) {
+                    return static_cast<float>(value.raw()) / static_cast<float>(sim::math::Fixed::scale);
+                };
+                space.live_camera_focus(real(target.fixed_transform.rows[0][3]), real(target.fixed_transform.rows[1][3]));
+                ++focuses_;
+                note("hero focus " + std::to_string(hero));
+            }
+            draw();
+        },
+        [&](const sim::tactical::TacticalInstance& target) {
+            if (!local_order_selection(live)) return;
+            ui::OrderInput* input = live.order_input();
+            if (input == nullptr) return;
+            const sim::EntityId entity = target.entity_id;
+            const sim::math::Vec3 point{target.fixed_transform.rows[0][3], target.fixed_transform.rows[1][3],
+                                       target.fixed_transform.rows[2][3]};
+            const ui::OrderMode mode = input->mode();
+            input->set_selection(selection_.units());
+            const auto issued = input->world_command({point, entity, true}, ui::CommandOrigin::hud_button);
+            if (!issued) {
+                ++refused_;
+                note("hero refused: " + issued.error().message);
+            } else if (issued.value()) {
+                ++orders_;
+                const bool attacked = mode != ui::OrderMode::move && mode != ui::OrderMode::waypoint;
+                note(std::string(attacked ? "hero attack " : "hero move ") + std::to_string(entity));
+                acknowledge(attacked ? Acknowledgement::Kind::attack : Acknowledgement::Kind::move,
+                            entity, sim::tactical::attack_hull, point);
+            }
+        });
 }
 
 void BattleInput::refresh_abilities(const LiveSessionView& live) {

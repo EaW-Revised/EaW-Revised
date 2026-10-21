@@ -33,6 +33,10 @@ struct InitialCampaignRelations {
 // and its orbital/presence rows are copied by the stock placement adapter.
 [[nodiscard]] sim::galactic::GalacticSession::NativeShadowForceBuilder stock_native_force_shadow_builder(
     std::shared_ptr<const StartingForceInputs>, sim::galactic::GalacticSession::NativeProductionRequest);
+// GFS-A22: only ordinary current slot exhaustion becomes a null placement.
+// Content/programming errors retain their diagnostics; the legacy path is unchanged.
+[[nodiscard]] sim::galactic::GalacticSession::NativeReconciledForceBuilder stock_native_force_reconciliation_builder(
+    std::shared_ptr<const StartingForceInputs>, sim::galactic::GalacticSession::NativeProductionRequest);
 
 // WGS-89: neutral precedence, exact same faction, then authored allies/enemies.
 [[nodiscard]] core::Result<InitialCampaignRelations> prepare_initial_campaign_relations(

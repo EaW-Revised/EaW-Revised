@@ -98,6 +98,13 @@ core::Result<std::uint64_t> intelligence_expiry(const math::Fixed seconds, const
 }
 
 core::Result<void> initialize_campaign_observer(GalacticSetup& setup, const std::optional<PlanetId> local_home) {
+    if (!setup.observer || !setup.observer->solo_reference_human)
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "singleton observer initialization requires a solo reference human"));
+    const ObserverHome home{setup.observer->solo_reference_human, local_home};
+    return initialize_campaign_observers(setup, std::span<const ObserverHome>(&home, 1));
+}
+core::Result<void> initialize_campaign_observers(GalacticSetup& setup, const std::span<const ObserverHome> homes) {
     if (!setup.observer || !setup.observer->records.empty())
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "campaign observer requires sourced facts without retained records"));
@@ -117,13 +124,19 @@ core::Result<void> initialize_campaign_observer(GalacticSetup& setup, const std:
         observer_detail::planet_spy_transition(observer, staged.planets, planet.id, 0, planet.owner, 0,
             staged.fleets, staged.movement ? &*staged.movement : nullptr,
             staged.census ? std::span<const CensusObject>(staged.census->objects) : std::span<const CensusObject>{});
-    if (local_home) {
-        const auto planet = observer_detail::find(observer.planets, *local_home, [](const auto& row) { return row.planet; });
+    const auto table = observer_detail::presence(observer, staged.fleets, staged.movement ? &*staged.movement : nullptr,
+        staged.census ? std::span<const CensusObject>(staged.census->objects) : std::span<const CensusObject>{});
+    if (homes.size() != observer.human_observers.size())
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "observer homes do not match human roster"));
+    for (std::size_t index = 0; index < homes.size(); ++index) {
+        const auto& home = homes[index];
+        if (home.player != observer.human_observers[index])
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "observer homes are not in human roster order"));
+        if (!home.planet) continue;
+        const auto planet = observer_detail::find(observer.planets, *home.planet, [](const auto& row) { return row.planet; });
         if (!planet) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "campaign observer home is not a retained planet"));
-        const auto player = observer_detail::find(observer.players, observer.local_player, [](const auto& row) { return row.player; });
-        const auto table = observer_detail::presence(observer, staged.fleets, staged.movement ? &*staged.movement : nullptr,
-            staged.census ? std::span<const CensusObject>(staged.census->objects) : std::span<const CensusObject>{});
+        const auto player = observer_detail::find(observer.players, home.player, [](const auto& row) { return row.player; });
         auto& record = observer.records[static_cast<std::size_t>(player - observer.players.data()) * observer.planets.size()
             + static_cast<std::size_t>(planet - observer.planets.data())];
         record.discovered = true;
@@ -143,6 +156,8 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
         || o.types.size() > galactic_max_objects || !o.logical_fps || o.reveal_delay_seconds < math::Fixed{} || o.automatic_reveal_range < math::Fixed{})
         return invalid("observer tables or ranges are invalid");
     const auto listed = [&](PlayerId id) { return observer_detail::find(setup.players, id, [](const auto& p) { return p.player_id; }) != nullptr; };
+    if (o.history_players.size() > galactic_max_players) return invalid("too many configured History players");
+    for (const auto id : o.history_players) if (!listed(id)) return invalid("configured History player is not listed");
     if (o.planet_spies.size() > galactic_max_objects) return invalid("too many planet spy abilities");
     std::set<std::pair<EntityId, std::uint64_t>> spy_ids;
     for (const auto& spy : o.planet_spies) {
@@ -152,7 +167,13 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
             || static_cast<unsigned>(spy.style) > static_cast<unsigned>(SpyStyle::ground_activated))
             return invalid("invalid planet spy ability");
     }
-    if (!listed(o.local_player)) return invalid("observer local player is not listed");
+    if (o.human_observers.empty() || o.human_observers.size() > o.players.size()
+        || !std::is_sorted(o.human_observers.begin(), o.human_observers.end())
+        || std::adjacent_find(o.human_observers.begin(), o.human_observers.end()) != o.human_observers.end())
+        return invalid("observer human roster is empty, unordered or duplicated");
+    for (const auto id : o.human_observers) if (!listed(id)) return invalid("observer human is not listed");
+    if (o.solo_reference_human && (o.human_observers.size() != 1 || o.human_observers.front() != o.solo_reference_human))
+        return invalid("solo reference human does not match singleton roster");
     if (!intelligence_expiry(o.reveal_delay_seconds, 0, o.logical_fps)) return invalid("observer reveal threshold overflows");
     const auto ids = [&](const auto& values, auto get) {
         for (std::size_t i = 0; i < values.size(); ++i) if (get(values[i]) == 0 || (i && get(values[i-1]) >= get(values[i]))) return false;
@@ -196,15 +217,16 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
 }
 
 std::vector<ObservedPlanet> observed_planets(const ObserverSetup& inputs, const std::span<const Fleet> fleets,
-    const MovementSetup* movement, const std::span<const CensusObject> actors) {
+    const ObserverViewContext view, const MovementSetup* movement, const std::span<const CensusObject> actors) {
     const auto table = observer_detail::presence(inputs, fleets, movement, actors);
-    std::vector<ObservedPlanet> result; result.reserve(inputs.records.size());
+    std::vector<ObservedPlanet> result; result.reserve(view.player ? inputs.planets.size() : inputs.records.size());
     for (std::size_t i = 0; i < inputs.records.size(); ++i) {
         const auto& record = inputs.records[i];
+        if (view.player && record.player != view.player) continue;
         const auto& player = inputs.players[i / inputs.planets.size()];
         const auto& planet = inputs.planets[i % inputs.planets.size()];
         ObservedPlanet row; row.player = record.player; row.planet = record.planet; row.discovered = record.discovered;
-        row.knowledge = planet_knowledge(observer_detail::context(inputs, player, planet, record, table));
+        row.knowledge = planet_knowledge(observer_detail::context(inputs, view, player, planet, record, table));
         if (row.knowledge.ownership) { row.known_owner = planet.current_owner; row.known_allegiance = planet.allegiance; }
         if (row.knowledge.political_control) row.known_political_control = planet.political_control;
         row.apparent_owner = row.known_owner;

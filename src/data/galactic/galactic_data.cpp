@@ -352,7 +352,7 @@ core::Result<GalacticData> load_galactic_data(const vfs::Vfs& filesystem, const 
 
 std::array<std::uint8_t, 32> content_identity(const GalacticData& data) {
     Encoder out;
-    out.text("eawr-galactic-data-v3");
+    out.text("eawr-galactic-data-v4");
     out.each(data.campaigns, [&](const Campaign& campaign) {
         out.text(campaign.name);
         out.text(campaign.campaign_set);
@@ -469,6 +469,7 @@ std::array<std::uint8_t, 32> content_identity(const GalacticData& data) {
         out.whole(faction.base_population_capacity);
         out.flag(faction.ai_uses_galactic_pop_cap);
         out.texts(faction.allies); out.texts(faction.enemies);
+        out.text(faction.basic_ai);
     });
     out.each(data.constants, [&](const Constant& constant) {
         out.text(constant.tag);

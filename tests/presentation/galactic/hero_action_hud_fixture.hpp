@@ -35,7 +35,7 @@ namespace eawr::viewer::galactic {
         {10,101,0,1004,true,true,f(2000),f(150),f(360)}};
     auto menus = g::observed_hero_action_menus(world, local, row, 10,
         name == "neutralization" ? nullptr : &theft, name == "neutralization" ? &neutral : nullptr);
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     return std::make_shared<const g::GalacticSnapshot>(0, g::GalacticClock{}, std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{}, std::vector<g::Route>{}, std::vector<g::Fleet>{}, std::vector<g::GalacticEvent>{},
         std::nullopt, std::nullopt, nullptr, std::nullopt, std::vector<g::Seat>{}, std::nullopt, std::nullopt,

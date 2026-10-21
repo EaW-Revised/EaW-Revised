@@ -1,3 +1,4 @@
+#include "gpu_debug_labels.hpp"
 #include "galactic_mode_internal.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include <godot_cpp/classes/shader.hpp>
@@ -26,9 +27,25 @@ bool GalacticMode::State::build_hero_map_bar() {
     // ring art; this GC component-to-ring binding is explicitly unverified.
     const auto* ring = command_catalog.find("hero_slot_good00");
     Ref<Shader> circle; circle.instantiate();
-    circle->set_code("shader_type canvas_item; void fragment() { "
-        "COLOR.a *= 1.0 - smoothstep(0.47, 0.49, distance(UV, vec2(0.5))); }");
-    Ref<ShaderMaterial> material; material.instantiate(); material->set_shader(circle);
+    name_canvas_shader(*circle.ptr(), "EAWR/UI/HeroPortraitCircle");
+    circle->set_code(R"(shader_type canvas_item;
+uniform sampler2D build_texture : source_color;
+uniform bool has_build_texture = false;
+uniform float completion = 1.0;
+void fragment() {
+    // PU-64: project the ray to the eight-segment square rim, clockwise from noon.
+    vec2 ray = vec2(UV.x - 0.5, 0.5 - UV.y);
+    vec2 rim = ray / max(2.0 * max(abs(ray.x), abs(ray.y)), 0.00001);
+    float step;
+    if (rim.y >= abs(rim.x)) step = rim.x >= 0.0 ? 2.0 * rim.x : 8.0 + 2.0 * rim.x;
+    else if (rim.x >= abs(rim.y)) step = 2.0 - 2.0 * rim.y;
+    else if (-rim.y >= abs(rim.x)) step = 4.0 - 2.0 * rim.x;
+    else step = 6.0 + 2.0 * rim.y;
+    if (has_build_texture && completion < 1.0 && step >= completion * 8.0)
+        COLOR.rgb += texture(build_texture, UV).rgb;
+    COLOR.a *= 1.0 - smoothstep(0.47, 0.49, distance(UV, vec2(0.5)));
+})");
+    const auto build = command_texture(first(*component, data::ui::Field::build_texture_name));
     for (std::size_t index = 0; index < hero_map_buttons.size(); ++index) {
         auto* button = memnew(EawrHudButton);
         hero_map_buttons[index] = button;
@@ -42,10 +59,14 @@ bool GalacticMode::State::build_hero_map_bar() {
         // The authored ring is a filled backplate; the circular portrait draws over it.
         button->set_order_icon({}, false);
         auto* portrait = Object::cast_to<TextureRect>(button->get_child(0));
+        Ref<ShaderMaterial> material; material.instantiate(); material->set_shader(circle);
+        material->set_shader_parameter("has_build_texture", build.is_valid());
+        if (build.is_valid()) material->set_shader_parameter("build_texture", build);
         portrait->set_material(material);
         button->set_action([this, index] {
             if (index >= hero_map_entries.size() || !map_input.hud_event() || !map_input.gates.world_allowed()) return;
             const auto entry = hero_map_entries[index];
+            if (entry.scheduled) return; // No fabricated live actor or unqualified scheduled click action.
             // Share the existing select_hero API path and re-resolve live containment.
             select_hero(entry.type, false, false);
             if (map_input.selected == entry.planet) {
@@ -62,10 +83,13 @@ void GalacticMode::State::update_hero_map_bar() {
     if (!hero_map_bar || !galaxy) return;
     // Ownership uses the session publication even when omniscient drawing is on.
     const auto publication = published_snapshot;
-    if (publication != hero_map_publication) {
+    if (publication != hero_map_publication || published_hero_returns != hero_map_returns) {
         hero_map_publication = publication;
+        hero_map_returns = published_hero_returns;
         hero_map_entries = publication
-            ? galactic_view::collect_map_heroes(*publication, galaxy->local.player, production_names, production_art)
+            ? galactic_view::collect_map_heroes(*publication, galaxy->local.player, production_names, production_art,
+                hero_map_returns ? std::span<const sim::galactic::HeroReturnView>(*hero_map_returns)
+                    : std::span<const sim::galactic::HeroReturnView>{})
             : std::vector<galactic_view::HeroMapEntry>{};
         for (std::size_t index = 0; index < hero_map_buttons.size(); ++index) {
             auto* button = hero_map_buttons[index];
@@ -73,6 +97,9 @@ void GalacticMode::State::update_hero_map_bar() {
             if (index >= hero_map_entries.size()) continue;
             const auto& look = production_art.at(production_names.at(hero_map_entries[index].type));
             button->set_icon_texture(command_texture(look.icon));
+            auto* portrait = Object::cast_to<TextureRect>(button->get_child(0));
+            const Ref<ShaderMaterial> material = portrait->get_material();
+            material->set_shader_parameter("completion", hero_map_entries[index].completion);
             auto tooltip = look.text;
             if (!look.encyclopedia_looks.unit_class.empty()) tooltip += "\n" + look.encyclopedia_looks.unit_class;
             button->set_tooltip_text(String::utf8(tooltip.c_str()));
@@ -102,16 +129,23 @@ void GalacticMode::State::update_hero_map_bar() {
 
 void GalacticMode::State::write_hero_map_report(std::ostream& output) const {
     using galactic_detail::json;
+    const auto* component = command_catalog.find("g_hero_icon");
     output << "{\"component\": \"g_hero_icon\", \"source\": \"published-local-heroes\", \"visible\": "
         << (hero_map_bar && hero_map_bar->is_visible_in_tree() ? "true" : "false")
         << ", \"clicks\": " << hero_map_clicks << ", \"selected_type\": " << hero_map_selected_type
-        << ", \"local_player\": " << (galaxy ? galaxy->local.player : 0) << ", \"entries\": [";
+        << ", \"local_player\": " << (galaxy ? galaxy->local.player : 0)
+        << ", \"current_frame\": " << (hero_map_publication ? hero_map_publication->clock().galactic_frame : 0)
+        << ", \"build_texture\": " << json(component ? first(*component, data::ui::Field::build_texture_name) : "")
+        << ", \"entries\": [";
     for (std::size_t index = 0; index < hero_map_entries.size(); ++index) {
         const auto& entry = hero_map_entries[index];
         const auto& look = production_art.at(production_names.at(entry.type));
         const auto rect = hero_map_buttons[index]->get_global_rect();
         output << (index ? ", " : "") << "{\"type\": " << entry.type << ", \"actor\": " << entry.actor
-            << ", \"planet\": " << entry.planet << ", \"name\": " << json(look.name)
+            << ", \"planet\": " << entry.planet << ", \"rank\": " << entry.rank
+            << ", \"scheduled\": " << (entry.scheduled ? "true" : "false")
+            << ", \"start_frame\": " << entry.start_frame << ", \"deadline\": " << entry.deadline
+            << ", \"completion\": " << entry.completion << ", \"name\": " << json(look.name)
             << ", \"icon\": " << json(look.icon) << ", \"tooltip\": " << json(galactic_detail::utf8(hero_map_buttons[index]->get_tooltip_text()))
             << ", \"presses\": " << hero_map_buttons[index]->presses()
             << ", \"portrait_shown\": " << (hero_map_buttons[index]->icon_shown() ? "true" : "false")

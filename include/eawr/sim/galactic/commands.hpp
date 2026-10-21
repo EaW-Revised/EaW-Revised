@@ -221,6 +221,8 @@ struct MoveFleet {
     FleetId fleet{};
     std::vector<PlanetId> path; // WGM-88: accepted graph path, source first
     std::optional<std::uint8_t> destination_slot;
+    bool raid{}; // WGM-37: explicit overview raid order, ordinary movement defaults false
+    EntityId destination_actor{}; // WGM-14/34: original supplied actor/container only
     friend bool operator==(const MoveFleet&, const MoveFleet&) = default;
 };
 
@@ -291,6 +293,7 @@ struct LaunchFleet {
     std::vector<EntityId> units;
     std::vector<PlanetId> path;
     std::optional<std::uint8_t> destination_slot;
+    EntityId destination_actor{};
     friend bool operator==(const LaunchFleet&, const LaunchFleet&) = default;
 };
 using CommandPayload =

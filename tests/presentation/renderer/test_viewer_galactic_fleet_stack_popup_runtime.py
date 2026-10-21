@@ -112,6 +112,51 @@ func _process(delta):
         self.assertTrue(any(row["type"] is None for row in contents))
         self.assertEqual(shown["population"], 0)  # no population from unknown types
 
+    def test_large_mixed_fleets_wrap_inside_the_frame(self):
+        # WGUI-166: debug-build captures at 5/10/20/40 types retain six
+        # cells per row, three heroes in the grid and an x17 stack caption.
+        previous_height = 0
+        frame_width = None
+        frame_bottom = None
+        icon_extent = None
+        for count in (5, 10, 20, 40):
+            with self.subTest(types=count):
+                data = self.hover(f"fleet-popup-{count}", "fleet_presence_101_2")
+                shown = data["fleet_hud"]["stack_popup"]["popup"]["tooltip"]
+                self.assertIsNotNone(shown, self.hover_facts(data))
+                cells = shown["cells"]
+                self.assertEqual(len(cells), count)
+                self.assertEqual(sorted(cell["count"] for cell in cells), [1] * (count - 1) + [17])
+                self.assertTrue(all(cell["icon"] for cell in cells))
+                left, top, width, height = shown["rect"]
+                # The stock atlas rectangle is 50 texels wide, and the
+                # authored fleet-list scale is .75 in the 262-unit frame.
+                self.assertAlmostEqual(cells[0]["rect"][2] / width, 50 * .75 / 262, places=4)
+                if icon_extent is None:
+                    icon_extent = cells[0]["rect"][2:]
+                self.assertEqual(cells[0]["rect"][2:], icon_extent)
+                if frame_width is None:
+                    frame_width, frame_bottom = width, top + height
+                self.assertAlmostEqual(width, frame_width, delta=1)
+                self.assertAlmostEqual(top + height, frame_bottom, delta=1)
+                self.assertGreater(height, previous_height)
+                previous_height = height
+                rows = {}
+                for cell in cells:
+                    x, y, w, h = cell["rect"]
+                    self.assertGreater(w, 0)
+                    self.assertGreater(h, 0)
+                    self.assertGreaterEqual(x, left)
+                    self.assertGreaterEqual(y, top)
+                    self.assertLessEqual(x + w, left + width + 0.01)
+                    self.assertLessEqual(y + h, top + height + 0.01)
+                    rows.setdefault(round(y, 2), []).append((x, w))
+                self.assertEqual([len(row) for _, row in sorted(rows.items())],
+                                 [6] * (count // 6) + ([count % 6] if count % 6 else []))
+                for row in rows.values():
+                    for (x, w), (next_x, _) in zip(row, row[1:]):
+                        self.assertLessEqual(x + w, next_x + 0.01)
+
     def test_centre_icon_opens_and_presence_only_icon_does_not(self):
         data = self.hover("fleet-contents", "fleet_presence_101_1")
         self.assertIsNotNone(data["fleet_hud"]["stack_popup"]["popup"]["tooltip"], self.hover_facts(data))

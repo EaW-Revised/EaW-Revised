@@ -140,10 +140,12 @@ public:
     std::uint32_t connected_seats() const;
     // Host: every seat of the agreed roster is present and every pair is verified. Member: all of its own pairs are open.
     bool mesh_complete() const;
+    bool mesh_complete(std::uint32_t active_seats) const;
     // Cached native lock view; reads no socket and is false when GNS is disabled.
     bool room_locked() const;
     // Host only: Lock the room (Start). Refused with EAWR-NET-1764 while the mesh is incomplete.
     core::Result<void> lock_room();
+    core::Result<bool> lock_roster(std::uint32_t active_seats);
     // I/O owner: apply the validated lobby commitment before battle handoff.
     // The host's GNS commitment may beat the service's TLS Lock roster push.
     core::Result<void> commit_room();

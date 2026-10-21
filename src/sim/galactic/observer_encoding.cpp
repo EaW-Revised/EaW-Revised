@@ -23,7 +23,7 @@ template<class T> auto fields(T& v) {
     else if constexpr (std::is_same_v<V, ObserverRecord>)
         return std::tie(v.player, v.planet, v.discovered, v.reveal_counter, v.refresh_frame, v.mask, v.sources, v.apparent_control, v.apparent_owner);
     else if constexpr (std::is_same_v<V, ObserverSetup>)
-        return std::tie(v.local_player, v.reveal_delay_seconds, v.automatic_reveal_range, v.players, v.planets, v.types, v.records, v.logical_fps, v.planet_spies);
+        return std::tie(v.human_observers, v.solo_reference_human, v.reveal_delay_seconds, v.automatic_reveal_range, v.players, v.planets, v.types, v.records, v.logical_fps, v.planet_spies, v.history_players);
     else if constexpr (std::is_same_v<V, PlanetSpy>)
         return std::tie(v.planet, v.ability, v.text_identity, v.mask, v.duration, v.influence_range, v.style, v.enabled, v.despawning);
     else
@@ -69,8 +69,13 @@ template<class T> std::optional<T> payload(std::span<const std::uint8_t> bytes) 
     return v;
 }
 }
-void encode_observer(std::vector<std::uint8_t>& bytes, const ObserverSetup& v) { encode(bytes, v); }
-std::optional<ObserverSetup> decode_observer(std::span<const std::uint8_t> bytes) { return payload<ObserverSetup>(bytes); }
+void encode_observer(std::vector<std::uint8_t>& bytes, const ObserverSetup& v) { put_u16(bytes, 3); encode(bytes, v); }
+std::optional<ObserverSetup> decode_observer(std::span<const std::uint8_t> bytes) {
+    Reader in(bytes); std::uint16_t schema{};
+    ObserverSetup value;
+    if (!in.read_u16(schema) || schema != 3 || !decode(in, value) || in.remaining()) return std::nullopt;
+    return value;
+}
 void encode_observer_command(std::vector<std::uint8_t>& bytes, const ObserverCommand& v) { encode(bytes, v); }
 std::optional<ObserverCommand> decode_observer_command(std::span<const std::uint8_t> bytes) {
     auto v = payload<ObserverCommand>(bytes);

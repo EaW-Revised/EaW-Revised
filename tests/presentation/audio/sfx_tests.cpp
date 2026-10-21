@@ -829,6 +829,11 @@ void two_dimensional_pool() {
 }
 
 void category_admission_and_gain() {
+    // ST-A1: no stored settings uses the same quieter master as a fresh settings record.
+    const audio::MixLevels defaults;
+    expect(near(defaults.master, 0.37) && near(defaults.sfx, 0.75)
+               && near(defaults.speech, 0.75) && near(defaults.music, 0.75),
+           "fresh mix lowers only master, preserving the retail channel balance");
     audio::Random random(19);
     const audio::Vec3 listener{};
     for (const bool spatial : {false, true}) {

@@ -467,7 +467,9 @@ Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `Lo
   (`GnsOptions::peers`); the host's seat count must equal it.
 - **Staging.** `LobbySession` admits a seat when its host pair verifies. A newcomer the mesh refuses (`seat_refused`) is refused
   with `mesh_newcomer_refusal_text` (1762) and a room notice; a closed or locked mesh refuses Start with 1764. Start calls
-  `mesh_complete` first and `lock_room` just before the committed broadcast; a refused Lock aborts the Start.
+  `mesh_complete` first. Skirmish then polls `lock_room_progress` for the roster-lock confirmation before the committed
+  broadcast; a pending reply stays frozen and a refused comparison aborts Start with its named reason. Campaigns retain
+  the existing full-capacity lock hook. See LLB-18 in [the staging rules](ui/lan-lobby.md).
 - **Incident driver (`MeshIncident`).** One per `LockstepSession` with three or more active seats. The incident ID is "incidents
   completed + 1"; the time base is the earliest start heard, in the sender's elapsed milliseconds, so seats that noticed the loss
   at different moments still share the grace and the pledge cutoff. A pair lost three times within two minutes is held lost for
@@ -526,9 +528,11 @@ Landed in `include/eawr/net/mesh_incident.hpp`, `src/net/mesh_incident.cpp`, `Lo
   `mesh_complete` check does not read the locked flag: Lock is only issued after it. `require_short_code` stays off in the lobby
   screen (its host is joined through the room list, so no code is awaited); only a code-only host such as the online test kit sets
   it. Adaptive timing is configured by no app yet, so the per-pair minimum is reached only through tests until MP-2 turns it on.
-- **Lock.** `GnsTransport::lock_room` queues the service Lock and marks the host's own mesh locked in the same call, so the host
-  ignores later attachments whatever the service answers; `NetworkGnsRoom::last_refusal()` keeps the service's acknowledgement for
-  diagnostics. A late newcomer at an unlocked service can only fail at its own pairs.
+- **Lock.** Skirmish uses roster-lock protocol 1 (room kinds 48/49): an exact service roster revision and attached-seat mask,
+  including sparse members below capacity. The service refuses reservations, incomplete attaches, a changed revision or a
+  different mask without changing the room. It pushes the locked roster before confirming the request; only that confirmation
+  lets the host commit. Older relays reject the operation and the client names the unsupported protocol and required update.
+  Existing `lock_room` remains the full-capacity campaign/test path.
 - **Repair before departure.** The adapter attempts an authenticated replacement during the incident grace. A successful
   repair uses the existing restoration agreement; a failed repair waits for the same decision and departure cutoff.
 - **What the minority side sees.** A seat cut off from the decider receives no confirmation. It cannot continue alone: at the
@@ -749,3 +753,23 @@ Decided 2026-10-14 (legacy EAWR-3669):
 A required input batch or hash voter that is still missing after the 30-second completeness deadline ends the local match as **Connection lost: the match could not continue**, with no winner. Every still-running peer reaches its own bounded loss deadline. The viewer names the missing peer and diagnostic reason, logs the loss, and saves the completed replay prefix with a companion `.connection-loss.json` reason record; the binary replay format is unchanged. A received quit, a confirmed mesh membership decision, or a closed-stream departure backed by received matching votes from multiple survivors retains its normal departure result. A lone survivor cannot confirm the other peer departed just by voting for itself. The retail observations MP-34 and MP-36 allow timeout-triggered quit processing; the deliberate project deviation is to withhold a winner when membership was not confirmed, so two isolated peers cannot each award themselves the match. Application silence on an otherwise open transport is not a mesh pair-loss report: feeding that evidence into recovery is a separate follow-up.
 
 This application-timeout rule also applies to three or more seats; it does not start a mesh membership incident. An already agreed reconnect policy still holds a closed-stream seat for its existing grace, progress and hard-cap deadlines before an unconfirmed lone-survivor loss ends neutrally. Confirmed mesh failures retain their specific agreement-failure messages. Loss recordings publish complete temporary files by rename in the log directory: the companion is published first and the final replay is the pair's commit marker.
+
+
+### TCP capacity staging
+
+Skirmish LAN rooms opt into capacity staging: the verified host hello carries the
+room capacity and mode, so a direct join or a browser vacancy count cannot select
+a different native mesh size. Verified host links carry staging snapshots before
+vacant seats connect. Start compares the admitted native identities and mask with
+attached streams and pending joins, freezes that sparse roster, and distributes
+pair secrets only for its active guests. Live tick-zero publication waits for the
+native readiness barrier, including flushing the host Open markers before a
+synchronous scene handover. A lost guest during that barrier fails with
+EAWR-NET-1301 and cannot produce a half-committed match; late joins get
+EAWR-NET-1305. Incompatible lobby bootstrap formats get EAWR-NET-1306.
+
+This mode is opt-in. Legacy fixed-roster TCP and campaign setup retain their
+original full-mesh barrier and recovery route; the lobby bootstrap negotiates that
+host mode before admission. Map selection checks each occupied human/AI row before
+repairing defaults: rows 1 and 7 require a map exposing row 7, even with only two
+humans, and a refused map never renumbers either player.

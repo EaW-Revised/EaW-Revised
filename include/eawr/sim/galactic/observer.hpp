@@ -86,11 +86,16 @@ struct ObservedPlanet {
     math::Fixed apparent_political_control{};
     friend bool operator==(const ObservedPlanet&, const ObservedPlanet&) = default;
 };
+// A requested publication player is local process state, never observer state.
+// Zero requests the canonical all-player queries used by simulation consumers.
+struct ObserverViewContext { PlayerId player{}; };
+struct ObserverHome { PlayerId player{}; std::optional<PlanetId> planet; };
 [[nodiscard]] core::Result<void> validate_observer(const GalacticSetup&);
 // WGUI-99 fresh records; WGS-06 reveals and explicitly refreshes only the local
 // matching home. Ordinary delayed/topology discovery is a later service pass.
 [[nodiscard]] core::Result<void> initialize_campaign_observer(GalacticSetup&, std::optional<PlanetId> local_home);
-[[nodiscard]] std::vector<ObservedPlanet> observed_planets(const ObserverSetup&, std::span<const Fleet>, const MovementSetup* = nullptr,
+[[nodiscard]] core::Result<void> initialize_campaign_observers(GalacticSetup&, std::span<const ObserverHome>);
+[[nodiscard]] std::vector<ObservedPlanet> observed_planets(const ObserverSetup&, std::span<const Fleet>, ObserverViewContext, const MovementSetup* = nullptr,
     std::span<const CensusObject> actors = {});
 
 } // namespace eawr::sim::galactic

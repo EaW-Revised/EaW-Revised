@@ -165,7 +165,14 @@ void EawrHeroTray::_gui_input(const Ref<InputEvent>& event) {
     if (button == nullptr) return;
     const auto index = button->get_button_index();
     // An icon takes the click so it never reaches the world behind it.
-    if ((index == MOUSE_BUTTON_LEFT || index == MOUSE_BUTTON_RIGHT) && slot_at(button->get_position())) accept_event();
+    const auto slot = slot_at(button->get_position());
+    if ((index != MOUSE_BUTTON_LEFT && index != MOUSE_BUTTON_RIGHT) || !slot) return;
+    accept_event();
+    if (button->is_pressed() && click_) {
+        // Copy before dispatch: a selection change can refresh the tray synchronously.
+        const Icon icon = icons(slot->first)[slot->second];
+        click_(slot->first, icon, index == MOUSE_BUTTON_RIGHT, button->is_double_click());
+    }
 }
 
 void EawrHeroTray::_notification(const int what) {

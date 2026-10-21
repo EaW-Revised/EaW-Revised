@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-// The command envelope and the galactic replay EAWRGCR v1 (ADR-015, ADR-020,
+// The command envelope and the galactic replay EAWRGCR v3 (ADR-015, ADR-020,
 // docs/galactic-replay-format.md): byte round trip, every refusal diagnostic, out-of-order and
 // late submission, and a live run that replays itself headless with identical per-tick hashes.
 namespace {
@@ -184,6 +184,26 @@ void submission_order() {
         "a late command is refused");
 }
 
+void raid_codec() {
+    using namespace galactic;
+    for (const bool raid : {false, true}) for (const auto slot : {std::optional<std::uint8_t>{}, std::optional<std::uint8_t>{std::uint8_t{2}}}) {
+        const CommandPayload order = MoveFleet{10, {1, 2}, slot, raid};
+        auto bytes = encode_payload(order);
+        expect(layer_of(order) == CommandLayer::galactic && opcode_of(order) == 5, "raid keeps MoveFleet opcode 5");
+        expect(bytes.size() == 38 + (slot ? 1U : 0U) && bytes[bytes.size() - 9] == (raid ? 1 : 0), "raid is a mandatory canonical boolean before the destination identity");
+        expect(decode_payload(CommandLayer::galactic, 5, bytes) == order, "ordinary and raid moves round-trip with either slot form");
+        bytes[bytes.size() - 9] = 2;
+        expect(!decode_payload(CommandLayer::galactic, 5, bytes), "non-boolean raid is refused");
+        bytes.pop_back();
+        expect(!decode_payload(CommandLayer::galactic, 5, bytes), "old move bytes are refused");
+        auto setup = synthetic_galaxy();
+        GalacticReplay replay{setup, 1, {{{0, {1}, 1}, order}}};
+        const auto written = write_replay(replay);
+        expect(written && parse_replay(written.value()).value() == replay, "raid bit survives replay bytes");
+    }
+    expect(!MoveFleet{}.raid, "ordinary producers default to nonraid");
+}
+
 void payloads() {
     using galactic::CommandLayer;
     const galactic::CommandPayload set_owner = galactic::DebugSetPlanetOwner{3, 2};
@@ -314,6 +334,7 @@ void refusals() {
 } // namespace
 
 int case_galactic_replay_tests() {
+    raid_codec();
     payloads();
     refusals();
     human_side_round_trip();

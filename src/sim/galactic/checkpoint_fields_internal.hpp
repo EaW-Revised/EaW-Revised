@@ -6,6 +6,19 @@
 
 namespace eawr::sim::galactic::checkpoint_detail {
 
+template <> struct Fields<::eawr::sim::galactic::HistoryValue> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.bits);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::HistorySample> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        // GREF-26: keep the stored order and floating bit patterns.
+        a(v.frame, v.economy, v.planets, v.technology, v.military);
+    }
+};
+
 template <> struct Fields<::eawr::sim::SeatId> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.value);
@@ -101,6 +114,21 @@ template <> struct Fields<::eawr::sim::galactic::ControlBase> {
         a(v.owner, v.level);
     }
 };
+template <> struct Fields<::eawr::sim::galactic::ControlAbility> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.protection, v.enabled, v.category, v.multiplier);
+    }
+};
+template <> struct Fields<::eawr::sim::galactic::ControlAbilityType> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.type, v.abilities);
+    }
+};
+template <> struct Fields<::eawr::sim::galactic::ControlAbilitySource> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.planet, v.actor, v.type, v.ability, v.owner);
+    }
+};
 
 template <> struct Fields<::eawr::sim::galactic::ControlCap> {
     template <class A, class T> static void apply(A& a, T& v) {
@@ -110,7 +138,7 @@ template <> struct Fields<::eawr::sim::galactic::ControlCap> {
 
 template <> struct Fields<::eawr::sim::galactic::ControlPlanet> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.planet, v.type, v.surface_accessible, v.retains_residual, v.destroyed, v.protected_control, v.ground_base, v.starbase, v.landed, v.production_owner, v.leaning_player, v.leaning, v.special_control, v.caps, v.transition_modifiers, v.capture_reward, v.built_structures);
+        a(v.planet, v.type, v.surface_accessible, v.retains_residual, v.destroyed, v.ground_base, v.starbase, v.landed, v.production_owner, v.leaning_player, v.leaning, v.special_control, v.caps, v.transition_modifiers, v.capture_reward, v.built_structures);
     }
 };
 
@@ -212,7 +240,7 @@ template <> struct Fields<::eawr::sim::galactic::FactionController> {
 
 template <> struct Fields<::eawr::sim::galactic::Fleet> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.owner, v.orbit, v.members, v.orbit_slot, v.motion);
+        a(v.id, v.owner, v.orbit, v.members, v.orbit_slot, v.motion, v.raid_destination);
     }
 };
 
@@ -236,7 +264,7 @@ template <> struct Fields<::eawr::sim::galactic::FleetProductionBlocker> {
 
 template <> struct Fields<::eawr::sim::galactic::FleetTransit> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.path, v.hop, v.desired, v.velocity, v.base_speed, v.speed, v.packed, v.destination_slot, v.producer, v.sequence, v.desired_facing);
+        a(v.path, v.hop, v.desired, v.velocity, v.base_speed, v.speed, v.packed, v.destination_slot, v.producer, v.sequence, v.desired_facing, v.destination_actor);
     }
 };
 
@@ -360,9 +388,23 @@ template <> struct Fields<::eawr::sim::galactic::MovementPlayer> {
     }
 };
 
+template <> struct Fields<::eawr::sim::galactic::RaidRules> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.required_faction, v.free_categories, v.limited_categories, v.max_heroes, v.max_limited);
+    }
+};
+template <> struct Fields<::eawr::sim::galactic::RaidType> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.type, v.categories, v.hero, v.stays_in_transport);
+    }
+};
+template <> struct Fields<::eawr::sim::galactic::RaidSetup> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.rules, v.types); }
+};
+
 template <> struct Fields<::eawr::sim::galactic::MovementSetup> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.types, v.contents, v.players, v.planets, v.access, v.mode_modifier);
+        a(v.types, v.contents, v.players, v.planets, v.access, v.mode_modifier, v.raid);
     }
 };
 
@@ -428,7 +470,7 @@ template <> struct Fields<::eawr::sim::galactic::ObserverRecord> {
 
 template <> struct Fields<::eawr::sim::galactic::ObserverSetup> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.local_player, v.reveal_delay_seconds, v.automatic_reveal_range, v.players, v.planets, v.types, v.records, v.logical_fps, v.planet_spies);
+        a(v.human_observers, v.solo_reference_human, v.reveal_delay_seconds, v.automatic_reveal_range, v.players, v.planets, v.types, v.records, v.logical_fps, v.planet_spies, v.history_players);
     }
 };
 
@@ -500,7 +542,7 @@ template <> struct Fields<::eawr::sim::galactic::PoliticalControlEffect> {
 
 template <> struct Fields<::eawr::sim::galactic::PoliticalControlSetup> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.change_seconds, v.max_ground_forces, v.players, v.relations, v.types, v.planets, v.routes, v.state, v.captured_types, v.absent_forces, v.ground_capability_types);
+        a(v.change_seconds, v.max_ground_forces, v.players, v.relations, v.types, v.planets, v.routes, v.state, v.captured_types, v.absent_forces, v.ground_capability_types, v.ability_types, v.ability_sources);
     }
 };
 

@@ -367,6 +367,7 @@ void threat_preparation();
 void threat_flat_storage();
 void plan_definition_paths();
 void mounted_ai_discovery();
+void mode_selected_closure();
 void authored_goal_extension();
 void unit_concentration();
 void coroutine_module_loading();

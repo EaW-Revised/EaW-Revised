@@ -163,14 +163,14 @@ void SpaceEnvironment::State::selftest_tick(const std::uint32_t tick) {
     case 1:
         notify(Node::NOTIFICATION_APPLICATION_FOCUS_IN);
         check("focus established before input", camera_bridge.adapter().focused() && focus_notifications > 0);
-        inject_key(KEY_D, true);
+        inject_key(KEY_RIGHT, true);
         break;
     case 2:
         // A declared one-second step makes the clamp independent of how
         // quickly the graphical runner schedules frames.
         if (auto moved = camera_bridge.step(1.0F); !moved) failure = core::format_diagnostic(moved.error());
         break;
-    case 3: inject_key(KEY_D, false); break;
+    case 3: inject_key(KEY_RIGHT, false); break;
     case 4:
         check("pan reaches authored X clamp", locked ? unchanged()
             : camera_bridge.frame().target[0] == controller.render_bounds().max_x);

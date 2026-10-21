@@ -21,8 +21,8 @@ effective FoC XML file. `tools/inventory/tag_registry.py` reads it and
   `Goals`, `GameConstants`), the tag path what is below it (`Max_Speed`, `Abilities/Stun_Ability/Stun_Range`,
   `@Name`), ASCII case folded as FoC matches names;
 - collapses the segments that are data, not tags, to `*`: goal, function-set and AI-template names, dialog control names
-  (`GUIDialogs/Textures/*/Frame_Left`), planet, terrain and hint names, equation, enum and movement-class names. The 14,783 inventory rows
-  become 8,202 pairs.
+  (`GUIDialogs/Textures/*/Frame_Left`), planet, terrain and hint names, equation, enum and movement-class names. The FoC profile has 14,783 inventory rows
+  (of 53,564 across all profiles), which become 8,202 stock-authored pairs.
 
 The game-data tier checks the inventory itself: every element and attribute name in the effective FoC XML must be in the
 inventory, so a stale inventory cannot hide a new tag from the gate. The check is name-level: a name the inventory already
@@ -60,9 +60,10 @@ particular nested context or application by the remake. ML-28's context and
 warning distinctions still apply. Misspellings remain `unknown`.
 The inventory manifest fingerprints the catalog and classifier source.
 
-The authored-pair registry below still covers exactly the stock inventory. A catalog
-entry adds no status row: application coverage needs a row only when authored data
-introduces that pair. Recognition alone never implies `applied` or `foc-ignores`.
+The registry covers those 8,202 stock-authored pairs plus six reviewed `engine_default` pairs,
+8,208 in all: `SpaceUnit`, `SpaceBuildable` and `SpecialStructure` each have
+`Turret_XY_Only` and `Turret_Rotate_To_Rest_Delay_Sec` defaults. Other catalog entries
+do not add rows automatically. Recognition alone never implies `applied` or `foc-ignores`.
 
 `docs/tag-coverage/statuses.json` holds the schema version, shared evidence and shard list, with no rows.
 Its `statuses-<area>.json` shards use `schema_version` 2, one row per line, sorted by tag then first class.
@@ -85,7 +86,8 @@ A row covers every class it lists:
 
 A tag we parse but do not apply is `todo` or `partial`, never covered. `area` is the subsystem. `types` are the unit kinds of
 `include/eawr/units/unit_tables.hpp` (`station`, `ship`, `squadron`, `craft`) where the sim splits by kind, otherwise
-empty (the whole class). `basis` is `reviewed` (someone read the code path) or `auto` (see the seed below); a reviewed
+empty (the whole class). `basis` is `reviewed` (someone read the code path) or `auto` (see the seed below).
+Older rows may omit `basis`; omission makes no claim of manual verification. A reviewed
 applied row names its rule IDs or a note saying no rule mentions the tag. `trace: unrecorded` marks a loader that reads under
 an unrecorded trace (see below).
 
@@ -116,7 +118,8 @@ For example, ignored ship thrust in ordinary flight does not cover optional atta
   claims about FoC.
 - A tag name's scope word (`Hyperspace`, `Land_`, `Piracy`, `Galactic`) labels `land-or-galactic` only for classes that are not
   fought in a tactical battle. On the classes of `TACTICAL_CLASSES` (`tools/inventory/tag_registry.py`: `SpaceUnit`, `UniqueUnit`,
-  `TransportUnit`, `Container`, `Squadron`, `StarBase`, the space and special structures and the heroes) such a tag stays `todo`
+  `TransportUnit`, `Container`, `Squadron`, `StarBase`, `SpaceBuildable`, `SpaceStructure`,
+  `SpecialStructure`, `SecondaryStructure`, `HeroUnit`, `GenericHeroUnit`, `Mobile_Defense_Unit`) such a tag stays `todo`
   until someone has read what a tactical battle does with it (legacy EAWR-4002), as for the `Hyperspace`
   arrival (legacy EAWR-3956); only pure ground words (`Garrison`, `Ground`, `Infantry`) still scope those classes out. Fields only the galactic map reads (`GalacticBehavior`, `Piracy_Value_Credits`,
   `Galactic_Fleet_Override_*`, `Disallows_Hyperspace_Retreat`) stay `land-or-galactic` on every class.
@@ -138,7 +141,7 @@ For example, ignored ship thrust in ordinary flight does not cover optional atta
   but never for this class' scene objects is `todo`, not applied.
 
 The scan is a text scan. Rows it produced are `basis: auto`; they are the rows the perturbation check
-(`out/specs/tag-applied-check.md`, tools/soak) proves or refutes mechanically. Hand decisions the scan cannot make are in
+(`tools/inventory/tag_applied_check.py`, tools/soak) proves or refutes mechanically. Hand decisions the scan cannot make are in
 the `OVERRIDES` table of `tag_registry_build.py`.
 
 The tag perturbation reassessment of AI, combat, economy and movement application fixes distinguishes an unchanged battle hash from a missing application. Reviewed
@@ -151,13 +154,15 @@ while craft preserve the debug build's default of no layer (AV-21). Neither defa
 
 ## Registry shards
 
-`docs/tag-coverage/statuses.json` lists `statuses-galactic.json` in its `shards` array. Shard names
+`docs/tag-coverage/statuses.json` lists all eight shards (`ai`, `combat`, `data`, `economy`,
+`fighters`, `galactic`, `movement`, `presentation`) in its `shards` array. Shard names
 are relative to the containing file. Registry readers combine the rows and evidence before checking coverage,
 so every (class, tag) pair still has exactly one status across all files. Conflicting evidence definitions,
 duplicate pairs, missing shards and repeated shard references fail the gate.
 
-The galactic shard owns Campaign, Planet and TradeRoute pairs and the GameConstants and Faction pairs
-already identified by `SCOPE-GALACTIC`. This split preserves every status, target, ticket and evidence value;
+The galactic shard owns Campaign, Planet, TradeRoute and TradeRouteLine pairs, the Particle
+`Galactic_Model_Name` pair, and the GameConstants and Faction pairs already identified by
+`SCOPE-GALACTIC`. It also retains 55 presentation-area rows; area and file ownership differ there. This split preserves every status, target, ticket and evidence value;
 it does not claim that a deferred mechanic is applied. Other rows live in the shard named by their `area`:
 `movement`, `combat`, `fighters`, `ai`, `presentation`, `economy` or `data`.
 When applying a galactic tag, edit its existing row in `statuses-galactic.json`.
@@ -342,14 +347,26 @@ python tools/inventory/tag_coverage.py scene --game-root <install> --trace <abs>
 
 ### Regenerating the seed
 
-Only for a bulk rebuild; the registry is hand-edited otherwise. The inputs live in the ignored `out/`:
+Only for a bulk rebuild; edit existing shard rows for ordinary changes and persist hand decisions
+in `tag_registry_build.py` OVERRIDES. The optional `--previous` flag still exists; it accepts
+the legacy schema-1 seed, not the current sharded v2 registry. The inputs live in the ignored `out/`:
 
 ```sh
 python tools/inventory/tag_apply_scan.py --out out/tag-coverage/apply-scan.json
 python tools/inventory/tag_registry_build.py --game-root <install> --scan out/tag-coverage/apply-scan.json \
     --scene out/tag-coverage/scene.json --tag-tables out/research/tag-tables/all/tag-tables \
-    --previous <schema 1 table> --out docs/tag-coverage/statuses.json
+    --previous <old schema-1 statuses.json> --out docs/tag-coverage/statuses.json
 ```
 
 The tag-tables output (addresses, table rows) is derived from the game binary and never committed; the registry holds tag
 names, our code locations, rule IDs and evidence ids only.
+
+### Reviewing applied claims
+
+`python tools/inventory/tag_applied_verify.py --out out/tag-coverage/applied-verification.json`
+checks every applied row for its tag leaf literal and anchor in each cited file, and selects
+100 rows with random seed 1021 for manual consumer review across the registry. Textual misses
+are listed, not downgraded: renamed fields, generated keys and downstream consumers commonly
+make literal checks miss real application. Review the sampled classes through to a sim or
+presentation consumer; a successful textual check alone is not that proof. Current status and
+area counts are generated in the [report overview](tag-coverage/report/README.md).

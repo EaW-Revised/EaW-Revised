@@ -407,6 +407,24 @@ void RoomService::operate(std::uint64_t connection, const Bytes& bytes, Reader& 
         if (!reader.done()) { sink_.fail(connection, 1521); return; }
         kick_or_release(connection, room, index, target, kind == Kind::room_kick, now); return;
     }
+    if (kind == Kind::room_lock_roster) {
+        const auto revision = reader.u32(), expected = reader.u32();
+        if (!reader.done() || index != 0) { sink_.fail(connection, reader.done() ? room_capability : 1521); return; }
+        std::uint32_t attached{};
+        bool joining = false;
+        for (std::uint32_t i = 0; i < room.capacity; ++i) {
+            joining = joining || room.slots[i].attaching || room.slots[i].state == State::reserved;
+            if (room.slots[i].state == State::attached && !room.slots[i].attaching) attached |= 1U << i;
+        }
+        const unsigned reason = room.state != GnsRoomState::open ? room_locked
+            : room.revision != revision || joining || expected != attached || (expected & 1U) == 0 || expected == 1U ? room_unavailable : 0;
+        auto reply = message(Kind::room_roster_locked); u32(reply, revision); u32(reply, expected); u32(reply, reason);
+        if (reason) { sink_.send(connection, std::move(reply)); return; }
+        room.state = GnsRoomState::locked;
+        sink_.directory_state(id, true, false);
+        announce(room); // The authoritative locked roster precedes its confirmation on the host stream.
+        sink_.send(connection, std::move(reply)); return;
+    }
     if (kind == Kind::room_lock) {
         if (!reader.done() || index != 0) { sink_.fail(connection, reader.done() ? room_capability : 1521); return; }
         if (room.state != GnsRoomState::open) { sink_.send(connection, ack_frame(room_locked)); return; } // a repeated Start

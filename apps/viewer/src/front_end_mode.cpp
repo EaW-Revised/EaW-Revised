@@ -554,12 +554,11 @@ void FrontEndMode::State::sync_attract() {
         const bool main_menu = nav.current() == model::FrontEndScreen::main_menu;
         attract->set_front_end(true, main_menu);
         attract->process(host->get_process_delta_time(), true, main_menu, focused);
-        // The battle shows through the overlay (MAT-01) and behind the single-player staging; the
-        // multiplayer menus and the LAN staging hide it (MAT-14, owner 10-12).
+        // MAT-14: the selector keeps the battle visible; the LAN and Internet lobby/chat
+        // screens supply their own opaque backing. Every menu return clears the shell backing.
         const model::FrontEndScreen screen = nav.current();
-        const bool multiplayer = screen == model::FrontEndScreen::multiplayer;
-        backdrop->set_color(Color(0.0F, 0.0F, 0.0F, multiplayer ? 1.0F : 0.0F));
-        setup->scene_behind(!multiplayer && screen != model::FrontEndScreen::lan_setup && screen != model::FrontEndScreen::online_setup);
+        backdrop->set_color(Color(0.0F, 0.0F, 0.0F, 0.0F));
+        setup->scene_behind(screen != model::FrontEndScreen::lan_setup && screen != model::FrontEndScreen::online_setup);
     }
     if (!attract->failure().empty()) attract_failure = attract->failure();
 }
@@ -598,7 +597,8 @@ void FrontEndMode::State::log_behind(const char* label) const {
             distinct.insert(pixel.to_rgba32() >> 2U);
         }
     }
-    UtilityFunctions::print("EAWR front end behind ", label, ": scene ", setup->scene_visible(), "; sampled ", sampled,
+    const bool scene = backdrop->is_visible() ? backdrop->get_color().a == 0.0F : setup->scene_visible();
+    UtilityFunctions::print("EAWR front end behind ", label, ": scene ", scene, "; sampled ", sampled,
                             "; differing ", differing, "; distinct ", static_cast<int64_t>(distinct.size()));
 }
 
@@ -1083,12 +1083,23 @@ std::optional<int> FrontEndMode::State::run_test() {
         case 8: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
         case 16: log_menu("multiplayer", menus[2]); press_gadget(S::multiplayer, "IDC_MULTIPLAYER_INTERNET_BUTTON"); break;
         case 24:
+            log_attract("online_setup");
+            log_behind("online_setup");
             if (auto* lobby = setup->online_lobby()) {
                 UtilityFunctions::print("EAWR online service lobby source: ", text(lobby->snapshot().source));
                 capture("online_service_lobby");
             }
             break;
         case 26: if (auto* lobby = setup->online_lobby()) static_cast<void>(lobby->run_action("cancel")); break;
+        case 28:
+            capture("online_cancel");
+            root->hide(); overlay->hide();
+            break;
+        case 30:
+            log_attract("online_cancel"); log_behind("online_cancel");
+            root->show(); overlay->show();
+            break;
+        case 32: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
         case 34: press_gadget(S::multiplayer, "IDC_MAIN_OPTIONS_NETWORK"); break;
         case 42:
             if (live_options()) UtilityFunctions::print("EAWR online service network page: ", EawrOptionsScreen::page_name(options_screen->page()));
@@ -1149,11 +1160,20 @@ std::optional<int> FrontEndMode::State::run_test() {
     case 42: press_gadget(S::single_player, "IDC_BACK_BUTTON_MAIN"); break;
     case 48: UtilityFunctions::print("EAWR front end back: ", text(model::to_string(nav.current()))); break;
     case 50: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
+    case 53:
+        capture("multiplayer");
+        root->hide(); overlay->hide();
+        break;
+    case 55:
+        log_behind("multiplayer"); log_attract("multiplayer");
+        root->show(); overlay->show();
+        break;
     case 56: log_menu("multiplayer", menus[2]); press_gadget(S::multiplayer, "IDC_MULTIPLAYER_LAN_BUTTON"); break;
     case 70:
         UtilityFunctions::print("EAWR front end setup: visible ", setup->visible(), "; lan ", setup->lan_selected());
         log_text_scale("lan_setup", setup->lan_host_button(), "lan_host");
         capture("lan_setup");
+        log_attract("lan_setup");
         setup->set_content_visible(false);
         break;
     case 71:
@@ -1164,8 +1184,25 @@ std::optional<int> FrontEndMode::State::run_test() {
     case 74:
         if (auto* back = setup->back_button()) click(back->get_global_rect().get_center());
         break;
-    case 80: press_gadget(S::multiplayer, "IDC_OK_MAIN"); break;
-    case 86: UtilityFunctions::print("EAWR front end back: ", text(model::to_string(nav.current()))); break;
+    case 77:
+        capture("lan_cancel");
+        root->hide(); overlay->hide();
+        break;
+    case 79:
+        log_behind("lan_cancel"); log_attract("lan_cancel");
+        root->show(); overlay->show();
+        break;
+    case 80: press_gadget(S::main_menu, "IDC_MAIN_MENU_MULTIPLAYER"); break;
+    case 84: press_gadget(S::multiplayer, "IDC_OK_MAIN"); break;
+    case 85:
+        capture("selector_back");
+        root->hide(); overlay->hide();
+        break;
+    case 86:
+        log_behind("selector_back"); log_attract("selector_back");
+        root->show(); overlay->show();
+        UtilityFunctions::print("EAWR front end back: ", text(model::to_string(nav.current())));
+        break;
     case 88: press_gadget(S::main_menu, "IDC_OPTIONS"); break;
     case 96:
         log_attract("options");
@@ -1504,6 +1541,13 @@ void FrontEndMode::window_activated() {
     if (state.attract && state.attract->running()) state.attract->window_activated();
 }
 
+// The host's multiplayer campaign launch skips start_campaign(), and the host stops calling process() once the
+// campaign runs, so sync_attract would never stop the demo battle behind the campaign's own battles (#4561).
+void FrontEndMode::campaign_started_by_host() {
+    state_->stop_attract("campaign start");
+    state_->begin_campaign();
+}
+
 void FrontEndMode::return_to_main_menu() {
     State& state = *state_;
     state.campaign_started = false;
@@ -1556,7 +1600,10 @@ std::optional<int> FrontEndMode::process() {
     const auto screen = state.nav.current();
     if ((screen == model::FrontEndScreen::skirmish_setup || screen == model::FrontEndScreen::lan_setup || screen == model::FrontEndScreen::online_setup)
         && state.setup->visible() && state.setup->take_back()) {
-        static_cast<void>(state.nav.back());
+        // MAT-14: lobby Cancel returns directly to main; single-player staging returns to its menu.
+        if (screen == model::FrontEndScreen::lan_setup || screen == model::FrontEndScreen::online_setup)
+            state.nav.reset();
+        else static_cast<void>(state.nav.back());
     }
     state.show_screen();
     state.sync_attract();

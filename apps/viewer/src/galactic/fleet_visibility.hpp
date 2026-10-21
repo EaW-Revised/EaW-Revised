@@ -11,7 +11,7 @@ namespace eawr::viewer::galactic {
     std::vector<sim::galactic::FleetDisplayVisibility> result;
     if (!snapshot.observer()) return result;
     for (const auto& row : snapshot.observations()) {
-        if (row.player == snapshot.observer()->local_player) result.push_back({row.planet, true});
+        if (row.player == snapshot.view_player()) result.push_back({row.planet, true});
     }
     return result;
 }

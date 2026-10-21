@@ -1,6 +1,7 @@
 #pragma once
 
 #include "session_types.hpp"
+#include "eawr/sim/tactical/space_path_service.hpp"
 
 namespace eawr::sim::tactical::session_detail {
 
@@ -20,7 +21,7 @@ struct SessionStorePaths {
     // its layer and the static layer as `world` holds them now. `inputs` is what it plans from;
     // the landing takes the plan only while the unit still plans from exactly that.
     struct SlicedSearch {
-        SlicedPathSearch search;
+        SpacePathService::Search search;
         std::uint64_t frame{};
         math::Vec3 target{};
         std::optional<math::Fixed> max_speed;

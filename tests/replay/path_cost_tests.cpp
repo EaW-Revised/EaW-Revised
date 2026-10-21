@@ -15,7 +15,7 @@
 
 #include "../support/check.hpp"
 #include "eawr/sim/tactical/motion.hpp"
-#include "eawr/sim/tactical/pathfind.hpp"
+#include "eawr/sim/tactical/space_path_service.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +26,7 @@
 #include <fstream>
 #include <iomanip>
 #include <ios>
+#include <limits>
 #include <iostream>
 #include <optional>
 #include <string>
@@ -219,7 +220,7 @@ struct Outcome {
     const auto limits = search.frigate ? frigate() : corvette();
     Outcome out;
     const auto began = std::chrono::steady_clock::now();
-    auto planned = tactical::plan_space_move(table, limits, *table.footprint(type), search.world->collisions,
+    auto planned = tactical::SpacePathService::plan(table, limits, *table.footprint(type), search.world->collisions,
         search.frigate ? 999 : 998, 3000, search.start, search.yaw, Fixed{}, search.target, &out.stats, mode);
     out.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count();
     expect(static_cast<bool>(planned), search.name + " plans without an arithmetic failure");
@@ -237,13 +238,13 @@ void check_slices(const tactical::MotionTable& table, const Search& search, cons
     const auto limits = search.frigate ? frigate() : corvette();
     const auto entity = search.frigate ? 999 : 998;
     for (const std::uint64_t slice : {std::uint64_t{1}, std::uint64_t{97}, std::uint64_t{1500}}) {
-        tactical::SlicedPathSearch sliced(table, limits, *table.footprint(type), search.world->collisions, entity, 3000,
+        auto sliced = tactical::SpacePathService::begin(table, limits, *table.footprint(type), search.world->collisions, entity, 3000,
             search.start, search.yaw, Fixed{}, search.target);
         std::uint64_t expansions = 0;
         std::uint64_t slices = 0;
         for (bool ended = false; !ended && slices < 100000; ++slices) {
             tactical::PathSearchStats stats;
-            ended = sliced.run(slice, &stats);
+            ended = tactical::SpacePathService::step(sliced, slice, &stats);
             expansions += stats.expansions;
             expect(stats.part == (ended ? tactical::PathSearchPart::last_slice : tactical::PathSearchPart::slice),
                 search.name + ": a slice reports itself");
@@ -251,15 +252,15 @@ void check_slices(const tactical::MotionTable& table, const Search& search, cons
             // most one parent's children (at most 10 operations).
             expect(stats.expansions <= slice + 10, search.name + ": a slice counts at most its expansions and one parent");
         }
-        const auto result = sliced.result();
+        const auto result = tactical::SpacePathService::result(sliced);
         expect(result && result.value() == bounded.state,
             search.name + ": the search in slices of " + std::to_string(slice) + " is the whole search");
-        expect(sliced.expansions() == bounded.stats.expansions && expansions == bounded.stats.expansions,
+        expect(tactical::SpacePathService::expansions(sliced) == bounded.stats.expansions && expansions == bounded.stats.expansions,
             search.name + ": the slices count the whole search's expansions");
-        expect(sliced.held_bytes() > 0, search.name + ": a sliced search reports what it holds");
+        expect(tactical::SpacePathService::held_bytes(sliced) > 0, search.name + ": a sliced search reports what it holds");
     }
     const auto within = [&](const std::uint64_t budget, tactical::PathSearchStats& stats) {
-        return tactical::plan_space_move_within(table, limits, *table.footprint(type), search.world->collisions, entity, 3000,
+        return tactical::SpacePathService::plan_within(table, limits, *table.footprint(type), search.world->collisions, entity, 3000,
             search.start, search.yaw, Fixed{}, search.target, budget, &stats);
     };
     tactical::PathSearchStats stats;
@@ -358,6 +359,59 @@ void check_slices(const tactical::MotionTable& table, const Search& search, cons
         + ',' + std::to_string(stats.leaves) + ',' + std::to_string(stats.narrow);
 }
 
+// The service preserves a running search, including its owned collision snapshot,
+// and resumes at exactly the same expansion cursor with the same per-slice work.
+void check_service_checkpoint(const tactical::MotionTable& table, const Search& request, const Outcome& bounded) {
+    using Service = tactical::SpacePathService;
+    const auto type = request.frigate ? frigate_type : corvette_type;
+    const auto limits = request.frigate ? frigate() : corvette();
+    auto search = Service::begin(table, limits, *table.footprint(type), request.world->collisions,
+        request.frigate ? 999 : 998, 3000, request.start, request.yaw, Fixed{}, request.target);
+    expect(!Service::ended(search) && !Service::result(search), "service refuses a result before completion");
+    const auto fresh = Service::restore(table, Service::checkpoint(search));
+    expect(fresh && !Service::ended(fresh.value()) && Service::expansions(fresh.value()) == 0,
+        "service restores a not-yet-started search");
+    expect(!Service::step(search, 1), "checkpoint witness remains mid-search after a small slice");
+    const auto saved = Service::checkpoint(search);
+    expect(saved.started && !saved.ended && saved.expansions > 0, "checkpoint saves actual in-flight progress");
+    auto restored = Service::restore(table, saved);
+    expect(static_cast<bool>(restored), "service restores a sliced-search checkpoint");
+    if (!restored) return;
+    auto resumed = std::move(restored).value();
+    expect(Service::expansions(resumed) == Service::expansions(search), "restore retains the expansion cursor");
+    while (!Service::ended(search)) {
+        tactical::PathSearchStats original_stats, resumed_stats;
+        const bool ended = Service::step(search, 97, &original_stats);
+        expect(Service::step(resumed, 97, &resumed_stats) == ended, "restored search finishes in the same slice");
+        expect(work_row("slice", "bounded", original_stats) == work_row("slice", "bounded", resumed_stats),
+            "restored search performs the same deterministic work per slice");
+        expect(Service::expansions(search) == Service::expansions(resumed), "restored search keeps the same cursor");
+    }
+    const auto result = Service::result(resumed);
+    expect(result && result.value() == bounded.state, "checkpoint round trip gives the original whole-search result");
+    expect(Service::exhausted(search) == Service::exhausted(resumed), "restore preserves exhaustion separately from completion");
+    const auto finished = Service::restore(table, Service::checkpoint(resumed));
+    expect(finished && Service::ended(finished.value()) && Service::result(finished.value())
+        && Service::result(finished.value()).value() == bounded.state, "completed checkpoint retains the result");
+}
+
+void check_service_lanes() {
+    using Service = tactical::SpacePathService;
+    Service::Lanes<3> lanes(5);
+    const std::vector<std::size_t> jobs{2, 0, 2, 1, 0, 2};
+    Service::Lanes<3>::Schedule schedule(jobs, [](std::size_t lane) { return lane; });
+    expect(schedule.next() == std::vector<std::size_t>{0, 1, 3}, "independent lane heads commit in submission order");
+    lanes.charge(2, 7); // One indivisible parent may exceed the requested budget.
+    expect(lanes.remaining(2) == 0 && lanes.remaining(0) == 5, "overshoot exhausts only the charged lane");
+    expect(schedule.next() == std::vector<std::size_t>{2, 4}, "each lane advances once per round");
+    expect(schedule.next() == std::vector<std::size_t>{5} && schedule.next().empty(), "schedule drains all lane jobs");
+    Service::Lanes<3>::Schedule later(jobs, [](std::size_t lane) { return lane; });
+    expect(!later.next().empty() && lanes.remaining(2) == 0, "command barriers preserve the tick budget ledger");
+    expect(Service::slice_limit(10, 11, 97) == 97
+        && Service::slice_limit(11, 11, 97) == std::numeric_limits<std::uint64_t>::max(),
+        "landing frame completes the search while earlier frames use slices");
+}
+
 // The bounded search's pinned bounds against the exact search over these searches (PC-06).
 constexpr std::size_t least_identical = 70;
 constexpr std::size_t most_other_side = 2;
@@ -393,6 +447,7 @@ int main(int argc, char** argv) {
         report = report || argument == "--report";
         profile = profile || argument == "--profile";
     }
+    check_service_lanes();
     const auto table = foc_table();
     World open;
     open.statics = coruscant_statics();
@@ -465,6 +520,7 @@ int main(int argc, char** argv) {
         std::size_t identical{};
         std::size_t other_side{};
     } totals;
+    bool checkpoint_checked = false;
     std::vector<std::string> rows;
     for (const auto& search : searches) {
         const auto exact = run(table, search, tactical::PathSearchMode::exact);
@@ -472,6 +528,10 @@ int main(int argc, char** argv) {
         const auto bounded = run(table, search, tactical::PathSearchMode::bounded);
         tactical::set_path_search_probe(nullptr);
         check_slices(table, search, bounded);
+        if (!checkpoint_checked && bounded.stats.expansions > 20) {
+            check_service_checkpoint(table, search, bounded);
+            checkpoint_checked = true;
+        }
         rows.push_back(work_row(search.name, "exact", exact.stats));
         rows.push_back(work_row(search.name, "bounded", bounded.stats));
         expect(bounded.path == exact.path, search.name + ": the bounded search finds a path where the exact one does");
@@ -530,6 +590,7 @@ int main(int argc, char** argv) {
               << " ms bounded; worst length x" << totals.worst_length << ", worst arrival x" << totals.worst_arrival
               << ", largest offset " << std::setprecision(1) << totals.worst_offset << " units; "
               << totals.other_side << " pass an obstacle or held ship on the other side\n";
+    expect(checkpoint_checked, "a nontrivial search exercises the mid-search service checkpoint");
     expect(totals.identical >= least_identical, "at least " + std::to_string(least_identical) + " bounded searches are the exact search");
     expect(totals.other_side <= most_other_side,
         "at most " + std::to_string(most_other_side) + " bounded searches pass an obstacle on the other side");

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "galaxy_view.hpp"
+#include "ability_drop.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/graph.hpp"
 
@@ -93,7 +94,7 @@ struct InputWidget {
 struct PointerPoint { float x{}, y{}; };
 enum class DropKind { move, merge, land, orbit_slot, launch, ability };
 using AbilityIntent = std::variant<sim::galactic::PrepareGalacticAbility,
-    sim::galactic::ExecutePreparedAbility, sim::galactic::CancelGalacticAbility>;
+    sim::galactic::ExecutePreparedAbility, sim::galactic::CancelGalacticAbility, sim::galactic::MoveFleet>;
 struct DropIntent {
     DropKind kind{};
     ObjectId source{}, target{}, planet{};
@@ -105,6 +106,7 @@ struct DropIntent {
     // #3072: a move dropped on a planet's stack icon asks for that orbit slot on arrival.
     std::optional<std::uint8_t> destination_slot;
     std::optional<AbilityIntent> ability{};
+    ObjectId destination_actor{};
 };
 
 // One queued execution per published capability, scoped to its session lifetime
@@ -147,49 +149,6 @@ struct PendingAbilityDrop {
     return false;
 }
 
-// WGCH-151..155 / WGUI-172: the hero ability one dragged local fleet offers at the planet it is parked over.
-// Every action shares the planet's special-action slot; the selector tries destruction, theft, sabotage, then
-// neutralization (WGCH-152; the black-market, spy, siphon, corruption and removal actions have their own entries).
-// Among several actors the first in stored order whose type authors an action wins; the original-type ranking
-// between several qualified heroes is unverified (WGCH-152 rank tie-break) and kept as the least visible choice.
-// Availability is the authored profile plus the target rule that needs no hidden state: a planet the local
-// player does not own. The host revalidates eligibility, ownership, price and preparation identity.
-struct AbilityDrop {
-    ObjectId actor{}, planet{};
-    sim::galactic::AbilityKind kind{};
-    friend bool operator==(const AbilityDrop&, const AbilityDrop&) = default;
-};
-[[nodiscard]] inline std::optional<sim::galactic::AbilityKind> authored_drop_kind(
-    const sim::galactic::GalacticAbilityProfile& profile) {
-    using sim::galactic::AbilityKind;
-    if (profile.lifecycle_only) return std::nullopt;
-    if (profile.destruction) return AbilityKind::planet_destruction;
-    if (profile.theft) return AbilityKind::technology_theft;
-    if (profile.sabotage) return AbilityKind::structure_sabotage;
-    if (profile.neutralize) return AbilityKind::hero_neutralization;
-    return std::nullopt;
-}
-[[nodiscard]] inline std::optional<AbilityDrop> ability_drop_candidate(
-    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId fleet_id,
-    const sim::galactic::GalacticAbilitySetup& host) {
-    const auto fleets = snapshot.fleets();
-    const auto fleet = std::lower_bound(fleets.begin(), fleets.end(), fleet_id,
-        [](const auto& row, auto id) { return row.id < id; });
-    if (fleet == fleets.end() || fleet->id != fleet_id || fleet->owner != local || fleet->motion.transit) return std::nullopt;
-    const auto planets = snapshot.planets();
-    const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == fleet->orbit; });
-    if (target == planets.end() || target->owner == local) return std::nullopt;
-    for (const auto& actor : snapshot.actor_records()) {
-        if (actor.owner != local || actor.dead || actor.delete_pending) continue;
-        const auto profile = std::find_if(host.profiles.begin(), host.profiles.end(),
-            [&](const auto& row) { return row.type == actor.current_type; });
-        if (profile == host.profiles.end()) continue;
-        const auto kind = authored_drop_kind(*profile);
-        if (kind && ability_source_in_fleet(snapshot, local, actor.id, fleet_id))
-            return AbilityDrop{actor.id, fleet->orbit, *kind};
-    }
-    return std::nullopt;
-}
 // The typed order a release on the slot submits: preparation for the menu abilities, whose published menu
 // then opens; destruction queues its unpriced execution directly (the host holds no menu for it, WGCH-156).
 [[nodiscard]] inline AbilityIntent ability_drop_order(const AbilityDrop& drop) {
@@ -481,7 +440,7 @@ public:
                 if (!target || !target->discovered) return std::nullopt;
             }
             if (intent.destination_slot && *intent.destination_slot > 2) return std::nullopt;
-            return MoveFleet{intent.source, intent.path, intent.destination_slot};
+            return MoveFleet{intent.source, intent.path, intent.destination_slot, false, intent.destination_actor};
         case DropKind::merge:
             if (!intent.target || intent.source == intent.target) return std::nullopt;
             return MergeFleets{intent.source, intent.target};
@@ -510,7 +469,7 @@ public:
                     const auto* node = planet(planets, id);
                     if (!node || !node->discovered) return std::nullopt;
                 }
-                return LaunchFleet{std::move(order.units), intent.path, intent.destination_slot};
+                return LaunchFleet{std::move(order.units), intent.path, intent.destination_slot, intent.destination_actor};
             }
             return order;
         }
@@ -520,7 +479,14 @@ public:
             if (!gates.hud_enabled || gates.action_menu || gates.selection_locked || !intent.ability) return std::nullopt;
             return std::visit([&](const auto& order) -> std::optional<CommandPayload> {
                 using Order = std::decay_t<decltype(order)>;
-                if constexpr (std::is_same_v<Order, CancelGalacticAbility>) {
+                if constexpr (std::is_same_v<Order, MoveFleet>) {
+                    if (!order.raid || order.fleet != intent.source || order.destination_slot
+                        || order.path.size() < 2 || order.path.back() != intent.planet) return std::nullopt;
+                    for (const auto id : order.path) {
+                        const auto* target = planet(planets, id);
+                        if (!target || !target->discovered) return std::nullopt;
+                    }
+                } else if constexpr (std::is_same_v<Order, CancelGalacticAbility>) {
                     if (order.actor != intent.source || !order.preparation) return std::nullopt;
                 } else {
                     const auto actor = [&] {

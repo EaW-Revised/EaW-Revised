@@ -201,12 +201,12 @@ cross-linked from implementation tickets.
 | WGUI-86 | Message click normalizes cursor coordinates and accepts only the handled press event, an icon with callback and a point **strictly inside** its rectangle (edges excluded). Invoke the first matching callback with its user data and consume; text itself has no callback hit region in this method. | debug build EGU-10 |
 | WGUI-87 | History submission accepts only an active galactic mode. For **each** entry, append localized current-cycle text in `Droid_Date_Color` (**255,0,0**), then message text in its supplied color, then localized separator in `Droid_Seperator_Color` (**128,128,128**, authored spelling). It does not coalesce repeated cycle headers in the inspected append path. Log persistence/capacity and page construction are U-08/session scope. | debug build EGU-10; XML EGU-12 |
 | WGUI-88 | The shared game-speed notification resolves the acting player's display name, adds localized speed-changed text, uses player color, sends it to disconnect-dialog feedback and shared messages/history. Fiscal and production events are an upstream delivery contract, WGEP-47 and WGM-03, rather than inferred extra log entry types. | debug build EGU-10; economy/movement interfaces |
-| WGUI-89 | Local hero-bar collection takes locally owned named heroes with an icon and parent, deduplicates by type and excludes objects directly inside another hero. Append locally owned named heroes from each planet's scheduled-spawn list with start/final frame. Advanced map or empty collection hides the shell; otherwise show at most **6**, sorted by hero rank. Live entries use full progress; scheduled entries use clamped `(current−start)/(spawn−start)` up to the final frame, with zero beyond it. Scheduling semantics belong to WGM-78..82 and the hero walk. | debug build EGU-06 |
+| WGUI-89 | Local hero-bar collection takes locally owned named heroes with an icon and parent, deduplicates by type and excludes objects directly inside another hero. Append locally owned named heroes from each planet's scheduled-spawn list with start/final frame. Advanced map or empty collection hides the shell; otherwise show at most **6**, sorted by hero rank. Selection when more than six qualify remains unverified. Live entries use full progress; scheduled entries use clamped `(current−start)/(spawn−start)` up to the final frame, with zero beyond it. Scheduling semantics belong to WGM-78..82 and the hero walk. | debug build EGU-06 |
 | WGUI-90 | Radar conversion has code galaxy half-extents **380 X / 460 Y**: divide radar-local coordinates by half component size, multiply by those extents and return Z **10**. The inverse divides world XY by those extents, multiplies by half radar size and returns Z **0**. These fixed radar scales are distinct from the camera's world-bounds pan clamp and authored scroll-plane tag. | debug build EGU-09 |
 | WGUI-91 | Galactic build choices clear/hide/disable entries and queues without a selected planet; only a locally controlled selection shows queues/options. Visit types in type-manager order; ask current and eventual producibility and category/domain filter. An already-under-production denial is promoted into the current list but its button is disabled. An unavailable base type is not shown as an eventual option. Partition current/eventual candidates by `GUI_Row` (**0** versus other) and active ground/space tab; current choices alone populate the inspected buttons. Explicit build-disabled status disables them, active-domain queue count below `Max_Build_Queue` (**5** default, WGEP-27) controls queue acceptance, and a newly available type can flash its button. Clear unused slots and hide scroll controls. WGUI-170 separates current capability from immediate purchase permission. Admission is WGEP-18..34; exact button-layout helper and internal row limits are U-07. | debug build EGU-07; same WGEP-27 |
 | WGUI-170 | The GC list's current-capability query skips affordability. Tech, locks, requirements, producer/structural capacity and type limits still govern membership (WGEP-18..26). Queue room and population room are later button gates, not list filters. A capable ground, space or station choice remains listed at insufficient prepaid credits, with its icon disabled and cost readable, and re-enables when the current account covers the price. Button refresh independently checks funds, explicit disable status, queue room and population room; insufficient money alone does not darken the cost text (GHUD-S57). A credits denial must not mask a second capability failure and expose an otherwise hidden choice. Retail capability has no general live-object or identity-resource gate. The project host resource bounds therefore leave capable choices listed but disabled with a resource-limit explanation. | debug build GUV-01..03; owner playtest; project host bounds |
 | WGUI-92 | Fleet stack presentation chooses a best-ship image through a helper, then chooses a stack texture from integer ceiling of object count divided by an internal ships-per-stack value, capped at the available texture index. All-stealth contents produce a stealth overlay; otherwise a raid flag produces a raid overlay; otherwise none. Use white foreground and supplied faction background. The getter's internal constant is separate from the ignored authored `Ships_Per_Stack` tag; best-image ranking and empty-stack behavior are U-07. | debug build EGU-06; registry EGU-12 |
-| WGUI-166 | Hovering a planet's fleet stack icon gives no plain tooltip; after the encyclopedia delay it opens the fleet encyclopedia. Its fleets: with no aware non-allied fleet at the planet, the fleets at the icon's own orbit position; otherwise the left icon lists the aware non-allied fleets of all three positions, the right icon the allied fleets at positions 0 and 2 and the centre icon the allied fleets at position 1. Allied fleets list their contents; a non-allied fleet lists its contents when the observer knows them, otherwise only when it knows the fleet. The units are grouped by their true type into one cell each with the unit count; nothing opens when the list is empty. A cell shows the type icon when contents are known, else a blank icon with the count, except the most powerful ship (greatest Damage, only with strongest-ship knowledge) and visible superweapons, which show their icon. A count of two or more adds an `xN` caption; icons of 52 pixels or more draw at half size; six cells per row. The header shows the fleet name of the owner's side (`TEXT_GOOD_SPACE_FLEET`, `TEXT_EVIL_SPACE_FLEET`, `TEXT_CORRUPT_SPACE_FLEET` for the GameConstants good/evil/corrupt side names, `TEXT_PIRATE_SPACE_FLEET` otherwise), the hovered stack icon (stack texture tinted by the owner's faction colour, best ship inside) at the `g_planet_fleet` `Size` X scale, and the sum of `Population_Value` times count over the listed types in yellow. A raid-capable fleet adds a `TEXT_RAID_FLEET` line (with `, ` and `TEXT_STEALTH_FLEET` when all are stealthed); an all-stealth fleet adds `TEXT_STEALTH_FLEET`. Cell order is the engine's type-key order, not a sorted list. | debug build fleet encyclopedia, tooltip dispatch and list-button setup |
+| WGUI-166 | Hovering a planet's fleet stack icon gives no plain tooltip; after the encyclopedia delay it opens the fleet encyclopedia. Its fleets: with no aware non-allied fleet at the planet, the fleets at the icon's own orbit position; otherwise the left icon lists the aware non-allied fleets of all three positions, the right icon the allied fleets at positions 0 and 2 and the centre icon the allied fleets at position 1. Allied fleets list their contents; a non-allied fleet lists its contents when the observer knows them, otherwise only when it knows the fleet. The units are grouped by their true type into one cell each with the unit count; nothing opens when the list is empty. A cell shows the type icon when contents are known, else a blank icon with the count, except the most powerful ship (greatest Damage, only with strongest-ship knowledge) and visible superweapons, which show their icon. A count of two or more adds an `xN` caption; the fleet list replaces ordinary list-button scaling with `encyclopedia_icon` `Size` X (0.75 in stock data), including atlas icons below 52 texels; six cells per row, with whole-display-pixel advances. The popup groups every admitted type independently of the focused grid's cell capacity and individual positions, preserving counts beyond that grid's last cell. The header shows the fleet name of the owner's side (`TEXT_GOOD_SPACE_FLEET`, `TEXT_EVIL_SPACE_FLEET`, `TEXT_CORRUPT_SPACE_FLEET` for the GameConstants good/evil/corrupt side names, `TEXT_PIRATE_SPACE_FLEET` otherwise), the hovered stack icon (stack texture tinted by the owner's faction colour, best ship inside) at the `g_planet_fleet` `Size` X scale, and the sum of `Population_Value` times count over the listed types in yellow. A raid-capable fleet adds a `TEXT_RAID_FLEET` line (with `, ` and `TEXT_STEALTH_FLEET` when all are stealthed); an all-stealth fleet adds `TEXT_STEALTH_FLEET`. Cell order is the engine's type-key order, not a sorted list. | debug build fleet encyclopedia, tooltip dispatch and list-button setup; live mixed-fleet captures at 5/10/20/40 types |
 
 ## Existing behavior notes and integration
 
@@ -651,8 +651,8 @@ orbit; an in-transit fleet, missing parent, dead/deleting container or cycle sup
 cached planet does not substitute for its current parent chain. Inactive, selection-lock and discovery gates
 remain in the input policy. Home uses the authored campaign home when available, otherwise resolves the local
 faction's authored `Faction_Leader` type through that same live chain and caches only a known planet. No owned
-planet or stock hero name is substituted. The WGUI-89 live hero-bar adapter is described below; ranking and scheduled display remain
-separate producer seams.
+planet or stock hero name is substituted. The WGUI-89 live hero-bar adapter is described below;
+scheduled display remains a separate producer seam.
 
 WGUI-49/50 first-match qualification: the retail type query takes its first instance without an ownership
 filter, then ascends parents. The local HUD supplies the type; containment does not add an owner gate. Our
@@ -670,7 +670,10 @@ belongs to the live session lifetime, so replacing/loading an owner can reuse nu
 WGUI-89's live viewer bar collects locally owned named heroes from the session's
 published actor census, with authored icons and resolvable containment. It deduplicates
 by current type, excludes direct children of another hero and shows at most six.
-Generic heroes and foreign heroes do not enter this bar. Dead/delete-pending records
+Generic heroes and foreign heroes do not enter this bar. Portraits run left to right
+in descending inherited `Ranking_In_Category`, with the shared type default 25
+(BA-20). Equal ranks retain this adapter's canonical type order; retail tie order
+has not been qualified. Dead/delete-pending records
 leave on the next publication. The existing hero-selection path (WGUI-49/50) resolves
 the planet again at click time and moves the camera; hovering names the hero and class.
 
@@ -685,11 +688,28 @@ its scale, sounds and each hero's authored icon. Circular portrait framing reuse
 `hero_slot_good00`'s authored friendly ring. This exact GC component/ring mapping is
 **unverified**: `st_hero_icon` belongs to `Grab Bar`, while `g_hero`/`g_enemy_hero` are
 planet-marker components. The top header shell and rollover/glow styling remain
-unverified; the widget does not invent a shell model or a health/respawn meter.
+unverified; the widget does not invent a shell model or a health meter.
 
-Hero-rank ordering and scheduled-spawn progress remain explicit unverified adapter
-seams (legacy EAWR-3899, EAWR-1155): this slice uses stable type order and live entries only.
+An internal/debug-hybrid build 3.00.045 capture (2026-10-20, 1280 by 720) changed
+the three local heroes' authored ranks to 90, 50 and 10. Their portraits appeared
+in that descending order, differing from both acquisition order and the earlier
+equal-rank capture. The adapter sorts before applying its six-portrait limit;
+which heroes retail retains when more than six qualify remains unverified.
+
+The same capture removed a hero through the debug Lua damage API and confirmed
+the live object was absent. Its portrait remained with a gold unfinished radial
+sector that shrank between observations; the normal portrait returned when the
+hero respawned. The campaign owner retains each return's actual scheduling frame
+and deadline in its version-two return record. Completed ticks and the live facade
+publish copied local-only intervals; initial restored frames publish them before
+the live thread starts. The viewer combines named, icon-bearing scheduled heroes
+with live entries, deduplicates by type, and uses the committed galactic frame for
+WGUI-89's clamped fraction (zero beyond the deadline while placement remains pending).
+Each portrait material adds the component's authored `Build_Texture_Name` over the
+unfinished eight-segment sector, clipped to the circular portrait. No wall-clock
+timer or guessed cooldown supplies progress. Scheduled clicks have no qualified
+action and consume the HUD gesture without pretending to select a live actor.
 Transit entries with no resolvable parked planet are omitted; orbit/surface receive
-no distinct badge. Dead/respawning display and double-click remain unverified; a
+no distinct badge. Double-click remains unverified; a
 second click follows the same ordinary selection gesture without added zoom.
 The advanced map hides the bar as WGUI-89 requires.

@@ -1,10 +1,29 @@
 #include "reference_pages.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <limits>
 
 namespace eawr::viewer::galactic {
+std::optional<HistoryFacts> published_history(const sim::galactic::GalacticSnapshot& snapshot,
+    const GalaxySnapshotStub& metadata) {
+    const auto* published = snapshot.history();
+    if (!published) return {};
+    HistoryFacts out; out.local_player = snapshot.view_player();
+    out.published = *published; out.fiscal_frames = published->fiscal_frames;
+    out.planetary_objects = published->planetary_objects;
+    for (const auto& line : published->lines) {
+        const auto at = std::find_if(metadata.players.begin(), metadata.players.end(),
+            [&](const auto& player) { return player.id == line.player; });
+        if (at == metadata.players.end()) continue;
+        HistoryFaction faction{line.player, at->faction, {at->colour[0] / 255.F, at->colour[1] / 255.F, at->colour[2] / 255.F}, {}};
+        for (const auto& row : line.samples) faction.samples.push_back({row.frame, row.planets,
+            static_cast<std::uint64_t>(row.technology), std::bit_cast<float>(row.economy.bits), std::bit_cast<float>(row.military.bits)});
+        out.factions.push_back(std::move(faction));
+    }
+    return out;
+}
 HistoryView history_view(const HistoryFacts& facts, HistoryMetric metric) {
     HistoryView view;
     if (facts.fiscal_frames == 0 || facts.factions.empty()) return view;
@@ -14,9 +33,16 @@ HistoryView history_view(const HistoryFacts& facts, HistoryMetric metric) {
         return metric == HistoryMetric::economy ? row.economy : metric == HistoryMetric::military
             ? row.military : static_cast<double>(row.planets);
     };
+    if (facts.published) {
+        if (!facts.published->available) return view;
+        first = facts.published->first_frame; last = facts.published->last_frame;
+        maximum = metric == HistoryMetric::economy ? std::bit_cast<float>(facts.published->maximum_economy.bits)
+            : metric == HistoryMetric::military ? std::bit_cast<float>(facts.published->maximum_military.bits)
+            : static_cast<double>(std::max(facts.published->maximum_planets, facts.published->planetary_objects));
+    }
     for (const auto& faction : facts.factions) {
         if (faction.samples.size() < 2) return view; // GREF-01
-        for (const auto& sample : faction.samples) {
+        if (!facts.published) for (const auto& sample : faction.samples) {
             first = std::min(first, sample.frame); last = std::max(last, sample.frame);
             maximum = std::max(maximum, value(sample));
         }

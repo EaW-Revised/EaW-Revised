@@ -171,7 +171,25 @@ void pure_policy() {
     expect(dead.destroyed == std::vector<eawr::sim::EntityId>({21, 20}), "attrition preserves reverse source order");
     std::vector<gc::HeroReturnRecord> heroes; gc::HeroDefeat d; d.id = 21; d.type = d.respawn_type = 3; d.owner = 1; d.planet = 2; d.named = true; d.default_seconds = f(1);
     const auto planets = galaxy().planets;
-    expect(checked(gc::schedule_hero_return(heroes, d, 5, planets)).scheduled && heroes.front().deadline == 35, "hero deadline uses rounded logical frames");
+    expect(checked(gc::schedule_hero_return(heroes, d, 5, planets)).scheduled
+        && heroes.front().start_frame == 5 && heroes.front().deadline == 35, "hero schedule retains actual start and rounded logical deadline");
+    const auto encoded = gc::encode_hero_returns(heroes);
+    expect(encoded.size() == 64 && checked(gc::decode_hero_returns(encoded)) == heroes,
+        "version two hero schedule roundtrip retains nonzero start");
+    auto malformed = encoded; malformed[0] = 1;
+    expect(!gc::decode_hero_returns(malformed), "old hero schedule version is rejected");
+    malformed = encoded; malformed[56] = 36;
+    expect(!gc::decode_hero_returns(malformed), "schedule start after deadline is rejected");
+    malformed = encoded; malformed.pop_back();
+    expect(!gc::decode_hero_returns(malformed), "truncated schedule is rejected");
+    auto foreign = heroes.front(); foreign.owner = 2; foreign.defeated = 22;
+    const std::array records{heroes.front(), foreign};
+    expect(gc::local_hero_returns(records, 1) == std::vector<gc::HeroReturnView>{{3, 1, 2, 5, 35}}
+        && gc::local_hero_returns(records, 0).empty(), "local schedule view excludes foreign and absent observers");
+    campaign::TacticalReturnState pending; pending.heroes = heroes;
+    auto owner = checked(campaign::GameSession::create(galaxy()));
+    okay(owner.restore_return_state(campaign::encode_tactical_return_state(pending)));
+    expect(owner.return_state().heroes == heroes, "restoring an absent hero preserves its actual scheduling interval");
     expect(!checked(gc::schedule_hero_return(heroes, d, 6, planets)).scheduled, "duplicate named hero does not reschedule");
     okay(gc::service_hero_returns(heroes, 35, true, planets, {})); expect(heroes.size() == 1, "paused hero tail does not consume due records");
     okay(gc::service_hero_returns(heroes, 35, false, planets, [](const auto&, const auto) { return eawr::core::Result<bool>::success(true); }));
@@ -981,7 +999,7 @@ void installed() {
     const auto types = eawr::units::galactic_type_table(catalog.catalog);
     eawr::data::galactic::Campaign authored; authored.name = "ReturnFixture"; authored.locations = {"Shola", "Kamino"}; authored.planets = authored.locations; authored.starting_active_player = "Rebel";
     authored.starting_tech_levels = {{"Rebel", 0}, {"Empire", 0}}; authored.max_tech_levels = {{"Rebel", 5}, {"Empire", 5}}; data.campaigns.push_back(authored);
-    campaign::CampaignSetupOptions options; options.seed = 123; options.local_observer = 1;
+    campaign::CampaignSetupOptions options; options.seed = 123; options.solo_reference_human = 1;
     options.players = {{{1, 1, 0}, "Rebel", true}, {{2, 2, 0}, "Empire", true}, {{3, 3, 0}, "Neutral", true}};
     options.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}, {{2}, 2, gc::SeatKind::ai, 1, true, 0}};
     for (const auto& type : types.types) options.types.push_back({eawr::assets::object_type_crc(type.name), type.name});

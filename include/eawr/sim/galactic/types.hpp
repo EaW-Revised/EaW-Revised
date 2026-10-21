@@ -149,6 +149,7 @@ struct FleetTransit {
     SeatId producer{};
     std::uint64_t sequence{};
     math::Vec3 desired_facing{};
+    EntityId destination_actor{}; // WGM-14/34: original supplied identity, resolved on final arrival
     friend bool operator==(const FleetTransit&, const FleetTransit&) = default;
 };
 struct FleetMotion {
@@ -164,6 +165,7 @@ struct Fleet {
     std::vector<FleetMember> members;
     std::uint8_t orbit_slot{}; // WGM-15: logical 0/1/2, independent of travel
     FleetMotion motion{};
+    std::optional<PlanetId> raid_destination{};
     friend bool operator==(const Fleet&, const Fleet&) = default;
 };
 
@@ -227,6 +229,23 @@ struct MovementAccess {
     bool accessible{}, potential_conflict{}; // control/conflict-owner seams, WGM-31/32
     friend bool operator==(const MovementAccess&, const MovementAccess&) = default;
 };
+// WGM-37: immutable raid policy and resolved type categories from effective data.
+struct RaidRules {
+    FactionId required_faction{};
+    std::uint32_t free_categories{}, limited_categories{}, max_heroes{}, max_limited{};
+    friend bool operator==(const RaidRules&, const RaidRules&) = default;
+};
+struct RaidType {
+    TypeId type{};
+    std::uint32_t categories{};
+    bool hero{}, stays_in_transport{};
+    friend bool operator==(const RaidType&, const RaidType&) = default;
+};
+struct RaidSetup {
+    RaidRules rules;
+    std::vector<RaidType> types;
+    friend bool operator==(const RaidSetup&, const RaidSetup&) = default;
+};
 struct MovementSetup {
     std::vector<MovementType> types;
     std::vector<MovementContents> contents;
@@ -234,6 +253,7 @@ struct MovementSetup {
     std::vector<MovementPlanet> planets;
     std::vector<MovementAccess> access; // player, planet order; complete observer table
     math::Fixed mode_modifier{}; // explicit effective GC modifier, WGM-26; never a slider value
+    std::optional<RaidSetup> raid{};
     friend bool operator==(const MovementSetup&, const MovementSetup&) = default;
 };
 
@@ -255,6 +275,26 @@ struct ControlType {
     bool stealth{}; // supplied by the live ability service
     bool ground_capable{}; // supplied capability predicate, WGM-U09
     friend bool operator==(const ControlType&, const ControlType&) = default;
+};
+// GPC-01: an ability instance is keyed by actor and its authored profile index.
+struct ControlAbility {
+    bool protection{}, enabled{true};
+    std::uint32_t category{};
+    math::Fixed multiplier{};
+    friend bool operator==(const ControlAbility&, const ControlAbility&) = default;
+};
+struct ControlAbilityType {
+    TypeId type{};
+    std::vector<ControlAbility> abilities;
+    friend bool operator==(const ControlAbilityType&, const ControlAbilityType&) = default;
+};
+struct ControlAbilitySource {
+    PlanetId planet{};
+    EntityId actor{};
+    TypeId type{};
+    std::uint32_t ability{}; // zero-based index in the current type's abilities
+    PlayerId owner{};
+    friend bool operator==(const ControlAbilitySource&, const ControlAbilitySource&) = default;
 };
 // WGM-106: current ordinary-object facts; capability depends on this object's
 // direct live payload, so it cannot be cached once per shared carrier type.
@@ -298,7 +338,7 @@ struct TacticalBuiltStructure {
 struct ControlPlanet {
     PlanetId planet{};
     TypeId type{}; // capture history is per original planet type, WGM-76
-    bool surface_accessible{}, retains_residual{}, destroyed{}, protected_control{};
+    bool surface_accessible{}, retains_residual{}, destroyed{};
     ControlBase ground_base{}, starbase{};
     std::vector<SurfaceForce> landed; // live surface-list order, WGM-66
     std::array<PlayerId, 2> production_owner{}; // ground then space, WGM-66
@@ -342,6 +382,8 @@ struct PoliticalControlSetup {
     std::vector<CapturedPlanetType> captured_types;
     std::vector<EntityId> absent_forces; // control roster deaths; full return reconciliation owns containers
     std::vector<GroundCapabilityType> ground_capability_types; // empty retains legacy supplied predicates
+    std::vector<ControlAbilityType> ability_types; // current-type profiles, ascending type
+    std::vector<ControlAbilitySource> ability_sources; // physical presence, ascending planet/actor/ability
     friend bool operator==(const PoliticalControlSetup&, const PoliticalControlSetup&) = default;
 };
 // Completed control commits; consumers own victory/story, economy, production,
@@ -572,6 +614,11 @@ struct ProductionSetup {
 // Original strategic types and owned-list metadata (WGEP-48/49/62).
 // Existing planet/member/result IDs may carry an override; other rows represent
 // owned containers or transports absent from the fleet/result tables.
+struct HistoryType {
+    math::Fixed power; // resolved galactic AI_Combat_Power, WGP-191
+    bool fleet{}, transport{}, squadron{};
+    friend bool operator==(const HistoryType&, const HistoryType&) = default;
+};
 struct CensusType {
     TypeId type{};
     math::Fixed population;
@@ -584,6 +631,7 @@ struct CensusType {
     math::Fixed authored_price{};
     std::uint8_t sale_policy{}; // 0 default, 1 always, 2 never
     bool named_hero{}, superweapon{};
+    std::optional<HistoryType> history;
     friend bool operator==(const CensusType&, const CensusType&) = default;
 };
 struct CensusObject {
@@ -1040,6 +1088,7 @@ struct GalacticAbilityProfile {
     std::optional<DestructionAbilityProfile> destruction{};
     std::optional<SabotageAbilityProfile> sabotage{};
     std::optional<NeutralizeAbilityProfile> neutralize{};
+    std::vector<AbilityKind> ground_activated{}; // WGCH-157: authored Activation_Style membership
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
 struct GalacticAbilitySetup {

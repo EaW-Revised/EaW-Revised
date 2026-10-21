@@ -306,7 +306,33 @@ void GalacticMode::State::service_fleet_stack_popup() {
     }
     if (hovered == fleet_popup_key && fleet_popup_publication == fleet_publication) return;
     fleet_popup_key = hovered; fleet_popup_publication = fleet_publication;
-    fleet_popup->set_external_hover(hovered, shown ? std::optional(fleet_stack_looks(*shown)) : std::nullopt);
+    std::optional<presentation::ui::UnitCardLooks> looks;
+    if (shown && fleet_publication) {
+        // WGUI-166: the encyclopedia lists all admitted types. WGUI-72's
+        // focused-grid capacity and individually positioned groups belong to
+        // the grid, so reuse the observer filter without those display limits.
+        // This work runs only when the hovered icon or publication changes.
+        const auto planet = (hovered - 1U) >> 2U;
+        std::vector<sim::galactic::FleetDisplayVisibility> visibility;
+        for (const auto& row : fleet_visibility) if (row.planet == planet) visibility.push_back(row);
+        const auto complete = sim::galactic::observed_fleets(*fleet_publication, galaxy->local.player,
+            fleet_display_traits, std::numeric_limits<std::size_t>::max(), visibility);
+        std::vector<const sim::galactic::ObservedFleet*> cards;
+        for (const auto& card : complete.cards) if (card.planet == planet) cards.push_back(&card);
+        std::optional<sim::galactic::PlayerId> other;
+        for (const auto& row : complete.presence)
+            if (row.planet == planet && row.owner != galaxy->local.player) { other = row.owner; break; }
+        const auto icons = galactic_view::fleet_stack_icons(cards, {}, 0, other);
+        for (const auto& icon : icons) {
+            if (icon.icon != ((hovered - 1U) & 3U) || icon.owner != shown->owner) continue;
+            FleetStackBadge popup;
+            popup.owner = shown->owner; popup.best = shown->best; popup.texture = shown->texture;
+            popup.contents = icon.contents;
+            if (!popup.contents.empty()) looks = fleet_stack_looks(popup);
+            break;
+        }
+    }
+    fleet_popup->set_external_hover(hovered, std::move(looks));
 }
 
 // GHUD-S52..54: the organize shell's alternate index is the planet's Zoomed_Terrain_Index (the panel
@@ -402,7 +428,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
             if (const auto* component = command_catalog.find("g_planet_fleet"))
                 button->set_sounds(*component, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
             button->set_name(String::utf8(("fleet_presence_" + std::to_string(planet) + "_" + std::to_string(icon.icon)).c_str()));
-            hud->add_child(button); badge.button = button;
+            world_overlays->add_child(button); badge.button = button;
             badge.ship = memnew(TextureRect);
             badge.ship->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             badge.ship->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
@@ -756,7 +782,7 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
                 button = memnew(EawrHudButton);
                 button->set_name(String::utf8(("fleet_empty_slot_" + std::to_string(icon)).c_str()));
                 button->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-                hud->add_child(button);
+                world_overlays->add_child(button);
                 button->set_texture_normal(command_texture(stacks.front()));
                 if (content) if (const auto owner = content->factions.find(galaxy->local.player);
                     owner != content->factions.end() && owner->second.present)

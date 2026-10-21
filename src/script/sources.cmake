@@ -88,6 +88,7 @@ set(EAWR_SCRIPT_FOC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/foc/tactical_ai_loading.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_equations.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_data.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/foc/ai_mode.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_perception.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_engine.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/foc/ai_service.cpp"

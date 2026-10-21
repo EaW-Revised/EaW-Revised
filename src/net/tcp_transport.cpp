@@ -72,6 +72,8 @@ struct TcpTransport::Impl {
     bool hosting{}, socket_ready{}, hello_seen{}, accepted{}, closing{};
     bool send_shutdown{}, peer_close{}, peer_eof{}, cancelled{}, discard_application{};
     std::uint64_t edge_identity{};
+    std::uint32_t remote_capacity{};
+    bool remote_staging{};
     PeerIndex index{};
     LinkState state{LinkState::connecting};
     socket::Handle listener{socket::invalid}, stream{socket::invalid};
@@ -232,6 +234,9 @@ struct TcpTransport::Impl {
         string(bytes, options.build_identity, 1024);
         u32(bytes, options.max_frame_size);
         bytes.push_back(hosting ? 0U : 1U);
+        if (options.lobby_bootstrap) {
+            u32(bytes, options.peers); u32(bytes, options.staging_capacity ? 1U : 0U);
+        }
         queue(std::move(bytes));
     }
     void message(Bytes bytes) {
@@ -259,7 +264,7 @@ struct TcpTransport::Impl {
             const auto version = u32(body.subspan(4));
             body = body.subspan(8);
             std::string identity;
-            if (!string(body, identity, 1024) || body.size() != 5
+            if (!string(body, identity, 1024) || (body.size() != 5 && body.size() != 13)
                 || body[4] != (hosting ? 1U : 0U)) {
                 refuse("EAWR-NET-0203", "Malformed transport identity or peer role"); return;
             }
@@ -268,6 +273,17 @@ struct TcpTransport::Impl {
             }
             if (identity != options.build_identity) {
                 refuse("EAWR-NET-0202", "Game build identities differ"); return;
+            }
+            if (options.lobby_bootstrap != (body.size() == 13)) {
+                refuse("EAWR-NET-1306", "TCP lobby bootstrap versions differ"); return;
+            }
+            if (options.lobby_bootstrap) {
+                remote_capacity = u32(body.subspan(5));
+                const auto mode = u32(body.subspan(9));
+                if (remote_capacity < 2 || remote_capacity > max_match_seats || mode > 1) {
+                    refuse("EAWR-NET-1300", "Invalid TCP lobby capacity or mode"); return;
+                }
+                remote_staging = mode != 0;
             }
             if (u32(body) != options.max_frame_size) {
                 refuse("EAWR-NET-0204", "Transport frame limits differ"); return;
@@ -494,6 +510,8 @@ struct TcpTransport::Impl {
 struct TcpTransport::Mesh {
     TcpOptions options;
     bool hosting{}, assigned{}, roster_seen{}, ready_sent{}, opened{}, stopping{}, repairing{};
+    bool bootstrap_seen{}, direct_bootstrap{};
+    std::uint32_t frozen_mask{};
     std::string listen_address;
     std::optional<TcpRejoinAuth> auth;
     PeerIndex index{};
@@ -502,7 +520,7 @@ struct TcpTransport::Mesh {
     std::optional<core::Diagnostic> failure;
     std::vector<std::unique_ptr<Impl>> links;
     std::vector<std::unique_ptr<Impl>> pending;
-    std::vector<bool> confirmed, pair_sent, ready;
+    std::vector<bool> confirmed, pair_sent, ready, released;
     std::vector<JoinEndpoint> endpoints;
     using PairSecret = std::array<std::uint8_t, 16>;
     std::vector<PairSecret> secrets;
@@ -511,10 +529,10 @@ struct TcpTransport::Mesh {
 
     Mesh(bool host, TcpOptions config) : options(std::move(config)), hosting(host), assigned(host),
         index(host ? 0U : options.peers), links(options.peers), confirmed(options.peers),
-        pair_sent(options.peers), ready(options.peers), endpoints(options.peers), secrets(options.peers) {}
+        pair_sent(options.peers), ready(options.peers), released(options.peers), endpoints(options.peers), secrets(options.peers) {}
     ~Mesh() { socket::close(listener); }
     static core::Result<std::unique_ptr<Impl>> dial(std::string address, std::uint16_t port, TcpOptions config) {
-        config.peers = 2; config.seat = 0;
+        config.peers = 2; config.seat = 0; config.staging_capacity = false;
         auto connection = TcpTransport::connect(std::move(address), port, std::move(config));
         if (!connection) return core::Result<std::unique_ptr<Impl>>::failure(connection.error());
         auto transport = std::move(connection).value();
@@ -542,12 +560,22 @@ struct TcpTransport::Mesh {
         if (bytes.size() < 4) return false;
         value = u32(bytes); bytes = bytes.subspan(4); return true;
     }
+    std::uint32_t attached_mask() const {
+        std::uint32_t mask = 1U;
+        for (PeerIndex peer = 1; peer < options.peers; ++peer)
+            if (links[peer] && confirmed[peer] && links[peer]->authenticated() && links[peer]->state == LinkState::open)
+                mask |= 1U << peer;
+        return mask;
+    }
     void assignment(Impl& candidate, std::span<const std::uint8_t> body) {
+        if (options.staging_capacity && frozen_mask) {
+            candidate.refuse("EAWR-NET-1305", "This room has started; its player roster is locked."); return;
+        }
         std::uint32_t count{}, seat{}, port{};
         std::string address;
         if (!read_word(body, count) || !read_word(body, seat) || !read_word(body, port)
-            || !string(body, address, 128) || !body.empty() || count != options.peers
-            || seat >= count || port == 0 || port > 65535) {
+            || !string(body, address, 128) || !body.empty() || count != (options.staging_capacity ? 0U : options.peers)
+            || seat >= options.peers || port == 0 || port > 65535) {
             candidate.refuse("EAWR-NET-1300", "Invalid mesh roster size, seat or endpoint"); return;
         }
         if (seat == 0) for (PeerIndex peer = 1; peer < options.peers; ++peer)
@@ -571,7 +599,7 @@ struct TcpTransport::Mesh {
     bool pair_identity(std::span<const std::uint8_t> body, PeerIndex& from) const {
         constexpr auto size = PairSecret{}.size();
         return body.size() == size + 8 && (from = u32(body.subspan(size))) > index && from < options.peers
-            && u32(body.subspan(size + 4)) == index
+            && (!options.staging_capacity || (frozen_mask & (1U << from))) && u32(body.subspan(size + 4)) == index
             && std::equal(secrets[from].begin(), secrets[from].end(), body.begin());
     }
     void roster(std::span<const std::uint8_t> body) {
@@ -579,15 +607,19 @@ struct TcpTransport::Mesh {
         if (!assigned || roster_seen || !read_word(body, count) || count != options.peers) {
             fail("Invalid or duplicate mesh roster"); return;
         }
+        frozen_mask = 1U;
         for (PeerIndex peer = 1; peer < count; ++peer) {
             std::uint32_t port{};
-            if (!string(body, endpoints[peer].host, 128) || endpoints[peer].host.empty()
+            if (!string(body, endpoints[peer].host, 128)
                 || endpoints[peer].host.find_first_of(" \t\r\n[]") != std::string::npos
-                || !read_word(body, port) || port == 0 || port > 65535) {
+                || !read_word(body, port) || port > 65535
+                || (port == 0 ? (!options.staging_capacity || !endpoints[peer].host.empty()) : endpoints[peer].host.empty())) {
                 fail("Invalid distributed mesh endpoint"); return;
             }
             endpoints[peer].port = static_cast<std::uint16_t>(port);
+            if (port) frozen_mask |= 1U << peer;
         }
+        if (!(frozen_mask & (1U << index))) { fail("Frozen mesh roster omits this player"); return; }
         constexpr auto secret_size = PairSecret{}.size();
         if (body.size() != count * secret_size) { fail("Invalid mesh pair secrets"); return; }
         for (auto& secret : secrets) {
@@ -595,6 +627,7 @@ struct TcpTransport::Mesh {
         }
         roster_seen = true; roster_started = Clock::now(); confirmed[0] = true;
         for (PeerIndex peer = 1; peer < index; ++peer) {
+            if (!(frozen_mask & (1U << peer))) continue;
             auto connected = dial(endpoints[peer].host, endpoints[peer].port, options);
             if (!connected) { fail(connected.error().message); return; }
             links[peer] = std::move(connected).value();
@@ -606,10 +639,14 @@ struct TcpTransport::Mesh {
         if (!hosting && from == 0 && kind == TcpMessage::mesh_assign) {
             std::uint32_t count{}, seat{};
             if (assigned || !read_word(body, count) || !read_word(body, seat) || !body.empty()
-                || count != options.peers || seat == 0 || seat >= count || (options.seat != 0 && seat != options.seat)) {
+                || count < 2 || count > max_match_seats || (!options.staging_capacity && count != options.peers)
+                || seat == 0 || seat >= count || (options.seat != 0 && seat != options.seat)) {
                 fail("Invalid mesh seat assignment"); return;
             }
-            index = seat; assigned = true;
+            options.peers = count;
+            links.resize(count); confirmed.resize(count); pair_sent.resize(count); ready.resize(count); released.resize(count);
+            endpoints.resize(count); secrets.resize(count);
+            index = seat; assigned = true; confirmed[0] = true;
         } else if (!hosting && from == 0 && kind == TcpMessage::mesh_roster) roster(body);
         else if ((!hosting || repairing) && (from != 0 || repairing) && kind == TcpMessage::mesh_pair) {
             constexpr auto size = PairSecret{}.size();
@@ -624,11 +661,7 @@ struct TcpTransport::Mesh {
             opened = true; socket::close(listener); listener = socket::invalid;
         } else fail("Unexpected mesh control, sender or phase");
     }
-    void pump() {
-        if (stopping) {
-            for (auto& link : links) if (link) link->pump();
-            return;
-        }
+    void accept_candidate() {
         if (listener != socket::invalid && pending.size() < options.peers) {
             const auto stream = socket::accept(listener);
             if (stream != socket::invalid) {
@@ -637,6 +670,56 @@ struct TcpTransport::Mesh {
                 pending.push_back(std::move(candidate));
             }
         }
+    }
+    void publish_roster() {
+        if (!options.staging_capacity) frozen_mask = (1U << options.peers) - 1U;
+        std::random_device random;
+        std::vector<PairSecret> pairs(options.peers * options.peers);
+        for (PeerIndex first = 1; first < options.peers; ++first)
+            for (PeerIndex second = first + 1; second < options.peers; ++second) {
+                if (!(frozen_mask & (1U << first)) || !(frozen_mask & (1U << second))) continue;
+                auto& secret = pairs[first * options.peers + second];
+                for (auto& byte : secret) byte = static_cast<std::uint8_t>(random());
+                pairs[second * options.peers + first] = secret;
+            }
+        Bytes roster{static_cast<std::uint8_t>(TcpMessage::mesh_roster)}; u32(roster, options.peers);
+        for (PeerIndex peer = 1; peer < options.peers; ++peer) {
+            const bool active = (frozen_mask & (1U << peer)) != 0;
+            string(roster, active ? endpoints[peer].host : std::string{}, 128);
+            u32(roster, active ? endpoints[peer].port : 0U);
+        }
+        for (PeerIndex peer = 1; peer < options.peers; ++peer) {
+            if (!(frozen_mask & (1U << peer))) continue;
+            auto bytes = roster;
+            for (PeerIndex remote = 0; remote < options.peers; ++remote) {
+                const auto& secret = pairs[peer * options.peers + remote];
+                bytes.insert(bytes.end(), secret.begin(), secret.end());
+            }
+            if (!queue(*links[peer], std::move(bytes))) return;
+        }
+        roster_seen = true; roster_started = Clock::now(); ready[0] = true;
+        // A staging host retains a bounded refusal listener: late arrivals get
+        // a typed started-room refusal without ever entering the frozen mask.
+        if (!options.staging_capacity) { socket::close(listener); listener = socket::invalid; }
+    }
+    void negotiate_bootstrap() {
+        const auto count = links[0]->remote_capacity;
+        if (count < 2 || count > max_match_seats || options.seat >= count) { fail("Invalid host TCP lobby capacity"); return; }
+        bootstrap_seen = true; options.peers = count; options.staging_capacity = links[0]->remote_staging;
+        links.resize(count); confirmed.resize(count); pair_sent.resize(count); ready.resize(count); released.resize(count);
+        endpoints.resize(count); secrets.resize(count);
+        if (!options.staging_capacity && count == 2) {
+            // Retain the original two-seat path and its recovery when the host
+            // advertises it (including a directly joined campaign room).
+            direct_bootstrap = opened = assigned = true; index = 1; confirmed[0] = true;
+        }
+    }
+    void pump() {
+        if (stopping) {
+            for (auto& link : links) if (link) link->pump();
+            return;
+        }
+        accept_candidate();
         for (auto& candidate : pending) {
             if (!candidate) continue;
             candidate->pump();
@@ -672,7 +755,7 @@ struct TcpTransport::Mesh {
             if (!candidate->controls.empty()) { candidate->refuse("EAWR-NET-1301", "Duplicate mesh admission controls"); continue; }
             const auto kind = static_cast<TcpMessage>(bytes.front());
             auto body = std::span<const std::uint8_t>(bytes).subspan(1);
-            if (hosting && !roster_seen && kind == TcpMessage::mesh_join) {
+            if (hosting && (!roster_seen || options.staging_capacity) && kind == TcpMessage::mesh_join) {
                 assignment(*candidate, body);
                 if (!stopping && !candidate->closing) {
                     const auto seat = candidate->index; links[seat] = std::move(candidate);
@@ -700,6 +783,10 @@ struct TcpTransport::Mesh {
         std::erase_if(pending, [](const auto& candidate) { return !candidate || candidate->stream == socket::invalid; });
         for (PeerIndex peer = 0; peer < options.peers; ++peer) if (links[peer]) {
             auto& link = *links[peer]; link.pump();
+            if (!hosting && !repairing && peer == 0 && options.lobby_bootstrap && !bootstrap_seen && link.state == LinkState::open) {
+                negotiate_bootstrap();
+                if (stopping || direct_bootstrap) return;
+            }
             if (link.auth) {
                 // Replacement edges already retain their seat/roster. Bootstrap
                 // controls cannot alter or fail that mesh, even before proof.
@@ -713,43 +800,34 @@ struct TcpTransport::Mesh {
             }
             // An opened peer may send before this client's host stream delivers Open.
             // Keep the edge's already bounded queue behind the local readiness gate.
-            if (!opened && !link.inbound.empty() && (!roster_seen || !confirmed[peer])) {
+            const bool staging_host_link = options.staging_capacity && assigned && confirmed[peer] && (hosting || peer == 0);
+            if (!opened && !staging_host_link && !link.inbound.empty() && (!roster_seen || !confirmed[peer])) {
                 fail("Application data before mesh identity"); return;
             }
             if (link.state == LinkState::closed && !opened) {
-                if (link.failure && !failure) failure = link.failure;
-                fail("Peer disconnected while building the mesh"); return;
+                if (options.staging_capacity && hosting && (!frozen_mask || !(frozen_mask & (1U << peer)))) {
+                    // The lobby removes the departed identity before releasing
+                    // its native index; a same-index newcomer cannot inherit it.
+                    if (released[peer] && link.outbound.empty()) {
+                        links[peer].reset(); endpoints[peer] = {}; confirmed[peer] = released[peer] = false;
+                    }
+                    continue;
+                }
+                // A frozen staging roster cannot recover a lost member. Report
+                // that formation phase by name, retaining the edge's detail.
+                if (link.failure && !failure && !(options.staging_capacity && frozen_mask)) failure = link.failure;
+                fail("Peer disconnected while building the mesh" + (link.failure ? ": " + link.failure->message : std::string{})); return;
             }
         }
         if (!hosting && !repairing && links[0] && links[0]->state == LinkState::open && !pair_sent[0]) {
             Bytes bytes{static_cast<std::uint8_t>(TcpMessage::mesh_join)};
-            u32(bytes, options.peers); u32(bytes, options.seat); u32(bytes, bound_port);
+            u32(bytes, options.staging_capacity ? 0U : options.peers); u32(bytes, options.seat); u32(bytes, bound_port);
             string(bytes, options.mesh_advertise, 128);
             if (!queue(*links[0], std::move(bytes))) return;
             pair_sent[0] = true;
         }
-        if (hosting && !roster_seen && std::all_of(links.begin() + 1, links.end(), [](const auto& link) { return !!link; })) {
-            std::random_device random;
-            std::vector<PairSecret> pairs(options.peers * options.peers);
-            for (PeerIndex first = 1; first < options.peers; ++first)
-                for (PeerIndex second = first + 1; second < options.peers; ++second) {
-                    auto& secret = pairs[first * options.peers + second];
-                    for (auto& byte : secret) byte = static_cast<std::uint8_t>(random());
-                    pairs[second * options.peers + first] = secret;
-                }
-            Bytes roster{static_cast<std::uint8_t>(TcpMessage::mesh_roster)}; u32(roster, options.peers);
-            for (PeerIndex peer = 1; peer < options.peers; ++peer) { string(roster, endpoints[peer].host, 128); u32(roster, endpoints[peer].port); }
-            for (PeerIndex peer = 1; peer < options.peers; ++peer) {
-                auto bytes = roster;
-                for (PeerIndex remote = 0; remote < options.peers; ++remote) {
-                    const auto& secret = pairs[peer * options.peers + remote];
-                    bytes.insert(bytes.end(), secret.begin(), secret.end());
-                }
-                if (!queue(*links[peer], std::move(bytes))) return;
-            }
-            roster_seen = true; roster_started = Clock::now(); ready[0] = true;
-            socket::close(listener); listener = socket::invalid;
-        }
+        if (hosting && !options.staging_capacity && !roster_seen
+            && std::all_of(links.begin() + 1, links.end(), [](const auto& link) { return !!link; })) publish_roster();
         if ((!hosting || repairing) && roster_seen) {
             for (PeerIndex peer = repairing ? 0U : 1U; peer < index; ++peer)
                 if (links[peer] && links[peer]->state == LinkState::open && !pair_sent[peer]) {
@@ -758,7 +836,8 @@ struct TcpTransport::Mesh {
                 }
             bool complete = true;
             for (PeerIndex peer = 0; peer < options.peers; ++peer)
-                if (peer != index && (!links[peer] || !confirmed[peer] || links[peer]->state != LinkState::open)) complete = false;
+                if (peer != index && (frozen_mask & (1U << peer))
+                    && (!links[peer] || !confirmed[peer] || links[peer]->state != LinkState::open)) complete = false;
             // Repair reuses the roster, not the initial host readiness barrier.
             // In particular, seat zero has no links[0] to send mesh_ready on.
             if (!repairing && complete && !ready_sent) {
@@ -766,9 +845,14 @@ struct TcpTransport::Mesh {
                 ready_sent = true;
             }
         }
-        if (hosting && roster_seen && !opened && std::all_of(ready.begin(), ready.end(), [](bool value) { return value; })) {
-            for (PeerIndex peer = 1; peer < options.peers; ++peer)
+        bool all_ready = true;
+        for (PeerIndex peer = 0; peer < options.peers; ++peer)
+            if ((frozen_mask & (1U << peer)) && !ready[peer]) all_ready = false;
+        if (hosting && roster_seen && !opened && all_ready) {
+            for (PeerIndex peer = 1; peer < options.peers; ++peer) {
+                if (!(frozen_mask & (1U << peer))) continue;
                 if (!queue(*links[peer], {static_cast<std::uint8_t>(TcpMessage::mesh_open)})) return;
+            }
             opened = true;
         }
         if (repairing) {
@@ -821,8 +905,9 @@ void TcpTransport::erase_reconnect_credentials() noexcept {
     }
 }
 core::Result<std::unique_ptr<TcpTransport>> TcpTransport::host(std::string address, std::uint16_t port, TcpOptions options) {
+    if (options.staging_capacity) options.lobby_bootstrap = true;
     if (!valid(options)) return core::Result<std::unique_ptr<TcpTransport>>::failure(error("EAWR-NET-0200", "Invalid TCP transport options"));
-    if (options.peers > 2) {
+    if (options.peers > 2 || options.staging_capacity) {
         if (options.seat != 0) return core::Result<std::unique_ptr<TcpTransport>>::failure(error("EAWR-NET-1300", "Host must occupy mesh seat zero"));
         auto mesh = std::make_unique<Mesh>(true, std::move(options));
         const auto listener = socket::listen(address, port);
@@ -839,8 +924,9 @@ core::Result<std::unique_ptr<TcpTransport>> TcpTransport::host(std::string addre
     return core::Result<std::unique_ptr<TcpTransport>>::success(std::move(result));
 }
 core::Result<std::unique_ptr<TcpTransport>> TcpTransport::connect(std::string address, std::uint16_t port, TcpOptions options) {
+    if (options.staging_capacity) options.lobby_bootstrap = true;
     if (!valid(options) || port == 0) return core::Result<std::unique_ptr<TcpTransport>>::failure(error("EAWR-NET-0200", "Invalid TCP transport options or port"));
-    if (options.peers > 2) {
+    if (options.peers > 2 || options.staging_capacity) {
         if (options.mesh_advertise.size() > 128 || sanitize_lan_text(options.mesh_advertise, 128) != options.mesh_advertise)
             return core::Result<std::unique_ptr<TcpTransport>>::failure(error("EAWR-NET-1300", "Invalid advertised mesh address"));
         auto mesh = std::make_unique<Mesh>(false, options);
@@ -878,7 +964,7 @@ core::Result<void> TcpTransport::send(PeerIndex to, std::span<const std::uint8_t
     if (mesh_) {
         if (to >= mesh_->options.peers || to == mesh_->index)
             return core::Result<void>::failure(error("EAWR-NET-1300", "Invalid mesh destination peer"));
-        if (!mesh_->opened || mesh_->stopping || !mesh_->links[to] || !mesh_->links[to]->authenticated() || mesh_->links[to]->state != LinkState::open)
+        if (link(to) != LinkState::open || !mesh_->links[to] || !mesh_->links[to]->authenticated())
             return core::Result<void>::failure(error("EAWR-NET-1304", "Mesh peer stream is not open"));
         auto& edge = *mesh_->links[to];
         if (frame.size() > edge.options.max_frame_size)
@@ -909,9 +995,20 @@ std::optional<Received> TcpTransport::poll() {
     }
     if (mesh_) {
         mesh_->pump();
-        if (!mesh_->opened || mesh_->stopping) return {};
+        if (mesh_->direct_bootstrap) {
+            reconnect_endpoint_ = mesh_->endpoints[0];
+            impl_ = std::move(mesh_->links[0]); impl_->mesh_controls = false;
+            mesh_.reset();
+        }
+    }
+    if (mesh_) {
+        // Once the roster freezes, Start/Setup requires the whole active mesh.
+        // Keep application frames ordered behind that native barrier while
+        // pump() continues authenticating pairs and exchanging readiness.
+        if ((!mesh_->opened && (!mesh_->options.staging_capacity || mesh_->frozen_mask)) || mesh_->stopping) return {};
         for (std::uint32_t count = 0; count < mesh_->options.peers; ++count) {
             const auto peer = static_cast<PeerIndex>(mesh_->cursor++ % mesh_->options.peers);
+            if (!mesh_->opened && (!mesh_->assigned || !mesh_->confirmed[peer] || (!mesh_->hosting && peer != 0))) continue;
             if (!mesh_->links[peer] || !mesh_->links[peer]->authenticated() || mesh_->links[peer]->discard_application || mesh_->links[peer]->inbound.empty()) continue;
             auto& edge = *mesh_->links[peer];
             auto result = std::move(edge.inbound.front()); edge.inbound.pop_front();
@@ -928,7 +1025,9 @@ LinkState TcpTransport::link(PeerIndex peer) const {
     if (mesh_) {
         if (peer >= mesh_->options.peers || mesh_->stopping) return LinkState::closed;
         if (mesh_->assigned && peer == mesh_->index) return LinkState::open;
-        if (!mesh_->opened) return LinkState::connecting;
+        if (!mesh_->opened && !(mesh_->options.staging_capacity && mesh_->assigned
+            && mesh_->confirmed[peer] && (mesh_->hosting || peer == 0)))
+            return mesh_->options.staging_capacity && mesh_->hosting && !mesh_->links[peer] ? LinkState::closed : LinkState::connecting;
         return mesh_->links[peer] ? (mesh_->links[peer]->state == LinkState::open && !mesh_->links[peer]->authenticated()
             ? LinkState::connecting : mesh_->links[peer]->state) : LinkState::closed;
     }
@@ -945,10 +1044,17 @@ std::optional<LinkStats> TcpTransport::link_stats(PeerIndex peer) const {
     if (peer != impl_->remote() || impl_->state != LinkState::open || !impl_->authenticated() || impl_->stats.sample_count == 0) return {};
     return impl_->stats;
 }
+bool TcpTransport::has_pending_output() const {
+    if (mesh_) return std::any_of(mesh_->links.begin(), mesh_->links.end(), [](const auto& edge) {
+        return edge && !edge->outbound.empty();
+    });
+    return !impl_->outbound.empty();
+}
 std::uint16_t TcpTransport::port() const { return mesh_ ? mesh_->bound_port : impl_->bound_port; }
 const std::optional<core::Diagnostic>& TcpTransport::diagnostic() const {
     if (mesh_) {
         if (mesh_->failure) return mesh_->failure;
+        if (mesh_->options.staging_capacity && mesh_->hosting && !mesh_->frozen_mask) return mesh_->failure;
         for (const auto& edge : mesh_->links) if (edge && edge->failure) return edge->failure;
         return mesh_->failure;
     }
@@ -957,6 +1063,7 @@ const std::optional<core::Diagnostic>& TcpTransport::diagnostic() const {
 core::Result<void> TcpTransport::close_peer(PeerIndex peer) {
     if (peer >= peer_count() || peer == self()) return core::Result<void>::failure(error("EAWR-NET-0200", "Invalid remote peer."));
     auto* edge = mesh_ ? mesh_->links[peer].get() : impl_.get();
+    if (mesh_ && mesh_->options.staging_capacity && mesh_->hosting && !mesh_->frozen_mask) mesh_->released[peer] = true;
     if (!edge || edge->state != LinkState::open || !edge->authenticated()) return core::Result<void>::success();
     edge->cancelled = edge->discard_application = true;
     edge->inbound.clear(); edge->inbound_bytes = 0;
@@ -969,6 +1076,43 @@ std::uint64_t TcpTransport::edge_identity(PeerIndex peer) const {
     if (peer >= peer_count() || peer == self() || link(peer) != LinkState::open) return 0;
     const auto* edge = mesh_ ? mesh_->links[peer].get() : impl_.get();
     return edge ? edge->edge_identity : 0;
+}
+bool TcpTransport::staging_capacity() const { return mesh_ && mesh_->options.staging_capacity; }
+bool TcpTransport::staging_roster_ready(std::uint32_t active) const {
+    return !staging_capacity() || (mesh_->hosting && !mesh_->stopping && (active & 1U)
+        && !(active >> mesh_->options.peers) && (mesh_->attached_mask() & active) == active);
+}
+core::Result<bool> TcpTransport::lock_staging_roster(std::uint32_t active) {
+    using Result = core::Result<bool>;
+    if (!staging_capacity()) return Result::success(true);
+    auto& mesh = *mesh_;
+    if (mesh.failure) return Result::failure(*mesh.failure);
+    if (!mesh.hosting || mesh.stopping || !(active & 1U) || active == 1U || (active >> mesh.options.peers))
+        return Result::failure(error("EAWR-NET-1300", "Invalid frozen TCP player roster."));
+    if (mesh.frozen_mask) {
+        if (active != mesh.frozen_mask) return Result::failure(error("EAWR-NET-1301", "The frozen TCP player roster changed."));
+        return Result::success(mesh.opened);
+    }
+    // Observe an already queued connection before the atomic owner-thread
+    // comparison. Anything arriving after this point is a late, refused join.
+    mesh.accept_candidate();
+    const bool joining = std::any_of(mesh.pending.begin(), mesh.pending.end(), [](const auto& candidate) {
+        return candidate && candidate->stream != socket::invalid && !candidate->closing;
+    });
+    if (joining || mesh.attached_mask() != active)
+        return Result::failure(error("EAWR-NET-1774", "Start raced a player joining or leaving. Wait for the player list and accept again."));
+    mesh.frozen_mask = active;
+    mesh.publish_roster(); // Ordered before the lobby's Start/offer on each host edge.
+    if (mesh.failure) return Result::failure(*mesh.failure);
+    return Result::success(false);
+}
+bool TcpTransport::staging_mesh_ready() const {
+    if (!staging_capacity()) return true;
+    if (!mesh_->opened || mesh_->stopping) return false;
+    // The host may enter a synchronous scene load as soon as this returns true.
+    // Every Open marker must have reached its socket before polling stops.
+    return !mesh_->hosting || std::all_of(mesh_->links.begin(), mesh_->links.end(),
+        [](const auto& edge) { return !edge || edge->outbound.empty(); });
 }
 core::Result<void> TcpTransport::reopen_staging_listener() {
     if (mesh_ || !impl_->hosting || repair_auth_) return core::Result<void>::failure(error("EAWR-NET-0200", "Staging refill requires an unauthenticated two-seat LAN host."));

@@ -1,3 +1,4 @@
+#include "gpu_debug_labels.hpp"
 #include "movie_player.hpp"
 
 #include <godot_cpp/classes/file_access.hpp>
@@ -81,6 +82,7 @@ core::Result<VideoStreamPlayer*> attach_hud_movie(Control& parent, const data::u
     if (movie.alpha) {
         Ref<Shader> shader;
         shader.instantiate();
+        name_canvas_shader(*shader.ptr(), "EAWR/UI/HudMoviePackedAlpha");
         shader->set_code(packed_alpha_shader);
         Ref<ShaderMaterial> material;
         material.instantiate();

@@ -176,7 +176,10 @@ void synthetic() {
         <Expensive_Bribe_Cost>150</Expensive_Bribe_Cost><Build_Cost_Credits>500</Build_Cost_Credits><Build_Time_Seconds>30</Build_Time_Seconds>
         <Build_Initially_Locked>Yep</Build_Initially_Locked><Required_Ground_Base_Level>2</Required_Ground_Base_Level>
         <Required_Special_Structures>Factory | Research</Required_Special_Structures><Affiliation>Custom_Side</Affiliation>
-        <Abilities><Galactic_Stealth_Ability Name="Initial"><Activation_Style>Galactic_Automatic</Activation_Style></Galactic_Stealth_Ability></Abilities></SpaceUnit>
+        <Abilities><Galactic_Stealth_Ability Name="Initial"><Activation_Style>Galactic_Automatic</Activation_Style></Galactic_Stealth_Ability>
+          <Political_Control_Protection_Ability Name="Mod_Shield"/>
+          <Political_Transition_Bonus_Ability Name="Mod_Rate"><Time_Reduction_Percentage>0.375</Time_Reduction_Percentage><Stacking_Category>4</Stacking_Category></Political_Transition_Bonus_Ability>
+        </Abilities></SpaceUnit>
       <SpaceUnit Name="Variant"><Variant_Of_Existing_Type>Carrier</Variant_Of_Existing_Type><Hyperspace_Speed>TBD</Hyperspace_Speed>
         <Hyperspace>No</Hyperspace>
         <Stay_In_Transport_During_Ground_Battle>No</Stay_In_Transport_During_Ground_Battle>
@@ -224,6 +227,13 @@ void synthetic() {
         && !eawr::units::resolve_initial_galactic_type(table, "OverflowTech"), "technology resolver agrees with the simulation signed-32 target bound");
     const auto* carrier = table.find("carrier");
     const auto* variant = table.find("Variant");
+    expect(carrier && variant && carrier->control_abilities.size() == 2 && variant->control_abilities.size() == 2
+        && carrier->control_abilities[0].name == "Mod_Shield" && carrier->control_abilities[0].protection
+        && carrier->control_abilities[0].initially_enabled == true
+        && carrier->control_abilities[0].activation_style == "Galactic_Automatic"
+        && carrier->control_abilities[1].multiplier == Fixed::from_ratio(3, 8).value()
+        && carrier->control_abilities[1].category == 4,
+        "renamed nonhero control abilities retain authored values, constructor defaults and variant inheritance");
     expect(carrier && variant && carrier->space_override_population_value == Fixed::from_integer(3).value()
         && variant->space_override_population_value == carrier->space_override_population_value
         && eawr::units::population_in_space(variant->population_value, variant->space_override_population_value) == Fixed::from_integer(3).value(),

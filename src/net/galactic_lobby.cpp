@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <locale>
 #include <map>
+#include <random>
 #include <set>
 #include <sstream>
 
@@ -49,7 +51,15 @@ std::optional<gc::HumanSideId> galactic_lobby_side(const GalacticLobbyOptions& o
     return found->second;
 }
 
+namespace {
+// The AI perception seed is 32-bit (the world-generation seed rule), so a session with a wider seed would refuse its
+// AI setup after it had already started. Every entry point names the problem instead.
+constexpr std::string_view galactic_seed_too_wide = "The Galactic Conquest seed must fit in 32 bits (qualified 32-bit AI seed).";
+}  // namespace
+
 core::Result<LobbyGame> encode_galactic_lobby_game(const GalacticLobbyOptions& options) {
+    if (options.seed > std::numeric_limits<std::uint32_t>::max())
+        return refuse<LobbyGame>(std::string(galactic_seed_too_wide));
     if (options.campaign.empty() || options.difficulty.empty() || options.input_delay == 0 || options.input_delay > max_input_delay
         || options.rows.size() < 2 || options.rows.size() > gc::galactic_max_players || options.auto_resolve > galactic_lobby_max_auto_resolve)
         return refuse<LobbyGame>("Incomplete Galactic Conquest staging options.");
@@ -86,6 +96,7 @@ core::Result<GalacticLobbyOptions> decode_galactic_lobby_game(const LobbyGame& g
     if (!(in >> result.input_delay >> result.seed >> result.auto_resolve >> result.custom >> result.credits >> result.starting_tech
         >> result.maximum_tech >> result.allow_heroes >> std::quoted(result.difficulty) >> count)
         || count < 2 || count > gc::galactic_max_players) return bad();
+    if (result.seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
     for (std::size_t index = 0; index < count; ++index) {
         GalacticLobbyRow row; unsigned dropout{};
         if (!(in >> row.player >> row.faction_id >> row.flags >> std::quoted(row.faction) >> row.human >> dropout)
@@ -98,8 +109,14 @@ core::Result<GalacticLobbyOptions> decode_galactic_lobby_game(const LobbyGame& g
     return Result::success(std::move(result));
 }
 
+std::uint64_t draw_galactic_session_seed() {
+    std::random_device device;
+    return static_cast<std::uint32_t>(device());
+}
+
 core::Result<GalacticLobbyOptions> default_galactic_lobby_options(const gc::MpLobbyCampaign& campaign,
     std::string_view difficulty, std::uint64_t seed, std::uint64_t input_delay, bool two_sides) {
+    if (seed > std::numeric_limits<std::uint32_t>::max()) return refuse<GalacticLobbyOptions>(std::string(galactic_seed_too_wide));
     GalacticLobbyOptions options;
     options.campaign = campaign.name; options.difficulty = std::string(difficulty);
     options.seed = seed; options.input_delay = input_delay;

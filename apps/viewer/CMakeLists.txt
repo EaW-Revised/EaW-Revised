@@ -175,6 +175,8 @@ add_library(eawr_viewer_core STATIC
     ${EAWR_BATTLE_SOURCES}
     ${EAWR_SKIRMISH_SOURCES}
     ${EAWR_PLATFORM_NET_SOURCES}
+    "${EAWR_ROOT}/src/platform/net/galactic_lan_match.cpp"
+    "${EAWR_ROOT}/src/net/galactic_adapter.cpp"
     ${EAWR_PLATFORM_SOURCES}
     ${EAWR_PLATFORM_GALACTIC_SOURCES}
     ${EAWR_SIM_GALACTIC_SOURCES}

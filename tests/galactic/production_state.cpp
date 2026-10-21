@@ -1121,11 +1121,13 @@ void census_rounding_and_data() {
     auto fractional_live = take(galactic::GalacticSession::create(config));
     expect(fractional_live.snapshot()->population()[0].used == f(1), "global live usage rounds once after summation");
     eawr::units::GalacticType type; type.population_value = f(3); type.additional_population_capacity = 7;
-    expect(take(campaign::prepare_census_type(type, 10)) == galactic::CensusType{10, f(3), 7}, "original type adapter consumes loaded values");
+    galactic::CensusType expected_type{10, f(3), 7}; expected_type.history = galactic::HistoryType{};
+    expect(take(campaign::prepare_census_type(type, 10)) == expected_type, "original type adapter consumes loaded values");
     type.population_value = take(Fixed::from_decimal("3.9"));
     expect(take(campaign::prepare_census_type(type, 10)).population == f(3), "authored population uses the source integer overlay");
     type.population_value.reset(); type.additional_population_capacity.reset();
-    expect(take(campaign::prepare_census_type(type, 10)) == galactic::CensusType{10, f(0), 0}, "WGEP-69 omitted type values default zero after inheritance");
+    expected_type.population = f(0); expected_type.additional_capacity = 0;
+    expect(take(campaign::prepare_census_type(type, 10)) == expected_type, "WGEP-69 omitted type values default zero after inheritance");
     eawr::data::galactic::Planet planet; planet.population_value = 2; planet.additional_population_capacity = 8;
     expect(take(campaign::prepare_census_planet(planet, 11)) == galactic::CensusType{11, f(2), 8}, "planet original population and capacity use their own loaded table");
     eawr::data::galactic::Faction faction;

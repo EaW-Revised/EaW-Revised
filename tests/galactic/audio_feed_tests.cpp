@@ -327,7 +327,7 @@ void construction_unlock_cues() {
         }
         if (local) {
             auto& observer = setup.observer.emplace();
-            observer.local_player = local; observer.reveal_delay_seconds = whole(1);
+            observer.human_observers = {local}; observer.solo_reference_human = local; observer.reveal_delay_seconds = whole(1);
             observer.players = {{1, false, false, 0, 1, {}}, {2, false, false, 0, 1, {}}};
             observer.types = {{1000, false, false, false}};
             for (const auto& planet : setup.planets) {

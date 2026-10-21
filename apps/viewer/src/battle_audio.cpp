@@ -102,7 +102,7 @@ BattleAudio::BattleAudio(godot::Node3D& host, std::shared_ptr<const vfs::Vfs> fi
     host_->add_child(speech_player_);
     // The viewer has no other sound: muting the master bus mutes the battle.
     options_.muted = options_.muted || audio_output_muted();
-    // The demo battle shares the front end's output and mutes no bus: its 3D events are refused at
+    // The demo battle shares the front end's output and mutes no bus: all its events are refused at
     // the source (MAT-18). A battle muted by --eawr-audio off or a capture run mutes Master.
     if (!options_.attract_silent) server->set_bus_mute(0, options_.muted);
 }

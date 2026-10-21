@@ -553,6 +553,15 @@ core::Result<void> session_detail::Tick::prepare_chase_pairs(std::vector<CraftVi
 }
 
 core::Result<void> session_detail::Tick::prepare_craft() {
+    if (impl_->setup.domain != BattleDomain::space) {
+        craft_prep_.emplace();
+        craft_prep_->minds.emplace(impl_->minds);
+        craft_prep_->craft_views.emplace();
+        craft_prep_->squadron_frames.emplace();
+        craft_prep_->craft_squadron.emplace();
+        craft_prep_->dogfight_cone_tests.emplace(0);
+        return core::Result<void>::success();
+    }
     auto& moving = gather_.value().moving.value();
     auto& gathered_crafts = gather_.value().gathered_crafts.value();
     const auto& squadron_table = impl_->motion.squadrons;

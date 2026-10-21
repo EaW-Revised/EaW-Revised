@@ -10,9 +10,90 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <cstdint>
+#include <array>
 #include <iostream>
 #include <string>
 #include <string_view>
+
+namespace eawr::script::foc::ai {
+struct EngineContractAccess {
+    static bool parallel_decision_reads(Engine& engine, authoritative::ScriptScheduler& scripts,
+        tactical::PlayerId first, tactical::PlayerId second, const sim::PartitionExecutor& executor) {
+        const std::array players{first, second};
+        for (std::size_t index = 0; index < players.size(); ++index)
+            engine.player_ai(players[index])->taskforces[901 + index].units = {51 + index};
+        engine.rebuild_runtime_index(); engine.freeze_galactic_decision_reads();
+        std::array<bool, 2> okay{};
+        const auto ran = executor.execute_phase("test-engine-decision-scopes", sim::tick_partition_count, [&](std::size_t partition) {
+            const auto range = sim::partition_range(partition, players.size());
+            for (auto index = range.begin; index < range.end; ++index) {
+                auto captured = engine.galactic_decision_scope(players[index]);
+                if (!captured) continue;
+                auto scope = std::move(captured).value();
+                const auto other = 1 - index;
+                engine.operate({CrossOwnerOp::Kind::taskforce_join, 901 + other, 61 + index, 0, true});
+                const Engine::BoundaryScope boundary;
+                okay[index] = engine.taskforce(901 + other)->units == std::vector<sim::EntityId>({51 + other, 61 + index})
+                    && engine.taskforce(901 + index)->units == std::vector<sim::EntityId>{51 + index};
+            }
+        });
+        const auto committed = engine.commit_effects(scripts); engine.finish_galactic_decision_reads();
+        return ran && committed && okay[0] && okay[1]
+            && engine.taskforce(901)->units == std::vector<sim::EntityId>({51, 62})
+            && engine.taskforce(902)->units == std::vector<sim::EntityId>({52, 61});
+    }
+    static bool independent_player_reads(Engine& engine, authoritative::ScriptScheduler& scripts,
+        tactical::PlayerId first, tactical::PlayerId second) {
+        auto& lower = *engine.player_ai(first); auto& higher = *engine.player_ai(second);
+        constexpr std::uint64_t retained = 901, later = 902;
+        lower.taskforces[retained].units = {51}; engine.rebuild_runtime_index();
+        if (engine.galactic_decision_scope(first)) return false;
+        engine.freeze_galactic_decision_reads();
+        if (engine.galactic_decision_scope(0)) return false;
+        lower.taskforces[retained].units.push_back(52);
+        lower.taskforces[later].units = {55}; Engine::index_runtime(engine.runtime_index_.taskforces, later, first);
+        lower.effects.credits[first] = math::Fixed::from_integer(10).value();
+        lower.effects.pads[1000] = PadReservation{first, 1, 100, false, 0};
+        bool okay = true;
+        {
+            auto scoped = engine.galactic_decision_scope(second);
+            if (!scoped) return false;
+            auto scope = std::move(scoped).value();
+            const auto* before = engine.taskforce(retained);
+            okay = okay && before && before->units == std::vector<sim::EntityId>{51} && !engine.taskforce(later);
+            engine.operate({CrossOwnerOp::Kind::taskforce_join, retained, 53, 0, true});
+            const auto* after = engine.taskforce(retained);
+            okay = okay && after && after->units == std::vector<sim::EntityId>({51, 53})
+                && lower.taskforces.at(retained).units == std::vector<sim::EntityId>({51, 52});
+            higher.effects.credits[first] = math::Fixed::from_integer(20).value();
+            okay = okay && engine.uncommitted_credits(first) == math::Fixed::from_integer(20).value().raw()
+                && !engine.pad_claim(1000);
+            engine.set_pad_claim(1000, {second, 2, 100, false, 0});
+            okay = okay && engine.pad_claim(1000) && engine.pad_claim(1000)->player == second;
+            {
+                const Engine::BoundaryScope boundary;
+                okay = okay && !engine.staged() && engine.taskforce(retained)
+                    && engine.taskforce(retained)->units == std::vector<sim::EntityId>({51, 53});
+                engine.operate({CrossOwnerOp::Kind::taskforce_join, retained, 54, 0, true});
+                okay = okay && lower.taskforces.at(retained).units == std::vector<sim::EntityId>({51, 52});
+            }
+            okay = okay && engine.staged() == &higher.effects;
+            {
+                auto nested = engine.galactic_decision_scope(first);
+                if (!nested) return false;
+                okay = okay && engine.taskforce(retained)->units == std::vector<sim::EntityId>({51, 52});
+            }
+            okay = okay && engine.staged() == &higher.effects
+                && engine.taskforce(retained)->units == std::vector<sim::EntityId>({51, 53, 54});
+        }
+        okay = okay && !engine.staged() && !engine.decision_effects();
+        const auto committed = engine.commit_effects(scripts);
+        engine.finish_galactic_decision_reads();
+        return okay && committed && lower.taskforces.at(retained).units == std::vector<sim::EntityId>({51, 52, 53, 54})
+            && engine.taskforce(later) && higher.effects.foreign_operations.empty() && higher.effects.foreign_players.empty();
+    }
+};
+} // namespace eawr::script::foc::ai
 
 namespace {
 namespace ai = s9_fixture::ai;
@@ -73,6 +154,25 @@ void staged_turns() {
 
 // A script instance runs in the chain of the player that owns it: a freestore instance carries its player, a plan
 // instance its slot's player; anything outside the AI domains belongs to no chain.
+void independent_player_reads() {
+    eawr::sim::InlineExecutor executor; s9_fixture::Owner owner;
+    owner.begin(executor);
+    expect(ai::EngineContractAccess::independent_player_reads(*owner.engine, owner.scripts, owner.shape.first, owner.shape.second),
+        "a frozen turn reads its own overlay over foreign barrier-start rows, pads and credits, then merges foreign operations once");
+}
+
+void parallel_decision_reads() {
+    const auto run = [](const eawr::sim::PartitionExecutor& executor) {
+        s9_fixture::Owner owner; owner.begin(executor);
+        expect(ai::EngineContractAccess::parallel_decision_reads(*owner.engine, owner.scripts, owner.shape.first, owner.shape.second, executor),
+            "decision scopes isolate foreign edits through attachment boundaries and merge identically after joined workers");
+    };
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers); run(executor);
+    }
+    eawr::test_support::ReverseOrderExecutor reverse(8); run(reverse);
+}
+
 void chain_owners() {
     const s9_fixture::Shape shape;
     eawr::sim::InlineExecutor executor;
@@ -107,6 +207,8 @@ int case_galactic_ai_player_state_tests() {
     try {
         staged_turns();
         chain_owners();
+        independent_player_reads();
+        parallel_decision_reads();
         order_independence();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

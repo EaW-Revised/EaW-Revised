@@ -341,6 +341,10 @@ bool LiveSessionView::start(std::string& failure) {
     // visit must not close the producer's current epoch (FD-01 phase order stays).
     std::function<std::uint64_t()> intent_epoch;
     if (options_.lan) intent_epoch = [this] { return session_ ? session_->completed_tick() : 0U; };
+    else if (options_.borrowed_feed && options_.borrowed_feed->agreed_pacing())
+        intent_epoch = [feed = std::weak_ptr(options_.borrowed_feed)] {
+            const auto source = feed.lock(); return source ? source->completed_tick() : 0U;
+        };
     scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch));
     if (options_.lan) options_.lan->set_input_epoch_provider([scheduler = std::weak_ptr(scheduler_)] {
         const auto producer = scheduler.lock();
@@ -371,7 +375,14 @@ bool LiveSessionView::start(std::string& failure) {
     if (options_.borrowed_feed) {
         session_ = options_.borrowed_feed;
         session_->configure_notifications(std::move(session_options.base_attack_types));
-        session_->command_source(std::move(session_options.command_source));
+        if (session_->agreed_pacing()) {
+            // The parent may continue while this view closes. Retain only the producer, with a weak epoch reader.
+            session_->command_source([scheduler = scheduler_](const std::uint64_t next_tick) { return scheduler->take(next_tick); });
+            session_->set_execution_observer([scheduler = std::weak_ptr(scheduler_)](
+                const std::uint64_t sequence, const std::uint64_t tick) {
+                if (const auto producer = scheduler.lock()) producer->note_execution(sequence, tick);
+            });
+        } else session_->command_source(std::move(session_options.command_source));
         return true;
     }
     tactical::TacticalContent content;

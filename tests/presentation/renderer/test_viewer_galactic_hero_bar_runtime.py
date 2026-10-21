@@ -78,6 +78,53 @@ func _process(delta):
 
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticHeroBarRuntime(unittest.TestCase):
+    def test_actual_return_schedule_drives_shrinking_portrait_sector(self):
+        from space_map_test_support import decode_png
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-hero-return-"))
+        captures = []
+        for ticks in (75, 225, 300):
+            run = directory / str(ticks)
+            run.mkdir()
+            report, capture = run / "report.json", run / "capture.png"
+            command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                       "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-galactic", "synthetic",
+                       "--eawr-game-root", GAME_ROOT, "--eawr-galactic-hud-fixture", "hero-map-respawn",
+                       "--eawr-galactic-ticks", str(ticks), "--eawr-galactic-hud-verify", "yes",
+                       "--eawr-environment", "map", "--eawr-lighting", "sh", "--eawr-shadows", "on",
+                       "--eawr-report", str(report), "--eawr-capture", str(capture)]
+            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+            (run / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+            self.assertTrue(report.is_file(), result.stdout + result.stderr)
+            data = json.loads(report.read_text(encoding="utf-8"))
+            self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+            self.assertGreater(data["hud_work"]["verify_checks"], 0)
+            self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
+            bar = data["hero_map_bar"]
+            self.assertTrue(bar["visible"])
+            self.assertTrue(bar["build_texture"], "the authored component must supply the unfinished-sector texture")
+            self.assertEqual(len(bar["entries"]), 1, "the actual foreign schedule must never enter the local bar")
+            entry = bar["entries"][0]
+            self.assertEqual(entry["name"], "Bossk")
+            self.assertTrue(entry["scheduled"] and entry["portrait_shown"])
+            self.assertEqual(entry["actor"], 0)
+            self.assertEqual((entry["start_frame"], entry["deadline"]), (0, 300))
+            self.assertEqual(bar["current_frame"], ticks)
+            self.assertAlmostEqual(entry["completion"], ticks / 300, places=5)
+            _, _, rows = decode_png(capture.read_bytes())
+            x, y, width, height = entry["rect"]
+            # Stay inside the circular portrait; exclude its antialiased edge and backplate.
+            pixels = [rows[py][px] for py in range(int(y), math.ceil(y + height))
+                      for px in range(int(x), math.ceil(x + width))
+                      if math.hypot((px + 0.5 - x) / width - 0.5,
+                                    (py + 0.5 - y) / height - 0.5) < 0.35]
+            captures.append(pixels)
+        full = captures[2]
+        changed = [sum(sum(max(0, a - b) for a, b in zip(pixel, normal)) > 20
+                       for pixel, normal in zip(pixels, full)) for pixels in captures[:2]]
+        self.assertGreater(changed[1], 30, "three-quarter progress still has a visible unfinished sector")
+        self.assertGreater(changed[0], changed[1] * 1.5, "the actual portrait's unfinished sector shrinks")
+        print("HERO-RETURN-DIRECTORY", directory)
+
     def test_stock_empire_bar_click_selects_and_recentres_own_hero(self):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-hero-bar-"))
 
@@ -90,13 +137,15 @@ class GalacticHeroBarRuntime(unittest.TestCase):
             command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
                        "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
                        "--eawr-galactic", "Sandbox_Equal_Footing_Empire", "--eawr-game-root", GAME_ROOT,
-                       "--eawr-galactic-paused", "yes", "--eawr-environment", "map",
+                       "--eawr-galactic-paused", "yes", "--eawr-galactic-hud-verify", "yes", "--eawr-environment", "map",
                        "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-report", str(report)]
             result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
             (run / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
             self.assertTrue(report.is_file(), result.stdout + result.stderr)
             data = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
+            self.assertGreater(data["hud_work"]["verify_checks"], 0)
+            self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
             return data
 
         panned = launch("pan", False)
@@ -106,7 +155,11 @@ class GalacticHeroBarRuntime(unittest.TestCase):
         self.assertEqual(bar["component"], "g_hero_icon")
         self.assertGreater(len(bar["entries"]), 0, "story-spawned stock named heroes must be present at start")
         self.assertLessEqual(len(bar["entries"]), 6)
-        self.assertEqual([row["type"] for row in bar["entries"]], sorted({row["type"] for row in bar["entries"]}))
+        self.assertEqual(len({row["type"] for row in bar["entries"]}), len(bar["entries"]))
+        self.assertGreater(len({row["rank"] for row in bar["entries"]}), 1,
+                           "the stock campaign must exercise distinct hero ranks")
+        self.assertEqual([row["rank"] for row in bar["entries"]],
+                         sorted((row["rank"] for row in bar["entries"]), reverse=True))
         entry = bar["entries"][0]
         self.assertTrue(entry["icon"])
         self.assertTrue(entry["tooltip"])

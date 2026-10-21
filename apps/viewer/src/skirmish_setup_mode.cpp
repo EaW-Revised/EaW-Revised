@@ -5,6 +5,8 @@
 #include "lan_broadcast_source.hpp"
 #include "battle_content.hpp"
 #include "lan_match.hpp"
+#include "lobby_retry.hpp"
+#include "galactic_lobby_backend.hpp"
 #include "eawr/scene/scene.hpp"
 #include "profile_store.hpp"
 #include <godot_cpp/classes/ip.hpp>
@@ -30,6 +32,7 @@
 #include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/input_event_key.hpp>
+#include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/popup_menu.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
@@ -42,10 +45,12 @@
 
 #include <algorithm>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <initializer_list>
 #include <set>
+#include <sstream>
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
@@ -119,6 +124,13 @@ struct SkirmishSetupMode::State final {
     std::optional<std::uint16_t> lan_host_port;
     bool lan_smoke{};
     bool lan_acceptance{};
+    std::string gc_acceptance_campaign;
+    std::uint64_t gc_acceptance_ticks{};
+    std::optional<std::uint64_t> gc_acceptance_seed;  // explicit override; otherwise the host draws one
+    std::filesystem::path gc_acceptance_out;
+    std::optional<std::chrono::steady_clock::time_point> gc_acceptance_setup_started;
+    std::chrono::steady_clock::time_point gc_acceptance_next_log{};
+    LobbyRetry gc_acceptance_ready_retry, gc_acceptance_start_retry;
     std::filesystem::path lan_trace;
     std::uint64_t lan_delay{3};
     EawrUiButton *advanced{}, *accept{}, *cancel{}, *defaults_button{}, *staging_cancel{};
@@ -150,6 +162,7 @@ struct SkirmishSetupMode::State final {
     std::optional<skirmish::SetupOptionsEdit> editing;
     // The rows' controls: the name combo (Open or AI; the host's own name in row one), faction, team, colour.
     std::array<EawrUiCombo*, skirmish::local_setup_rows> faction{}, team{}, controller{}, colour{};
+    std::size_t authored_rows{};
     std::shared_ptr<const vfs::Vfs> filesystem;
     std::shared_ptr<const data::Catalog> catalog;
     std::shared_ptr<const BattleContent> content;
@@ -173,6 +186,8 @@ struct SkirmishSetupMode::State final {
     std::string benchmark_map;
     bool benchmark{};
     bool three_players{};
+    bool nine_players{};
+    std::uint32_t test_players{9};
     std::string three_player_test_map{"data/art/maps/_mp_space_ryloth.ted"};
     bool two_vs_two{};
     bool policy_test{};
@@ -347,6 +362,27 @@ bool SkirmishSetupMode::State::load() {
         if (args[i] == "--eawr-font-cache" && i + 1 < args.size()) cache = ViewerPath{utf8(args[++i])}.native();
         if (args[i] == "--eawr-lan-smoke") lan_smoke = true;
         if (args[i] == "--eawr-lan-acceptance") lan_smoke = lan_acceptance = true;
+        if (args[i] == "--eawr-gc-lan-out" && i + 1 < args.size()) gc_acceptance_out = ViewerPath{utf8(args[++i])}.native();
+        if (args[i] == "--eawr-gc-lan-acceptance" && i + 1 < args.size()) {
+            gc_acceptance_campaign = utf8(args[++i]);
+        }
+        if (args[i] == "--eawr-galactic-seed" && i + 1 < args.size()) {
+            const auto value = utf8(args[++i]);
+            std::uint64_t seed{};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), seed);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
+                failure = "--eawr-galactic-seed expects a number"; return false;
+            }
+            gc_acceptance_seed = seed;
+        }
+        if (args[i] == "--eawr-gc-lan-final-tick" && i + 1 < args.size()) {
+            const auto value = utf8(args[++i]);
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), gc_acceptance_ticks);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()
+                || gc_acceptance_ticks == 0 || gc_acceptance_ticks > net::max_session_ticks) {
+                failure = "Invalid GC acceptance final tick"; return false;
+            }
+        }
         if (args[i] == "--eawr-lan-trace" && i + 1 < args.size()) lan_trace = ViewerPath{utf8(args[++i])}.native();
         if (args[i] == "--eawr-lan-input-delay" && i + 1 < args.size()) {
             const auto value = utf8(args[++i]);
@@ -366,6 +402,8 @@ bool SkirmishSetupMode::State::load() {
         }
         if (args[i] == "--eawr-lan-join" && i + 1 < args.size()) lan_join_endpoint = utf8(args[++i]);
         if (args[i] == "--eawr-setup-test") test = true;
+        if (args[i] == "--eawr-setup-nine-player-test") nine_players = true;
+        if (args[i] == "--eawr-setup-eight-player-test") { nine_players = true; test_players = 8; }
         if (args[i] == "--eawr-setup-profile" && i + 1 < args.size()) {
             profile_store = ProfileStore{ViewerPath{utf8(args[++i])}.native()};
             profile_named = true;
@@ -384,6 +422,10 @@ bool SkirmishSetupMode::State::load() {
             benchmark_map = utf8(args[++i]);
             benchmark = true;
         }
+    }
+    if ((!gc_acceptance_campaign.empty() || gc_acceptance_ticks || !gc_acceptance_out.empty())
+        && (!lan_acceptance || gc_acceptance_campaign.empty() || !gc_acceptance_ticks || gc_acceptance_out.empty())) {
+        failure = "GC acceptance needs --eawr-lan-acceptance, an output directory and final tick"; return false;
     }
     // The profile belongs to an interactive run: fixtures, captures, reports and LAN smoke runs keep the defaults.
     profile_live = profile_named || (!test && !two_vs_two && !three_players && !policy_test && !layout_test && !benchmark
@@ -447,7 +489,7 @@ void SkirmishSetupMode::State::fill_map_list() {
 // the map's capacity are.
 void SkirmishSetupMode::State::idle_row(const std::size_t row) {
     for (auto* combo : {faction[row], team[row], controller[row], colour[row]}) {
-        combo->set_visible(true);
+        combo->set_visible(row < authored_rows || row_live(row));
         combo->set_disabled(true);
     }
 }
@@ -623,6 +665,37 @@ bool SkirmishSetupMode::State::build() {
         staging->frame->add_child(status);
     }
 
+    while (authored_rows < skirmish::local_setup_rows
+        && gadget_control(*staging, "IDC_PLAYER_NAME_" + std::to_string(authored_rows)) != nullptr) ++authored_rows;
+    // R-SETUP-01: extend missing controls from the last authored row's geometry and skin.
+    // refresh_map fits extra live rows above the existing status band.
+    for (const std::string column : {"IDC_PLAYER_NAME_", "IDC_PLAYER_FACTION_", "IDC_PLAYER_COLOR_", "IDC_PLAYER_TEAM_"}) {
+        for (std::size_t row = 2; row < skirmish::local_setup_rows; ++row) {
+            const std::string id = column + std::to_string(row);
+            if (gadget_control(*staging, id) != nullptr) continue;
+            const auto* previous = gadget_of(*staging, column + std::to_string(row - 1));
+            const auto* before = gadget_of(*staging, column + std::to_string(row - 2));
+            if (previous == nullptr || before == nullptr || previous->kind != "combo") {
+                failure = "Skirmish setup cannot extend the player row " + id;
+                return false;
+            }
+            BuiltGadget added = *previous;
+            added.id = id;
+            added.rect.y += previous->rect.y - before->rect.y;
+            auto* combo = memnew(EawrUiCombo);
+            combo->set_name(text(id));
+            combo->set_theme_type_variation(text(added.variation));
+            combo->set_fit_to_longest_item(false);
+            combo->set_clip_text(true);
+            combo->set_retail_list(true);
+            combo->set_position(previous->control->get_position()
+                + Vector2(0, static_cast<float>(added.rect.y - previous->rect.y)));
+            combo->set_size(previous->control->get_size());
+            staging->frame->add_child(combo);
+            added.control = combo;
+            staging->gadgets.push_back(std::move(added));
+        }
+    }
     // The player rows: name combo (Open or AI; the local player's name in row one), faction, colour, team.
     for (std::size_t slot_index = 0; slot_index < skirmish::local_setup_rows; ++slot_index) {
         const std::string suffix = std::to_string(slot_index);
@@ -868,6 +941,21 @@ void SkirmishSetupMode::State::refresh_map(const int index) {
     skirmish::repair_setup_selection(selection, map);
     notice.clear();
     const auto rows = skirmish::setup_row_count(map);
+    // Keep the status/footer space. Only maps needing generated controls change row pitch;
+    // switching back restores every authored rectangle and hides the generated idle row.
+    for (const std::string column : {"IDC_PLAYER_NAME_", "IDC_PLAYER_FACTION_", "IDC_PLAYER_COLOR_", "IDC_PLAYER_TEAM_"}) {
+        const auto* first = gadget_of(*staging, column + "0");
+        const auto* last = gadget_of(*staging, column + std::to_string(authored_rows - 1));
+        for (std::size_t slot = 0; slot < skirmish::local_setup_rows; ++slot) {
+            const auto* gadget = gadget_of(*staging, column + std::to_string(slot));
+            const float y = rows > authored_rows && slot < rows
+                ? static_cast<float>(first->rect.y) + static_cast<float>(last->rect.y - first->rect.y)
+                    * static_cast<float>(slot) / static_cast<float>(rows - 1)
+                : static_cast<float>(gadget->rect.y);
+            gadget->control->set_position(Vector2(gadget->control->get_position().x,
+                y - static_cast<float>(staging->layout.frame.y)));
+        }
+    }
     const std::string team_word = lookup(model::skirmish_setup_text_key(model::SetupText::team_number));
     for (std::size_t slot = 0; slot < skirmish::local_setup_rows; ++slot) {
         team[slot]->clear();
@@ -1029,6 +1117,99 @@ void SkirmishSetupMode::State::validate() {
 }
 
 void SkirmishSetupMode::State::process_lan() {
+    if (lan_acceptance && !gc_acceptance_campaign.empty()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (!gc_acceptance_setup_started) gc_acceptance_setup_started = now;
+        const auto fail_setup = [&](const std::string& reason) {
+            Dictionary receipt;
+            receipt["mode"] = "galactic"; receipt["phase"] = "lobby"; receipt["failure"] = text(reason);
+            receipt["campaign"] = text(gc_acceptance_campaign);
+            if (gc_acceptance_seed) receipt["seed"] = static_cast<int64_t>(*gc_acceptance_seed);
+            receipt["elapsed_ms"] = static_cast<int64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - *gc_acceptance_setup_started).count());
+            std::error_code error;
+            std::filesystem::create_directories(gc_acceptance_out, error);
+            if (!error) {
+                const auto json = utf8(JSON::stringify(receipt));
+                std::ofstream output(gc_acceptance_out / "report.json");
+                output << json << '\n';
+            }
+            UtilityFunctions::printerr(text("EAWR GC acceptance setup failed: " + reason));
+            host->get_tree()->quit(3);
+        };
+        if (!failure.empty()) { fail_setup(failure); return; }
+        if (!lan) {
+            connection->select(1);
+            lan = make_lan_match(ViewerPath{utf8(OS::get_singleton()->get_user_data_dir())}.native() / "lan-desync", lan_delay);
+            lan->set_diagnostic_logger([](std::string_view line) {
+                UtilityFunctions::print(String::utf8(line.data(), static_cast<int64_t>(line.size())));
+            });
+            lan->configure_factions(scene::faction_order(*catalog));
+            lan->configure_lobby(lan_host_port ? "Acceptance host" : "Acceptance join", 0, maps,
+                [](const skirmish::FixtureOptions&) {
+                    return core::Result<sim::tactical::TacticalSetup>::failure(net::lobby_diagnostic(
+                        net::LobbyReason::invalid_choice, "GC acceptance cannot prepare a skirmish"));
+                });
+            auto backend = std::make_shared<GalacticLobbyBackend>(GalacticLobbyLoader([content = content] {
+                return load_galactic_lobby_content(*content->filesystem, *content->catalog, content);
+            }));
+            backend->acceptance_final_tick(gc_acceptance_ticks);
+            lan->configure_galactic(backend);
+            if (lan_host_port) {
+                lan->host(*lan_host_port);
+                const auto& campaigns = backend->campaigns();
+                const auto selected_campaign = std::find_if(campaigns.begin(), campaigns.end(), [&](const auto& row) {
+                    return gc_acceptance_campaign == "auto" || row.name == gc_acceptance_campaign;
+                });
+                if (selected_campaign == campaigns.end()) { failure = "GC acceptance campaign is not in the multiplayer list"; return; }
+                const std::uint64_t seed = gc_acceptance_seed.value_or(net::draw_galactic_session_seed());
+                UtilityFunctions::print("EAWR GC acceptance seed=", static_cast<int64_t>(seed));
+                gc_acceptance_seed = seed;
+                auto game = net::default_galactic_lobby_options(*selected_campaign, "Normal_Default", seed, lan_delay);
+                if (!game || !lan->set_galactic_game(game.value())) { failure = "GC acceptance room could not open"; return; }
+            } else lan->join(lan_join_endpoint);
+        }
+        lan->pump_setup({});
+        const auto room = lan->lobby_state();
+        const auto view = lan->view();
+        const bool log = now >= gc_acceptance_next_log;
+        if (log) {
+            gc_acceptance_next_log = now + std::chrono::seconds(5);
+            std::ostringstream state;
+            state << "EAWR GC acceptance lobby role=" << (lan_host_port ? "host" : "join")
+                  << " transport_phase=" << static_cast<int>(view.phase) << " connected=" << view.connected
+                  << " message=" << view.message;
+            if (room) {
+                state << " revision=" << room->snapshot.revision << " seats=" << room->snapshot.seats.size()
+                      << " room_phase=" << static_cast<int>(room->snapshot.phase) << " local_ready=" << room->local_ready
+                      << " identity_pending=" << room->identity_pending << " ready_enabled=" << room->ready_enabled
+                      << " start_enabled=" << room->start_enabled << " ready_reason=" << room->ready_reason
+                      << " start_reason=" << room->start_reason;
+                for (const auto& seat : room->snapshot.seats)
+                    state << " [peer=" << seat.peer << " player=" << seat.player << " ready=" << seat.ready << ']';
+                if (room->notice) state << " notice=" << room->notice->message;
+            } else state << " room=none";
+            UtilityFunctions::print(text(state.str()));
+        }
+        if (room && room->snapshot.seats.size() == 2) {
+            const auto local = std::find_if(room->snapshot.seats.begin(), room->snapshot.seats.end(), [&](const auto& row) {
+                return row.peer == (lan_host_port ? 0U : 1U);
+            });
+            if (local != room->snapshot.seats.end() && !local->ready && room->ready_enabled
+                && gc_acceptance_ready_retry.attempt(room->snapshot.revision, now)) {
+                const bool accepted = lan->lobby_ready(true);
+                if (log) UtilityFunctions::print("EAWR GC acceptance ready request accepted=", accepted);
+            }
+            if (lan_host_port && room->start_enabled
+                && gc_acceptance_start_retry.attempt(room->snapshot.revision, now)) lan->start({});
+        }
+        lan_status->set_text(text(lan->view().message));
+        if (view.phase == LanPhase::ended) { fail_setup(view.message); return; }
+        if (now - *gc_acceptance_setup_started >= std::chrono::seconds(300)) {
+            fail_setup("Lobby did not launch within 300 seconds; see acceptance lobby diagnostics.");
+        }
+        return;
+    }
     if (frames == 0 && (lan_host_port || !lan_join_endpoint.empty())) {
         connection->select(1);
         lan = make_lan_match(ViewerPath{utf8(OS::get_singleton()->get_user_data_dir())}.native() / "lan-desync", lan_delay, lan_smoke, lan_trace);
@@ -1060,10 +1241,12 @@ void SkirmishSetupMode::State::process_lan() {
     lan_scroll->set_visible(lan_review->is_visible());
     start->set_text(caption(model::SetupText::start));
     if (!enabled) {
-        if (lan) { lan->cancel(); lan.reset(); }
+        if (lan) {
+            lan->cancel(); lan.reset();
+            controller[1]->select(controller_normal);
+        }
         controller[0]->set_item_text(0, text(local_name));
         controller[1]->set_item_text(controller_easy, caption(model::SetupText::ai_easy_player));
-        controller[1]->select(controller_normal);
         official->set_disabled(false); custom->set_disabled(false); advanced->set_disabled(false);
         list->set_mouse_filter(Control::MOUSE_FILTER_STOP); list->set_focus_mode(Control::FOCUS_ALL);
         for (std::size_t row = 1; row < skirmish::local_setup_rows; ++row) controller[row]->set_disabled(!row_live(row));
@@ -1304,6 +1487,7 @@ void SkirmishSetupMode::process() {
     auto& state = *state_;
     if (!state.visible) return;
     if (state.online_mode) {
+        state.lan = state.online_screen->lan_match();
         if (auto selected = state.online_screen->take_start()) { state.lan = state.online_screen->lan_match(); state.pending = std::move(selected); }
         else if (!state.online_screen->shown()) state.cancel_requested = true;
         return;
@@ -1320,7 +1504,7 @@ void SkirmishSetupMode::process() {
     state.process_cancel();
     state.process_back(was_editing);
     ++state.frames;
-    if (!state.captured && state.frames >= (state.layout_test ? 40U : state.two_vs_two && state.test ? 94U : state.policy_test ? 114U : state.three_players ? 98U : state.test ? 78U : 30U) && !state.options.capture_path.empty()) {
+    if (!state.captured && state.frames >= (state.layout_test || state.nine_players ? 40U : state.two_vs_two && state.test ? 94U : state.policy_test ? 114U : state.three_players ? 98U : state.test ? 78U : 30U) && !state.options.capture_path.empty()) {
         std::error_code directory_error;
         std::filesystem::create_directories(state.options.capture_path.parent_path(), directory_error);
         auto image = state.host->get_viewport()->get_texture()->get_image();
@@ -1338,7 +1522,47 @@ void SkirmishSetupMode::process() {
     }
     // GPU contract hook: real GUI pointer/key events, then the ordinary Start handler.
     if (state.test) {
-        if (state.layout_test) {
+        if (state.nine_players) {
+            const auto ninth = static_cast<std::size_t>(state.test_players - 1);
+            if (state.frames == 4) {
+                const auto map = std::find_if(state.maps.begin(), state.maps.end(), [&](const auto& candidate) {
+                    return skirmish::setup_row_count(candidate) == state.test_players && candidate.unavailable.empty();
+                });
+                if (map == state.maps.end()) {
+                    UtilityFunctions::printerr("EAWR nine-player setup: no authored nine-seat map");
+                    state.host->get_tree()->quit(1);
+                    return;
+                }
+                state.list->select(static_cast<int>(map - state.maps.begin()));
+            } else if (state.frames == 10) {
+                for (std::size_t row = 1; row < ninth; ++row) state.controller[row]->select(State::controller_normal);
+            } else if (state.frames == 12 || state.frames == 20 || state.frames == 28) {
+                click(state.controller[ninth]->get_global_rect().get_center());
+            } else if ((state.frames >= 13 && state.frames <= 15) || (state.frames >= 29 && state.frames <= 31)) {
+                navigate_popup(state.controller[ninth], State::controller_normal);
+            } else if (state.frames == 22 || state.frames == 23) {
+                navigate_popup(state.controller[ninth], State::controller_open);
+            } else if (state.frames == 16 || state.frames == 24 || state.frames == 32) key(KEY_ENTER);
+            else if (state.frames == 18 || state.frames == 26 || state.frames == 34) {
+                UtilityFunctions::print("EAWR setup last row: live=", state.row_live(ninth) ? 1 : 0,
+                    " controller=", state.controller[ninth]->get_selected(),
+                    " occupied=", static_cast<int64_t>(state.selection.slots.size()),
+                    " start=", state.start->is_disabled() ? 0 : 1);
+                if (state.frames == 34) {
+                    state.report_layouts();
+                    const auto rect = state.status->get_global_rect();
+                    UtilityFunctions::print("EAWR setup status rect: ", rect.position.x, ",", rect.position.y,
+                        ",", rect.size.x, ",", rect.size.y);
+                }
+            } else if (state.frames == 36 || state.frames == 38) {
+                const auto image = state.host->get_viewport()->get_texture()->get_image();
+                const auto path = state.options.capture_path.parent_path()
+                    / (state.frames == 36 ? "status-visible.png" : "status-hidden.png");
+                if (image.is_valid()) image->save_png(text(ViewerPath::utf8(path)));
+                state.status->set_visible(state.frames == 38);
+            } else if (state.frames == 44) click(state.start->get_global_rect().get_center());
+            return;
+        } else if (state.layout_test) {
             // #3167: the staging's rectangles against the resource's; a row's drop-down list; the advanced
             // dialog with its slider and win-condition list. Each state is captured beside the staging image.
             const auto sibling = [&](const char* suffix) {
@@ -1379,8 +1603,10 @@ void SkirmishSetupMode::process() {
             else if (state.frames == 56) key(KEY_ENTER);
             else if (state.frames == 57) report_row(1);
             else if (state.frames == 58) click(state.controller[1]->get_global_rect().get_center());
-            else if (state.frames >= 59 && state.frames <= 61) navigate_popup(state.controller[1], State::controller_normal);
-            else if (state.frames == 62) key(KEY_ENTER);
+            else if (state.frames >= 59 && state.frames <= 61) {
+                if (state.frames == 60) report_row(1);
+                navigate_popup(state.controller[1], State::controller_normal);
+            } else if (state.frames == 62) key(KEY_ENTER);
             else if (state.frames == 64) click(state.advanced->get_global_rect().get_center());
             else if (state.frames == 70) {
                 report_row(1);
@@ -1554,6 +1780,7 @@ const skirmish::SetupMap* SkirmishSetupMode::map(const std::string& path) const 
 }
 std::shared_ptr<GodotShaderCache> SkirmishSetupMode::shaders() const { return state_->shaders; }
 std::shared_ptr<LanMatch> SkirmishSetupMode::lan_match() const { return state_->lan; }
+const std::filesystem::path& SkirmishSetupMode::gc_acceptance_directory() const { return state_->gc_acceptance_out; }
 BaseButton* SkirmishSetupMode::start_button() const { return state_->start; }
 BaseButton* SkirmishSetupMode::lan_host_button() const { return state_->lan_host; }
 void SkirmishSetupMode::hide() { state_->visible = false; state_->layer->hide(); if (state_->online_mode && state_->online_screen) state_->online_screen->dismiss(); }

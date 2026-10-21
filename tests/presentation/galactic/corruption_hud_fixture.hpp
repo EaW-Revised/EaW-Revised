@@ -33,7 +33,7 @@ namespace eawr::viewer::galactic {
     g::ObservedPlanet row; row.player = local; row.planet = 101; row.discovered = true;
     const std::array<c::Id, 1> names{7};
     auto menu = g::observed_corruption_menu(world, local, row, 10, true, names);
-    g::ObserverSetup observer; observer.local_player = local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     return std::make_shared<const g::GalacticSnapshot>(0, g::GalacticClock{}, std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{}, std::vector<g::Route>{}, std::vector<g::Fleet>{}, std::vector<g::GalacticEvent>{},
         std::nullopt, std::nullopt, nullptr, std::nullopt, std::vector<g::Seat>{}, std::nullopt, std::nullopt,

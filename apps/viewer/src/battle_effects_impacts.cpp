@@ -279,6 +279,33 @@ bool BattleEffects::update_corrupt_effects(const sim::tactical::TacticalSnapshot
     return true;
 }
 
+bool BattleEffects::update_concentrate_effects(const tactical::TacticalSnapshot& latest, const UnitLookup& units) {
+    for (auto effect = effects_.begin(); effect != effects_.end();) {
+        if (effect->concentrate_owner == sim::invalid_entity_id || effect->detached) { ++effect; continue; }
+        const auto* owner = space::find_instance(latest, effect->concentrate_owner);
+        const bool active = owner && std::any_of(owner->abilities.begin(), owner->abilities.end(), [&](const auto& ability) {
+            return ability.kind == tactical::AbilityKind::concentrate_fire && ability.active
+                && ability.target == effect->concentrate_target;
+        });
+        const auto target = units(effect->concentrate_target);
+        if (!active || !target) {
+            const auto detached = registry_->detach(effect->handle);
+            effect->detached = true;
+            effect->drain_from = effect->age;
+            if (!detached || detached.value() == particles::EffectDetachState::released) {
+                effect = effects_.erase(effect);
+                continue;
+            }
+        } else {
+            effect->frame.origin = {static_cast<float>(target->position[0]), static_cast<float>(target->position[1]),
+                static_cast<float>(target->position[2])};
+            if (!registry_->set_frame(effect->handle, effect->frame)) return false;
+        }
+        ++effect;
+    }
+    return true;
+}
+
 template <typename SampleOf>
 bool BattleEffects::update_lure_effects(const sim::tactical::TacticalSnapshot& latest, const UnitLookup& units, const double presented_tick, SampleOf& sample_of) {
     // WLU-09: one effect per luring team at its formation centre (the mean of its shown craft),
@@ -620,6 +647,23 @@ bool BattleEffects::present_reached_effects(const std::span<const platform::Live
             const auto type = types_.find(instance.type_id);
             if (type == types_.end()) continue;
             for (const auto& ability : instance.abilities) {
+                // WHE-78: an activation flash at the chosen target, once per start. The
+                // authored emitters drain normally; the ability's duration does not retrigger it.
+                if (ability.kind == tactical::AbilityKind::concentrate_fire && ability.active
+                    && ability.started_tick + 1 == record.tick) {
+                    const auto target = units(ability.target);
+                    const auto before = effects_.size();
+                    const auto authored_scale = type->second.concentrate_scale;
+                    const particles::Basis3 basis{{authored_scale, 0, 0}, {0, authored_scale, 0}, {0, 0, authored_scale}};
+                    if (target && !spawn(type->second.concentrate_particle, target->position, basis,
+                                         "concentrate_fire", record.tick)) return false;
+                    if (effects_.size() > before) {
+                        auto& effect = effects_.back();
+                        effect.concentrate_owner = instance.entity_id;
+                        effect.concentrate_target = ability.target;
+                        if (effect.lifetime == 0) effect.lifetime = std::numeric_limits<std::uint32_t>::max();
+                    }
+                }
                 if (ability.kind != tactical::AbilityKind::corrupt_systems || !ability.position
                     || ability.started_tick + 1 != record.tick) continue;
                 const auto convert = [](const sim::math::Fixed value) {
@@ -813,6 +857,7 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
     FrameTimer owner_abilities(measure_owner_ ? &owner_timings_[2] : nullptr);
     note_ability_shots(reached, latest, snapshot_at);
     if (!update_corrupt_effects(latest, units, presented_tick, sample_of)) return false;
+    if (!update_concentrate_effects(latest, units)) return false;
     if (!update_lure_effects(latest, units, presented_tick, sample_of)) return false;
     if (!update_charged_effects(latest, units, presented_tick, sample_of)) return false;
     owner_abilities.finish();

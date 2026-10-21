@@ -249,6 +249,8 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
         if (!listed_planet(fleet.orbit)) {
             return invalid("fleet " + std::to_string(fleet.id) + ": orbit " + std::to_string(fleet.orbit) + " is not a planet");
         }
+        if (fleet.raid_destination)
+            return invalid("tick-zero fleets cannot seed a raid destination; qualified commands own it");
         if (fleet.orbit_slot > 2 || (!setup.fleet_control && fleet.orbit_slot != 0))
             return invalid("fleet slot requires fleet control and must be 0/1/2");
         if (fleet.members.empty()) return invalid("fleet " + std::to_string(fleet.id) + ": has no members");

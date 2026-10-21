@@ -124,6 +124,22 @@ the remaining integration gaps explicitly listed.
 | GREF-29 | Summary is a current-state rebuild, not an archived faction-statistics or campaign-score consumer. Exact local ownership selects planet rows; planetary production, retained upgrades, capacity types and typed income modifiers supply the corresponding category facts. All-planet totals and allied fleet filtering retain GREF-13..18. | debug build; WGP-150 |
 | GREF-30 | Production activation builds immediately. Active nonnull galactic Summary service refreshes once when supplied frame minus last-service frame is at least logical FPS, stores that supplied frame and does not catch up multiple times. All three category handlers have this local gate. Production refresh invokes complete data/name-sort/totals rebuild; this input is distinct from the recorder's active-mode frame. | debug build; WGP-151; GREF-U04 |
 
+The implementation exposes `GalacticSession::service_admitted_history` as the
+bounded player-service seam. Standalone galactic steps admit it with ordinary
+galactic service; the scripted owner defers it until all committed player AI
+has finished and before story service. It runs once outside the parallel AI
+phases and reads the supplied active galactic tick (a 30/s simulation step),
+never render time. This integration does not settle GREF-U01/02's complete
+pause, child-mode or first-load admission. Missing typed object-power inputs
+leave recording unavailable rather than inventing a military value; compaction
+still visits the stored archive on an admitted turn. Snapshots retain the
+global scales while publishing only authorized lines, and share that immutable
+publication until archive or observer inputs change.
+Economy and military retain binary32 interchange values, with software
+round-to-nearest-even addition and halving through the existing authoritative
+integer backend. Saved words are their floating encodings; no native floating
+arithmetic or render-rate value enters simulation state.
+
 ### Remaining runtime qualifications
 
 The mounted reference catalog now applies GREF-27 by enumerating active

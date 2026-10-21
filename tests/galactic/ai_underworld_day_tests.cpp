@@ -68,7 +68,7 @@ Result run(std::uint64_t ticks, std::size_t workers, std::string_view campaign_n
         const bool human = faction.name == source->starting_active_player;
         options.players.push_back({{id, id, 0}, faction.name, true}); names[id] = faction.name;
         options.seats.push_back({gc::SeatId{id}, id, human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
     }
     std::vector<std::string> originals; for (const auto& type : types.types) originals.push_back(type.name);
     std::sort(originals.begin(), originals.end());

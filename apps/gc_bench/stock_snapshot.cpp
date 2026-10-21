@@ -77,7 +77,7 @@ int stock_snapshot_benchmark(const std::span<const std::size_t> workers,
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool local = faction.name == source->starting_active_player;
-        if (local) options.local_observer = id;
+        if (local) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
     }

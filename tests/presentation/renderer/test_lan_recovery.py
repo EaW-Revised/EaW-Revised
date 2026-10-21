@@ -111,7 +111,11 @@ class LanRecoveryGpu(unittest.TestCase):
                 ("desync_paused", "Players' game states differ. Play is paused." + details),
                 ("resyncing", "Restoring synchronized game state... Recovery timeout: 19 s"),
                 ("recovered", "Game synchronized." + details),
-                ("recovery_failed", "Synchronization could not be restored. This match cannot continue." + details)):
+                ("recovery_failed", "Synchronization could not be restored. This match cannot continue." + details),
+                ("peer_left", "Opponent left."),
+                ("result", "Victory - opponent left."),
+                ("loss", "Defeat"),
+                ("single_player", "")):
                 with self.subTest(state=state):
                     report = output / (state + ".json")
                     capture = output / (state + ".png")
@@ -119,7 +123,8 @@ class LanRecoveryGpu(unittest.TestCase):
                         os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
                         "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-live-session", "m2",
                         "--eawr-map", "data/art/maps/_mp_space_coruscant.ted", "--eawr-populate",
-                        "--eawr-live-lan-test", state, "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                        *([] if state == "single_player" else ["--eawr-live-lan-test", state]),
+                        "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
                         "--eawr-report", str(report), "--eawr-capture", str(capture),
                         "--eawr-live-ticks", "1", "--eawr-live-ai", "off", "--eawr-audio", "off",
                         "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"],
@@ -127,11 +132,41 @@ class LanRecoveryGpu(unittest.TestCase):
                     (output / (state + ".log")).write_text(result.stdout, encoding="utf-8")
                     self.assertEqual(result.returncode, 0, result.stdout[-6000:])
                     data = json.loads(report.read_text(encoding="utf-8"))
-                    self.assertTrue(data["live_session"]["multiplayer"])
+                    self.assertEqual(data["live_session"]["multiplayer"], state != "single_player")
                     # The report writer flattens the overlay's line break to a space.
                     self.assertEqual(data["live_session"]["lan_message"], message)
                     self.assertTrue(capture.exists())
                     self.assertGreater(capture.stat().st_size, 1000)
+
+    def test_recovery_button_states(self):
+        # Frame-indexed input also works while recovery holds the simulation tick.
+        # Keep the same scene and compare only the Leave button's rectangle.
+        from PIL import Image, ImageChops
+        with tempfile.TemporaryDirectory(prefix="lan-button-") as temporary:
+            output = Path(os.environ.get("EAWR_LAN_EYECHECK", temporary)).resolve() / "buttons"
+            output.mkdir(parents=True, exist_ok=True)
+            buttons = []
+            for state, gesture in (("normal", "hover:screen=20,120"),
+                                   ("hover", "hover:screen=610,466"),
+                                   ("pressed", "press:screen=610,466")):
+                report = output / (state + ".json")
+                capture = output / (state + ".png")
+                result = subprocess.run([
+                    os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                    "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-live-session", "m2",
+                    "--eawr-map", "data/art/maps/_mp_space_coruscant.ted", "--eawr-populate",
+                    "--eawr-live-lan-test", "held", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                    "--eawr-report", str(report), "--eawr-capture", str(capture),
+                    "--eawr-live-capture-frames", "30", "--eawr-live-input", "f10:" + gesture,
+                    "--eawr-live-ticks", "1", "--eawr-live-ai", "off", "--eawr-audio", "off",
+                    "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"],
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
+                (output / (state + ".log")).write_text(result.stdout, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                with Image.open(output / (state + "_f0030.png")) as image:
+                    buttons.append(image.convert("RGB").crop((510, 448, 710, 484)))
+            self.assertIsNotNone(ImageChops.difference(buttons[0], buttons[1]).getbbox())
+            self.assertIsNotNone(ImageChops.difference(buttons[1], buttons[2]).getbbox())
 
 if __name__ == "__main__":
     unittest.main()

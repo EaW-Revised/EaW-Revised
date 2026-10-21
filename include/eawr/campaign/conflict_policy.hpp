@@ -79,10 +79,7 @@ using FleetQualifier = std::function<core::Result<OuterFleetFacts>(const sim::ga
 [[nodiscard]] bool admits_space_conflict(const LayerPresence& presence);
 [[nodiscard]] bool admits_land_conflict(const LayerPresence& presence);
 [[nodiscard]] bool skips_space_combat(std::span<const AdmissionForce> flattened);
-struct RaidRules {
-    sim::galactic::FactionId required_faction{}; // zero means unrestricted
-    std::uint32_t free_categories{}, limited_categories{}, max_heroes{}, max_limited{};
-};
+using RaidRules = sim::galactic::RaidRules;
 [[nodiscard]] bool raid_capable(std::span<const AdmissionForce> flattened, const RaidRules& rules);
 
 enum class ConflictRoute : std::uint8_t { instant_auto, dialog_auto, vote, pending_tactical, tactical };

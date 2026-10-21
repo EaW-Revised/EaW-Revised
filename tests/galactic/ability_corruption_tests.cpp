@@ -194,10 +194,22 @@ void observer_idle() {
     }
     expect(game.galaxy().ability_work() == work && game.galaxy().clock().galactic_frame == frame,
         "paused idle ticks do not scan ability inputs, rebuild menus or service transition time");
-    config.observer->local_player = 1;
+    config.observer->human_observers = {1}; config.observer->solo_reference_human = 1;
     auto foreign = take(eawr::campaign::GameSession::create(config)); (void)prepare(foreign, config, pool, unused);
     expect(!foreign.galaxy().snapshot()->corruption_menu(), "foreign observer never receives an actor's corruption capability");
-    config.observer->local_player = 2;
+    {
+        auto multiplayer = config;
+        multiplayer.observer->human_observers = {1, 2}; multiplayer.observer->solo_reference_human = 0;
+        auto shared = take(eawr::campaign::GameSession::create(multiplayer));
+        (void)prepare(shared, multiplayer, pool, unused);
+        const auto host = shared.galaxy().view_snapshot({1});
+        const auto guest = shared.galaxy().view_snapshot({2});
+        expect(!host->corruption_menu() && guest->corruption_menu() && guest->corruption_menu()->player == 2,
+            "seat-local corruption capability belongs only to the acting guest");
+        expect(shared.galaxy().view_snapshot({2})->corruption_menu() == guest->corruption_menu()
+            && !shared.galaxy().view_snapshot({1})->corruption_menu(), "corruption menu caches remain isolated across seat switches");
+    }
+    config.observer->human_observers = {2}; config.observer->solo_reference_human = 2;
     auto visible = take(eawr::campaign::GameSession::create(config));
     const auto choice = prepare(visible, config, pool, unused);
     order(visible, 2, gc::ExecutePreparedAbility{choice}); (void)take(visible.step(pool));
@@ -211,12 +223,12 @@ void observer_idle() {
     expect(native->corruption_transitions().data() == transitions.data() && publication->canonical_bytes() == bytes,
         "read-only native view borrows transition storage without changing canonical bytes");
     gc::NativeSnapshotChanges other_view; other_view.observer = *publication->observer();
-    other_view.observer->local_player = 1;
+    other_view.observer->human_observers = {1}; other_view.observer->solo_reference_human = 1;
     const auto foreign_view = gc::GalacticSnapshot::native_view(publication, std::move(other_view));
     expect(foreign_view->corruption_transitions().empty(),
         "observer replacement never borrows another player's admitted transition facts");
     const auto stacked_foreign = gc::GalacticSnapshot::native_view(foreign_view, {});
-    expect(stacked_foreign->observer() && stacked_foreign->observer()->local_player == 1
+    expect(stacked_foreign->observer() && stacked_foreign->observer()->solo_reference_human == 1
         && stacked_foreign->corruption_transitions().empty(),
         "flattened native views retain inherited observer admission for corruption transitions");
     const auto stacked_local = gc::GalacticSnapshot::native_view(native, {});

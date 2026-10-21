@@ -17,6 +17,12 @@ namespace eawr::presentation::godot_backend {
 
 namespace render_profile_detail {
 
+// Main-thread count of render-target/filter setters, for menu-cycle regression receipts.
+[[nodiscard]] inline std::uint64_t& apply_count() noexcept {
+    static std::uint64_t count{};
+    return count;
+}
+
 [[nodiscard]] inline godot::Viewport::MSAA msaa(const std::uint32_t samples) noexcept {
     switch (samples) {
     case 2: return godot::Viewport::MSAA_2X;
@@ -59,10 +65,21 @@ namespace render_profile_detail {
 
 inline void apply_render_profile(godot::Viewport& viewport, const RenderProfile profile) {
     const RenderSettings settings = render_settings(profile);
-    viewport.set_msaa_3d(render_profile_detail::msaa(settings.msaa_samples));
-    viewport.set_screen_space_aa(
-        settings.smaa ? godot::Viewport::SCREEN_SPACE_AA_SMAA : godot::Viewport::SCREEN_SPACE_AA_DISABLED);
-    viewport.set_anisotropic_filtering_level(render_profile_detail::anisotropy(settings.anisotropy));
+    const auto msaa = render_profile_detail::msaa(settings.msaa_samples);
+    const auto aa = settings.smaa ? godot::Viewport::SCREEN_SPACE_AA_SMAA : godot::Viewport::SCREEN_SPACE_AA_DISABLED;
+    const auto anisotropy = render_profile_detail::anisotropy(settings.anisotropy);
+    if (viewport.get_msaa_3d() != msaa) {
+        viewport.set_msaa_3d(msaa);
+        ++render_profile_detail::apply_count();
+    }
+    if (viewport.get_screen_space_aa() != aa) {
+        viewport.set_screen_space_aa(aa);
+        ++render_profile_detail::apply_count();
+    }
+    if (viewport.get_anisotropic_filtering_level() != anisotropy) {
+        viewport.set_anisotropic_filtering_level(anisotropy);
+        ++render_profile_detail::apply_count();
+    }
 }
 
 // The root viewport's settings as a report object: the profile they match

@@ -114,11 +114,17 @@ struct LobbyHooks {
     // Host only: close admitted streams and cancel reservations for this identity.
     // The closed notice is best-effort; must not destroy the room transport.
     std::function<void(PeerIndex, LobbyReason)> remove_peer;
-    // Online room mesh, host only; LAN sets neither (docs/net-online-npeer.md, section 3). mesh_complete is checked by Start:
-    // every agreed seat present and every pair verified. lock_room runs once the setup is agreed, just before the commitment
+    // Host transport readiness (docs/net-online-npeer.md, section 3). mesh_complete is checked by Start:
+    // every agreed seat present (online also verifies every pair). lock_room runs once the setup is agreed, just before the commitment
     // is published; a refusal returns the room to staging. Neither may block.
     std::function<core::Result<void>()> mesh_complete;
     std::function<core::Result<void>()> lock_room;
+    // Optional asynchronous lock confirmation. Pending keeps Start frozen;
+    // failure returns to staging with its named reason, never commits locally.
+    std::function<core::Result<bool>()> lock_room_progress;
+    // Capacity-based TCP staging freezes admissions before publishing Start.
+    // Legacy/online rooms retain their setup-agreement lock timing.
+    bool lock_at_start{};
 };
 struct LobbyRuntime;
 class LobbyResult final {

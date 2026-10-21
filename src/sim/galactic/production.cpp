@@ -113,7 +113,7 @@ core::Result<std::int64_t> GalacticSession::Impl::assign_technology(const Techno
                 : core::Result<void>::success();
         });
     if (!assigned) { failed = true; return Result::failure(assigned.error()); }
-    if (assigned.value() && write.request_sound && observer && observer->local_player == write.player && technology_notice_handler) {
+    if (assigned.value() && write.request_sound && observer && std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), write.player) && technology_notice_handler) {
         auto notified = technology_notice_handler({TechnologyNotice::Kind::new_options, write.player, account->current_tech});
         if (!notified) { failed = true; return Result::failure(notified.error()); }
     }
@@ -1056,10 +1056,9 @@ core::Result<void> GalacticSession::Impl::refresh_population(const PartitionExec
 
 GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_offer_inputs(
     std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
-    std::span<const Planet> owners) const {
+    std::span<const Planet> owners, const PlayerId local) const {
     ProductionOfferInputs result;
     if (!production || !economy || !observer) return result;
-    const auto local = observer->local_player;
     const auto player = std::lower_bound(production->players.begin(), production->players.end(), local,
         [](const auto& row, auto id) { return row.player < id; });
     const auto account = std::lower_bound(economy->players.begin(), economy->players.end(), local,
@@ -1129,10 +1128,9 @@ GalacticSession::Impl::ProductionOfferInputs GalacticSession::Impl::production_o
 }
 
 std::vector<ObservedProductionOffer> GalacticSession::Impl::observed_production_offers(
-    const ProductionOfferInputs& inputs, std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor) const {
+    const ProductionOfferInputs& inputs, std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, const PlayerId local) const {
     std::vector<ObservedProductionOffer> result;
     if (!production || !economy || !observer) return result;
-    const auto local = observer->local_player;
     const auto player = std::lower_bound(production->players.begin(), production->players.end(), local,
         [](const auto& row, auto id) { return row.player < id; });
     const auto account = std::lower_bound(economy->players.begin(), economy->players.end(), local,

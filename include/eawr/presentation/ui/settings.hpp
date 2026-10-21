@@ -5,7 +5,7 @@
 // form and the clamping that makes a hand-edited or damaged file safe. Settings are UI
 // state (UI-C2): they never enter a replay or a hash, and an option that changes a game's
 // rules goes through the existing setup and command seams, never into the simulation
-// from here. Defaults are FoC's own (docs/ui/ui-settings.md, source column).
+// from here. Defaults and deliberate project choices are in docs/ui/ui-settings.md.
 //
 // The record keeps integers (percent, steps, permille) so the text form round-trips
 // exactly and a slider's stop is the stored value.
@@ -27,8 +27,9 @@ namespace eawr::presentation::ui {
 // loads as the defaults (no compatibility is kept before 1.0).
 inline constexpr std::uint32_t settings_version = 1;
 
-// The volume sliders and their FoC default of 0.75 (ST-A1).
+// The channel sliders keep FoC's 0.75; ST-A1 lowers the fresh master at the owner's request.
 inline constexpr int volume_default_percent = 75;
+inline constexpr int master_default_percent = 37;
 // Game speed has five steps (TM-01); scroll speed has ten stops over 0..3 (ST-G2).
 inline constexpr int speed_step_count = 5;
 inline constexpr int speed_step_default = 2;
@@ -52,7 +53,7 @@ inline constexpr int display_size_minimum = 320;
 enum class RenderProfileSetting : std::uint8_t { automatic, retail, enhanced };
 
 struct AudioSettings final {
-    int master_percent{volume_default_percent};
+    int master_percent{master_default_percent};
     int sfx_percent{volume_default_percent};
     int speech_percent{volume_default_percent};
     int music_percent{volume_default_percent};
@@ -68,7 +69,9 @@ struct VideoSettings final {
     int window_width{800};
     int window_height{600};
     bool windowed{false};
-    bool vsync{false};
+    bool vsync{true}; // ST-V5: owner-requested FIFO default; stored choices stay unchanged.
+    // ST-P2: owner-requested render limit; 0 is Off, -1 follows the display.
+    int frame_rate_limit{120};
     int detail_level{detail_level_default};
     // GM-04: project texture detail floor, independent of the retail detail presets.
     int texture_mip_drop{};
@@ -80,6 +83,19 @@ struct VideoSettings final {
 
     friend bool operator==(const VideoSettings&, const VideoSettings&) = default;
 };
+
+// ST-P2: presentation pacing only. The live simulation keeps its elapsed-time tick clock.
+[[nodiscard]] constexpr int frame_rate_cap(const VideoSettings& video, const int refresh_rate,
+                                         const bool menu, const bool focused) noexcept {
+    const int refresh = refresh_rate >= 30 ? refresh_rate : 60;
+    int cap = video.frame_rate_limit < 0 ? refresh : video.frame_rate_limit;
+    if (cap > 0 && cap < 30) cap = 30;
+    const auto lower = [&](const int limit) { if (cap == 0 || limit < cap) cap = limit; };
+    if (video.vsync) lower(refresh);
+    if (menu) lower(60);
+    if (!focused) lower(30);
+    return cap;
+}
 
 struct GameplaySettings final {
     int tactical_speed{speed_step_default};
@@ -130,6 +146,8 @@ struct PlayerSettings final {
     VideoSettings video;
     GameplaySettings gameplay;
     NetworkSettings network;
+    // ST-K3: optional physical WASD pan; the default keeps retail arrow keys.
+    bool camera_wasd{};
     // Command name -> key text overrides of the keyboard pages. Empty keeps the project's
     // keys; rebinding is not built yet (ST-K1), so nothing writes here today.
     std::map<std::string, std::string> keys;
@@ -212,5 +230,19 @@ struct OptionStatus final {
 // The key the project binds to a retail keyboard-page command, shown read-only on the
 // keyboard pages. Empty when the project has no key for the command (ST-K2).
 [[nodiscard]] std::string_view project_key_for(std::string_view edit_control) noexcept;
+
+struct CameraKeyMove final {
+    std::string_view control;
+    char retail;
+    char wasd;
+};
+// ST-K3: only bare chords move. Modified ability/selection chords stay unchanged.
+inline constexpr std::array<CameraKeyMove, 4> camera_key_moves{{
+    {"IDC_EDIT_WAYPOINT", 'W', 'U'}, {"IDC_EDIT_ATTACK", 'A', 'X'},
+    {"IDC_EDIT_STOP", 'S', 'V'}, {"IDC_EDIT_PREV_UNIT", 'D', 'H'},
+}};
+[[nodiscard]] std::string_view project_key_for(std::string_view edit_control, bool camera_wasd) noexcept;
+// A bare physical letter to the existing command's letter. Zero is reserved for pan.
+[[nodiscard]] char camera_command_key(char physical, bool camera_wasd) noexcept;
 
 } // namespace eawr::presentation::ui

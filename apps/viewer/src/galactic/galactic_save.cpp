@@ -65,7 +65,7 @@ void GalacticSaveControls::open() {
     if (!build_widgets() || !admission().open) return;
     state_.held.clear(); state_.orbiting = false;
     menu_selection_ = state_.map_input.selected;
-    const auto frame = state_.game->frame();
+    const auto frame = state_.game->frame(sim::SeatId{state_.galaxy->local.seat});
     if (frame.conflict) {
         paused_child_ = frame.conflict->id; child_was_paused_ = state_.game->battle_paused(paused_child_);
         if (auto feed = state_.game->battle_feed(paused_child_, sim::SeatId{state_.galaxy->local.seat})) feed->set_paused(true);
@@ -251,10 +251,11 @@ bool GalacticSaveControls::accept_loaded(std::unique_ptr<platform::PreparedLiveR
     state_.corruption_lines.reset(); state_.corruption_paths.reset(); state_.corruption_path_quads = 0;
     state_.corruption_uploaded_quads.clear(); state_.corruption_quads.clear(); state_.corruption_particle_layers.clear();
     state_.economy_hud_snapshot.reset(); state_.hud_facts_snapshot.reset(); state_.hud_command_key.reset(); state_.hud_label_key.reset(); state_.reset_label_placement();
+    state_.weapon_menu.applied.reset(); state_.hud_offers_owner.reset();
     state_.income_labels_snapshot.reset();
     if (!state_.refresh_game()) { message(state_.failure); return false; }
     state_.update_hud(); menu_selection_ = state_.map_input.selected;
-    if (const auto conflict = state_.game->frame().conflict) {
+    if (const auto conflict = state_.game->frame(sim::SeatId{state_.galaxy->local.seat}).conflict) {
         pending_loaded_child_ = conflict->id; message("Loading space battle…");
     } else {
         ++completed_loads_; state_.game->presentation_ready(); message("Game loaded.");

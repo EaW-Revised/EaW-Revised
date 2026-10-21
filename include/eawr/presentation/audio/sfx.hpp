@@ -205,7 +205,8 @@ inline constexpr double default_volume_slider = 0.75;
 
 // SND-60: Localize chooses the gain category independently of spatial mode or VO flags.
 struct MixLevels final {
-    double master{default_volume_slider};
+    // ST-A1: quieter fresh-profile output; the retail slider-times-channel model stays BA-45.
+    double master{0.37};
     double sfx{default_volume_slider};
     double speech{default_volume_slider};
     double music{default_volume_slider};

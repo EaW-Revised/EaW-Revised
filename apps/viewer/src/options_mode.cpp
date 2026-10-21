@@ -4,6 +4,7 @@
 #include "audio_buses.hpp"
 #include "capture_viewport.hpp"
 #include "options_screen.hpp"
+#include "render_profile_viewport.hpp"
 #include "settings_store.hpp"
 #include "viewer_path.hpp"
 
@@ -11,8 +12,10 @@
 
 #include <godot_cpp/classes/audio_server.hpp>
 #include <godot_cpp/classes/display_server.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
@@ -115,6 +118,9 @@ struct OptionsMode::State final {
     int frames{};
     std::size_t next_action{};
     int settle{-1};
+    std::uint64_t last_frame_usec{};
+    double settled_seconds{};
+    int settled_intervals{};
     bool scripted{};
     bool was_shown{};
     bool completed{};
@@ -124,6 +130,8 @@ struct OptionsMode::State final {
     std::vector<std::string> snapshots;
     std::optional<std::array<std::int32_t, 2>> png;
     std::string capture_sha256;
+    VideoApplyCounts initial_video_applies;
+    std::uint64_t initial_render_applies{};
 
     [[nodiscard]] bool run_action(const std::string& action);
     [[nodiscard]] bool capture();
@@ -170,17 +178,59 @@ bool OptionsMode::State::run_action(const std::string& action) {
     const auto colon = action.find(':');
     const std::string verb = action.substr(0, colon);
     const std::string argument = colon == std::string::npos ? std::string{} : action.substr(colon + 1);
+    if (verb == "context" && (argument == "main" || argument == "game")) {
+        options.context = argument;
+        return true;
+    }
+    if (verb == "window" && (argument == "minimize" || argument == "restore")) {
+        auto* display = DisplayServer::get_singleton();
+        display->window_set_mode(argument == "minimize" ? DisplayServer::WINDOW_MODE_MINIMIZED
+                                                        : DisplayServer::WINDOW_MODE_WINDOWED);
+        if (argument == "restore") display->window_move_to_foreground();
+        return true;
+    }
     if (verb == "snapshot") {
         std::ostringstream output;
         output << "{\"page\": " << json(EawrOptionsScreen::page_name(screen->page())) << ", \"controls\": "
                << controls_json(screen->control_states()) << ", \"rectangles\": " << screen->rectangles() << "}";
-        snapshots.push_back(output.str());
+        std::string snapshot = output.str();
+        snapshot.pop_back();
+        const auto* display = DisplayServer::get_singleton();
+        const bool focused = display != nullptr && display->window_is_focused();
+        const bool minimized = display != nullptr && display->window_get_mode() == DisplayServer::WINDOW_MODE_MINIMIZED;
+        snapshot += ",\"max_fps\":" + std::to_string(Engine::get_singleton()->get_max_fps())
+            + ",\"focused\":" + (focused ? "true" : "false")
+            + ",\"minimized\":" + (minimized ? "true" : "false") + "}";
+        snapshots.push_back(std::move(snapshot));
         return true;
     }
     if (verb == "page") {
         EawrOptionsScreen::Page target{};
         if (!EawrOptionsScreen::parse_page(argument, target)) return false;
         screen->open_page(target);
+        return true;
+    }
+    if (verb == "show") {
+        EawrOptionsScreen::Page target{};
+        if (screen->shown() || !EawrOptionsScreen::parse_page(argument, target)) return false;
+        screen->show(*host, target);
+        return screen->shown();
+    }
+    if (verb == "apply-video") {
+        // Exercise the same current-state guard used by startup, independently of the menu's draft guard.
+        ApplyReport report;
+        apply_video(screen->committed().video, ApplyTargets{}, report);
+        return report.applied.empty();
+    }
+    if (verb == "apply-profile") {
+        apply_render_profile(*host->get_viewport(), active_render_profile());
+        return true;
+    }
+    if (verb == "startup-video") {
+        ApplyTargets targets;
+        targets.window = false; // the test's viewport stays pinned
+        ApplyReport report;
+        apply_startup_video(SettingsStore{options.settings_file}.load(), targets, report);
         return true;
     }
     if (verb == "press") return screen->press(argument);
@@ -245,10 +295,18 @@ bool OptionsMode::State::write_report() const {
     RenderingServer* rendering = RenderingServer::get_singleton();
     const DisplayFacts display = display_facts();
     const DisplayServer* display_server = DisplayServer::get_singleton();
+    const int max_fps = Engine::get_singleton()->get_max_fps();
+    const double frame_seconds = settled_intervals > 0 ? settled_seconds / settled_intervals : 0.0;
     const int vsync_mode = display_server != nullptr ? display_server->window_get_vsync_mode() : -1;
+    const VideoApplyCounts counts = video_apply_counts();
+    const auto vsync_applies = counts.vsync - initial_video_applies.vsync;
+    const auto mode_applies = counts.window_mode - initial_video_applies.window_mode;
+    const auto size_applies = counts.window_size - initial_video_applies.window_size;
     std::ostringstream output;
     output << "{\n  \"mode\": \"options\",\n  \"status\": " << json(status) << ",\n  \"failure\": " << json(failure)
            << ",\n  \"context\": " << json(options.context) << ",\n  \"rules\": " << json(options.rules)
+           << ",\n  \"max_fps\": " << max_fps
+           << ",\n  \"frame_seconds\": " << frame_seconds
            << ",\n  \"backend\": {\"rendering_method\": " << json(utf8(rendering->get_current_rendering_method()))
            << ", \"adapter_name\": " << json(utf8(rendering->get_video_adapter_name()))
            << "},\n  \"viewport\": {\"width\": " << width << ", \"height\": " << height << "}"
@@ -257,6 +315,11 @@ bool OptionsMode::State::write_report() const {
            << "], \"windowed\": " << (display.windowed ? "true" : "false")
            << ", \"vsync\": " << (display.vsync ? "true" : "false")
            << ", \"vsync_mode\": " << vsync_mode << "}"
+           << ",\n  \"render_profile\": " << render_profile_report()
+           << ",\n  \"video_applies\": {\"vsync\": " << vsync_applies
+           << ", \"window_mode\": " << mode_applies << ", \"window_size\": " << size_applies
+           << ", \"swapchain_requests\": " << vsync_applies + mode_applies + size_applies
+           << ", \"render_targets\": " << render_profile_detail::apply_count() - initial_render_applies << "}"
            << ",\n  \"actions\": " << strings_json(performed);
     if (screen != nullptr) {
         output << ",\n  \"settings_file\": {\"path\": " << json(screen->settings_file())
@@ -342,12 +405,23 @@ bool OptionsMode::ready(Node3D& host) {
     }
     state.screen->show(host, start);
     state.was_shown = state.screen->shown();
+    state.initial_video_applies = video_apply_counts();
+    state.initial_render_applies = render_profile_detail::apply_count();
     return true;
 }
 
 std::optional<int> OptionsMode::process() {
     State& state = *state_;
     if (state.completed) return std::nullopt;
+    if (state.screen != nullptr) {
+        update_frame_pacing(state.screen->committed().video, state.options.context == "main");
+    }
+    const std::uint64_t now = Time::get_singleton()->get_ticks_usec();
+    if (state.settle >= 0 && state.last_frame_usec != 0) {
+        state.settled_seconds += static_cast<double>(now - state.last_frame_usec) / 1000000.0;
+        ++state.settled_intervals;
+    }
+    state.last_frame_usec = now;
     ++state.frames;
     if (state.screen != nullptr && state.was_shown && !state.screen->shown() && !state.scripted) {
         // An interactive run ends when the player leaves the hub.

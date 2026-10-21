@@ -18,6 +18,8 @@ set(EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/fleets.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fleet_intelligence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/graph.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/history.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/session_history.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hero_return.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/economy_corruption.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/economy_corruption_encoding.cpp"

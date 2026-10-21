@@ -122,6 +122,11 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
   admitted return step. (FC-61; debug build EFSB-06)
   `ordinary_object_turret_runtime_boundaries` seam retains UFS-29's runtime normalization
   and indirect lifecycle producers.
+  Attached manual hardpoint models draw their WAD-40/MC-06 snapshot yaw and pitch through
+  the same procedural turret/barrel posing routine. The authored `Turret_Bone_Name`,
+  `Barrel_Bone_Name` and `Model_To_Attach` select the skeleton; presentation adds no aim timer.
+  A rig recording with the debug build (2026-10-21) confirms that the level-four and
+  level-five Underworld manual cannon turns before firing at an off-axis target.
 
 - **WWP-18** (debug build, EWW-03) The projectile is the hardpoint's `Fire_Projectile_Type`, replaced
   by a unit ability's override for this target and aimed hardpoint: the Y-wing's ion shot (legacy EAWR-561).
@@ -407,7 +412,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-13, WWP-15 | `attempt` (live, fogged, restricted); stealth and hero clash not modelled | same for M2 |
 | WWP-14 | not modelled | missing (not in M2) |
 | WWP-16 | nearest targetable hardpoint from the shooter's height-adjusted position | **same** for space units and structures |
-| WWP-17 | ordinary TURRET objects use authored mechanical aim/readiness and posed muzzle | applied to ordinary space objects; manual hardpoint visual pose remains missing |
+| WWP-17 | ordinary TURRET objects use authored mechanical aim/readiness and posed muzzle | applied to ordinary space objects and attached manual hardpoint turret models |
 | WWP-18 | projectile override comes with targeted ion-shot input and HUD (legacy EAWR-561) | same after the targeted ion-shot input and HUD work |
 | WWP-19 | a squadron resolves to a random live craft per hardpoint attempt (`random_member`, a draw keyed by seed, frame, unit and slot), then the R-10 search on it | **same** (G-04 resolved) |
 | WWP-20 | planar range plus the target radius | same for M2; minimum range missing (not in M2; G-08) |

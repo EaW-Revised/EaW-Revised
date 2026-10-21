@@ -18,6 +18,7 @@ set(EAWR_VIEWER_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galaxy_view.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/corruption_particles.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_mode.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_lan_hud.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_audio.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_report.cpp"

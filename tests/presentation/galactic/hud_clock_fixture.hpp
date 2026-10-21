@@ -36,7 +36,7 @@ inline void configure_synthetic_hud_production(sim::galactic::GalacticSetup& set
     setup.fleet_control.emplace(); setup.production.emplace(); setup.observer.emplace();
     setup.fleet_control->types = {{1, false, true, false}, {1000, false, true, false}};
     setup.production->maximum_human_queue = 5;
-    setup.observer->local_player = local; setup.observer->reveal_delay_seconds = whole(1);
+    setup.observer->human_observers = {local}; setup.observer->solo_reference_human = local; setup.observer->reveal_delay_seconds = whole(1);
     setup.observer->types = {{1, false, false, false}};
     for (auto& seat : setup.seats) if (seat.player == local) {
         seat.kind = sim::SeatKind::human; seat.human_side_id = local == 3 ? 1 : local;

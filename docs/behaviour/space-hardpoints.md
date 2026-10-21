@@ -96,9 +96,10 @@ hardpoints (destroyed ones included) and S the sum of their current health; C th
 | HR-02 | A destroyed hardpoint cannot be repaired; the repair ends. | research E72-08 |
 | HR-03 | A player who cannot pay a frame drops out of the repair. | research E72-08 |
 | HR-04 | After a paid frame, a hull fraction h below the combined hardpoint fraction c becomes a hull of H · (1 + c − h). | research E72-08 |
-| HR-05 | The repair ends when the hardpoint is back at full health; retail also re-enables it. | research E72-08 |
+| HR-05 | The repair ends when the hardpoint is back at full health; retail also re-enables it. An active paid repair completes even when another healing source has already filled the slot, clearing the disabled flag and payers without a further debit. | research E72-08; WSL-42; project (zero-debit completion after another source fills health) |
 | HR-06 | In the M2 roster only station hardpoints author repair values: 0.5 health per frame, for 1.3 credits (weapons), 1.5 credits (shield generator, fighter bay), and 1.5 (Rebel) or 1.3 (Empire) for the supply dock and comm array. Ship and craft hardpoints author none; the live repair command admits station hardpoints. The pure service accepts zero authored amount and can pay without progress. | data; research IS-09, IS-10 (retail offers the repair order only on star-base hardpoints below full health and never reads the amount; a zero amount would repair without end) |
 | HR-07 | M2 station repair uses a replayable player command and a partitioned per-frame service. Each registered payer pays the authored cost once per service until insolvency, destruction or completion. Disabled positive-health upgrade slots can be repaired back to full and re-enabled. Unit repair abilities are separate. | project; WSL-38/40/41/42 |
+| HR-07 recovery | Automatic healing alone retains a disabled slot's flag even at full health (WSH-04). The remake also admits an explicit paid repair command on that full disabled slot to perform HR-05 completion without a health increment or charge; healthy enabled slots still reject repair. This recovery admission extends WSL-40's below-full retail UI condition. The snapshot publishes the resulting enabled state, which the marker reads each frame. | WSH-04; HR-05; project (full disabled-slot recovery admission) |
 
 ### Scripted damage
 

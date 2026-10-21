@@ -19,6 +19,63 @@ template<class Rows, class Value, class Key> void put(Rows& rows, Value value, K
     else rows.insert(at, std::move(value));
 }
 }
+bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorState& s, AbilityKind kind) {
+    if (p.lifecycle_only || p.type != s.type
+        || std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) == p.ground_activated.end()) return false;
+    switch (kind) {
+    case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
+    case AbilityKind::technology_theft: return p.theft && s.theft_enabled && !s.theft_cancelled;
+    case AbilityKind::corruption: return p.corruption && s.corruption_enabled && !s.corruption_cancelled;
+    case AbilityKind::superweapon_hack: return p.hack && s.hack_enabled && !s.hack_cancelled;
+    case AbilityKind::planet_destruction: return p.destruction && s.destruction_enabled && !s.destruction_cancelled;
+    case AbilityKind::structure_sabotage: return p.sabotage && s.sabotage_enabled && !s.sabotage_cancelled;
+    case AbilityKind::hero_neutralization: return p.neutralize && s.neutralize_enabled && !s.neutralize_cancelled;
+    }
+    return false;
+}
+void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId target, SeatId producer,
+    std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    if (!ability_host || !setup.ability_host || !planets.contains(target)) return;
+    const auto* issuer = seat(producer);
+    if (!issuer || !issuer->active) return;
+    const auto live = actor_records.find(supplied);
+    if (live == actor_records.end() || live->second.dead || live->second.delete_pending
+        || live->second.owner != issuer->player || live->second.planet != target) return;
+    std::vector<EntityId> candidates{supplied};
+    const auto* traits = movement_inputs ? find(movement_inputs->types, live->second.current_type,
+        [](const auto& r) { return r.type; }) : nullptr;
+    if (traits && traits->transport) {
+        candidates.clear();
+        const auto* contents = find(movement_inputs->contents, supplied, [](const auto& r) { return r.container; });
+        if (contents) for (const auto& child : contents->children) candidates.push_back(child.id);
+    }
+    // WGCH-155/156: scan live contents in stored order, never retain a prepared bearer.
+    for (const auto id : candidates) {
+        const auto at = actor_records.find(id);
+        if (at == actor_records.end() || at->second.dead || at->second.delete_pending
+            || at->second.owner != issuer->player || at->second.planet != target
+            || (id != supplied && at->second.container != supplied)) continue;
+        const auto* profile = find(setup.ability_host->profiles, at->second.current_type, [](const auto& r) { return r.type; });
+        const auto* service = find(ability_host->actors, id, [](const auto& r) { return r.actor; });
+        if (!profile || !service) continue;
+        bool qualified = false;
+        for (const auto kind : profile->ground_activated) {
+            if (!ground_ability_enabled(*profile, *service, kind)) continue;
+            qualified = true;
+            const CommandOrderKey key{tick, producer, sequence};
+            const auto begin = events.size();
+            if (kind == AbilityKind::planet_destruction) {
+                // Bind the qualified live bearer; re-scanning the transport could select another child.
+                PreparedAbility request; request.actor = id; request.planet = target; request.kind = kind;
+                execute_ability({key, ExecutePreparedAbility{request}}, tick, events);
+            } else execute_ability({key, PrepareGalacticAbility{id, target, kind}}, tick, events);
+            if (std::any_of(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end(), [](const auto& e) {
+                return e.kind == GalacticEventKind::ability_prepared || e.kind == GalacticEventKind::ability_settled;
+            })) return;
+        }
+        if (qualified) return; // first qualified contained object owns the submission, including refusal
+    }
+}
 core::Result<void> validate_ability_host(const GalacticSetup& setup) {
     if (!setup.ability_host) return core::Result<void>::success();
     const auto bad = [] { return core::Result<void>::failure(detail::diagnostic(
@@ -38,6 +95,10 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
             || (!market.absence_min.empty() && market.absence_min.size() != 5)
             || std::none_of(setup.census->types.begin(), setup.census->types.end(),
                 [&](const auto& row) { return row.type == profile.type; })) return bad();
+        if (profile.ground_activated.size() > 7) return bad();
+        std::set<AbilityKind> group;
+        for (const auto kind : profile.ground_activated)
+            if (static_cast<unsigned>(kind) < 1 || static_cast<unsigned>(kind) > 7 || !group.insert(kind).second) return bad();
         previous = profile.type;
         for (std::size_t i = 0; i < market.absence_min.size(); ++i)
             if (market.absence_min[i].raw() < 0 || market.absence_min[i] > market.absence_max[i]) return bad();

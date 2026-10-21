@@ -4,6 +4,7 @@
 
 #include "eawr/script/foc/tactical_ai.hpp"
 
+#include "ai_mode.hpp"
 #include "tactical_ai_internal.hpp"
 #include "mode_time.hpp"
 #include "tactical_ai_world.hpp"
@@ -648,7 +649,7 @@ core::Result<PreparedAiSession> prepare_session(
             const auto selected = data.value().players.find(upper(player.player_type));
             if (selected == data.value().players.end()) return SessionResult::failure(make_error(
                 authoritative::codes::invalid_request, "AI player type is missing: " + player.player_type));
-            for (const auto& name : selected->second.space_templates) {
+            for (const auto& name : ai::mode_templates(selected->second, setup.domain)) {
                 if (!data.value().templates.contains(name)) return SessionResult::failure(make_error(
                     authoritative::codes::invalid_request, "AI player " + player.player_type + " references missing template " + name));
             }
@@ -660,7 +661,7 @@ core::Result<PreparedAiSession> prepare_session(
                     const auto goal = data.value().goals.find(function.goal);
                     if (goal == data.value().goals.end()) {
                         notes.push_back("AI function set " + name + " skips missing goal " + function.goal);
-                    } else if (goal->second.mode == "SPACE") {
+                    } else if (goal->second.mode == ai::ai_mode(setup.domain).goal_mode) {
                         selected_goals.insert(function.goal);
                         if (!data.value().equations.find(function.function))
                             return SessionResult::failure(make_error(authoritative::codes::invalid_request,
@@ -684,7 +685,7 @@ core::Result<PreparedAiSession> prepare_session(
     authoritative::SessionConfig config;
     config.seed = setup.seed;
     config.tick_duration = authoritative::TickDuration{tactical::tick_numerator, tactical::tick_denominator};
-    config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/GameObject/", "Data/Scripts/AI/SpaceMode/"};
+    config.script_directories = {"Data/Scripts/Library/", "Data/Scripts/GameObject/", std::string(ai::ai_mode(setup.domain).script_directory)};
     auto scripts = ScriptScheduler::create(std::move(config), std::move(manifest));
     if (!scripts) return SessionResult::failure(scripts.error());
     std::vector<core::Diagnostic> errors;
@@ -709,6 +710,8 @@ core::Result<PreparedAiSession> prepare_session(
     if (!configuration) return SessionResult::failure(configuration.error());
     append(configuration.value());
     append(setup.freestore_module);
+    // #3780: a non-space mode names itself in the closure; space writes today's bytes.
+    if (const auto marker = ai::ai_mode(setup.domain).closure_marker; !marker.empty()) append(marker);
     for (const auto& [path, bytes] : modules) { append(path); append(bytes); }
     append("xml");
     for (const auto& [path, bytes] : setup.xml) { append(path); append(bytes); }

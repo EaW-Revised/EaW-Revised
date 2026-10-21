@@ -44,6 +44,7 @@ struct FleetData {
     std::vector<FleetMember> members;
     std::uint8_t orbit_slot{};
     FleetMotion motion{};
+    std::optional<PlanetId> raid_destination{};
 };
 
 enum class ObjectKind : std::uint8_t { planet, route, fleet };
@@ -88,6 +89,8 @@ public:
     std::optional<GalacticAbilityState> ability_host;
     // GHUD-S61: raw scoring counters; only ordered commits write them.
     CampaignScoreLedger score_ledger;
+    HistoryArchive history_archive;
+    bool history_service_deferred{}; // rebound service owner, never saved
     void touch_score_ledger() { dirty[static_cast<std::size_t>(StateSection::campaign_scoring)] = true; }
     void record_build(PlayerId owner, PlanetId planet, TypeId type);
     void record_death(PlayerId owner, PlayerId killer, TypeId type);
@@ -102,7 +105,7 @@ public:
     std::map<std::uint64_t, std::vector<PlanetId>> corruption_due;
     std::span<const TypeId> corruption_local_unlocks(PlanetId, PlayerId) const;
     std::size_t corruption_unit_count(std::span<const TypeId>, PlayerId) const;
-    std::shared_ptr<const CorruptionMenu> publish_corruption_menu() const;
+    std::shared_ptr<const CorruptionMenu> publish_corruption_menu(PlayerId, std::span<const ObservedPlanet>) const;
     core::Result<bool> begin_corruption(PlanetId, corruption_fixture::Type, math::Fixed);
     core::Result<void> finish_corruption_mission(std::uint64_t, CorruptionMissionState);
     core::Result<void> service_corruption(const PartitionExecutor&, std::size_t preceding_events);
@@ -143,6 +146,10 @@ public:
     void execute_corruption(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     void refresh_ability_actor(const CensusObject&);
     void lose_ability_actor(EntityId);
+    const CensusObject* movement_actor(EntityId id) const {
+        const auto at = actor_records.find(id); return at == actor_records.end() ? nullptr : &at->second;
+    }
+    void dispatch_ground_ability(EntityId supplied, PlanetId, SeatId, std::uint64_t sequence, std::uint64_t tick, std::vector<GalacticEvent>&);
     void execute_ability(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     [[nodiscard]] std::optional<HeroDefeat> prepare_ability_defeat(const CensusObject&, math::Fixed, bool bypass);
     // WGCH-27..30/96..99: live structure sabotage and WGCH-20..26/91..95 hero neutralization on the shared host.
@@ -215,7 +222,6 @@ public:
     // The independent hash path recomputes these digests to verify the cache.
     mutable std::optional<detail::ProductionOfferDigests> production_offer_hashes;
     // Derived observer-local offer rows (never hashed), keyed by their admission inputs.
-    mutable std::shared_ptr<const std::vector<ObservedProductionOffer>> published_production_offers;
     mutable std::uint64_t production_offer_rebuilds{};
     // Published production state: copied again only after the production section changed (its dirty flag is
     // counted before the hash consumes it, like the economy input generation).
@@ -231,6 +237,7 @@ public:
     mutable PublishedSections published_sections;
     mutable std::uint64_t production_generation{1}, published_production_generation{};
     [[nodiscard]] std::span<const CensusObject> actor_inputs() const;
+    [[nodiscard]] bool raid_qualified(FleetId, PlanetId) const;
     void refresh_fleet_combat_skip(FleetId);
     void notify_fleet_approach(FleetId, PlanetId, bool notify, std::size_t preceding_events);
     void refresh_containing_fleet_combat_skip(EntityId);
@@ -243,8 +250,7 @@ public:
     // Derived presentation facts: not encoded/hashed. Every relevant ordered
     // observer, orbit/membership or live-content commit advances this generation.
     std::uint64_t observer_input_generation{1};
-    mutable std::uint64_t observer_projection_generation{}, observer_projection_records{};
-    mutable std::shared_ptr<const std::vector<ObservedPlanet>> observer_projection;
+    mutable std::uint64_t observer_projection_records{};
     void invalidate_observer_projection(bool income_changed = true) noexcept {
         ++observer_input_generation;
         if (income_changed) invalidate_income_inputs(); // live orbit/membership changes
@@ -276,12 +282,11 @@ public:
         std::vector<std::uint8_t> admission;
         friend bool operator==(const ProductionOfferInputs&, const ProductionOfferInputs&) = default;
     };
-    mutable ProductionOfferInputs published_offer_inputs;
     [[nodiscard]] ProductionOfferInputs production_offer_inputs(
         std::span<const ObservedPlanet> observations, std::span<const Fleet> fleet_inputs,
-        std::span<const Planet> planets) const;
+        std::span<const Planet> planets, PlayerId) const;
     [[nodiscard]] std::vector<ObservedProductionOffer> observed_production_offers(const ProductionOfferInputs& inputs,
-        std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor) const;
+        std::span<const Fleet> fleet_inputs, const PartitionExecutor& executor, PlayerId) const;
     [[nodiscard]] core::Result<void> service_production(const PartitionExecutor&, std::uint64_t,
         std::vector<GalacticEvent>&, bool pending_conflict);
     std::map<PlayerId, std::size_t> owned_planet_counts;
@@ -292,6 +297,8 @@ public:
     std::optional<PlanetGraph> graph;
     std::size_t applied_outcomes{};
     std::optional<PoliticalControlSetup> control;
+    void refresh_control_actor(const CensusObject&);
+    void lose_control_actor(EntityId);
     std::uint64_t control_stealth_generation{}; // derived, never archived or hashed
     std::map<FleetId, core::Result<bool>> control_stealth_inputs;
     std::vector<PoliticalControlEffect> control_effects;
@@ -337,6 +344,7 @@ public:
         if (planet_access) ids.push_back(19);
         if (ability_host) ids.push_back(20);
         if (!score_ledger.empty()) ids.push_back(static_cast<std::size_t>(StateSection::campaign_scoring));
+        ids.push_back(static_cast<std::size_t>(StateSection::history));
         return ids;
     }
     [[nodiscard]] std::size_t section_count() const { return section_ids().size(); }
@@ -353,7 +361,14 @@ public:
     // The clock; clock.session_tick mirrors completed_tick in every published copy.
     GalacticClock clock;
     GalacticSession::TimelineService timeline_service;
-    bool failed{};
+    // Terminal liveness only: partition joins publish the staged data. Keep
+    // every existing boolean use relaxed without making caller error paths
+    // perform shared non-atomic writes during independent player decisions.
+    struct FailureFlag {
+        std::atomic<bool> value{};
+        operator bool() const noexcept { return value.load(std::memory_order_relaxed); }
+        FailureFlag& operator=(bool value_to_store) noexcept { value.store(value_to_store, std::memory_order_relaxed); return *this; }
+    } failed;
     bool prebattle_autosave_window{}; // WGS-99/142: owner-derived per step, never saved
 
     // The seat table as state: whether each seat is active (ascending seat ID).
@@ -386,13 +401,25 @@ public:
     mutable std::shared_ptr<const EconomyInputGeneration> economy_input_generation =
         std::make_shared<const EconomyInputGeneration>();
     mutable std::shared_ptr<const EconomyInputGeneration> published_economy_input_generation;
-    mutable std::shared_ptr<const std::vector<ObservedBlackMarketMenu>> published_black_market_menus;
-    mutable std::shared_ptr<const std::vector<AbilityResult>> published_ability_results;
-    mutable std::shared_ptr<const std::vector<LiveCorruptionTransition>> published_corruption_transitions;
-    mutable std::array<std::uint64_t, 3> corruption_publication_key{};
-    mutable std::shared_ptr<const CorruptionMenu> published_corruption_menu;
-    mutable std::shared_ptr<const HeroActionMenus> published_hero_action_menus;
-    mutable std::array<std::uint64_t, 5> black_market_publication_key{};
+    struct ViewPublicationCache {
+        std::shared_ptr<const HistorySnapshot> history;
+        std::array<std::uint64_t, 2> history_key{std::numeric_limits<std::uint64_t>::max(), 0};
+        std::uint64_t observer_projection_generation{};
+        std::shared_ptr<const std::vector<ObservedProductionOffer>> published_production_offers;
+        std::shared_ptr<const std::vector<ObservedPlanet>> observer_projection;
+        ProductionOfferInputs published_offer_inputs;
+        std::shared_ptr<const std::vector<ObservedBlackMarketMenu>> published_black_market_menus;
+        std::shared_ptr<const std::vector<AbilityResult>> published_ability_results;
+        std::shared_ptr<const std::vector<AbilityActorState>> published_ability_services;
+        std::shared_ptr<const std::vector<LiveCorruptionTransition>> published_corruption_transitions;
+        std::array<std::uint64_t, 3> corruption_publication_key{};
+        std::shared_ptr<const CorruptionMenu> published_corruption_menu;
+        std::shared_ptr<const HeroActionMenus> published_hero_action_menus;
+        std::array<std::uint64_t, 5> black_market_publication_key{};
+    };
+    // Session-owner-only, like published_sections above. Live publication builds
+    // seat frames serially after workers return; UI frame(seat) only copies them.
+    mutable std::map<PlayerId, ViewPublicationCache> view_publications;
     void refresh_economy_input_generation() const;
 
     void insert(const Planet& planet);
@@ -462,7 +489,7 @@ public:
     // mutable derived projection cache. Never call from partition workers.
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> publish_native_snapshot(std::vector<GalacticEvent> events) const;
     [[nodiscard]] std::shared_ptr<const GalacticSnapshot> make_snapshot(std::vector<GalacticEvent> events,
-        const PartitionExecutor* executor = nullptr) const;
+        const PartitionExecutor* executor = nullptr, ObserverViewContext view = {}) const;
 };
 
 } // namespace eawr::sim::galactic

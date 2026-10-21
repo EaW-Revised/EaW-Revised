@@ -69,7 +69,7 @@ void retail_c01() {
     // Four authored links factor0.5; Coruscant->Kamino is hostile and adds nothing.
     for (auto& route : inputs.routes) route.factor = take(Fixed::from_decimal("0.5"));
     config.observer.emplace(); auto& observer = *config.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     for (const auto& player : config.players) observer.players.push_back({player.player_id});
     for (const auto& planet : config.planets) {
         galactic::ObserverPlanet row; row.planet = planet.id;
@@ -238,7 +238,7 @@ void preview(bool trade = false) {
     auto config = setup();
     config.observer.emplace();
     auto& observer = *config.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     for (const auto& player : config.players) observer.players.push_back({player.player_id});
     for (const auto& planet : config.planets) {
         galactic::ObserverPlanet row;
@@ -351,7 +351,7 @@ void preview(bool trade = false) {
         for (int i = 0; i < 4; ++i) (void)take(capped.step(pool));
         expect(take(eawr::sim::math::subtract(balance(capped, 0), before)) == *predicted.adjusted_payment,
             "capped preview equals actual next credit delta on 1/2/4/8");
-        auto ai_config = config; ai_config.observer->local_player = 2;
+        auto ai_config = config; ai_config.observer->human_observers = {2}; ai_config.observer->solo_reference_human = 2;
         auto adjusted = take(galactic::GalacticSession::create(ai_config));
         const auto ai_before = balance(adjusted, 1);
         const auto ai_preview = *adjusted.snapshot()->economy_forecast();

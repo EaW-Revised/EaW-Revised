@@ -59,7 +59,7 @@ They remain named issue rows; schema absence alone does not establish runtime be
 
 ## Identity
 
-`content_identity` is SHA-256 over the length-framed encoding `eawr-galactic-data-v3` of every
+`content_identity` is SHA-256 over the length-framed encoding `eawr-galactic-data-v4` of every
 table field in table order, the unit tables' encoding style. Issues and input receipts are not
 part of it. It joins the galactic session identity when the session is built.
 Planet fields include the effective authored system-spy definitions: ability name, activation
@@ -76,6 +76,7 @@ style, enabled/despawn flags, duration, resolved influence range and requested i
 | `Credit_Cap_Per_Planet` | WGS-09 | fiscal ledger (legacy EAWR-682) |
 | `MaximumPoliticalControl`, `Political_Control_Change_Time_Seconds` | WGM-65..77 | political control (legacy EAWR-1114) |
 | `Max_Ground_Forces_On_Planet` | WGM-39 | surface landing capacity (legacy EAWR-1114, EAWR-1115) |
+| `Raid_Force_Required_Faction`, `Raid_Force_Free_Object_Category_Mask`, `Raid_Force_Limited_Object_Category_Mask`, `Raid_Force_Max_Heros`, `Raid_Force_Max_Limited_Objects` | WGM-37 | canonical raid policy and shared fleet capability predicate |
 | `TradeRouteMovementFactor`, `MaximumFleetMovementDistance` | WGM-17..38 | galaxy model (legacy EAWR-680) |
 | `Strategic_Queue_Tactical_Battles`, `Battle_Pending_Timeout_Seconds` | WGM-44..47 | conflict hand-off (legacy EAWR-1115) |
 | `AutoResolveDisplayTime`, `AutoResolveWinnerAttrition`, `AutoResolveLoserAttrition`, `RetreatAutoResolveWinnerAttrition`, `RetreatAutoResolveLoserAttrition`, `AutoResolveAttritionAllowanceFactor`, `AutoResolveTransportLosses` | WAR-28/29/38/39/44 | `auto_resolve_round_rules` and the pure galactic round; omitted values use only the walk's code defaults |

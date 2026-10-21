@@ -24,6 +24,58 @@ sys.path.insert(0, str(ROOT))
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST") and os.environ.get("EAWR_EAW_GAME_ROOT"),
                      "requires the viewer GPU lane and installed game data")
 class SkirmishSetupGpu(unittest.TestCase):
+    def test_ninth_local_row_opens_closes_and_starts_nine_seats(self):
+        from PIL import Image, ImageChops
+        with tempfile.TemporaryDirectory(prefix="setup-nine-") as temporary:
+            for seats in (8, 9):
+                output = Path(temporary) / str(seats)
+                output.mkdir()
+                report = output / "battle.json"
+                probe = "--eawr-setup-nine-player-test" if seats == 9 else "--eawr-setup-eight-player-test"
+                result = subprocess.run([
+                    os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                    "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                    "--eawr-setup-test", probe, "--eawr-game-root",
+                    os.environ["EAWR_EAW_GAME_ROOT"], "--eawr-report", str(report),
+                    "--eawr-capture", str(output / "setup.png"), "--eawr-font-cache",
+                    os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")),
+                    "--eawr-live-ticks", "2", "--eawr-live-ai", "off", "--eawr-audio", "off",
+                    "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"],
+                    cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+                (output / "setup.log").write_text(result.stdout, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                states = re.findall(r"EAWR setup last row: live=(\d) controller=(\d) occupied=(\d) start=(\d)", result.stdout)
+                self.assertEqual(states, [("1", "2", str(seats), "1"), ("1", "0", str(seats - 1), "1"),
+                                          ("1", "2", str(seats), "1")])
+                number = r"(-?\d+(?:\.\d+)?)"
+                rects = {}
+                for column in ("NAME", "FACTION", "COLOR", "TEAM"):
+                    found = re.search(r"EAWR setup layout IDC_PLAYER_" + column + "_" + str(seats - 1)
+                                      + " authored=" + ",".join([number] * 4) + r" actual=" + ",".join([number] * 4)
+                                      + r" visible=1", result.stdout)
+                    self.assertIsNotNone(found, column)
+                    rects[column] = tuple(float(value) for value in found.groups()[4:])
+                    x, y, width, height = rects[column]
+                    self.assertTrue(0 <= x < x + width <= 1280 and 0 <= y < y + height <= 720, rects[column])
+                for left, right in zip(rects.values(), list(rects.values())[1:]):
+                    self.assertGreater(right[0], left[0] + left[2])
+                status = re.search(r"EAWR setup status rect: " + ",".join([number] * 4), result.stdout)
+                self.assertIsNotNone(status)
+                x, y, width, height = (float(value) for value in status.groups())
+                self.assertGreaterEqual(height, 20, "the status keeps a readable text band")
+                self.assertGreaterEqual(y, max(rect[1] + rect[3] for rect in rects.values()))
+                box = (int(x), int(y), int(x + width), int(y + height))
+                visible = Image.open(output / "status-visible.png").convert("RGB").crop(box)
+                hidden = Image.open(output / "status-hidden.png").convert("RGB").crop(box)
+                changed = ImageChops.difference(visible, hidden).convert("L")
+                self.assertGreater(sum(value > 8 for value in changed.getdata()), 30,
+                                   "status text draws visible framebuffer pixels with eight and nine seats")
+                live = json.loads(report.read_text(encoding="utf-8"))["live_session"]
+                self.assertEqual([row["slot"] for row in live["start_slots"]], list(range(1, seats + 1)))
+                self.assertEqual([row["human"] for row in live["start_slots"]], [True] + [False] * (seats - 1))
+                self.assertTrue(live["headless_hashes_equal"])
+                self.assertGreater((output / "setup.png").stat().st_size, 10000)
+
     @staticmethod
     def _command_players(path):
         """Read replay framing independently; count orders by their actual issuer."""
@@ -398,12 +450,12 @@ class SkirmishSetupGpu(unittest.TestCase):
                     values[:4], values[4:], found.group(10) == "1")
             # Every row's four controls sit on the rectangle the resource gives them (no growth to their
             # longest item), and the columns keep the resource's gaps.
-            self.assertEqual(len(staging), 32, sorted(staging))
+            self.assertEqual(len(staging), 36, sorted(staging))
             for name, (authored, actual, visible) in staging.items():
-                self.assertTrue(visible, name)
+                self.assertEqual(visible, not name.endswith("_8"), name)
                 for index, axis in enumerate(("x", "y", "width", "height")):
                     self.assertAlmostEqual(authored[index], actual[index], delta=0.75, msg=name + " " + axis)
-            for row in range(8):
+            for row in range(9):
                 columns = [staging["IDC_PLAYER_%s_%d" % (kind, row)][1]
                            for kind in ("NAME", "FACTION", "COLOR", "TEAM")]
                 for left, right in zip(columns, columns[1:]):
@@ -429,7 +481,7 @@ class SkirmishSetupGpu(unittest.TestCase):
             self.assertTrue(open_rows, result.stdout[-6000:])
             self.assertTrue(all(not faction and not team for _, _, faction, team in open_rows), open_rows)
             reopened = [row for row in slots if row[0] == "1"]
-            self.assertEqual([row[1] for row in reopened], ["1", "0", "1"], reopened)
+            self.assertEqual([row[1] for row in reopened], ["1", "0", "0", "1"], reopened)
             self.assertTrue(reopened[-1][2] and reopened[-1][3], reopened)
             alpha = re.search(r"EAWR setup popup alpha: " + number, result.stdout)
             self.assertIsNotNone(alpha)

@@ -453,6 +453,41 @@ void moderation_and_refill() {
     expect(w.failure_of(h.conn) == 1521, "The host cannot kick itself");
 }
 
+void roster_lock_compares_membership() {
+    World w; auto& h = w.host(9);
+    auto one = w.member(h, "Guest1", "peer-1"), two = w.member(h, "Guest2", "peer-2");
+    const auto old = w.roster(h.conn).revision;
+    w.send(h.conn, h.prefix, slot_request(Kind::room_release, one.slot));
+    const auto attempt = [&](std::uint32_t revision, std::uint32_t seats) {
+        auto bytes = message(Kind::room_lock_roster); u32(bytes, revision); u32(bytes, seats);
+        w.send(h.conn, h.prefix, bytes);
+        const auto response = got(w.sink.take(h.conn, Kind::room_roster_locked));
+        Reader reader{std::span(response).subspan(2)};
+        expect(reader.u32() == revision && reader.u32() == seats, "Roster lock confirmation echoes the exact request");
+        const auto reason = reader.u32(); expect(reader.done(), "Roster lock confirmation layout"); return reason;
+    };
+    expect(attempt(old, 5) == room_unavailable && w.roster(h.conn).state == 0, "stale membership refuses Start without locking");
+    auto pending = w.guest(h, "Pending player");
+    expect(attempt(w.roster(h.conn).revision, 5) == room_unavailable && w.roster(h.conn).state == 0,
+        "an in-flight reservation refuses Start even when all requested peers are present");
+    w.send(h.conn, h.prefix, slot_request(Kind::room_release, pending.slot));
+    expect(attempt(w.roster(h.conn).revision, 3) == room_unavailable, "a dense mask cannot replace the actual sparse roster");
+    expect(attempt(w.roster(h.conn).revision, 5) == 0, "host and peer 2 can lock a nine-capacity room");
+    expect(w.roster(h.conn).state == 1 && w.roster(two.conn).state == 1, "all admitted peers receive the same locked roster");
+    std::uint64_t late{};
+    expect(!w.alias_attach(h.opened.alias, "too-late", &late) && w.failure_of(late) == room_locked, "lock wins against all later admissions");
+    // Identity replacement at the same transport index still changes the compared revision.
+    World refill; auto& host = refill.host(3); auto guest = refill.member(host, "First", "first");
+    const auto revision = refill.roster(host.conn).revision;
+    refill.send(host.conn, host.prefix, slot_request(Kind::room_release, guest.slot));
+    refill.member(host, "Second", "second");
+    auto request = message(Kind::room_lock_roster); u32(request, revision); u32(request, 3);
+    refill.send(host.conn, host.prefix, request);
+    const auto refused = got(refill.sink.take(host.conn, Kind::room_roster_locked));
+    expect(read_u32(std::span(refused).subspan(10)) == room_unavailable && refill.roster(host.conn).state == 0,
+        "same-mask identity refill cannot pass the previous member's roster lock");
+}
+
 void lock_and_battle() {
     RoomOptions options; options.hold_timeout = 60s;
     World w(options); auto& h = w.host(5);
@@ -1214,6 +1249,28 @@ void loopback_end(const std::string& certificate, const std::string& key) {
     expect(one->status().error().code == "EAWR-NET-1528", "Members learn that the host left");
     until([&] { return f.rooms == 0; }, "The service drops the room");
 }
+void loopback_partial_roster_lock(const std::string& certificate, const std::string& key) {
+    Fixture f(server_options(), certificate, key); Table table(f, 9);
+    auto one = table.join("Guest1", "first"); auto two = table.join("Guest2", "second");
+    until([&] { return attached_count(table.host->roster()) == 3; }, "three attached room members");
+    require(one->leave());
+    until([&] { return attached_count(table.host->roster()) == 2; }, "sparse room roster");
+    const auto revision = table.host->roster().revision;
+    until([&] { return !table.host->lock_roster(3, revision); }, "wrong roster is refused");
+    expect(table.host->roster().state == GnsRoomState::open, "a refused comparison leaves the real TLS room open");
+    bool pending = false;
+    const auto lock_revision = table.host->roster().revision;
+    until([&] {
+        const auto result = table.host->lock_roster(5, lock_revision);
+        if (!result) throw std::runtime_error(result.error().message);
+        pending = pending || !result.value(); return result.value();
+    }, "real relay confirms sparse roster lock");
+    expect(pending && table.host->roster().state == GnsRoomState::locked, "sending Lock alone never counts as confirmation");
+    until([&] { return two->roster().state == GnsRoomState::locked; }, "guest receives the authoritative sparse lock");
+    expect(two->roster().slots[1].state == GnsRoomSlotState::vacant && two->roster().slots[2].identity == "second",
+        "lock preserves sparse peer identities without filling vacant capacity");
+}
+
 template<class F> void run(const char* name, F test) {
     try { test(); }
     catch (const std::exception& e) { throw std::runtime_error(std::string(name) + ": " + e.what()); }
@@ -1225,7 +1282,7 @@ int main(int argc, char** argv) {
         expect(argc == 2, "Artifact directory argument");
         run("formation_and_routing", formation_and_routing); run("admission_races", admission_races);
         run("reservation_expiry", reservation_expiry); run("moderation_and_refill", moderation_and_refill);
-        run("lock_and_battle", lock_and_battle); run("pre_start_rules", pre_start_rules);
+        run("roster_lock", roster_lock_compares_membership); run("lock_and_battle", lock_and_battle); run("pre_start_rules", pre_start_rules);
         run("turn_credentials", turn_credentials_contracts); run("lease", lease_contracts); run("budgets", budget_contracts);
         run("max_rooms", bounds_at_max_rooms);
         run("benign_races", benign_races_keep_connections); run("denylist_bound", denylist_bound);
@@ -1235,6 +1292,7 @@ int main(int argc, char** argv) {
         std::filesystem::create_directories(directory);
         const auto cert = (directory / "certificate.pem").string(), key = (directory / "key.pem").string();
         require(create_certificate(cert, key));
+        run("loopback_partial_roster_lock", [&] { loopback_partial_roster_lock(cert, key); });
         run("loopback_room", [&] { loopback_room(cert, key); });
         run("loopback_without_relay", [&] { loopback_without_relay(cert, key); });
         run("loopback_nine_seats", [&] { loopback_nine_seats(cert, key); });

@@ -63,7 +63,8 @@ core::Result<void> session_detail::Tick::CommandHandlers::repair_hardpoint(const
         else if (repair->hardpoint >= profile->hardpoints.size()
             || !profile->hardpoints[repair->hardpoint].destroyable
             || unit.durability->hardpoints[repair->hardpoint].raw() <= 0
-            || unit.durability->hardpoints[repair->hardpoint] >= profile->hardpoints[repair->hardpoint].max_health) {
+            || (unit.durability->hardpoints[repair->hardpoint] >= profile->hardpoints[repair->hardpoint].max_health
+                && !hardpoint_disabled(*unit.durability, repair->hardpoint))) {
             reason = RejectReason::hardpoint_invalid;
         } else if (arrivals.contains(unit.state.entity_id)) reason = RejectReason::arriving;
         else {

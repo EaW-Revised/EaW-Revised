@@ -5,6 +5,7 @@
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "ui_test_support.hpp"
 #include "online_lobby_fixture.hpp"
+#include "../../apps/viewer/src/lobby_retry.hpp"
 
 #include <algorithm>
 #include <set>
@@ -17,6 +18,26 @@ namespace {
 namespace ui = eawr::presentation::ui;
 
 void expect(const bool condition, const std::string& message) { eawr::test::ui::expect(condition, message.c_str()); }
+
+void acceptance_lobby_retries() {
+    using Retry = eawr::presentation::godot_backend::LobbyRetry;
+    using namespace std::chrono_literals;
+    Retry ready, start;
+    const auto now = Retry::Clock::time_point{};
+    expect(ready.attempt(10, now), "first ready request is immediate");
+    for (int frame = 0; frame < 1000; ++frame)
+        expect(!ready.attempt(10, now + 4s), "pending ready is independent of render rate");
+    expect(ready.attempt(10, now + 5s), "transient refusal can retry after cooldown");
+    expect(!ready.attempt(10, now + 5s), "retry is sent only once at its deadline");
+    expect(ready.attempt(10, now + 10s) && !ready.attempt(10, now + 300s),
+           "persistent refusal exhausts the per-revision budget");
+    expect(ready.attempt(11, now + 301s), "new revision restores the retry budget");
+    expect(!ready.attempt(11, now + 302s) && ready.attempt(12, now + 302s),
+           "revision change permits immediate readiness after options change");
+    expect(start.attempt(12, now + 302s) && !start.attempt(12, now + 303s)
+               && start.attempt(12, now + 307s),
+           "start has an independent bounded retry after transient refusal");
+}
 
 ui::LobbyGame game(std::string name, std::string map, std::string type, std::uint32_t players, std::uint32_t max,
                    std::uint32_t ping) {
@@ -558,6 +579,7 @@ void online_chat_state() {
 } // namespace
 
 int main() {
+    acceptance_lobby_retries();
     list_and_sort();
     filtering();
     row_text();

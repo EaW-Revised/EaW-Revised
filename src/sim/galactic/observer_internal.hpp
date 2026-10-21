@@ -62,10 +62,11 @@ inline PresenceTable presence(const ObserverSetup& inputs, std::span<const Fleet
     }
     return table;
 }
-inline IntelligenceContext context(const ObserverSetup& inputs, const ObserverPlayer& player,
+inline IntelligenceContext context(const ObserverSetup& inputs, ObserverViewContext view, const ObserverPlayer& player,
     const ObserverPlanet& planet, const ObserverRecord& record, const PresenceTable& table) {
     IntelligenceContext c;
-    c.observer = player.player; c.local_player = inputs.local_player;
+    c.observer = player.player;
+    c.local_player = view.player ? view.player : inputs.solo_reference_human ? inputs.solo_reference_human : player.player;
     c.allegiance = planet.allegiance; c.target_owner = planet.target_owner;
     c.space_owner = planet.space_owner; c.ground_owner = planet.ground_owner;
     c.corruption_benefit = player.benefits_from_corruption; c.corrupted = planet.corrupted;

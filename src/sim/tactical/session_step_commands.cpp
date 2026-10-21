@@ -44,6 +44,7 @@ namespace eawr::sim::tactical {
 
 core::Result<void> session_detail::Tick::service_retreat_flight(UnitStage& staged,
     std::vector<Event>& events, std::vector<UnitState>& killed) {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     // WR-50..52 / FC-R02: service once per active tactical frame, independently of client traffic.
     if (impl_->retreat && pending_retreat_.phase == RetreatPhase::escaping && !pending_outcome_) {
         const auto issuer = pending_retreat_.player;
@@ -119,6 +120,7 @@ core::Result<void> session_detail::Tick::service_retreat_flight(UnitStage& stage
 }
 
 core::Result<void> session_detail::Tick::retreat_service() {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     if (!impl_->retreat || (pending_retreat_.phase != RetreatPhase::countdown
         && pending_retreat_.phase != RetreatPhase::escaping)) return core::Result<void>::success();
     auto& survivors = surviving_->survivors.value();

@@ -215,6 +215,12 @@ void LiveSessionView::record_draw_digest(const std::vector<SpacePopulation::Live
             drawn_hash.add(pose.turret->pitch.raw());
             drawn_hash.add(static_cast<std::uint64_t>(pose.turret->xy_only) | static_cast<std::uint64_t>(pose.turret->barrel) << 1U);
         }
+        // Keep old scenes' digest bytes; append only when a manual pose is drawn.
+        for (const auto& turret : pose.hardpoint_turrets) {
+            drawn_hash.add(static_cast<std::uint64_t>(turret.hardpoint));
+            drawn_hash.add(turret.angles.yaw.raw());
+            drawn_hash.add(turret.angles.pitch.raw());
+        }
     }
     drawn_hash.add(static_cast<std::uint64_t>(clips.size()));
     for (const SpacePopulation::LiveClipPose& clip : clips) {
@@ -708,6 +714,18 @@ void LiveSessionView::write_report_object_turrets(std::ostream& output) const {
                << ", \"desired_yaw\": " << static_cast<double>(turret.desired_yaw.raw()) / sim::math::Fixed::scale
                << ", \"ready\": " << (turret.ready ? "true" : "false") << "}";
         first_turret = false;
+    }
+    output << "]";
+    output << ", \"manual_turrets\": [";
+    bool first_manual = true;
+    if (ability_snapshot_) for (const auto& instance : ability_snapshot_->instances()) {
+        for (const auto& turret : instance.manual_weapons) {
+            output << (first_manual ? "" : ", ") << "{\"entity\": " << instance.entity_id
+                   << ", \"hardpoint\": " << turret.hardpoint << ", \"target\": " << turret.target
+                   << ", \"yaw\": " << static_cast<double>(turret.yaw.raw()) / sim::math::Fixed::scale
+                   << ", \"pitch\": " << static_cast<double>(turret.pitch.raw()) / sim::math::Fixed::scale << "}";
+            first_manual = false;
+        }
     }
     output << "]";
 }

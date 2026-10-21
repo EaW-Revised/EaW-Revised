@@ -128,6 +128,20 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
         else { matrix[0] = c; matrix[1] = s; matrix[4] = -s; matrix[5] = c; }
         return matrix;
     };
+    const auto apply_angles = [&](TurretBinding& binding, const LivePose::TurretPose& angles) {
+        const bool barrel = angles.barrel && binding.barrel.has_value();
+        if (angles.barrel && !binding.barrel) {
+            failure_ = "turret profile requires a missing barrel bone";
+            return false;
+        }
+        auto turret = rotation(angles.yaw, false);
+        if (!barrel && !angles.xy_only)
+            turret = animation::Player::multiply(turret, rotation(angles.pitch, true));
+        if (!binding.player->apply_bone_transform(binding.pose, binding.turret, turret)) return false;
+        if (barrel && !angles.xy_only
+            && !binding.player->apply_bone_transform(binding.pose, *binding.barrel, rotation(angles.pitch, true))) return false;
+        return true;
+    };
     for (const auto& request : poses) {
         if (!request.turret || request.ship >= turret_bindings_.size() || !turret_bindings_[request.ship]) continue;
         auto& binding = *turret_bindings_[request.ship];
@@ -136,11 +150,6 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
             return false;
         }
         // UA-05: the validated sim profile owns XY-only and usable-barrel admission.
-        const bool barrel = request.turret->barrel && binding.barrel.has_value();
-        if (request.turret->barrel && !binding.barrel) {
-            failure_ = "ordinary turret profile requires a missing barrel bone";
-            return false;
-        }
         const bool active_clip = std::any_of(clips.begin(), clips.end(),
             [&](const LiveClipPose& clip) { return clip.ship == request.ship; });
         if (active_clip) {
@@ -155,12 +164,7 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
         } else {
             std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
         }
-        auto turret = rotation(request.turret->yaw, false);
-        if (!barrel && !request.turret->xy_only)
-            turret = animation::Player::multiply(turret, rotation(request.turret->pitch, true));
-        if (!binding.player->apply_bone_transform(binding.pose, binding.turret, turret)) return false;
-        if (barrel && !request.turret->xy_only
-            && !binding.player->apply_bone_transform(binding.pose, *binding.barrel, rotation(request.turret->pitch, true))) return false;
+        if (!apply_angles(binding, *request.turret)) return false;
         // UA-05: storage and bone bindings are prepared once at composition, then reused each frame.
         std::copy(binding.pose.bones.begin(), binding.pose.bones.end(), contact_bones_[request.ship].begin());
         for (auto& bone : binding.pose.bones) {
@@ -173,6 +177,32 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
             if (piece.gate || piece.shield || piece.cloak) continue;
             if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
                 failure_ = core::format_diagnostic(posed.error()); return false;
+            }
+        }
+    }
+    for (const auto& request : poses) {
+        if (request.ship >= hardpoint_turret_bindings_.size()) continue;
+        auto& bindings = hardpoint_turret_bindings_[request.ship];
+        for (const auto& turret : request.hardpoint_turrets) {
+            const auto found = bindings.find(turret.hardpoint);
+            if (found == bindings.end()) continue;
+            auto& binding = found->second;
+            std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
+            if (!apply_angles(binding, turret.angles)) return false;
+            for (auto& bone : binding.pose.bones) {
+                if (bone.visible) continue;
+                for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                    for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+            }
+            for (const auto index : piece_index_.pieces(request.ship)) {
+                const auto& piece = pieces_[index];
+                if (!piece.gate || piece.gate->hardpoint != turret.hardpoint
+                    || piece.gate->art != HardpointGate::Art::attached_model) continue;
+                if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
+                    failure_ = core::format_diagnostic(posed.error());
+                    return false;
+                }
+                binding.applied = turret.angles;
             }
         }
     }

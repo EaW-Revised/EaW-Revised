@@ -50,7 +50,7 @@ void bind_galactic_ai_actor_changes(script::foc::galactic_ai::NativeActions&,
 [[nodiscard]] core::Result<script::foc::galactic_ai::ExecutionRouteInput> copy_stock_execution_input(
     const GalacticAiRuntimeSetup&, sim::galactic::PlayerId, const sim::galactic::GalacticSnapshot&,
     const script::foc::ai::GalacticWorld&, const script::foc::ai::Engine&, const GalacticAiUsability&,
-    const script::foc::ai::DerivedExecutionRestore* = nullptr);
+    const script::foc::ai::DerivedExecutionRestore* = nullptr, bool read_only = false);
 // Production callers select from campaign authoring and actual controller state.
 // The selected adjustment record is resolved through the authored player mappings.
 [[nodiscard]] core::Result<std::vector<script::foc::galactic_ai::PlayerSelection>> select_live_galactic_ai_players(
@@ -92,6 +92,10 @@ struct GalacticAiRuntimeProviders {
     using World = script::foc::ai::GalacticWorld;
     std::function<core::Result<script::foc::galactic_ai::ExecutionRouteInput>(
         sim::galactic::PlayerId, const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const script::foc::ai::DerivedExecutionRestore*)> execution_input;
+    // The same input read without writing the perception cache or the visibility rows (S9b-prep path-table prepass).
+    // Unset: no prepass; every table builds in the player's chain.
+    std::function<core::Result<script::foc::galactic_ai::ExecutionRouteInput>(
+        sim::galactic::PlayerId, const sim::galactic::GalacticSnapshot&, const World&, const Engine&)> execution_input_read_only;
     std::function<core::Result<script::foc::ai::GalacticConnectivity>(
         const sim::galactic::GalacticSession&, World&, Engine&, const sim::PartitionExecutor&)> prepare_connectivity;
     using ConnectivityPublication = std::shared_ptr<const script::foc::ai::GalacticConnectivity>;
@@ -111,6 +115,7 @@ struct GalacticAiRuntimeProviders {
         std::function<script::authoritative::ScriptScheduler*()>)> prepare_battle;
     Actions::Placement placement;
     Actions::ShadowPlacement shadow_placement;
+    Actions::ReconciliationPlacement reconciliation_placement;
     script::foc::ai::GalacticHeroSelectionProvider heroes;
     using SnapshotSupplier = std::function<std::shared_ptr<const sim::galactic::GalacticSnapshot>()>;
     using FreestoreSelectorFactory = std::function<core::Result<script::foc::ai::GalacticFreestoreSelectionProvider>(

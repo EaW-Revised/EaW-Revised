@@ -115,6 +115,37 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }
         std::filesystem::remove_all(directory);
     }
+    // R-SETUP-01: a nine-position local map carries every occupied seat into battle startup.
+    {
+        const auto tables = synthetic_tables();
+        auto inputs = synthetic_inputs(tables);
+        for (std::uint32_t colour = static_cast<std::uint32_t>(inputs.lobby_colours.size()); colour < 9; ++colour)
+            inputs.lobby_colours.push_back({"Test_Colour_" + std::to_string(colour), {10, 11, 12}});
+        skirmish::SetupMap map;
+        map.path = inputs.map;
+        map.metadata.capacity = 9;
+        map.metadata.new_markers = true;
+        map.metadata.start_positions = std::vector<eawr::assets::Vec2f>(9);
+        map.teams = {{0, {"Rebel"}}, {1, {"Empire"}}};
+        skirmish::SetupSelection selection;
+        selection.map = map.path;
+        for (std::uint32_t row = 3; row <= 9; ++row)
+            selection.slots.push_back({row, "Empire", 1, false, {}});
+        const std::array maps{map};
+        expect(skirmish::setup_row_count(map) == 9, "nine-position map offers nine local rows");
+        const auto options = skirmish::setup_options(selection, maps);
+        expect(options && options.value().slots->size() == 9, "nine occupied local rows produce nine start slots");
+        if (options) {
+            auto fixture = synthetic_fixture();
+            fixture.slots = *options.value().slots;
+            const auto start = skirmish::build_start(fixture, inputs);
+            expect(start && std::count_if(start.value().players.begin(), start.value().players.end(),
+                [](const auto& player) { return player.lobby; }) == 9,
+                "local battle startup retains all nine lobby seats");
+        }
+        selection.slots.push_back({10, "Empire", 1, false, {}});
+        expect(!skirmish::setup_options(selection, maps), "local start rejects an unauthored tenth seat");
+    }
     // WSS-54: six-player capacity is independent of three spawn markers per team.
     {
         auto tables = synthetic_tables();
@@ -560,6 +591,15 @@ void setup_contract(const std::filesystem::path& fixtures) {
     expect(chosen && !chosen.value().victory_condition,
         "WSS-31: a land condition in the record leaves the data's default");
     auto bad = selection;
+    for (const auto level : {3U, 255U}) {
+        bad = selection; bad.slots[1].difficulty = static_cast<tactical::AiLevel>(level);
+        for (const bool local : {true, false}) {
+            const auto invalid = skirmish::validate_setup_slots(bad.slots, map.metadata, local);
+            expect(!invalid && invalid.error().message == "Choose a valid AI difficulty level.",
+                "canonical local/network validation refuses out-of-range AI levels");
+        }
+    }
+    bad = selection;
     bad.map = "data/art/maps/_mp_land_example.ted";
     expect(!skirmish::setup_options(bad, maps), "unlisted/land maps rejected");
     bad = selection; bad.slots[1].team = 1;
@@ -600,7 +640,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
     expect(static_cast<bool>(skirmish::setup_options(roster, maps)), "WSS-08: capacity nine permits eight local occupied rows");
     auto network_roster = roster;
     network_roster.slots.push_back({9, "Rebel", 2, false, {}});
-    expect(!skirmish::setup_options(network_roster, maps), "local controls keep the ninth row hidden");
+    expect(static_cast<bool>(skirmish::setup_options(network_roster, maps)), "R-SETUP-01: local controls accept the ninth AI row");
     for (auto& row : network_roster.slots) row.human = true;
     expect(static_cast<bool>(skirmish::setup_options(network_roster, maps, false)),
         "network controls accept nine separate human rows on a nine-row map");
@@ -615,8 +655,8 @@ void setup_contract(const std::filesystem::path& fixtures) {
     expect(repaired.slots.size() == 8, "network map repair obeys an eight-row map");
     repaired = network_roster;
     skirmish::repair_setup_selection(repaired, maps[0]);
-    expect(repaired.slots.size() == 8 && skirmish::setup_row_count(maps[0]) == 8,
-        "local map repair still hides the ninth row");
+    expect(repaired.slots.size() == 9 && skirmish::setup_row_count(maps[0]) == 9,
+        "R-SETUP-01: local map repair retains the ninth authored row");
     auto limited = maps;
     limited[0].teams[2].spawn_capacity = 2;
     const auto overflow = skirmish::setup_options(roster, limited);
@@ -637,7 +677,11 @@ void setup_contract(const std::filesystem::path& fixtures) {
     free_for_all.slots.push_back({5, "Rebel", 0, false, {}});
     expect(!skirmish::setup_options(free_for_all, custom_maps), "custom map rejects a roster beyond authored capacity");
     roster.slots.push_back({9, "Rebel", 2, false, {}});
-    expect(!skirmish::setup_options(roster, maps), "WSS-08: ninth local row stays unavailable");
+    expect(static_cast<bool>(skirmish::setup_options(roster, maps)), "R-SETUP-01: all nine local rows reach the start options");
+    for (const auto capacity : {2U, 4U, 8U, 9U}) {
+        auto authored_map = map; authored_map.metadata.capacity = capacity;
+        expect(skirmish::setup_row_count(authored_map) == capacity, "local row count follows authored capacity");
+    }
     auto smaller = map; smaller.metadata.capacity = 2;
     smaller.metadata.start_positions->resize(2);
     roster = {{}, {{1, "Rebel", 0, true, {}}, {8, "Empire", 7, false, {}}, {9, "Rebel", 2, false, {}}}};

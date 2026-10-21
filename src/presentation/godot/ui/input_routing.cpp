@@ -15,6 +15,7 @@ using namespace godot;
 using presentation::ui::InputClass;
 
 EawrUiHitMask::EawrUiHitMask() {
+    add_to_group("eawr_ui_panel");
     set_mouse_filter(MOUSE_FILTER_STOP);
     // Godot passes wheel events on through STOP controls by default; over the HUD they stop.
     set_force_pass_scroll_events(false);
@@ -68,6 +69,18 @@ presentation::ui::InputFocus input_focus(Viewport& viewport) {
         }
     }
     return focus;
+}
+
+bool pointer_over_panel(Node& root, const Vector2& point) {
+    auto* tree = root.get_tree();
+    if (!tree) return false;
+    const TypedArray<Node> panels = tree->get_nodes_in_group("eawr_ui_panel");
+    for (int64_t index = 0; index < panels.size(); ++index) {
+        auto* mask = Object::cast_to<EawrUiHitMask>(panels[index]);
+        if (!mask || !mask->is_visible_in_tree() || (&root != mask && !root.is_ancestor_of(mask))) continue;
+        if (mask->_has_point(mask->get_global_transform_with_canvas().affine_inverse().xform(point))) return true;
+    }
+    return false;
 }
 
 void register_ui_input_classes() {

@@ -56,6 +56,44 @@ void test_activation_is_atomic() {
            "an inactive adapter refuses routing with a diagnostic");
 }
 
+void test_camera_key_presets() {
+    for (const auto context : {input::Context::land, input::Context::space}) {
+        input::Adapter adapter = ready_adapter();
+        adapter.set_context(context);
+        expect(adapter.set_camera_keys(true).has_value(), "ST-K3: WASD preset binds in both tactical contexts");
+        for (const auto& [name, action] : std::array<std::pair<const char*, input::Action>, 4>{{
+                 {"W", input::Action::pan_forward}, {"A", input::Action::pan_left},
+                 {"S", input::Action::pan_back}, {"D", input::Action::pan_right}}}) {
+            send(adapter, key(name, true), "press physical camera position");
+            expect(adapter.is_held(action), "ST-K3: each WASD position pans");
+            send(adapter, key(name, true, true), "repeat camera position");
+            send(adapter, key(name, false, false, input::modifier::shift), "release with changed modifier");
+            expect(!adapter.is_held(action), "ST-K3: repeat and modifier change cannot latch pan");
+            send(adapter, key(name, true, false, input::modifier::ctrl), "modified shortcut");
+            expect(!adapter.is_held(action), "ST-K3: a modified ability/selection shortcut never also pans");
+            send(adapter, key(name, false), "release modified shortcut");
+        }
+        if (context == input::Context::land) {
+            send(adapter, key("D", true), "press WASD alias");
+            send(adapter, key("Right", true), "press arrow alias");
+            send(adapter, key("D", false), "release one alias");
+            expect(adapter.is_held(input::Action::pan_right), "ST-K3: held arrow survives WASD release");
+            expect_close(step(adapter).pan_x, 1.0F, "ST-K3: aliases do not double pan speed");
+            send(adapter, key("Right", false), "release arrow alias");
+        }
+        expect(adapter.set_camera_keys(false).has_value(), "ST-K3: arrows preset binds");
+        send(adapter, key("D", true), "press disabled camera position");
+        expect(!adapter.is_held(input::Action::pan_right), "ST-K3: arrows preset disables WASD fixture bindings");
+    }
+    auto adapter = ready_adapter();
+    const auto conflict = table_with(R"({"id":"competing.w","action":"reset_view","context":"land",
+        "device":"keyboard","control":"W","trigger":"pressed","scale":1})");
+    expect(adapter.activate(conflict).has_value(), "ST-K3: custom competing fixture activates alone");
+    const auto original = *adapter.table();
+    expect(!adapter.set_camera_keys(true).has_value() && *adapter.table() == original,
+        "ST-K3: conflicting preset is rejected atomically at bind time");
+}
+
 void test_held_repeat_and_pressed_triggers() {
     input::Adapter adapter = ready_adapter();
     send(adapter, key("D", true), "press D");

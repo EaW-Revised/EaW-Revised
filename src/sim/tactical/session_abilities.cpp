@@ -1236,7 +1236,7 @@ std::vector<AbilityStatus> TacticalSession::Impl::ability_statuses(const LiveUni
                 status.blast_charged_presentation = unit.abilities->charged_blast->charged_presentation;
             }
             if (slot.active && (ability.kind == AbilityKind::energy_weapon || ability.kind == AbilityKind::tractor_beam
-                || ability.kind == AbilityKind::leech_shields)) {
+                || ability.kind == AbilityKind::leech_shields || ability.kind == AbilityKind::concentrate_fire)) {
                 status.target = slot.target;
                 status.target_hardpoint = slot.target_hardpoint;
             }

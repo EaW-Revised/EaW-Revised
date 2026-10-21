@@ -4,6 +4,7 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/platform/campaign_end_inputs.hpp"
 #include "eawr/platform/campaign_scoring.hpp"
+#include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/units/galactic_types.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "black_market_hud_fixture.hpp"
@@ -14,6 +15,7 @@
 #include "ground_hud_fixture.hpp"
 #include "hero_action_hud_fixture.hpp"
 #include "hud_clock_fixture.hpp"
+#include "history_hud_fixture.hpp"
 #include "orbit_hud_fixture.hpp"
 #include "weapon_action_hud_fixture.hpp"
 #include "weapon_action_live_fixture.hpp"
@@ -151,6 +153,8 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
     auto& production_names = state.production_names;
     auto& audio_catalog = state.audio_catalog;
     auto& content = state.content;
+    if (synthetic_ && name_ == "history")
+        galactic_view::configure_history_hud_fixture(galaxy_setup, galaxy->local.player);
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::fleet_hud_fixture(options.hud_fixture)
         && !galactic_view::ground_fixture(options.hud_fixture)) {
         galactic_view::configure_fleet_hud_fixture(galaxy_setup, galaxy->local.player, options.hud_fixture,
@@ -242,6 +246,20 @@ bool CaptureHudFixture::start_session(GalacticMode::State& state) {
     auto& failure = state.failure;
     auto& galaxy = state.galaxy;
     auto& game = state.game;
+    if (synthetic_ && name_ == "history") {
+        const auto publish = [&](sim::galactic::CommandPayload payload) {
+            const auto target = game->frame().session_tick + 1;
+            game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, std::move(payload), {}});
+            game->advance_to(target);
+            return game->wait_for(target, std::chrono::seconds(5));
+        };
+        if (options.paused && !publish(sim::galactic::ResumeGalaxy{})) { failure = "History fixture could not resume"; return false; }
+        const auto target = game->frame().session_tick + 61;
+        game->advance_to(target);
+        if (!game->wait_for(target, std::chrono::seconds(10)) || (options.paused && !publish(sim::galactic::PauseGalaxy{}))) {
+            failure = "History fixture did not publish its admitted samples"; return false;
+        }
+    }
     if (enabled(Feature::driven_transit)) {
         // Drawing fixture only: movement admission requires an unpaused galaxy.
         // Driven pacing publishes each command before freezing the transit view.
@@ -391,6 +409,7 @@ bool CaptureHudFixture::orbit(GalacticMode::State& state) {
 }
 
 bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
+    if (synthetic_ && name_ == "hero-map-respawn") return true; // Uses actual owner publications, not stub HUD facts.
     auto& options = state.options;
     auto& failure = state.failure;
     auto& map_input = state.map_input;
@@ -403,7 +422,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
         if (options.campaign != galactic_view::synthetic_campaign
             || (options.hud_fixture != "accessible" && options.hud_fixture != "inaccessible"
                 && options.hud_fixture != "objectives-audio"
-                && options.hud_fixture != "known" && options.hud_fixture != "masked"
+                && options.hud_fixture != "known" && options.hud_fixture != "masked" && options.hud_fixture != "history"
                 && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only"
                 && options.hud_fixture != "production" && options.hud_fixture != "production-unlocks"
                 && options.hud_fixture != "capture-live" && !galactic_view::fleet_hud_fixture(options.hud_fixture)
@@ -651,6 +670,56 @@ bool CaptureHudFixture::configure_score(GalacticMode::State& state, platform::Li
 
     const auto fixture = parse_score_fixture(options.hud_fixture);
     if (options.campaign != galactic_view::synthetic_campaign) return true;
+    if (options.hud_fixture == "hero-map-respawn") {
+        // Explicit synthetic defeat inputs; the production owner schedules and publishes them.
+        // No test-only material, progress uniform or direct viewer schedule injection.
+        if (!audio_catalog || !galaxy) { failure = "hero return fixture needs installed art"; return false; }
+        const auto local = galaxy->local.player;
+        production_names[90001] = "Bossk";
+        production_names[90002] = "Silri";
+        sim::galactic::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
+        for (const auto& player : galaxy_setup.players) observer.players.push_back({player.player_id});
+        std::map<sim::galactic::TypeId, sim::galactic::ObserverType> traits;
+        for (const auto& fleet : galaxy_setup.fleets) for (const auto& member : fleet.members)
+            traits.try_emplace(member.type, sim::galactic::ObserverType{member.type});
+        if (galaxy_setup.movement) for (const auto& container : galaxy_setup.movement->contents)
+            for (const auto& member : container.children)
+                traits.try_emplace(member.type, sim::galactic::ObserverType{member.type});
+        for (const auto& [type, row] : traits) { static_cast<void>(type); observer.types.push_back(row); }
+        for (const auto& planet : galaxy_setup.planets) {
+            sim::galactic::ObserverPlanet facts; facts.planet = planet.id;
+            facts.current_owner = facts.current_controller = facts.allegiance = facts.target_owner = planet.owner;
+            observer.planets.push_back(facts);
+        }
+        for (const auto& player : galaxy_setup.players) for (const auto& planet : galaxy_setup.planets)
+            observer.records.push_back({player.player_id, planet.id, true});
+        galaxy_setup.observer = std::move(observer);
+        sim::galactic::PlayerId other{};
+        for (const auto& player : galaxy_setup.players)
+            if (player.player_id != local && player.player_id != neutral_owner) { other = player.player_id; break; }
+        if (!other) { failure = "hero return fixture needs a foreign owner"; return false; }
+        auto services = std::make_shared<platform::CampaignServiceConfiguration>();
+        services->configure = [local, other](campaign::GameSession& owner) {
+            const sim::InlineExecutor executor;
+            for (const auto player : {local, other}) {
+                sim::galactic::HeroDefeat defeat;
+                defeat.id = player == local ? 99001 : 99002;
+                defeat.type = defeat.respawn_type = player == local ? 90001 : 90002;
+                defeat.owner = player; defeat.named = true;
+                defeat.seconds = sim::math::Fixed::from_raw(10 * sim::math::Fixed::scale);
+                auto result = owner.schedule_hero_defeat(defeat, executor);
+                if (!result) return core::Result<void>::failure(result.error());
+                if (!result.value().scheduled) {
+                    core::Diagnostic error; error.code = "fixture.hero_schedule";
+                    error.message = "synthetic hero schedule was not admitted";
+                    return core::Result<void>::failure(std::move(error));
+                }
+            }
+            return core::Result<void>::success();
+        };
+        live.services = std::move(services);
+        return true;
+    }
     if (!fixture.valid) {
         if (options.hud_fixture.starts_with("score-")) failure = "unknown score fixture " + options.hud_fixture;
         return failure.empty();

@@ -30,6 +30,7 @@
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <set>
@@ -218,7 +219,7 @@ void installed_world_phase_births(const cp::CampaignSetupPlan& plan, const cp::C
         ga::ActionRequest request; request.kind = ga::ActionKind::magic;
         request.player = player; request.target = location; request.type = ship->first;
         const auto born = must(actions.admit(request));
-        expect(born.admitted && actions.created().size() == 1 && !admitted
+        expect(born.admitted && actions.created(player).size() == 1 && !admitted
             && actions.qualified_freestore().contains(player, born.request)
             && actions.qualified_freestore().object_count(player) == before + 1,
             "actual world-phase stock birth offers through configured workers without an active AI barrier");
@@ -329,7 +330,7 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
             selected.push_back({id, faction.name == "Empire" ? "BASICEMPIRE" : "BASICREBEL", "NORMAL", {}, {}});
         }
         if (faction.name == source->starting_active_player) {
-            human = id; options.local_observer = id;
+            human = id; options.solo_reference_human = id;
             options.seats.push_back({galactic::SeatId{id}, id, galactic::SeatKind::human, id - 1, true, 1});
         }
     }
@@ -459,7 +460,7 @@ struct InstalledLive final {
             // Match the viewer's full seat layout, including its neutral/nonplayable
             // AI metadata. Only playable opponents supply the progression witnesses.
             setup.seats.push_back({galactic::SeatId{id}, id, local ? galactic::SeatKind::human : galactic::SeatKind::ai, id - 1, true, local ? id : 0});
-            if (local) { setup.local_observer = id; human = {id}; }
+            if (local) { setup.solo_reference_human = id; human = {id}; }
             else if (playable) ai_players.insert(id);
         }
         expect(human.value != 0 && !ai_players.empty(), "installed production case has actual human and AI controllers");
@@ -475,7 +476,13 @@ struct InstalledLive final {
 struct ProfileEvidence final {
     std::vector<std::vector<std::string>> hashes{};
     std::vector<std::string> galaxy_sha{};
+    // Count prepass builds through the existing opt-in profile scopes.
+    std::uint64_t path_tables{};
 };
+void check_path_table_prepass(const ProfileEvidence& evidence, bool expect_tables) {
+    std::cout << "GC-AI-PATH-TABLES path_tables_built=" << evidence.path_tables << std::endl;
+    if (expect_tables) expect(evidence.path_tables > 0, "the path-table prepass built the refreshed tables");
+}
 int live_production(const std::filesystem::path& directory, std::uint64_t frames, bool performance_only,
     bool cadence_window = false, ga::ServicePeriods periods = ga::retail_service_periods,
     ProfileEvidence* evidence = nullptr, bool short_record_contract = false) {
@@ -740,6 +747,8 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
             << ",\"restored_workers\":" << restored_options.workers << ",\"restore_boundary\":" << boundary << ",\"restore_end\":" << end
             << ",\"builds\":" << builds << ",\"movement_requests\":" << movements << ",\"conflicts\":" << conflicts;
         if (profiling) {
+            if (evidence) for (const auto& frame : live_phases)
+                evidence->path_tables += frame[static_cast<std::size_t>(eawr::gc_profile::Phase::path_table_prepass)].calls;
             report << ",\"ai_compute_budget\":";
             eawr::gc_profile::write_budget(report, live_phases);
             std::cout << "GC-AI-BUDGET workers=" << workers << ' ';
@@ -762,6 +771,11 @@ int live_production(const std::filesystem::path& directory, std::uint64_t frames
             report << (index ? "," : "") << '"' << hashes[index] << '"';
         report << "],\"canonical_galaxy_sha_at_boundary\":\"" << boundary_galaxy_sha << "\"}";
         std::cout << "GC-AI-PROFILE-GALAXY workers=" << workers << " sha=" << boundary_galaxy_sha << std::endl;
+        // One line per worker count that a later head can be compared with: SHA-256 over every live tick hash in order.
+        std::string joined;
+        for (const auto& hash : hashes) joined += hash;
+        std::cout << "GC-AI-TICK-HASHES workers=" << workers << " ticks=" << hashes.size() << " sha256="
+            << eawr::core::sha256_hex(std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(joined.data()), joined.size())) << std::endl;
         report.flush();
     }
     report << "],\"passed\":" << (failures ? "false" : "true") << "}\n";
@@ -943,8 +957,10 @@ int main(int argc, char** argv) {
             // Exercise the real composed owners and cross-worker midpoint restore in a short
             // window. Accelerated service periods cross several deadlines; this is not timing evidence.
             ProfileEvidence evidence;
-            return live_production(argc > 2 ? argv[2] : "out/galactic-ai-live-record-contracts",
+            const auto code = live_production(argc > 2 ? argv[2] : "out/galactic-ai-live-record-contracts",
                 32, true, true, ga::ServicePeriods{8, 3, 2, 2, 8, 5}, &evidence, true);
+            check_path_table_prepass(evidence, false);
+            return code || failures ? 1 : 0;
         }
         if (argc > 1 && std::string_view(argv[1]) == "--live-profile-comparison") {
             const std::filesystem::path directory = argc > 2 ? argv[2] : "out/galactic-ai-profile";
@@ -954,6 +970,7 @@ int main(int argc, char** argv) {
             live_production(directory / "off", frames, true, true, ga::retail_service_periods, &off);
             eawr::gc_profile::enabled.store(true, std::memory_order_relaxed);
             live_production(directory / "on", frames, true, true, ga::retail_service_periods, &on);
+            check_path_table_prepass(on, frames >= 200);
             expect(off.hashes == on.hashes && !off.hashes.empty(), "profile off/on preserves every live tick hash at 1/2/4/8 workers");
             expect(off.galaxy_sha == on.galaxy_sha && !off.galaxy_sha.empty(), "profile off/on preserves canonical galaxy SHA at 1/2/4/8 workers");
             std::cout << "GC-AI-PROFILE-EQUALITY " << (failures ? "FAIL" : "PASS") << std::endl;
@@ -1002,6 +1019,10 @@ int main(int argc, char** argv) {
         }
         prepared_restore_contracts();
         authored_selection_contracts();
+        mp_ai_uses_authored_faction_basic_ai();
+        mp_ai_uses_agreed_difficulty_mapping();
+        mp_ai_preserves_human_inactive_and_ambient_absence();
+        mp_ai_refuses_unsupported_playable_inputs();
         unattended_human_contracts();
         worker_verdict_contracts();
         qualified_safety_contracts();

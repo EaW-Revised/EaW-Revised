@@ -235,6 +235,35 @@ int main() {
     assert(response(ordinary) == "transport_response");
     assert(galactic_fleet_move_event({}, rankings, masks).empty());
     assert(galactic_fleet_move_members(fleet, nullptr) == fleet);
+    // WGP-181: debug-build captures distinguish an audible hero from a
+    // silent passenger whose transport supplies its ordinary move event.
+    const std::vector<Field> silent_hero{{"CategoryMask", "LandHero"}, {"Ranking_In_Category", "1"}};
+    const std::vector<Field> shuttle{{"CategoryMask", "Transport"},
+        {"SFXEvent_Fleet_Move", "Unit_Fleet_Move_Alliance_Shuttle"},
+        {"SFXEvent_Move", "Unit_Move_Alliance_Shuttle"}};
+    const std::vector<Field> emperor{{"CategoryMask", "LandHero"}, {"Ranking_In_Category", "1"},
+        {"SFXEvent_Fleet_Move", "Unit_Fleet_Move_Emperor"}, {"SFXEvent_Move", "emperor_move"}};
+    const auto move_event = [&](std::vector<std::vector<Field>> traits) {
+        return galactic_fleet_move_event(traits, rankings, masks);
+    };
+    assert(move_event({silent_hero, shuttle}) == "Unit_Move_Alliance_Shuttle");
+    assert(move_event({shuttle, silent_hero}) == "Unit_Move_Alliance_Shuttle");
+    assert(move_event({emperor}) == "Unit_Fleet_Move_Emperor");
+    assert(move_event({emperor, shuttle, ship}) == "Unit_Fleet_Move_Emperor");
+    assert(move_event({ship, shuttle, emperor}) == "Unit_Fleet_Move_Emperor");
+    assert(move_event({shuttle}) == "Unit_Fleet_Move_Alliance_Shuttle");
+    assert(move_event({silent_hero}).empty());
+    assert(move_event({silent_hero, silent_hero}).empty());
+    assert(move_event({silent_hero, transport}) == "transport_response"); // Fleet-only fallback.
+    assert(move_event({transport, silent_hero}) == "transport_response");
+    assert(move_event({silent_hero, ship}) == "ship_move"); // Move-only fallback.
+    assert(move_event({ship, silent_hero}) == "ship_move");
+    assert(move_event({silent_hero, shuttle, ship}) == "ship_move"); // Rank eligible candidates.
+    assert(move_event({ship, shuttle, silent_hero}) == "ship_move");
+    auto ordinary_hero = silent_hero;
+    ordinary_hero.emplace_back("SFXEvent_Move", "ordinary_hero_move");
+    assert(move_event({ordinary_hero, shuttle}) == "ordinary_hero_move");
+    assert(move_event({shuttle, ordinary_hero}) == "ordinary_hero_move");
     // The enum file, rather than a fixed Hero alias, controls mod categories.
     const std::vector<std::vector<Field>> mod_members{
         {{"CategoryMask", "customPassenger"}, {"SFXEvent_Fleet_Move", "mod_response"}}};

@@ -397,8 +397,8 @@ bool LiveSessionView::hardpoint_repair_allowed(const sim::EntityId station, cons
         [&](const tactical::StationMenu& menu) { return menu.station == instance->type_id; })) return false;
     if (hardpoint >= instance->durability->hardpoints.size()) return false;
     const auto& slot = instance->durability->hardpoints[hardpoint];
-    // WSL-40: disabled positive-health replacement slots still qualify.
-    return slot.health.raw() > 0 && slot.health < slot.max_health
+    // HR-05 recovery: automatic healing can fill a disabled slot before paid repair completes it.
+    return slot.max_health.raw() > 0 && slot.health.raw() > 0 && (slot.health < slot.max_health || !slot.enabled)
         && std::find(slot.repairing_players.begin(), slot.repairing_players.end(), player_) == slot.repairing_players.end();
 }
 

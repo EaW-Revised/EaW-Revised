@@ -120,6 +120,22 @@
     ],
     "exact_line_allow": [
       {
+        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
+        "sha256": "335c5c4d213d283dd6cdb7b9bfd66d11a0886b5fd1430271f64e7a760919b70a",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
+        "sha256": "472c75068cb30e09049ca34b84200a025094095a0b7fb3129a395ddc9b49a057",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+      },
+      {
         "path": "apps/viewer/src/live_session_config.cpp",
         "sha256": "29ba83a39ca49cf5fe3e22803761113490a93fc2b041b86b60aee901dbc30438",
         "patterns": [

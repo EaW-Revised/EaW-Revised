@@ -112,6 +112,9 @@ def main():
                 assert all(value not in out + err for value in private_values if value), "Private invitation, ownership or password reached bridge logs"
                 assert child.returncode == 0, out + err
 
+        _, partial_port = start_server("1")
+        pair("partial-capacity", "host-partial", "guest-partial", selected_port=partial_port)
+
         # cancel, normal, mismatch and the invalid host use four principals on the first server; silent, public and refill four more.
         pair("normal", "host", "guest")
         pair("mismatch", "host-mismatch", "guest-mismatch", ("staging", "EAWR-NET-1503"))

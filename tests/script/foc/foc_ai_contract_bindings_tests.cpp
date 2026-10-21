@@ -1147,6 +1147,94 @@ void mounted_ai_discovery() {
 }
 
 
+// #3780: the closure is selected by the battle domain from the mounted data; space stays exactly as before.
+void mode_selected_closure() {
+    using eawr::sim::tactical::BattleDomain;
+    const std::map<std::string, std::string> modules{
+        {"data/scripts/ai/spacemode/spaceplan.lua", ""}, {"data/scripts/ai/spacemode/Nested/helper.lua", ""},
+        {"data/scripts/ai/landmode/landplan.lua", ""}, {"data/scripts/ai/landmode/Nested/helper.lua", ""},
+        {"data/scripts/ai/storyarc/story.lua", ""}, {"data/scripts/ai/rootplan.lua", ""},
+        {"data/scripts/library/pgcommands.lua", ""}};
+    const std::vector<std::string> space_paths{"data/scripts/ai/rootplan.lua", "data/scripts/ai/spacemode/spaceplan.lua",
+        "data/scripts/ai/storyarc/story.lua"};
+    const std::vector<std::string> land_paths{"data/scripts/ai/landmode/landplan.lua", "data/scripts/ai/rootplan.lua",
+        "data/scripts/ai/storyarc/story.lua"};
+    auto sorted = [](std::vector<std::string> paths) { std::sort(paths.begin(), paths.end()); return paths; };
+    expect(foc::selected_plans(modules) == foc::selected_plans(modules, BattleDomain::space)
+        && sorted(foc::selected_plans(modules, BattleDomain::space)) == space_paths,
+        "#3780: space plan selection reads the space directory, root plans and story arcs");
+    expect(sorted(foc::selected_plans(modules, BattleDomain::land)) == land_paths,
+        "#3780: land plan selection reads the land directory, root plans and story arcs");
+    const auto space_xml = foc::required_xml();
+    expect(space_xml == foc::required_xml(BattleDomain::space) && space_xml.size() == 18
+        && space_xml.front() == "data/xml/ai/players/basicempireplayer.xml"
+        && space_xml[4] == "data/xml/ai/goalfunctions/basicoffensivespaceset.xml"
+        && space_xml.back() == "data/xml/enum/aigoalcategorytype.xml",
+        "#3780: the space XML closure keeps today's paths and order");
+    expect(foc::required_xml(BattleDomain::land).size() < space_xml.size(),
+        "#3780: land does not list space goal sets");
+
+    // A land closure loads from mode data: Templates/Land, land difficulty and constant tags, land plans.
+    std::map<std::string, std::string, std::less<>> xml;
+    xml["data/xml/ai/players/lander.xml"] = R"XML(<AIPlayerType><Name>Lander</Name>
+        <LandFreeStoreScript>LandFree</LandFreeStoreScript><SpaceFreeStoreScript>SpaceFree</SpaceFreeStoreScript>
+        <Templates><Space>SpaceT</Space><Land>LandT, LandU</Land></Templates>
+        <Difficulty_Adjustments><HARD>Hard</HARD></Difficulty_Adjustments></AIPlayerType>)XML";
+    xml["data/xml/difficultyadjustments.xml"] = R"XML(<Root><Adj Name="Hard"><Space_AI_Contrast_Multiplier>2</Space_AI_Contrast_Multiplier>
+        <Land_AI_Contrast_Multiplier>3</Land_AI_Contrast_Multiplier><Land_AI_Goal_Cycle_Sleep_Duration>15</Land_AI_Goal_Cycle_Sleep_Duration>
+        <Land_Build_Time_Multiplier>0.5</Land_Build_Time_Multiplier></Adj></Root>)XML";
+    xml["data/xml/gameconstants.xml"] = "<Root><AI_LandEvaluatorRegionSize>640</AI_LandEvaluatorRegionSize></Root>";
+    const auto data = ai::load_ai_data(xml, {});
+    expect(data.has_value(), "#3780: a land closure's data loads");
+    if (!data) return;
+    const auto& player = data.value().players.at("LANDER");
+    expect(player.land_templates == std::vector<std::string>{"LANDT", "LANDU"}
+        && player.space_templates == std::vector<std::string>{"SPACET"}
+        && ai::mode_templates(player, BattleDomain::land) == player.land_templates
+        && ai::mode_templates(player, BattleDomain::space) == player.space_templates,
+        "#3780: templates are read and selected by mode");
+    const auto level = ai::resolve_difficulty(data.value(), &player, "hard");
+    expect(level.space_contrast_multiplier == ai::real(2) && level.land_contrast_multiplier == ai::real(3)
+        && level.land_goal_cycle_sleep == ai::real(15) && level.land_build_time_multiplier == ai::parse_real("0.5").value()
+        && data.value().constants.land_region_size == ai::real(640),
+        "#3780: land difficulty and constants are read beside the space ones");
+    foc::AiSetup land_setup;
+    land_setup.domain = BattleDomain::land;
+    land_setup.players = {{1, "FIRST", false, true, "Lander"}};
+    land_setup.xml = xml;
+    foc::AiSetup space_setup = land_setup;
+    space_setup.domain = BattleDomain::space;
+    expect(foc::freestore_module(land_setup, land_setup.players[0]) == "Data/Scripts/FreeStore/LandFree.lua"
+        && foc::freestore_module(space_setup, space_setup.players[0]) == "Data/Scripts/FreeStore/SpaceFree.lua",
+        "#3780: the freestore lookup follows the mode tag");
+
+    // Plan definitions load from the land directory under a land host, and not under a space host.
+    const std::string plan_path = "Data/Scripts/AI/LandMode/landplan.lua";
+    const std::map<std::string, std::string> plan_modules{{plan_path, R"LUA(
+function Base_Definitions()
+    Category = "Land_Goal"
+    TaskForce = { { "LandForce", "MinimumTotalSize = 0" } }
+    MagicPlan = true
+    IgnoreTarget = true
+end
+)LUA"}};
+    World land;
+    land.host->setup.domain = BattleDomain::land;
+    std::vector<std::string> notes;
+    const std::set<std::string> land_goals{"LAND_GOAL"};
+    const auto land_plans = foc::tactical_ai_detail::load_plans(land.host, plan_modules, notes, &land_goals);
+    expect(land_plans && land_plans.value().size() == 1 && land_plans.value().front().module == plan_path
+        && notes.size() == 1 && notes.front() == "AI selected land plan definitions loaded=1, outside selection=0",
+        "#3780: a land closure loads its LandMode plan in a unit test");
+    World space;
+    notes.clear();
+    const auto space_plans = foc::tactical_ai_detail::load_plans(space.host, plan_modules, notes, &land_goals);
+    expect(space_plans && space_plans.value().empty() && notes.size() == 1
+        && notes.front() == "AI selected space plan definitions loaded=0, outside selection=0",
+        "#3780: a space host does not read the land directory");
+}
+
+
 void authored_goal_extension() {
     for (const auto extension : {0, 2, 7}) {
         World world;

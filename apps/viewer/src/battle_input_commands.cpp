@@ -1,4 +1,5 @@
 #include "battle_input.hpp"
+#include "settings_store.hpp"
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/scene/scene.hpp"
@@ -114,8 +115,16 @@ bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, con
         if (!pressed_key->is_pressed() || pressed_key->is_echo()) return false;
         const Key code = pressed_key->get_physical_keycode() != KEY_NONE ? pressed_key->get_physical_keycode()
                                                                           : pressed_key->get_keycode();
+        std::int64_t command_code = static_cast<std::int64_t>(code);
+        const auto modifiers = modifiers_of(*pressed_key);
+        if (const auto* saved = ActiveSettings::get(); saved && !modifiers.ctrl && !modifiers.shift
+            && !modifiers.alt && !pressed_key->is_meta_pressed() && code >= KEY_A && code <= KEY_Z) {
+            const char letter = ui::camera_command_key(static_cast<char>('A' + (code - KEY_A)), saved->camera_wasd);
+            if (letter == '\0') return false; // The bound camera position owns this bare chord.
+            command_code = static_cast<std::int64_t>(KEY_A) + letter - 'A';
+        }
         refresh(live, population, space);
-        const bool taken = key(static_cast<std::int64_t>(code), modifiers_of(*pressed_key), live, space);
+        const bool taken = key(command_code, modifiers, live, space);
         if (taken) {
             refresh_cards(live);
             ++events_;
@@ -580,7 +589,8 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
     // OR-01: the default keys are A attack, M move, T attack-move and G guard; the key
     // of the armed mode disarms it, another key replaces it (OR-01).
     if (code == static_cast<std::int64_t>(KEY_A) || code == static_cast<std::int64_t>(KEY_M)
-        || code == static_cast<std::int64_t>(KEY_T) || code == static_cast<std::int64_t>(KEY_G)) {
+        || code == static_cast<std::int64_t>(KEY_T) || code == static_cast<std::int64_t>(KEY_G)
+        || code == static_cast<std::int64_t>(KEY_W)) {
         if (input == nullptr) return true;
         ui::OrderMode mode = ui::OrderMode::move;
         const char* name = "move mode";
@@ -593,6 +603,9 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
         } else if (code == static_cast<std::int64_t>(KEY_G)) {
             mode = ui::OrderMode::guard;
             name = "guard mode";
+        } else if (code == static_cast<std::int64_t>(KEY_W)) {
+            mode = ui::OrderMode::waypoint;
+            name = "waypoint mode";
         }
         command_click(mode, false, live, ui::CommandOrigin::hotkey);
         note(name);

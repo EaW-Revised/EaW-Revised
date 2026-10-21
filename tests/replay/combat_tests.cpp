@@ -605,6 +605,40 @@ void test_manual_contracts() {
         && aligned.value().state.weapons.front().manual->target == 0
         && aligned.value().state.weapons.front().manual->yaw == Fixed{},
         "WSW-18: nonaligned attachment coordinates preserve the muzzle cone and launch a manual shot");
+    // WAD-40: a full off-axis request waits for the authored mechanical speed
+    // and muzzle cone, independently of the viewer and the appearance delay.
+    for (const auto speed : {Fixed::from_raw(one / 2), units(1)}) {
+        weapon.manual_turret->speed = speed;
+        weapon.manual_turret->yaw_extent = units(360);
+        weapon.fire_a = weapon.fire_b = {};
+        state = tactical::initial_combat(combat.profiles.front(), 12345, 0, 1);
+        state.weapons.front().countdown = 0;
+        state.weapons.front().manual->target = 2;
+        enemy.position = enemy.previous_position = at(0, 500);
+        enemy.transform = math::to_matrix(math::identity_quat(), enemy.position).value();
+        world.units[1] = enemy;
+        std::uint64_t shot_frame = 0;
+        for (std::uint64_t frame = 1; frame <= 100; ++frame) {
+            world.frame = frame;
+            auto step = detail::step_combat(world, own);
+            expect(static_cast<bool>(step), "WAD-40: turn-to-fire service succeeds");
+            if (!step) break;
+            const auto yaw = step.value().state.weapons.front().manual->yaw;
+            expect(yaw.raw() == static_cast<std::int64_t>(frame) * speed.raw() * 2,
+                "WAD-40: both authored yaw steps reach the snapshot each tick");
+            if (!step.value().manual_fired.empty()) {
+                shot_frame = frame;
+                expect(yaw >= units(70) && yaw <= units(72),
+                    "WAD-40: first shot waits for the 40-degree cone about the off-axis target");
+                break;
+            }
+            expect(yaw < units(72), "WAD-40: an aligned manual gun does not keep waiting");
+            state = std::move(step.value().state);
+        }
+        const auto expected = speed == units(1) ? 35U : 70U;
+        expect(shot_frame >= expected && shot_frame <= expected + 1,
+            "WAD-40: changing authored speed changes the first-shot tick proportionally");
+    }
 }
 
 void test_planetary_purchase_and_burst() {

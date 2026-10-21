@@ -320,8 +320,25 @@ struct GalacticPerceptionWork {
 };
 
 class GalacticWorld final : public World, public galactic_ai::TrackedStateContributor {
+    struct BoundState;
 public:
     explicit GalacticWorld(GalacticPerceptionSetup setup);
+    [[nodiscard]] core::Result<void> prepare_player_frontiers(const sim::PartitionExecutor&,
+        std::span<const tactical::PlayerId> players);
+    class PlayerFrontier {
+    public:
+        PlayerFrontier(const PlayerFrontier&) = delete;
+        PlayerFrontier& operator=(const PlayerFrontier&) = delete;
+        ~PlayerFrontier();
+    private:
+        friend class GalacticWorld;
+        PlayerFrontier(GalacticWorld&, tactical::PlayerId);
+        const GalacticWorld* previous_world_{};
+        BoundState* previous_frontier_{};
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+    [[nodiscard]] PlayerFrontier player_frontier(tactical::PlayerId player) { return PlayerFrontier(*this, player); }
+
     // Nested equation reads do no locking; battle-child equations serialize
     // outside the parent's owner scope. A phase the owner waits on must never
     // query parent perception while owner_reads() holds query_mutex_.
@@ -330,7 +347,10 @@ public:
         SequentialReads(const SequentialReads&) = delete;
         SequentialReads(SequentialReads&&) = delete;
         ~SequentialReads() {
-            if (owner_world_) owner_world_->owner_reads_.fetch_sub(1, std::memory_order_release);
+            if (owner_world_) {
+                owner_world_->legacy_owner_reads_.fetch_sub(1, std::memory_order_release);
+                owner_world_->owner_reads_.fetch_sub(1, std::memory_order_release);
+            }
             active_world_ = previous_;
         }
     private:
@@ -338,7 +358,10 @@ public:
         explicit SequentialReads(const GalacticWorld& world, bool owner = false)
             : lock_(world.query_lock()), previous_(active_world_), owner_world_(owner ? &world : nullptr) {
             active_world_ = &world;
-            if (owner_world_) owner_world_->owner_reads_.fetch_add(1, std::memory_order_release);
+            if (owner_world_) {
+                owner_world_->legacy_owner_reads_.fetch_add(1, std::memory_order_release);
+                owner_world_->owner_reads_.fetch_add(1, std::memory_order_release);
+            }
         }
         std::unique_lock<std::recursive_mutex> lock_;
         const GalacticWorld* previous_{};
@@ -346,6 +369,24 @@ public:
     };
     [[nodiscard]] SequentialReads sequential_reads() const { return SequentialReads(*this); }
     [[nodiscard]] SequentialReads owner_reads() const { return SequentialReads(*this, true); }
+    // ADR-009: the serial partitioned_reads() prologue freezes shared economy inputs before these
+    // disjoint player scopes open. Nested equation reads inherit the player's ownership.
+    class PlayerReads {
+    public:
+        PlayerReads(const PlayerReads&) = delete;
+        PlayerReads(PlayerReads&&) = delete;
+        ~PlayerReads();
+    private:
+        friend class GalacticWorld;
+        PlayerReads(const GalacticWorld&, tactical::PlayerId);
+        const GalacticWorld& world_;
+        std::unique_lock<std::recursive_mutex> lock_;
+        const GalacticWorld* previous_world_{};
+        const GalacticWorld* previous_player_world_{};
+        tactical::PlayerId previous_player_{};
+    };
+    [[nodiscard]] PlayerReads sequential_reads(tactical::PlayerId player) const { return PlayerReads(*this, player); }
+    [[nodiscard]] PlayerReads owner_reads(tactical::PlayerId player) const { return PlayerReads(*this, player); }
     // A serial run of ordinary perception reads of one player. The guard, the player check and the economy refresh that
     // every read repeats are made once, before the first read; each read is otherwise exactly perception(). Nothing a
     // read stores feeds the economy refresh, so the refreshed copy holds for the whole run.
@@ -353,7 +394,7 @@ public:
     public:
         ReadBatch(const GalacticWorld& world, tactical::PlayerId owner)
             : world_(world), owner_(owner), reads_(world.sequential_reads()),
-              ready_(world.snapshot_ && world.player(owner) && world.refresh_economy_runtime()) {}
+              ready_(world.bound().snapshot_ && world.player(owner) && world.refresh_economy_runtime()) {}
         ReadBatch(const ReadBatch&) = delete;
         ReadBatch& operator=(const ReadBatch&) = delete;
         [[nodiscard]] std::optional<Real> perception(const Engine&, const Equation&, const Context&, AiRandom&) const;
@@ -396,12 +437,12 @@ public:
     // separately. The atomic binder remains the independent fixture oracle.
     void enable_live_deltas(std::uint64_t perception_period = 300,
         std::shared_ptr<const sim::PartitionExecutor> read_workers = {}) noexcept {
-        live_deltas_ = true; perception_period_ = std::max<std::uint64_t>(1, perception_period);
+        bound().live_deltas_ = true; perception_period_ = std::max<std::uint64_t>(1, perception_period);
         read_workers_ = std::move(read_workers);
     }
     void set_perception_period(std::uint64_t frames) noexcept {
         const auto period = std::max<std::uint64_t>(1, frames);
-        if (period != perception_period_) { perception_period_ = period; last_catalog_slice_.reset(); }
+        if (period != perception_period_) { perception_period_ = period; bound().last_catalog_slice_.reset(); }
     }
     void set_producer_executor_supplier(std::function<const sim::PartitionExecutor*()> supplier) {
         producer_executor_ = std::move(supplier);
@@ -433,28 +474,30 @@ public:
     struct NativeFrontierWork {
         std::uint64_t barrier{}, requests{}, binds{}, sparse_binds{}, prepared_planets{}, prepared_force_planets{}, force_terms{};
     };
-    [[nodiscard]] NativeFrontierWork native_frontier_work() const noexcept { return native_frontier_work_; }
+    [[nodiscard]] NativeFrontierWork native_frontier_work() const noexcept { return bound().native_frontier_work_; }
     // Independent full-preparation oracle for deterministic work/equality probes.
     void enable_sparse_native_frontiers(bool enabled) noexcept { sparse_native_frontiers_ = enabled; }
-    [[nodiscard]] std::shared_ptr<const detail::WorldView> view() const override { return reader_.view(); }
-    [[nodiscard]] bool available() const noexcept override { return snapshot_ != nullptr; }
-    [[nodiscard]] const std::set<sim::EntityId>& stealth_fleets() const noexcept { return connectivity_->stealth_fleets; }
+    [[nodiscard]] std::shared_ptr<const detail::WorldView> view() const override { return bound().reader_.view(); }
+    [[nodiscard]] bool available() const noexcept override { return bound().snapshot_ != nullptr; }
+    [[nodiscard]] const std::set<sim::EntityId>& stealth_fleets() const noexcept { return bound().connectivity_->stealth_fleets; }
     [[nodiscard]] std::uint64_t completed_tick() const noexcept override;
-    [[nodiscard]] std::uint64_t synchronized_frame() const noexcept { return synchronized_frame_; }
+    [[nodiscard]] std::uint64_t synchronized_frame() const noexcept { return bound().synchronized_frame_; }
     [[nodiscard]] std::uint64_t observer_input_generation() const noexcept {
-        return snapshot_ ? snapshot_->observer_input_generation() : 0;
+        return bound().snapshot_ ? bound().snapshot_->observer_input_generation() : 0;
     }
     // Derived B invalidation, independent of unrelated budget/hint cache writes.
     [[nodiscard]] std::uint64_t movement_input_revision() const noexcept {
         const auto lock = query_lock();
-        std::uint64_t total = movement_input_revision_;
+        std::uint64_t total = bound().movement_input_revision_;
         for (const auto& [who, slice] : shards_) { static_cast<void>(who); total += slice.movement_revision; }
         return total;
     }
+    // A frozen aggregate prefix plus this player's changes; no live foreign shard reads.
+    [[nodiscard]] std::uint64_t movement_input_revision(tactical::PlayerId player) const;
     // Parent world remains frozen in a child; the synchronizer clock still advances.
     void set_synchronized_frame(std::uint64_t frame) {
         const auto reads = sequential_reads();
-        finish_perception_queries(); synchronized_frame_ = frame;
+        finish_perception_queries(); bound().synchronized_frame_ = frame;
     }
     [[nodiscard]] std::optional<Real> perception(const Engine&, const Equation&, const Context&, AiRandom&) const override;
     [[nodiscard]] std::optional<Real> perception_read_only(const Engine&, const Equation&, const Context&, AiRandom&) const;
@@ -491,14 +534,14 @@ public:
     [[nodiscard]] tactical::ProductionCounts production_counts(tactical::PlayerId, tactical::TypeId) const override;
     [[nodiscard]] bool construction_allowed(tactical::PlayerId, sim::EntityId) const override { return false; }
     [[nodiscard]] bool constructing_for(sim::EntityId, tactical::PlayerId) const override { return false; }
-    [[nodiscard]] sim::EntityId next_entity_id() const noexcept override { return next_id_; }
+    [[nodiscard]] sim::EntityId next_entity_id() const noexcept override { return bound().next_id_; }
     [[nodiscard]] std::optional<ReinforcementResult> reinforcement_search_result(tactical::PlayerId, std::uint64_t) const override { return {}; }
     [[nodiscard]] std::span<const tactical::Event> events() const noexcept override { return {}; }
     [[nodiscard]] std::span<const tactical::CombatEvent> combat_events() const noexcept override { return {}; }
 
     [[nodiscard]] std::optional<galactic::PlanetId> containing_planet(sim::EntityId) const;
     [[nodiscard]] const GalacticExecutionRoute* execution_route(tactical::PlayerId, galactic::PlanetId, galactic::PlanetId) const;
-    [[nodiscard]] bool execution_available() const noexcept { return connectivity_->execution_available; }
+    [[nodiscard]] bool execution_available() const noexcept { return bound().connectivity_->execution_available; }
     // WGA-138/139: derived E publication does not re-copy completed forces,
     // production offers or perception caches, and does not advance gameplay.
     [[nodiscard]] core::Result<void> publish_execution_routes(bool available, std::uint64_t revision,
@@ -508,7 +551,7 @@ public:
     // nullopt: production-site relation not supplied; false: known nonmember.
     [[nodiscard]] std::optional<bool> goal_reachable(tactical::PlayerId, galactic::PlanetId,
         galactic::PlanetId, std::string_view) const;
-    [[nodiscard]] GalacticPerceptionWork work() const noexcept { return work_; }
+    [[nodiscard]] GalacticPerceptionWork work() const noexcept { return bound().work_; }
     // Ordered owner boundary, between equations: reclaim derived spellings
     // that are no longer referenced by native remembered records.
     void finish_perception_queries() const;
@@ -524,7 +567,7 @@ public:
         }
         return total;
     }
-    [[nodiscard]] std::uint64_t producer_admission_preparations() const noexcept { return admission_preparations_; }
+    [[nodiscard]] std::uint64_t producer_admission_preparations() const noexcept { return bound().admission_preparations_; }
     [[nodiscard]] std::uint64_t producer_demand_offer_checks() const noexcept;
     [[nodiscard]] std::shared_ptr<const galactic_ai::WorldInput> copy_input() const;
     // Copied owning-service input, refreshed at the same completed boundary.
@@ -577,12 +620,9 @@ private:
         sim::EntityId, bool perception_due, bool native_sparse);
     bool sparse_native_frontiers_{true};
     std::shared_ptr<GalacticMarkup> markup_;
-    NativeFrontierWork native_frontier_work_;
-    tactical::PlayerId native_frontier_player_{};
     struct Evaluator;
     struct Shard;
     [[nodiscard]] bool refresh_economy_runtime() const;
-    mutable std::uint64_t movement_input_revision_{};
     struct PlanetRow {
         galactic::Planet planet;
         GalacticPlanetFacts facts;
@@ -642,37 +682,35 @@ private:
     void rebuild_row_index(Shard&) const;
     [[nodiscard]] std::unique_lock<std::recursive_mutex> query_lock() const {
         std::unique_lock<std::recursive_mutex> lock(query_mutex_, std::defer_lock);
-        if (active_world_ != this) {
+        if (active_world_ != this && active_player_world_ != this) {
             gc_profile::Scope wait_scope(gc_profile::Phase::perception_lock_wait);
             // Published before dispatching any owned phase, including child
             // work: a foreign query must fail before waiting for its owner.
             if (owner_reads_.load(std::memory_order_acquire) != 0) {
+                if (player_reads_.load(std::memory_order_acquire) != 0)
+                    throw std::logic_error("parent perception query during galactic player scope");
                 // A nested scope for another world changes TLS, but the same
                 // thread can still own this recursive mutex. Never wait here.
                 if (!lock.try_lock())
                     throw std::logic_error("parent perception query during galactic owner scope");
             } else lock.lock();
+            // A player scope may have announced itself while this query waited on the admission gate.
+            if (player_reads_.load(std::memory_order_acquire) != 0)
+                throw std::logic_error("parent perception query during galactic player scope");
         }
         return lock;
     }
     static thread_local const GalacticWorld* active_world_;
+    static thread_local const GalacticWorld* active_player_world_;
+    static thread_local tactical::PlayerId active_player_;
     [[nodiscard]] GalacticVisibility* visibility(tactical::PlayerId, galactic::PlanetId, std::uint32_t mask = 0, bool publish = true) const;
     GalacticPerceptionSetup setup_;
     // Immutable first-match lookup, derived before sorting identity metadata.
     std::map<std::string, std::map<std::uint32_t, tactical::TypeId>, std::less<>> next_technology_types_;
-    std::shared_ptr<const galactic::GalacticSnapshot> snapshot_;
-    // PlanetRow's production pointers belong to this retained physical publication.
-    std::shared_ptr<const galactic::GalacticSnapshot> bound_source_;
-    bool live_deltas_{};
-    // S3a: the structural index and the published world view of the bound tick.
-    AiWorldReader reader_;
     std::vector<ReaderTypeTraits> type_traits_;
     std::vector<ReaderTeam> teams_;
-    std::vector<PlanetRow> planets_;
     std::vector<tactical::Player> players_;
-    std::vector<tactical::EconomyView> accounts_;
     struct BuildRow { tactical::PlayerId player{}; sim::EntityId producer{}; tactical::BuildOption option; galactic_ai::ProducerInput input; };
-    std::vector<BuildRow> builds_;
     struct PreparedProducerOffers;
     [[nodiscard]] core::Result<void> prepare_catalog_slice(const sim::PartitionExecutor&, std::uint64_t);
     // inputs_unchanged: the caller proved the income inputs and planets equal to the retained catalog's source.
@@ -682,20 +720,11 @@ private:
     [[nodiscard]] static core::Result<std::vector<galactic_ai::ProducerInput>> read_producers(
         const PreparedProducerOffers&, std::uint32_t logical_fps, tactical::PlayerId,
         galactic::PlanetId, std::span<const galactic::TypeId>, bool first_allowed, const sim::PartitionExecutor&);
-    std::shared_ptr<const PreparedProducerOffers> prepared_producer_offers_;
     std::uint64_t perception_period_{300};
-    std::optional<std::uint64_t> last_catalog_slice_;
     std::shared_ptr<const sim::PartitionExecutor> read_workers_;
     std::function<const sim::PartitionExecutor*()> producer_executor_;
-    mutable std::map<std::tuple<tactical::PlayerId, sim::EntityId, tactical::TypeId>, tactical::BuildOption> build_options_;
-    std::uint64_t admission_preparations_{};
-    std::shared_ptr<const galactic_ai::WorldInput> input_;
     tactical::EconomyRules economy_;
     std::map<sim::EntityId, tactical::PadState> pads_;
-    std::shared_ptr<const GalacticConnectivity> connectivity_{std::make_shared<const GalacticConnectivity>()};
-    // Always describes connectivity_->goal_reach; republishing routes copies the same rows, so only bind_connectivity rebuilds it.
-    std::shared_ptr<const GalacticGoalReachIndex> goal_reach_index_{std::make_shared<const GalacticGoalReachIndex>()};
-    GalacticPerceptionWork work_;
     struct EconomyPlanet {
         galactic::PlanetId planet{};
         tactical::PlayerId owner{};
@@ -711,26 +740,59 @@ private:
         bool force_available{true};
         std::optional<Real> maintenance;
     };
-    std::vector<EconomyPlanet> economy_planets_;
-    std::map<tactical::PlayerId, EconomyPlayer> economy_players_;
-    std::shared_ptr<const galactic::EconomyInputGeneration> economy_generation_;
-    mutable std::shared_ptr<const GalacticEconomyRuntime> economy_runtime_;
     EconomySupplier economy_supplier_;
     TimelineReader timeline_reader_;
-    std::uint64_t economy_rebuilds_{};
+    // Derived physical inputs belong to a frontier; canonical remembered values remain in the player shards.
+    struct BoundState {
+        std::shared_ptr<const galactic::GalacticSnapshot> snapshot_;
+        // PlanetRow's production pointers belong to this retained physical publication.
+        std::shared_ptr<const galactic::GalacticSnapshot> bound_source_;
+        bool live_deltas_{};
+        // S3a: structural index and published world view for this physical frontier.
+        AiWorldReader reader_;
+        std::vector<PlanetRow> planets_;
+        std::vector<tactical::EconomyView> accounts_;
+        std::vector<BuildRow> builds_;
+        std::shared_ptr<const PreparedProducerOffers> prepared_producer_offers_;
+        std::optional<std::uint64_t> last_catalog_slice_;
+        mutable std::map<std::tuple<tactical::PlayerId, sim::EntityId, tactical::TypeId>, tactical::BuildOption> build_options_;
+        std::uint64_t admission_preparations_{};
+        std::shared_ptr<const galactic_ai::WorldInput> input_;
+        std::shared_ptr<const GalacticConnectivity> connectivity_{std::make_shared<const GalacticConnectivity>()};
+        // Republished routes share goal-reach rows; only bind_connectivity rebuilds their index.
+        std::shared_ptr<const GalacticGoalReachIndex> goal_reach_index_{std::make_shared<const GalacticGoalReachIndex>()};
+        GalacticPerceptionWork work_;
+        std::vector<EconomyPlanet> economy_planets_;
+        std::map<tactical::PlayerId, EconomyPlayer> economy_players_;
+        std::shared_ptr<const galactic::EconomyInputGeneration> economy_generation_;
+        mutable std::shared_ptr<const GalacticEconomyRuntime> economy_runtime_;
+        std::uint64_t economy_rebuilds_{};
+        sim::EntityId next_id_{1};
+        std::uint64_t synchronized_frame_{};
+        NativeFrontierWork native_frontier_work_;
+        tactical::PlayerId native_frontier_player_{};
+        mutable std::uint64_t movement_input_revision_{};
+    };
+    BoundState bound_state_;
+    std::map<tactical::PlayerId, BoundState> player_frontiers_;
+    std::vector<tactical::PlayerId> prepared_frontier_players_;
+    static thread_local const GalacticWorld* frontier_world_;
+    static thread_local BoundState* active_frontier_;
+    [[nodiscard]] BoundState& bound() noexcept { return frontier_world_ == this ? *active_frontier_ : bound_state_; }
+    [[nodiscard]] const BoundState& bound() const noexcept { return frontier_world_ == this ? *active_frontier_ : bound_state_; }
     struct PlayerEconomyMemo {
         std::map<GalacticInternedKey, std::optional<Real>> queries{};
         std::optional<Real> expiry{};
         std::optional<std::uint64_t> frame{};
     };
     [[nodiscard]] PlayerEconomyMemo& economy_memo(const GalacticQueryKey&, ReadMode, PlayerEconomyMemo& scratch) const;
-    sim::EntityId next_id_{1};
-    std::uint64_t synchronized_frame_{};
     // Open PartitionedReads scopes, and whether their one refresh succeeded.
     mutable std::atomic<std::uint32_t> partitioned_reads_{};
     mutable bool partitioned_refresh_ok_{};
     mutable std::recursive_mutex query_mutex_;
     mutable std::atomic<std::uint32_t> owner_reads_{};
+    mutable std::atomic<std::uint32_t> legacy_owner_reads_{};
+    mutable std::atomic<std::uint32_t> player_reads_{};
     void update_record(tactical::PlayerId, std::uint32_t kind, std::size_t index) const;
     // Rebuilds every shard's record slice from its rows; the digest of all slices is records_digest().
     void rebuild_records() const;
@@ -743,6 +805,8 @@ private:
     // its own player's shard. The layout is invisible in bytes: every export sorts by the canonical keys and the
     // record digest sums per player and ignores slots.
     struct Shard {
+        // Shards are pre-created at load; the mutex stays with its owner through derived row copies.
+        std::shared_ptr<std::recursive_mutex> query_mutex{std::make_shared<std::recursive_mutex>()};
         std::vector<GalacticInternedValue> cache;
         // Empty slots are zero; populated slots contain record position + 1.
         std::vector<std::size_t> cache_index;
@@ -761,7 +825,7 @@ private:
         std::map<std::vector<std::string>, std::uint64_t> late_token_ids;
         std::map<std::uint64_t, std::shared_ptr<const PerceptionToken>> late_tokens;
         core::RecordDigest records;
-        std::uint64_t revision{}, movement_revision{}, record_encodes{};
+        std::uint64_t revision{}, movement_revision{}, movement_read_base{}, record_encodes{};
         bool refreshing_visibility{};
         ReadTrace* trace{}; // set only while a serial owner pass records its reads (trace_reads)
         // Positions in `cache` of the rows the deadline scan (force_rows) and the connectivity drop (first_connected)

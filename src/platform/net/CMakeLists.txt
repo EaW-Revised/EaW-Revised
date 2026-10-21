@@ -14,3 +14,6 @@ target_include_directories(eawr_platform_net_galactic PUBLIC "${CMAKE_CURRENT_LI
 target_link_libraries(eawr_platform_net_galactic PUBLIC eawr::net_galactic eawr::net eawr::platform)
 target_compile_features(eawr_platform_net_galactic PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_platform_net_galactic)
+
+# The lobby launch retains/adopts the galactic driver.
+target_link_libraries(eawr_platform_net PUBLIC eawr::platform_net_galactic)

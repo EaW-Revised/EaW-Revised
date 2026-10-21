@@ -50,6 +50,21 @@ class AttractStructure(unittest.TestCase):
         self.assertIn("front_end_->input(event)", host)
         self.assertIn("front_end_->window_activated()", host)
 
+    def test_a_host_started_campaign_stops_the_demo_battle_and_leaves_it_to_the_menu(self):
+        # #4561: the multiplayer lobby's campaign launch skips the shell's launcher, and the host stops
+        # calling the front end once the campaign runs, so the demo battle stayed alive and frozen under the
+        # campaign's child battles and the menu came back grey. The launch hands the frame over like a start.
+        front = (SRC / "front_end_mode.cpp").read_text(encoding="utf-8")
+        handover = front[front.index("void FrontEndMode::campaign_started_by_host()"):front.index("void FrontEndMode::return_to_main_menu()")]
+        self.assertIn('state_->stop_attract("campaign start")', handover)
+        self.assertLess(handover.index("stop_attract"), handover.index("begin_campaign()"))
+        process = (SRC / "viewer_host_process.cpp").read_text(encoding="utf-8")
+        launch = process[process.index("lan->take_galactic_launch()"):process.index("if (auto selected = skirmish_setup_->take_start())")]
+        self.assertIn("front_end_->campaign_started_by_host()", launch)
+        # Only a launch that started: a refused one returns to the setup screen with the demo battle running.
+        self.assertLess(launch.index("lan->cancel()"), launch.index("front_end_->campaign_started_by_host()"))
+        self.assertLess(launch.index("front_end_->campaign_started_by_host()"), launch.index("galactic_mode_ = std::move(campaign)"))
+
     def test_the_demo_battle_builds_no_hud_and_takes_no_world_input(self):
         population = (SRC / "map_mode_ready_population.cpp").read_text(encoding="utf-8")
         # MAT-10, WGUI-76, MAT-18: no battle input, silent battle audio, the saved camera.
@@ -67,12 +82,18 @@ class AttractStructure(unittest.TestCase):
         population = (SRC / "map_mode_ready_population.cpp").read_text(encoding="utf-8")
         self.assertIn(".attract_silent = state.options.attract.has_value()", population)
         events = (SRC / "battle_audio_events.cpp").read_text(encoding="utf-8")
-        # The event queue entry (speech class, then 3D), the production cue's speech queue and the
-        # campaign briefing.
-        self.assertEqual(events.count("options_.attract_silent"), 4)
-        self.assertIn("options_.attract_silent && speech_class(*sfx)", events)
-        # MAT-18: 3D events are refused at the source (retail's multiplier 0); no bus is muted.
-        self.assertIn("options_.attract_silent && sfx->is_3d", events)
+        # All SFX, speech queues and music (including directly re-cued summary stings) use one policy.
+        header = (SRC / "battle_audio.hpp").read_text(encoding="utf-8")
+        self.assertIn("bool admits_battle_audio() const noexcept { return !options_.attract_silent; }", header)
+        self.assertEqual(events.count("if (!admits_battle_audio())"), 4)
+        self.assertNotIn("options_.attract_silent", events)
+        play = events[events.index("BattleAudio::play("):events.index("BattleAudio::event_backend()")]
+        gate = play[play.index("if (!admits_battle_audio()) {"):play.index("++requested_")]
+        self.assertIn("return std::nullopt;", gate)
+        self.assertLess(play.index("return std::nullopt;", play.index("if (!admits_battle_audio())")),
+                        play.index("events_.admit("))
+        self.assertNotIn("attract_silent &&", play)
+        self.assertNotIn("SFX_Death_Bombard", play)  # mods may author any event/preset
         audio = (SRC / "battle_audio.cpp").read_text(encoding="utf-8")
         self.assertNotIn("sfx_3d_muted", audio)
         self.assertIn("if (!options_.attract_silent) server->set_bus_mute(0, options_.muted);", audio)
@@ -82,6 +103,14 @@ class AttractStructure(unittest.TestCase):
         runner = (SRC / "attract_runner.cpp").read_text(encoding="utf-8")
         self.assertIn(r'\"speech\": {\"refused\"', runner)
         self.assertIn(r'\"sfx_3d\": {\"refused\"', runner)
+        self.assertIn(r'\"audio_events\": {\"refused\"', runner)
+
+    def test_summary_music_and_its_loops_use_the_battle_admission_gate(self):
+        events = (SRC / "battle_audio_events.cpp").read_text(encoding="utf-8")
+        music = events[events.index("void BattleAudio::cue_music("):events.index("void BattleAudio::update_music(")]
+        # Reject before logs, stream replacement or a player start; no sim-outcome assumption.
+        self.assertLess(music.index("if (!admits_battle_audio()) return;"), music.index("music_log_"))
+        self.assertIn("cue_music({summary_event_", events)
 
     def test_the_pool_return_comes_in_through_the_session_setup(self):
         # MAT-15/16 (legacy #3021): the demo start carries the pool-return record in its setup (the
@@ -127,13 +156,16 @@ class AttractStructure(unittest.TestCase):
         self.assertNotIn("Demo_Attract_Kamino", attract)
 
 
-def run_attract(test, directory, name, *extra, frames=400, capture=True, timeout=600):
+def run_attract(test, directory, name, *extra, frames=400, capture=True, timeout=600, fixed_step=False):
     executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
     test.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
     report = directory / f"{name}.json"
     arguments = [executable, "--resolution", "1280x720", "--path", str(ROOT / "apps/viewer/project"), "--",
                  "--eawr-attract", *extra, "--eawr-game-root", GAME_ROOT, "--eawr-attract-frames", str(frames),
                  "--eawr-report", str(report)]
+    if fixed_step:
+        # Fixed presentation time makes this a bounded simulated battle, independent of draw speed.
+        arguments[1:1] = ["--fixed-fps", "30"]
     keep = os.environ.get("EAWR_ATTRACT_CAPTURE_DIR")
     if capture:
         picture = (pathlib.Path(keep) if keep else directory) / f"{name}.png"
@@ -200,6 +232,24 @@ class AttractGraphical(unittest.TestCase):
         self.assertEqual(speech["queued"], 0, "no speech event was queued under the attract")
         self.assertEqual(speech["started"], 0, "no speech or announcement started under the attract")
         self.assertGreater(speech["refused"], 0, "the gate saw the battle's own speech-class events")
+        self.assertEqual(result["audio_events"]["admitted"], 0)
+        self.assertEqual(result["audio_events"]["started"], 0)
+
+    def test_capital_ship_death_admits_no_battle_audio_contract(self):
+        # MAT-18: run the real demo, published death records and BattleAudio admission together.
+        # The stock capital-ship death effect is 2D; this catches the old 3D/speech-only guard.
+        # The live viewer needs a rendering backend; the contract reads admission counters.
+        result = run_attract(self, self.directory, "death-contract", frames=18000,
+                             capture=False, timeout=1800, fixed_step=True)
+        self.assertGreater(result["battle"]["lost"], 0)
+        self.assertGreater(result["audio_events"]["deaths_2d_refused"], 0,
+                           "the battle must reach a non-positional ship death cue")
+        self.assertGreater(result["audio_events"]["refused"], 0)
+        self.assertEqual(result["audio_events"]["admitted"], 0)
+        self.assertEqual(result["audio_events"]["started"], 0)
+        self.assertEqual(result["speech"]["queued"], 0)
+        self.assertEqual(result["speech"]["started"], 0)
+        self.assertTrue(result["session_freed"])
 
     def test_the_forces_fight_for_a_whole_cycle_and_the_battle_does_not_run_dry(self):
         # The coordinator's question (#2937): without the pool return (MAT-15, MAT-16) the battle must

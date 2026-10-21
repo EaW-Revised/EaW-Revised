@@ -7,6 +7,7 @@
 #include "ai_equations.hpp"
 
 #include "eawr/core/result.hpp"
+#include "eawr/sim/tactical/types.hpp"
 
 #include <cstdint>
 #include <map>
@@ -80,6 +81,7 @@ struct PlayerType {
     std::vector<std::string> function_sets; // upper case, in order
     std::vector<std::string> space_templates;
     std::vector<std::string> galactic_templates;
+    std::vector<std::string> land_templates; // #3780: read from Templates/Land; not part of galactic checkpoints
     std::map<std::string, std::string, std::less<>> freestore; // mode -> authored script
     std::map<std::string, std::string, std::less<>> difficulty; // EASY/NORMAL/HARD -> adjustment name
 };
@@ -96,6 +98,10 @@ struct Difficulty {
     Real shield_multiplier{real(1)};
     Real damage_multiplier{real(1)};
     Real space_build_time_multiplier{real(1)};
+    // #3780: the land mode's values of the same three adjustments (not part of galactic checkpoints).
+    Real land_contrast_multiplier{real(1)};
+    Real land_goal_cycle_sleep{};
+    Real land_build_time_multiplier{real(1)};
 };
 
 // gameconstants.xml values of the space perception grid and targets; engine defaults where
@@ -113,6 +119,7 @@ struct Constants {
     Real medium_threat_tolerance{};
     Real high_threat_tolerance{};
     Real health_low_threshold{};               // Health_Low_Percent_Threshold
+    Real land_region_size{real(2000)};         // AI_LandEvaluatorRegionSize (#3780; not part of galactic checkpoints)
 };
 
 struct AiData {
@@ -131,8 +138,11 @@ struct AiData {
 // not the Normal entry.
 [[nodiscard]] Difficulty resolve_difficulty(const AiData& data, const PlayerType* type, std::string_view level);
 
-// The XML files the goal system reads, as logical paths (AI-15).
+// The XML files the goal system reads, as logical paths (AI-15). Mounted directories add to this.
 [[nodiscard]] std::vector<std::string> ai_xml_files();
+[[nodiscard]] std::vector<std::string> ai_xml_files(sim::tactical::BattleDomain domain);
+// The player type's template list for a mode (space, or land from Templates/Land).
+[[nodiscard]] const std::vector<std::string>& mode_templates(const PlayerType& type, sim::tactical::BattleDomain domain);
 
 // `xml` holds ai_xml_files() by logical path; `converters` give Converter[...] constants.
 [[nodiscard]] core::Result<AiData> load_ai_data(

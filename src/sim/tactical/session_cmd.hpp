@@ -94,7 +94,8 @@ public:
 
 // Phase-local path lanes and command preparation; ordered callers retain all barriers.
 struct Tick::PlanLanes final {
-    explicit PlanLanes(Tick& owner) : phase(owner) {}
+    explicit PlanLanes(Tick& owner)
+        : phase(owner), paths(owner.impl_->motion.avoidance ? owner.impl_->motion.avoidance->search_budget : 0) {}
 
     Tick& phase;
     struct PlanJob {
@@ -107,7 +108,7 @@ struct Tick::PlanLanes final {
         bool landing{};
     };
     std::vector<PlanJob> pending;
-    std::array<std::uint64_t, 4> spent{};
+    SpacePathService::Lanes<4> paths;
     std::deque<PlayerCommand> concentrate_batches;
     std::vector<SpaceBody> concentrate_new_bodies;
     CommandKey concentrate_command_key{};

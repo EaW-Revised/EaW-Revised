@@ -86,6 +86,9 @@ func _process(delta):
             slot_seen = true
             release_frame = frame + 4
             print("ENTRY_SLOT=true")
+            var slot = viewport.find_child("galaxy_destruction_first_slot",true,false)
+            for child in slot.get_children():
+                if child is Label: print("ENTRY_CAPTION=", child.text.to_upper())
             motion(point,true)
             viewport.get_texture().get_image().save_png(%(capture)s)
         elif frame == 200:
@@ -143,6 +146,7 @@ class GalacticHeroAbilityEntryRuntime(unittest.TestCase):
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ENTRY_SLOT=true", result.stdout, "the hero slot must show while the hero fleet is dragged")
+        self.assertIn("ENTRY_CAPTION=" + ("SABOTAGE" if fixture == "sabotage-entry" else "NEUTRALIZE"), result.stdout)
         self.assertIn("ENTRY_MODAL=true", result.stdout, "the release must open the hero action menu")
         data = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(data["destruction_hud"]["hero_drops"], 1)

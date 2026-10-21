@@ -105,6 +105,7 @@ std::optional<Content> combat_engagement_witness(const std::filesystem::path& ro
     bool economy_disabled = false);
 void check_combat_engagement(const Run& result, const std::uint64_t seed, const std::uint64_t ticks);
 int passive_contact_control(const std::filesystem::path& root, const std::uint64_t ticks);
+int capital_avoidance_probe(const std::filesystem::path& root);
 int stock_economy_witness(const std::filesystem::path& root);
 void hutt_nearest_probe(const Content& content);
 void ability_probe(const Content& content);

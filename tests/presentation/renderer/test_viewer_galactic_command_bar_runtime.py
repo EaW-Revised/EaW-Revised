@@ -14,11 +14,14 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticCommandBarRuntime(unittest.TestCase):
     def capture(self, seat, fixture=None, campaign="synthetic"):
+        # Imported BASE/HEAD capture helpers keep their original verification policy.
+        verify = isinstance(self, GalacticCommandBarRuntime)
+        verify_args = ("--eawr-galactic-hud-verify", "yes") if verify else ()
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-command-bar-"))
         report, capture = directory / "report.json", directory / "capture.png"
         args = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
                 "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-galactic", campaign,
-                "--eawr-game-root", GAME_ROOT, "--eawr-galactic-seat", str(seat),
+                *verify_args, "--eawr-game-root", GAME_ROOT, "--eawr-galactic-seat", str(seat),
                 "--eawr-galactic-paused", "yes", "--eawr-report", str(report),
                 "--eawr-capture", str(capture)]
         if fixture:
@@ -27,6 +30,9 @@ class GalacticCommandBarRuntime(unittest.TestCase):
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
+        if verify:
+            self.assertGreater(data["hud_work"]["verify_checks"], 0)
+            self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         self.assertEqual(data["status"], "captured")
         self.assertTrue(data["paused"])
@@ -41,6 +47,44 @@ class GalacticCommandBarRuntime(unittest.TestCase):
         self.assertEqual(data["live_session"]["pause_depth"], 1)
         self.assertEqual(data["live_session"]["galactic_frame"], 0)
         return data, capture
+
+    def test_paused_selected_view_does_not_rebuild_per_render_frame(self):
+        # Screenshot mode does not service the interactive HUD on every frame. Keep an interactive paused
+        # campaign open for a fixed number of frames so this would reject an unconditional view rebuild.
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-command-view-work-"))
+        report = directory / "report.json"
+        driver = directory / "paused.gd"
+        driver.write_text('''extends SceneTree
+var frame = 0
+func _initialize():
+    call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(_delta):
+    frame += 1
+    if frame == 120:
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''', encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--fixed-fps", "60", "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "Sandbox_Equal_Footing_Underworld", "--eawr-game-root", GAME_ROOT,
+            "--eawr-galactic-paused", "yes", "--eawr-galactic-hud-verify", "yes",
+            "--eawr-report", str(report)], cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        work = data["hud_work"]
+        self.assertGreaterEqual(work["updates"], 120)
+        self.assertGreater(work["verify_checks"], 0)
+        self.assertEqual(work["verify_mismatches"], 0, work.get("verify_detail"))
+        self.assertGreater(work["command_view_rebuilds"], 0)
+        # Facts/selection changes may rebuild the view; unchanged render frames may only verify it.
+        self.assertLessEqual(work["command_view_rebuilds"], work["fact_rebuilds"] + 2)
+        self.assertLess(work["command_view_rebuilds"], work["updates"])
 
     def test_each_faction_shell_and_accessible_domain(self):
         from space_map_test_support import decode_png
@@ -131,12 +175,14 @@ func _process(_delta):
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-seat", "1",
-            "--eawr-galactic-hud-fixture", "accessible", "--eawr-game-root", GAME_ROOT,
+            "--eawr-galactic-hud-fixture", "accessible", "--eawr-galactic-hud-verify", "yes", "--eawr-game-root", GAME_ROOT,
             "--eawr-galactic-paused", "yes", "--eawr-report", str(report)],
             cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertGreater(data["hud_work"]["verify_checks"], 0)
+        self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         bar = data["command_bar"]
         self.assertTrue(bar["space_tab"])
@@ -227,12 +273,14 @@ func _process(_delta):
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-seat", "1",
-            "--eawr-galactic-hud-fixture", "accessible", "--eawr-game-root", GAME_ROOT,
+            "--eawr-galactic-hud-fixture", "accessible", "--eawr-galactic-hud-verify", "yes", "--eawr-game-root", GAME_ROOT,
             "--eawr-galactic-paused", "yes", "--eawr-report", str(report)],
             cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertGreater(data["hud_work"]["verify_checks"], 0)
+        self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         for name in ["b_space_tab", "b_planet_tab", "b_play_pause", "b_fast_forward"]:
             self.assertIn("HUD_PRESS " + name, result.stdout + result.stderr)
@@ -290,11 +338,13 @@ func _process(_delta):
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "Sandbox_Equal_Footing_Underworld", "--eawr-galactic-seat", "1",
-            "--eawr-galactic-ai", "on" if ai else "off", "--eawr-game-root", GAME_ROOT,
+            "--eawr-galactic-ai", "on" if ai else "off", "--eawr-galactic-hud-verify", "yes", "--eawr-game-root", GAME_ROOT,
             "--eawr-report", str(report)], cwd=ROOT, capture_output=True, text=True, timeout=600, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertGreater(data["hud_work"]["verify_checks"], 0)
+        self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         return data
 

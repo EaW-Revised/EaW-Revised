@@ -71,7 +71,7 @@ gc::GalacticSetup fixture() {
     }
     // The observer's live surface references mirror the control lists (WGUI-41/103).
     s.observer.emplace(); auto& o = *s.observer;
-    o.local_player = 1; o.reveal_delay_seconds = f(1);
+    o.human_observers = {1}; o.solo_reference_human = 1; o.reveal_delay_seconds = f(1);
     o.types = {{1, false, false, false}, {2, false, false, false}};
     const gc::IntelligenceMask mask = gc::bit(gc::Intelligence::ground_count) | gc::bit(gc::Intelligence::ground_contents)
         | gc::bit(gc::Intelligence::ownership) | gc::bit(gc::Intelligence::fleet_presence) | gc::bit(gc::Intelligence::fleet_count);

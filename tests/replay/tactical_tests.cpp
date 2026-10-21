@@ -395,6 +395,90 @@ void test_match_policy_format(const std::string& fixtures) {
         "v5 retains the squadron table beside tagged policy records");
 }
 
+void test_battle_domain(const std::string& fixtures) {
+    auto replay = load_fixture(fixtures);
+    const auto legacy = read_bytes(fixtures + "/tactical-v2.eawr-replay");
+    expect(replay.setup.domain == tactical::BattleDomain::space, "absent battle domain is space");
+    const auto space = tactical::write_replay(replay);
+    expect(space && space.value() == legacy, "default space keeps every fixture byte");
+    tactical::TacticalContent content;
+    auto world = tactical::TacticalSession::create(replay.setup, content);
+    expect(world && world.value().domain() == tactical::BattleDomain::space, "space content remains the default");
+    if (world) {
+        const auto recorded = tactical::write_replay(world.value().record());
+        auto initial = replay;
+        initial.commands.clear();
+        initial.final_tick_count = 0;
+        expect(recorded && recorded.value() == tactical::write_replay(initial).value(), "space session recording keeps its domain implicit");
+    }
+    replay.setup.domain = tactical::BattleDomain::land;
+    auto expected = legacy;
+    expected[8] = 4;
+    expected[10] = 120;
+    const auto tag = tactical::replay_extension_battle_domain;
+    const std::array<std::uint8_t, 16> extension{
+        1, 0, 0, 0, static_cast<std::uint8_t>(tag), static_cast<std::uint8_t>(tag >> 8),
+        8, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+    expected.insert(expected.begin() + 104, extension.begin(), extension.end());
+    const auto land = tactical::write_replay(replay);
+    const auto parsed = tactical::parse_replay(expected);
+    expect(land && land.value() == expected, "land domain uses the independently encoded versioned extension");
+    expect(parsed && parsed.value() == replay, "land replay parses without creating a land world");
+    if (parsed) {
+        const auto rewritten = tactical::write_replay(parsed.value());
+        expect(rewritten && rewritten.value() == expected, "land replay has one canonical round-trip encoding");
+    }
+    const auto refused = [&](const auto& result) {
+        return !result && result.error().code == tactical::diagnostic_codes::land_provider_unavailable;
+    };
+    expect(refused(tactical::TacticalSession::create(replay.setup)), "unbundled land create refuses missing provider");
+    expect(refused(tactical::TacticalSession::from_replay(replay)), "unbundled land replay cannot bypass provider refusal");
+    content.domain = tactical::BattleDomain::land;
+    expect(refused(tactical::TacticalSession::create(replay.setup, content)), "bundled land create refuses missing provider");
+    expect(refused(tactical::TacticalSession::from_replay(replay, content)), "bundled land replay refuses missing provider");
+    replay.setup.domain = tactical::BattleDomain::space;
+    const auto mismatch = tactical::TacticalSession::create(replay.setup, content);
+    expect(!mismatch && mismatch.error().code == tactical::diagnostic_codes::invalid_setup,
+        "space setup cannot bind land content");
+    content.domain = tactical::BattleDomain::space;
+    replay.setup.domain = tactical::BattleDomain::land;
+    const auto reverse_mismatch = tactical::TacticalSession::from_replay(replay, content);
+    expect(!reverse_mismatch && reverse_mismatch.error().code == tactical::diagnostic_codes::invalid_setup,
+        "land replay cannot bind space content");
+    replay.setup.domain = static_cast<tactical::BattleDomain>(2);
+    expect(!tactical::write_replay(replay), "unknown setup domain cannot be written");
+    expect(!tactical::TacticalSession::create(replay.setup), "unknown setup domain cannot create a world");
+    const auto rejects = [&](std::size_t offset, std::uint8_t value, std::string_view label) {
+        auto bytes = expected;
+        bytes[offset] = value;
+        expect(!tactical::parse_replay(bytes), label);
+    };
+    rejects(110, 4, "domain extension length must be exact");
+    rejects(112, 2, "unknown domain extension version refuses");
+    rejects(116, 0, "explicit space extension is noncanonical");
+    rejects(116, 2, "unknown wire domain refuses");
+    auto truncated = expected;
+    truncated.resize(119);
+    expect(!tactical::parse_replay(truncated), "truncated domain body refuses");
+    auto duplicate = expected;
+    duplicate[10] = 132;
+    duplicate[104] = 2;
+    duplicate.insert(duplicate.begin() + 120, expected.begin() + 108, expected.begin() + 120);
+    expect(!tactical::parse_replay(duplicate), "duplicate domain extension refuses");
+    replay.setup.domain = tactical::BattleDomain::land;
+    replay.setup.match_policy = tactical::SkirmishMatchPolicy{false, true, true, true};
+    replay.setup.units = {{1, 101, 1}, {2, 102, 1}};
+    replay.setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    replay.setup.squadrons = {{1, {2}}};
+    replay.commands.clear();
+    const auto combined = tactical::write_replay(replay);
+    expect(combined && combined.value()[8] == 5, "land domain composes with squadron extensions");
+    if (combined) {
+        const auto round_trip = tactical::parse_replay(combined.value());
+        expect(round_trip && round_trip.value() == replay, "domain composes with other ordered extensions");
+    }
+}
+
 void test_native_scene_format(const std::string& fixtures) {
     auto replay = load_fixture(fixtures);
     tactical::ReplaySkirmishSetup map;
@@ -1152,6 +1236,7 @@ int main(const int argc, const char* const argv[]) {
     test_match_policy_format(fixtures);
     test_skirmish_setup_format(fixtures);
     test_native_scene_format(fixtures);
+    test_battle_domain(fixtures);
     test_golden_across_workers(fixtures, golden);
     test_phase_map(fixtures);
     test_canonical_encoder_oracle(fixtures);

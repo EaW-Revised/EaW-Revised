@@ -801,7 +801,7 @@ void installed() {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == source->starting_active_player;
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
         if (faction.name == "Empire") empire = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
@@ -812,7 +812,7 @@ void installed() {
     const auto services = take(cp::prepare_live_campaign_services(files, catalog.catalog, data, types, plan, "Normal_Default"));
     auto root_campaign = take(cp::CampaignRoot::create(plan, services));
     const auto setup = root_campaign.game()->galaxy().setup();
-    if (!empire || empire == options.local_observer) throw std::runtime_error("stock Normal Empire AI absent");
+    if (!empire || empire == options.solo_reference_human) throw std::runtime_error("stock Normal Empire AI absent");
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(workers);

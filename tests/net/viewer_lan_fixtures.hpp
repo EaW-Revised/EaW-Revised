@@ -40,10 +40,12 @@ void lan_ai_defaults_follow_authored_constraints();
 void lobby_refusal_and_placeholder_contracts();
 void terminal_lobby_commands_are_inert();
 void close_one_mesh_edge();
-void missing_planned_owner_is_refused();
+void capacity_does_not_create_players();
 void nine_seat_staging(const std::vector<std::uint32_t>& owners);
 void editable_staging_team_rules();
 void advanced_options_three_peers();
+void ai_difficulty_two_peers();
+void seat_controls_three_peers(bool drop_during_formation = false);
 void authoritative_staging(bool play, std::optional<eawr::net::LobbyReason> end_during_start = {});
 void loopback(bool abrupt, bool departed_ahead = false, bool closed_before_launch = false, int final_window = 0,
     bool speed_during_departure = false, std::shared_ptr<eawr::presentation::godot_backend::LanMatch> existing_host = {},

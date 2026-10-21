@@ -232,6 +232,15 @@ void test_repair() {
         ++frames;
     }
     expect(frames == 200 && state.hardpoints[5] == units(975), "HR-05: 200 half-point frames restore 100 health, then stop");
+    state.disabled.resize(station.hardpoints.size());
+    state.disabled[5] = true;
+    state.hardpoints[5] = units(974);
+    const auto healed = tactical::heal_health(station, state, {}, units(1));
+    expect(healed && healed.value() == 5 && state.hardpoints[5] == units(975) && state.disabled[5],
+        "WSH-04: an automatic increment fills a disabled point without enabling it");
+    frame = tactical::repair_frame(station, state, 5, Fixed{});
+    expect(frame && !frame.value().paid && frame.value().stopped && !state.disabled[5],
+        "HR-05: paid service finalizes already-full health without another debit");
     static_cast<void>(tactical::apply_damage(station, state, 6, units(1500)));
     frame = tactical::repair_frame(station, state, 6, units(10));
     expect(frame && !frame.value().paid && frame.value().stopped && state.hardpoints[6] == Fixed{},

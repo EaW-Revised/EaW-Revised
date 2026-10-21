@@ -596,5 +596,50 @@ int case_galactic_planet_hud_tests() {
         g.add(true); h.add(false);
         assert(g.value() != h.value());
     }
+    {
+        // #4331: the command bar draws again only when the view derived from a publication differs from the last drawn one,
+        // so every input of the bar that a publication can change must make the views compare unequal, and a publication
+        // that changes none of them must compare equal.
+        using eawr::sim::math::Fixed;
+        PlanetHudFacts planet;
+        planet.planet = 7; planet.discovered = true; planet.locally_controlled = true; planet.local_allegiance = true;
+        planet.surface_accessible = true; planet.display_name = "Corellia"; planet.name_colour = {0.1F, 0.2F, 0.3F};
+        planet.visible_income = 120.0; planet.maximum_queue = 4;
+        planet.ground_queue = std::vector<ProductionItem>{{"Trooper", "i_trooper", "", 10, 5, 77}};
+        planet.space_queue = std::vector<ProductionItem>{};
+        ProductionChoice choice;
+        choice.type = "Trooper"; choice.icon = "i_trooper"; choice.current = true; choice.gui_row = 0; choice.type_id = 5;
+        choice.price = Fixed::from_raw(50 * Fixed::scale); choice.base_price = choice.price;
+        planet.choices.push_back(choice);
+        const auto bar_view = [](const PlanetHudFacts& facts, const bool space_tab = false) {
+            return planet_hud_view(&facts, space_tab, 2, 3);
+        };
+        const auto republished = planet; // the next publication: nothing about the planet changed
+        assert(republished == planet && bar_view(republished) == bar_view(planet));
+        const auto differs = [&](auto change) {
+            auto next = planet;
+            change(next);
+            return !(bar_view(next) == bar_view(planet));
+        };
+        assert(differs([](PlanetHudFacts& next) { next.ground_queue->front().progress_percent = 11; })); // a daily tick
+        assert(differs([](PlanetHudFacts& next) { next.ground_queue->push_back({"Trooper", "i_trooper", "", 0, 5, 78}); }));
+        assert(differs([](PlanetHudFacts& next) { next.choices.front().price = Fixed::from_raw(40 * Fixed::scale); }));
+        assert(differs([](PlanetHudFacts& next) { next.choices.front().build_disabled = true; }));
+        assert(differs([](PlanetHudFacts& next) { next.display_name = "Coruscant"; }));
+        assert(differs([](PlanetHudFacts& next) { next.name_colour = {0.1F, 0.2F, 0.4F}; }));
+        assert(differs([](PlanetHudFacts& next) { next.visible_income = 121.0; }));
+        assert(differs([](PlanetHudFacts& next) { next.surface_accessible = false; }));
+        assert(differs([](PlanetHudFacts& next) { next.locally_controlled = false; })); // lost to another faction
+        assert(!(bar_view(planet, false) == bar_view(planet, true))); // the production tab is part of the view
+        // Facts the bar's view never reads do not move it, so a publication that only changes them draws nothing.
+        auto far_away = planet;
+        far_away.structures = 3; far_away.ground_level = 2;
+        assert(!(far_away == planet) && bar_view(far_away) == bar_view(planet));
+        PlayerHudView readout{"Day 3", "$ 90", "12 / 40", "4"};
+        auto next_readout = readout;
+        assert(readout == next_readout);
+        next_readout.population = "13 / 40";
+        assert(!(readout == next_readout));
+    }
     return 0;
 }

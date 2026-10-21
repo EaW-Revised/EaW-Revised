@@ -140,6 +140,10 @@ void EawrLanLobby::announce() {
         presence.game_type = impl_->host_options.game_type;
         presence.tcp_port = match_ ? match_->view().port : 0;
         presence.max_players = static_cast<std::uint32_t>(impl_->human_owners.size());
+        if (!match_->galactic_room() && impl_->join_selection.source() == model::LobbySourceKind::lan) if (const auto room = match_->lobby_state()) {
+            if (const auto choices = decode_lan_lobby_game(room->snapshot); choices)
+                presence.max_players = static_cast<std::uint32_t>(room->snapshot.seats.size() + choices.value().open_slots.size());
+        }
         presence.passworded = impl_->join_selection.source() == model::LobbySourceKind::online
             && !impl_->host_password.empty();
         presence.locked = impl_->locked;

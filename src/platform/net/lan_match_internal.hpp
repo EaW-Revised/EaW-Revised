@@ -446,6 +446,7 @@ public:
     bool lobby_galactic_game(const net::GalacticLobbyOptions& options) override;
     bool galactic_room() const override;
     std::optional<GalacticLobbyStart> galactic_start() const override;
+    std::shared_ptr<GalacticLaunch> take_galactic_launch() override;
 private:
     bool lobby_mutable() const;
     void flush_lobby_closes();
@@ -481,8 +482,10 @@ private:
     std::shared_ptr<GalacticLobbyBackend> galactic_;
     std::optional<net::GalacticLobbyOptions> galactic_host_game_;
     std::optional<GalacticLobbyStart> galactic_start_;
+    std::optional<std::uint64_t> galactic_flush_started_;
     core::Result<void> validate_galactic_lobby(const net::LobbySnapshot& state, bool starting) const;
     void start_galactic_lobby();
+    void pump_galactic_start();
 public:
 
     void set_public_invitation(bool value) override;
@@ -528,6 +531,7 @@ private:
 public:
     void configure_factions(std::vector<std::string> factions) override;
     void configure_seats(std::vector<tactical::PlayerId> owners) override;
+    void configure_staging_capacity(bool enabled) override { if (!handed_over_) capacity_staging_ = enabled; }
     ~TcpLanMatch() override;
     void set_port_mapping(bool enabled) override;
     void host(std::uint16_t port) override;
@@ -628,6 +632,7 @@ private:
     std::optional<net::SetupSession> setup_session_;
     std::optional<net::SetupResult> runtime_;
     std::vector<tactical::PlayerCommand> queued_;
+    bool capacity_staging_{};
     std::vector<tactical::PlayerId> owners_{1, 2};
     std::optional<core::Diagnostic> roster_error_;
     std::deque<net::Received> early_;

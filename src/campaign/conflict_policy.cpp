@@ -1,3 +1,4 @@
+#include "eawr/sim/galactic/raid.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
 
 #include <algorithm>
@@ -228,16 +229,11 @@ bool skips_space_combat(const std::span<const AdmissionForce> forces) {
     });
 }
 bool raid_capable(const std::span<const AdmissionForce> forces, const RaidRules& rules) {
-    if (forces.empty() || (rules.required_faction && forces.front().faction != rules.required_faction)) return false;
-    std::uint32_t heroes = 0, limited = 0;
-    for (const auto& row : forces) {
-        if (row.transport && row.stays_in_transport) return false;
-        if (row.force.hero && ++heroes > rules.max_heroes) return false;
-        if ((row.categories & rules.free_categories) == 0) {
-            if ((row.categories & rules.limited_categories) == 0 || ++limited > rules.max_limited) return false;
-        }
-    }
-    return limited != 0; // WGM-37: free heroes alone cannot raid.
+    std::vector<sim::galactic::RaidForce> qualified;
+    qualified.reserve(forces.size());
+    for (const auto& row : forces)
+        qualified.push_back({row.faction, row.categories, row.force.hero, row.transport, row.stays_in_transport});
+    return sim::galactic::raid_capable(qualified, rules);
 }
 core::Result<Arbitration> arbitrate_conflict(const ArbitrationInputs& p) {
     if (p.custom_option > 3 || p.invader_power.raw() < 0 || p.defender_power.raw() < 0 || p.overrun_multiple.raw() < 0)

@@ -117,6 +117,102 @@ void landing_gates_and_preference() {
     expect(ga::ordinary_freestore_birth(bad).prefer_ground, "only a fresh actor constructor defaults preference true");
     done(owner.update(actor(21))); expect(!owner.set_prefer_ground(21, false), "setter requires actual unit-AI behavior");
 }
+void overlay_contracts() {
+    ga::QualifiedFreestore base;
+    auto first = actor(20), second = actor(21); first.unit_ai = second.unit_ai = true; second.object.owner = 2;
+    done(base.update(first)); done(base.update(second));
+    const std::array a{first.object.id}, b{second.object.id};
+    done(base.initialize(1, a)); done(base.initialize(2, b));
+    const auto check = [](const auto& owner) {
+        expect(owner.record_sync_hash() == owner.record_sync_hash(true), "ordered freestore intents match cold record reconstruction");
+    };
+    {
+        auto decision = base.clone({}, true), canonical = base.clone();
+        std::vector<ga::QualifiedFreestore::Replay> emitted;
+        decision.set_intent_sink([&](auto replay) { emitted.push_back(std::move(replay)); });
+        done(decision.set_prefer_ground(20, false));
+        expect(emitted.size() == 1, "a selected decision frontier emits its successful direct freestore intent");
+        {
+            auto native_callback = decision.suspend_intents();
+            done(decision.set_prefer_ground(20, true)); done(decision.set_prefer_ground(20, false));
+        }
+        expect(emitted.size() == 1, "native callback projections do not duplicate their enclosing world intent");
+        {
+            auto tentative = decision.clone();
+            expect(!tentative.intent_sink(), "a tentative Lua clone never inherits a live canonical intent sink");
+            const auto cursor = tentative.operation_cursor();
+            done(tentative.set_prefer_ground(20, true));
+            done(tentative.prevent_ai_usage(1, 20, true));
+            const auto delta = take(tentative.operations_since(cursor));
+            expect(delta.size() == 2 && emitted.size() == 1 && decision.contains(1, 20),
+                "a cursor exports only new value-owned operations without publishing tentative Lua effects");
+            auto abandoned = tentative.clone(); done(abandoned.set_prefer_ground(20, false));
+            expect(emitted.size() == 1, "an abandoned nested Lua clone emits no direct or replacement operation");
+            decision.replace(tentative);
+            expect(emitted.size() == 1, "private row replacement emits nothing until the accepted transaction delivers its stream");
+            for (const auto& replay : delta) decision.intent_sink()(replay);
+        }
+        expect(emitted.size() == 3, "accepted freestore steps are delivered exactly once after their transaction commits");
+        for (const auto& replay : emitted) done(replay(canonical));
+        expect(canonical.encode() == decision.encode() && canonical.facts(20)->prefer_ground && !canonical.contains(1, 20),
+            "exported operations retain chronological setter/membership order after the Lua clone dies");
+        auto sibling = base.clone({}, true);
+        const auto foreign = decision.operation_cursor();
+        expect(!sibling.operations_since(foreign), "a foreign cursor refuses before executing any operation");
+        check(canonical);
+    }
+    {
+        auto lower = base.clone({}, true), higher = base.clone({}, true), canonical = base.clone();
+        lower.remove_membership(1, 20); higher.remove_membership(2, 21);
+        expect(higher.contains(1, 20) && lower.contains(2, 21), "independent freestore overlays retain foreign root memberships");
+        expect(take(canonical.commit_overlay(base, lower)) == 0 && take(canonical.commit_overlay(base, higher)) == 0
+            && !canonical.contains(1, 20) && !canonical.contains(2, 21) && base.contains(1, 20) && base.contains(2, 21),
+            "ordered overlay publication preserves both players' independent changes");
+        check(canonical);
+    }
+    {
+        auto lower = base.clone({}, true), higher = base.clone({}, true), canonical = base.clone();
+        done(lower.set_prefer_ground(20, false)); done(higher.set_prefer_ground(20, true));
+        auto publication = base.clone({}, true); publication.replace(higher);
+        expect(take(canonical.commit_overlay(base, lower)) == 0 && !canonical.facts(20)->prefer_ground
+            && take(canonical.commit_overlay(base, publication)) == 0 && canonical.facts(20)->prefer_ground,
+            "a setter that was a no-op on the root remains an intent after private replacement and overrides an earlier write");
+        check(canonical);
+    }
+    {
+        auto lower = base.clone({}, true), higher = base.clone({}, true), canonical = base.clone();
+        expect(take(lower.reserve(1, 20, 77)) && take(higher.reserve(1, 20, 88)), "each frozen overlay admits its own reservation");
+        expect(take(canonical.commit_overlay(base, lower)) == 0 && take(canonical.commit_overlay(base, higher)) == 1
+            && canonical.reservations(1)->at(20) == 77, "a conflicting later reservation refuses once and preserves the earlier admission");
+        check(canonical);
+    }
+    {
+        auto lower = base.clone({}, true), higher = base.clone({}, true), canonical = base.clone();
+        lower.lost(20); done(higher.set_prefer_ground(20, false));
+        expect(take(canonical.commit_overlay(base, lower)) == 0 && take(canonical.commit_overlay(base, higher)) == 1
+            && !canonical.facts(20), "a later speculative setter cannot resurrect an object lost by an earlier commit");
+        check(canonical);
+    }
+    {
+        auto prefix = base.clone({}, true), sibling = base.clone({}, true), canonical = base.clone();
+        done(prefix.set_prefer_ground(20, false)); done(sibling.set_prefer_ground(21, false));
+        const auto bytes = canonical.encode();
+        expect(!canonical.commit_overlay(prefix, sibling) && canonical.encode() == bytes,
+            "a foreign operation prefix refuses before any effect is applied");
+        auto child = prefix.clone(); done(child.set_prefer_ground(21, false));
+        auto owner = prefix.clone();
+        expect(take(owner.commit_overlay(prefix, child)) == 0 && take(canonical.commit_overlay(base, owner)) == 0
+            && !canonical.facts(20)->prefer_ground && !canonical.facts(21)->prefer_ground,
+            "nested private publications retain only their new intents for the final ordered commit");
+        check(canonical);
+    }
+    {
+        auto deep = base.clone({}, true);
+        for (std::size_t index = 0; index < 20000; ++index) done(deep.set_prefer_ground(20, true));
+        expect(deep.encode() == base.encode(), "a long no-op intent chain keeps canonical bytes unchanged and releases without recursive teardown");
+    }
+}
+
 void player_publications(eawr::platform::ThreadWorkerAdapter& executor) {
     const auto check_records = [](const ga::QualifiedFreestore& value) {
         expect(value.record_sync_hash() == value.record_sync_hash(true),
@@ -1063,7 +1159,7 @@ void installed() {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == source->starting_active_player;
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
     }
@@ -1126,7 +1222,7 @@ int case_galactic_ai_freestore_tests(int argc, char** argv) {
         return 1;
     }
     try { if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { gates(); landing_gates_and_preference(); std::vector<std::uint8_t> return_baseline; std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
+        else { gates(); landing_gates_and_preference(); overlay_contracts(); std::vector<std::uint8_t> return_baseline; std::string baseline, movement_baseline, direct_baseline, landing_baseline, callbacks_baseline;
             for (const auto workers : {1U, 2U, 4U, 8U}) { eawr::platform::ThreadWorkerAdapter executor(workers); player_publications(executor); retained(executor, return_baseline); automatic_landing(executor, landing_baseline); movement(executor, movement_baseline); direct_movement(executor, direct_baseline); fresh_conversion(executor); continuation(executor, baseline); lua(executor); selector(executor); const auto callbacks = object_callbacks(executor); if (callbacks_baseline.empty()) callbacks_baseline = callbacks; else expect(callbacks_baseline == callbacks, "object callback answers are equal on 1/2/4/8 workers"); }
         }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }

@@ -380,7 +380,7 @@ core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const
                 ? std::optional<math::Vec3>{order.destination} : std::nullopt;
             if (budget) {
                 bool exhausted = false;
-                auto within = plan_space_move_within(motion, in.limits, *footprint, *world, unit.state.entity_id, start,
+                auto within = SpacePathService::plan_within(motion, in.limits, *footprint, *world, unit.state.entity_id, start,
                     in.position, in.yaw, in.speed, target, *budget, stats, order.through_hazards, filter_destination, &exhausted);
                 if (!within) return core::Result<bool>::failure(within.error());
                 if (!within.value()) return core::Result<bool>::success(false);
@@ -392,7 +392,7 @@ core::Result<bool> TacticalSession::Impl::plan_path_within(LiveUnit& unit, const
                 return core::Result<bool>::success(true);
             }
             bool exhausted = false;
-            auto plan = plan_space_move(
+            auto plan = SpacePathService::plan(
                 motion, in.limits, *footprint, *world, unit.state.entity_id, start, in.position, in.yaw, in.speed, target, stats,
                 PathSearchMode::bounded, order.through_hazards, filter_destination, &exhausted);
             if (!plan) return core::Result<bool>::failure(plan.error());
@@ -428,7 +428,7 @@ core::Result<TacticalSession::Impl::SlicedSearch> TacticalSession::Impl::start_s
             || ((order.kind == OrderKind::attack_move || order.kind == OrderKind::guard)
                 && order.target == invalid_entity_id)
             ? std::optional<math::Vec3>{order.destination} : std::nullopt;
-        SlicedPathSearch search(motion, in.limits, *footprint, world, unit.state.entity_id, frame, in.position, in.yaw,
+        auto search = SpacePathService::begin(motion, in.limits, *footprint, world, unit.state.entity_id, frame, in.position, in.yaw,
             in.speed, target, order.through_hazards, filter_destination);
         return core::Result<SlicedSearch>::success(SlicedSearch{std::move(search), frame, target, max_speed, in, std::nullopt});
     }

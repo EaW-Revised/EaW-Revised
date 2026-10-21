@@ -121,7 +121,7 @@ Scene scene(bool with_observer) {
     out.income->inputs.types = {reducer}; out.income->inputs.planets = {{10}, {20}};
     out.accounts.players = {{1, whole(500), whole(9999), 3, 5}, {2, whole(500), whole(9999), 3, 5}};
     if (with_observer) {
-        gc::ObserverSetup observer; observer.local_player = 1;
+        gc::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
         gc::ObserverPlayer a; a.player = 1; a.allies = {1};
         gc::ObserverPlayer b; b.player = 2; b.allies = {2};
         gc::ObserverPlayer c; c.player = 3; c.allies = {3, 2};
@@ -328,12 +328,73 @@ void identity_contracts() {
     expect(world.containing_planet(1001) == std::optional<gc::PlanetId>{10}, "the first claim's parent wins");
     expect(world.arriving(1001), "a later claim by an enroute fleet still marks the identity enroute (roster order is preserved)");
 }
+
+void player_frontier_contracts() {
+    const eawr::sim::InlineExecutor executor;
+    auto state = scene(true);
+    const auto unqualified = state.snapshot();
+    auto actors = std::make_shared<std::vector<gc::CensusObject>>();
+    for (const auto& row : reference(*unqualified, setup(false)).rows) {
+        gc::CensusObject actor;
+        actor.id = row.id; actor.original_type = actor.current_type = row.type;
+        actor.owner = row.owner; actor.planet = row.planet; actor.garrison = false;
+        actor.combat_role = gc::ActorCombatRole::ordinary;
+        if (std::any_of(state.fleets.begin(), state.fleets.end(), [&](const auto& fleet) { return fleet.id == row.id; }))
+            actor.combat_role = gc::ActorCombatRole::fleet;
+        else if (std::any_of(state.movement->contents.begin(), state.movement->contents.end(),
+            [&](const auto& contents) { return contents.container == row.id; }))
+            actor.combat_role = gc::ActorCombatRole::transport;
+        actors->push_back(actor);
+    }
+    std::sort(actors->begin(), actors->end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    gc::NativeSnapshotChanges qualified;
+    qualified.actors = std::move(actors);
+    const auto root = gc::GalacticSnapshot::native_view(unqualified, std::move(qualified));
+    ai::GalacticWorld world(setup(false));
+    must(world.bind(root, {}, executor, root->completed_tick(), 5000));
+    const auto root_view = world.view();
+    const std::array<gc::PlayerId, 2> owners{1, 2};
+    must(world.prepare_player_frontiers(executor, owners));
+    gc::NativeSnapshotChanges changes;
+    changes.fleets.emplace(root->fleets().begin(), root->fleets().end());
+    changes.fleets->front().orbit = 20;
+    changes.touched_planets = std::vector<gc::PlanetId>{10, 20};
+    const auto own = gc::GalacticSnapshot::native_view(root, std::move(changes));
+    {
+        const auto first = world.player_frontier(1);
+        must(world.bind_native_frontier(1, own, executor, 9000));
+        expect(world.containing_planet(1000) == std::optional<gc::PlanetId>{20} && world.next_entity_id() == 9000,
+            "a player rebinds its own physical frontier and identity range");
+        expect(!world.prepare_player_frontiers(executor, owners), "a selected player cannot replace the barrier root");
+        {
+            const auto second = world.player_frontier(2);
+            expect(world.containing_planet(1000) == std::optional<gc::PlanetId>{10}
+                && world.next_entity_id() == 5000 && world.view() == root_view,
+                "another player retains the root's fleet rows, identity frontier and reader publication");
+        }
+        expect(world.containing_planet(1000) == std::optional<gc::PlanetId>{20} && world.next_entity_id() == 9000,
+            "nested frontier selection restores the first player's own rebind");
+    }
+    expect(world.view() == root_view && world.containing_planet(1000) == std::optional<gc::PlanetId>{10}
+        && world.next_entity_id() == 5000, "player rebinds leave the serial boundary's root unchanged");
+    must(world.prepare_player_frontiers(executor, owners));
+    {
+        const auto first = world.player_frontier(1);
+        expect(world.view() == root_view && world.next_entity_id() == 5000,
+            "a new barrier resets derived player frontiers from the current root");
+    }
+    const std::array<gc::PlayerId, 2> reversed{2, 1};
+    const std::array<gc::PlayerId, 1> unknown{9};
+    expect(!world.prepare_player_frontiers(executor, reversed) && !world.prepare_player_frontiers(executor, unknown),
+        "frontier preparation refuses unordered or unknown player identities");
+}
 } // namespace
 
 int case_galactic_ai_world_reader_tests() {
     try {
         for (const unsigned workers : {1U, 2U, 4U, 8U}) for (const bool with_observer : {true, false}) run(workers, with_observer);
         identity_contracts();
+        player_frontier_contracts();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
         return 1;

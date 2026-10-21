@@ -20,6 +20,7 @@
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/label.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
 #include <godot_cpp/classes/input_event_mouse_motion.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -84,6 +85,7 @@ struct HudButtonArt final {
     struct Overlays final {
         Ref<Texture2D> hover, selected, disabled;
         bool selected_additive{};
+        bool hover_additive{};
     };
     std::optional<Portrait> portrait;
     std::optional<Overlays> overlays;
@@ -113,7 +115,7 @@ public:
             set_portrait_cell_enabled(art.portrait->shared_cell);
         }
         if (art.overlays) set_special_overlays(art.overlays->hover, art.overlays->selected,
-            art.overlays->disabled, art.overlays->selected_additive);
+            art.overlays->disabled, art.overlays->selected_additive, art.overlays->hover_additive);
     }
     void _pressed() override {
         if (is_disabled() || !is_visible_in_tree() || (get_viewport() && get_viewport()->gui_is_dragging())) return;
@@ -158,8 +160,19 @@ public:
     // `selected_additive`: a component without Selected_Alpha adds its selected art instead of
     // blending it (PU-70), so the icon under it stays visible.
     void set_special_overlays(const Ref<Texture2D>& hover, const Ref<Texture2D>& selected, const Ref<Texture2D>& disabled,
-                              bool selected_additive = false) {
+                              bool selected_additive = false, bool hover_additive = false) {
         special_hover_ = hover; special_selected_ = selected; special_disabled_ = disabled;
+        if (hover_additive && hover.is_valid()) {
+            // GCF-01: add authored RGB, independently of the rollover's stored alpha.
+            // get_image returns the texture's image copy; keep the shared source texture unchanged.
+            auto image = hover->get_image();
+            if (image.is_valid()) {
+                image->convert(Image::FORMAT_RGB8);
+                special_hover_ = ImageTexture::create_from_image(image);
+            }
+            special_hover_additive_.instantiate();
+            special_hover_additive_->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
+        }
         if (selected_additive) {
             special_additive_.instantiate();
             special_additive_->set_blend_mode(CanvasItemMaterial::BLEND_MODE_ADD);
@@ -312,10 +325,12 @@ private:
         const bool selected = !is_disabled() && (order_selected_ || is_pressed());
         special_overlay_->set_texture(is_disabled() ? special_disabled_
             : selected ? special_selected_ : is_hovered() ? special_hover_ : Ref<Texture2D>());
-        special_overlay_->set_material(selected ? special_additive_ : Ref<CanvasItemMaterial>());
+        special_overlay_->set_material(selected ? special_additive_
+            : !is_disabled() && is_hovered() ? special_hover_additive_ : Ref<CanvasItemMaterial>());
     }
     TextureRect* special_overlay_{};
     Ref<CanvasItemMaterial> special_additive_;
+    Ref<CanvasItemMaterial> special_hover_additive_;
     Ref<Texture2D> special_hover_, special_selected_, special_disabled_;
     void shift_order_icon(bool down) {
         if (!order_icon_) return;

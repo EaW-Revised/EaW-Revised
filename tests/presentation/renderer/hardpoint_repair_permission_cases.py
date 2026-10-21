@@ -70,6 +70,9 @@ int main() {
     instance.owner = 0; emit("neutral");
     instance.owner = 3;
     slot.health.value = 100; emit("undamaged");
+    slot.enabled = false; emit("disabled_full"); slot.enabled = true;
+    slot.max_health.value = 0; slot.enabled = false; emit("indestructible_disabled");
+    slot.max_health.value = 100; slot.enabled = true;
     slot.health.value = 0; emit("destroyed");
     slot.health.value = 50;
     slot.enabled = false; emit("disabled_positive");
@@ -104,10 +107,10 @@ class HardpointRepairPermissionCases:
             ran = subprocess.run([str(executable)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
         actual = dict(line.split("=") for line in ran.stdout.splitlines())
-        allowed = {"own", "ally_community", "disabled_positive", "other_payer", "missing_type_own"}
+        allowed = {"own", "ally_community", "disabled_positive", "disabled_full", "other_payer", "missing_type_own"}
         expected = {name: "1" if name in allowed else "0" for name in (
             "own", "pending_repair", "ally_community", "ally_private", "enemy", "neutral", "undamaged", "destroyed",
-            "disabled_positive", "already_paying", "other_payer", "missing_account", "missing_type_ally",
+            "disabled_positive", "disabled_full", "indestructible_disabled", "already_paying", "other_payer", "missing_account", "missing_type_ally",
             "missing_type_own", "not_station", "missing_entity", "invalid_slot", "missing_durability")}
         self.assertEqual(actual, expected)
 

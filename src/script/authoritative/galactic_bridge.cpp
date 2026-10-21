@@ -84,6 +84,7 @@ struct ScriptedGalacticSession::Impl {
 
     Impl(gc::GalacticSession world_in, ScriptScheduler ai_in, ScriptScheduler story_in)
         : world(std::move(world_in)), ai(std::move(ai_in)), story(std::move(story_in)) {
+        world.defer_history_service(true);
         ai.set_managed_handle_roots([this] {
             ValueList roots;
             for (const auto& command : pending) roots.insert(roots.end(), command.arguments.begin(), command.arguments.end());
@@ -310,6 +311,7 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     auto digest = impl->script_hash();
     if (!digest || digest.value() != saved.scripts_sha256) return refuse("saved script barrier digest differs");
     impl->world = std::move(world);
+    impl->world.defer_history_service(true);
     return core::Result<ScriptedGalacticSession>::success(ScriptedGalacticSession(std::move(impl)));
 }
 
@@ -347,6 +349,7 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
         auto pending = std::move(impl.pending);
         impl.pending.clear();
         for (auto& command : pending) out.script_input.push_back(impl.route(std::move(command)));
+        const auto history_tick = impl.world.clock().galactic_frame;
         auto stepped = gc_profile::timed(gc_profile::Phase::tick_galaxy_step, [&] { return impl.world.step(executor, local_conflict_pending); });
         if (!stepped) return abort(stepped.error());
         out.world = std::move(stepped).value();
@@ -355,6 +358,10 @@ core::Result<ScriptedGalacticTick> ScriptedGalacticSession::step(
             if (!serviced) return abort(serviced.error());
             out.ai = std::move(serviced).value();
             impl.pending = out.ai->commands;
+            // WGP-146: one admitted History turn after all committed player AI,
+            // outside its parallel phases, before the global story reader.
+            if (auto recorded = impl.world.service_admitted_history(history_tick, executor); !recorded) return abort(recorded.error());
+            out.world.snapshot = impl.world.snapshot();
         }
         auto serviced = gc_profile::timed(gc_profile::Phase::tick_story_service, [&] { return impl.service(executor, out.world, impl.story, impl.story_engine, true); });
         if (!serviced) return abort(serviced.error());

@@ -1,4 +1,5 @@
 #include "ai_data.hpp"
+#include "ai_mode.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include <algorithm>
@@ -228,26 +229,15 @@ std::vector<std::string> split_names(std::string_view text, std::string_view sep
     return out;
 }
 
-std::vector<std::string> ai_xml_files() {
-    return {
-        "data/xml/ai/players/basicempireplayer.xml",
-        "data/xml/ai/players/basicrebelplayer.xml",
-        "data/xml/ai/players/ai_player_underworld.xml",
-        "data/xml/ai/templates/basicgenerictemplates.xml",
-        "data/xml/ai/goalfunctions/basicoffensivespaceset.xml",
-        "data/xml/ai/goalfunctions/ai_goalset_underworld_space.xml",
-        "data/xml/ai/goalfunctions/systemfunctions.xml",
-        "data/xml/ai/goals/offensivespacegoals.xml",
-        "data/xml/ai/goals/ai_goals_underworld_space.xml",
-        "data/xml/ai/perceptualequations/offensivespaceequations.xml",
-        "data/xml/ai/perceptualequations/ai_equations_underworld_space.xml",
-        "data/xml/ai/perceptualequations/budgetingequations.xml",
-        "data/xml/ai/perceptualequations/basicgalacticequations.xml",
-        "data/xml/ai/perceptualequations/basiclandequations.xml",
-        "data/xml/ai/perceptualequations/ai_equations_expansiongeneric_landskirmish.xml",
-        "data/xml/difficultyadjustments.xml",
-        "data/xml/gameconstants.xml",
-    };
+std::vector<std::string> ai_xml_files() { return ai_xml_files(sim::tactical::BattleDomain::space); }
+
+std::vector<std::string> ai_xml_files(const sim::tactical::BattleDomain domain) {
+    const auto& paths = ai_mode(domain).required_xml;
+    return {paths.begin(), paths.end()};
+}
+
+const std::vector<std::string>& mode_templates(const PlayerType& type, const sim::tactical::BattleDomain domain) {
+    return domain == sim::tactical::BattleDomain::land ? type.land_templates : type.space_templates;
 }
 
 Difficulty resolve_difficulty(const AiData& data, const PlayerType* type, std::string_view level) {
@@ -299,6 +289,7 @@ core::Result<AiData> load_ai_data_files(
                 }
             };
             set("AI_SpaceEvaluatorRegionSize", constants.region_size);
+            set("AI_LandEvaluatorRegionSize", constants.land_region_size);
             set("DesiredSpaceFOWCellSize", constants.fog_cell_size);
             set("AI_SpaceThreatLookAheadTime", constants.threat_look_ahead);
             set("AI_SpaceThreatRangeCap", constants.threat_range_cap);
@@ -334,6 +325,9 @@ core::Result<AiData> load_ai_data_files(
                 }
                 for (const std::string& name : split_names(templates->child_text("Galactic"), ", \t\r\n")) {
                     player.galactic_templates.push_back(upper_case(name));
+                }
+                for (const std::string& name : split_names(templates->child_text(ai_mode(sim::tactical::BattleDomain::land).template_tag), ", \t\r\n")) {
+                    player.land_templates.push_back(upper_case(name));
                 }
             }
             for (const auto mode : {"Galactic", "Space", "Land"}) {
@@ -408,6 +402,9 @@ core::Result<AiData> load_ai_data_files(
                 if (const auto value = number(element.child_text("Space_AI_Goal_Cycle_Sleep_Duration"))) {
                     difficulty.space_goal_cycle_sleep = *value;
                 }
+                if (const auto value = number(element.child_text("Land_AI_Contrast_Multiplier"))) difficulty.land_contrast_multiplier = *value;
+                if (const auto value = number(element.child_text("Land_AI_Goal_Cycle_Sleep_Duration"))) difficulty.land_goal_cycle_sleep = *value;
+                if (const auto value = number(element.child_text("Land_Build_Time_Multiplier"))) difficulty.land_build_time_multiplier = *value;
                 if (const auto value = number(element.child_text("Galactic_AI_Contrast_Multiplier"))) difficulty.galactic_contrast_multiplier = *value;
                 if (const auto value = number(element.child_text("Galactic_Build_Time_Multiplier"))) difficulty.galactic_build_time_multiplier = *value;
                 if (const auto value = number(element.child_text("Galactic_AI_Goal_Cycle_Sleep_Duration"))) difficulty.galactic_goal_cycle_sleep = *value;
@@ -469,6 +466,9 @@ AiDifficultyAdjustment AiDifficultyTable::resolve(std::string_view player_type, 
     out.credit = entry.credit_multiplier;
     out.space_contrast = entry.space_contrast_multiplier;
     out.space_goal_cycle_sleep = entry.space_goal_cycle_sleep;
+    out.land_build_time = entry.land_build_time_multiplier;
+    out.land_contrast = entry.land_contrast_multiplier;
+    out.land_goal_cycle_sleep = entry.land_goal_cycle_sleep;
     return out;
 }
 

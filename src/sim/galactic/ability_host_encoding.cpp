@@ -117,9 +117,11 @@ std::optional<PreparedAbility> decode_prepared_ability(std::span<const std::uint
     p.absence = math::Fixed::from_raw(absence); p.owned = owned != 0; return p;
 }
 void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilitySetup& setup) {
-    put_u32(out, 7); put_i64(out, setup.default_hero_absence.raw()); // coordinator-reserved encoding 7 (sabotage, neutralization)
+    put_u32(out, 8); put_i64(out, setup.default_hero_absence.raw()); // encoding 8 adds authored ground activation membership
     put_u32(out, static_cast<std::uint32_t>(setup.profiles.size()));
     for (const auto& p : setup.profiles) {
+        put_u8(out, static_cast<std::uint8_t>(p.ground_activated.size()));
+        for (const auto kind : p.ground_activated) put_u8(out, static_cast<std::uint8_t>(kind));
         put_u64(out, p.type); put_i64(out, p.market.price_modifier.raw()); put_u8(out, p.market.causes_despawn ? 1 : 0);
         put_u8(out, p.named ? 1 : 0); put_u8(out, p.respawn_whole_team ? 1 : 0); put_u8(out, p.initially_enabled ? 1 : 0); put_u64(out, p.respawn_structure);
         put_u32(out, static_cast<std::uint32_t>(p.market.absence_min.size()));
@@ -193,11 +195,20 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
 }
 std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::uint8_t> bytes) {
     sim::detail::Reader in(bytes); GalacticAbilitySetup result; std::uint32_t version{}, count{}; std::int64_t value{};
-    if (!in.read_u32(version) || version != 7 || !in.read_i64(value) || value <= 0
+    if (!in.read_u32(version) || version != 8 || !in.read_i64(value) || value <= 0
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 32) return {};
     result.default_hero_absence = math::Fixed::from_raw(value); TypeId previous{};
     for (std::uint32_t i = 0; i < count; ++i) {
-        GalacticAbilityProfile p; std::uint8_t despawn{}, named{}, whole{}, enabled{}; std::uint32_t ranges{};
+        GalacticAbilityProfile p; std::uint8_t group_count{};
+        if (!in.read_u8(group_count) || group_count > 7) return {};
+        for (std::uint8_t j = 0; j < group_count; ++j) {
+            std::uint8_t value_kind{};
+            if (!in.read_u8(value_kind) || value_kind < 1 || value_kind > 7) return {};
+            const auto kind = static_cast<AbilityKind>(value_kind);
+            if (std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) != p.ground_activated.end()) return {};
+            p.ground_activated.push_back(kind);
+        }
+        std::uint8_t despawn{}, named{}, whole{}, enabled{}; std::uint32_t ranges{};
         if (!in.read_u64(p.type) || p.type <= previous || !in.read_i64(value) || value < 0
             || !in.read_u8(despawn) || despawn > 1 || !in.read_u8(named) || named > 1
             || !in.read_u8(whole) || whole > 1 || !in.read_u8(enabled) || enabled > 1 || !in.read_u64(p.respawn_structure)
@@ -350,7 +361,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     return in.remaining() ? std::nullopt : std::optional(std::move(result));
 }
 void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityState& s) {
-    put_u32(out, 7); put_u64(out, s.next_request); // coordinator-reserved encoding 7
+    put_u32(out, 8); put_u64(out, s.next_request); // coordinator-reserved encoding 8
     put_u32(out, static_cast<std::uint32_t>(s.actors.size()));
     for (const auto& a : s.actors) {
         put_u64(out, a.actor); put_u64(out, a.type); put_u8(out, a.enabled ? 1 : 0); put_u8(out, a.cancelled ? 1 : 0);

@@ -39,9 +39,9 @@ Gathering nearby inbound fleets before insertion remains an explicit owner
 seam. Corruption-benefiting intermediate traversal requires the separate
 AI-bribe flag hook. Known deviation (legacy EAWR-3981): that request and its billing have no world owner yet, so
 without the hook the move ends at the previous planet, as a block does, instead of faulting the simulation;
-WGA-230 still describes the retail behaviour. Raid
-destination/raid admission remain unavailable until their qualified world
-owner exists. Ordinary moves currently have no raid destination to clear.
+WGA-230 still describes the retail behaviour. The separate AI raid producer
+remains an owner seam; overview raid orders now retain their qualified target
+through movement and land admission. Ordinary AI moves clear that target.
 
 Direct allied landing scans fleet contents in reverse order and stops at
 equality with the authored surface capacity. Inaccessible or full surfaces

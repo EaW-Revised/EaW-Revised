@@ -41,6 +41,7 @@
 namespace eawr::sim::tactical {
 
 core::Result<void> session_detail::Tick::nebulas() {
+    if (impl_->setup.domain != BattleDomain::space) return core::Result<void>::success();
     auto& units = gather_.value().moving.value();
     auto& scratch = impl_->nebula_scratch;
     for (auto& signals : scratch.events) signals.clear();
@@ -490,6 +491,12 @@ core::Result<void> session_detail::Tick::service_hardpoint_repairs(std::vector<L
                 auto& state = *unit.durability;
                 for (std::size_t slot = 0; slot < job.paid.size(); ++slot) {
                     const bool disabled_before = hardpoint_disabled(state, slot);
+                    // HR-05: full slots reserve no budget, but an existing repair still completes.
+                    if (!state.repairing_players[slot].empty()
+                        && state.hardpoints[slot] >= profile.hardpoints[slot].max_health) {
+                        const auto result = repair_frame(profile, state, slot, {});
+                        if (!result) { errors[job.unit] = result.error(); break; }
+                    }
                     state.repairing_players[slot] = std::move(job.paid[slot]);
                     for (const auto payer : state.repairing_players[slot]) {
                         static_cast<void>(payer);

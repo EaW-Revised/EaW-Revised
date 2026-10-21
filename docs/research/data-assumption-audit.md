@@ -336,7 +336,8 @@ item into the findings above.
 - **Other documented constants:**
   - build queue length 5 (PU-14, `src/skirmish/economy.cpp:442`; (legacy EAWR-753));
   - `multiplayer_colour_count` = 9 (WSS-20);
-  - `local_setup_rows` = 8 (WSS-08);
+  - `local_setup_rows` aliases the shared engine seat limit (R-SETUP-01, an
+    owner-requested extension of retail WSS-08);
   - victory countdown 210 frames;
   - voice pools of 32 3D and 16 2D voices (BA-09);
   - SFX priority, probability, pitch and volume clamps (BA-01; the volume clamp is (legacy EAWR-804));

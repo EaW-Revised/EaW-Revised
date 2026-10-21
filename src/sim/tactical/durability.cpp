@@ -459,9 +459,17 @@ core::Result<RepairOutcome> repair_frame(
         return core::Result<RepairOutcome>::success(outcome);
     }
     const auto& hardpoint = profile.hardpoints[index];
-    // WSL-41/42: zero authored amount still pays; full and destroyed slots stop without a debit.
-    if (!hardpoint.destroyable || state.hardpoints[index].raw() <= 0 || state.hardpoints[index] >= hardpoint.max_health
-        || hardpoint.repair_cost_per_frame > credits) {
+    // HR-05: another healing source may have filled this slot before its paid service.
+    // Complete even without credits; no health increment means no additional debit.
+    if (!hardpoint.destroyable || state.hardpoints[index].raw() <= 0) {
+        return core::Result<RepairOutcome>::success(outcome);
+    }
+    if (state.hardpoints[index] >= hardpoint.max_health) {
+        if (index < state.disabled.size()) state.disabled[index] = false;
+        return core::Result<RepairOutcome>::success(outcome);
+    }
+    // WSL-41/42: zero authored amount still pays while below maximum.
+    if (hardpoint.repair_cost_per_frame > credits) {
         return core::Result<RepairOutcome>::success(outcome);
     }
     outcome.paid = true;

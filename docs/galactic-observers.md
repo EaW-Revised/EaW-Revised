@@ -1,6 +1,16 @@
 # Galactic discovery and observer intelligence
 
-The galactic session publishes one `ObservedPlanet` for each player and planet.
+The galactic session retains canonical intelligence for every player and planet.
+Its human observer set follows the agreed player roster in ascending identity order;
+startup reveals each human's own home and player load refreshes that same set on every peer.
+Solo games retain an explicit `solo_reference_human` for WGA-127/264 AI policy.
+Multiplayer AI reads its own knowledge and perception, retaining the multiplayer
+usability override even when its discovery producer has not initialized a planet.
+
+`frame(seat)` resolves the requesting human after agreement and publishes that
+player's observations, menus, forecasts, notices and hero returns. These derived
+caches are keyed by player and never encoded, hashed or restored over a peer's
+chosen seat. Canonical simulation snapshots retain all-player query results.
 Presentation reads `GalacticSnapshot::observations()` instead of treating the raw
 owner as an intelligence fact. Discovery and knowledge are independent:
 intelligence can expose a category without discovering the map location, and a
@@ -96,10 +106,12 @@ sources do not use that transfer branch. Failed inputs leave source and memory
 state unchanged. The source must exist when adding or transferring; cleanup
 can remove a source after its destruction.
 
-The observer setup is replay extension 12 and runtime state section 13.
+The observer setup is replay extension 12, payload schema 2, and runtime state section 13.
 Checkpoint planet payloads retain that state, and sparse section IDs leave
-other services' reserved IDs available. Setups without observers retain their
-existing encodings and pins.
+other services' reserved IDs available. Galactic rules version 2, state encoding 4
+and checkpoint galaxy version 36 reject older project data. The multiplayer rules
+identity uses the `eawr-gc-rules-v2` domain. Source lists, timers and apparent-control
+history remain canonical for every player; view context is never part of those bytes.
 
 WGUI-12/103 ownership-bit acceptance requires both base stealth flags false.
 Orbit fallback requires an observer-owned fleet and ground stealth false.

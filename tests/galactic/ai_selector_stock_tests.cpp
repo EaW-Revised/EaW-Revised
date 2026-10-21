@@ -439,7 +439,7 @@ int main(int argc, char** argv) {
             const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
             options.players.push_back({{id, id, 0}, faction.name, true});
             const bool human = faction.name == "Rebel";
-            if (human) options.local_observer = id;
+            if (human) options.solo_reference_human = id;
             if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id, human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
         }
         std::vector<std::string> originals;

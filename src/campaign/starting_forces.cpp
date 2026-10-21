@@ -9,6 +9,7 @@
 namespace eawr::campaign {
 namespace {
 namespace gc = sim::galactic;
+enum class PlacementRefusal { none, structure_slots };
 template<class T> core::Result<T> refuse(const std::string& message) {
     core::Diagnostic error; error.code = std::string(gc::diagnostic_codes::invalid_setup);
     error.message = "WGS-80 starting placement: " + message;
@@ -147,7 +148,8 @@ core::Result<MovementInputs> prepare_initial_movement_inputs(const StartingForce
 
 static core::Result<StartingForcePlacement> place_starting_force_once(const StartingForceInputs& inputs,
     const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
-    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
+    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip,
+    PlacementRefusal* refusal) {
     const auto* type = original(inputs, request.type);
     const auto planet = std::find_if(context.control.planets.begin(), context.control.planets.end(),
         [&](const auto& row) { return row.planet == request.planet; });
@@ -190,8 +192,10 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
         const auto domain = ground_structure ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
         const auto count = std::count_if(production->objects.begin(), production->objects.end(),
             [&](const auto& object) { return object.domain == domain && object.kind == gc::ProductionKind::structure; });
-        if (count >= (ground_structure ? production->ground_slots : production->space_slots))
+        if (count >= (ground_structure ? production->ground_slots : production->space_slots)) {
+            if (refusal) *refusal = PlacementRefusal::structure_slots;
             return refuse<StartingForcePlacement>("authored special-structure capacity exceeded");
+        }
         const auto id = allocate();
         if (!id) return refuse<StartingForcePlacement>("allocation frontier exhausted");
         out.structures.push_back({id, request.type, request.owner, {}, domain, gc::ProductionKind::structure});
@@ -249,6 +253,10 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
     return core::Result<StartingForcePlacement>::success(std::move(out));
 }
 
+static core::Result<StartingForcePlacement> place_starting_force_checked(const StartingForceInputs&,
+    const StartingForceRequest&, sim::EntityId, const gc::GalacticSetup&, const CampaignPlacementContext&,
+    const std::function<core::Result<bool>(const gc::Fleet&)>&, PlacementRefusal*);
+
 sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(
     std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
     return [inputs = std::move(inputs), request](const gc::GalacticSnapshot& snapshot, sim::EntityId frontier) {
@@ -274,37 +282,57 @@ sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(
     };
 }
 
+static core::Result<gc::GalacticSession::NativeForcePlacement> stock_native_shadow_placement(
+    const std::shared_ptr<const StartingForceInputs>& inputs, const gc::GalacticSession::NativeProductionRequest& request,
+    const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier, PlacementRefusal* refusal) {
+    using Result = core::Result<gc::GalacticSession::NativeForcePlacement>;
+    if (!inputs || view.planet.id != request.planet)
+        return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow placement requires its original inputs and staging planet");
+    const auto binding = std::find_if(inputs->bindings.begin(), inputs->bindings.end(),
+        [&](const auto& row) { return row.id == request.type; });
+    if (binding == inputs->bindings.end()) return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow original type is unbound");
+    gc::GalacticSetup setup;
+    setup.fleets.assign(view.orbit.begin(), view.orbit.end());
+    setup.planets.push_back(view.planet);
+    CampaignPlacementContext context;
+    context.control.max_ground_forces = view.maximum_ground_forces;
+    context.control.planets.push_back(view.presence);
+    context.movement.contents.assign(view.contents.begin(), view.contents.end());
+    context.production.planets.push_back(view.production);
+    context.production.nested_creation = view.creation;
+    setup.control = context.control; setup.movement = context.movement;
+    auto placed = place_starting_force_checked(*inputs, {request.planet, request.player, request.type, binding->original_type, false, {}},
+        frontier, setup, context, view.combat_skip, refusal);
+    if (!placed) return Result::failure(placed.error());
+    const auto& row = placed.value();
+    if (!row.detached_units.empty()) return refuse<gc::GalacticSession::NativeForcePlacement>("native detached placement requires its owning service");
+    return Result::success({row.next_id, row.fleets, row.contents, row.landed, row.structures, row.originals,
+        row.starbase, row.ground_base, row.starbase_type, row.special_control});
+}
 gc::GalacticSession::NativeShadowForceBuilder stock_native_force_shadow_builder(
     std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
     return [inputs = std::move(inputs), request](const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier) {
-        using Result = core::Result<gc::GalacticSession::NativeForcePlacement>;
-        if (!inputs || view.planet.id != request.planet)
-            return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow placement requires its original inputs and staging planet");
-        const auto binding = std::find_if(inputs->bindings.begin(), inputs->bindings.end(),
-            [&](const auto& row) { return row.id == request.type; });
-        if (binding == inputs->bindings.end()) return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow original type is unbound");
-        gc::GalacticSetup setup;
-        setup.fleets.assign(view.orbit.begin(), view.orbit.end());
-        setup.planets.push_back(view.planet);
-        CampaignPlacementContext context;
-        context.control.max_ground_forces = view.maximum_ground_forces;
-        context.control.planets.push_back(view.presence);
-        context.movement.contents.assign(view.contents.begin(), view.contents.end());
-        context.production.planets.push_back(view.production);
-        context.production.nested_creation = view.creation;
-        setup.control = context.control; setup.movement = context.movement;
-        auto placed = place_starting_force(*inputs, {request.planet, request.player, request.type, binding->original_type, false, {}}, frontier, setup, context, view.combat_skip);
-        if (!placed) return Result::failure(placed.error());
-        const auto& row = placed.value();
-        if (!row.detached_units.empty()) return refuse<gc::GalacticSession::NativeForcePlacement>("native detached placement requires its owning service");
-        return Result::success({row.next_id, row.fleets, row.contents, row.landed, row.structures, row.originals,
-            row.starbase, row.ground_base, row.starbase_type, row.special_control});
+        return stock_native_shadow_placement(inputs, request, view, frontier, nullptr);
     };
 }
-
-core::Result<StartingForcePlacement> place_starting_force(const StartingForceInputs& inputs,
+gc::GalacticSession::NativeReconciledForceBuilder stock_native_force_reconciliation_builder(
+    std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
+    return [inputs = std::move(inputs), request](const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier) {
+        using Result = core::Result<std::optional<gc::GalacticSession::NativeForcePlacement>>;
+        PlacementRefusal refusal{};
+        auto placed = stock_native_shadow_placement(inputs, request, view, frontier, &refusal);
+        if (!placed) {
+            if (refusal == PlacementRefusal::structure_slots) return Result::success({});
+            return Result::failure(placed.error());
+        }
+        return Result::success(std::move(placed).value());
+    };
+}
+static core::Result<StartingForcePlacement> place_starting_force_checked(const StartingForceInputs& inputs,
     const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
-    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
+    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip,
+    PlacementRefusal* refusal) {
+    if (refusal) *refusal = PlacementRefusal::none;
     auto staged = setup; auto presence = context;
     staged.control = presence.control; staged.movement = presence.movement;
     StartingForcePlacement result; result.next_id = first_free;
@@ -322,7 +350,7 @@ core::Result<StartingForcePlacement> place_starting_force(const StartingForceInp
             return combat_skip(fleet);
         };
         auto placed = place_starting_force_once(inputs, current, result.next_id, staged, presence,
-            combat_skip ? std::function<core::Result<bool>(const gc::Fleet&)>(reader) : std::function<core::Result<bool>(const gc::Fleet&)>{});
+            combat_skip ? std::function<core::Result<bool>(const gc::Fleet&)>(reader) : std::function<core::Result<bool>(const gc::Fleet&)>{}, refusal);
         if (!placed) return placed;
         const auto& part = placed.value();
         staged.fleets.insert(staged.fleets.end(), part.fleets.begin(), part.fleets.end());
@@ -347,6 +375,11 @@ core::Result<StartingForcePlacement> place_starting_force(const StartingForceInp
         if (!current.type) return refuse<StartingForcePlacement>("unbound additional creation type");
     }
     return core::Result<StartingForcePlacement>::success(std::move(result));
+}
+core::Result<StartingForcePlacement> place_starting_force(const StartingForceInputs& inputs,
+    const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
+    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
+    return place_starting_force_checked(inputs, request, first_free, setup, context, combat_skip, nullptr);
 }
 
 core::Result<void> apply_starting_force_placement(const StartingForceInputs&,

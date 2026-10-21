@@ -30,6 +30,10 @@ struct TcpOptions {
     std::chrono::milliseconds handshake_timeout{10000};
     // LAN-8B: peers correspond to stable seat positions, separately from faction owners.
     std::uint32_t peers{2}; // 2..max_match_seats; the default retains the direct two-seat path.
+    // Lobby capacity: authenticate host links now, form only the frozen roster's
+    // full mesh at Start. Joining clients learn the capacity from the host.
+    bool staging_capacity{};
+    bool lobby_bootstrap{}; // Negotiate the host's capacity/mode in the authenticated hello.
     PeerIndex seat{}; // Joining mesh seat, 1..peers-1; zero requests the first available seat.
     std::string mesh_listen{"0.0.0.0"};
     std::uint16_t mesh_port{}; // zero chooses an ephemeral per-client listener.
@@ -48,7 +52,8 @@ core::Result<JoinEndpoint> parse_join_endpoint(std::string_view text);
 
 // Host is peer 0. For N>2 it assigns seat indices and distributes client listener
 // endpoints; each pair then opens one reliable stream (full mesh, never a relay).
-// Every participant must select the same TcpOptions::peers before joining. Client
+// Legacy fixed rosters require the same TcpOptions::peers on every participant.
+// Opt-in staging learns host capacity and freezes only admitted peers at Start. Client
 // listener ports must be reachable by the other clients; NAT traversal is external.
 // Call send/poll/link/close on the same game thread. poll drives non-blocking I/O;
 // callers must pump regularly, including while idle and while closing. Work and
@@ -70,11 +75,17 @@ public:
     PeerIndex self() const override;
     std::uint32_t peer_count() const override;
     std::optional<LinkStats> link_stats(PeerIndex peer) const override;
+    // Local queue observation on the I/O owner; false only after all queued bytes enter the socket.
+    [[nodiscard]] bool has_pending_output() const;
     std::uint16_t port() const;
     const std::optional<core::Diagnostic>& diagnostic() const;
     // Ordered close of one admitted edge; discard its application input. Vacant/closed is a no-op success.
     [[nodiscard]] core::Result<void> close_peer(PeerIndex peer);
     [[nodiscard]] std::uint64_t edge_identity(PeerIndex peer) const override; // Local generation, never a display name or credential.
+    [[nodiscard]] bool staging_capacity() const;
+    [[nodiscard]] bool staging_roster_ready(std::uint32_t active) const;
+    [[nodiscard]] core::Result<bool> lock_staging_roster(std::uint32_t active);
+    [[nodiscard]] bool staging_mesh_ready() const;
     [[nodiscard]] core::Result<void> reopen_staging_listener(); // Two-seat unauthenticated LAN host only; same port.
     void close(); // ordered clean-close frame, flushed by poll; destructor aborts immediately
     // Like poll/link, query only on the current I/O owner's thread. Ownership may

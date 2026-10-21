@@ -122,6 +122,7 @@ public:
     core::Result<void> release(PeerIndex slot) override;
     core::Result<void> kick(PeerIndex slot) override;
     core::Result<void> lock() override;
+    core::Result<bool> lock_roster(std::uint32_t seats, std::uint64_t revision) override;
     // Diagnostic snapshot only: count and latest EAWR-NET-1732/1733 renewal refusal, never credentials.
     std::pair<std::uint64_t, std::string> renewal_failure() const;
     core::Result<bool> repair_attachment(std::uint64_t epoch) override;

@@ -855,6 +855,12 @@ tick.
   the lane's searches after it do not start. Both run sliced instead (PC-08). The first search
   of a layer always starts, so a search that fits in the budget plans in its own frame as in
   FoC (PC-02); only a long search or a burst runs sliced.
+  The neutral `PathService<Backend>` contract in `path_service.hpp` owns the budget
+  ledger, stable lane rounds and sliced landing limit. `SpacePathService` plugs in
+  the existing state lattice; session planning and checkpoint callers use this seam.
+  Backend-specific copied inputs and the expansion cursor retain their existing
+  checkpoint field order. A future land provider supplies its own request and
+  checkpoint types; this seam supplies no land passability or local-movement policy.
 - **PC-08** (project, path-search performance parity; the owner's suggestion to compute in the background and adjust the
   heading when done) Sliced searches with a fixed landing. A search PC-07 gives up or does not
   start runs again from where the ship's current plan puts it `search_delay` frames later (4,

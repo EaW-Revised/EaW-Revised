@@ -217,7 +217,7 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
     if (!metadata.capacity) return fail("This map has no valid authored player capacity.");
     const auto rows = std::min(*metadata.capacity, local_controls ? local_setup_rows
         : static_cast<std::uint32_t>(sim::max_match_seats));
-    if (slots.size() < 2 || slots.size() > rows) return fail("Choose at least two players within this map's local capacity.");
+    if (slots.size() < (complete_teams ? 2U : 1U) || slots.size() > rows) return fail("Choose at least two players within this map's local capacity.");
     if (metadata.new_markers != true) return fail("Legacy map starts are not supported yet.");
     if (!metadata.start_positions || metadata.start_positions->size() < 2)
         return fail("This map has missing or malformed authored start positions.");
@@ -230,6 +230,7 @@ core::Result<void> validate_setup_slots(const std::span<const LobbySlot> slots,
             return fail("Occupied player rows must be distinct, ordered and within range.");
         previous = slot.slot;
         if (local_controls && slot.slot != 1 && slot.human) return fail("Other local rows support AI or Open only.");
+        if (static_cast<unsigned>(slot.difficulty) > static_cast<unsigned>(sim::tactical::AiLevel::hard)) return fail("Choose a valid AI difficulty level.");
         if (slot.human && slot.difficulty != sim::tactical::AiLevel::normal) return fail("A human row has no AI difficulty level.");
         if (slot.team >= metadata.start_positions->size()) return fail("The selected team has no authored start on this map.");
         const auto [team, inserted] = factions.emplace(slot.team, slot.faction);

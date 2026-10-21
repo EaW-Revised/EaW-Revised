@@ -32,11 +32,14 @@ struct WalletHost final : auth::ImmediateEffectHost {
     unsigned publications{};
     mutable unsigned captures{};
     bool refuse{};
+    std::function<void(std::string_view)> observe;
     eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>> capture() const override {
+        if (observe) observe("capture");
         ++captures;
         return eawr::core::Result<std::unique_ptr<auth::ImmediateEffectState>>::success(state.clone());
     }
     eawr::core::Result<void> publish(std::unique_ptr<auth::ImmediateEffectState> shadow) override {
+        if (observe) observe("publish");
         if (refuse) {
             eawr::core::Diagnostic error; error.code = "test.publish"; error.message = "publication refused";
             return eawr::core::Result<void>::failure(error);
@@ -151,11 +154,15 @@ Register_Event('Bad', DispatchFailure)
     // partitions run in never show: the inline run, 1/2/4/8 workers and a highest-first executor agree.
     struct ChainRun {
         std::vector<std::string> commands;
+        std::vector<std::uint64_t> selections;
+        std::vector<std::string> scope_events;
+        bool succeeded{};
         unsigned publications{}, captures{};
         std::int64_t balance{};
         bool operator==(const ChainRun&) const = default;
     };
-    const auto run_chains = [&](const eawr::sim::PartitionExecutor& executor, bool chained, const std::string& chain_source) {
+    const auto run_chains = [&](const eawr::sim::PartitionExecutor& executor, bool chained, const std::string& chain_source,
+                                bool select_frontier = false, bool refuse_publication = false) {
         Session session = make_session({{"Main.lua", chain_source}});
         auto host = std::make_shared<WalletHost>();
         expect(static_cast<bool>(session.scheduler->register_binding("Self", [](auth::BindingContext& context, const auth::ValueList&) {
@@ -176,11 +183,37 @@ Register_Event('Bad', DispatchFailure)
         }
         auth::ServiceOptions options;
         if (chained) options.chain_of = [](std::uint64_t instance) -> std::uint64_t { return instance == 2 ? 10 : 20; };
+        std::vector<std::uint64_t> selections;
+        std::vector<std::string> scope_events;
+        std::optional<std::uint64_t> active_owner;
+        if (select_frontier) options.begin_chain = [&](std::uint64_t owner) {
+            expect(!active_owner, "previous player scope is released before selecting another chain");
+            active_owner = owner;
+            scope_events.push_back("begin:" + std::to_string(owner));
+            selections.push_back(owner); host->state.balance = static_cast<std::int64_t>(owner);
+            std::shared_ptr<void> scope(new std::uint64_t(owner), [&](void* value) {
+                const auto* selected = static_cast<std::uint64_t*>(value);
+                expect(active_owner && *active_owner == *selected, "scope restores the selected player");
+                scope_events.push_back("end:" + std::to_string(*selected));
+                active_owner.reset();
+                delete selected;
+            });
+            return eawr::core::Result<std::shared_ptr<void>>::success(std::move(scope));
+        };
+        if (select_frontier) host->observe = [&](std::string_view operation) {
+            expect(active_owner.has_value(), "capture and publication retain their player scope");
+            if (active_owner) scope_events.push_back(std::string(operation) + ":" + std::to_string(*active_owner));
+        };
+        host->refuse = refuse_publication;
         // Creating an instance captures too; only the service's own captures count.
         const unsigned captured_before = host->captures, published_before = host->publications;
         auto result = session.scheduler->service(executor, options);
-        expect(static_cast<bool>(result), "chained immediate service completes");
+        expect(static_cast<bool>(result) != refuse_publication, "chained service reports the actual publication result");
+        expect(!active_owner, "service releases its last scope on success and failure");
         ChainRun run;
+        run.succeeded = static_cast<bool>(result);
+        run.selections = std::move(selections);
+        run.scope_events = std::move(scope_events);
         run.publications = host->publications - published_before; run.captures = host->captures - captured_before;
         run.balance = host->state.balance;
         if (result) for (const auto& command : result.value().commands) run.commands.push_back(text(command));
@@ -215,6 +248,22 @@ Register_Event('Bad', DispatchFailure)
         const auto readonly = run_chains(inline_executor, true, readonly_source);
         expect(readonly.publications == 0 && readonly.captures == 1 && readonly.balance == 0,
             "owner chains that change nothing neither publish nor capture again");
+        const auto selected = run_chains(inline_executor, true, readonly_source, true);
+        expect(selected.selections == std::vector<std::uint64_t>({10, 20})
+            && selected.commands == std::vector<std::string>({"1#0 report 20 1", "2#0 report 10 2", "3#0 report 20 3"})
+            && selected.publications == 0 && selected.captures == 2,
+            "owner selection precedes capture and refreshes a read-only chain's distinct host frontier");
+        expect(selected.scope_events == std::vector<std::string>({"begin:10", "capture:10", "end:10",
+            "begin:20", "capture:20", "end:20"}), "read-only scopes end before the next selection and service return");
+        const auto scoped_writes = run_chains(inline_executor, true, chain_source, true);
+        expect(scoped_writes.scope_events == std::vector<std::string>({"begin:10", "capture:10", "publish:10", "end:10",
+            "begin:20", "capture:20", "publish:20", "end:20"}), "each scope includes its canonical publication");
+        const auto refused_scope = run_chains(inline_executor, true, chain_source, true, true);
+        expect(!refused_scope.succeeded && refused_scope.scope_events == std::vector<std::string>({
+            "begin:10", "capture:10", "publish:10", "end:10"}), "a failed publication releases the player scope before aborting");
+        const auto refused_tail = run_chains(inline_executor, false, chain_source, true, true);
+        expect(!refused_tail.succeeded && refused_tail.scope_events == std::vector<std::string>({
+            "begin:0", "capture:0", "publish:0", "end:0"}), "a failed final publication also releases the unowned tail scope");
         for (const std::size_t workers : eawr::platform::determinism_worker_counts()) {
             const eawr::platform::ThreadWorkerAdapter executor(workers);
             expect(run_chains(executor, true, readonly_source) == readonly, "the read-only chains equal the inline run on every determinism worker count");

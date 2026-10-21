@@ -10,7 +10,7 @@ std::vector<SummaryPlanet> published_summary_planets(const sim::galactic::Galact
     const std::map<ObjectId, ReferenceType>& planet_types) {
     using namespace sim::galactic;
     std::vector<SummaryPlanet> result;
-    if (!snapshot.observer() || snapshot.observer()->local_player != local_player) return result;
+    if (!snapshot.observer() || snapshot.view_player() != local_player) return result;
     const auto ally = [&](PlayerId owner) {
         if (owner == local_player) return true;
         for (const auto& player : snapshot.observer()->players) if (player.player == local_player)

@@ -5,6 +5,8 @@
 #include <span>
 #include <utility>
 #include "../../support/check.hpp"
+#include "../../../src/sim/galactic/checkpoint_archive_internal.hpp"
+#include "../../../src/sim/tactical/checkpoint_archive_internal.hpp"
 // The EAWRCKP container and the child-log section (docs/checkpoint-format.md, ADR-016): round
 // trips, every refusal leaving the running battle untouched, and restore-and-continue with
 // identical per-tick hashes on 1, 2, 4 and 8 workers.
@@ -42,6 +44,44 @@ int& failures = local_checker.failures;
 
 void expect(const bool condition, const std::string_view message) {
     if (!condition) local_checker.check(condition, message, std::cerr, "FAIL: ");
+}
+
+template <class Writer, class Reader, class Invalid>
+void test_boolean_vector_archive() {
+    std::vector<bool> long_bits(4097);
+    for (std::size_t i = 0; i < long_bits.size(); ++i) long_bits[i] = i % 3U == 0U;
+    for (const auto& bits : std::array<std::vector<bool>, 3>{{{}, {true, false, false, true, false}, long_bits}}) {
+        Writer writer;
+        writer(bits);
+        Bytes expected;
+        for (std::size_t i = 0; i < 8; ++i) {
+            expected.push_back(static_cast<std::uint8_t>(static_cast<std::uint64_t>(bits.size()) >> (8U * i)));
+        }
+        for (const bool bit : bits) expected.push_back(bit ? 1U : 0U);
+        expect(writer.bytes == expected, "boolean vectors use a u64 count and one canonical byte per bit");
+        Reader reader(writer.bytes);
+        std::vector<bool> restored{true, true};
+        reader(restored);
+        expect(restored == bits && reader.remaining() == 0, "boolean vectors replace and round trip empty, mixed and long inputs");
+    }
+
+    // Other containers must dispatch nested packed vectors through the same overload.
+    const std::array<std::vector<bool>, 2> nested{{{true, false}, {false, true, true}}};
+    Writer writer;
+    writer(nested);
+    Reader reader(writer.bytes);
+    std::array<std::vector<bool>, 2> restored;
+    reader(restored);
+    expect(restored == nested && reader.remaining() == 0, "array elements dispatch boolean vectors without proxies");
+
+    for (const std::uint8_t invalid : {std::uint8_t{2}, std::uint8_t{255}}) {
+        Bytes bytes{1, 0, 0, 0, 0, 0, 0, 0, invalid};
+        Reader malformed(bytes);
+        std::vector<bool> output;
+        bool refused = false;
+        try { malformed(output); } catch (const Invalid&) { refused = true; }
+        expect(refused, "boolean vectors refuse noncanonical element bytes");
+    }
 }
 
 template <typename T>
@@ -1122,6 +1162,10 @@ int main(int argc, char** argv) {
         if (failures != 0) std::cerr << failures << " checkpoint corpus check(s) failed\n";
         return result;
     }
+    test_boolean_vector_archive<eawr::sim::galactic::checkpoint_detail::Writer,
+        eawr::sim::galactic::checkpoint_detail::Reader, eawr::sim::galactic::checkpoint_detail::Invalid>();
+    test_boolean_vector_archive<tactical::checkpoint_detail::Writer,
+        tactical::checkpoint_detail::Reader, tactical::checkpoint_detail::Invalid>();
     test_container_round_trip();
     test_container_refusals();
     test_seats();

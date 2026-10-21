@@ -53,7 +53,7 @@ core::Result<HeroSchedule> schedule_hero_return(std::vector<HeroReturnRecord>& r
     if (frame > std::numeric_limits<std::uint64_t>::max() - delay || records.size() >= galactic_max_objects)
         return fail<HeroSchedule>("hero respawn record limit");
     records.push_back({defeat.id, defeat.respawn_type, defeat.structure, defeat.owner,
-        defeat.killer ? defeat.killer : defeat.parent_killer, location, frame + delay});
+        defeat.killer ? defeat.killer : defeat.parent_killer, location, frame + delay, frame});
     out.scheduled = true;
     if (defeat.respawn_whole_team) for (const auto& member : defeat.companions)
         if (member.id != defeat.id && !member.dead && !member.deletion_pending) out.destroyed_companions.push_back(member.id);
@@ -113,10 +113,11 @@ core::Result<void> service_hero_returns(std::vector<HeroReturnRecord>& records, 
     return core::Result<void>::success();
 }
 std::vector<std::uint8_t> encode_hero_returns(const std::span<const HeroReturnRecord> records) {
-    std::vector<std::uint8_t> bytes; put(bytes, 1, 4); put(bytes, records.size(), 4);
+    std::vector<std::uint8_t> bytes; put(bytes, 2, 4); put(bytes, records.size(), 4);
     for (const auto& row : records) {
         put(bytes, row.defeated, 8); put(bytes, row.type, 8); put(bytes, row.structure, 8);
         put(bytes, row.owner, 4); put(bytes, row.killer, 4); put(bytes, row.planet, 8); put(bytes, row.deadline, 8);
+        put(bytes, row.start_frame, 8);
     }
     return bytes;
 }
@@ -129,17 +130,25 @@ core::Result<std::vector<HeroReturnRecord>> decode_hero_returns(const std::span<
         return value;
     };
     const auto version = read(4), count = read(4);
-    if (!version || *version != 1 || !count || *count > galactic_max_objects || *count > (bytes.size() - cursor) / 48)
+    if (!version || *version != 2 || !count || *count > galactic_max_objects || *count > (bytes.size() - cursor) / 56)
         return fail<std::vector<HeroReturnRecord>>("malformed hero return records");
     std::vector<HeroReturnRecord> rows;
     std::set<EntityId> ids;
     for (std::uint64_t i = 0; i < *count; ++i) {
         const auto id = read(8), type = read(8), structure = read(8), owner = read(4), killer = read(4), planet = read(8), deadline = read(8);
-        if (!id || !*id || !ids.insert(*id).second || !type || !*type || !structure || !owner || !*owner || !killer || !planet || !*planet || !deadline)
+        const auto start = read(8);
+        if (!id || !*id || !ids.insert(*id).second || !type || !*type || !structure || !owner || !*owner || !killer || !planet || !*planet || !deadline
+            || !start || *start > *deadline)
             return fail<std::vector<HeroReturnRecord>>("invalid hero return record");
-        rows.push_back({*id, *type, *structure, static_cast<PlayerId>(*owner), static_cast<PlayerId>(*killer), *planet, *deadline});
+        rows.push_back({*id, *type, *structure, static_cast<PlayerId>(*owner), static_cast<PlayerId>(*killer), *planet, *deadline, *start});
     }
     if (cursor != bytes.size()) return fail<std::vector<HeroReturnRecord>>("trailing hero return bytes");
     return core::Result<std::vector<HeroReturnRecord>>::success(std::move(rows));
+}
+std::vector<HeroReturnView> local_hero_returns(const std::span<const HeroReturnRecord> records, const PlayerId local) {
+    std::vector<HeroReturnView> views;
+    if (local) for (const auto& row : records) if (row.owner == local)
+        views.push_back({row.type, row.owner, row.planet, row.start_frame, row.deadline});
+    return views;
 }
 } // namespace eawr::sim::galactic

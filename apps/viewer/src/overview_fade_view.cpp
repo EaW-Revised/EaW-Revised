@@ -1,6 +1,8 @@
+#include "gpu_debug_labels.hpp"
 #include "overview_fade_view.hpp"
 
 #include <godot_cpp/classes/control.hpp>
+#include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rd_texture_view.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
@@ -43,6 +45,7 @@ OverviewFadeView::OverviewFadeView(Node& host) {
     rect_->set_visible(false);
     Ref<Shader> shader;
     shader.instantiate();
+    name_canvas_shader(*shader.ptr(), "EAWR/UI/OverviewFade");
     shader->set_code(fade_shader);
     material_.instantiate();
     material_->set_shader(shader);
@@ -107,6 +110,8 @@ bool OverviewFadeView::hold(Viewport& viewport) {
         rect_->set_texture(texture_);
     }
     // The render target still holds the last drawn frame: this frame has not drawn yet.
+    const bool labels = OS::get_singleton()->get_cmdline_user_args().has("--eawr-gpu-labels");
+    const GpuDebugLabel label(*rendering, *device, "EAWR/BLIT/OverviewFadeHold", labels);
     if (device->texture_copy(source, held_, Vector3(), Vector3(), Vector3(static_cast<float>(width), static_cast<float>(height), 1.0F),
                              0, 0, 0, 0) != OK) {
         capture_ = "unavailable: the copy failed";

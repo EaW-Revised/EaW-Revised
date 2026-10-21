@@ -62,6 +62,10 @@ protected:
 // The viewport's focus state: a visible modal layer and a text control with keyboard focus.
 [[nodiscard]] presentation::ui::InputFocus input_focus(godot::Viewport& viewport);
 
+// Tests visible panel masks in canvas coordinates, including empty component slots.
+// World pickers use this before GUI dispatch or while holding a captured button.
+[[nodiscard]] bool pointer_over_panel(godot::Node& root, const godot::Vector2& point);
+
 // Registers the routing classes with ClassDB (scene initialisation level).
 void register_ui_input_classes();
 

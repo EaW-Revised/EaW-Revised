@@ -51,6 +51,8 @@ public:
     template <class A, class B> void value(const std::pair<A, B>& input) { (*this)(input.first, input.second); }
     template <class T, std::size_t N> void value(const std::array<T, N>& input) { for (const auto& v : input) value(v); }
     template <class T, std::size_t N> void value(const T (&input)[N]) { for (const auto& v : input) value(v); }
+    // Materialize packed bits so the archive never dispatches on a library proxy type.
+    void value(const std::vector<bool>& input) { value(static_cast<std::uint64_t>(input.size())); for (const bool v : input) value(v); }
     template <class T> void value(const std::vector<T>& input) { value(static_cast<std::uint64_t>(input.size())); for (const auto& v : input) value(v); }
     template <class T, std::size_t N> void value(std::span<T, N> input) { value(static_cast<std::uint64_t>(input.size())); for (const auto& v : input) value(v); }
     template <class K, class V> void value(const std::map<K, V>& input) { value(static_cast<std::uint64_t>(input.size())); for (const auto& v : input) value(v); }
@@ -89,6 +91,7 @@ public:
     template <class T, std::size_t N> void value(T (&output)[N]) { for (auto& v : output) value(v); }
     // Byte-wide elements (u8 blobs, strings) may use the whole byte budget; wider rows are bounded by an eighth of it.
     std::uint64_t count(std::size_t limit = byte_limit / 8U) { std::uint64_t n{}; value(n); if (n > remaining() || n > limit) throw Invalid("state count exceeds remaining byte budget"); return n; }
+    void value(std::vector<bool>& output) { const auto n = count(byte_limit); allocation(n, sizeof(bool)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { bool v{}; value(v); output.push_back(v); } }
     template <class T> void value(std::vector<T>& output) { const auto n = count(sizeof(T) == 1U ? byte_limit : byte_limit / 8U); allocation(n, sizeof(T)); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { T v{}; value(v); output.push_back(std::move(v)); } }
     template <class K, class V> void value(std::map<K, V>& output) { const auto n = count(); allocation(n, sizeof(K) + sizeof(V) + 32U); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { K k{}; V v{}; (*this)(k, v); if (!output.empty() && !(output.rbegin()->first < k)) throw Invalid("unordered state map"); output.emplace(std::move(k), std::move(v)); } }
     template <class K, class V> void value(std::multimap<K, V>& output) { const auto n = count(); allocation(n, sizeof(K) + sizeof(V) + 32U); output.clear(); for (std::uint64_t i = 0; i < n; ++i) { K k{}; V v{}; (*this)(k, v); if (!output.empty() && k < output.rbegin()->first) throw Invalid("unordered state multimap"); output.emplace(std::move(k), std::move(v)); } }

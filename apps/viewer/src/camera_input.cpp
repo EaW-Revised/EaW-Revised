@@ -87,7 +87,58 @@ core::Result<void> Adapter::activate(const std::string_view json) {
     auto parsed = parse_binding_table(json);
     if (!parsed) return core::Result<void>::failure(parsed.error());
     table_ = std::move(parsed).value();
+    configured_table_ = table_;
+    camera_wasd_.reset();
     cancel();
+    return core::Result<void>::success();
+}
+
+core::Result<void> Adapter::set_camera_keys(const bool wasd) {
+    if (!configured_table_ || camera_wasd_ == wasd) return core::Result<void>::success();
+    BindingTable candidate = *configured_table_;
+    const auto pan = [](const Action action) {
+        return action == Action::pan_left || action == Action::pan_right
+            || action == Action::pan_forward || action == Action::pan_back;
+    };
+    std::erase_if(candidate.bindings, [&](const Binding& binding) {
+        return binding.context != Context::free && binding.device == Device::keyboard
+            && binding.modifiers == 0U && pan(binding.action)
+            && (binding.code == *key_code("W") || binding.code == *key_code("A")
+                || binding.code == *key_code("S") || binding.code == *key_code("D"));
+    });
+    if (wasd) {
+        constexpr std::array<std::pair<std::string_view, Action>, 4> keys{{
+            {"W", Action::pan_forward}, {"A", Action::pan_left},
+            {"S", Action::pan_back}, {"D", Action::pan_right}}};
+        for (const auto context : {Context::land, Context::space}) {
+            for (const auto& [key, action] : keys) {
+                Binding binding;
+                binding.id = "camera-keys." + std::string(to_string(context)) + "." + std::string(key);
+                std::transform(binding.id.begin(), binding.id.end(), binding.id.begin(),
+                    [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+                binding.context = context;
+                binding.device = Device::keyboard;
+                binding.code = *key_code(key);
+                binding.action = action;
+                binding.trigger = Trigger::held;
+                binding.scale = 1.0F;
+                candidate.bindings.push_back(std::move(binding));
+            }
+        }
+    }
+    // Reject a fixture's competing chord before installing any part of the preset.
+    std::set<std::tuple<Context, Device, std::uint32_t, std::uint8_t>> chords;
+    std::set<std::string> ids;
+    for (const auto& binding : candidate.bindings) {
+        if (!chords.emplace(binding.context, binding.device, binding.code, binding.modifiers).second
+            || !ids.insert(binding.id).second) {
+            return core::Result<void>::failure(failure(diagnostic_codes::invalid_bindings,
+                "camera-key preset conflicts with a configured binding"));
+        }
+    }
+    cancel();
+    table_ = std::move(candidate);
+    camera_wasd_ = wasd;
     return core::Result<void>::success();
 }
 

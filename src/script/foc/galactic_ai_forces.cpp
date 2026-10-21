@@ -56,12 +56,12 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
         direct_routes[route.from].insert(route.to); direct_routes[route.to].insert(route.from);
     }
     // WGA-192: unchanged authored positions/topology reuse the derived neighbourhood.
-    const bool reuse_nearby = !retained_nearby && snapshot_ && planets_.size() == snapshot.planets().size()
-        && snapshot_->planets().size() == snapshot.planets().size()
-        && std::equal(snapshot_->planets().begin(), snapshot_->planets().end(), snapshot.planets().begin(),
+    const bool reuse_nearby = !retained_nearby && bound().snapshot_ && bound().planets_.size() == snapshot.planets().size()
+        && bound().snapshot_->planets().size() == snapshot.planets().size()
+        && std::equal(bound().snapshot_->planets().begin(), bound().snapshot_->planets().end(), snapshot.planets().begin(),
             [](const auto& a, const auto& b) { return a.id == b.id && a.position == b.position; })
-        && snapshot_->routes().size() == snapshot.routes().size()
-        && std::equal(snapshot_->routes().begin(), snapshot_->routes().end(), snapshot.routes().begin());
+        && bound().snapshot_->routes().size() == snapshot.routes().size()
+        && std::equal(bound().snapshot_->routes().begin(), bound().snapshot_->routes().end(), snapshot.routes().begin());
     const auto type = [&](tactical::TypeId id) -> const GalacticForceType* {
         const auto found = std::lower_bound(setup_.force_types.begin(), setup_.force_types.end(), id,
             [](const auto& row, auto key) { return row.type < key; });
@@ -136,7 +136,7 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
                 }
             }
             // Native layers retain the completed topology/neighbourhood in row.
-            if (!retained_nearby && setup_.maximum_fleet_distance && reuse_nearby) row.nearby = planets_[index].nearby;
+            if (!retained_nearby && setup_.maximum_fleet_distance && reuse_nearby) row.nearby = bound().planets_[index].nearby;
             else if (!retained_nearby && setup_.maximum_fleet_distance) for (const auto& other : snapshot.planets()) {
                 ++row.neighbourhood_pairs;
                 const auto separation = distance(row.planet.position, other.position);
@@ -154,7 +154,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
     if (key.tokens.size() == 2 && key.tokens.front() == "VARIABLE_TARGET") {
         if (!at) return {};
         if (token == "CONNECTSISOLATEDPLANETSBYFORCE" || token == "CONNECTSLARGESTISLANDS") {
-            for (const auto& path : connectivity_->island_paths) if (path.player == key.player && path.planet == key.planet)
+            for (const auto& path : bound().connectivity_->island_paths) if (path.player == key.player && path.planet == key.planet)
                 return real((token == "CONNECTSLARGESTISLANDS" ? path.largest : path.least_force) ? 1 : 0); // WGA-194
             return {}; // producer must publish known false as well as true
         }
@@ -179,7 +179,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
     const bool friendly = key.tokens[1] == "FRIENDLYFORCE";
     const auto matches = [&](tactical::PlayerId owner) {
         if (!player(owner)) return false;
-        if (snapshot_->control()) for (const auto& relation : snapshot_->control()->relations) if (relation.player == key.player && relation.other == owner)
+        if (bound().snapshot_->control()) for (const auto& relation : bound().snapshot_->control()->relations) if (relation.player == key.player && relation.other == owner)
             return friendly ? relation.allied : !relation.allied;
         return friendly ? allied(key.player, owner) : !allied(key.player, owner);
     }; // WGA-181: copied explicit relation; typed team fixture otherwise
@@ -196,8 +196,8 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
                 // WGA-273/274: authored type qualifies once if any explicitly
                 // enemy player has an affiliated faction; neutral is not !ally.
                 for (const auto& potential : *row.facts.indigenous_potential) {
-                    if (!snapshot_->production() || !snapshot_->production()->nested_creation) return {};
-                    const auto& relations = snapshot_->production()->nested_creation->relations;
+                    if (!bound().snapshot_->production() || !bound().snapshot_->production()->nested_creation) return {};
+                    const auto& relations = bound().snapshot_->production()->nested_creation->relations;
                     bool enemy{};
                     for (const auto affiliation : potential.affiliations) {
                         if (!player(affiliation)) return {};
@@ -220,7 +220,7 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
         if (token != "SPACETOTALUNNORMALIZED" && token != "GROUNDTOTALUNNORMALIZED") return {};
         Real total{}; auto nested = copy_key(key); nested.tokens.front() = "VARIABLE_TARGET";
         nested.bindings.clear(); // WGA-189: rebuilt planet contexts omit incoming bindings
-        for (const auto& row : planets_) { nested.planet = row.planet.id; const auto value = read(nested, mode); if (!value) return {}; total += *value; }
+        for (const auto& row : bound().planets_) { nested.planet = row.planet.id; const auto value = read(nested, mode); if (!value) return {}; total += *value; }
         return total; // WGA-189
     }
     if (!at) return {};
@@ -265,14 +265,14 @@ std::optional<Real> GalacticWorld::force_token(const GalacticQueryKey& key, Read
         const bool maximum = token.ends_with("NBPTM");
         // WGA-189: game force rebuilds planet contexts without parameter bindings.
         nested.bindings.clear();
-        for (const auto& row : planets_) {
+        for (const auto& row : bound().planets_) {
             nested.planet = row.planet.id;
             const auto value = read(nested, mode); if (!value) return {};
             denominator = maximum ? std::max(denominator, *value) : denominator + *value;
         }
         if (both) {
             nested.tokens[1] = friendly ? "ENEMYFORCE" : "FRIENDLYFORCE";
-            for (const auto& row : planets_) { nested.planet = row.planet.id; const auto value = read(nested, mode); if (!value) return {}; denominator += *value; }
+            for (const auto& row : bound().planets_) { nested.planet = row.planet.id; const auto value = read(nested, mode); if (!value) return {}; denominator += *value; }
         }
     }
     if (!nearby) return normalized(*numerator, denominator);

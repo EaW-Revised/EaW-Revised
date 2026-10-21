@@ -158,12 +158,18 @@ void GalacticMode::State::write_report_controls(std::ostringstream& output) cons
            << ", \"text_style_updates\": " << hud_text_style_updates
            << ", \"offer_rows_visited\": " << hud_offer_rows_visited
            << ", \"max_offer_rows\": " << hud_offer_max_rows
-           << ", \"command_updates\": " << hud_command_updates << "}";
+           << ", \"offer_index_builds\": " << hud_offer_index_builds
+           << ", \"verify_checks\": " << hud_verify_checks
+           << ", \"verify_mismatches\": " << hud_verify_mismatches
+           << ", \"fact_changes\": " << hud_fact_changes
+           << ", \"verify_detail\": " << json(hud_verify_detail)
+           << ", \"command_updates\": " << hud_command_updates
+           << ", \"command_view_rebuilds\": " << hud_view_rebuilds << "}";
 }
 
 void GalacticMode::State::write_report_phases(std::ostringstream& output) const {
     output << ",\n  \"presentation_phases\": [";
-    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels"};
+    constexpr std::array phase_names{"main", "snapshot", "instances", "animation", "sample", "bind", "material_clock", "corruption", "camera_hud", "submit", "routes", "hud_facts", "hud_commands", "hud_fleets", "hud_ground", "hud_orbit", "hud_radar", "hud_labels", "hud_weapon"};
     static_assert(phase_names.size() == static_cast<std::size_t>(FramePhase::count));
     for (std::size_t index = 0; index < frame_phase_costs.size(); ++index) {
         const auto& cost = frame_phase_costs[index];
@@ -736,7 +742,7 @@ void GalacticMode::State::write_report_battle_proof(std::ostringstream& output) 
             output << (index ? "," : "") << json(core::format_diagnostic(refused[index]));
     }
     output << "],\"unfinished_battle\":{\"tick\":";
-    const auto proof_frame = game && !options.space_cycle_proof.empty() ? game->frame() : platform::LiveGameFrame{};
+    const auto proof_frame = game && !options.space_cycle_proof.empty() ? game->frame(sim::SeatId{galaxy->local.seat}) : platform::LiveGameFrame{};
     output << (proof_frame.battle ? proof_frame.battle->completed_tick() : 0) << ",\"units\":[";
     if (proof_frame.battle) {
         bool first = true;

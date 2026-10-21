@@ -43,6 +43,7 @@ inline constexpr std::uint16_t replay_extension_beacon_rules = 9; // HCB-12f, co
 inline constexpr std::uint16_t replay_extension_attract_pool = 13; // MAT-15 ATRC, coordinator-reserved
 inline constexpr std::uint16_t replay_extension_native_scene = 15; // optional native campaign content selection
 inline constexpr std::uint16_t replay_extension_object_turn = 16; // #3644: object-turn uses follow the commands
+inline constexpr std::uint16_t replay_extension_battle_domain = 17; // BF-1: absent is space
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
 
 // Recorded lobby settings are load-time metadata, never part of canonical simulation state.
@@ -166,6 +167,7 @@ struct TacticalSetup {
     std::vector<BeaconRule> beacon_rules; // HCB-12: resolved faction type/lifetime, ascending issuer.
     std::optional<ReplayNativeScene> native_scene{};
     std::optional<AttractPoolReturn> attract_pool; // MAT-15/16: the demo attract's pool return, opt-in
+    BattleDomain domain{BattleDomain::space};
     friend bool operator==(const TacticalSetup&, const TacticalSetup&) = default;
 };
 

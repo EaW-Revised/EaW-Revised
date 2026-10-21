@@ -95,4 +95,45 @@ void collect_heroes(const HeroCollectInput& input, const HeroTrayPolicy& policy,
     }
 }
 
+void dispatch_hero_click(const HeroCollectInput& input, const HeroTrayPolicy& policy, HeroRoster& scratch,
+                         const sim::EntityId hero, const bool hostile, const bool right, const bool double_click,
+                         const HeroEntityResolver& resolve, const HeroSelection& select, const HeroTarget& target) {
+    collect_heroes(input, policy, scratch);
+    // An old icon side is untrusted; resolve the current identity, then validate ownership below.
+    const HeroEntry* entry = nullptr;
+    for (const auto* side : {&scratch.friendly, &scratch.hostile}) {
+        const auto found = std::find_if(side->begin(), side->end(),
+            [hero](const HeroEntry& candidate) { return candidate.hero == hero; });
+        if (found != side->end()) { entry = &*found; break; }
+    }
+    if (entry == nullptr) return;
+    const auto instance = [&](const sim::EntityId id) -> const tactical::TacticalInstance* {
+        const auto found = std::find_if(input.instances.begin(), input.instances.end(),
+            [id](const auto& candidate) { return candidate.entity_id == id; });
+        return found == input.instances.end() ? nullptr : &*found;
+    };
+    const auto* represented = instance(entry->represented);
+    if (represented == nullptr) return;
+    const sim::EntityId entity = resolve ? resolve(represented->entity_id) : represented->entity_id;
+    const auto* ordered = instance(entity);
+    if (ordered == nullptr) return;
+    const auto alive = [](const tactical::TacticalInstance& unit) {
+        return !unit.durability || unit.durability->hull.raw() > 0;
+    };
+    if (!alive(*represented) || !alive(*ordered)) return;
+    const auto same_side = [&](const tactical::TacticalInstance& unit) {
+        return hostile ? tactical::players_hostile(input.players, input.local, unit.owner)
+                       : tactical::players_allied(input.players, input.local, unit.owner);
+    };
+    if (!same_side(*represented) || !same_side(*ordered)) return;
+    if (!hostile) {
+        if (!right && select) select(*ordered, double_click);
+        return;
+    }
+    // The icon grants no sight. Validate both the represented object and the actual
+    // command target, including when a craft resolves to its squadron container.
+    if (right && seen(input.visible, represented->entity_id) && seen(input.visible, entity) && target)
+        target(*ordered);
+}
+
 } // namespace eawr::presentation::ui

@@ -76,6 +76,9 @@ public:
     // A battle or campaign the player left from the in-game menu is gone: the shell shows its main menu
     // again, whichever screen started the game (the setup screen is left, the campaign shell restored).
     void return_to_main_menu();
+    // A campaign the host started itself (a multiplayer lobby's launch, which never passes through the shell's
+    // own campaign launcher) owns the frame: the demo battle stops and the menus leave it, as for a launcher start.
+    void campaign_started_by_host();
     // The host's input and window focus, for the attract's idle clock (MAT-06).
     void input(const godot::Ref<godot::InputEvent>& event);
     void window_activated();

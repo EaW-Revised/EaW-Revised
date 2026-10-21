@@ -382,6 +382,65 @@ void observer_story_publication() {
         "older immutable publication remains valid after quiet tick");
     live->stop();
 }
+void local_hero_return_publication() {
+    namespace cp = eawr::campaign;
+    galactic::GalacticSetup initial;
+    initial.players = {{1, 1, 0}, {2, 2, 0}};
+    initial.seats = {{{1}, 1, galactic::SeatKind::human, 0, true, 1},
+        {{2}, 2, galactic::SeatKind::human, 1, true, 2}};
+    initial.planets = {{1, {}, 1}, {2, {}, 2}};
+    initial.rules.maximum_fleet_movement_distance = Fixed::from_raw(Fixed::scale);
+    initial.observer.emplace(); initial.observer->human_observers = {1, 2}; initial.observer->solo_reference_human = 0;
+    initial.observer->players = {{1}, {2}};
+    for (const auto& planet : initial.planets) {
+        galactic::ObserverPlanet facts; facts.planet = planet.id;
+        facts.current_owner = facts.current_controller = facts.allegiance = facts.target_owner = planet.owner;
+        initial.observer->planets.push_back(facts);
+        for (const auto& player : initial.players)
+            initial.observer->records.push_back({player.player_id, planet.id});
+    }
+    std::sort(initial.observer->records.begin(), initial.observer->records.end(), [](const auto& a, const auto& b) {
+        return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+    });
+    auto owner = cp::GameSession::create(initial).value();
+    const eawr::sim::InlineExecutor executor;
+    for (unsigned i = 0; i < 5; ++i) expect(static_cast<bool>(owner.step(executor)), "hero publication advances to real schedule frame");
+    for (const auto player : {1U, 2U}) {
+        galactic::HeroDefeat defeat; defeat.id = 100 + player; defeat.type = defeat.respawn_type = 10 + player;
+        defeat.owner = player; defeat.planet = player; defeat.named = true;
+        defeat.seconds = Fixed::from_raw(10 * Fixed::scale);
+        expect(owner.schedule_hero_defeat(defeat, executor).value().scheduled, "actual owner schedules each hero");
+    }
+    const auto saved = owner.save_return_state().value();
+    const auto tick = owner.step(executor).value();
+    const std::vector<galactic::HeroReturnView> expected{{11, 1, 1, 5, 305}};
+    const std::vector<galactic::HeroReturnView> guest_expected{{12, 2, 2, 5, 305}};
+    expect(tick.hero_returns == std::vector<galactic::HeroReturnView>{{11, 1, 1, 5, 305}, {12, 2, 2, 5, 305}},
+        "GameTick carries both canonical human schedules");
+    auto services = std::make_shared<eawr::platform::CampaignServiceConfiguration>();
+    services->configure = [saved](auto& game) { return game.restore_return_state(saved); };
+    LiveGameSession::Options options; options.pacing = LiveGameSession::Pacing::driven; options.services = services;
+    auto live = LiveGameSession::start(initial, options).value();
+    const auto restored = live->frame({1}).hero_returns;
+    expect(restored && *restored == expected, "initial restored frame publishes copied local schedule before any step");
+    const auto guest = live->frame({2}).hero_returns;
+    expect(guest && *guest == guest_expected && live->frame({1}).hero_returns == restored
+        && !live->frame({999}).hero_returns && !live->frame().hero_returns,
+        "seat switch publishes each human's schedule without a hidden default observer");
+    expect(live->frame({1}).latest->view_player() == 1 && live->frame({2}).latest->view_player() == 2,
+        "frame seat binding selects the private snapshot");
+    live->submit(LiveGameOrder{{1}, galactic::PauseGalaxy{}, {}});
+    live->advance_to(1); expect(live->wait_for(1, 5s), "hero publication pause reaches boundary");
+    const auto paused = live->frame({1});
+    expect(paused.hero_returns == restored && *restored == expected,
+        "paused publication preserves the retained interval and older immutable frame");
+    expect(live->frame({2}).hero_returns == guest, "guest return cache survives a host query and a paused tick");
+    live->stop();
+    initial.observer.reset();
+    auto headless = LiveGameSession::start(initial, options).value();
+    expect(!headless->frame().hero_returns, "observer-free owner publishes no private schedule");
+    headless->stop();
+}
 void configured_services() {
     unsigned calls = 0;
     const auto caller = std::this_thread::get_id();
@@ -1331,6 +1390,7 @@ int case_galactic_live_game_session_tests() {
     campaign_end_owner();
     campaign_end_movies();
     observer_story_publication();
+    local_hero_return_publication();
     summary_clock_hold();
     tactical_summary_clock_hold();
     invasion_accept_command();

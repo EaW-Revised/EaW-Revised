@@ -45,9 +45,14 @@ add_test(NAME net_galactic_setup_contracts COMMAND net_galactic_setup_tests)
 # GCMP-07 (#4363): the lobby GC mode (gc1 options codec and versioning, campaign list, staging refusals, two-peer and nine-seat
 # rooms through the real lobby core and the galactic offer; the skirmish options bytes pinned).
 add_executable(net_galactic_lobby_tests galactic_lobby_tests.cpp)
+target_include_directories(net_galactic_lobby_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic")
 target_link_libraries(net_galactic_lobby_tests PRIVATE eawr::net eawr::platform eawr::campaign eawr::platform_net eawr::skirmish)
 eawr_target_project_warnings(net_galactic_lobby_tests)
 add_test(NAME net_galactic_lobby_contracts COMMAND net_galactic_lobby_tests)
+add_test(NAME net_galactic_lobby_stock_ai COMMAND net_galactic_lobby_tests --stock-ai)
+# The combined contract measured 776 s on the MSVC pool; allow twice that upper bound.
+set_tests_properties(net_galactic_lobby_stock_ai PROPERTIES
+    LABELS "long;batch-only" TIMEOUT 1560 SKIP_REGULAR_EXPRESSION "SKIPPED:")
 add_executable(net_viewer_lan_tests
     viewer_lan_tests.cpp
     viewer_lan_mesh_tests.cpp
@@ -275,9 +280,26 @@ add_test(NAME net_galactic_adapter_contracts COMMAND net_galactic_adapter_tests)
 set_tests_properties(net_galactic_adapter_contracts PROPERTIES TIMEOUT 600)
 
 add_executable(net_galactic_live_driver_tests galactic_live_driver_tests.cpp)
-target_link_libraries(net_galactic_live_driver_tests PRIVATE eawr::platform_net_galactic eawr::net_galactic eawr::platform)
+target_link_libraries(net_galactic_live_driver_tests PRIVATE eawr::platform_net_galactic eawr::net_galactic eawr::platform eawr::ui_model)
 eawr_target_project_warnings(net_galactic_live_driver_tests)
 add_test(NAME net_galactic_live_driver_contracts COMMAND net_galactic_live_driver_tests)
+add_test(NAME net_galactic_live_raid_contracts COMMAND net_galactic_live_driver_tests --raid)
+add_test(NAME net_galactic_mp_arbitration_contracts COMMAND net_galactic_live_driver_tests --arbitration)
+add_test(NAME net_galactic_mp_coop_battle_contracts COMMAND net_galactic_live_driver_tests --coop)
+set_tests_properties(net_galactic_mp_arbitration_contracts PROPERTIES TIMEOUT 180)
+set_tests_properties(net_galactic_live_raid_contracts PROPERTIES TIMEOUT 120)
 set_tests_properties(net_galactic_live_driver_contracts PROPERTIES TIMEOUT 600)
+
+add_executable(net_galactic_lan_hud_tests galactic_lan_hud_tests.cpp)
+target_include_directories(net_galactic_lan_hud_tests PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic")
+target_link_libraries(net_galactic_lan_hud_tests PRIVATE eawr::platform_net_galactic)
+eawr_target_project_warnings(net_galactic_lan_hud_tests)
+add_test(NAME net_galactic_lan_hud_contracts COMMAND net_galactic_lan_hud_tests)
+
+add_executable(net_galactic_ability_travel_tests galactic_ability_travel_tests.cpp)
+target_link_libraries(net_galactic_ability_travel_tests PRIVATE eawr::net_galactic eawr::platform)
+eawr_target_project_warnings(net_galactic_ability_travel_tests)
+add_test(NAME net_galactic_ability_travel_contracts COMMAND net_galactic_ability_travel_tests)
+set_tests_properties(net_galactic_ability_travel_contracts PROPERTIES TIMEOUT 120)
 
 eawr_label_tests()

@@ -19,7 +19,7 @@ namespace eawr::viewer::galactic {
     g::DestructionPreparation prepared{7001,101,name == "destruction-contested" ? h::Refusal::contested : h::Refusal::none,601};
     auto menus=g::observed_hero_action_menus(world,local,row,7001,nullptr,nullptr,nullptr,
         name == "destruction-absent" ? nullptr : &prepared);
-    g::ObserverSetup observer; observer.local_player=local;
+    g::ObserverSetup observer; observer.human_observers = {local}; observer.solo_reference_human = local;
     return std::make_shared<const g::GalacticSnapshot>(0,g::GalacticClock{},std::vector<g::GalacticPlayer>{},
         std::vector<g::Planet>{},std::vector<g::Route>{},std::vector<g::Fleet>{},std::vector<g::GalacticEvent>{},
         std::nullopt,std::nullopt,nullptr,std::nullopt,std::vector<g::Seat>{},std::nullopt,std::nullopt,

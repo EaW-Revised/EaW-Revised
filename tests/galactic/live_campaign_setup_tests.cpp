@@ -11,6 +11,7 @@
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
+#include "eawr/sim/galactic/control.hpp"
 #include "galactic/fleet_traits.hpp"
 #include "galactic/planet_hud.hpp"
 #include "galactic/ground_roster.hpp"
@@ -40,6 +41,12 @@ namespace {
 namespace cp = eawr::campaign;
 namespace gc = eawr::sim::galactic;
 using galactic_test::expect;
+bool control_sources_match(const gc::GalacticSnapshot& snapshot) {
+    if (!snapshot.control()) return false;
+    auto projected = *snapshot.control(); projected.ability_sources.clear();
+    for (const auto& actor : snapshot.actor_records()) gc::update_control_actor(projected, actor);
+    return projected.ability_sources == snapshot.control()->ability_sources;
+}
 std::optional<std::string> game_root() {
     return eawr::testing::game_root();
 }
@@ -83,7 +90,7 @@ void production_domains(const gc::GalacticSetup& setup, const cp::CampaignSetupP
 void structure_slot_counter(cp::CampaignRoot campaign, const cp::CampaignSetupPlan& plan,
     const cp::CampaignSetupOptions& options) {
     namespace hud = eawr::viewer::galactic;
-    const auto local = *options.local_observer;
+    const auto local = *options.solo_reference_human;
     auto initial = campaign.game()->galaxy().snapshot();
     const auto offers = initial->production_offers();
     const auto mining = std::find_if(offers.begin(), offers.end(), [&](const auto& row) {
@@ -154,7 +161,7 @@ void structure_slot_counter(cp::CampaignRoot campaign, const cp::CampaignSetupPl
     std::cout << "slot-counter before=" << *before.structures << " after=" << *after.structures
         << " capacity=" << *after.ground_capacity << " tick=" << completed->completed_tick() << '\n';
 }
-void installed(bool domains_only = false, bool slots_only = false) {
+void installed(bool domains_only = false, bool slots_only = false, std::string_view protection_case = {}) {
     const auto root = game_root();
     if (!root) { eawr::testing::skip_installed("SKIPPED: stock live campaign requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
     std::vector<eawr::vfs::MountSpec> mounts;
@@ -177,7 +184,27 @@ void installed(bool domains_only = false, bool slots_only = false) {
         {"DS_Durasteel", 5}, {"DS_Primary_Hyperdrive", 2}, {"DS_Shield_Gen", 3}, {"DS_Superlaser_Core", 4}},
         "every installed stock Build_Advances_Tech_Level value parses as its numeric target");
     bool installed_stealth_hero_fleet = false;
-    for (const auto& name : {"Sandbox_Equal_Footing_Underworld", "Sandbox_Equal_Footing_Rebel", "Sandbox_Equal_Footing_Empire"}) {
+    const bool solo_sources = protection_case == "--solo-protection-sources";
+    const bool all_mp = protection_case == "--all-mp-protection-sources";
+    std::vector<std::string> campaigns{"Sandbox_Equal_Footing_Underworld", "Sandbox_Equal_Footing_Rebel", "Sandbox_Equal_Footing_Empire"};
+    if (solo_sources) {
+        campaigns.clear();
+        // The active Underworld story still needs its orbital scanner placement
+        // provider (#4478). Keep that refusal intact; this case covers authored Tarkin sources.
+        for (const auto& source : data.campaigns) {
+            if (source.name == "Full_Story_Campaign_Underworld") continue;
+            if (std::any_of(source.starting_forces.begin(), source.starting_forces.end(),
+                [](const auto& force) { return force.type == "Grand_Moff_Tarkin_Team"; })) campaigns.push_back(source.name);
+        }
+        expect(!campaigns.empty(), "installed campaigns include authored protection sources");
+    }
+    if (all_mp) {
+        campaigns.clear();
+        for (const auto& source : data.campaigns) if (source.is_multiplayer.value_or(false)) campaigns.push_back(source.name);
+        expect(campaigns.size() == 6, "installed stock catalog contains all six multiplayer campaigns");
+    }
+    for (const auto& name : campaigns) {
+        if (!protection_case.empty() && !solo_sources && !all_mp && name != "Sandbox_Equal_Footing_Underworld") continue;
         if ((domains_only || slots_only) && std::string_view(name) != "Sandbox_Equal_Footing_Empire") continue;
         const auto* source = data.campaign(name); expect(source != nullptr, "stock family exists"); if (!source) continue;
         cp::CampaignSetupOptions options; options.seed = 42;
@@ -185,14 +212,158 @@ void installed(bool domains_only = false, bool slots_only = false) {
             const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
             options.players.push_back({{id, id, 0}, faction.name, true});
             const bool local = faction.name == source->starting_active_player;
-            if (local) options.local_observer = id;
+            if (local) options.solo_reference_human = id;
             if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
                 local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
+        }
+        if (solo_sources && !options.solo_reference_human) {
+            for (auto& seat : options.seats) {
+                const auto* faction = data.faction(options.players[seat.player - 1].faction);
+                if (!faction || !faction->is_playable.value_or(false)) continue;
+                options.solo_reference_human = seat.player;
+                seat.kind = gc::SeatKind::human; seat.human_side_id = seat.player;
+                break;
+            }
         }
         std::vector<std::string> originals;
         for (const auto& type : types.types) originals.push_back(type.name);
         std::sort(originals.begin(), originals.end());
         for (const auto& original : originals) options.types.push_back({options.types.size() + 1, original});
+        if (all_mp) {
+            options.mode = cp::CampaignSetupMode::multiplayer;
+            options.solo_reference_human.reset();
+            unsigned humans{};
+            for (auto& seat : options.seats) {
+                const auto* faction = data.faction(options.players[seat.player - 1].faction);
+                const bool human = faction && faction->is_playable.value_or(false) && humans < 2;
+                if (human) ++humans;
+                seat.kind = human ? gc::SeatKind::human : gc::SeatKind::ai;
+                seat.human_side_id = human ? seat.player : 0;
+            }
+            expect(humans == 2, "stock MP campaign prepares two human seats");
+            for (const bool heroes : {false, true}) {
+                options.custom = cp::CampaignCustomOptions{12000, 1, 5, heroes};
+                auto plan = cp::plan_live_campaign_setup(filesystem, data, types, name, options, "Normal_Default");
+                if (!plan) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(plan.error()));
+                auto services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, data, types, plan.value(), "Normal_Default");
+                if (!services) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(services.error()));
+                auto created = cp::CampaignRoot::create(plan.value(), services.value());
+                if (!created) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(created.error()));
+                const auto& setup = created.value().game()->galaxy().setup();
+                expect(control_sources_match(*created.value().game()->galaxy().snapshot()),
+                    "all stock MP automatic control sources match their live actor identities");
+                unsigned sources{};
+                for (const auto& force : plan.value().forces()) if (force.original_type == "Grand_Moff_Tarkin_Team") {
+                    ++sources;
+                    expect(setup.census && std::count_if(setup.census->objects.begin(), setup.census->objects.end(), [&](const auto& row) {
+                        return row.original_type == force.type && row.owner == force.owner;
+                    }) == 1, "authored Tarkin is placed once, also when MP hero planning references him");
+                }
+                expect(sources != 0, "each stock MP campaign exercises an authored protection source");
+                expect(heroes || plan.value().multiplayer_heroes().empty(), "heroes-off suppresses only the generated hero pass");
+                auto prepared = eawr::platform::PreparedLiveCampaign::from_plan(filesystem_owner, catalog.catalog,
+                    data, types, plan.value(), "Normal_Default");
+                if (!prepared) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(prepared.error()));
+                expect(prepared.value()->native_ai_installed() && !prepared.value()->native_ai_players().empty(),
+                    "stock MP installs faction-authored native AI after typed protection placement");
+                std::cout << "MP-protection-inert campaign=" << name << " heroes=" << heroes
+                    << " typed_root=passed placed=passed native_ai=installed\n";
+            }
+            continue;
+        }
+        if (!protection_case.empty()) {
+            auto protection_data = data;
+            const bool authored = protection_case == "--authored-protection-source";
+            if (authored) {
+                const auto selected = std::find_if(protection_data.campaigns.begin(), protection_data.campaigns.end(),
+                    [&](const auto& row) { return row.name == source->name; });
+                selected->starting_forces.push_back({"Empire", "Coruscant", "Grand_Moff_Tarkin_Team"});
+            } else if (!solo_sources) {
+                options.mode = cp::CampaignSetupMode::multiplayer;
+                options.custom = cp::CampaignCustomOptions{12000, 1, 5, true};
+            }
+            auto plan = cp::plan_live_campaign_setup(filesystem, protection_data, types, name, options, "Normal_Default");
+            if (!plan) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(plan.error()));
+            auto services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, protection_data,
+                types, plan.value(), "Normal_Default");
+            if (!services) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(services.error()));
+            std::optional<cp::CampaignHero> tarkin;
+            if (authored || solo_sources) {
+                expect(plan.value().mode() == cp::CampaignSetupMode::single_player && plan.value().multiplayer_heroes().empty(),
+                    "authored protection source prepares without the multiplayer hero path");
+                for (const auto& force : plan.value().forces()) if (force.original_type == "Grand_Moff_Tarkin_Team")
+                    tarkin = cp::CampaignHero{force.owner, force.planet, force.type, force.original_type};
+                expect(tarkin.has_value() || source->is_story_campaign.value_or(false), "authored protection test contains Tarkin or a stock story");
+            } else {
+                for (const auto& hero : plan.value().multiplayer_heroes()) if (hero.original_type == "Grand_Moff_Tarkin_Team") tarkin = hero;
+                expect(tarkin.has_value(), "stock multiplayer plan includes Tarkin with heroes enabled");
+            }
+            auto created = cp::CampaignRoot::create(plan.value(), services.value());
+            if (!created) throw std::runtime_error(name + ": " + eawr::core::format_diagnostic(created.error()));
+            const auto& setup = created.value().game()->galaxy().setup();
+            if (tarkin) {
+                expect(setup.census && std::any_of(setup.census->objects.begin(), setup.census->objects.end(), [&](const auto& row) {
+                    return row.original_type == tarkin->original_type_id && row.owner == tarkin->player && row.planet == tarkin->home;
+                }), "Tarkin is placed at his authored or planned multiplayer location");
+                const auto child = std::find_if(options.types.begin(), options.types.end(),
+                    [](const auto& row) { return row.original_type == "Grand_Moff_Tarkin"; });
+                expect(child != options.types.end() && setup.census && std::any_of(setup.census->objects.begin(), setup.census->objects.end(),
+                    [&](const auto& row) { return row.original_type == child->id && row.owner == tarkin->player && row.planet == tarkin->home; }),
+                    "Tarkin's nested actor is placed with its original identity");
+                const auto snapshot = created.value().game()->galaxy().snapshot();
+                bool has_protection{}, has_transition{};
+                if (child != options.types.end()) for (const auto& row : snapshot->control()->ability_sources) {
+                    if (row.type != child->id || row.owner != tarkin->player || row.planet != tarkin->home) continue;
+                    const auto profile = std::find_if(snapshot->control()->ability_types.begin(), snapshot->control()->ability_types.end(),
+                        [&](const auto& value) { return value.type == row.type; });
+                    if (profile == snapshot->control()->ability_types.end() || row.ability >= profile->abilities.size()) continue;
+                    const auto& ability = profile->abilities[row.ability];
+                    has_protection |= ability.protection;
+                    has_transition |= !ability.protection && ability.multiplier == eawr::sim::math::Fixed::from_ratio(1, 4).value();
+                }
+                expect(has_protection && has_transition, "Tarkin's nested actor supplies separate protection and direct-quarter-time sources");
+            }
+            expect(control_sources_match(*created.value().game()->galaxy().snapshot()),
+                "every authored/story/MP control source follows the placed actor");
+            if (authored || protection_case == "--mp-hero-protection-live") {
+                const eawr::platform::ThreadWorkerAdapter executor(1);
+                for (unsigned tick = 0; tick < 3; ++tick) {
+                    auto stepped = created.value().game()->step(executor);
+                    if (!stepped) throw std::runtime_error(eawr::core::format_diagnostic(stepped.error()));
+                    expect(control_sources_match(*created.value().game()->galaxy().snapshot()),
+                        "automatic control source ledger remains bound after campaign ticks");
+                }
+            }
+            if (protection_case == "--mp-heroes-tarkin" && tarkin) {
+                for (const bool galactic_production : {false, true}) {
+                    auto behavior_data = data;
+                    for (const auto& home : plan.value().homes()) if (home.planet) {
+                        auto planet = std::find_if(behavior_data.planets.begin(), behavior_data.planets.end(),
+                            [&](const auto& row) { return row.name == home.original_type; });
+                        if (planet == behavior_data.planets.end()) throw std::runtime_error("MP home authoring missing");
+                        std::erase(planet->behaviors, "PRODUCTION"); std::erase(planet->galactic_behaviors, "PRODUCTION");
+                        if (galactic_production) planet->galactic_behaviors.push_back("PRODUCTION");
+                    }
+                    auto behavior_plan = cp::plan_live_campaign_setup(filesystem, behavior_data, types, name, options, "Normal_Default");
+                    if (!behavior_plan) throw std::runtime_error(eawr::core::format_diagnostic(behavior_plan.error()));
+                    auto behavior_services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, behavior_data,
+                        types, behavior_plan.value(), "Normal_Default");
+                    if (!behavior_services) throw std::runtime_error(eawr::core::format_diagnostic(behavior_services.error()));
+                    auto behavior_root = cp::CampaignRoot::create(behavior_plan.value(), behavior_services.value());
+                    if (!behavior_root) throw std::runtime_error(eawr::core::format_diagnostic(behavior_root.error()));
+                    const auto& objects = behavior_root.value().game()->galaxy().setup().census->objects;
+                    const bool placed = std::any_of(objects.begin(), objects.end(), [&](const auto& row) {
+                        return row.original_type == tarkin->original_type_id && row.owner == tarkin->player;
+                    });
+                    expect(placed == galactic_production,
+                        "MP heroes need authored production behavior, including the galactic-only behavior list");
+                }
+            }
+            std::cout << "protection-live campaign=" << name << " mode=" << (solo_sources || authored ? "solo" : "MP")
+                << " authored_tarkin=" << tarkin.has_value() << " prepared=passed placed=passed\n";
+            if (solo_sources) continue;
+            return;
+        }
         auto planned = cp::plan_live_campaign_setup(filesystem, data, types, name, options, "Normal_Default");
         if (!planned) throw std::runtime_error(eawr::core::format_diagnostic(planned.error()));
         if (source->name == "Sandbox_Equal_Footing_Underworld") {
@@ -221,8 +392,7 @@ void installed(bool domains_only = false, bool slots_only = false) {
             if (!protected_plan) throw std::runtime_error(eawr::core::format_diagnostic(protected_plan.error()));
             auto protection = cp::prepare_live_campaign_services(filesystem, catalog.catalog, protected_data,
                 types, protected_plan.value(), "Normal_Default");
-            expect(!protection && protection.error().message.find("campaign_political_protection_sources") != std::string::npos,
-                "Tarkin-starting campaign refuses its missing source-keyed protection lifecycle");
+            expect(static_cast<bool>(protection), "authored Tarkin source prepares with live political abilities");
             auto economic_data = data;
             const auto economic_campaign = std::find_if(economic_data.campaigns.begin(), economic_data.campaigns.end(),
                 [&](const auto& row) { return row.name == source->name; });
@@ -260,9 +430,9 @@ void installed(bool domains_only = false, bool slots_only = false) {
             const auto empire = std::find_if(options.players.begin(), options.players.end(),
                 [](const auto& row) { return row.faction == "Empire"; });
             if (empire == options.players.end()) throw std::runtime_error("stock Empire player missing");
-            price_options.local_observer = empire->player.player_id;
+            price_options.solo_reference_human = empire->player.player_id;
             for (auto& seat : price_options.seats) {
-                seat.kind = seat.player == *price_options.local_observer ? gc::SeatKind::human : gc::SeatKind::ai;
+                seat.kind = seat.player == *price_options.solo_reference_human ? gc::SeatKind::human : gc::SeatKind::ai;
                 seat.human_side_id = seat.kind == gc::SeatKind::human ? seat.player : 0;
             }
             auto price_plan = cp::plan_live_campaign_setup(filesystem, price_data, types, name, price_options, "Normal_Default");
@@ -425,7 +595,7 @@ void installed(bool domains_only = false, bool slots_only = false) {
         const auto published_admission = [&](const gc::GalacticSnapshot& snapshot, gc::TypeId id) {
             std::optional<gc::ProductionAdmission> result;
             for (const auto& row : snapshot.production_offers()) {
-                if (row.type != id || row.player != *options.local_observer) continue;
+                if (row.type != id || row.player != *options.solo_reference_human) continue;
                 if (!result || *result == gc::ProductionAdmission::unavailable) result = row.admission;
             }
             return result;
@@ -643,7 +813,7 @@ void installed(bool domains_only = false, bool slots_only = false) {
                     && value->target_tech == target, "stock DS offer applies its authored numeric target 2-5");
             }
         }
-        expect(std::any_of(setup.planets.begin(), setup.planets.end(), [&](const auto& planet) { return planet.owner == *options.local_observer; }),
+        expect(std::any_of(setup.planets.begin(), setup.planets.end(), [&](const auto& planet) { return planet.owner == *options.solo_reference_human; }),
             "authored local forces establish owned planets");
         for (const auto& request : planned.value().forces()) {
             const auto* type = planned.value().original_type(request.type);
@@ -700,6 +870,7 @@ void installed(bool domains_only = false, bool slots_only = false) {
         }
         std::cout << "stock live root " << name << " forces=" << planned.value().forces().size() << '\n';
     }
+    if (all_mp || solo_sources) return;
     expect(installed_stealth_hero_fleet, "installed automatic stealth hero has a recursively stealthed fleet");
 }
 void installed_origin_starbases() {
@@ -749,7 +920,7 @@ void installed_origin_starbases() {
             const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
             options.players.push_back({{id, id, 0}, faction.name, true});
             const bool human = faction.name == source->starting_active_player;
-            if (human) options.local_observer = id;
+            if (human) options.solo_reference_human = id;
             if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
                 human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
         }
@@ -853,7 +1024,7 @@ void installed_starting_levels(const bool accepted_route = false) {
             const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
             options.players.push_back({{id, id, 0}, faction.name, true});
             const bool human = faction.name == source.starting_active_player;
-            if (human) options.local_observer = id;
+            if (human) options.solo_reference_human = id;
             if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
                 human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
         }
@@ -924,10 +1095,10 @@ void installed_starting_levels(const bool accepted_route = false) {
                 bool available_upgrade{}, authored_gate{};
                 const auto& low_accounts = low_snapshot->player_economy()->players;
                 const auto local_account = std::find_if(low_accounts.begin(), low_accounts.end(),
-                    [&](const auto& row) { return row.player == *options.local_observer; });
+                    [&](const auto& row) { return row.player == *options.solo_reference_human; });
                 const auto& high_accounts = high_snapshot->player_economy()->players;
                 const auto high_account = std::find_if(high_accounts.begin(), high_accounts.end(),
-                    [&](const auto& row) { return row.player == *options.local_observer; });
+                    [&](const auto& row) { return row.player == *options.solo_reference_human; });
                 bool requires_authored_gate{};
                 if (local_account != low_accounts.end() && high_account != high_accounts.end())
                     for (const auto& planet : high_snapshot->production()->planets) {
@@ -1030,7 +1201,7 @@ void installed_starting_levels(const bool accepted_route = false) {
                 live_options.workers = 2; live_options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
                 live_options.saves.directory = directory.string();
                 auto live = eawr::platform::LiveGameSession::start(std::move(prepared), live_options).value();
-                eawr::platform::LiveSaveRequest request; request.seat = {*options.local_observer}; request.name = "level" + std::to_string(level);
+                eawr::platform::LiveSaveRequest request; request.seat = {*options.solo_reference_human}; request.name = "level" + std::to_string(level);
                 const auto token = live->request_save(request); live->advance_to(1);
                 expect(live->wait_for(1, std::chrono::seconds(20)) && live->wait_save(token, std::chrono::seconds(20)), "custom stock save completes");
                 const auto saved_bytes = eawr::platform::save_detail::read(directory.string(), request.name).value();
@@ -1089,7 +1260,7 @@ void installed_unscouted_intel() {
             const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
             options.players.push_back({{id, id, 0}, faction.name, true});
             const bool local = faction.name == source->starting_active_player;
-            if (local) options.local_observer = id;
+            if (local) options.solo_reference_human = id;
             if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
                 local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
         }
@@ -1111,7 +1282,7 @@ void installed_unscouted_intel() {
         auto step = galaxy.step(executor); // the first service pass runs discovery
         if (!step) throw std::runtime_error(eawr::core::format_diagnostic(step.error()));
         const auto snapshot = galaxy.snapshot();
-        const auto local = *options.local_observer;
+        const auto local = *options.solo_reference_human;
         const auto by_name = [&](const char* planet) -> const gc::ObservedPlanet* {
             const auto row = std::find_if(planned.value().locations().begin(), planned.value().locations().end(),
                 [&](const auto& value) { return value.original_type == planet; });
@@ -1189,7 +1360,7 @@ void installed_unscouted_intel() {
                         (space ? grown.ground_level : grown.space_level) = 0;
                         if (space) grown.space_owner = grown.target_owner; else grown.ground_owner = grown.target_owner;
                         gc::IntelligenceContext context;
-                        context.observer = local; context.local_player = observer.local_player;
+                        context.observer = local; context.local_player = observer.solo_reference_human;
                         context.allegiance = grown.allegiance; context.target_owner = grown.target_owner;
                         context.space_owner = grown.space_owner; context.ground_owner = grown.ground_owner;
                         context.space_stealth = grown.space_stealth; context.ground_stealth = grown.ground_stealth;
@@ -1243,7 +1414,7 @@ void installed_unscouted_intel() {
                         std::vector<gc::FleetDisplayVisibility> sight;
                         for (const auto& row : view_snapshot->observations())
                             if (row.player == local) sight.push_back({row.planet, true});
-                        const auto cards = gc::observed_fleets(*view_snapshot, observer.local_player, traits, 8, sight);
+                        const auto cards = gc::observed_fleets(*view_snapshot, observer.solo_reference_human, traits, 8, sight);
                         std::size_t typed = 0, groups = 0;
                         for (const auto& card : cards.cards) {
                             if (card.planet != target || card.local) continue;
@@ -1270,7 +1441,7 @@ void installed_unscouted_intel() {
                 expect(korriban != observer.planets.end(), "Korriban has an observer row");
                 if (korriban != observer.planets.end()) {
                     gc::IntelligenceContext context;
-                    context.observer = local; context.local_player = observer.local_player;
+                    context.observer = local; context.local_player = observer.solo_reference_human;
                     context.allegiance = korriban->allegiance; context.target_owner = korriban->target_owner;
                     context.space_owner = korriban->space_owner; context.ground_owner = korriban->ground_owner;
                     context.space_stealth = korriban->space_stealth; context.ground_stealth = korriban->ground_stealth;
@@ -1307,7 +1478,12 @@ int main(int argc, const char* const argv[]) {
     expect(setenv("EAWR_VERIFY_GALACTIC_HASH", "1", 1) == 0, "installed galactic hash verifier enabled");
 #endif
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
+        if (argc == 2 && (std::string_view(argv[1]) == "--mp-heroes-tarkin"
+                || std::string_view(argv[1]) == "--mp-hero-protection-live"
+                || std::string_view(argv[1]) == "--authored-protection-source"
+                || std::string_view(argv[1]) == "--solo-protection-sources"
+                || std::string_view(argv[1]) == "--all-mp-protection-sources")) installed(false, false, argv[1]);
+        else if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);
         else if (argc == 2 && std::string_view(argv[1]) == "--unscouted-intel") installed_unscouted_intel();

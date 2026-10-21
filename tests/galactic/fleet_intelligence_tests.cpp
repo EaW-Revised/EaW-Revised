@@ -16,7 +16,7 @@ namespace {
 Fixed damage(std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); }
 gc::ObserverSetup observer() {
     gc::ObserverSetup o;
-    o.local_player = 1;
+    o.human_observers = {1}; o.solo_reference_human = 1;
     o.players = {{1, false, false, 0, 0, {3}}, {2, true, false, 0, 0, {}}, {3, true, false, 0, 0, {1}}};
     o.types = {{100, false, false, false}, {200, false, true, false},
         {300, true, false, false}, {400, false, false, true}};

@@ -35,8 +35,11 @@ struct ProductionPreparation {
 // WGEP-69: effective inherited original-type values precede the shared zero defaults.
 [[nodiscard]] core::Result<sim::galactic::CensusType> prepare_census_type(
     const units::GalacticType&, sim::galactic::TypeId, std::span<const FleetTypeBinding> bindings = {});
+// WGP-191: Planet data is separate from the ordinary starting-force type table.
+// The resolved object reader supplies power; an absent reader stays unknown.
 [[nodiscard]] core::Result<sim::galactic::CensusType> prepare_census_planet(
-    const data::galactic::Planet&, sim::galactic::TypeId);
+    const data::galactic::Planet&, sim::galactic::TypeId,
+    std::optional<sim::math::Fixed> combat_power = {});
 [[nodiscard]] sim::galactic::CensusPlayer prepare_census_player(
     const data::galactic::Faction&, sim::galactic::PlayerId, std::vector<sim::galactic::PlanetId> unusable_planets);
 

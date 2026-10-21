@@ -42,6 +42,13 @@ public:
     virtual core::Result<void> release(PeerIndex slot) = 0;
     virtual core::Result<void> kick(PeerIndex slot) = 0;
     virtual core::Result<void> lock() = 0;
+    // Roster-lock protocol 1: atomic compare of revision and attached-seat mask.
+    // False is pending; true means the service confirmed exactly that roster.
+    virtual core::Result<bool> lock_roster(std::uint32_t, std::uint64_t) {
+        core::Diagnostic error; error.code = "EAWR-NET-1764";
+        error.message = "The room endpoint does not support roster-lock protocol 1.";
+        return core::Result<bool>::failure(std::move(error));
+    }
     // Nonblocking repair attachment: call with a new nonzero epoch to request
     // Reattach, then the same epoch to poll. True means that attachment's fresh
     // TURN response is installed (including an explicit no-TURN response).

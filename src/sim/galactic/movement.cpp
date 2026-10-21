@@ -1,7 +1,9 @@
+#include "eawr/sim/galactic/raid.hpp"
 #include "eawr/sim/galactic/movement.hpp"
 #include "session_impl.hpp"
 #include "encoding.hpp"
 #include "native_movement_admission.hpp"
+#include "native_control_admission.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -107,10 +109,11 @@ void GalacticSession::Impl::notify_fleet_approach(FleetId id, PlanetId destinati
     // WGUI-114/122: committed enroute assignment, never an arrival/snapshot delta.
     if (!notify || !destination || !feedback_notice_handler || !observer || !control
         || !production || !production->nested_creation || !fleets.contains(id)) return;
-    const auto local = observer->local_player;
     const auto at = std::lower_bound(control->state.begin(), control->state.end(), destination,
         [](const auto& state, PlanetId planet) { return state.planet < planet; });
-    if (!local || at == control->state.end() || at->planet != destination || at->current_player != local) return;
+    if (at == control->state.end() || at->planet != destination) return;
+    const auto local = at->current_player;
+    if (!std::binary_search(observer->human_observers.begin(), observer->human_observers.end(), local)) return;
     const auto& fleet = registry.get<session_detail::FleetData>(fleets.at(id));
     const auto& relations = production->nested_creation->relations;
     if (std::none_of(relations.begin(), relations.end(), [&](const auto& r) {
@@ -212,6 +215,12 @@ core::Result<void> validate_movement_setup(const GalacticSetup& setup) {
         for (const auto& p : setup.planets) if (planet(s, p.id).bounds_half_z.raw() < 0) invalid("negative planet movement bounds");
         for (const auto& t : s.types) if (t.type == 0 || t.hyperspace_speed.raw() < 0 || t.build_cost.raw() < 0
             || (t.squadron && t.fleet_container) || (t.transport && (t.squadron || t.fleet_container))) invalid("invalid authored movement type");
+        if (s.raid) {
+            if (!setup.control || s.raid->types.size() != s.types.size()
+                || !ordered(s.raid->types, [](const auto& r) { return r.type; })) invalid("raid requires complete ordered type policy and control");
+            for (std::size_t i = 0; i < s.types.size(); ++i)
+                if (s.raid->types[i].type != s.types[i].type) invalid("raid type identities differ from movement");
+        }
         std::set<EntityId> identities, containers;
         for (const auto& p : setup.planets) identities.insert(p.id);
         for (const auto& r : setup.routes) identities.insert(r.id);
@@ -276,11 +285,19 @@ session_detail::NativeMovementAdmission session_detail::prepare_native_movement(
     if (!prepared.value().left_behind.empty() && (next_id == std::numeric_limits<EntityId>::max() || live_object_count >= galactic_max_objects)) return {GalacticRejectReason::resource_limit, {}, {}};
     auto motion = f.motion;
     motion.transit = FleetTransit{move.path, 0, {}, {}, prepared.value().base_speed, {}, prepared.value().packed, move.destination_slot, command.key.seat, command.key.sequence};
+    motion.transit->destination_actor = move.destination_actor;
     try {
         std::map<PlanetId, Vec3> positions; for (const auto& p : planets) positions.emplace(p.id, p.position);
         install_hop(motion, movement, f.owner, positions, routes);
     } catch (const InvalidMovement&) { return {GalacticRejectReason::cannot_depart, {}, {}}; }
     return {GalacticRejectReason::none, prepared.value(), std::move(motion)};
+}
+
+bool GalacticSession::Impl::raid_qualified(FleetId id, PlanetId destination) const {
+    const auto& f = registry.get<session_detail::FleetData>(fleets.at(id));
+    return control && movement_inputs && qualifies_raid(
+        Fleet{id, f.owner, f.orbit, f.members, f.orbit_slot, f.motion, f.raid_destination}, destination,
+        *movement_inputs, *control, actor_inputs(), planet_access.get());
 }
 
 void GalacticSession::Impl::execute_movement(const GameCommand& command, std::uint64_t tick,
@@ -405,7 +422,7 @@ core::Result<void> GalacticSession::Impl::recheck_movement_orbit(EntityId target
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "orbit recheck requires a fleet or planet"));
     }
     auto& fleet = registry.get<session_detail::FleetData>(fleets.at(id));
-    if (!fleet.orbit || fleet.motion.transit) return core::Result<void>::success();
+    if (!fleet.orbit || fleet.motion.transit || fleet.raid_destination == fleet.orbit) return core::Result<void>::success();
     if (!movement_inputs) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "orbit recheck requires movement inputs"));
     try {
         const auto destination = fleet.orbit;
@@ -516,7 +533,8 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             if (!a.accessible) {
                 if (final) {
                     notify(id, t, GalacticEventKind::movement_bounced, destination);
-                    t.path = {destination, t.path.at(t.hop)}; t.hop = 0; t.destination_slot.reset();
+                    t.path = {destination, t.path.at(t.hop)}; t.hop = 0; t.destination_slot.reset(); t.destination_actor = 0;
+                    if (f.raid_destination) { f.raid_destination.reset(); dirty[static_cast<std::size_t>(StateSection::fleets)] = true; }
                 } else ++t.hop;
                 install_hop(f.motion, inputs, f.owner, positions, route_rows); continue;
             }
@@ -524,7 +542,50 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             const auto actors = actor_inputs();
             const auto live_skip = actors.empty() ? skips_combat(inputs, f.members)
                 : checked(fleet_combat_skip(Fleet{id, f.owner, f.orbit, f.members}, actors, &inputs));
-            const bool conflict = a.potential_conflict && !live_skip && (final || !p.benefits_from_corruption);
+            const bool normal_conflict = a.potential_conflict && !live_skip && (final || !p.benefits_from_corruption);
+            const bool retained_raid = final && f.raid_destination == destination;
+            const bool raid_arrival = retained_raid && control && qualifies_raid(
+                Fleet{id, f.owner, f.orbit, f.members}, destination, inputs, *control, actors, planet_access.get());
+            // WGM-34/39: current qualification is checked again at arrival. A
+            // stale raid intent follows the ordinary orbital arrival path.
+            if (retained_raid && !raid_arrival) {
+                f.raid_destination.reset();
+                dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+            }
+            const bool conflict = !raid_arrival && normal_conflict;
+            if (raid_arrival) {
+                const auto completed = t;
+                link_movement_orbit(id, destination, tick, events);
+                std::vector<EntityId> selected;
+                for (const auto& member : f.members) {
+                    const auto trait = std::lower_bound(setup.fleet_control->types.begin(), setup.fleet_control->types.end(), member.type,
+                        [](const auto& row, auto type_id) { return row.type < type_id; });
+                    if (trait != setup.fleet_control->types.end() && trait->type == member.type && trait->transport) selected.push_back(member.id);
+                }
+                auto admitted = session_detail::admit_native_invasion_rows(*this, f.owner, id, selected, false);
+                if (!admitted) return core::Result<void>::failure(admitted.error());
+                if (!admitted.value().admitted) {
+                    f.raid_destination.reset();
+                    if (normal_conflict) {
+                        gather_movement_orbit(id, destination, tick, events);
+                        notify(id, completed, GalacticEventKind::movement_conflict, destination);
+                    }
+                    dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+                    invalidate_observer_projection();
+                    dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
+                    continue;
+                }
+                // The retained explicit list is consumed by the campaign land owner;
+                // no orbital conflict or gather/merge runs for this destination.
+                native_invasions.at(admitted.value().request).reader_released = true;
+                if (!admitted.value().queued) {
+                    native_invasions.erase(admitted.value().request);
+                    f.raid_destination.reset();
+                    execute_landing({{tick, completed.producer, completed.sequence}, LandFleet{id, destination}}, tick, events, false);
+                }
+                dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
+                continue;
+            }
             if (conflict) {
                 const auto transit = t;
                 link_movement_orbit(id, destination, tick, events);
@@ -562,6 +623,10 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                     events.push_back({tick, GalacticEventKind::fleet_destroyed, {}, id, 0, 0, GalacticRejectReason::none});
                 }
             }
+            // WGM-34: final nonconflicting arrival only; relink/merge has refreshed live containers.
+            // Transit was consumed by relink, so failure or actor loss cannot replay the action.
+            if (completed.destination_actor) dispatch_ground_ability(completed.destination_actor, destination,
+                completed.producer, completed.sequence, tick, events);
             invalidate_observer_projection(); // after the final slot/member/merge mutation
             dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
         }

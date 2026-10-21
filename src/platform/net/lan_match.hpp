@@ -247,6 +247,7 @@ using MatchSetup = skirmish::FixtureOptions;
 [[nodiscard]] std::string lan_admission_name(const net::LobbySnapshot&, net::PeerIndex);
 using LanLobbyBuilder = std::function<core::Result<sim::tactical::TacticalSetup>(const MatchSetup&)>;
 class GalacticLobbyBackend;
+struct GalacticLaunch;
 // GCMP-07 (#4363): a Galactic Conquest room that reached its Start phase. This is the seam to the galactic lockstep
 // driver (GCMP-03): the room holds the frozen revision and the tick-zero barrier is still open; the driver binds the
 // desync monitor, accepts the offer on guests and takes the committed result. No tactical setup exists for it.
@@ -297,10 +298,13 @@ public:
     // Whether the live room is in GC mode, and the Start seam once it froze (host after Start, guests when the host started).
     virtual bool galactic_room() const { return false; }
     virtual std::optional<GalacticLobbyStart> galactic_start() const { return {}; }
+    // Available once the local tick-zero barrier and host commitment both complete. Taken once.
+    virtual std::shared_ptr<GalacticLaunch> take_galactic_launch() { return {}; }
     // Stable transport seat order; shared entries control the same faction owner.
     // Call before Host/Join. A joining client only selects the advertised count;
     // its authoritative owner comes from the host's validated offer.
     virtual void configure_seats(std::vector<sim::tactical::PlayerId>) {}
+    virtual void configure_staging_capacity(bool) {}
     virtual void host(std::uint16_t port) = 0;
     virtual void set_recovery_policy(net::SetupRecoveryPolicy, LanCredentialProvider = {}) {}
     virtual bool rejoin() { return false; }

@@ -1,6 +1,7 @@
 #include "galactic_ai_runtime.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "../script/foc/galactic_ai.hpp"
+#include "eawr/script/foc/galactic_ai_pass.hpp"
 #include "../script/foc/tactical_ai_internal.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
 #include "eawr/campaign/ai_perception_content.hpp"
@@ -111,10 +112,40 @@ public:
     std::map<ga::gc::PlayerId, ga::ExecutionRoutes> routes;
     ai::AiData data;
     ga::gc::GalacticSession* galaxy{};
-    std::map<ga::gc::PlayerId, std::vector<ai::EvaluatedFundingTemplate>> initial;
     std::uint64_t sequence{};
     auth::ScriptScheduler* active_scripts{};
     const sim::PartitionExecutor* active_executor{};
+    // S9b: a player's decision chain (run()) is handed pass_executor, never the pool: bulk work it needs and
+    // can share is built before the first player by prepare_path_tables(), the rest is player-owned and
+    // runs inline, as it will inside a player partition.
+    ga::DecisionPassExecutor pass_executor;
+    inline static thread_local const Runtime* decision_owner_{};
+    inline static thread_local ga::gc::PlayerId decision_player_{};
+    struct PathTable {
+        std::uint64_t frame{};
+        ga::ExecutionRouteInput input; // A: what the build read at the barrier start
+        ga::ExecutionRouteBuild build;
+    };
+    const sim::PartitionExecutor& workers() const noexcept {
+        return decision_owner_ == this ? static_cast<const sim::PartitionExecutor&>(pass_executor) : *setup->executor;
+    }
+    [[nodiscard]] const sim::PartitionExecutor* current_executor() const noexcept {
+        return decision_owner_ == this ? &pass_executor : active_executor;
+    }
+    class DecisionPass {
+    public:
+        explicit DecisionPass(Runtime& owner, ga::gc::PlayerId player)
+            : previous_(decision_owner_), previous_player_(decision_player_), actions_(owner.actions.get(), &owner.pass_executor) {
+            decision_owner_ = &owner; decision_player_ = player;
+        }
+        DecisionPass(const DecisionPass&) = delete;
+        DecisionPass& operator=(const DecisionPass&) = delete;
+        ~DecisionPass() { decision_owner_ = previous_; decision_player_ = previous_player_; }
+    private:
+        const Runtime* previous_{};
+        ga::gc::PlayerId previous_player_{};
+        ga::NativeActions::ExecutorScope actions_;
+    };
     std::shared_ptr<const ai::GalacticConnectivity> connectivity{std::make_shared<const ai::GalacticConnectivity>()};
     std::shared_ptr<const ai::GalacticConnectivity> route_source, combined_routes;
     struct RoutePublication {
@@ -123,23 +154,55 @@ public:
         std::shared_ptr<const std::vector<ai::GalacticExecutionRoute>> rows{};
     };
     std::map<ga::gc::PlayerId, RoutePublication> route_publications;
-    std::mutex economy_mutex;
-    std::shared_ptr<const std::vector<ai::GalacticBudgetPlayer>> budget_players;
-    std::optional<std::uint64_t> budget_players_revision;
-    std::weak_ptr<const ai::GalacticEconomyRuntime> last_economy;
-    std::uint64_t economy_revision{};
-    std::uint64_t economy_tick{};
-    std::uint64_t economy_engine_revision{};
-    std::optional<std::uint64_t> economy_production_revision;
-    bool economy_production_present{}, economy_build_tasks_ready{}, build_tasks_ready{};
-    bool build_budgets_cached{};
-    std::uint64_t build_engine_revision{}, build_funding_revision{};
-    std::optional<std::uint64_t> build_production_revision;
-    GalacticAiRuntimeProviders::BuildBudgetPublication copied_build_budgets;
+    struct EconomyCopy {
+        std::mutex economy_mutex;
+        std::shared_ptr<const std::vector<ai::GalacticBudgetPlayer>> budget_players;
+        std::optional<std::uint64_t> budget_players_revision;
+        std::weak_ptr<const ai::GalacticEconomyRuntime> last_economy;
+        std::uint64_t economy_revision{};
+        std::uint64_t economy_tick{};
+        std::uint64_t economy_engine_revision{};
+        std::optional<std::uint64_t> economy_production_revision;
+        bool economy_production_present{}, economy_build_tasks_ready{};
+        bool build_budgets_cached{};
+        std::uint64_t build_engine_revision{}, build_funding_revision{};
+        std::optional<std::uint64_t> build_production_revision;
+        GalacticAiRuntimeProviders::BuildBudgetPublication copied_build_budgets;
+    };
+    struct PlayerRuntimeState {
+        std::map<ga::gc::PlayerId, std::vector<ai::EvaluatedFundingTemplate>> initial;
+        std::map<ga::gc::PlayerId, PathTable> path_tables;
+        // A mod can query another player's perception during its own decision chain. Keep that reader's
+        // projection separate, including human/neutral readers which have no native AI PlayerState.
+        std::map<ga::gc::PlayerId, EconomyCopy> economy;
+    };
+    // Key zero is the serial boundary/battle-reader copy; decision chains own their selected-player entry.
+    std::map<ga::gc::PlayerId, PlayerRuntimeState> player_runtime;
+    bool build_tasks_ready{};
+    void clear_path_tables() {
+        for (auto& [player, slice] : player_runtime) { static_cast<void>(player); slice.path_tables.clear(); }
+    }
 
     core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>> copy_economy() {
         using Result = core::Result<std::shared_ptr<const ai::GalacticEconomyRuntime>>;
         if (!galaxy || !world->available()) return absent<std::shared_ptr<const ai::GalacticEconomyRuntime>>("completed economy world");
+        auto& memo = player_runtime.at(decision_owner_ == this ? decision_player_ : 0).economy.at(engine->build_budget_reader());
+        auto& economy_mutex = memo.economy_mutex;
+        auto& budget_players = memo.budget_players;
+        auto& budget_players_revision = memo.budget_players_revision;
+        auto& last_economy = memo.last_economy;
+        auto& economy_revision = memo.economy_revision;
+        auto& economy_tick = memo.economy_tick;
+        auto& economy_engine_revision = memo.economy_engine_revision;
+        auto& economy_production_revision = memo.economy_production_revision;
+        auto& economy_production_present = memo.economy_production_present;
+        auto& economy_build_tasks_ready = memo.economy_build_tasks_ready;
+        auto& build_budgets_cached = memo.build_budgets_cached;
+        auto& build_engine_revision = memo.build_engine_revision;
+        auto& build_funding_revision = memo.build_funding_revision;
+        auto& build_production_revision = memo.build_production_revision;
+        auto& copied_build_budgets = memo.copied_build_budgets;
+
         const auto lock = [&] {
             gc_profile::Scope wait_scope(gc_profile::Phase::economy_lock_wait);
             return std::unique_lock(economy_mutex);
@@ -221,7 +284,7 @@ public:
 
     core::Result<void> publish_freestore() {
         return providers.publish_freestore
-            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *setup->executor) : core::Result<void>::success();
+            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), workers()) : core::Result<void>::success();
     }
 
     // The execution copy is archival. Readers use their player's native pool and
@@ -252,7 +315,7 @@ public:
             copied->reservations = std::move(reservations); pool->pool = std::move(copied);
         }
         return providers.publish_freestore
-            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *setup->executor) : core::Result<void>::success();
+            ? providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), workers()) : core::Result<void>::success();
     }
 
     std::shared_ptr<const ai::GalacticConnectivity> route_publication() {
@@ -309,16 +372,78 @@ public:
         if (route->second.next_refresh > frame) return core::Result<void>::success();
         return update_routes(player, frame, false, executor);
     }
+    // The execution graph of a refresh: the player's planets in their retained order (WGA-27/77). It reads the
+    // snapshot, the player's usability and its cached enemy-space perception, and writes only those caches.
+    // `read_only` reads the same facts without writing the perception cache or visibility rows (the prepass and
+    // the diagnostic reads; only the player's own refresh in its chain may write them, in its sequential order).
+    core::Result<ga::ExecutionRouteInput> refresh_input(ga::gc::PlayerId player, const ga::ExecutionRetainedPlayer& row, bool read_only) {
+        auto source = read_only ? providers.execution_input_read_only(player, *galaxy->snapshot(), *world, *engine)
+            : providers.execution_input(player, *galaxy->snapshot(), *world, *engine, nullptr);
+        if (!source) return core::Result<ga::ExecutionRouteInput>::failure(source.error());
+        auto input = std::move(source).value();
+        if (input.player != player) return absent<ga::ExecutionRouteInput>("execution input player identity");
+        if (!row.initialized || input.planets.size() != row.node_order.size()) return absent<ga::ExecutionRouteInput>("retained execution node domain");
+        std::vector<ga::ExecutionPlanet> ordered;
+        for (const auto node : row.node_order) {
+            const auto found = std::find_if(input.planets.begin(), input.planets.end(), [node](const auto& planet) { return planet.planet == node; });
+            if (found == input.planets.end()) return absent<ga::ExecutionRouteInput>("retained execution node identity");
+            ordered.push_back(*found);
+        }
+        input.planets = std::move(ordered); input.maximum_distance = row.maximum_distance;
+        return core::Result<ga::ExecutionRouteInput>::success(std::move(input));
+    }
+    // Bit-exact equality of two path-table inputs (the build is a pure function of the input).
+    static bool same_input(const ga::ExecutionRouteInput& a, const ga::ExecutionRouteInput& b) {
+        if (a.player != b.player || a.maximum_distance.repr != b.maximum_distance.repr || a.trade_routes != b.trade_routes
+            || a.planets.size() != b.planets.size()) return false;
+        for (std::size_t i = 0; i < a.planets.size(); ++i) {
+            const auto& x = a.planets[i]; const auto& y = b.planets[i];
+            if (x.planet != y.planet || !(x.position == y.position) || x.layer_z_adjust.repr != y.layer_z_adjust.repr
+                || x.enemy_space_power.repr != y.enemy_space_power.repr
+                || x.nonallied_starbase_power.repr != y.nonallied_starbase_power.repr || x.usable != y.usable) return false;
+        }
+        return true;
+    }
+    // S9b prepass over S_t, before the first player's chain: the path table of every player whose execution
+    // service runs this barrier and whose own deadline has passed, built from the barrier-start input A (read
+    // without writing the perception cache). The build is the bulk part of a refresh. The chain still reads its
+    // input at the point GFS-A02 always read it (update_routes) and installs the prebuilt table only when that
+    // input equals A bit for bit; otherwise it builds from its own input as before, so the result never depends
+    // on the prepass. A player whose perception service runs in the same barrier is left to its own chain (that
+    // service refreshes the cache the table reads). A refusal here is left to the player's own service, which
+    // reports it at the same point as before.
+    core::Result<void> prepare_path_tables(const sim::PartitionExecutor& executor, const ga::gc::GalacticSession& parent,
+        const ga::gc::GalacticTick& tick) {
+        clear_path_tables();
+        const auto lifecycle = manager.lock();
+        if (!lifecycle || !providers.execution_input_read_only) return core::Result<void>::success();
+        const auto frame = parent.clock().galactic_frame;
+        for (const auto& [player, route] : routes) {
+            auto& path_tables = player_runtime.at(player).path_tables;
+            const auto row = retained.find(player);
+            if (row == retained.end() || route.next_refresh > frame || !lifecycle->service_due(player, ga::Service::execution, tick.completed_tick)
+                || lifecycle->service_due(player, ga::Service::perception, tick.completed_tick)) continue;
+            gc_profile::Scope profile_scope(gc_profile::Phase::path_table_prepass); // one call per table built
+            auto input = refresh_input(player, row->second, true);
+            if (!input) continue;
+            auto built = ga::build_execution_routes(input.value(), executor, route.memo);
+            if (!built) continue;
+            path_tables.insert_or_assign(player, PathTable{frame, std::move(input).value(), std::move(built).value()});
+        }
+        return core::Result<void>::success();
+    }
     core::Result<void> update_routes(ga::gc::PlayerId player, std::uint64_t frame, bool initialize, const sim::PartitionExecutor& executor) {
+        auto& path_tables = player_runtime.at(player).path_tables;
         // Route writes validate archival reservations against the live Engine.
         // A goal may have released its holds earlier in this barrier.
         if (auto synchronized = synchronize_reservations(); !synchronized) return synchronized;
+        auto state = retained;
+        auto& row = state[player];
+        const auto prepared = initialize ? path_tables.end() : path_tables.find(player);
         auto source = providers.execution_input(player, *galaxy->snapshot(), *world, *engine, nullptr);
         if (!source) return core::Result<void>::failure(source.error());
         auto input = std::move(source).value();
         if (input.player != player) return absent<void>("execution input player identity");
-        auto state = retained;
-        auto& row = state[player];
         if (!initialize) {
             if (!row.initialized || input.planets.size() != row.node_order.size()) return absent<void>("retained execution node domain");
             std::vector<ga::ExecutionPlanet> ordered;
@@ -329,10 +454,14 @@ public:
             }
             input.planets = std::move(ordered); input.maximum_distance = row.maximum_distance;
         }
-        const auto producer = [&input, previous = routes[player].memo](const sim::PartitionExecutor& executor) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
-            auto built = ga::build_execution_routes(input, executor, previous);
-            if (!built) return core::Result<std::optional<ga::ExecutionRouteBuild>>::failure(built.error());
-            return core::Result<std::optional<ga::ExecutionRouteBuild>>::success(std::move(built).value());
+        const bool offered = prepared != path_tables.end() && prepared->second.frame == frame;
+        const bool prebuilt = offered && same_input(prepared->second.input, input);
+        const auto producer = [&, previous = routes[player].memo](const sim::PartitionExecutor& workers_) -> core::Result<std::optional<ga::ExecutionRouteBuild>> {
+            using Built = core::Result<std::optional<ga::ExecutionRouteBuild>>;
+            if (prebuilt) return Built::success(std::move(prepared->second.build));
+            auto built = ga::build_execution_routes(input, workers_, previous);
+            if (!built) return Built::failure(built.error());
+            return Built::success(std::move(built).value());
         };
         auto staged = routes[player];
         if (initialize) {
@@ -352,6 +481,7 @@ public:
         row.next_refresh = staged.next_refresh;
         if (auto replaced = execution->replace_retained(std::move(state)); !replaced) return replaced;
         routes[player] = std::move(staged);
+        if (prepared != path_tables.end()) path_tables.erase(prepared);
         return publish_refreshed_routes();
     }
 
@@ -393,6 +523,7 @@ public:
         return core::Result<std::vector<ai::EvaluatedFundingTemplate>>::success(std::move(result));
     }
     core::Result<void> initialize(ga::gc::PlayerId player) override {
+        auto& initial = player_runtime.at(player).initial;
         if (auto selected = select_native_player(player); !selected) return selected;
         const auto* account = world->account(player);
         if (!account || !initial.contains(player)) return absent<void>("initial template/account");
@@ -401,7 +532,7 @@ public:
             initial.erase(player);
             const auto lifecycle = manager.lock();
             if (!active_scripts || !lifecycle) return absent<void>("fresh freestore host");
-            if (auto initialized = update_routes(player, galaxy->clock().galactic_frame, true, *active_executor); !initialized) return initialized;
+            if (auto initialized = update_routes(player, galaxy->clock().galactic_frame, true, *current_executor()); !initialized) return initialized;
             const auto module = lifecycle->freestore(player);
             if (!module.empty()) {
                 // Player identities occupy the freestore instance domain; plans
@@ -410,9 +541,9 @@ public:
                 if (auto attached = ga::attach_freestore(*active_scripts, {player, player}, true); !attached) return attached;
             }
             if (providers.initialize_freestore) {
-                if (auto initialized = providers.initialize_freestore(player, *actions, *galaxy->snapshot(), *active_executor); !initialized) return initialized;
+                if (auto initialized = providers.initialize_freestore(player, *actions, *galaxy->snapshot(), *current_executor()); !initialized) return initialized;
                 if (providers.publish_freestore)
-                    if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *active_executor); !published) return published;
+                    if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
             }
         }
         return result;
@@ -429,6 +560,7 @@ public:
         return core::Result<void>::success();
     }
     core::Result<void> apply_policy(ga::gc::PlayerId player, const ga::TemplatePolicy& policy, ga::PolicyWrite write) override {
+        auto& initial = player_runtime.at(player).initial;
         if (auto selected = select_native_player(player); !selected) return selected;
         if (auto applied = engine->apply_galactic_policy(player, policy); !applied) return applied;
         if (write == ga::PolicyWrite::ordinary) return core::Result<void>::success();
@@ -441,10 +573,16 @@ public:
     core::Result<void> run(const ga::ServiceInput& input, auth::ScriptScheduler& scripts) override {
         if (auto selected = select_native_player(input.player); !selected) return selected;
         const auto reads = world->owner_reads();
+        const auto* barrier_executor = active_executor;
+        if (input.service == ga::Service::execution && !barrier_executor) return absent<void>("admitted execution worker adapter");
+        const DecisionPass decision_pass(*this, input.player);
         if (auto published = publish_freestore(); !published) return published;
         if (input.service == ga::Service::execution) {
-            if (!active_executor) return absent<void>("admitted execution worker adapter");
-            if (auto refreshed = prepare_path_table(input.player, input.clocks.mode, *active_executor); !refreshed) return refreshed;
+            // The table is the prepass's (prepare_path_tables). A refresh it did not take builds here and keeps the
+            // barrier executor: the one right after this player's own initialization in the campaign's first
+            // barrier (initialization is its own serial step) and the one in a barrier where the player's
+            // perception service also runs (see prepare_path_tables).
+            if (auto refreshed = prepare_path_table(input.player, input.clocks.mode, *barrier_executor); !refreshed) return refreshed;
             // WGA-405: execution assignment precedes cleanup/native landing.
             if (auto assigned = engine->service_galactic_system(input.player, input.service, scripts, sequence); !assigned) return assigned;
             const auto lifecycle = manager.lock();
@@ -461,10 +599,10 @@ public:
                         if (auto cleaned = actions->service_freestore_movement(input.player, actor.id); !cleaned) return cleaned;
                     }
                     if (providers.publish_freestore)
-                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *active_executor); !published) return published;
-                    if (auto landed = actions->service_freestore_landing(input.player, *pool->pool, *active_executor); !landed) return landed;
+                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
+                    if (auto landed = actions->service_freestore_landing(input.player, *pool->pool, *current_executor()); !landed) return landed;
                     if (providers.publish_freestore)
-                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *active_executor); !published) return published;
+                        if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
                 }
                 auto serviced = ga::service_freestore(scripts, {input.player, input.player}, *pool->pool, input.clocks.mode,
                     pool->pool->qualified ? &actions->qualified_freestore() : nullptr);
@@ -568,7 +706,7 @@ public:
         core::Result<void> begun = [&] {
             gc_profile::Scope begin_scope(gc_profile::Phase::barrier_begin);
             return owner_->engine->begin_galactic_barrier(*owner_->world, clocks, scripts, owner_->sequence,
-                owner_->setup->lifecycle.players, &executor);
+                owner_->setup->lifecycle.players, &owner_->pass_executor);
         }();
         if (!begun) {
             owner_->native_actions_barrier.reset();
@@ -576,6 +714,8 @@ public:
         }
         owner_->engine->set_galactic_funding(owner_->funding);
         owner_->engine->defer_galactic_effects(true); // S9a: the players' engine effects commit once, at finish_barrier
+        if (auto tables = owner_->prepare_path_tables(executor, parent, tick); !tables)
+            return core::Result<auth::ServiceOptions>::failure(tables.error());
         if (owner_->native_actions_barrier) {
             auto started = owner_->checked_native(owner_->native_actions_barrier->begin_players());
             if (!started) return core::Result<auth::ServiceOptions>::failure(started.error());
@@ -597,6 +737,7 @@ public:
     core::Result<void> after_service(auth::ServiceReport& report) override {
         const auto native_record_write = owner_->engine->native_record_scope();
         auto result = owner_->checked_native(manager_->after_service(report));
+        owner_->clear_path_tables();
         owner_->active_executor = nullptr; owner_->actions->set_executor(owner_->setup->executor.get()); return result;
     }
 private:
@@ -607,6 +748,7 @@ private:
         ~NativeBarrierCleanup() {
             if (owner->native_actions_barrier && owner->native_actions_barrier.get() != barrier) return;
             owner->native_actions_barrier.reset();
+            owner->clear_path_tables();
             owner->active_executor = nullptr;
             owner->actions->set_executor(owner->setup->executor.get());
         }
@@ -618,7 +760,7 @@ private:
 
 core::Result<ga::ExecutionRouteInput> copy_stock_execution_input(const GalacticAiRuntimeSetup& setup,
     ga::gc::PlayerId player, const ga::gc::GalacticSnapshot& snapshot, const ai::GalacticWorld& world,
-    const ai::Engine& engine, const GalacticAiUsability& usable, const ai::DerivedExecutionRestore* reconstruction) {
+    const ai::Engine& engine, const GalacticAiUsability& usable, const ai::DerivedExecutionRestore* reconstruction, bool read_only) {
     using Result = core::Result<ga::ExecutionRouteInput>;
     if (!usable || !setup.perception.maximum_fleet_distance) return absent<ga::ExecutionRouteInput>("qualified execution usability/movement limit");
     const auto selected = std::find_if(setup.lifecycle.players.begin(), setup.lifecycle.players.end(),
@@ -640,6 +782,7 @@ core::Result<ga::ExecutionRouteInput> copy_stock_execution_input(const GalacticA
         if (!target) return absent<ga::ExecutionRouteInput>("retained execution planet target");
         const ai::Context context{player, selected->enemy, selected->human, target};
         const auto power = reconstruction ? world.reconstruction_enemy_space(*reconstruction, context)
+            : read_only ? world.perception_read_only(engine, equation.value(), context, unused_random)
             : world.perception(engine, equation.value(), context, unused_random);
         if (!power) return absent<ga::ExecutionRouteInput>("cached enemy space total unnormalized");
         const auto relation = std::find_if(snapshot.control()->relations.begin(), snapshot.control()->relations.end(),
@@ -664,8 +807,9 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
     const data::galactic::GalacticData& data, const CampaignSetupPlan& plan, const ai::AiData& loaded,
     std::string_view authored_difficulty) {
     std::vector<ga::PlayerSelection> selected;
-    // WGA-02 / WGS-08: select the campaign's authored player type only
-    // for an active AI controller. Difficulty names remain mod-authored.
+    // WGA-02 / WGS-08: single-player selection uses authored campaign pairs.
+    // GCMP-AI-01 is the project's multiplayer AI extension, not retail parity.
+    // Both paths select only active AI controllers; difficulty names remain authored.
     const auto* campaign = data.campaign(plan.campaign_name());
     if (!campaign) return absent<std::vector<ga::PlayerSelection>>("authored campaign AI selection");
     std::string level;
@@ -689,10 +833,19 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
         // Neutral seat metadata does not create a galactic goal owner; the
         // existing native goal checkpoint contract excludes neutral players.
         if (faction->is_neutral.value_or(false)) continue;
-        const auto assignment = std::find_if(campaign->ai_player_control.begin(), campaign->ai_player_control.end(),
-            [&](const auto& row) { return ai::upper_case(row.faction) == ai::upper_case(binding.faction); });
-        if (assignment == campaign->ai_player_control.end()) continue;
-        const auto type = loaded.players.find(ai::upper_case(assignment->name));
+        std::string_view player_type;
+        if (plan.mode() == CampaignSetupMode::multiplayer && faction->is_playable.value_or(false)) {
+            player_type = faction->basic_ai;
+            if (player_type.empty()) return absent<std::vector<ga::PlayerSelection>>("multiplayer playable faction Basic_AI");
+        } else {
+            // Ambient factions retain the authored selection/absence they had before
+            // the extension. Neutral remains outside native goal ownership above.
+            const auto assignment = std::find_if(campaign->ai_player_control.begin(), campaign->ai_player_control.end(),
+                [&](const auto& row) { return ai::upper_case(row.faction) == ai::upper_case(binding.faction); });
+            if (assignment == campaign->ai_player_control.end()) continue;
+            player_type = assignment->name;
+        }
+        const auto type = loaded.players.find(ai::upper_case(player_type));
         if (type == loaded.players.end()) return absent<std::vector<ga::PlayerSelection>>("authored AI player type");
         bool mapped = false;
         for (const auto& [candidate, adjustment] : type->second.difficulty) if (adjustment == authored_adjustment) {
@@ -702,7 +855,7 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
             mapped = true;
         }
         if (!mapped) return absent<std::vector<ga::PlayerSelection>>("authored difficulty level");
-        ga::PlayerSelection player{id, assignment->name, level, {}, human_player};
+        ga::PlayerSelection player{id, std::string(player_type), level, {}, human_player};
         // WGA-431: prefer a human enemy, otherwise the last non-rogue
         // enemy in player order. Relations are directional (WGS-85).
         for (const auto& other : plan.player_bindings()) {
@@ -840,6 +993,12 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
     try {
         auto runtime = std::make_shared<Runtime>(); runtime->setup = std::move(setup); runtime->providers = std::move(providers);
         const auto& input = *runtime->setup;
+        runtime->player_runtime.try_emplace(0);
+        for (const auto& player : input.lifecycle.players) runtime->player_runtime.try_emplace(player.player);
+        for (auto& [actor, slice] : runtime->player_runtime) {
+            static_cast<void>(actor); slice.economy.try_emplace(0);
+            for (const auto& player : input.perception.players) slice.economy.try_emplace(player.player);
+        }
         auto loaded = ga::load_data(input.lifecycle); if (!loaded) return Result::failure(loaded.error());
         runtime->data = std::move(loaded).value();
         auto& host = *runtime->host; host.setup.seed = input.perception.seed; host.setup.content = input.content->ai;
@@ -861,7 +1020,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         runtime->world = std::make_shared<ai::GalacticWorld>(input.perception); host.ai_world = runtime->world;
         runtime->world->enable_live_deltas(input.lifecycle.service_periods[static_cast<std::size_t>(ga::Service::perception)], input.executor);
         runtime->world->set_producer_executor_supplier([weak = std::weak_ptr<Runtime>(runtime)]() -> const sim::PartitionExecutor* {
-            const auto owner = weak.lock(); return owner ? owner->active_executor : nullptr;
+            const auto owner = weak.lock(); return owner ? owner->current_executor() : nullptr;
         });
         runtime->engine = std::make_shared<ai::Engine>(runtime->host, runtime->data, runtime->plans->plans); host.engine = runtime->engine.get();
         runtime->engine->set_galactic_stage_catalog(runtime->plans);
@@ -962,9 +1121,10 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                         const auto found = content->types.find(type); if (found == content->types.end()) return absent<sim::math::Fixed>("original build cost");
                         return script::numeric::to_fixed(ai::real(ai::truncate(found->second.value.cost)));
                     });
+                runtime->actions->bind_reconciliation_placement(runtime->providers.reconciliation_placement);
                 if (auto bound = runtime->providers.bind_actions(game, galaxy, *runtime->actions, runtime->engine, runtime->world, [weak] {
                     const auto owner = weak.lock();
-                    return owner ? (owner->active_executor ? owner->active_executor : owner->setup->executor.get()) : nullptr;
+                    return owner ? (owner->current_executor() ? owner->current_executor() : owner->setup->executor.get()) : nullptr;
                 }); !bound) return core::Result<GalacticAiContributors>::failure(bound.error());
                 // WGA-385..389: use the retained full execution matrix, never
                 // ordinary-world reach, TaskForce pathing or a rebuilt route.
@@ -1053,11 +1213,9 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             }, [runtime](const auto& notice) { return runtime->battle(notice); }, std::move(measure));
             if (!installed) return core::Result<void>::failure(installed.error());
             runtime->native_state = installed.value();
-            for (const auto layer : {BattleLayer::space, BattleLayer::land}) {
-                if (!game.has_conflict_parent_queries(layer)) {
-                    auto child = game.add_conflict_parent_queries(layer, runtime->child_scripts.parent_queries);
-                    if (!child) return child;
-                }
+            if (!game.has_conflict_parent_queries(BattleLayer::space)) {
+                auto child = game.add_conflict_parent_queries(BattleLayer::space, runtime->child_scripts.parent_queries);
+                if (!child) return child;
             }
             const auto manager = runtime->manager.lock();
             if (!manager) return absent<void>("retained manager");

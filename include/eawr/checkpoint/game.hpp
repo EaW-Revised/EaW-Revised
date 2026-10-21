@@ -21,7 +21,7 @@ namespace eawr::checkpoint {
 // v34 (#4058): a save keeps the history since the previous save or load. The session section carries the history base
 // (boundary tick, chained frontier digest, last sealed key, dropped counts); the frontier input digest is
 // sha256(previous digest || replay window bytes), never a digest of the window alone.
-inline constexpr std::uint16_t galaxy_section_version = 35;
+inline constexpr std::uint16_t galaxy_section_version = 42;
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(
@@ -31,6 +31,8 @@ inline constexpr std::uint16_t galaxy_section_version = 35;
 struct GameLoadOptions {
     // Reinstall pure runtime adapters before direct owner import. Never run new-game placement.
     std::function<core::Result<void>(campaign::GameSession&)> configure_session;
+    // Space assembly callbacks. Complete providers for other layers register
+    // through configure_session before owner/child reconstruction.
     campaign::GameSession::ContentResolver content;
     campaign::GameSession::ScriptFactory scripts;
     campaign::ScriptRequirement script_requirement{campaign::ScriptRequirement::required};

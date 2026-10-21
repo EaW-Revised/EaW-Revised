@@ -185,6 +185,10 @@ uint16 tag, uint16 body length excluding tag/length, then the body. Records are 
 the declared header, and unknown tags, duplicates, malformed lengths and trailing header
 bytes fail. Future additions use another tagged record within versions 4/5.
 
+| Seam | Header record and session boundary |
+|---|---|
+| BF-1 battle domain | Tag 17 carries exactly uint32 version 1 and uint32 domain 1 (land). Absent means space; explicit space, unknown domains/versions and malformed or duplicate records fail. Space writers omit it, retaining every replay and digest byte. `TacticalSetup` and `TacticalContent` default to space and must agree; land parses and round-trips but all session construction paths refuse with `EAWR-SIM-0311` until the land terrain provider (L1) exists. `Get_Game_Mode` reads the session domain; nebula, ion-team, fighter, hangar, station-upgrade and hyperspace-retreat services are space-only. |
+
 Tag 1 is the match policy: exactly one uint32 disabled-flags word. Bits 0, 1, 2 and 3 mean
 heroes, superweapons, free starting units and prebuilt base respectively are disabled.
 Other bits and the all-zero word fail; an all-enabled match without setup metadata uses

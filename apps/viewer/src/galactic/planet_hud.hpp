@@ -45,6 +45,7 @@ struct ProductionItem final {
     int progress_percent{};
     sim::galactic::TypeId type_id{};
     sim::EntityId build_id{};
+    friend bool operator==(const ProductionItem&, const ProductionItem&) = default;
 };
 
 // #3931 galaxy reveal: one planet's production queues as HUD rows, ground and space apart. `describe` names a
@@ -82,6 +83,7 @@ struct ProductionChoice final {
     sim::galactic::ProductionAdmission admission{sim::galactic::ProductionAdmission::unavailable};
     bool build_tab{true}; // GHUD-S90: an authored build category admits the choice.
     bool population_fits{true}; // GHUD-S57: published apart from admission, which reports credits first
+    friend bool operator==(const ProductionChoice&, const ProductionChoice&) = default;
 };
 
 // WGUI-170: consume the observer's capability and purchase permission separately.
@@ -117,6 +119,7 @@ struct PlanetHudFacts final {
     // GHUDL-15: the planet's own corruption state and the local faction's
     // corruption benefit select the status-row corruption icon.
     bool corrupted{}, local_benefits_from_corruption{};
+    friend bool operator==(const PlanetHudFacts&, const PlanetHudFacts&) = default;
 };
 
 // #4315: a digest of every fact the planet name, income, level, status-icon and fleet-badge placement reads. The
@@ -150,6 +153,7 @@ struct QueueComponent final {
     sim::galactic::TypeId type_id{};
     sim::EntityId build_id{};
     std::uint32_t index{};
+    friend bool operator==(const QueueComponent&, const QueueComponent&) = default;
 };
 
 struct BuildChoiceComponent final {
@@ -164,6 +168,7 @@ struct BuildChoiceComponent final {
     sim::galactic::ProductionAdmission admission{sim::galactic::ProductionAdmission::unavailable};
     // GHUD-S57: the card's price colour (RGBA bytes) from the price-vs-base state and the buildable flag.
     std::array<std::uint8_t, 4> price_colour{255, 255, 255, 200};
+    friend bool operator==(const BuildChoiceComponent&, const BuildChoiceComponent&) = default;
 };
 
 struct PlanetHudView final {
@@ -177,6 +182,7 @@ struct PlanetHudView final {
     bool accepts_queue{};
     std::vector<QueueComponent> queues;
     std::vector<BuildChoiceComponent> choices;
+    friend bool operator==(const PlanetHudView&, const PlanetHudView&) = default;
 };
 
 struct ObjectNameComponent final {
@@ -239,6 +245,7 @@ struct PlayerHudView final {
     std::string next_income;
     std::string population;
     std::string technology;
+    friend bool operator==(const PlayerHudView&, const PlayerHudView&) = default;
 };
 [[nodiscard]] PlayerHudFacts published_player_hud_facts(const sim::galactic::GalacticSnapshot& snapshot,
     PlayerId observer_player);

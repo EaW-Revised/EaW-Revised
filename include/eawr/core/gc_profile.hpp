@@ -32,7 +32,7 @@ enum class Phase : std::size_t {
     lua_sync, make_snapshot, snapshot_ai, snapshot_other,
     runtime_prepare, world_bind,
     // S3a attribution scopes (serial, wall): nested under runtime_prepare / world_bind.
-    prepare_freestore, prepare_reservations, prepare_connectivity, publish_routes, barrier_begin,
+    prepare_freestore, prepare_reservations, prepare_connectivity, publish_routes, barrier_begin, path_table_prepass,
     world_compare, world_copy, world_catalog, world_producers, world_rows, forces, world_objects,
     world_visibility, world_economy, world_observed, world_input, world_view, world_release,
     compare_production, view_moved, freestore_publish, selection, goal_record_maintenance, usability_record_maintenance,
@@ -48,7 +48,7 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::co
     "ai_barrier_wall", "scripted_hash_wall", "frame_end_hash_wall", "native_digest",
     "lua_sync", "make_snapshot", "snapshot_ai", "snapshot_other",
     "runtime_prepare", "world_bind",
-    "prepare_freestore", "prepare_reservations", "prepare_connectivity", "publish_routes", "barrier_begin",
+    "prepare_freestore", "prepare_reservations", "prepare_connectivity", "publish_routes", "barrier_begin", "path_table_prepass",
     "world_compare", "world_copy", "world_catalog", "world_producers", "world_rows", "forces", "world_objects",
     "world_visibility", "world_economy", "world_observed", "world_input", "world_view", "world_release",
     "compare_production", "view_moved", "freestore_publish", "selection", "goal_record_maintenance", "usability_record_maintenance",

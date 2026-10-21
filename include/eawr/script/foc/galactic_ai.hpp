@@ -372,6 +372,9 @@ public:
         const sim::PartitionExecutor&, const gc::GalacticSession&, const gc::GalacticTick&, authoritative::ScriptScheduler&) override;
     [[nodiscard]] bool admits_service(const gc::GalacticTick&) const noexcept override;
     [[nodiscard]] bool perception_due(std::uint64_t synchronization) const noexcept;
+    // True when this barrier will run `service` for `player`: the player is initialized, processing is admitted
+    // in galactic mode and the service deadline has passed (the same test service() applies).
+    [[nodiscard]] bool service_due(gc::PlayerId player, Service service, std::uint64_t synchronization) const noexcept;
     [[nodiscard]] ServicePeriods service_periods() const noexcept;
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport&) override;
     void set_admission(Admission) noexcept;

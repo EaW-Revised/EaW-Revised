@@ -47,7 +47,8 @@ tactical::TacticalSetup human_setup(unsigned count) { return setup_test::human_s
 
 void player_row_parser() {
     expect(require(viewer::skirmish_player_ids("1,2,3,4,5,6,7,8")).size() == 8, "eight local faction rows parse");
-    for (const auto text : {"1,2,3,4,5,6,7,8,9", "1,2,", "1,1", "0,2", "1", "1,x"})
+    expect(require(viewer::skirmish_player_ids("1,2,3,4,5,6,7,8,9")).size() == 9, "nine local faction rows parse");
+    for (const auto text : {"1,2,3,4,5,6,7,8,9,10", "1,2,", "1,1", "0,2", "1", "1,x"})
         expect(!viewer::skirmish_player_ids(text), "invalid local rows refuse at parse time");
 }
 
@@ -518,6 +519,60 @@ void lan_ai_defaults_follow_authored_constraints() {
     eawr::skirmish::SetupSelection initial; initial.map = map.path; initial.match = setup().skirmish->match;
     initial.slots = {{1, "Rebel", 0, true, {}, 0}, {2, "Empire", 1, true, {}, 1}};
     auto selection = initial;
+    for (const auto item : {2, 4, 3}) {
+        require(viewer::select_lan_ai_level(selection, map, 3, 8, item));
+        const auto level = item == 2 ? tactical::AiLevel::easy : item == 4 ? tactical::AiLevel::hard : tactical::AiLevel::normal;
+        expect(selection.slots.back().difficulty == level && selection.slots.size() == 3,
+            "Easy/Hard/Medium create then update the same AI row");
+        net::LobbySnapshot snapshot;
+        snapshot.game = require(viewer::encode_lan_lobby_game(require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)))));
+        expect(require(viewer::decode_lan_lobby_game(snapshot)).slots->back().difficulty == level,
+            "the editable snapshot preserves each AI level");
+        snapshot.game.options.front() = '1';
+        const auto old = viewer::decode_lan_lobby_game(snapshot);
+        expect(!old && old.error().message == "Unsupported skirmish staging options version; all peers must use the same build.",
+            "the old staging codec is refused with a named version error");
+    }
+    const auto valid = require(viewer::encode_lan_lobby_game(require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)))));
+    expect(!viewer::select_lan_ai_level(selection, map, 1, 8, 2)
+        && !viewer::select_lan_ai_level(selection, map, 3, 8, 1), "human rows and Open are not AI difficulty edits");
+    expect(require(viewer::encode_lan_lobby_game(require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1))))) == valid,
+        "refused controller edits preserve all row bytes");
+    auto invalid = require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)));
+    invalid.slots->back().difficulty = static_cast<tactical::AiLevel>(3);
+    expect(!viewer::encode_lan_lobby_game(invalid), "out-of-range AI levels are refused before publication");
+    invalid.slots->back().difficulty = tactical::AiLevel::easy; invalid.slots->back().human = true;
+    expect(!viewer::encode_lan_lobby_game(invalid), "a human row cannot publish an AI level");
+    {
+        auto editable = initial;
+        editable.slots[1].human = false;
+        for (const auto kind : {viewer::LanSeatKind::open, viewer::LanSeatKind::closed, viewer::LanSeatKind::ai,
+            viewer::LanSeatKind::open, viewer::LanSeatKind::ai}) {
+            require(viewer::select_lan_seat_kind(editable, map, 2, 8, kind, tactical::AiLevel::easy));
+            eawr::skirmish::FixtureOptions options; options.map = editable.map; options.slots = editable.slots;
+            options.open_slots = editable.open_slots; options.match = editable.match;
+            net::LobbySnapshot state; state.game = require(viewer::encode_lan_lobby_game(options));
+            const auto decoded = require(viewer::decode_lan_lobby_game(state));
+            expect(viewer::lan_seat_kind(decoded, 2) == kind, "every row-2 vacancy transition round trips without becoming a different controller");
+            if (kind == viewer::LanSeatKind::ai) expect(decoded.slots->back().difficulty == tactical::AiLevel::easy, "AI level remains part of the same row");
+        }
+        eawr::skirmish::FixtureOptions options; options.map = initial.map; options.match = initial.match; options.slots = initial.slots;
+        net::LobbySnapshot state; state.game = require(viewer::encode_lan_lobby_game(options));
+        state.seats = {{0, sim::SeatId{1}, 1, {"host", "Rebel", 0, 0, 1}, false}};
+        auto departed = require(viewer::decode_lan_lobby_game(state));
+        expect(departed.slots->size() == 1 && viewer::lan_seat_kind(departed, 2) == viewer::LanSeatKind::open,
+            "a departed human leaves an Open row and creates no AI player");
+        for (const auto version : {'1', '2'}) {
+            state.game.options.front() = static_cast<std::uint8_t>(version);
+            const auto old = viewer::decode_lan_lobby_game(state);
+            expect(!old && old.error().message.starts_with("Unsupported skirmish staging options version"), "v1 and v2 are refused by name");
+        }
+        options.open_slots = {1};
+        expect(!viewer::encode_lan_lobby_game(options), "a row cannot be both occupied and Open");
+        options.open_slots = {4, 3};
+        expect(!viewer::encode_lan_lobby_game(options), "vacant rows have one canonical ascending order");
+    }
+    selection = initial;
     require(viewer::append_lan_ai_row(selection, map, 3, 8, true));
     expect(selection.slots.back().team == 2, "a new planned human owner prefers an unused loaded team");
     selection = initial;

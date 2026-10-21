@@ -54,7 +54,7 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
         out(checkpoint_detail::Access::visibility(*impl_));
         out(static_cast<std::uint64_t>(impl_->searches.size()));
         for (const auto& [id, search] : impl_->searches) {
-            out(id, search.search.checkpoint(), search.frame, search.target, search.max_speed, search.inputs, search.plan);
+            out(id, SpacePathService::checkpoint(search.search), search.frame, search.target, search.max_speed, search.inputs, search.plan);
         }
         out(encode_retreat_state(impl_->retreat_state), impl_->midbattle_solve);
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
@@ -131,7 +131,7 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         EntityId previous_search = 0;
         for (std::uint64_t i = 0; i < search_count; ++i) {
             EntityId id{};
-            SlicedPathSearch::Checkpoint saved;
+            SpacePathService::Checkpoint saved;
             std::uint64_t frame{};
             math::Vec3 target{};
             std::optional<math::Fixed> max_speed;
@@ -140,7 +140,7 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
             in(id, saved, frame, target, max_speed, inputs, plan);
             if (id <= previous_search || saved.entity != id) throw checkpoint_detail::Invalid("invalid sliced search identity");
             previous_search = id;
-            auto search = SlicedPathSearch::from_checkpoint(impl_->motion, saved);
+            auto search = SpacePathService::restore(impl_->motion, saved);
             if (!search) throw checkpoint_detail::Invalid(search.error().message);
             impl_->searches.emplace(id, Impl::SlicedSearch{std::move(search).value(), frame, target, max_speed, inputs, plan});
         }

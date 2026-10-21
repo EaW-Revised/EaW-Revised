@@ -238,7 +238,10 @@ void register_globals(ScriptScheduler& scripts, const HostPtr& host, std::vector
         context.issue_command("tactical-suspend-ai", {number(*value)});
         return none();
     });
-    add("Get_Game_Mode", [](BindingContext&, const ValueList&) { return one(Value::text("Space")); });
+    add("Get_Game_Mode", [host](BindingContext&, const ValueList&) {
+        const auto domain = host->world != nullptr ? host->world->domain() : tactical::BattleDomain::space;
+        return one(Value::text(domain == tactical::BattleDomain::land ? "Land" : "Space"));
+    });
     add("Find_Nearest", [host](BindingContext&, const ValueList& arguments) { return find_nearest(*host, arguments); });
     add("EvaluatePerception", [host](BindingContext& context, const ValueList& arguments) {
         return evaluate_perception(*host, context, arguments);

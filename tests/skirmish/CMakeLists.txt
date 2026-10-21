@@ -63,6 +63,8 @@ target_link_libraries(foc_ai_tests PRIVATE eawr::skirmish eawr::platform)
 target_compile_features(foc_ai_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(foc_ai_tests)
 add_test(NAME foc_ai_battle COMMAND foc_ai_tests)
+eawr_add_game_data_test(NAME foc_capital_avoidance COMMAND foc_ai_tests --capital-avoidance)
+set_tests_properties(foc_capital_avoidance PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)
 # GFS-A24 release acceptance runs BOTH the pure identity profile and the restore row below.
 eawr_add_game_data_test(NAME foc_ai_player_stream_profile COMMAND foc_ai_tests --player-stream-profile 5400)
 set_tests_properties(foc_ai_player_stream_profile PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:"

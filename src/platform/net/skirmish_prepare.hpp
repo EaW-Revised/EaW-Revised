@@ -1,9 +1,18 @@
 #pragma once
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include <optional>
 #include <set>
 namespace eawr::presentation::godot_backend {
+// LLB-18: one row control model for editing, canonical staging and match preparation.
+using LanSeatKind = presentation::ui::RowKind;
+[[nodiscard]] LanSeatKind lan_seat_kind(const skirmish::FixtureOptions&, std::uint32_t slot);
+[[nodiscard]] core::Result<void> select_lan_seat_kind(skirmish::SetupSelection&, const skirmish::SetupMap&,
+    std::uint32_t slot, std::size_t palette_size, LanSeatKind kind,
+    sim::tactical::AiLevel level = sim::tactical::AiLevel::normal);
+// Changing maps cannot relocate an occupied human/AI row. Open vacancies may disappear.
+[[nodiscard]] bool lan_map_supports_rows(const skirmish::SetupMap&, std::span<const skirmish::LobbySlot>);
 // Local faction rows use the authored dialog bound, independently of command seats.
 [[nodiscard]] core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view);
 // Shared installed-data builder: staging and the live scene bind identical bytes.
@@ -29,5 +38,8 @@ struct PreparedSkirmish {
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, units::UnitTables, skirmish::StartInputs);
 [[nodiscard]] core::Result<skirmish::FixtureOptions> validated_lan_options(const skirmish::SetupSelection&, std::span<const skirmish::SetupMap>);
 [[nodiscard]] core::Result<void> append_lan_ai_row(skirmish::SetupSelection&, const skirmish::SetupMap&, std::uint32_t slot, std::size_t palette_size, bool prefer_unused_team = false);
+// The staging combo's AI entries are 2/3/4 (Easy/Medium/Hard); Open is separate.
+[[nodiscard]] core::Result<void> select_lan_ai_level(skirmish::SetupSelection&, const skirmish::SetupMap&, std::uint32_t slot, std::size_t palette_size, int item);
+[[nodiscard]] const char* lan_ai_label(sim::tactical::AiLevel);
 [[nodiscard]] sim::tactical::TacticalSetup lan_recording_setup(const skirmish::Fixture&, const skirmish::SkirmishStart&);
 }

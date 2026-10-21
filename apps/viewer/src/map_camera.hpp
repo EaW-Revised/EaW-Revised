@@ -200,6 +200,7 @@ public:
         if (controller_) controller_->stop_pan();
     }
     [[nodiscard]] core::Result<void> handle(const camera_input::RawEvent& event);
+    [[nodiscard]] core::Result<void> set_camera_keys(bool wasd) { return adapter_.set_camera_keys(wasd); }
     // #82: the tactical camera looks at render (x, z) (a control group's focus).
     [[nodiscard]] core::Result<void> focus(const float x, const float z) {
         if (!controller_) return core::Result<void>::success();

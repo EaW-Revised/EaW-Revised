@@ -372,6 +372,109 @@ void test_bound_production_relationships() {
 }
 
 void test_live_station_repair() {
+    // A different repair source can fill an upgrade-disabled slot before its paid service.
+    for (const unsigned repair_path : {0U, 1U, 2U}) {
+      const bool automatic = repair_path != 0;
+      std::vector<std::string> reference;
+      for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto table = durability();
+        table.rules.hull_vs_hardpoints = whole(1); // Isolate repair completion from hull-cap convergence.
+        for (auto& profile : table.profiles) {
+            profile.max_shields = {};
+            for (auto& point : profile.hardpoints) {
+                point.repair_amount_per_frame = whole(100);
+                point.repair_cost_per_frame = whole(1);
+            }
+            if (profile.type_id == 41) profile.destroyed_with_hardpoints = true;
+        }
+        auto healer_health = table.profiles.front(); healer_health.type_id = 12;
+        table.profiles.insert(table.profiles.begin() + 1, healer_health);
+        t::CombatTable combat;
+        for (const auto type : {10ULL, 12ULL, 40ULL, 41ULL}) {
+            t::CombatProfile profile; profile.type_id = type; profile.category_bits = 1;
+            if (type == 41) {
+                t::WeaponProfile gun; gun.hardpoint = 0; gun.range = whole(1000);
+                gun.cone_width = whole(360); gun.cone_height = whole(360);
+                gun.shot = t::ShotProfile{whole(1), t::no_type_index, whole(1), whole(1000), true, true, {}};
+                profile.weapons = {gun};
+            }
+            combat.profiles.push_back(profile);
+        }
+        t::AbilityTable abilities;
+        t::UnitAbilityProfile healer; healer.type_id = repair_path == 2 ? 41 : 12;
+        t::SpecialAbilityProfile pulse; pulse.name = "Repair";
+        pulse.kind = t::SpecialAbilityKind::force_healing;
+        pulse.style = t::SpecialActivationStyle::space_automatic; pulse.initially_enabled = true;
+        pulse.heal_range = repair_path == 2 ? m::Fixed{} : whole(1000);
+        pulse.heal_amount = whole(100); pulse.heal_interval_frames = 1;
+        pulse.filter.applicable_types = {41};
+        healer.special = {pulse}; abilities.profiles = {healer};
+        auto initial = setup();
+        initial.seed = 548; // The new source's keyed first poll is due in the repair-command frame.
+        initial.units.back().position.x = whole(100);
+        const std::vector<t::SensorProfile> sensors{{10, whole(1000)}, {12, whole(1000)},
+            {40, whole(1000)}, {41, whole(1000)}};
+        auto made = t::TacticalSession::create(initial, sensors, table, {}, std::nullopt, combat, {}, abilities, economy());
+        expect(static_cast<bool>(made), "HR-05 competing repair fixture creates"); if (!made) return;
+        auto world = std::move(made).value();
+        expect(static_cast<bool>(world.submit({{0, 1, 0}, {1}, t::DamagePayload{whole(100), 0}})), "destroy station gun");
+        expect(static_cast<bool>(world.submit(buy(0, 1, 1, 1, 91))), "upgrade destroyed station gun");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        eawr::sim::EntityId replacement{};
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 7; ++tick) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "repair fixture upgrade advances"); if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+            for (const auto& event : step.value().snapshot->events())
+                if (event.kind == t::EventKind::station_replaced) replacement = event.sequence;
+        }
+        expect(replacement != 0, "repair fixture replaced station"); if (!replacement) return;
+        expect(t::hardpoint_disabled(*world.durability_state(replacement), 0), "upgrade gun begins disabled");
+        if (repair_path == 1) {
+            const auto source = world.stage_spawn({0, 12, 1, {}, m::identity_quat(), {}});
+            expect(static_cast<bool>(source), "add automatic repair source");
+            if (!source) return;
+            expect(world.ability_state(source.value())->special.slots[0].next_service_frame == 7,
+                "competing heal is due before paid repair in the same frame");
+        }
+        const std::uint64_t repair_tick = repair_path == 2 ? 9 : 7;
+        for (std::uint64_t tick = 7; tick < repair_tick; ++tick) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "automatic-only repair advances"); if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+        }
+        if (repair_path == 2) {
+            const auto filled = world.durability_state(replacement);
+            expect(filled && filled->hardpoints[0] == whole(100) && t::hardpoint_disabled(*filled, 0),
+                "WSH-04 automatic healing alone fills health without enabling the gun");
+        }
+        expect(static_cast<bool>(world.submit({{repair_tick, 1, 2}, {replacement}, t::RepairHardpointPayload{0}})), "register station repair");
+        expect(static_cast<bool>(world.submit({{repair_tick, 1, 3}, {replacement}, t::AttackPayload{5}})), "order repaired gun to fire");
+        const auto credits_before = account(world, 1).credits;
+        bool fired = false;
+        for (std::uint64_t tick = repair_tick; tick < repair_tick + 5; ++tick) {
+            const auto step = world.step(executor);
+            expect(static_cast<bool>(step), "repair fixture advances"); if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+            expect(std::none_of(step.value().snapshot->events().begin(), step.value().snapshot->events().end(),
+                [](const auto& event) { return event.kind == t::EventKind::order_rejected; }),
+                "HR-05 paid completion admits a full disabled slot");
+            for (const auto& event : step.value().snapshot->combat_events())
+                if (event.kind == t::CombatEventKind::weapon_fired && event.shooter == replacement) fired = true;
+            const auto instances = step.value().snapshot->instances();
+            const auto unit = std::find_if(instances.begin(), instances.end(), [=](const auto& candidate) { return candidate.entity_id == replacement; });
+            expect(unit != instances.end() && unit->durability && unit->durability->hardpoints[0].enabled
+                && unit->durability->hardpoints[0].health == whole(100), "HR-05 full repair snapshot restores active marker input");
+            expect(!t::hardpoint_disabled(*world.durability_state(replacement), 0), "HR-05 full repair clears sim disabled state");
+        }
+        expect(fired, "HD-10 full repaired gun fires at its target");
+        expect(account(world, 1).credits == (automatic ? credits_before : m::Fixed::from_raw(credits_before.raw() - whole(1).raw())),
+            "HR-05 completion charges only for actual paid health increments");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "HR-05 competing repairs are deterministic at 1/2/4/8 workers");
+      }
+    }
     auto health = durability();
     for (auto& profile : health.profiles) profile.max_shields = {}; // isolate hardpoint repair from shield absorption
     for (auto& profile : health.profiles) for (auto& hp : profile.hardpoints) {

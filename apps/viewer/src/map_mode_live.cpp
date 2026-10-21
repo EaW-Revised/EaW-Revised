@@ -8,9 +8,11 @@
 #include "eawr/presentation/space/projectiles.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "settings_store.hpp"
 #include "eawr/core/tick_profile.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/engine.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -656,6 +658,16 @@ std::optional<int> MapMode::State::capture_map_frame() {
 std::optional<int> MapMode::process(const double delta) {
     State& state = *state_;
     state.service_game_menu();
+    if (state.live_options.audio_pace && !state.live_options.real_time) {
+        // ST-P2: driven audio recordings own their render clock (#474), including
+        // rates below the player's 30 FPS floor. Menu/settings changes cannot replace it.
+        const double fps = static_cast<double>(sim::tactical::logical_frames_per_second)
+            / state.live_options.ticks_per_frame;
+        const int cap = std::max(1, static_cast<int>(std::llround(fps)));
+        if (Engine::get_singleton()->get_max_fps() != cap) Engine::get_singleton()->set_max_fps(cap);
+    } else if (const auto* active = ActiveSettings::get()) {
+        update_frame_pacing(active->video, state.options.attract.has_value());
+    }
     core::tick_profile::Recording ui_recording;
     std::optional<core::tick_profile::Capture> ui_capture;
     if (state.perf_trace) ui_capture.emplace(ui_recording);
@@ -811,6 +823,12 @@ void MapMode::input(const Ref<InputEvent>& event) {
         return;
     }
     if (state.map_camera && event.is_valid()) {
+        if (const auto* saved = ActiveSettings::get()) {
+            if (auto bound = state.map_camera->set_camera_keys(saved->camera_wasd); !bound) {
+                state.failure = core::format_diagnostic(bound.error());
+                return;
+            }
+        }
         if (const auto raw = map_camera_event(event)) {
             if (auto handled = state.map_camera->handle(*raw); !handled) {
                 state.failure = core::format_diagnostic(handled.error());
@@ -870,6 +888,10 @@ MapMode::AttractStatus MapMode::attract_status() {
         status.speech_started = silence.started;
         status.sfx_3d_refused = silence.sfx_3d_refused;
         status.sfx_3d_started = silence.sfx_3d_started;
+        status.audio_events_refused = silence.events_refused;
+        status.audio_events_admitted = silence.events_admitted;
+        status.audio_events_started = silence.events_started;
+        status.audio_deaths_2d_refused = silence.deaths_2d_refused;
     }
     if (!state.live_session) return status;
     status.live = true;

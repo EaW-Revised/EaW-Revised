@@ -72,6 +72,9 @@ void resolve_cinematic_seats(TacticalSetup& setup, const std::span<const Economy
 }
 
 core::Result<void> validate_setup(const TacticalSetup& setup) {
+    if (setup.domain != BattleDomain::space && setup.domain != BattleDomain::land) {
+        return fail<void>(diagnostic_codes::invalid_setup, "unknown tactical battle domain", {});
+    }
     if (setup.match_identity) {
         if (auto valid = sim::validate_match_identity(*setup.match_identity); !valid) return valid;
         const auto& domains = setup.match_identity->domains;

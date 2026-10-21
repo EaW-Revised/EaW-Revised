@@ -44,6 +44,7 @@ struct GnsTransport::Mesh {
     };
     std::array<Slot, max_match_seats> slot;
     bool locked{}, closing{};
+    std::optional<std::pair<std::uint64_t, std::uint32_t>> roster_lock;
     std::optional<TcpRejoinAuth> repair_auth;
     std::uint64_t attachment_epoch{};
     bool attachment_pending{}, attachment_ready{};

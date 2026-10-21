@@ -75,6 +75,12 @@ struct PendingConflictAlert {
     sim::galactic::PlayerId invader{}, defender{};
     bool land{};
 };
+// Publication-only correlation for a local producer. Gameplay keys are still derived from the authenticated seat.
+struct TacticalInputExecution {
+    sim::SeatId seat{};
+    std::uint64_t producer_sequence{};
+    std::uint64_t tactical_tick{};
+};
 struct GameTick {
     std::uint64_t completed_tick{};
     SessionMode mode{SessionMode::galaxy};
@@ -102,6 +108,8 @@ struct GameTick {
     [[nodiscard]] std::vector<GameStoryNotice> observer_story_notices(sim::galactic::PlayerId) const;
     // WGP-26: retain emission context even when this step selects or retires the conflict.
     std::map<sim::EntityId, PendingConflictAlert> pending_alerts;
+    std::vector<TacticalInputExecution> tactical_input_executions{};
+    std::vector<sim::galactic::HeroReturnView> hero_returns; // WGUI-89: canonical humans; platform filters per requested seat.
 };
 
 struct RecordedConflict {
@@ -146,6 +154,7 @@ struct GameRecording {
     bool conflict_services{}; // opt-in ordered tail/timer context, even before the first arrival
     // The history in `commands` (numbered from native sequence 1) is the window after this boundary.
     HistoryBase base{};
+    std::optional<std::uint64_t> multiplayer_vote_timeout{};
 };
 // The frontier a recording seals: chained over its base and the canonical replay bytes of its window; the key is the
 // later of the base's last sealed command and the window's last command.
@@ -175,6 +184,7 @@ struct SeatBattleView {
 using GalacticParentQuery = std::function<std::optional<script::numeric::LuaNumber>(std::string_view, sim::tactical::PlayerId)>;
 using GalacticParentQueryFactory = std::function<GalacticParentQuery(const ConflictRecord&)>;
 inline constexpr std::string_view missing_conflict_scripts = "EAWR-CONFLICT-MISSING-SCRIPTS";
+inline constexpr std::string_view unavailable_conflict_tactical = "EAWR-CONFLICT-TACTICAL-UNAVAILABLE";
 
 class GameSession final {
 public:
@@ -214,7 +224,7 @@ public:
     using ContentResolver = std::function<core::Result<sim::tactical::TacticalContent>(const ConflictRecord&)>;
     using EntryResolver = std::function<core::Result<ResolvedConflictEntry>(
         const ConflictRecord&, const sim::galactic::GalacticSnapshot&, sim::EntityId)>;
-    // Assembly seams for synthetic owners; a complete layer install seals these setters.
+    // Space assembly seams for synthetic owners; a complete layer install seals these setters.
     void set_entry_resolver(EntryResolver resolver);
     using ScriptFactory = std::function<core::Result<script::authoritative::ScriptScheduler>(const ConflictRecord&)>;
     // Resolvers rebuild pinned content/scripts without embedding content tables in replay state.
@@ -238,7 +248,11 @@ public:
     // Every player, AI, script and test input enters here (ADR-015). Session and galactic layers
     // go to the galaxy; a tactical command needs a running battle, so without one it is refused.
     [[nodiscard]] core::Result<void> submit(const sim::galactic::GameCommand& command);
+    // Multiplayer setup keeps session ticks alive while agreed pause controls freeze the child and its scripts.
+    // The saved setup, rather than a caller flag or local clock, determines this on replay and restore as well.
     [[nodiscard]] core::Result<GameTick> step(const sim::PartitionExecutor& executor);
+    // The child owns one nested galactic pause level; only levels above that pause the child itself.
+    [[nodiscard]] bool child_paused() const noexcept;
     // Ordered conflict-service seam: stage an already selected entry for the next galaxy commit.
     // This is not a player-input path. The caller supplies immutable content matching its identity.
     [[nodiscard]] core::Result<void> stage_battle(ConflictRecord record, const sim::tactical::TacticalContent& content,
@@ -247,6 +261,10 @@ public:
     [[nodiscard]] core::Result<void> stage_battle(ConflictRecord record, const sim::tactical::TacticalContent& content,
         ScriptRequirement requirement = ScriptRequirement::required);
     using ResultApplier = std::function<core::Result<void>(sim::galactic::GalacticSession&, const BattleResult&)>;
+    // Layer returns receive the admitted conflict. Directly staged automatic outcomes
+    // supply its identity, planet, layer and participants without a tactical roster.
+    using LayerResultApplier = std::function<core::Result<void>(sim::galactic::GalacticSession&,
+        const ConflictRecord&, const BattleResult&)>;
     using ResultDecorator = std::function<core::Result<void>(const ConflictRecord&,
         const sim::tactical::TacticalSession&, BattleResult&)>;
     using HeroDefeatResolver = std::function<core::Result<std::optional<sim::galactic::HeroDefeat>>(
@@ -331,6 +349,7 @@ public:
     void set_child_configurator(ChildConfigurator configure);
     // A paired parent-aware host must be installed before child reconstruction.
     [[nodiscard]] core::Result<void> set_child_script_services(ScriptFactory scripts, ChildConfigurator configure);
+    [[nodiscard]] core::Result<void> set_child_script_services(BattleLayer, ScriptFactory, ChildConfigurator);
     // WGM-41..49: source-qualified admission/map/roster owner supplies the FT-09-built
     // record. No distance heuristic, map default, frame schedule or solver is inferred here.
     using ConflictService = std::function<core::Result<std::optional<RecordedAdmission>>(
@@ -345,10 +364,13 @@ public:
         ScriptFactory scripts;
         ChildConfigurator configure;
         ResultDecorator decorate;
-        ResultApplier apply;
+        LayerResultApplier apply; // absent preserves the default land persistence writer
         ConflictService admission;
         NativeConflictService native_admission;
         ScriptRequirement script_requirement{ScriptRequirement::required};
+        // Empty for a tactical provider. Otherwise ordinary choices use auto-resolve,
+        // and forced/direct child construction returns this provider's named refusal.
+        std::string tactical_refusal;
     };
     // One complete install per layer, before child construction. Parent queries are additive.
     [[nodiscard]] core::Result<void> install_conflict_layer(BattleLayer, ConflictLayerServices);
@@ -371,7 +393,7 @@ public:
     // Borrowed from this session's stable Impl; bind anew on each load and keep
     // only while this session's owners live. Moving GameSession preserves them.
     [[nodiscard]] NativeConflictReaders native_conflict_readers() const;
-    [[nodiscard]] std::optional<PendingConflictView> pending_conflict_view() const;
+    [[nodiscard]] std::optional<PendingConflictView> pending_conflict_view(sim::galactic::SeatId observer = {}) const;
     using PendingBattleAlertReader = std::function<std::optional<PendingBattleAlertInputs>(const ConflictRecord&)>;
     // Empty result means its sourced delay/solver has not completed. No frame-to-wall-clock
     // conversion or substitute winner is invented by this session.
@@ -381,6 +403,9 @@ public:
     using VoteProgress = std::function<core::Result<std::optional<bool>>(
         const ConflictRecord&, const std::map<sim::galactic::PlayerId, bool>&)>;
     void set_vote_progress(VoteProgress progress);
+    // GCMP-06 / WGM-47: session-tick timeout injected from mounted XML. Explicit
+    // choices still enter through BattleChoice in the agreed seat inbox.
+    [[nodiscard]] core::Result<void> configure_multiplayer_votes(std::uint64_t timeout_ticks);
     // Named zoom/vote/load/speech eligibility input of the manager tail (WGM-43/47,
     // GFD-18). A closed gate delays arbitration, without inventing a timeout.
     using ConflictGate = std::function<bool(const sim::galactic::GalacticSnapshot&)>;

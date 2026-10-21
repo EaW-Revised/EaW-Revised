@@ -206,6 +206,7 @@ inline constexpr const char* prompt_cancel_button = "EAWR_LOBBY_PROMPT_CANCEL";
     skirmish::FixtureOptions options;
     options.map = selection.map;
     options.slots = selection.slots;
+    options.open_slots = selection.open_slots;
     options.match = selection.match;
     if (options.match) {
         if (auto condition = sim::tactical::parse_victory_condition(options.match->space_win_condition))

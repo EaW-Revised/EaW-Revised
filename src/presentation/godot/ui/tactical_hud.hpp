@@ -253,6 +253,7 @@ public:
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on);
     void set_order_mode(std::string_view active);
+    void set_order_shortcut(std::string_view order, std::string_view caption);
     void set_special_weapon_handler(std::function<void()> handler);
     void set_special_weapon(const presentation::ui::SpecialWeaponButton& view);
     // HCB-15: the authored b_retreat slot; a disabled glyph until a campaign caller publishes a view.

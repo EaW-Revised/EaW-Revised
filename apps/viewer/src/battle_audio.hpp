@@ -48,9 +48,8 @@ class BattleAudio final {
 public:
     struct Options final {
         bool muted{};
-        // MAT-18: the demo battle queues no speech, advisor, announcement or GUI event, starts no
-        // 3D sound event (retail plays them at multiplier 0) and no tactical music, so nothing of it
-        // reaches the shared buses; no bus is muted, because the front end's menu music, clicks and
+        // MAT-18: the demo battle admits no sound event, queues no speech and starts no tactical
+        // music, so nothing of it reaches the shared buses; no bus is muted, because menu music, clicks and
         // slider previews play on the same SFX and music buses. The refusals are counted
         // (attract_silenced()).
         bool attract_silent{};
@@ -92,21 +91,30 @@ public:
     // MAT-18: what the attract gate refused (speech, GUI and announcement events, queued speech) and
     // what started on the voice path anyway (queued speech played, a speech-class event allocated).
     // `started` stays 0 while Options::attract_silent holds. The 3D members are the same for the
-    // positional events: refused before the queue, and any that started anyway.
+    // positional events: refused before the queue, and any that started anyway. Event totals cover
+    // every SFX category, including non-positional effects; the death subtotal proves that path ran.
     struct AttractSilence final {
         std::uint64_t refused{};
         std::uint64_t queued{};
         std::uint64_t started{};
         std::uint64_t sfx_3d_refused{};
         std::uint64_t sfx_3d_started{};
+        std::uint64_t events_refused{};
+        std::uint64_t events_admitted{};
+        std::uint64_t events_started{};
+        std::uint64_t deaths_2d_refused{};
     };
     [[nodiscard]] AttractSilence attract_silenced() const noexcept {
-        return {attract_refused_, speech_queued_, speech_class_starts_, attract_3d_refused_, spatial_starts_};
+        return {attract_refused_, speech_queued_, speech_class_starts_, attract_3d_refused_, spatial_starts_,
+                attract_events_refused_, events_admitted_, spatial_starts_ + two_d_starts_, attract_2d_deaths_refused_};
     }
     // The report's "battle_audio" member, followed by ",\n".
     void write_report(std::ostream& output) const;
 
 private:
+    // MAT-18: SFX, queued speech and music share this admission policy. The front end owns
+    // its own audio, so the battle can refuse every category without muting shared buses.
+    [[nodiscard]] bool admits_battle_audio() const noexcept { return !options_.attract_silent; }
     void present_outcome_cues(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle, const bool recovery_quiet);
     void update_listener(const LiveSessionView& live, const FixedCamera& camera);
     void remember_visible_units(const LiveSessionView& live, const LiveSessionView::BattleFrame& battle);
@@ -348,7 +356,7 @@ private:
     [[nodiscard]] const SpeechEvent* speech_event(std::string_view name);
     void production_cue(const SpeechEvent* speech, const audio::SfxEvent* fallback, std::string_view reason);
     void update_speech(bool paused);
-    // MAT-18: true for the event classes the demo battle keeps off the voice path.
+    // Speech-class diagnostics (MAT-18 gates every class before admission).
     [[nodiscard]] static bool speech_class(const audio::SfxEvent& event) noexcept {
         return event.localized || event.hud_vo || event.unit_response_vo || event.ambient_vo || event.gui;
     }
@@ -365,6 +373,9 @@ private:
     std::uint64_t speech_overflow_{};
     std::uint64_t attract_refused_{};
     std::uint64_t attract_3d_refused_{};
+    std::uint64_t attract_events_refused_{};
+    std::uint64_t attract_2d_deaths_refused_{};
+    std::uint64_t events_admitted_{};
     std::uint64_t speech_class_starts_{};
     audio::SightingAnnouncements sightings_;
     const audio::SfxEvent* enemy_spotted_{};

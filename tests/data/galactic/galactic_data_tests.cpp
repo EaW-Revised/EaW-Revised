@@ -129,6 +129,7 @@ constexpr std::string_view factions_xml = R"xml(<?xml version="1.0"?>
     <Force_Alignment>Light</Force_Alignment>
     <Is_Playable>Yes</Is_Playable>
     <Primary_Enemy>Empire</Primary_Enemy>
+    <Basic_AI>Mod_Faction_Controller</Basic_AI>
     <Allies>Empire</Allies><Enemies>Empire, Missing_Faction</Enemies>
     <Hyperspace_Speed_Factor>1.0</Hyperspace_Speed_Factor>
     <Displayed_Tech_Level_Adjustment>1</Displayed_Tech_Level_Adjustment>
@@ -208,6 +209,11 @@ constexpr std::string_view routes_xml = R"xml(<?xml version="1.0"?>
 
 constexpr std::string_view constants_xml = R"xml(<?xml version="1.0"?>
 <GameConstants>
+<Raid_Force_Required_Faction>Faction_A</Raid_Force_Required_Faction>
+<Raid_Force_Free_Object_Category_Mask>CustomHero</Raid_Force_Free_Object_Category_Mask>
+<Raid_Force_Limited_Object_Category_Mask>CustomGround</Raid_Force_Limited_Object_Category_Mask>
+<Raid_Force_Max_Heros>3</Raid_Force_Max_Heros>
+<Raid_Force_Max_Limited_Objects>7</Raid_Force_Max_Limited_Objects>
   <Object_Max_Speed_Multiplier_Galactic> 5.0 </Object_Max_Speed_Multiplier_Galactic>
   <Corruption_Hyperspace_Bonus>1.75</Corruption_Hyperspace_Bonus>
   <Fiscal_Cycle_Time_In_Secs>45.0 seconds</Fiscal_Cycle_Time_In_Secs>
@@ -380,6 +386,8 @@ void world_contracts(const galactic::GalacticData& data) {
     expect(data.planet("Alpha")->population_value == 2 && data.planet("Alpha")->additional_population_capacity == 8,
         "planet original population and capacity preserve authored XML");
     const auto* empire = data.faction("Empire");
+    expect(rebel && rebel->basic_ai == "Mod_Faction_Controller" && empire && empire->basic_ai.empty(),
+        "Basic_AI preserves a mod-authored player reference and its omission");
     expect(rebel && rebel->allies == std::vector<std::string>{"Empire"}
         && rebel->enemies == std::vector<std::string>{"Empire", "Missing_Faction"}
         && empire && empire->allies.empty() && empire->enemies.empty()
@@ -419,6 +427,9 @@ void world_contracts(const galactic::GalacticData& data) {
 }
 
 void identity_contracts(const std::filesystem::path& root, const galactic::GalacticData& data) {
+    auto controller_changed = data; controller_changed.factions[0].basic_ai = "Other_Mod_Controller";
+    expect(galactic::content_identity(controller_changed) != galactic::content_identity(data),
+        "authored faction Basic_AI participates in galactic content identity");
     auto relation_changed = data; relation_changed.factions[0].allies.push_back("Extra");
     expect(galactic::content_identity(relation_changed) != galactic::content_identity(data), "authored allies participate in identity");
     relation_changed = data; relation_changed.factions[0].enemies.push_back("Extra");

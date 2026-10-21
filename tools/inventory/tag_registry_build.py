@@ -186,6 +186,102 @@ OVERRIDES: dict[tuple[str, str], dict[str, Any]] = {
     ("*", "file"): applied("src/data/xml.cpp#File", note="a registry file entry, read by the catalog's file lists"),
 }
 
+
+# Reviewed application/scope decisions, keyed by the complete class/tag path.
+OVERRIDES.update({
+    ('planet', 'space_tactical_map'): {'applied': [{'code': 'src/campaign/space_entry_stock.cpp#resolve', 'rules': ['WGT-04'], 'types': ['prepared campaign space entry']}], 'area': 'economy', 'basis': 'reviewed', 'missing_types': ['Unsupported scene and qualification boundaries in docs/behaviour/galactic-space-entry.md'], 'note': 'Conflict entry resolves the authored space map; the remaining map-selection scope is listed in missing_types.', 'status': 'partial', 'ticket': 2006},
+    ('gameconstants', 'tractor_beam_width'): {'applied': [{'code': 'apps/viewer/src/battle_effects_prepare.cpp#hero_beams_', 'rules': ['TBF-01'], 'types': ['GameConstants']}, {'code': 'apps/viewer/src/battle_effects_projectiles.cpp#BattleEffects::draw_ability_beams', 'rules': ['TBF-01'], 'types': ['GameConstants']}], 'area': 'presentation', 'basis': 'reviewed', 'note': 'TBF-01: battle_effects_prepare.cpp builds the Tractor_Beam_ prefix plus Width and loads hero_beams_[1].width; draw_ability_beams uses look.width * 0.5F for both quad sides. The complete tag is not a source literal.', 'status': 'applied'},
+    ('planet', 'land_tactical_map'): {'applied': [{'code': 'src/campaign/auto_resolve_live.cpp#record.map_identity', 'rules': ['WGM-50'], 'types': []}, {'code': 'src/platform/galactic/live_game_session.cpp#from_plan', 'rules': ['WGM-50'], 'types': []}], 'area': 'economy', 'basis': 'reviewed', 'note': 'The authored land_tactical_map is copied into the admitted conflict record at src/campaign/auto_resolve_live.cpp:641, from_plan sets descriptor.selected_map from conflict.map_identity at src/platform/galactic/live_game_session.cpp:248, and the viewer loads that map as the battle map_path at apps/viewer/src/galactic/galactic_handoff.cpp:503; drop the todo note and ticket 1989 (closed).', 'status': 'applied'},
+    ('marker', 'in_background'): {'area': 'combat', 'basis': 'reviewed', 'status': 'todo', 'ticket': 4532, 'note': 'BP-75: the tactical viewer clears tags.background before classification; live arrivals only count backdrop_ships_. No tactical background pass, depth clear or widened clip range applies this flag.'},
+    ('spaceprop', 'in_background'): {'area': 'combat', 'basis': 'reviewed', 'status': 'todo', 'ticket': 4532, 'note': 'BP-75: the tactical viewer clears tags.background before classification; live arrivals only count backdrop_ships_. No tactical background pass, depth clear or widened clip range applies this flag.'},
+    ('spaceunit', 'in_background'): {'area': 'combat', 'basis': 'reviewed', 'status': 'todo', 'ticket': 4532, 'note': 'BP-75: the tactical viewer clears tags.background before classification; live arrivals only count backdrop_ships_. No tactical background pass, depth clear or widened clip range applies this flag.'},
+    ('uniqueunit', 'in_background'): {'area': 'combat', 'basis': 'reviewed', 'status': 'todo', 'ticket': 4532, 'note': 'BP-75: the tactical viewer clears tags.background before classification; live arrivals only count backdrop_ships_. No tactical background pass, depth clear or widened clip range applies this flag.'},
+    ('particle', 'in_background'): {'applied': [{'code': 'apps/viewer/src/galactic/scene_content.cpp#galactic_particle_layer', 'rules': ['WGP-01b'], 'types': ['galactic particle scene layering']}], 'area': 'combat', 'basis': 'reviewed', 'status': 'partial', 'ticket': 4532, 'missing_types': ['tactical background scene pass, depth clear and widened clip range'], 'note': 'Galactic particle insertion uses the authored scene layer (WGP-01b). Tactical compose clears tags.background and live arrivals only report backdrop_ships_; the BP-75 background pass is not implemented.'},
+    **{(object_class, 'abilities/system_spy_ability/' + tag): todo(
+        'Galactic spy income and income-breakdown disclosure remain unimplemented.', 1143)
+       for object_class in ('specialstructure', 'uniqueunit')
+       for tag in ('see_credit_income', 'see_credit_income_breakdown')},
+    ('guidialogs', 'textures/*/scanlines'): {'status': 'todo', 'area': 'presentation', 'ticket': 653, 'basis': 'reviewed', 'note': 'Consumer review: theme.cpp only classifies/registers this texture slot; no dialog/frame renderer requests the Scanlines icon or KitPart::scanlines. Registration alone does not apply the value.'},
+    ('guidialogs', 'textures/*/scroll_tab_disabled'): {'status': 'todo', 'area': 'presentation', 'ticket': 653, 'basis': 'reviewed', 'note': 'Consumer review: theme.cpp only registers this texture slot. EawrUiList::draw_scroll_tab always requests Scroll_Tab, and apply_skin does not bind a disabled thumb texture. No disabled-tab draw consumer exists.'},
+    ('genericherounit', 'abilities/neutralize_hero_ability/can_neutralize_major_heroes'): {'area': 'combat', 'basis': 'reviewed', 'note': "Galactic bounty-hunter (GenericHeroUnit) neutralization: the GC prepare path accepts a minor or major target only when the actor's CAN_NEUTRALIZE flag is set (ability_neutralize.cpp, valid = named ? can_major : can_minor), with the flags parsed in live_setup.cpp install_live_ability_services. Basis: reviewed; no ticket (applied rows carry none).", 'status': 'applied', 'code': 'src/sim/galactic/ability_neutralize.cpp#prepare_neutralization', 'rules': ['WGCH-52'], 'types': []},
+    ('genericherounit', 'abilities/neutralize_hero_ability/can_neutralize_minor_heroes'): {'area': 'combat', 'basis': 'reviewed', 'note': "Galactic bounty-hunter (GenericHeroUnit) neutralization: the GC prepare path accepts a minor or major target only when the actor's CAN_NEUTRALIZE flag is set (ability_neutralize.cpp, valid = named ? can_major : can_minor), with the flags parsed in live_setup.cpp install_live_ability_services. Basis: reviewed; no ticket (applied rows carry none).", 'status': 'applied', 'code': 'src/sim/galactic/ability_neutralize.cpp#prepare_neutralization', 'rules': ['WGCH-52'], 'types': []},
+    ('genericherounit', 'abilities/neutralize_hero_ability/owner_respawn_time_in_secs'): {'area': 'combat', 'basis': 'reviewed', 'note': 'GC neutralization samples the actor and target absence times from the authored OWNER/TARGET_RESPAWN_TIME_IN_SECS ranges in prepare_neutralization (ability_neutralize.cpp absence_sample), parsed in live_setup.cpp install_live_ability_services. Basis: reviewed; no ticket (applied rows carry none).', 'status': 'applied', 'code': 'src/sim/galactic/ability_neutralize.cpp#prepare_neutralization', 'rules': ['WGCH-21'], 'types': []},
+    ('genericherounit', 'abilities/neutralize_hero_ability/target_respawn_time_in_secs'): {'area': 'combat', 'basis': 'reviewed', 'note': 'GC neutralization samples the actor and target absence times from the authored OWNER/TARGET_RESPAWN_TIME_IN_SECS ranges in prepare_neutralization (ability_neutralize.cpp absence_sample), parsed in live_setup.cpp install_live_ability_services. Basis: reviewed; no ticket (applied rows carry none).', 'status': 'applied', 'code': 'src/sim/galactic/ability_neutralize.cpp#prepare_neutralization', 'rules': ['WGCH-21'], 'types': []},
+    ('props_story', 'affiliation'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'live_setup.cpp:114 admission.affiliated = contains(type.affiliation, owner->faction); setup.cpp:146 uses it to select affected types; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/live_setup.cpp#affiliation', 'rules': [], 'types': []},
+    ('props_story', 'base_level'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'setup.cpp:300 admission.base_level = *type.base_level; live_setup.cpp:156 reads type.base_level for the station rule; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/setup.cpp#base_level', 'rules': [], 'types': []},
+    ('props_story', 'build_cost_credits'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'setup.cpp:197 and 265 use type.build_cost_credits for the authored and resolved price; live_setup.cpp:202 scales it; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/setup.cpp#build_cost_credits', 'rules': [], 'types': []},
+    ('props_story', 'build_limit_lifetime_per_player'): {'area': 'presentation', 'basis': 'reviewed', 'note': "setup.cpp:302 sets admission.lifetime_limit from the type's build_limit_lifetime_per_player; no behaviour-note rule mentions this tag yet", 'status': 'applied', 'code': 'src/campaign/setup.cpp#build_limit_lifetime_per_player', 'rules': [], 'types': []},
+    ('props_story', 'build_time_seconds'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'live_setup.cpp:198-200 scales type.build_time_seconds by production speed into the built time; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/live_setup.cpp#build_time_seconds', 'rules': [], 'types': []},
+    ('planet', 'camera_aligned'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('planet', 'corruption_1_failure_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_1_failure_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_1_mission_commencing_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_1_success_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_1_success_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_2_failure_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_2_failure_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_2_success_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_2_success_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_3_failure_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_3_failure_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_3_success_bink_hologram_name'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('planet', 'corruption_3_success_speech_event'): {'area': 'economy', 'note': 'No authored corruption completion/mission speech or hologram consumer; route the outcome through galactic presentation.', 'status': 'todo', 'ticket': 4528},
+    ('difficulty_adjustment', 'galactic_ai_contrast_multiplier'): {'area': 'economy', 'basis': 'reviewed', 'note': "Engine::select_galactic_units multiplies each enemy category force by player.difficulty.galactic_contrast_multiplier (galactic_ai_selector_runtime.cpp:191-192), so the authored value reaches galactic AI plan selection; the row's SCOPE-GALACTIC evidence is dropped because it is no longer out of scope for this row.", 'status': 'applied', 'code': 'src/script/foc/galactic_ai_selector_runtime.cpp#select_galactic_units', 'rules': ['WGA-26'], 'types': []},
+    ('difficulty_adjustment', 'galactic_ai_goal_cycle_sleep_duration'): {'area': 'economy', 'basis': 'reviewed', 'note': 'Engine::service_goals sets player.sleep_frames from player.difficulty.galactic_goal_cycle_sleep for galactic players (ai_goals.cpp:188-189), so the authored sleep reaches the goal cycle; the SCOPE-GALACTIC evidence is dropped.', 'status': 'applied', 'code': 'src/script/foc/ai_goals.cpp#service_goals', 'rules': ['WGA-17'], 'types': []},
+    ('gameconstants', 'galactic_zoom_acceleration'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('gameconstants', 'galactic_zoom_in_station_offset'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('props_story', 'hyperspace_speed'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'fleets.cpp:153 validates original->hyperspace_speed and carries it into the fleet type used by GC movement; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/fleets.cpp#hyperspace_speed', 'rules': [], 'types': []},
+    ('gameconstants', 'max_galactic_zoom_distance'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('gameconstants', 'max_galactic_zoom_speed'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('gameconstants', 'min_galactic_zoom_speed'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('props_story', 'next_level_base'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'ai_selection_content.cpp:279-280 resolves type.original->next_level_base to the next starbase level; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/ai_selection_content.cpp#next_level_base', 'rules': [], 'types': []},
+    ('planet', 'planet_retains_residual_influence'): {'area': 'economy', 'basis': 'reviewed', 'note': 'The authored flag reaches the control presence at src/campaign/control.cpp:108, calculate_planet_control keeps the residual controller for an uncontrolled, undestroyed planet at src/sim/galactic/control.cpp:267, and the same flag sets CorruptionPlanet.retains_influence (src/campaign/corruption_setup.cpp:82) which the corruption refusal reads at src/sim/galactic/ability_corruption.cpp:324; drop the SCOPE-GALACTIC evidence.', 'status': 'applied', 'code': 'src/sim/galactic/control.cpp#calculate_planet_control', 'rules': ['WGM-67'], 'types': []},
+    ('props_story', 'political_control'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'control.cpp:90-105 turns type->political_control and planet->political_control into the presence and leaning the GC control step uses; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/control.cpp#political_control', 'rules': [], 'types': []},
+    ('props_story', 'political_faction'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'live_setup.cpp:359-362 sets control.leaning and matches source->political_faction to the faction at setup; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/live_setup.cpp#political_faction', 'rules': [], 'types': []},
+    ('props_story', 'required_ground_base_level'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'setup.cpp:298 copies type.required_ground_base_level into admission.required_ground_level; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/setup.cpp#required_ground_base_level', 'rules': [], 'types': []},
+    ('props_story', 'required_planets'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'live_setup.cpp:147 refuses direct build unless a required planet is held; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/live_setup.cpp#required_planets', 'rules': [], 'types': []},
+    ('props_story', 'required_special_structures'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'live_setup.cpp:135 iterates words(type.required_special_structures) as the admission requirement; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/live_setup.cpp#required_special_structures', 'rules': [], 'types': []},
+    ('props_story', 'required_star_base_level'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'setup.cpp:299 copies type.required_star_base_level into admission.required_space_level; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/setup.cpp#required_star_base_level', 'rules': [], 'types': []},
+    ('props_story', 'squadron_capacity'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'fleets.cpp:158-161 validates original->squadron_capacity and carries it into the fleet type (t.squadron_capacity); no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/fleets.cpp#squadron_capacity', 'rules': [], 'types': []},
+    ('gameconstants', 'starting_galactic_camera_position'): {'area': 'economy', 'note': 'Authored galactic camera parameter has no live consumer; camera flights and transforms remain tracked.', 'status': 'todo', 'ticket': 1157},
+    ('props_story', 'tech_level'): {'area': 'presentation', 'basis': 'reviewed', 'note': 'setup.cpp:295 copies type.tech_level into admission.tech; no behaviour-note rule mentions this tag yet', 'status': 'applied', 'code': 'src/campaign/setup.cpp#tech_level', 'rules': [], 'types': []},
+})
+
+# Closed implementation tickets no longer own the remaining documented gaps.
+# The grouped follow-up enumerates the exact class/tag selectors and remaining
+# kinds/modes; broad subsystem titles alone do not establish gap ownership.
+AUDIT_CLOSED_TICKETS = frozenset({
+    530, 540, 679, 680, 682, 683, 701, 727, 923, 924, 934, 935, 936, 937, 941, 942,
+    1072, 1074, 1075, 1114, 1120, 1140, 1142, 1172, 1481, 1500, 1501, 1502, 1503,
+    1504, 1505, 1509, 1511, 1760, 1884, 1906, 1917, 1931, 1962, 1989, 2003, 2004,
+    2025, 2192, 2273, 2275, 2299, 2305, 2393, 2400, 2676, 2684, 3355, 3427, 4000,
+})
+
+
+def refresh_audit_ticket(entry: dict[str, Any], object_class: str, tag: str) -> None:
+    ticket = entry.get("ticket")
+    if ticket not in AUDIT_CLOSED_TICKETS:
+        return
+    if entry["status"] in ("applied", "by-design", "foc-ignores"):
+        entry.pop("ticket", None)
+        return
+    successor = 4532
+    if ticket in (530, 540) and entry["status"] == "todo":
+        successor = 1143 if "System_Spy_Ability/See_Credit_Income" in tag else 654
+    if ticket == 680 and tag in ("Cheap_Bribe_Cost", "Expensive_Bribe_Cost"):
+        successor = 4005
+    if ticket == 1142 and tag == "Easily_Bribed":
+        successor = 4005
+        entry["note"] = "Loaded faction bribability has no fleet-admission cost consumer (WGM-85)."
+    if ticket == 1120 and "/Plans/Name" in tag:
+        successor = 2585
+    entry["ticket"] = successor
+    if successor == 4532:
+        reason = "Remaining class/mode consumers are listed explicitly in the follow-up, beyond the completed implementation slice."
+        entry["note"] = (entry.get("note", "") + "; " if entry.get("note") else "") + reason
+    if tag == "Space_Tactical_Map" and entry["status"] == "partial":
+        entry["note"] = "Conflict entry resolves the authored space map; the remaining map-selection scope is listed in missing_types."
+
 # Tickets that own a tag's gap, by folded leaf name; every other todo row links its area's tracking issue.
 PARTIAL_TICKET = 843  # the issue for tags applied for one unit kind only
 TICKET_BY_TAG = {
@@ -429,8 +525,12 @@ class Builder:
         if override:
             entry.update({k: v for k, v in override.items() if k not in ("code", "types", "rules")})
             if entry["status"] == "applied":
-                rules = override.get("rules") or self.docs.rules(leaf)
-                entry["applied"] = [{"code": override["code"], "rules": rules, "types": override.get("types", [])}]
+                if override.get("applied"):
+                    entry["applied"] = [dict(target) for target in override["applied"]]
+                    rules = [rule for target in entry["applied"] for rule in target.get("rules", [])]
+                else:
+                    rules = override.get("rules") or self.docs.rules(leaf)
+                    entry["applied"] = [{"code": override["code"], "rules": rules, "types": override.get("types", [])}]
                 entry["basis"] = "reviewed"
                 if not rules:
                     entry["note"] = (entry.get("note", "") + "; " if entry.get("note") else "") \
@@ -604,6 +704,9 @@ def build(args: argparse.Namespace) -> dict[str, Any]:
         if path.suffix in (".cpp", ".hpp", ".h") and path.is_file()}
     decisions = {pair: builder.decide(row) for pair, row in sorted(universe.items())}
     apply_kinds(builder, decisions)
+    for pair, entry in decisions.items():
+        row = universe[pair]
+        refresh_audit_ticket(entry, row.object_class, row.tag)
     rows = group_rows(universe, decisions)
     registry = {"schema_version": tr.SCHEMA_VERSION, "evidence": dict(seed.EVIDENCE), "rows": rows}
     for note in builder.notes:

@@ -47,7 +47,7 @@ void gateway_route(const vfs::Vfs& files, const data::Catalog& catalog,
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool local = faction.name == source->starting_active_player;
-        if (local) options.local_observer = id;
+        if (local) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
             local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
     }
@@ -522,7 +522,7 @@ void installed_commanders(const campaign::CampaignSetupPlan& plan, const units::
 
 void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalog,
     data::galactic::GalacticData authored, const units::GalacticTypeTable& types,
-    campaign::CampaignSetupOptions options) {
+    campaign::CampaignSetupOptions options, const bool multiplayer_difficulty) {
     auto source = *authored.campaign("Sandbox_Equal_Footing_Empire");
     source.name = "LayerServicesFixture";
     source.locations = source.planets = {"Shola", "Kamino"};
@@ -533,10 +533,21 @@ void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalo
         {"Rebel", "Shola", "Corellian_Corvette"}, {"Empire", "Shola", "Tartan_Patrol_Cruiser"}};
     source.special_case_production.clear(); source.corruption_level_overrides.clear();
     authored.campaigns.push_back(std::move(source));
-    options.seats.push_back({gc::SeatId{3}, 3, gc::SeatKind::ai, 2, true, 0});
-    const auto plan = take(campaign::plan_live_campaign_setup(files, authored, types, "LayerServicesFixture", options, "Normal_Default"));
-    const auto services = take(campaign::prepare_live_campaign_services(files, catalog, authored, types, plan, "Normal_Default"));
-    const auto provider = take(campaign::prepare_stock_space_entry(files, catalog, authored, types, plan));
+    options.seats.push_back({gc::SeatId{3}, 3, multiplayer_difficulty ? gc::SeatKind::human : gc::SeatKind::ai, 2, true,
+        multiplayer_difficulty ? 3U : 0U});
+    if (multiplayer_difficulty) {
+        options.mode = campaign::CampaignSetupMode::multiplayer; options.solo_reference_human.reset();
+        for (auto& faction : authored.factions) {
+            faction.multiplayer_campaign_heroes.clear();
+            if (faction.name == "Rebel") faction.basic_ai.clear();
+        }
+        // An explicitly human faction needs no tactical AI declaration to enter MP.
+    }
+    const auto difficulty = multiplayer_difficulty ? "Hard_Default" : "Normal_Default";
+    const auto plan = take(campaign::plan_live_campaign_setup(files, authored, types, "LayerServicesFixture", options, difficulty));
+    const auto services = take(campaign::prepare_live_campaign_services(files, catalog, authored, types, plan, difficulty));
+    const auto provider = take(campaign::prepare_stock_space_entry(files, catalog, authored, types, plan,
+        multiplayer_difficulty ? difficulty : ""));
     const auto location = std::find_if(plan.locations().begin(), plan.locations().end(), [](const auto& row) {
         return row.original_type == "Shola" && row.planet;
     });
@@ -558,7 +569,29 @@ void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalo
         std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         expect(record.forces.size() == 2, "stock layer fixture retains both authored forces");
         auto entry = take(provider->resolve(record, *snapshot, record.id + 1));
-        // Both layers formerly used the same callbacks for an already retained entry.
+        if (multiplayer_difficulty) {
+            const auto& slots = entry.conflict.tactical.skirmish->slots;
+            const auto ai = std::find_if(slots.begin(), slots.end(), [](const auto& slot) { return slot.player == 2; });
+            expect(ai != slots.end() && !ai->human && ai->difficulty == tt::AiLevel::hard,
+                "D10 agreed authored campaign difficulty is frozen in the AI conflict replay slot");
+            (void)take(provider->prepare_ai(entry.conflict));
+            const auto view = take(provider->presentation(entry.conflict, entry.content));
+            const auto prepared_ai = std::find_if(view->start->players.begin(), view->start->players.end(),
+                [](const auto& player) { return player.player.player_id == 2; });
+            expect(prepared_ai != view->start->players.end() && !prepared_ai->human && prepared_ai->difficulty == tt::AiLevel::hard,
+                "D10 presentation and restored AI setup read the recorded difficulty");
+            // D9 / WGM-47: the vote deadline is the mounted XML constant converted at 30 Hz, never a hardcoded 450.
+            expect(game.recording().multiplayer_vote_timeout == std::optional<std::uint64_t>{450},
+                "stock Battle_Pending_Timeout_Seconds (15 s) configures the 450-tick multiplayer vote");
+            auto modded = authored;
+            for (auto& constant : modded.constants) if (constant.tag == "Battle_Pending_Timeout_Seconds") constant.text = "7";
+            auto modded_root = take(campaign::CampaignRoot::create(plan, services));
+            check(campaign::configure_live_campaign_conflicts(modded_root, files, catalog, modded, types, provider));
+            expect(modded_root.game()->recording().multiplayer_vote_timeout == std::optional<std::uint64_t>{210},
+                "a mod's Battle_Pending_Timeout_Seconds retunes the multiplayer vote deadline");
+            return;
+        }
+        // Relabeling a retained space entry must not supply a land provider.
         entry.conflict.layer = layer;
         std::size_t parent_preparations{};
         if (ai_parent_queries) {
@@ -574,14 +607,164 @@ void installed_layer_services(const vfs::Vfs& files, const data::Catalog& catalo
                 && !game.has_conflict_parent_queries(campaign::BattleLayer::land),
                 "AI-on stock fixture binds the space parent-query slot");
         }
-        check(game.stage_battle(entry.conflict, entry.content));
+        auto staged = game.stage_battle(entry.conflict, entry.content);
+        if (layer == campaign::BattleLayer::land) {
+            expect(!staged && staged.error().code == campaign::unavailable_conflict_tactical
+                && staged.error().message == "land tactical provider is unavailable",
+                "stock land child requests receive the dispatcher's named refusal");
+            expect(!game.battle() && parent_preparations == 0, "land refusal never constructs a space child host");
+            continue;
+        }
+        check(std::move(staged));
         if (ai_parent_queries) expect(parent_preparations == 1,
             "AI-on stock space staging reaches the bound parent-query factory exactly once");
-        expect(!game.battle(), "both installed layers stage their retained script host before activation");
+        expect(!game.battle(), "space layer stages its retained script host before activation");
     }
 }
 
-void installed(bool garrison_only, bool population_only, bool commander_only, bool superweapon_only) {
+// #4563: a passenger whose transport is not in the conflict (the authored data keeps some transports out of space
+// battles) is left out of the entry with a note; Begin still stages the battle.
+void installed_orphan_rider(const std::shared_ptr<const campaign::StockSpaceEntry>& provider,
+    const campaign::CampaignSetupPlan& plan, const data::galactic::GalacticData& authored,
+    const units::GalacticTypeTable& types, const campaign::CampaignSetupOptions& options) {
+    const auto id = [&](std::string_view name) {
+        for (const auto& binding : plan.type_bindings()) if (binding.original_type == name) return binding.id;
+        throw std::runtime_error("orphan rider fixture type missing: " + std::string(name));
+    };
+    const units::GalacticType* silent = nullptr;
+    for (const auto& binding : plan.type_bindings()) {
+        const auto* type = types.find(binding.original_type);
+        if (type && type->can_participate_in_space == false
+            && std::find(type->behavior.begin(), type->behavior.end(), "TRANSPORT") != type->behavior.end()) { silent = type; break; }
+    }
+    if (!silent) { std::cout << "ORPHAN_RIDER no bound transport is kept out of space battles; fixture skipped\n"; return; }
+    std::cout << "ORPHAN_RIDER silent transport type: " << silent->name << '\n';
+    gc::GalacticSetup setup; setup.seed = options.seed; setup.content_identity = plan.galaxy().content_identity;
+    setup.players = plan.galaxy().players; setup.seats = options.seats; setup.planets = plan.galaxy().planets;
+    setup.planets.front().owner = 2;
+    setup.fleets = {{10, 1, setup.planets.front().id, {{100, id("Corellian_Corvette")}}},
+        {11, 2, setup.planets.front().id, {{200, id("Star_Destroyer")}, {201, id(silent->name)}}}};
+    setup.rules.maximum_fleet_movement_distance = whole(10000);
+    setup.fleet_control.emplace(); setup.movement.emplace(); setup.movement->mode_modifier = whole(1);
+    for (const auto& name : {std::string("Corellian_Corvette"), std::string("Star_Destroyer"), silent->name, std::string("Generic_Fleet_Commander_Rebel")}) {
+        const bool transport = name == silent->name;
+        setup.fleet_control->types.push_back({id(name), transport, true, false});
+        setup.movement->types.push_back({id(name), whole(1), {}, 0, true, false, false, false, transport});
+    }
+    std::sort(setup.fleet_control->types.begin(), setup.fleet_control->types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+    std::sort(setup.movement->types.begin(), setup.movement->types.end(), [](const auto& a, const auto& b) { return a.type < b.type; });
+    for (const auto& player : setup.players) {
+        setup.movement->players.push_back({player.player_id, whole(1), {}, false});
+        for (const auto& p : setup.planets) setup.movement->access.push_back({player.player_id, p.id, true, false});
+    }
+    for (const auto& p : setup.planets) setup.movement->planets.push_back({p.id, {}, false});
+    setup.movement->contents.push_back({201, {{250, id("Generic_Fleet_Commander_Rebel")}}});
+    setup.player_economy = gc::PlayerEconomySetup{{{1, whole(10000), whole(100000), 0, 5}, {2, whole(10000), whole(100000), 0, 5},
+        {3, whole(10000), whole(100000), 0, 5}, {4, {}, whole(100000), 0, 5}}};
+    auto galaxy = take(gc::GalacticSession::create(setup));
+    campaign::ConflictRecord record; record.id = 900; record.planet = setup.planets.front().id;
+    record.invader = 1; record.defender = 2; record.seats = {{{1}, 1}, {{2}, 2}};
+    const auto location = std::find_if(plan.locations().begin(), plan.locations().end(), [&](const auto& row) {
+        return row.planet && row.planet->id == record.planet;
+    });
+    record.map_identity = authored.planet(location->original_type)->space_tactical_map;
+    // The live conflict manifest leaves out members that cannot take part in space battles; their passengers stay behind.
+    for (const auto& fleet : setup.fleets) for (const auto& member : fleet.members) if (member.id != 201)
+        record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+    std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    const auto resolved = provider->resolve(record, *galaxy.snapshot(), 901);
+    expect(bool(resolved), "a passenger whose transport is kept out of the conflict does not block the space entry: "
+        + (resolved ? std::string() : resolved.error().message));
+    if (!resolved) return;
+    expect(resolved.value().notes.size() == 1 && resolved.value().notes.front().find("250") != std::string::npos
+        && std::none_of(resolved.value().conflict.forces.begin(), resolved.value().conflict.forces.end(), [](const auto& f) { return f.id == 250; }),
+        "the left-out passenger is named in the entry notes and absent from the conflict forces");
+    std::cout << "ORPHAN_RIDER note: " << (resolved.value().notes.empty() ? std::string("none") : resolved.value().notes.front()) << '\n';
+}
+
+// The same check over a stock campaign's start fleets: every fleet that carries passengers is entered as a defender
+// (its non-space members left out, as the live conflict manifest does); an orphan passenger is named on stdout.
+void orphan_rider_scan(const vfs::Vfs& files, const data::Catalog& catalog, const data::galactic::GalacticData& authored,
+    const units::GalacticTypeTable& types, const std::string& campaign_name, std::string_view human_faction) {
+    const auto* source = authored.campaign(campaign_name);
+    if (!source) { std::cout << "ORPHAN_SCAN campaign " << campaign_name << " is absent; skipped\n"; return; }
+    campaign::CampaignSetupOptions options; options.seed = 17;
+    for (const auto& faction : authored.factions) {
+        const auto player = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{player, player, 0}, faction.name, true});
+        const bool local = faction.name == human_faction;
+        if (local) options.solo_reference_human = player;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{player}, player,
+            local ? gc::SeatKind::human : gc::SeatKind::ai, player - 1, true, local ? player : 0});
+    }
+    for (const auto& type : types.types) options.types.push_back({assets::object_type_crc(type.name), type.name});
+    std::sort(options.types.begin(), options.types.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    const auto plan = take(campaign::plan_live_campaign_setup(files, authored, types, source->name, options, "Normal_Default"));
+    auto root = take(campaign::CampaignRoot::create(plan,
+        take(campaign::prepare_live_campaign_services(files, catalog, authored, types, plan, "Normal_Default"))));
+    const auto provider = take(campaign::prepare_stock_space_entry(files, catalog, authored, types, plan));
+    check(campaign::configure_live_campaign_conflicts(root, files, catalog, authored, types, provider));
+    auto& game = *root.game();
+    const auto snapshot = game.galaxy().snapshot();
+    const auto name_of = [&](gc::TypeId type) -> std::string {
+        for (const auto& row : plan.type_bindings()) if (row.id == type) return row.original_type;
+        return "?";
+    };
+    std::size_t scanned = 0, entered = 0, refused = 0, noted = 0;
+    for (const auto& fleet : snapshot->fleets()) {
+        if (!snapshot->movement()) break;
+        const auto carries = std::any_of(fleet.members.begin(), fleet.members.end(), [&](const auto& member) {
+            return std::any_of(snapshot->movement()->contents.begin(), snapshot->movement()->contents.end(),
+                [&](const auto& row) { return row.container == member.id && !row.children.empty(); });
+        });
+        if (!carries) continue;
+        ++scanned;
+        const auto location = std::find_if(plan.locations().begin(), plan.locations().end(), [&](const auto& row) {
+            return row.planet && row.planet->id == fleet.orbit;
+        });
+        const auto* planet = location == plan.locations().end() ? nullptr : authored.planet(location->original_type);
+        if (!planet) continue;
+        gc::PlayerId invader{};
+        for (const auto& player : plan.player_bindings()) if (player.player.player_id != fleet.owner && player.player.player_id != 0) { invader = player.player.player_id; break; }
+        if (!invader) continue;
+        campaign::ConflictRecord record; record.id = game.galaxy().next_entity_id(); record.planet = fleet.orbit;
+        record.invader = invader; record.defender = fleet.owner;
+        record.seats = {{gc::SeatId{invader}, invader}, {gc::SeatId{fleet.owner}, fleet.owner}};
+        record.map_identity = planet->space_tactical_map;
+        for (const auto& member : fleet.members) {
+            const auto* type = types.find(name_of(member.type));
+            if (type && !type->can_participate_in_space.value_or(true)) continue;
+            record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+        }
+        std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        const auto resolved = provider->resolve(record, *snapshot, record.id + 1);
+        if (!resolved) {
+            ++refused;
+            std::cout << "ORPHAN_SCAN fleet " << fleet.id << " at " << location->original_type << " owner " << fleet.owner
+                << " did not enter: " << resolved.error().message << '\n';
+            continue;
+        }
+        ++entered;
+        for (const auto& note : resolved.value().notes) {
+            ++noted;
+            std::cout << "ORPHAN_SCAN fleet " << fleet.id << " at " << location->original_type << " owner " << fleet.owner << ": " << note << '\n';
+            for (const auto& member : fleet.members) {
+                const auto contents = std::find_if(snapshot->movement()->contents.begin(), snapshot->movement()->contents.end(),
+                    [&](const auto& row) { return row.container == member.id; });
+                if (contents == snapshot->movement()->contents.end()) continue;
+                std::cout << "  carrier " << member.id << ' ' << name_of(member.type) << " carries";
+                for (const auto& child : contents->children) std::cout << ' ' << child.id << ' ' << name_of(child.type);
+                std::cout << '\n';
+            }
+        }
+    }
+    std::cout << "ORPHAN_SCAN " << campaign_name << ": carrying fleets=" << scanned << " entered=" << entered << " notes=" << noted
+        << " refused=" << refused << '\n';
+    expect(noted == 0, "no stock start fleet leaves a passenger out of its space entry");
+    expect(refused == 0, "no stock start fleet that carries passengers is refused");
+}
+
+void installed(bool garrison_only, bool population_only, bool commander_only, bool superweapon_only, bool layers_only, bool multiplayer_difficulty, bool orphan_only) {
     std::optional<std::string> root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
     if (!root || root->empty()) { std::cout << "SKIPPED: stock entry needs EAWR_EAW_GAME_ROOT\n"; return; }
     std::vector<vfs::MountSpec> mounts;
@@ -590,22 +773,29 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
     const auto files = take(vfs::Vfs::mount(mounts));
     const auto catalog = take(data::load_catalog(files, data::Profile::foc));
     auto authored = take(data::galactic::load_galactic_data(files, catalog.catalog));
-    if (!garrison_only && !population_only && !commander_only) stock_scene_relation_graphs(authored, files, catalog.catalog);
+    if (!garrison_only && !population_only && !commander_only && !layers_only && !multiplayer_difficulty) stock_scene_relation_graphs(authored, files, catalog.catalog);
     const auto types = units::galactic_type_table(catalog.catalog);
     data::galactic::Campaign fixture; fixture.name = "SpaceEntryFixture";
     fixture.locations = {superweapon_only ? "NalHutta" : "Shola", "Kamino"}; fixture.planets = fixture.locations; fixture.starting_active_player = "Rebel";
     fixture.starting_tech_levels = {{"Rebel", 0}, {"Empire", 0}}; fixture.max_tech_levels = {{"Rebel", 5}, {"Empire", 5}};
     authored.campaigns.push_back(fixture);
-    campaign::CampaignSetupOptions options; options.seed = 17; options.local_observer = 1;
+    campaign::CampaignSetupOptions options; options.seed = 17; options.solo_reference_human = 1;
     options.players = {{{1, 1, 0}, "Rebel", true}, {{2, 2, 0}, "Empire", true}, {{3, 3, 0}, "Underworld", true},
         {{4, 4, 0}, "Neutral", true}};
     options.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}, {{2}, 2, gc::SeatKind::ai, 1, true, 0}};
     for (const auto& type : types.types) options.types.push_back({assets::object_type_crc(type.name), type.name});
     std::sort(options.types.begin(), options.types.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+    if (layers_only) { installed_layer_services(files, catalog.catalog, authored, types, options); return; }
+    if (multiplayer_difficulty) { installed_layer_services(files, catalog.catalog, authored, types, options, true); return; }
     const auto plan = take(campaign::plan_campaign_setup(authored, types, fixture.name, options));
     const auto provider = take(campaign::prepare_stock_space_entry(files, catalog.catalog, authored, types, plan));
     if (commander_only) { installed_commanders(plan,types,authored,provider); return; }
     if (garrison_only) { installed_garrison(provider, plan, authored, files, catalog.catalog); return; }
+    if (orphan_only) {
+        installed_orphan_rider(provider, plan, authored, types, options);
+        orphan_rider_scan(files, catalog.catalog, authored, types, "Sandbox_Rim_Worlds_Underworld", "Underworld");
+        return;
+    }
     installed_reserve_order(provider, plan, authored);
     const auto type_id = [&](std::string_view name) {
         const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& row) { return row.original_type == name; });

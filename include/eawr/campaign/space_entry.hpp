@@ -94,6 +94,7 @@ struct SpaceEntryPlan {
     sim::EntityId first_free{};
     std::uint64_t marker_draws{};
     std::vector<sim::EntityId> reserve_order{}; // WGT-07: transport source order, then bucket leftovers forward
+    std::vector<std::string> notes{};           // passengers left out of the entry because their transport is not in it
 };
 
 struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
@@ -137,11 +138,11 @@ private:
     std::shared_ptr<const Impl> impl_;
     friend core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(
         const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&,
-        const units::GalacticTypeTable&, const CampaignSetupPlan&);
+        const units::GalacticTypeTable&, const CampaignSetupPlan&, std::string_view);
 };
 [[nodiscard]] core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(
     const vfs::Vfs&, const data::Catalog&, const data::galactic::GalacticData&,
-    const units::GalacticTypeTable&, const CampaignSetupPlan&);
+    const units::GalacticTypeTable&, const CampaignSetupPlan&, std::string_view multiplayer_difficulty = {});
 struct SpaceEntryScriptServices {
     GameSession::ScriptFactory scripts;
     GameSession::ChildConfigurator bind;

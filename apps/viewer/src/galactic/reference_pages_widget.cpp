@@ -24,8 +24,8 @@ std::string number(const std::optional<std::int64_t>& value) { return value ? st
 page::ReferenceFacts ReferencePages::facts(GalacticMode::State& state) {
     page::ReferenceFacts result;
     result.local_player = state.galaxy->local.player;
-    // GREF seams: no archive/cadence/save, advisor archive or legend provider yet.
-    // Current balances are never synthesized into chart samples.
+    result.history = page::published_history(*state.displayed_snapshot, state.metadata);
+    // Advisor archive and legend providers remain separate GREF seams.
     if (!reference_catalog_) return result;
     if (types_.empty()) for (const auto& [id, name] : state.production_names)
         if (auto type = reference_catalog_->metadata(name)) {
@@ -314,6 +314,10 @@ void ReferencePages::refresh(GalacticMode::State& state) {
             }
         for (const auto& slot : page::tree_view(model_.facts.tree, model_.space)) set_icon(slot.control, &slot.type, slot.dimmed);
     } else if (model_.tab == page::ReferenceTab::history) {
+        for (auto& gadget : dialog_->gadgets) if (gadget.id == "IDC_DATA_CHART_IMAGE")
+            if (auto* control = Object::cast_to<TextureRect>(gadget.control)) { control->set_texture({}); control->hide(); }
+        for (const auto* id : {"IDC_STATIC_START", "IDC_STATIC_MIDDLE", "IDC_STATIC_END", "IDC_Y_MIN", "IDC_Y_MAX", "IDC_Y_CAPTION"}) set_text(id, "");
+        set_text("IDC_HINTS", "");
         const auto chart = model_.facts.history ? page::history_view(*model_.facts.history, model_.metric) : page::HistoryView{};
         if (!chart.available) { set_text("IDC_HINTS", "History samples are unavailable."); return; }
         set_text("IDC_STATIC_START", "0"); set_text("IDC_STATIC_MIDDLE", std::to_string(chart.middle_cycle));

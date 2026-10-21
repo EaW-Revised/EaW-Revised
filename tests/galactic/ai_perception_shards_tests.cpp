@@ -14,6 +14,9 @@
 #include "eawr/platform/sim_workers.hpp"
 
 #include <algorithm>
+#include <array>
+#include <latch>
+#include <thread>
 #include <iostream>
 #include <string>
 #include <string_view>
@@ -137,6 +140,67 @@ void worker_counts_are_invisible() {
     }
 }
 
+std::string player_owned_reads(const eawr::sim::PartitionExecutor& executor) {
+    const s9_fixture::Shape shape;
+    auto subject = world(shape, executor);
+    must(subject->restore(rows(shape, false)));
+    const std::array players{shape.first, shape.second};
+    std::array<std::uint64_t, 2> revisions{};
+    {
+        const auto frozen = subject->partitioned_reads();
+        must(executor.execute_phase("galactic-ai-test-player-reads", players.size(), [&](std::size_t index) {
+            const auto owner = subject->owner_reads(players[index]);
+            subject->set_story_flag(players[index], 10, "PLAYER_OWNED");
+            subject->visibility_changed(players[index], 20, true);
+            static_cast<void>(subject->force_cache_deadline(players[index], 30, true));
+            revisions[index] = subject->movement_input_revision(players[index]);
+            subject->finish_perception_queries();
+        }));
+    }
+    expect(must(subject->record_sync_hash(false)) == must(subject->record_sync_hash(true)),
+        "player-owned writes retain warm/cold record identity");
+    return must(subject->state_hash()) + ":" + std::to_string(revisions[0]) + ":" + std::to_string(revisions[1]);
+}
+
+void player_scope_ownership() {
+    const s9_fixture::Shape shape;
+    eawr::sim::InlineExecutor inline_executor;
+    auto subject = world(shape, inline_executor);
+    bool refused_unfrozen{};
+    try { const auto scope = subject->owner_reads(shape.first); }
+    catch (const std::logic_error&) { refused_unfrozen = true; }
+    expect(refused_unfrozen, "player reads require the serial shared-input freeze");
+    {
+        const auto frozen = subject->partitioned_reads();
+        const auto owner = subject->owner_reads(shape.first);
+        bool refused_foreign{};
+        try { subject->set_story_flag(shape.second, 10, "FOREIGN"); }
+        catch (const std::logic_error&) { refused_foreign = true; }
+        expect(refused_foreign, "a player scope refuses another player's mutable shard");
+    }
+    {
+        const auto frozen = subject->partitioned_reads();
+        std::latch entered(1), release(1);
+        std::jthread first([&] {
+            const auto owner = subject->owner_reads(shape.first);
+            entered.count_down(); release.wait();
+        });
+        entered.wait();
+        bool duplicate_refused{};
+        try { const auto duplicate = subject->owner_reads(shape.first); }
+        catch (const std::logic_error&) { duplicate_refused = true; }
+        release.count_down(); first.join();
+        expect(duplicate_refused, "a second partition cannot own the same player's shard");
+    }
+    const auto reference = player_owned_reads(inline_executor);
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(player_owned_reads(executor) == reference, "concurrent player reads keep identical bytes and owner revisions");
+    }
+    eawr::test_support::ReverseOrderExecutor reverse(8);
+    expect(player_owned_reads(reverse) == reference, "player-owned reads are equal in reverse partition order");
+}
+
 void save_at_n_restore_at_m() {
     const s9_fixture::Shape shape;
     for (const auto saved_on : eawr::platform::determinism_worker_counts()) {
@@ -168,6 +232,7 @@ int case_galactic_ai_perception_shards_tests() {
         shard_layout_is_invisible();
         round_trip_and_mutation();
         worker_counts_are_invisible();
+        player_scope_ownership();
         save_at_n_restore_at_m();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

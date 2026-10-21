@@ -2,7 +2,9 @@
 #include "loading_screen.hpp"
 #include "audio_output.hpp"
 #include "startup_trace.hpp"
+#include "settings_store.hpp"
 #include "gpu_memory_trace.hpp"
+#include "galactic/galactic_launch_options.hpp"
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/viewport_texture.hpp>
@@ -152,6 +154,13 @@ void ViewerHost::start_replay_battle(const UiGalleryMode::ReplayRequest& request
 
 void ViewerHost::_process(const double delta) {
     if (completed_) return;
+    if (!options_mode_ && !map_mode_) {
+        if (const auto* active = ActiveSettings::get()) {
+            const bool menu = !map_mode_ && !galactic_mode_
+                && (front_end_ || skirmish_setup_ || lan_lobby_mode_ || attract_runner_);
+            update_frame_pacing(active->video, menu);
+        }
+    }
     if (options_ && options_->window_resize_pending) {
         options_->window_resize_pending = false;
         const Vector2i before = get_window()->get_size();
@@ -327,6 +336,32 @@ void ViewerHost::process_battle_setup_frame() {
         // The screen's Controls draw once in a normal frame before the preparation draws it on the spot.
         if (skirmish_loading_ == nullptr || skirmish_loading_->frames() >= 2) start_skirmish_battle();
         return;
+    }
+    if (auto lan = skirmish_setup_->lan_match()) {
+        if (auto launch = lan->take_galactic_launch()) {
+            GalacticMode::Options campaign_options;
+            viewer::galactic::apply_lobby_launch(campaign_options, std::move(launch));
+            campaign_options.game_root = options_->game_root;
+            campaign_options.mod_root = options_->mod_root;
+            if (!skirmish_setup_->gc_acceptance_directory().empty()) {
+                campaign_options.lan_acceptance_directory = skirmish_setup_->gc_acceptance_directory();
+                campaign_options.report_path = campaign_options.lan_acceptance_directory / "report.json";
+            }
+            auto* campaign_host = memnew(Node3D);
+            add_child(campaign_host);
+            auto campaign = std::make_unique<GalacticMode>(std::move(campaign_options));
+            if (!campaign->ready(*campaign_host)) {
+                const auto reason = campaign->failure();
+                campaign.reset(); remove_child(campaign_host); memdelete(campaign_host);
+                lan->cancel();
+                skirmish_setup_->show(reason.empty() ? "The campaign could not be started." : reason);
+                return;
+            }
+            skirmish_setup_->hide();
+            if (front_end_) front_end_->campaign_started_by_host();
+            galactic_mode_ = std::move(campaign); galactic_host_ = campaign_host;
+            return;
+        }
     }
     if (auto selected = skirmish_setup_->take_start()) {
         skirmish_setup_->hide();

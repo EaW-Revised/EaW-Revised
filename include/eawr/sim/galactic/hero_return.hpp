@@ -31,8 +31,19 @@ struct HeroReturnRecord {
     PlayerId owner{}, killer{};
     PlanetId planet{};
     std::uint64_t deadline{};
+    std::uint64_t start_frame{}; // WGUI-89: the actual scheduling frame, retained across save/restore.
     friend bool operator==(const HeroReturnRecord&, const HeroReturnRecord&) = default;
 };
+// Immutable presentation facts; no defeated identity, killer or backing-structure internals.
+struct HeroReturnView {
+    TypeId type{};
+    PlayerId owner{};
+    PlanetId planet{};
+    std::uint64_t start_frame{}, deadline{};
+    friend bool operator==(const HeroReturnView&, const HeroReturnView&) = default;
+};
+[[nodiscard]] std::vector<HeroReturnView> local_hero_returns(
+    std::span<const HeroReturnRecord> records, PlayerId local);
 struct HeroSchedule {
     bool scheduled{};
     std::vector<EntityId> destroyed_companions;

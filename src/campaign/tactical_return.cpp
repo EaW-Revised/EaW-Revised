@@ -151,9 +151,12 @@ core::Result<TacticalReturnPlan> plan_tactical_return(const ConflictRecord& conf
     const bool losing_raid = conflict.layer == BattleLayer::land && conflict.raid && out.result.winner != conflict.invader;
     if (losing_raid) out.result.retreat_player = conflict.invader;
     // WGM-201 / WAR-57: a surface loss leaves unrelated space fleets in orbit.
+    const bool retained_raid = losing_raid && std::any_of(snapshot.fleets().begin(), snapshot.fleets().end(),
+        [&](const auto& fleet) { return fleet.owner == conflict.invader && fleet.raid_destination == conflict.planet; });
     if (out.result.retreat_player && (conflict.layer == BattleLayer::space || losing_raid))
         for (auto at = snapshot.fleets().rbegin(); at != snapshot.fleets().rend(); ++at)
-        if (at->owner == *out.result.retreat_player && at->orbit == conflict.planet && !at->motion.transit)
+        if (at->owner == *out.result.retreat_player && at->orbit == conflict.planet && !at->motion.transit
+            && (!retained_raid || at->raid_destination == conflict.planet))
             out.retreat_fleets.push_back(at->id);
     return core::Result<TacticalReturnPlan>::success(std::move(out));
 }
@@ -167,7 +170,11 @@ core::Result<void> apply_tactical_return(gc::GalacticSession& galaxy, const Conf
     if (plan.result.retreat_player) {
         if (auto refreshed = galaxy.refresh_movement_access(executor); !refreshed) return refreshed;
         const auto snapshot = galaxy.snapshot();
-        const bool surface = conflict.layer == BattleLayer::land;
+        const bool orbital_raid = std::any_of(snapshot->fleets().begin(), snapshot->fleets().end(), [&](const auto& fleet) {
+            return fleet.raid_destination == conflict.planet
+                && std::find(plan.retreat_fleets.begin(), plan.retreat_fleets.end(), fleet.id) != plan.retreat_fleets.end();
+        });
+        const bool surface = conflict.layer == BattleLayer::land && !orbital_raid;
         const auto selected = destination(*snapshot, conflict.planet, *plan.result.retreat_player, surface);
         if (!selected) return core::Result<void>::failure(selected.error());
         std::vector<gc::FleetId> live;

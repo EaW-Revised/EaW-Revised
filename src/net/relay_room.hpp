@@ -26,7 +26,12 @@
 //                 u32 count (== capacity), count x { u32 slot_state, string identity }  (no addresses or capabilities)
 //   room_signal   member -> service  u32 destination slot, blob (1..65536 bytes, never parsed)
 //   room_forwarded service -> member u32 source slot, string source identity, blob   (source set by the service)
-//   room_leave / room_lock   empty body
+//   room_leave / room_lock   empty body (legacy full-room Start)
+//   room_lock_roster (48) host -> service u32 roster revision, u32 attached-seat mask
+//   room_roster_locked (49) service -> host u32 requested revision, u32 requested mask, u32 reason (zero confirmed)
+//   Roster-lock protocol 1 compares the exact revision/mask and refuses reservations or attaching members (1774).
+//   A success pushes the locked roster before confirmation. Old services refuse Kind 48 with 1521; clients name
+//   the unsupported roster-lock version and require a service update, never fall back to a local commitment.
 //   room_ack      service -> member  empty: done. With a u32 reason: not (fully) applied and the connection stays
 //                 (a repeated lock 1775, a release after Start 1775, a kick whose denylist entry did not fit 1777)
 //   room_release / room_kick  host -> service  u32 slot

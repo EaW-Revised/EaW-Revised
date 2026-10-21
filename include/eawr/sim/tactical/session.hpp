@@ -181,6 +181,7 @@ public:
     };
     [[nodiscard]] TickWork tick_work() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
+    [[nodiscard]] BattleDomain domain() const noexcept;
     [[nodiscard]] EntityId next_entity_id() const noexcept;
     [[nodiscard]] std::uint64_t rng_state() const noexcept;
     // Campaign-only policy. Entry content supplies authored times and actor qualifications.

@@ -36,7 +36,7 @@ namespace {
 // adapters, hash caches, immutable content and publication caches are rebound or rebuilt.
 template <class A, class T> void checkpoint_owner(A& a, T& v) {
     a(v.completed_tick, v.next_id, v.clock, v.seats, v.seat_control,
-        v.economy, v.production, v.income, v.economy_corruption, v.ability_host, v.score_ledger,
+        v.economy, v.production, v.income, v.economy_corruption, v.ability_host, v.score_ledger, v.history_archive,
         v.victory, v.control, v.control_effects, v.observer, v.planet_access, v.movement_inputs, v.detached_units,
         v.production_originals, v.actor_records, v.pending_actor_changes, v.population,
         v.population_stale, v.live_object_count, v.applied_outcomes,
@@ -86,6 +86,15 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         auto journal = std::move(impl_->native_replay);
         impl_->native_replay.clear();
         checkpoint_owner(in, *impl_);
+        if (impl_->history_archive.size() != impl_->setup.players.size()) throw Invalid("History archive player roster differs");
+        for (const auto& player : impl_->setup.players) {
+            const auto at = impl_->history_archive.find(player.player_id);
+            if (at == impl_->history_archive.end()) throw Invalid("History archive player is missing");
+            for (const auto& row : at->second)
+                if (row.frame > galactic_max_ticks || row.planets > galactic_max_objects || row.technology < 0
+                    || !row.economy.finite() || !row.military.finite())
+                    throw Invalid("invalid stored History field");
+        }
         std::uint64_t journal_entries{}; in(journal_entries);
         if (journal_entries != journal.size() || impl_->native_sequence != impl_->native_dropped + journal.size() + 1U
             || (!journal.empty() && (journal.front().sequence != impl_->native_dropped + 1U
@@ -104,7 +113,11 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         impl_->registry.clear(); impl_->planets.clear(); impl_->routes.clear(); impl_->fleets.clear();
         for (const auto& row : planets) { identity(row.id); impl_->insert(row); }
         for (const auto& row : routes) { identity(row.id); impl_->insert(row); }
-        for (const auto& row : fleets) { identity(row.id); impl_->insert(row); }
+        for (const auto& row : fleets) {
+            if (row.raid_destination && (!*row.raid_destination || !impl_->movement_inputs || !impl_->movement_inputs->raid
+                || !impl_->planets.contains(*row.raid_destination))) throw Invalid("invalid retained raid destination");
+            identity(row.id); impl_->insert(row);
+        }
         if (impl_->setup.rules.maximum_fleet_movement_distance) {
             auto graph = PlanetGraph::build(planets, routes, *impl_->setup.rules.maximum_fleet_movement_distance);
             if (!graph) return core::Result<void>::failure(graph.error());
@@ -118,11 +131,8 @@ core::Result<void> GalacticSession::load_checkpoint_state(std::span<const std::u
         }
         impl_->rebuild_technology_price_expiry();
         impl_->published_actor_records.reset(); impl_->published_production_originals.reset();
-        impl_->production_offer_hashes.reset(); impl_->published_production_offers.reset();
+        impl_->production_offer_hashes.reset(); impl_->view_publications.clear();
         impl_->published_economy_input_generation.reset();
-        impl_->published_black_market_menus.reset(); impl_->published_ability_results.reset();
-        impl_->published_corruption_transitions.reset();
-        impl_->published_hero_action_menus.reset(); impl_->published_corruption_menu.reset();
         impl_->income_forecast_cache.reset(); impl_->gathered_income_inputs.reset();
         impl_->movement_access_generation = std::numeric_limits<std::uint64_t>::max();
         impl_->control_stealth_inputs.clear(); impl_->control_stealth_generation = 0;
@@ -383,12 +393,35 @@ core::Result<void> GalacticSession::Impl::journal_native_receipt(GalacticSession
     return world.append_native_effect(kind, std::move(payload));
 }
 
+core::Result<void> GalacticSession::reserve_native_identity_frontier(EntityId expected, EntityId next) {
+    return reserve_native_frontiers(expected, next, impl_->next_native_invasion, impl_->next_native_invasion);
+}
+core::Result<void> GalacticSession::reserve_native_frontiers(EntityId expected, EntityId next,
+    std::uint64_t expected_invasion, std::uint64_t next_invasion) {
+    auto& impl = *impl_;
+    if (impl.failed || native_shadow() || expected != impl.next_id || next < expected
+        || next == std::numeric_limits<EntityId>::max() || !expected_invasion
+        || expected_invasion != impl.next_native_invasion || next_invasion < expected_invasion
+        || next_invasion == std::numeric_limits<std::uint64_t>::max())
+        return fail<void>(diagnostic_codes::invalid_setup, "native identity reservation requires its current ordered frontiers");
+    if (next == expected && next_invasion == expected_invasion) return core::Result<void>::success();
+    std::vector<std::uint8_t> payload;
+    detail::put_u64(payload, expected); detail::put_u64(payload, next);
+    detail::put_u64(payload, expected_invasion); detail::put_u64(payload, next_invasion);
+    if (auto recorded = append_native_effect(NativeEffectKind::identity_reservation, std::move(payload)); !recorded)
+        return recorded;
+    if (next != expected) impl.dirty[static_cast<std::size_t>(StateSection::session)] = true;
+    if (next_invasion != expected_invasion) impl.dirty[static_cast<std::size_t>(StateSection::native_invasions)] = true;
+    impl.next_id = next; impl.next_native_invasion = next_invasion;
+    return core::Result<void>::success();
+}
+
 core::Result<void> GalacticSession::append_native_effect(NativeEffectKind kind, std::vector<std::uint8_t> payload,
     NativeEffectPhase phase) {
     auto& impl = *impl_;
     if (impl.native_applying) return core::Result<void>::success();
     if (auto* shadow = native_shadow()) return stage_native_effect(*shadow, kind, std::move(payload), phase);
-    if (impl.failed || impl.native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::story_reward
+    if (impl.failed || impl.native_replaying || kind < NativeEffectKind::fleet || kind > NativeEffectKind::identity_reservation
         || phase > NativeEffectPhase::world_service || payload.size() > galactic_replay_max_payload
         || impl.native_dropped + impl.native_effects.size() + impl.executed_dropped + impl.executed.size() + impl.pending.size() >= galactic_max_commands
         || impl.native_sequence == std::numeric_limits<std::uint64_t>::max()) {
@@ -462,13 +495,24 @@ core::Result<void> GalacticSession::replay_native_barrier(const PartitionExecuto
         if (effect.frontier != impl.completed_tick || effect.phase != NativeEffectPhase::barrier)
             return fail<void>(diagnostic_codes::invalid_setup, "native reconstruction missed its recorded phase");
         const auto handler = impl.native_replayers.find(effect.kind);
-        if (handler == impl.native_replayers.end()) return fail<void>(diagnostic_codes::invalid_setup, "native effect requires its typed reconstruction owner");
+        if (effect.kind != NativeEffectKind::identity_reservation && handler == impl.native_replayers.end())
+            return fail<void>(diagnostic_codes::invalid_setup, "native effect requires its typed reconstruction owner");
         struct Applying {
             bool& flag;
             explicit Applying(bool& value) : flag(value) { flag = true; }
             ~Applying() { flag = false; }
         } applying(impl.native_applying);
-        auto applied = handler->second(*this, effect, executor);
+        auto applied = [&]() -> core::Result<void> {
+            if (effect.kind != NativeEffectKind::identity_reservation) return handler->second(*this, effect, executor);
+            if (effect.payload.size() != 32)
+                return fail<void>(diagnostic_codes::invalid_setup, "native identity reservation payload is invalid");
+            const auto read = [&](std::size_t offset) {
+                std::uint64_t value{};
+                for (unsigned i = 0; i < 8; ++i) value |= std::uint64_t{effect.payload[offset + i]} << (i * 8);
+                return value;
+            };
+            return reserve_native_frontiers(read(0), read(8), read(16), read(24));
+        }();
         if (!applied) { impl.failed = true; return applied; }
         impl.native_effects.push_back(effect); impl.native_sequence = effect.sequence + 1; ++impl.native_replay_cursor;
     }
@@ -561,7 +605,7 @@ core::Result<void> GalacticSession::Impl::service_tick_control(GalacticSession& 
         account->credits = balance.value();
         impl.dirty[static_cast<std::size_t>(StateSection::players)] = true;
         // WGP-53: first-capture award, after crediting; not every windfall.
-        if (impl.feedback_notice_handler && impl.observer && effect.new_owner == impl.observer->local_player)
+        if (impl.feedback_notice_handler && impl.observer && std::binary_search(impl.observer->human_observers.begin(), impl.observer->human_observers.end(), effect.new_owner))
             impl.feedback_notice_handler({GalacticFeedbackNotice::Kind::capture_reward, effect.new_owner, effect.planet, events.size()});
         if (auto tested = impl.test_credit_condition(effect.new_owner, executing, events); !tested) {
             impl.failed = true; return core::Result<void>::failure(tested.error());
@@ -831,6 +875,7 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
 
     // A paused galaxy runs no service: no phase, no frame, no fiscal or periodic check (WGM-05/06).
     const bool frame_admitted = impl.clock.pause_depth == 0;
+    const auto history_tick = impl.clock.galactic_frame;
     if (frame_admitted) {
         if (auto result = impl.service_tick_objects(*this, executor, executing, events, tick, pending_local_conflict); !result)
             return core::Result<GalacticTick>::failure(result.error());
@@ -864,6 +909,11 @@ core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& execut
             return core::Result<GalacticTick>::failure(result.error());
     }
 
+    if (frame_admitted && !impl.history_service_deferred) {
+        if (auto recorded = service_admitted_history(history_tick, executor); !recorded) {
+            impl.failed = true; return core::Result<GalacticTick>::failure(recorded.error());
+        }
+    }
     impl.expire_technology_prices();
     impl.expire_income_blockers();
     ++impl.completed_tick;
@@ -1204,7 +1254,8 @@ bool GalacticSession::multiplayer() const noexcept { return impl_->multiplayer_f
 const GalacticSetup& GalacticSession::setup() const noexcept { return impl_->setup; }
 std::span<const Seat> GalacticSession::seats() const noexcept { return impl_->seats; }
 const std::optional<SeatControlState>& GalacticSession::seat_control() const noexcept { return impl_->seat_control; }
-core::Result<void> GalacticSession::begin_battle_roles(const EntityId conflict, const PlayerId invader, const PlayerId defender) {
+core::Result<void> GalacticSession::begin_battle_roles(const EntityId conflict, const PlayerId invader, const PlayerId defender,
+    const bool default_spectate) {
     if (!impl_->seat_control) return core::Result<void>::success();
     if (impl_->seat_control->battle || conflict == 0 || invader == defender)
         return fail<void>(diagnostic_codes::invalid_setup, "battle role context is already active or invalid");
@@ -1222,7 +1273,8 @@ core::Result<void> GalacticSession::begin_battle_roles(const EntityId conflict, 
     if (other == teams.end()) return core::Result<void>::success();
     const auto human = invader_side != 0 ? invader : defender;
     const auto ai = invader_side != 0 ? defender : invader;
-    impl_->seat_control->battle = BattleRoleChoice{conflict, human, ai, other->side, other->observer_ai ? ai : human, BattleTeamRole::pending};
+    impl_->seat_control->battle = BattleRoleChoice{conflict, human, ai, other->side, other->observer_ai ? ai : human,
+        default_spectate ? BattleTeamRole::spectate : BattleTeamRole::pending};
     impl_->dirty[static_cast<std::size_t>(StateSection::session)] = true;
     std::vector<GalacticEvent> events;
     if (impl_->snapshot) events.assign(impl_->snapshot->events().begin(), impl_->snapshot->events().end());
@@ -1247,6 +1299,27 @@ GalacticReplay GalacticSession::record() const {
     return replay;
 }
 std::shared_ptr<const GalacticSnapshot> GalacticSession::snapshot() const noexcept { if (const auto* shadow = native_shadow()) return shadow->snapshot(); return impl_->snapshot; }
+std::shared_ptr<const GalacticSnapshot> GalacticSession::view_snapshot(ObserverViewContext view) const {
+    if (!view.player || !impl_->observer || !std::binary_search(impl_->observer->human_observers.begin(), impl_->observer->human_observers.end(), view.player)) return {};
+    if (view.player == impl_->observer->solo_reference_human) {
+        // The completed solo snapshot already publishes this reference human's
+        // offers, forecast and services. Share those immutable columns; only its
+        // all-player observation rows need the explicit private-view filter.
+        auto& cache = impl_->view_publications[view.player];
+        if (!cache.observer_projection || cache.observer_projection_generation != impl_->snapshot->observer_input_generation()) {
+            auto observations = std::make_shared<std::vector<ObservedPlanet>>();
+            observations->reserve(impl_->observer->planets.size());
+            for (const auto& row : impl_->snapshot->observations())
+                if (row.player == view.player) observations->push_back(row);
+            cache.observer_projection = std::move(observations);
+            cache.observer_projection_generation = impl_->snapshot->observer_input_generation();
+        }
+        NativeSnapshotChanges projection;
+        projection.observations = cache.observer_projection;
+        return GalacticSnapshot::native_view(impl_->snapshot, std::move(projection));
+    }
+    return impl_->make_snapshot(std::vector<GalacticEvent>(impl_->snapshot->events().begin(), impl_->snapshot->events().end()), nullptr, view);
+}
 
 core::Result<bool> GalacticSession::set_planet_access(PlanetId planet, bool restricted,
     std::optional<bool> local_revealed) {

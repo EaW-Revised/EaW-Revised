@@ -625,6 +625,17 @@ InProcessGnsRoom::Clock::time_point time_now{};
 InProcessGnsRoom::Clock::time_point now() { return time_now; }
 void room_fixture() {
     time_now = {};
+    {
+        InProcessGnsRoom sparse(9, now);
+        const auto host = require(sparse.attach(0, "sparse-host"));
+        require(sparse.attach(7, "sparse-guest"));
+        const auto old = host->roster().revision;
+        require(host->release(7)); require(sparse.attach(7, "replacement"));
+        expect(!host->lock_roster(129, old) && host->roster().state == GnsRoomState::open, "a refilled seat at the same index cannot satisfy a stale roster lock");
+        expect(!host->lock_roster(3, host->roster().revision), "the lock mask must name the actual sparse roster");
+        expect(require(host->lock_roster(129, host->roster().revision)), "two sparse members can lock a nine-capacity room");
+        expect(!sparse.attach(1, "late"), "confirmed sparse lock rejects later arrivals");
+    }
     InProcessGnsRoom room(3, now, 4, 2, 60s);
     const auto host = require(room.attach(0, "host"));
     const auto a = require(room.attach(1, "a"));

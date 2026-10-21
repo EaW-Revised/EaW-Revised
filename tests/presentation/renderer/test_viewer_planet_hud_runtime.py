@@ -15,16 +15,22 @@ GAME_ROOT = os.environ.get("EAWR_EAW_GAME_ROOT")
 @unittest.skipUnless(RUNTIME and GAME_ROOT, "requires GPU viewer and installed FoC")
 class PlanetHudRuntime(unittest.TestCase):
     def capture(self, campaign, *extra, engine_args=()):
+        # Imported BASE/HEAD capture helpers keep their original verification policy.
+        verify = isinstance(self, PlanetHudRuntime)
+        verify_args = ("--eawr-galactic-hud-verify", "yes") if verify else ()
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-planet-hud-"))
         report, capture = directory / "report.json", directory / "capture.png"
         result = subprocess.run([
             os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", *engine_args,
             "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-galactic", campaign,
-            "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
+            *verify_args, "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
             "--eawr-report", str(report), "--eawr-capture", str(capture), *extra],
             cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         self.assertTrue(report.is_file(), result.stdout + result.stderr)
         data = json.loads(report.read_text(encoding="utf-8"))
+        if verify:
+            self.assertGreater(data["hud_work"]["verify_checks"], 0)
+            self.assertEqual(data["hud_work"]["verify_mismatches"], 0, data["hud_work"].get("verify_detail"))
         self.assertEqual(result.returncode, 0, data.get("failure") or result.stdout + result.stderr)
         self.assertEqual(data["status"], "captured")
         return data, capture
@@ -217,10 +223,14 @@ func _process(_delta):
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "production",
-            "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes"],
+            "--eawr-galactic-hud-verify", "yes", "--eawr-game-root", GAME_ROOT, "--eawr-galactic-paused", "yes",
+            "--eawr-report", str(directory / "report.json")],
             cwd=ROOT, capture_output=True, text=True, timeout=300, check=False)
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        work = json.loads((directory / "report.json").read_text(encoding="utf-8"))["hud_work"]
+        self.assertGreater(work["verify_checks"], 0)
+        self.assertEqual(work["verify_mismatches"], 0, work.get("verify_detail"))
         from tests.presentation.renderer.space_map_test_support import decode_png
         images = {name: decode_png((directory / (name + ".png")).read_bytes())[2]
                   for name in ["overlay", "hidden", "exposed"]}

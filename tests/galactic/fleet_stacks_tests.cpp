@@ -65,7 +65,7 @@ int case_galactic_fleet_stacks_tests() {
         for (const auto id : {81U,82U,83U,91U,92U}) assert(indices.at(id) == 2);
         assert(indices.at(93) == 3 && indices.at(84) == 0); // other type and source remainder
         namespace gc = eawr::sim::galactic;
-        gc::ObserverSetup observer; observer.local_player = 1;
+        gc::ObserverSetup observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
         observer.players = {{1,false,false,0,0,{}}};
         observer.planets = {{10,1,1,1,1}};
         auto observations = std::make_shared<std::vector<gc::ObservedPlanet>>();

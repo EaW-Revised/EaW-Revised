@@ -36,7 +36,7 @@ void BattleAudio::loading_complete() {
 }
 bool BattleAudio::campaign_briefing(const std::string_view event_name) {
     if (released_) return false;
-    if (options_.attract_silent) { ++attract_refused_; return false; } // MAT-18
+    if (!admits_battle_audio()) { ++attract_refused_; return false; } // MAT-18
     const auto* speech = speech_event(event_name);
     if (!speech) return false;
     if (!speech_queue_.push(speech, "campaign_briefing")) { ++speech_overflow_; return false; }
@@ -81,11 +81,15 @@ std::optional<audio::EventQueue::Handle> BattleAudio::play(const audio::SfxEvent
     const std::optional<audio::Vec3> position, const bool hidden, const std::string& reason,
     const sim::EntityId loop_child, const sim::EntityId attached, const bool engine_loop) {
     if (!sfx || released_) return std::nullopt;
-    // MAT-18: the demo battle's speech, announcement and GUI events never reach the event queue.
-    if (options_.attract_silent && speech_class(*sfx)) { ++attract_refused_; return std::nullopt; }
-    // MAT-18: retail plays the demo battle's 3D events at multiplier 0; they are refused here instead
-    // of muting the SFX bus, which the front end's clicks and slider previews share.
-    if (options_.attract_silent && sfx->is_3d) { ++attract_3d_refused_; return std::nullopt; }
+    // MAT-18: every battle event is silent, including non-positional effects and stings.
+    // Gate before admission, rather than muting buses shared with the front end's music and UI.
+    if (!admits_battle_audio()) {
+        ++attract_events_refused_;
+        if (speech_class(*sfx)) ++attract_refused_;
+        if (sfx->is_3d) ++attract_3d_refused_;
+        if (!sfx->is_3d && reason == "death") ++attract_2d_deaths_refused_;
+        return std::nullopt;
+    }
     ++requested_[reason + ":" + sfx->name];
     auto& allocation = allocations_[reason];
     ++allocation.requested;
@@ -98,7 +102,7 @@ std::optional<audio::EventQueue::Handle> BattleAudio::play(const audio::SfxEvent
     const auto playback_position = spatial_audio_available_ ? position : std::nullopt;
     const auto accepted = events_.admit({{sfx, playback_position, attached ? false : hidden, false, false, clock_},
                                        attached, loop_child != sim::invalid_entity_id || reason == "ability_leech_loop"}, random_, admission);
-    if (accepted.handle) ++allocation.admitted;
+    if (accepted.handle) { ++allocation.admitted; ++events_admitted_; }
     else ++allocation.refused;
     ++results_[reason][std::string(audio::to_string(accepted.result))];
     if (accepted.handle) {
@@ -537,7 +541,7 @@ void BattleAudio::production_cue(const SpeechEvent* speech, const audio::SfxEven
         play(fallback, std::nullopt, false, std::string(reason));
         return;
     }
-    if (options_.attract_silent) { ++attract_refused_; return; } // MAT-18
+    if (!admits_battle_audio()) { ++attract_refused_; return; } // MAT-18
     // SND-35/38: an authored speech event wins even if its MP3 fails to open.
     if (speech_queue_.push(speech, reason)) ++speech_queued_;
     else ++speech_overflow_;
@@ -593,6 +597,8 @@ void BattleAudio::update_speech(const bool paused) {
 }
 
 void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
+    // MAT-18: also covers direct summary stings and their subsequent files/loops.
+    if (!admits_battle_audio()) return;
     const char* mode = cue.mode == audio::MusicDirector::Mode::battle ? "battle"
         : cue.mode == audio::MusicDirector::Mode::victory ? "victory"
         : cue.mode == audio::MusicDirector::Mode::defeat ? "defeat"

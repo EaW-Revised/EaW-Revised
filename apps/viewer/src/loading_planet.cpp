@@ -1,3 +1,4 @@
+#include "gpu_debug_labels.hpp"
 #include "eawr/core/json_text.hpp"
 #include "eawr/core/text.hpp"
 #include "loading_planet.hpp"
@@ -183,6 +184,7 @@ bool LoadingPlanet::build(Control& parent, const Rect2& rect, const BattleConten
     canvas->set_scale(canvas_scale);
     canvas->set_position(-picture_rect.position * canvas_scale);
     Ref<Shader> canvas_shader(memnew(Shader));
+    name_canvas_shader(*canvas_shader.ptr(), "EAWR/UI/LoadingPlanetCanvasEncode");
     canvas_shader->set_code(R"GODOT(shader_type canvas_item;
 void fragment() {
     vec4 colour = texture(TEXTURE, UV);

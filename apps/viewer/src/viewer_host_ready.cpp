@@ -15,6 +15,41 @@ namespace {
 
 } // namespace
 
+// Opt-in, process-local experiments. Reassert only when another screen changes
+// the requested value; never write diagnostic overrides to the settings store.
+bool ViewerHost::configure_preview_render_overrides(const PackedStringArray& arguments) {
+    for (int64_t index = 0; index < arguments.size(); ++index) {
+        const bool vsync = arguments[index] == "--eawr-diagnostic-vsync";
+        if (!vsync && arguments[index] != "--eawr-diagnostic-max-fps") continue;
+        if (++index >= arguments.size() || !arguments[index].is_valid_int()) return false;
+        const int64_t value = arguments[index].to_int();
+        if (value < 0 || value > (vsync ? 1 : 1000)) return false;
+        if (vsync) preview_vsync_ = static_cast<int>(value);
+        else preview_max_fps_ = static_cast<int>(value);
+    }
+    if (preview_vsync_ || preview_max_fps_) {
+        RenderingServer::get_singleton()->connect("frame_pre_draw",
+            callable_mp(this, &ViewerHost::apply_preview_render_overrides));
+        apply_preview_render_overrides();
+        UtilityFunctions::print("EAWR diagnostic overrides: vsync=", preview_vsync_.value_or(-1),
+            "; max_fps=", preview_max_fps_.value_or(-1), "; -1 means unchanged; process-local");
+        UtilityFunctions::print("EAWR diagnostic observed: vsync=",
+            static_cast<int>(DisplayServer::get_singleton()->window_get_vsync_mode()),
+            "; max_fps=", Engine::get_singleton()->get_max_fps());
+    }
+    return true;
+}
+
+void ViewerHost::apply_preview_render_overrides() {
+    auto* display = DisplayServer::get_singleton();
+    if (preview_vsync_) {
+        const auto mode = *preview_vsync_ == 0 ? DisplayServer::VSYNC_DISABLED : DisplayServer::VSYNC_ENABLED;
+        if (display->window_get_vsync_mode() != mode) display->window_set_vsync_mode(mode);
+    }
+    if (preview_max_fps_ && Engine::get_singleton()->get_max_fps() != *preview_max_fps_)
+        Engine::get_singleton()->set_max_fps(*preview_max_fps_);
+}
+
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
     mute_lane_audio_output();
@@ -79,33 +114,56 @@ void ViewerHost::_ready() try {
     std::optional<RenderProfile> saved_render_profile;
     if (!evidence_run) {
         const SettingsStore store(options_->settings_file);
-        if (store.exists()) {
-            presentation::ui::SettingsLoad saved = store.load();
-            if (!saved.defaulted) {
-                ApplyReport applied;
-                ApplyTargets targets;
-                targets.texture_detail = !options_->texture_mip_drop_explicit;
-                apply_video(saved.settings.video, targets, applied);
-                // #3165: the saved volumes reach the shared buses before the front end's music starts.
-                apply_audio(saved.settings.audio, applied);
-                // The log is the receipt that a player's start-up took the saved record (#2927).
-                for (const std::string& line : applied.applied) {
-                    UtilityFunctions::print(String("EAWR settings applied: ") + String::utf8(line.c_str()));
-                }
-                for (const std::string& line : applied.skipped) {
-                    UtilityFunctions::print(String("EAWR settings skipped: ") + String::utf8(line.c_str()));
-                }
-                if (saved.settings.video.render_profile != presentation::ui::RenderProfileSetting::automatic) {
-                    saved_render_profile = resolve_render_profile(saved.settings.video.render_profile,
-                                                                  RenderProfile::retail);
-                }
-                ActiveSettings::set(std::move(saved.settings));
+        presentation::ui::SettingsLoad saved = store.load();
+        ApplyReport applied;
+        ApplyTargets targets;
+        targets.texture_detail = !options_->texture_mip_drop_explicit;
+        // ST-V5: missing, damaged and other-version files take the same FIFO-on defaults;
+        // the shared apply checks current state and preserves launch geometry for a fallback.
+        apply_startup_video(saved, targets, applied);
+        if (!saved.defaulted) {
+            // #3165: saved volumes reach the shared buses before the front end's music starts.
+            apply_audio(saved.settings.audio, applied);
+            if (saved.settings.video.render_profile != presentation::ui::RenderProfileSetting::automatic) {
+                saved_render_profile = resolve_render_profile(saved.settings.video.render_profile,
+                                                              RenderProfile::retail);
             }
+            ActiveSettings::set(std::move(saved.settings));
+        }
+        // A player's start-up receipt includes any changed saved or default setting.
+        for (const std::string& line : applied.applied) {
+            UtilityFunctions::print(String("EAWR settings applied: ") + String::utf8(line.c_str()));
+        }
+        for (const std::string& line : applied.skipped) {
+            UtilityFunctions::print(String("EAWR settings skipped: ") + String::utf8(line.c_str()));
         }
     }
 
+    if (evidence_run && !options_->settings_file.empty()) {
+        // An explicitly named test file is isolated from the player's profile.
+        // Apply pacing and vsync; capture geometry and texture detail stay pinned.
+        const auto saved = SettingsStore(options_->settings_file).load();
+        ApplyReport applied;
+        ApplyTargets targets;
+        targets.window = false;
+        targets.texture_detail = false;
+        apply_video(saved.settings.video, targets, applied);
+        ActiveSettings::set(saved.settings);
+    } else if (!evidence_run && ActiveSettings::get() == nullptr) {
+        ActiveSettings::set(presentation::ui::PlayerSettings{});
+    }
+
+    if (!configure_preview_render_overrides(arguments)) {
+        status_message_ = "diagnostic overrides expect --eawr-diagnostic-vsync 0|1 and "
+                          "--eawr-diagnostic-max-fps 0..1000";
+        UtilityFunctions::printerr(String::utf8(status_message_.c_str()));
+        static_cast<void>(write_report("failed"));
+        stop(2);
+        return;
+    }
+
     // #3165: the shared audio buses exist from the viewer's start, front end included; a run
-    // without saved settings has them at FoC's 0.75 (BattleAudio and MenuAudio use these).
+    // without saved settings uses ST-A1's quieter master (BattleAudio and MenuAudio use these).
     if (!audio_buses::exist()) audio_buses::ensure(audio::MixLevels{});
 
     // Retail for every capture and test, enhanced for a player's view (#184), or what the

@@ -366,27 +366,46 @@ void EawrOptionsScreen::rebuild_page() {
     }
     data::Dialog service = *found;
     if (page_ == Page::hub && options_.context == Context::main_menu) {
-        const auto found_button = std::find_if(service.controls.begin(), service.controls.end(), [](const auto& c) { return c.id_name == "IDC_MAIN_OPTIONS_GAMEPLAY"; });
-        if (found_button != service.controls.end()) {
-            data::DialogControl network = *found_button; network.id_name = "IDC_MAIN_OPTIONS_NETWORK"; network.id.reset();
-            network.text = "TEXT_BUTTON_INTERNET_OPTIONS";
-            // Find room for the added entry without moving authored controls.
-            const auto fits = [&](const data::RcRect& rect) {
-                return std::none_of(service.controls.begin(), service.controls.end(), [&](const auto& c) {
-                    const bool button = c.statement == "PUSHBUTTON" || c.statement == "DEFPUSHBUTTON" || c.class_name == "Button";
-                    return button && !hidden_gadget(c.id_name) && std::find(c.style.begin(), c.style.end(), "BS_GROUPBOX") == c.style.end() && rect.x < c.rect.x + c.rect.width && rect.x + rect.width > c.rect.x
-                        && rect.y < c.rect.y + c.rect.height && rect.y + rect.height > c.rect.y;
-                });
-            };
-            bool placed = false;
-            for (int y = network.rect.y; !placed && y + network.rect.height <= service.rect.height; y += std::max(1, network.rect.height / 2)) {
-                for (int x = network.rect.x; !placed && x + network.rect.width <= service.rect.width; x += std::max(1, network.rect.width / 2)) {
-                    data::RcRect candidate{x, y, network.rect.width, network.rect.height};
-                    if (fits(candidate)) { network.rect = candidate; placed = true; }
-                }
-            }
-            if (placed) service.controls.push_back(std::move(network));
+        const auto back = std::find_if(service.controls.begin(), service.controls.end(),
+                                      [](const auto& c) { return c.id_name == "IDC_OK_MAIN"; });
+        if (back != service.controls.end()) {
+            // ST-N2: the owner-requested entry belongs immediately before Back.
+            // Clone the loaded button so mod skins and resource styles still apply.
+            data::DialogControl network = *back;
+            network.id_name = "IDC_MAIN_OPTIONS_NETWORK";
+            network.id.reset();
+            network.text = "Network";
+            service.controls.insert(back, std::move(network));
         }
+    }
+    if (page_ == Page::keyboard) {
+        // ST-K3: append the owner-requested preset to the loaded keyboard page.
+        const int top = service.rect.height;
+        service.rect.height += 36;
+        data::DialogControl label;
+        label.statement = "LTEXT"; label.id_name = "IDC_CAMERA_KEYS_LABEL";
+        label.text = "Camera keys"; label.rect = {12, top + 8, service.rect.width / 3 - 18, 20};
+        label.style = {"WS_VISIBLE"}; service.controls.push_back(label);
+        data::DialogControl combo;
+        combo.statement = "COMBOBOX"; combo.id_name = "IDC_CAMERA_KEYS";
+        combo.rect = {service.rect.width / 3, top + 4, service.rect.width * 2 / 3 - 12, 26};
+        combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"}; service.controls.push_back(combo);
+    }
+    if (page_ == Page::video) {
+        // ST-P2 is an owner-requested addition to the loaded Graphics dialog.
+        const int top = service.rect.height;
+        service.rect.height += 32;
+        data::DialogControl label;
+        label.statement = "LTEXT"; label.id_name = "IDC_FRAME_RATE_LIMIT_LABEL";
+        label.text = "Frame-rate limit";
+        label.rect = {12, top + 6, service.rect.width / 2 - 18, 18};
+        label.style = {"WS_VISIBLE"};
+        service.controls.push_back(label);
+        data::DialogControl combo;
+        combo.statement = "COMBOBOX"; combo.id_name = "IDC_FRAME_RATE_LIMIT";
+        combo.rect = {service.rect.width / 2, top + 4, service.rect.width / 2 - 12, 22};
+        combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"};
+        service.controls.push_back(combo);
     }
     if (page_ == Page::network) {
         // Keep every authored control in place. Extend the loaded dialog with a
@@ -417,7 +436,7 @@ void EawrOptionsScreen::rebuild_page() {
         add("LTEXT", "IDC_ONLINE_SERVICE_ERROR", "", row, true);
         service.controls.back().rect.height = height / 6;
     }
-    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement, page_ == Page::network));
+    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement, page_ == Page::network || page_ == Page::video || page_ == Page::keyboard));
     root->add_child(state.dialog->frame);
     for (BuiltGadget& gadget : state.dialog->gadgets) {
         if (gadget.control == nullptr) continue;
@@ -465,6 +484,36 @@ void EawrOptionsScreen::rebuild_page() {
         if (gadget.kind == "group") state.dialog->frame->move_child(gadget.control, 0);
     }
     wire_page();
+    if (page_ == Page::hub && options_.context == Context::main_menu) {
+        // Authored rectangles can be shorter than the skin's minimum button height.
+        // Lay out the live controls, including additions, rather than scanning for
+        // empty authored rectangles (ST-N2). Keep mod entries in their visual order.
+        std::vector<Control*> column;
+        Control* back = nullptr;
+        for (const BuiltGadget& gadget : state.dialog->gadgets) {
+            if (gadget.kind != "button" || !gadget.control || !gadget.control->is_visible()) continue;
+            if (gadget.id == "IDC_OK_MAIN") back = gadget.control;
+            else column.push_back(gadget.control);
+        }
+        if (back && !column.empty()) {
+            std::stable_sort(column.begin(), column.end(), [](const Control* a, const Control* b) {
+                return a->get_position().y < b->get_position().y;
+            });
+            column.push_back(back);
+            const float top = column.front()->get_position().y;
+            float heights = 0.0F;
+            float gap = std::max(0.0F, column[1]->get_position().y - top - column.front()->get_size().y);
+            for (Control* control : column) heights += control->get_size().y;
+            const float available = state.dialog->frame->get_size().y - top;
+            gap = std::min(gap, std::max(0.0F, (available - heights) / static_cast<float>(column.size() - 1)));
+            float y = std::min(top, std::max(0.0F, state.dialog->frame->get_size().y - heights
+                                                - gap * static_cast<float>(column.size() - 1)));
+            for (Control* control : column) {
+                control->set_position(Vector2(control->get_position().x, y));
+                y += control->get_size().y + gap;
+            }
+        }
+    }
 }
 
 void EawrOptionsScreen::disable(Control& control, const std::string& id, const std::string& reason) {
@@ -559,6 +608,21 @@ void EawrOptionsScreen::wire_page() {
     }
     case Page::video: {
         const model::VideoSettings& video = draft_.video;
+        if (has("IDC_FRAME_RATE_LIMIT")) {
+            auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_FRAME_RATE_LIMIT"]);
+            const std::array<int, 9> choices{0, -1, 30, 60, 90, 120, 144, 165, 240};
+            int selected = -1;
+            for (std::size_t i = 0; i < choices.size(); ++i) {
+                const int fps = choices[i];
+                combo->add_item(text(fps == 0 ? "Off" : fps < 0 ? "Display refresh rate" : std::to_string(fps)));
+                if (fps == video.frame_rate_limit) selected = static_cast<int>(i);
+            }
+            if (selected < 0) {
+                selected = static_cast<int>(choices.size());
+                combo->add_item(text(std::to_string(video.frame_rate_limit)));
+            }
+            combo->select(selected);
+        }
         state.windowed_draft = video.windowed;
         state.selected_size = video.windowed ? model::DisplaySize{video.window_width, video.window_height}
                                              : model::DisplaySize{video.fullscreen_width, video.fullscreen_height};
@@ -669,15 +733,23 @@ void EawrOptionsScreen::wire_page() {
         break;
     }
     case Page::keyboard: {
-        // Retail keeps Accept off until a key changes (MNU-14); no key can change here yet (ST-K1).
-        if (has("IDC_APPLY")) disable(*state.controls["IDC_APPLY"], "IDC_APPLY", "No key can be changed yet.");
+        if (auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_CAMERA_KEYS"])) {
+            combo->clear();
+            combo->add_item("Arrows (default, retail)");
+            combo->add_item("WASD (ZQSD on AZERTY)");
+            combo->select(draft_.camera_wasd ? 1 : 0);
+            combo->set_tooltip_text(text(camera_keys_help(draft_.camera_wasd)));
+        }
+        if (auto* apply = Object::cast_to<BaseButton>(state.controls["IDC_APPLY"])) {
+            apply->set_disabled(draft_.camera_wasd == committed_.camera_wasd);
+        }
         for (BuiltGadget& gadget : state.dialog->gadgets) {
             if (gadget.control == nullptr) continue;
             if (auto* edit = Object::cast_to<LineEdit>(gadget.control)) {
                 const auto override_it = draft_.keys.find(gadget.id.substr(9)); // after IDC_EDIT_
                 const std::string_view key = override_it != draft_.keys.end()
-                    ? std::string_view(override_it->second) : model::project_key_for(gadget.id);
-                edit->set_text(text(std::string(key)));
+                    ? std::string_view(override_it->second) : model::project_key_for(gadget.id, draft_.camera_wasd);
+                edit->set_text(text(keyboard_key_label(key)));
             }
         }
         for (int number = 1; number <= keyboard_page_count; ++number) {
@@ -799,6 +871,32 @@ void EawrOptionsScreen::on_value_changed(const double value, String id) {
 void EawrOptionsScreen::on_item_selected(const int64_t index, String id) {
     if (loading_ || !state_) return;
     const std::string name = utf8(id);
+    if (page_ == Page::keyboard && name == "IDC_CAMERA_KEYS" && (index == 0 || index == 1)) {
+        draft_.camera_wasd = index == 1;
+        dirty_ = draft_.camera_wasd != committed_.camera_wasd;
+        rebuild_page(); // refresh every displayed shortcut from the same resolved preset
+        return;
+    }
+    if (page_ == Page::video && name == "IDC_FRAME_RATE_LIMIT") {
+        const std::array<int, 9> choices{0, -1, 30, 60, 90, 120, 144, 165, 240};
+        if (index >= 0 && index <= static_cast<int64_t>(choices.size())) {
+            int fps = draft_.video.frame_rate_limit;
+            if (index < static_cast<int64_t>(choices.size())) fps = choices[static_cast<std::size_t>(index)];
+            else {
+                const auto* combo = Object::cast_to<EawrUiCombo>(state_->controls[name]);
+                if (combo == nullptr || index >= combo->get_item_count()) return;
+                const std::string caption = utf8(combo->get_item_text(static_cast<int32_t>(index)));
+                const auto [end, error] = std::from_chars(caption.data(), caption.data() + caption.size(), fps);
+                if (error != std::errc{} || end != caption.data() + caption.size()) return;
+            }
+            draft_.video.frame_rate_limit = fps;
+            dirty_ = true;
+            if (auto* apply = Object::cast_to<BaseButton>(state_->controls["IDC_APPLY"])) {
+                apply->set_disabled(false);
+                apply->set_tooltip_text(String());
+            }
+        }
+    }
     if (page_ == Page::video && name == "IDC_RESOLUTION_LIST" && index >= 0
         && index < static_cast<int64_t>(state_->sizes.size())) {
         state_->selected_size = state_->sizes[static_cast<std::size_t>(index)];
@@ -818,14 +916,27 @@ void EawrOptionsScreen::apply_preview() {
     last_apply_ = std::move(report);
 }
 
-void EawrOptionsScreen::apply_committed() {
+void EawrOptionsScreen::apply_committed(const model::VideoSettings& previous_video) {
     ApplyReport report;
     apply_audio(committed_.audio, report);
     ApplyTargets targets;
-    targets.window = options_.apply_window;
-    apply_video(committed_.video, targets, report);
+    const model::VideoSettings& video = committed_.video;
+    const bool window_changed = video.windowed != previous_video.windowed
+        || (video.windowed && (video.window_width != previous_video.window_width
+                              || video.window_height != previous_video.window_height));
+    if (video.frame_rate_limit != previous_video.frame_rate_limit) {
+        update_frame_pacing(video, options_.context == Context::main_menu);
+        report.applied.emplace_back("frame-rate limit: " + std::to_string(video.frame_rate_limit));
+    }
+    targets.window = options_.apply_window && window_changed;
+    targets.vsync = video.vsync != previous_video.vsync;
+    targets.texture_detail = video.texture_mip_drop != previous_video.texture_mip_drop;
+    // ST-V5: an unchanged Accept must not reset the window or renderer. Compare with the
+    // last committed values, advancing the baseline after Apply as well as Accept.
+    if (window_changed || targets.vsync || targets.texture_detail) apply_video(video, targets, report);
     // The render profile is the player's explicit choice only; "automatic" leaves the run's own.
-    if (committed_.video.render_profile != model::RenderProfileSetting::automatic) {
+    if (video.render_profile != previous_video.render_profile
+        && video.render_profile != model::RenderProfileSetting::automatic) {
         if (auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop())) {
             const RenderProfile profile = resolve_render_profile(committed_.video.render_profile, RenderProfile::retail);
             apply_render_profile(*tree->get_root(), profile);
@@ -895,6 +1006,7 @@ void EawrOptionsScreen::sync_draft_from_controls() {
 }
 
 void EawrOptionsScreen::commit_page(const bool leave) {
+    const model::VideoSettings previous_video = committed_.video;
     sync_draft_from_controls();
     if (page_ == Page::network) {
         if (const auto error = model::validate_online_settings(draft_.network)) {
@@ -909,12 +1021,13 @@ void EawrOptionsScreen::commit_page(const bool leave) {
     case Page::video: committed_.video = draft_.video; break;
     case Page::gameplay: committed_.gameplay = draft_.gameplay; break;
     case Page::network: committed_.network = draft_.network; break;
+    case Page::keyboard: committed_.camera_wasd = draft_.camera_wasd; break;
     default: break;
     }
     draft_ = committed_;
     std::string error;
     if (!store_.save(committed_, error)) notes_.push_back("settings not saved: " + error);
-    apply_committed();
+    apply_committed(previous_video);
     // The viewer's other readers (the next battle's buses, the live speed step) see the same record.
     ActiveSettings::set(committed_);
     dirty_ = false;
@@ -951,6 +1064,7 @@ void EawrOptionsScreen::defaults_page() {
         // The honoured option only: the others are not editable here, so Defaults leaves them.
         draft_.gameplay.tactical_speed = defaults.gameplay.tactical_speed;
         break;
+    case Page::keyboard: draft_.camera_wasd = defaults.camera_wasd; break;
     case Page::network:
         draft_.network.online_host.clear(); draft_.network.online_port = defaults.network.online_port;
         draft_.network.online_trust = defaults.network.online_trust; draft_.network.online_pin.clear();
@@ -1064,8 +1178,10 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_DEFAULTS_BUTTON") defaults_page();
         break;
     case Page::keyboard:
-        // Nothing here is editable (ST-K1): Accept stays disabled, Back leaves.
-        if (id == "IDC_OK") leave_to_hub();
+        if (id == "IDC_OK") commit_page(true);
+        else if (id == "IDC_APPLY") commit_page(false);
+        else if (id == "IDC_CANCEL" || id == "IDC_BACK") cancel_page();
+        else if (id == "IDC_DEFAULTS" || id == "IDC_RESTORE_DEFAULT") defaults_page();
         break;
     case Page::network:
         if (id == "IDC_OK") commit_page(true);

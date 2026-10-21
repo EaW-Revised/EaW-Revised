@@ -179,7 +179,7 @@ void galaxy_roundtrip(std::size_t workers, const std::string& directory) {
 void discovery_roundtrip(std::size_t workers, const std::string& directory) {
     for (const bool paused : {false, true}) {
         auto initial = setup();
-        auto& observer = initial.observer.emplace(); observer.local_player = 1;
+        auto& observer = initial.observer.emplace(); observer.human_observers = {1}; observer.solo_reference_human = 1;
         observer.reveal_delay_seconds = take(Fixed::from_decimal("0.5"));
         for (const auto& player : initial.players) {
             galactic::ObserverPlayer row; row.player = player.player_id; row.ai = row.player != 1;

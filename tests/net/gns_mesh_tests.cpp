@@ -246,7 +246,12 @@ public:
         }
     }
     PeerIndex local_slot() const override { return slot_; }
-    GnsRoomRoster roster() const override { std::lock_guard guard(mutex_); drain(); return roster_; }
+    GnsRoomRoster roster() const override {
+        std::lock_guard guard(mutex_); drain(); auto value = roster_;
+        if (changed_roster_identity_) value.slots[1].identity += "-replacement";
+        return value;
+    }
+    void change_roster_identity(bool changed) { std::lock_guard guard(mutex_); changed_roster_identity_ = changed; }
     eawr::core::Result<void> send(PeerIndex to, std::span<const std::uint8_t> blob) override {
         std::lock_guard guard(mutex_);
         Bytes wire{tag_signal, static_cast<std::uint8_t>(slot_), static_cast<std::uint8_t>(to)};
@@ -359,6 +364,7 @@ private:
     mutable Udp udp_;
     mutable unsigned credential_reads_{};
     mutable GnsRoomRoster roster_;
+    bool changed_roster_identity_{};
     mutable std::deque<GnsRoomSignal> inbox_;
     std::map<PeerIndex, Bytes> last_signals_, first_signals_;
     mutable std::optional<bool> attach_result_;
@@ -487,6 +493,11 @@ public:
             if (options_.slot == 0) return locked_;
             return transport_->mesh_complete();
         }, timeout, "complete mesh");
+        expect(transport_->mesh_complete((1U << options_.seats) - 1U), "the explicit agreed roster verifies every real native pair");
+        if (options_.seats > 2) expect(!transport_->mesh_complete(3), "a connected but unadmitted extra member prevents Start");
+        room_->change_roster_identity(true);
+        expect(!transport_->mesh_complete((1U << options_.seats) - 1U), "a same-index replacement cannot reuse the previous native pair's readiness");
+        room_->change_roster_identity(false);
         for (PeerIndex p = 0; p < options_.seats; ++p) if (p != options_.slot)
             expect(transport_->link(p) == LinkState::open, "Every pair is open once the mesh is complete");
     }

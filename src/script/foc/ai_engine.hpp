@@ -633,6 +633,7 @@ struct EffectCounts {
     bool operator==(const EffectCounts&) const = default;
 };
 
+struct PlayerAi;
 struct PlayerEffects {
     tactical::PlayerId owner{};
     // Scheduler-facing effects, chronological. An event takes its sequence at the commit; `submit` ones
@@ -648,7 +649,10 @@ struct PlayerEffects {
     // serial attach boundary, never inside a turn.
     struct IndexEffect { RuntimeTable table{}; std::uint64_t id{}; };
     std::vector<IndexEffect> index;
-    std::uint64_t operations{}; // typed operations on foreign rows (applied in place, counted here)
+    std::uint64_t operations{}; // typed operations on foreign rows
+    std::vector<CrossOwnerOp> foreign_operations;
+    // Each acting player owns any foreign rows it has touched over the immutable barrier-start copy.
+    std::map<tactical::PlayerId, std::shared_ptr<PlayerAi>> foreign_players;
     // Pad-perception inputs the turn asked for: the late-prepass counter and the open-pad requests.
     std::uint64_t pad_queries{};
     std::set<tactical::PlayerId> pad_open;
@@ -667,6 +671,7 @@ struct PlayerEffects {
     std::uint64_t tasks_revision{};
     std::shared_ptr<const std::vector<GalacticBudgetBuild>> build_cache;
     std::array<std::uint64_t, 3> build_cache_key{};
+    tactical::PlayerId build_cache_reader{};
 
     [[nodiscard]] bool empty() const noexcept {
         return scheduler.empty() && orders.empty() && credits.empty() && pads.empty() && attaches.empty()
@@ -678,10 +683,10 @@ struct PlayerEffects {
     void clear(tactical::PlayerId player) noexcept {
         owner = player;
         scheduler.clear(); orders.clear(); credits.clear(); pads.clear(); attaches.clear(); index.clear();
-        operations = 0; pad_queries = 0; pad_open.clear();
+        operations = 0; foreign_operations.clear(); foreign_players.clear(); pad_queries = 0; pad_open.clear();
         invalidations.clear(); revisions = 0; scope_depth = 0; diagnostics.clear();
         work = {}; producer_candidates = 0; reads = {};
-        tasks_revision = 0; build_cache.reset(); build_cache_key = {};
+        tasks_revision = 0; build_cache.reset(); build_cache_key = {}; build_cache_reader = 0;
     }
 };
 
@@ -883,6 +888,23 @@ public:
     [[nodiscard]] core::Result<std::map<sim::EntityId, std::uint64_t>> galactic_execution_reservations(tactical::PlayerId) const;
     [[nodiscard]] core::Result<void> reserve_galactic_object(tactical::PlayerId, std::uint64_t goal, sim::EntityId);
     [[nodiscard]] core::Result<void> release_galactic_goal(tactical::PlayerId, std::uint64_t goal);
+    // Owner-only budget rows feed only that player's BUDGETFRACTIONTOBUILD queries. The producer still
+    // validates every player's associations at the original read point until its barrier-start freeze.
+    class BuildBudgetReads {
+    public:
+        // A boundary refresh serves mixed-player readers and must publish every owner.
+        BuildBudgetReads() noexcept;
+        BuildBudgetReads(const Engine&, tactical::PlayerId) noexcept;
+        BuildBudgetReads(const BuildBudgetReads&) = delete;
+        BuildBudgetReads& operator=(const BuildBudgetReads&) = delete;
+        ~BuildBudgetReads();
+    private:
+        const Engine* previous_engine_{};
+        tactical::PlayerId previous_player_{};
+    };
+    [[nodiscard]] tactical::PlayerId build_budget_reader() const noexcept {
+        return build_reader_engine_ == this ? build_reader_player_ : tactical::PlayerId{};
+    }
     using GalacticBuildPublication = std::shared_ptr<const std::vector<GalacticBudgetBuild>>;
     [[nodiscard]] core::Result<GalacticBuildPublication> galactic_build_budgets(
         const galactic_ai::NativeActions&, const GalacticFunding&) const;
@@ -910,6 +932,12 @@ public:
     // staged effects of all players wait for commit_galactic_events and apply there in ascending player order,
     // so no player's pass sees another's appends (GFS-A20); otherwise each call commits its own turn on return.
     void defer_galactic_effects(bool deferred) noexcept { galactic_deferred_ = deferred; }
+    // GFS-A22 semantic switch, independent of whether the caller dispatches the chains concurrently.
+    // Both calls belong to the serial boundary; an active turn sees only its own live row and frozen foreign rows.
+    void freeze_galactic_decision_reads();
+    void finish_galactic_decision_reads() noexcept { decision_reads_frozen_ = false; decision_players_.clear(); }
+    // Keeps the owner's frozen foreign view across native turns, attachment boundaries and Lua work.
+    [[nodiscard]] core::Result<std::shared_ptr<void>> galactic_decision_scope(tactical::PlayerId);
     // S9a: the player whose Lua chain a galactic script instance belongs to (a freestore instance carries its
     // player, a plan instance its slot's player), or 0 for an instance no player owns.
     [[nodiscard]] std::uint64_t galactic_chain_owner(std::uint64_t instance) const;
@@ -1048,6 +1076,18 @@ private:
     private:
         PlayerEffects* previous_effects_;
     };
+    class DecisionScope {
+    public:
+        DecisionScope(Engine&, PlayerAi&) noexcept;
+        ~DecisionScope();
+        DecisionScope(const DecisionScope&) = delete;
+        DecisionScope& operator=(const DecisionScope&) = delete;
+    private:
+        const Engine* previous_engine_;
+        PlayerEffects* previous_effects_;
+        TurnScope turn_;
+    };
+    [[nodiscard]] PlayerEffects* decision_effects() const noexcept;
     // Attaches the plans the player's goal service queued as intents, at the boundary after the service.
     [[nodiscard]] core::Result<void> settle_galactic_attaches(PlayerAi& player, authoritative::ScriptScheduler& scripts);
     // The running turn's effects, or null when the caller writes directly (serial phases, other threads).
@@ -1078,6 +1118,8 @@ private:
     [[nodiscard]] bool foreign_row(RuntimeTable table, std::uint64_t id) const;
     void retire_runtime(RuntimeTable table, std::uint64_t id);
     void note_handle(tactical::PlayerId owner) const noexcept;
+    static thread_local const Engine* build_reader_engine_;
+    static thread_local tactical::PlayerId build_reader_player_;
     static constexpr std::uint32_t touch_only_kind = 0xFFFFFFFFU; // marks the owner's group dirty, sets no bit
     void apply_native_records_changed(std::uint32_t owner, std::uint32_t kind);
     void apply_native_record_changed(std::uint32_t owner, std::uint32_t kind, std::uint64_t key);
@@ -1232,6 +1274,7 @@ private:
     std::uint64_t galactic_tasks_revision_{1}; // derived publication invalidation, not saved state
     mutable std::shared_ptr<const std::vector<GalacticBudgetBuild>> galactic_build_cache_;
     mutable std::array<std::uint64_t, 3> galactic_build_cache_key_{};
+    mutable tactical::PlayerId galactic_build_cache_reader_{};
     std::shared_ptr<Host> host_;
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
@@ -1252,6 +1295,8 @@ private:
     mutable std::string native_configuration_; // immutable closure, computed once
     ThreatGrid grid_;
     std::vector<PlayerAi> players_;
+    bool decision_reads_frozen_{};
+    std::map<tactical::PlayerId, std::shared_ptr<const PlayerAi>> decision_players_;
     // Incrementally published by serial mutations; adapters and bindings only read it. Never encoded.
     struct RuntimeIndex {
         std::map<std::uint64_t, tactical::PlayerId> plans, taskforces, blocks, instances;
@@ -1306,18 +1351,24 @@ private:
     template<class T> auto ordered_runtime(std::map<std::uint64_t, T> PlayerAi::* member) {
         std::map<std::uint64_t, T*> result;
         auto* turn = staged();
-        for (auto& owner : players_) for (auto& [id, row] : owner.*member) {
-            if (turn && owner.player != turn->owner) ++turn->reads.row_scans;
-            if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+        for (const auto& selected : players_) {
+            auto* owner = player_ai(selected.player); if (!owner) continue;
+            for (auto& [id, row] : owner->*member) {
+                if (turn && selected.player != turn->owner) ++turn->reads.row_scans;
+                if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+            }
         }
         return result;
     }
     template<class T> auto ordered_runtime(std::map<std::uint64_t, T> PlayerAi::* member) const {
         std::map<std::uint64_t, const T*> result;
         auto* turn = staged();
-        for (const auto& owner : players_) for (const auto& [id, row] : owner.*member) {
-            if (turn && owner.player != turn->owner) ++turn->reads.row_scans;
-            if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+        for (const auto& selected : players_) {
+            const auto* owner = player_ai(selected.player); if (!owner) continue;
+            for (const auto& [id, row] : owner->*member) {
+                if (turn && selected.player != turn->owner) ++turn->reads.row_scans;
+                if (!result.emplace(id, &row).second) throw std::logic_error("duplicate AI runtime identity");
+            }
         }
         return result;
     }

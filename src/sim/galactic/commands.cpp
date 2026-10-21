@@ -159,6 +159,7 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                        for (const auto id : command.path) detail::put_u64(bytes, id);
                        detail::put_u8(bytes, command.destination_slot ? 1 : 0);
                        if (command.destination_slot) detail::put_u8(bytes, *command.destination_slot);
+                       detail::put_u64(bytes, command.destination_actor);
                    },
                    [&](const ProductionCommand& command) {
                        detail::put_u64(bytes, command.planet); detail::put_u64(bytes, command.type);
@@ -176,6 +177,8 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                        for (const auto id : command.path) detail::put_u64(bytes, id);
                        detail::put_u8(bytes, command.destination_slot ? 1 : 0);
                        if (command.destination_slot) detail::put_u8(bytes, *command.destination_slot);
+                       detail::put_u8(bytes, command.raid ? 1 : 0);
+                       detail::put_u64(bytes, command.destination_actor);
                    },
                    [&](const SaveRequest& command) {
                        detail::put_i64(bytes, command.slot);
@@ -405,7 +408,7 @@ std::optional<CommandPayload> decode_payload(
                 if (!reader.read_u8(slot) || slot > 2) return std::nullopt;
                 c.destination_slot = slot;
             }
-            if (reader.remaining()) return std::nullopt;
+            if (!reader.read_u64(c.destination_actor) || reader.remaining()) return std::nullopt;
             return CommandPayload{std::move(c)};
         }
         if (opcode == galactic_opcodes::recheck_orbit) {
@@ -426,7 +429,9 @@ std::optional<CommandPayload> decode_payload(
             }
             if (!reader.read_u8(present) || present > 1) return std::nullopt;
             if (present) { std::uint8_t slot{}; if (!reader.read_u8(slot) || slot > 2) return std::nullopt; c.destination_slot = slot; }
-            if (reader.remaining()) return std::nullopt;
+            std::uint8_t raid{};
+            if (!reader.read_u8(raid) || raid > 1 || !reader.read_u64(c.destination_actor) || reader.remaining()) return std::nullopt;
+            c.raid = raid != 0;
             return CommandPayload{std::move(c)};
         }
         if (opcode == galactic_opcodes::create_fleet) {

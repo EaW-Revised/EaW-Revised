@@ -89,6 +89,11 @@ std::string combined_hash(const std::string& galaxy, const std::string& world,
 } // namespace game_session_detail
 
 GameSession::Impl::Impl(galactic::GalacticSession session) : galaxy(std::move(session)) {
+    layer(BattleLayer::land).services.tactical_refusal = "land tactical provider is unavailable";
+    // WGM-187: bind a stateless return writer for automatic and future land children.
+    layer(BattleLayer::land).services.apply = [](auto& world, const auto& conflict, const auto& result) {
+        return world.fix_tactical_built_structures(conflict.planet, result.winner);
+    };
     galaxy.defer_victory_tail(galaxy.setup().victory.has_value());
     // A multiplayer observer is local presentation, never synchronized policy.
     const auto& victory = galaxy.victory();
@@ -364,8 +369,17 @@ bool GameSession::Impl::assembling_layers() {
 
 GameSession::ConflictLayerServices& GameSession::Impl::services(const ConflictRecord& value) { return layer(value.layer).services; }
 
+core::Result<bool> GameSession::Impl::tactical_selection(const ConflictRecord& record, bool requested, bool forced) const {
+    const auto& refusal = layer(record.layer).services.tactical_refusal;
+    if (!requested || refusal.empty()) return core::Result<bool>::success(requested);
+    if (forced) return fail<bool>(refusal, unavailable_conflict_tactical);
+    return core::Result<bool>::success(false);
+}
+
 core::Result<authoritative::ScriptScheduler> GameSession::Impl::scripts_for(const ConflictRecord& record,
         ScriptRequirement requirement) {
+    if (auto allowed = tactical_selection(record, true, true); !allowed)
+        return core::Result<authoritative::ScriptScheduler>::failure(allowed.error());
     const auto& service = services(record);
     if (service.scripts) return service.scripts(record);
     if ((layer(record.layer).installed || requirement == ScriptRequirement::required)
@@ -410,6 +424,12 @@ const galactic::Seat* GameSession::Impl::seat(const galactic::SeatId id) const {
     const auto found = std::lower_bound(seats.begin(), seats.end(), id,
         [](const auto& value, const auto key) { return value.seat_id < key; });
     return found == seats.end() || found->seat_id != id ? nullptr : &*found;
+}
+bool GameSession::Impl::human_side(const galactic::PlayerId owner) const {
+    const auto seats = world().seats();
+    return std::any_of(seats.begin(), seats.end(), [&](const auto& seat) {
+        return seat.active && seat.kind == galactic::SeatKind::human && seat.player == owner;
+    });
 }
 
 tactical::PlayerId GameSession::Impl::player(const galactic::SeatId id) const {
@@ -508,6 +528,12 @@ core::Result<std::string> GameSession::Impl::base_hash() {
         put(bytes, withdrawing_player, 4);
         put(bytes, votes.size(), 8);
         for (const auto& [owner, yes] : votes) { put(bytes, owner, 4); put(bytes, yes ? 1 : 0, 1); }
+        if (multiplayer_vote_timeout) {
+            put(bytes, *multiplayer_vote_timeout, 8);
+            put(bytes, vote_started.has_value() ? 1 : 0, 1);
+            if (vote_started) put(bytes, *vote_started, 8);
+            put(bytes, tick, 8);
+        }
         return core::Result<std::string>::success(queued_context(core::sha256_hex(bytes)));
     }
     return core::Result<std::string>::success(combined_hash(child->galaxy_hash, child->world_hash.get(), child->script_hash, child_context_hash()));
@@ -795,8 +821,15 @@ std::vector<GameStoryNotice> GameTick::observer_story_notices(galactic::PlayerId
     return notices;
 }
 void GameSession::set_movement_access_provider(galactic::GalacticSession::MovementAccessProvider provider) { impl_->world().set_movement_access_provider(std::move(provider)); }
-void GameSession::set_entry_resolver(EntryResolver resolver) { if (impl_->assembling_layers()) for (auto& layer : impl_->layers) layer.services.entry = resolver; }
-void GameSession::set_result_applier(ResultApplier applier) { if (impl_->assembling_layers()) for (auto& layer : impl_->layers) layer.services.apply = applier; }
+void GameSession::set_entry_resolver(EntryResolver resolver) { if (impl_->assembling_layers()) impl_->layer(BattleLayer::space).services.entry = std::move(resolver); }
+void GameSession::set_result_applier(ResultApplier applier) {
+    if (!impl_->assembling_layers()) return;
+    auto& target = impl_->layer(BattleLayer::space).services.apply;
+    target = {};
+    if (applier) target = [applier = std::move(applier)](auto& world, const auto&, const auto& result) {
+        return applier(world, result);
+    };
+}
 void GameSession::set_hero_defeat_resolver(HeroDefeatResolver resolver) { impl_->hero_resolver = std::move(resolver); }
 core::Result<galactic::HeroSchedule> GameSession::schedule_hero_defeat(const galactic::HeroDefeat& defeat,
     const sim::PartitionExecutor& executor) {
@@ -878,12 +911,16 @@ bool GameSession::auto_resolve_needs_service() const noexcept {
     return impl_->auto_resolver && impl_->admission && (impl_->admission->arbitration.route == ConflictRoute::instant_auto
         || impl_->admission->arbitration.route == ConflictRoute::dialog_auto);
 }
-void GameSession::set_child_configurator(ChildConfigurator configure) { if (impl_->assembling_layers()) for (auto& layer : impl_->layers) layer.services.configure = configure; }
+void GameSession::set_child_configurator(ChildConfigurator configure) { if (impl_->assembling_layers()) impl_->layer(BattleLayer::space).services.configure = std::move(configure); }
 core::Result<void> GameSession::set_child_script_services(ScriptFactory scripts, ChildConfigurator configure) {
+    return set_child_script_services(BattleLayer::space, std::move(scripts), std::move(configure));
+}
+core::Result<void> GameSession::set_child_script_services(BattleLayer layer, ScriptFactory scripts, ChildConfigurator configure) {
     if (impl_->child) return fail<void>("cannot replace child script services while a tactical child is active");
     if (!scripts || !configure) return fail<void>("child script services require a paired factory and configurator");
-    if (!impl_->assembling_layers()) return core::Result<void>::failure(*impl_->failure);
-    for (auto& layer : impl_->layers) { layer.services.scripts = scripts; layer.services.configure = configure; }
+    auto& target = impl_->layer(layer);
+    if (target.installed || impl_->staged || impl_->failure) return fail<void>("child script assembly cannot replace installed layer services");
+    target.services.scripts = std::move(scripts); target.services.configure = std::move(configure);
     return core::Result<void>::success();
 }
 void GameSession::set_native_conflict_service(NativeConflictService service) {
@@ -902,9 +939,10 @@ GameSession::NativeConflictReaders GameSession::native_conflict_readers() const 
 void GameSession::set_conflict_service(ConflictService service, ContentResolver content, ScriptFactory scripts, ScriptRequirement requirement) {
     if (!impl_->assembling_layers()) return;
     for (auto& layer : impl_->layers) {
-        layer.services.admission = service; layer.services.content = content; layer.services.scripts = scripts;
-        layer.services.script_requirement = requirement;
+        layer.services.admission = service;
     }
+    auto& space = impl_->layer(BattleLayer::space).services;
+    space.content = std::move(content); space.scripts = std::move(scripts); space.script_requirement = requirement;
     impl_->conflict_services = impl_->conflict_services || static_cast<bool>(service);
     impl_->world().enable_conflict_requests(impl_->conflict_services);
     impl_->world().defer_victory_tail(impl_->world().setup().victory.has_value());
@@ -945,9 +983,27 @@ void GameSession::set_auto_resolve_checkpoint_services(AutoResolveStateWriter wr
     impl_->auto_state_writer = std::move(writer); impl_->auto_state_reader = std::move(reader);
 }
 void GameSession::set_vote_progress(VoteProgress progress) { impl_->vote_progress = std::move(progress); }
+core::Result<void> GameSession::configure_multiplayer_votes(std::uint64_t timeout_ticks) {
+    if (!impl_->world().multiplayer() || impl_->tick || timeout_ticks >= galactic::galactic_max_ticks)
+        return fail<void>("multiplayer voting needs an authored timeout at campaign creation");
+    impl_->multiplayer_vote_timeout = timeout_ticks;
+    set_vote_progress([impl = impl_.get()](const ConflictRecord& conflict, const auto& votes) {
+        // GCMP-06 policy: either refusal selects auto-resolve; every voting side saying yes selects Begin.
+        // Only sides with an active human seat vote (a human fighting the AI is a one-side vote).
+        std::optional<bool> selected{true};
+        for (const auto owner : {conflict.invader, conflict.defender}) {
+            if (!impl->human_side(owner)) continue;
+            const auto vote = votes.find(owner);
+            if (vote != votes.end() && !vote->second) return core::Result<std::optional<bool>>::success(std::optional<bool>{false});
+            if (vote == votes.end()) selected.reset();
+        }
+        return core::Result<std::optional<bool>>::success(selected);
+    });
+    return core::Result<void>::success();
+}
 void GameSession::set_conflict_gate(ConflictGate gate) { impl_->conflict_gate = std::move(gate); }
 const ConflictRecord* GameSession::pending_conflict() const noexcept { return impl_->admission ? &impl_->admission->conflict : nullptr; }
-std::optional<PendingConflictView> GameSession::pending_conflict_view() const {
+std::optional<PendingConflictView> GameSession::pending_conflict_view(galactic::SeatId observer) const {
     if (!impl_->admission) return std::nullopt;
     const auto route = impl_->admission->arbitration.route;
     const bool choice_ready = impl_->conflict_pause
@@ -957,6 +1013,23 @@ std::optional<PendingConflictView> GameSession::pending_conflict_view() const {
         const auto vote = impl_->votes.find(inputs->local);
         view.alert = pending_battle_alert_view(view.conflict, *inputs, choice_ready,
             vote == impl_->votes.end() ? std::optional<bool>{} : vote->second);
+    }
+    if (impl_->multiplayer_vote_timeout) {
+        view.alert.reset();
+        const auto* seat = impl_->seat(observer);
+        if (seat && seat->active && seat->kind == galactic::SeatKind::human
+            && (seat->player == view.conflict.invader || seat->player == view.conflict.defender)) {
+            PendingBattleAlertInputs inputs;
+            inputs.local = seat->player; inputs.active_mode = inputs.queue_tactical = inputs.multiplayer = inputs.authorized_issuer = true;
+            inputs.always_bypass = view.arbitration.forced_tactical;
+            inputs.timeout_ms = *impl_->multiplayer_vote_timeout * 1000 / galactic::galactic_frames_per_second;
+            inputs.elapsed_wall_ms = impl_->vote_started ? (impl_->tick - *impl_->vote_started) * 1000 / galactic::galactic_frames_per_second : 0;
+            const auto vote = impl_->votes.find(seat->player);
+            view.alert = pending_battle_alert_view(view.conflict, inputs, choice_ready,
+                vote == impl_->votes.end() ? std::optional<bool>{} : vote->second);
+            // The canonical session service owns MP defaults. Presentation never injects a second local timeout.
+            view.alert->timeout_due = false;
+        }
     }
     return view;
 }
@@ -1130,7 +1203,8 @@ galactic::GalacticReplay GameSession::record() const {
     return {std::move(setup), impl_->tick, std::move(commands), std::move(window)};
 }
 GameRecording GameSession::recording() const {
-    return {record(), impl_->conflicts, impl_->load_fixups, impl_->admissions, impl_->conflict_services, impl_->history};
+    return {record(), impl_->conflicts, impl_->load_fixups, impl_->admissions, impl_->conflict_services, impl_->history,
+        impl_->multiplayer_vote_timeout};
 }
 const ConflictRecord* GameSession::conflict() const noexcept { return impl_->child ? &impl_->child->conflict : nullptr; }
 const tactical::TacticalSession* GameSession::battle() const noexcept { return impl_->child ? &impl_->child->session.world() : nullptr; }

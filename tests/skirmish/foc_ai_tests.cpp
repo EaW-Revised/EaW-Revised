@@ -6,6 +6,7 @@
 // run paused mid-attack and resumed on fast forward must replay like an unpaused one (#459).
 //
 //   foc_ai_tests [ticks [hits.csv]]   (needs EAWR_EAW_GAME_ROOT; skipped otherwise)
+//   foc_ai_tests --capital-avoidance          installed capital approach/arrival regression
 //   foc_ai_tests --combat-engagement-trace [ticks [trace.txt [seed]]]
 //                                     the economy-disabled diagnostic, including later admitted AI units
 //   foc_ai_tests --stock-engagement-trace [ticks [trace.txt [seed]]]
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the FoC AI battle\n";
         return 0;
     }
+    if (argc > 1 && std::string_view(argv[1]) == "--capital-avoidance") return capital_avoidance_probe(*root);
     foc::ai::Engine::observe_effects(count_effects);
     struct EffectReport {
         ~EffectReport() { foc::ai::Engine::observe_effects(nullptr); if (effect_barriers != 0) report_effects("run"); }

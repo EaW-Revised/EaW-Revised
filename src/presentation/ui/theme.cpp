@@ -121,6 +121,38 @@ public:
             }
         }
         for (ThemeStyle& style : chained) model_.variations.push_back(std::move(style));
+
+        // #4446: staging player names share the first row's font when the skin
+        // omits a row override. Keep explicit mod fonts and each row's textures.
+        for (const data::ui::Dialog& dialog : catalog.script.dialogs) {
+            if (dialog.name != "IDD_LAN_STAGING_DIALOG" && dialog.name != "IDD_INTERNET_STAGING_DIALOG") continue;
+            if (const auto* outer = skin.font_override(dialog.name); outer && outer->find(FontRole::combo_box)) continue;
+            const ThemeStyle* first = model_.find(variation_name("IDC_PLAYER_NAME_0"));
+            if (!first || first->fonts.empty()) continue;
+            const auto row_fonts = first->fonts;
+            for (const data::ui::DialogControl& control : dialog.controls) {
+                constexpr std::string_view prefix = "IDC_PLAYER_NAME_";
+                if (!control.id_name.starts_with(prefix) || control.statement != "COMBOBOX") continue;
+                const auto suffix = std::string_view(control.id_name).substr(prefix.size());
+                if (suffix.empty() || suffix.find_first_not_of("0123456789") != std::string_view::npos) continue;
+                if (const auto* set = skin.font_override(control.id_name); set && set->spec) continue;
+                const auto name = variation_name(dialog.name) + "__" + control.id_name;
+                auto existing = std::find_if(model_.variations.begin(), model_.variations.end(),
+                    [&](const ThemeStyle& style) { return style.name == name; });
+                if (existing != model_.variations.end()) {
+                    existing->fonts = row_fonts;
+                } else {
+                    ThemeStyle style;
+                    style.name = name;
+                    style.base = model_.variation(dialog, &control);
+                    style.entry = control.id_name;
+                    style.level = OverrideLevel::control;
+                    style.fonts = row_fonts;
+                    model_.variations.push_back(std::move(style));
+                }
+            }
+        }
+
     }
 
 private:
@@ -367,10 +399,8 @@ std::string ThemeModel::variation(const data::ui::Dialog& dialog, const data::ui
     const ThemeStyle* dialog_style = find(outer);
     const bool has_dialog = dialog_style != nullptr && dialog_style->level == OverrideLevel::dialog;
     if (control != nullptr) {
-        if (has_dialog) {
-            const std::string chained = outer + "__" + control->id_name;
-            if (find(chained) != nullptr) return chained;
-        }
+        const std::string chained = outer + "__" + control->id_name;
+        if (find(chained) != nullptr) return chained;
         const std::string inner = variation_name(control->id_name);
         const ThemeStyle* control_style = find(inner);
         if (control_style != nullptr && control_style->level == OverrideLevel::control) return inner;

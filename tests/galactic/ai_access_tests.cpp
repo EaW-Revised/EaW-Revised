@@ -38,7 +38,7 @@ gc::GalacticSetup fixture() {
     control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
     control.types = {{100, 0, false, false}};
     for (const auto& a : control.players) for (const auto& b : control.players) control.relations.push_back({a.player, b.player, a.player == b.player});
-    s.observer.emplace(); auto& observer = *s.observer; observer.local_player = 2;
+    s.observer.emplace(); auto& observer = *s.observer; observer.human_observers = {2}; observer.solo_reference_human = 2;
     observer.reveal_delay_seconds = f(1000); observer.automatic_reveal_range = f(0);
     observer.players = {{1, true, false, 0, 100, {}}, {2, false, false, 0, 100, {}}, {3, false, false, 0, 100, {}}};
     observer.types = {{100, false, false, false}};

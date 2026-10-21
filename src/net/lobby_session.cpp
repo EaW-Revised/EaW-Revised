@@ -296,7 +296,7 @@ struct LobbyRuntime {
     std::set<std::string> denied;
     std::map<PeerIndex, std::deque<std::uint64_t>> chat_times;
     std::map<PeerIndex, std::deque<std::uint64_t>> request_times;
-    bool awaiting_snapshot{};
+    bool awaiting_snapshot{}, room_lock_pending{};
     std::uint64_t snapshot_query_time{}, dropped{};
     std::unique_ptr<SetupStream> stream;
     std::optional<LobbySetupContext> context;
@@ -352,7 +352,7 @@ struct LobbyRuntime {
         if (!allow_starting && state.phase != LobbyPhase::staging) return failure<void>(LobbyReason::frozen, "room is starting");
         return core::Result<void>::success();
     }
-    void reset_setup() { setup.reset(); context.reset(); stream.reset(); }
+    void reset_setup() { room_lock_pending = false; setup.reset(); context.reset(); stream.reset(); }
     core::Result<void> advance() {
         if (state.revision == std::numeric_limits<std::uint64_t>::max())
             return failure<void>(LobbyReason::resource_limit, "room revision exhausted");
@@ -372,6 +372,10 @@ struct LobbyRuntime {
         return hooks.validate(candidate, starting);
     }
     core::Result<void> abort(LobbyReason reason, std::string message) {
+        // A pending remote Lock may already have succeeded. Reopening staging
+        // locally would advertise vacancies in a service-locked room.
+        if (room_lock_pending) return terminal(reason,
+            std::move(message) + ". Start was being confirmed; create a new room.");
         const auto frozen = state.frozen_revision;
         // A poll inside the Start drain can observe a close after pump's loss
         // scan. Remove every such guest before publishing the cancellation.
@@ -763,6 +767,16 @@ core::Result<void> LobbySession::start(std::uint64_t revision) {
     if (!encoded) return core::Result<void>::failure(encoded.error());
     if (auto wrapped = encode_lobby_frame(LobbySetupFrame{frozen.room, frozen.revision, encoded.value()}); !wrapped)
         return core::Result<void>::failure(wrapped.error());
+    if (value.hooks.lock_at_start && value.hooks.lock_room_progress) {
+        auto locked = value.hooks.lock_room_progress();
+        if (!locked) {
+            if (locked.error().code != "EAWR-NET-1774")
+                static_cast<void>(value.terminal(LobbyReason::setup_failed, locked.error().message));
+            return core::Result<void>::failure(locked.error());
+        }
+        // From here cancellation cannot reopen a transport whose roster froze.
+        value.room_lock_pending = true;
+    }
     value.state = std::move(frozen);
     value.stream = std::make_unique<SetupStream>(); value.stream->outer = value.transport;
     value.stream->room = value.state.room; value.stream->revision = value.state.frozen_revision;
@@ -850,6 +864,16 @@ core::Result<void> LobbySession::pump(std::uint64_t now) {
             return core::Result<void>::success(); // Host serializes the abort/new revision.
         }
         if (value.is_host && value.state.phase == LobbyPhase::starting && value.setup->phase() == SetupPhase::ready) {
+            if (value.hooks.lock_room_progress) {
+                auto locked = value.hooks.lock_room_progress();
+                if (!locked) {
+                    // Only the service's explicit compare refusal proves it stayed open.
+                    if (locked.error().code == "EAWR-NET-1774") value.room_lock_pending = false;
+                    return value.abort(LobbyReason::mesh_incomplete, locked.error().message);
+                }
+                value.room_lock_pending = !locked.value();
+                if (value.room_lock_pending) return core::Result<void>::success();
+            }
             if (value.hooks.lock_room)
                 if (auto locked = value.hooks.lock_room(); !locked)
                     return value.abort(LobbyReason::mesh_incomplete, "The room could not be locked for Start; every player must be connected to every other player.");

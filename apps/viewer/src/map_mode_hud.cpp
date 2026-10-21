@@ -393,6 +393,15 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             });
         }
     }
+    if (battle && live_session && space && hud->hero_tray() != nullptr) {
+        hud->hero_tray()->set_click([this](const EawrHeroTray::Tray tray, const EawrHeroTray::Icon& icon,
+                                         const bool right, const bool double_click) {
+            if (!battle || !live_session || !space) return;
+            battle->hero_click(icon.hero, tray == EawrHeroTray::Tray::hostile, right, double_click,
+                               *live_session, *space);
+            sync_cards();
+        });
+    }
     // #454: an ability button's release becomes the battle input's ability request (a report line
     // until #76); scripted ability=N gestures find the N-th shown button.
     if (battle && live_session) {
@@ -1043,6 +1052,13 @@ void MapMode::State::sync_battle_hud() {
     // A battle that began some other way (a time-panel press) takes the screen with it.
     if (loading != nullptr && loading->shown() && !waiting) loading->dismiss();
     if (!hud) return;
+    const auto* saved_keys = ActiveSettings::get();
+    const bool wasd = saved_keys && saved_keys->camera_wasd;
+    for (const auto& [order, control] : std::array<std::pair<const char*, const char*>, 3>{{
+             {"attack", "IDC_EDIT_ATTACK"}, {"stop", "IDC_EDIT_STOP"}, {"waypoint", "IDC_EDIT_WAYPOINT"}}}) {
+        hud->set_order_shortcut(order, std::string(order) + " ("
+            + keyboard_key_label(ui::project_key_for(control, wasd)) + ")");
+    }
     const presentation::ui::TimeControls& time = live_session->time();
     const bool running = live_session->phase() == LiveSessionView::Phase::running;
     const auto& end = live_session->battle_end();
@@ -1065,10 +1081,14 @@ void MapMode::State::sync_battle_hud() {
             lan_incident->set_oversampling_with_scale(CanvasItem::OVERSAMPLING_WITH_SCALE_ENABLED);
             lan_incident->set_size(Vector2(1280, 96)); lan_incident->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
             layer->add_child(lan_incident);
+            auto* incident_frame = memnew(EawrUiFrame); incident_frame->set_small(true);
+            incident_frame->set_position(Vector2(12, 8)); incident_frame->set_size(Vector2(1256, 88));
+            lan_incident->add_child(incident_frame);
             auto* incident = memnew(EawrUiLabel); incident->set_name("LanIncidentText"); incident->set_role("L_Text"); incident->set_wrap(true);
             incident->set_position(Vector2(24, 20)); incident->set_size(Vector2(950, 72));
             incident->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); lan_incident->add_child(incident);
             auto* retry = memnew(EawrUiButton); retry->set_name("LanIncidentSave"); retry->set_toggle_mode(true);
+            retry->set_fit_to_rect(true);
             retry->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_SAVE", "Save").c_str()));
             retry->set_position(Vector2(1030, 20)); retry->set_size(Vector2(200, 36)); lan_incident->add_child(retry);
             lan_overlay->set_size(Vector2(820, 280));
@@ -1082,14 +1102,17 @@ void MapMode::State::sync_battle_hud() {
             message->set_position(Vector2(24, 20)); message->set_size(Vector2(772, 190));
             message->set_mouse_filter(Control::MOUSE_FILTER_IGNORE); lan_overlay->add_child(message);
             auto* leave = memnew(EawrUiButton); leave->set_name("LanLeave");
+            leave->set_fit_to_rect(true);
             leave->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_DISCONNECT_QUIT", "Leave").c_str())); leave->set_toggle_mode(true);
             leave->set_position(Vector2(280, 228)); leave->set_size(Vector2(200, 36));
             lan_overlay->add_child(leave);
             auto* rejoin = memnew(EawrUiButton); rejoin->set_name("LanRejoin");
+            rejoin->set_fit_to_rect(true);
             rejoin->set_text("Rejoin"); rejoin->set_toggle_mode(true);
             rejoin->set_position(Vector2(590, 228)); rejoin->set_size(Vector2(200, 36));
             lan_overlay->add_child(rejoin);
             auto* save = memnew(EawrUiButton); save->set_name("LanSaveDiagnostic");
+            save->set_fit_to_rect(true);
             save->set_text(String::utf8(hud->localized_text("TEXT_BUTTON_SAVE", "Save").c_str()));
             save->set_toggle_mode(true); save->set_position(Vector2(24, 228)); save->set_size(Vector2(200, 36));
             save->set_tooltip_text("Confirm automatically saved diagnostic details, or retry the local save"); lan_overlay->add_child(save);

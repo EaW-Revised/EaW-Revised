@@ -12,6 +12,9 @@
 
 namespace eawr::sim::tactical {
 
+// Selects the tactical provider; space remains the default for existing callers.
+enum class BattleDomain : std::uint32_t { space = 0, land = 1 };
+
 // Logical frame rate pinned by docs/behaviour/tactical-tick-rate.md: one tick is 1/30 s.
 inline constexpr std::uint32_t logical_frames_per_second = 30;
 inline constexpr std::uint32_t tick_numerator = 1;
@@ -539,6 +542,7 @@ inline constexpr std::string_view late_command = "EAWR-SIM-0307";
 inline constexpr std::string_view invalid_command = "EAWR-SIM-0308";
 inline constexpr std::string_view command_rejected = "EAWR-SIM-0309";
 inline constexpr std::string_view worker_failure = "EAWR-SIM-0310";
+inline constexpr std::string_view land_provider_unavailable = "EAWR-SIM-0311";
 } // namespace diagnostic_codes
 
 } // namespace eawr::sim::tactical

@@ -1141,7 +1141,7 @@ ai::GalacticPerceptionSetup stock_setup(const cp::CampaignSetupPlan& planned,
     setup.maximum_fleet_distance = eawr::script::numeric::from_fixed(*distance->number);
     for (const auto& binding : planned.player_bindings()) {
         const auto* faction = data.faction(binding.faction);
-        const bool human = planned.local_observer() == binding.player.player_id;
+        const bool human = planned.solo_reference_human() == binding.player.player_id;
         ai::GalacticPlayerFacts facts{binding.player.player_id, binding.player.player_id, binding.faction, "Normal",
             faction->is_neutral.value_or(false), !human, human, 0};
         for (const auto& home : planned.homes()) if (home.player == facts.player && home.planet) facts.home = *home.planet;
@@ -1183,7 +1183,7 @@ void installed() {
         const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
         options.players.push_back({{id, id, 0}, faction.name, true});
         const bool human = faction.name == source->starting_active_player;
-        if (human) options.local_observer = id;
+        if (human) options.solo_reference_human = id;
         if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id, human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, human ? id : 0});
     }
     std::vector<std::string> originals; for (const auto& type : types.types) originals.push_back(type.name);
@@ -1235,9 +1235,9 @@ void installed() {
     for (std::size_t i = 0; i < control_campaign.planets.size(); ++i) for (auto& planet : control_data.planets)
         if (ai::upper_case(planet.name) == ai::upper_case(control_campaign.planets[i])) planet.galactic_position = eawr::data::galactic::Position{whole(static_cast<std::int64_t>(i) * 20), {}, {}};
     auto control_options = options;
-    for (const auto& binding : control_options.players) if (binding.faction == "Underworld") control_options.local_observer = binding.player.player_id;
+    for (const auto& binding : control_options.players) if (binding.faction == "Underworld") control_options.solo_reference_human = binding.player.player_id;
     for (auto& seat : control_options.seats) {
-        const bool human = seat.player == control_options.local_observer;
+        const bool human = seat.player == control_options.solo_reference_human;
         seat.kind = human ? gc::SeatKind::human : gc::SeatKind::ai;
         seat.human_side_id = human ? seat.player : 0;
     }

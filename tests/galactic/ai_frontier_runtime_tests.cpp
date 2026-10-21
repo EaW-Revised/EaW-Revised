@@ -164,7 +164,7 @@ int case_galactic_ai_frontier_runtime_tests(int argc, char** argv) {
             options.players.push_back({{id, id, 0}, faction.name, local || opponent || !faction.is_playable.value_or(false)});
             if (local || opponent) options.seats.push_back({gc::SeatId{id}, id, local ? gc::SeatKind::human : gc::SeatKind::ai,
                 id - 1, true, local ? 1U : 0U});
-            if (local) { human = id; options.local_observer = id; }
+            if (local) { human = id; options.solo_reference_human = id; }
             if (opponent) selected.push_back({id, faction.name == "Empire" ? "BASICEMPIRE" : "BASICREBEL", "NORMAL", {}, {}});
         }
         expect(human && selected.size() == 2, "seeded frontier campaign uses both stock AI controllers");

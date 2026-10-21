@@ -189,6 +189,11 @@ public:
         // MAT-18: 3D sound events refused before the queue (retail's multiplier 0); started stays 0.
         std::uint64_t sfx_3d_refused{};
         std::uint64_t sfx_3d_started{};
+        // MAT-18: every battle event class is refused, including 2D death effects.
+        std::uint64_t audio_events_refused{};
+        std::uint64_t audio_events_admitted{};
+        std::uint64_t audio_events_started{};
+        std::uint64_t audio_deaths_2d_refused{};
     };
     [[nodiscard]] AttractStatus attract_status();
     // MAT-05: holds or releases the battle (the start timeout). A no-op without a session.

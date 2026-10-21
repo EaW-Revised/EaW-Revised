@@ -64,6 +64,10 @@ protected:
 private:
     struct Options;
     void read_host_options(const godot::PackedStringArray& arguments);
+    bool configure_preview_render_overrides(const godot::PackedStringArray& arguments);
+    void apply_preview_render_overrides();
+    std::optional<int> preview_vsync_;
+    std::optional<int> preview_max_fps_;
     void ready_battle_setup();
     bool ready_requested_mode();
     void ready_replay_scene();

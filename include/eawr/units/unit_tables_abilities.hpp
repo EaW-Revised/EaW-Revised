@@ -43,6 +43,8 @@ struct Ability final {
     std::uint32_t spawned_projectile_index{no_index};
     std::optional<Fixed> bomb_countdown_seconds, target_position_z_offset;
     std::string replenish_particle;
+    // WHE-78: presentation only; not part of the simulation content identity.
+    std::string concentrate_particle;
     // WLU-01: LURE's pulse data as authored (Target_Types names, the pulse period and count, the
     // Is_Pulsing flag the service never reads, and the presentation particle).
     std::vector<std::string> target_types;

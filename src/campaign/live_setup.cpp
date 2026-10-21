@@ -310,6 +310,11 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
     if (!movement) return core::Result<CampaignPlacementContext>::failure(movement.error());
     context.movement.types = movement.value().types; context.movement.players = movement.value().players;
     context.movement.mode_modifier = movement.value().base_mode_modifier;
+    std::vector<RaidFactionBinding> raid_factions;
+    for (const auto& binding : plan.player_bindings()) raid_factions.push_back({binding.player.faction_id, binding.faction});
+    auto raid = build_raid_inputs(p.starting.types, p.data, p.starting.bindings, raid_factions);
+    if (!raid) return core::Result<CampaignPlacementContext>::failure(raid.error());
+    context.movement.raid = std::move(raid).value();
     context.control.relations = p.relations.control;
     context.production.maximum_human_queue = 5; // WGEP-27 / WPR-30 fresh queue default.
     context.production.fleet_blockers.emplace();
@@ -371,7 +376,15 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
         production.maximum_ground_forces = 0; // installed from the control constant below.
         production.enabled = true; production.surface_accessible = control.surface_accessible;
         context.production.planets.push_back(std::move(production));
-        auto census = prepare_census_planet(*source, planet_type);
+        // WGP-191: planets have resolved object data but are intentionally
+        // absent from the ordinary starting-force type table.
+        std::optional<Fixed> history_power;
+        if (!original.empty()) {
+            auto power = number(data::retail::single(original, "AI_Combat_Power"), Fixed{});
+            if (!power) return core::Result<CampaignPlacementContext>::failure(power.error());
+            history_power = power.value();
+        }
+        auto census = prepare_census_planet(*source, planet_type, history_power);
         if (!census) return core::Result<CampaignPlacementContext>::failure(census.error());
         context.census.types.push_back(std::move(census).value());
         context.location_originals.push_back({control.planet, planet_type, location.initial_owner, control.planet, 0, false, false, 0, 0, gc::ActorCombatRole::unavailable, {}, {}});
@@ -450,7 +463,7 @@ core::Result<void> prepare_live_relations(Prepared& p, const data::galactic::Gal
         faction.benefits_from_corruption = faction.benefits_from_corruption.value_or(false);
         faction.minimum_visible_base_level = faction.minimum_visible_base_level.value_or(0);
     }
-    if (!plan.fiscal() || !plan.local_observer()) return refuse<void>("live root requires fiscal policy and a local observer");
+    if (!plan.fiscal() || plan.human_observers().empty()) return refuse<void>("live root requires fiscal policy and human observers");
     auto relations = prepare_initial_campaign_relations(data, plan.player_bindings());
     if (!relations) return core::Result<void>::failure(relations.error());
     p.relations = std::move(relations).value();
@@ -468,6 +481,7 @@ core::Result<void> prepare_live_starting_forces(Prepared& p, const data::Catalog
     // not inputs to a GC census merely because they share an XML behavior token.
     std::set<gc::TypeId> wanted{p.identity("Galactic_Fleet"), p.identity("Galactic_Squadron")};
     for (const auto& force : plan.forces()) wanted.insert(force.type);
+    for (const auto& hero : plan.multiplayer_heroes()) wanted.insert(hero.original_type_id);
     for (const auto& placement : plan.initial_placements()) wanted.insert(placement.type);
     for (const auto& binding : plan.type_bindings()) {
         const auto* type = types.find(binding.original_type);
@@ -512,17 +526,14 @@ core::Result<void> prepare_live_starting_forces(Prepared& p, const data::Catalog
         return core::Result<void>::success();
     };
     if (auto closed = close(wanted); !closed) return closed;
-    // #683: the units the campaign's own plots create can be placed at any time (WST-40), so they join the creation
-    // inputs with what they need. A unit that needs an unbound type stays out; its reward is declined by name when it
-    // runs. A story-only type may carry a political-protection source: it is placed, but the protection lifecycle
-    // (#2359) is not implemented, so the ability does not act yet. Types the campaign starts with keep the refusal below.
-    std::set<gc::TypeId> story_only;
+    // #683: plot-created units join the creation inputs with their dependencies
+    // (WST-40). Unbound rewards still decline by name when they run.
     for (const auto& name : story_units) {
         const auto id = p.identity(name);
         if (!id || wanted.contains(id)) continue;
         std::set<gc::TypeId> extra{id};
         if (!close(extra)) continue;
-        for (const auto added : extra) if (wanted.insert(added).second) story_only.insert(added);
+        wanted.insert(extra.begin(), extra.end());
     }
     std::vector<FleetTypeBinding> live_bindings;
     const std::set<std::string> type_inputs{"BUILD_COST_CREDITS", "BUILD_TIME_SECONDS", "TECH_LEVEL",
@@ -540,15 +551,8 @@ core::Result<void> prepare_live_starting_forces(Prepared& p, const data::Catalog
         p.identity("Galactic_Fleet"), p.identity("Galactic_Squadron"));
     if (!starting) return core::Result<void>::failure(starting.error());
     p.starting = std::move(starting).value();
-    // campaign_political_protection_sources (#2359): source identity and removal
-    // belong to the protection lifecycle, never to a sticky startup Boolean.
-    for (const auto& binding : p.starting.bindings) {
-        if (story_only.contains(binding.id)) continue;
-        const auto original = layers(p.catalog, binding.original_type, data::Category::game_object);
-        for (const auto* block : data::retail::list(original, "Abilities", data::retail::ListRule::replace_in_variant))
-            for (const auto& ability : block->children) if (key(ability.name) == "POLITICAL_CONTROL_PROTECTION_ABILITY")
-                return refuse<void>("campaign_political_protection_sources: source lifecycle provider required");
-    }
+    // GPC-01: original-type control abilities bind above and the canonical
+    // placed actors supply their source-keyed presence at root construction.
     return core::Result<void>::success();
 }
 
@@ -618,6 +622,16 @@ void install_live_placement_services(CampaignSetupServices& services,
     };
     // Root retains home records; setup does not publish presentation/Lua pointers.
     services.home = [](const CampaignHome&) { return core::Result<void>::success(); };
+    // WGS-14 / WGS-01a: production behavior may come from either authored list.
+    std::set<gc::PlanetId> producing_homes;
+    for (const auto& home : plan.homes()) if (home.planet) {
+        const auto* source = planet_source(*owned, plan, *home.planet);
+        if (source && (contains(source->behaviors, "PRODUCTION") || contains(source->galactic_behaviors, "PRODUCTION")))
+            producing_homes.insert(*home.planet);
+    }
+    services.home_has_production = [homes = std::move(producing_homes)](gc::PlanetId home) {
+        return core::Result<bool>::success(homes.contains(home));
+    };
     services.assign_tech = [](const CampaignTech& tech, const gc::GalacticSetup&) {
         return core::Result<std::int64_t>::success(std::clamp<std::int64_t>(tech.requested_current, 0, 5)); // WGS-13/73 prior fresh max.
     };
@@ -732,6 +746,7 @@ void install_live_ability_services(CampaignSetupServices& services,
             const auto original = layers(owned->catalog, binding.original_type, data::Category::game_object);
             bool market = false; std::optional<bool> market_enabled{true}; // WGCH-170/WGS-88 common enabled default
             const data::XmlNode* slicer = nullptr;
+            const data::XmlNode* market_ability = nullptr;
             std::vector<const data::XmlNode*> corruptors, hackers, destroyers, saboteurs, neutralizers;
             for (const auto* block : data::retail::list(original, "Abilities", data::retail::ListRule::replace_in_variant))
                 for (const auto& ability : block->children) {
@@ -742,7 +757,7 @@ void install_live_ability_services(CampaignSetupServices& services,
                     if (key(ability.name) == "GALACTIC_SABOTAGE_ABILITY") saboteurs.push_back(&ability);
                     if (key(ability.name) == "NEUTRALIZE_HERO_ABILITY") neutralizers.push_back(&ability);
                     if (key(ability.name) != "BLACK_MARKET_ABILITY") continue;
-                    market = true;
+                    market = true; market_ability = &ability;
                     for (const auto& value : ability.children) if (key(value.name) == "INITIALLY_ENABLED") {
                         data::tag_trace::used(&value); market_enabled = data::retail::boolean(value.raw_text);
                     }
@@ -783,6 +798,18 @@ void install_live_ability_services(CampaignSetupServices& services,
             if (!market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !victim
                 && !(original_metadata && original_metadata->named_hero.value_or(false))) continue;
             gc::GalacticAbilityProfile profile; profile.type = binding.id; profile.has_market = market;
+            for (const auto& [ability, kind] : {
+                std::pair{market_ability, gc::AbilityKind::black_market}, std::pair{slicer, gc::AbilityKind::technology_theft},
+                std::pair{corruptor, gc::AbilityKind::corruption}, std::pair{hacker, gc::AbilityKind::superweapon_hack},
+                std::pair{destroyer, gc::AbilityKind::planet_destruction}, std::pair{saboteur, gc::AbilityKind::structure_sabotage},
+                std::pair{neutralizer, gc::AbilityKind::hero_neutralization}}) {
+                if (!ability) continue;
+                for (const auto& value : ability->children) if (key(value.name) == "ACTIVATION_STYLE") {
+                    data::tag_trace::used(&value);
+                    const auto style = words(value.raw_text);
+                    if (style.size() == 1 && key(style.front()) == "GROUND_ACTIVATED") profile.ground_activated.push_back(kind);
+                }
+            }
             profile.lifecycle_only = !market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer;
             if (saboteur) {
                 profile.sabotage = gc::SabotageAbilityProfile{sabotage_name, true, Fixed::from_integer(2).value()}; // WGCH-28: stock factor two
@@ -1074,6 +1101,12 @@ void install_live_observer_service(CampaignSetupServices& services,
     const std::shared_ptr<const Prepared>& owned) {
     services.observer = [owned](const CampaignSetupPlan& input, const gc::GalacticSetup& setup) {
         gc::ObserverSetup result;
+        for (const auto* name : {"Good_Side_Name", "Evil_Side_Name", "Corrupt_Side_Name"}) {
+            const auto* configured = owned->data.constant(name);
+            if (!configured) continue;
+            for (const auto& binding : input.player_bindings())
+                if (key(binding.faction) == key(configured->text)) result.history_players.push_back(binding.player.player_id);
+        }
         if (!setup.control) return refuse<gc::ObserverSetup>("observer requires complete control presence");
         for (const auto& binding : input.player_bindings()) {
             const auto* faction = owned->data.faction(binding.faction);

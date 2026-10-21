@@ -148,11 +148,12 @@ or service configuration". The standalone mode feeds a fixed source from `--eawr
 - **Room code.** The field under the list takes the optional four-character code and attaches the room by
   its alias the same way. A pasted long invitation of the earlier two-player bridge is no alias: the room service refuses it.
 - **Host.** `Host Online` opens the host options with the password edit enabled: empty lists a public
-  room, a password makes it private. **Human players** offers two humans up to the chosen map's
-  player-row count (up to nine), just as LAN does. Each human has a separate row,
-  faction, colour and Team; the create dialog has no shared-sides Teams selector. Set alliances
+  room, a password makes it private. Skirmish player count is chosen with the staging rows (LLB-18),
+  after creating the room. Each human has a separate row, faction, colour and Team. Set alliances
   with the Team selector on each staging row (LLB-08/09), with one faction per team. Shared sides
-  are reserved for galactic conquest. Capacity is fixed while connected; changing it creates a new room.
+  and the human-side count remain separate galactic conquest controls. Room transport capacity is
+  a fixed upper bound from the largest loaded map; its directory count describes admission capacity,
+  while the occupied staging rows determine match players.
   The published state (`Listing your room…`, `Your room is listed.`, `Could not list your room.
   Trying again…`) shows as a notice line in the staging chat.
 - **Chat.** The window shows the service's room chat. Slice 1's service has room chat only, so before
@@ -175,9 +176,12 @@ visibility described in the earlier LLB-08 implementation no longer describes th
 
 Directory and room-code joins obtain the agreed capacity from the attached room roster before
 creating the mesh. Every skirmish human has a separate command seat and player row. A newcomer fills the next
-free human row with that row's own faction and unused default colour. Joined members appear by
+Open row with a loaded-team faction and unused default colour (LLB-18). Joined members appear by
 name on both host and joiner staging screens; AI rows keep their existing controls. The local
 skirmish screen keeps its retail eight-row layout; a nine-start map enables the ninth network row.
+For staging player names, a missing per-row skin font uses the first row's loaded font (legacy EAWR-4446).
+This follows the owner's requirement that every slot look alike. Explicit row or dialog combo fonts and row textures remain
+authoritative; row geometry still comes from the loaded dialog.
 The **My connections** button opens a scrollable list of all room seats, including vacancies. It shows
 your own named links as connecting, checking, direct, relayed or failed; a failed link says whether
 relay was available. Closing the list restores the map/settings view. The host can Start only after
@@ -191,6 +195,51 @@ Connection-state refreshes do not add chat lines. Confirmed battle departures na
 players in a banner that expires after ten seconds, and a removed player sees why they left once,
 in the terminal dialog. See the [nine-player crew runbook](../net-online-playtest.md)
 for the cross-network dry run and the logs to keep.
+
+## Seat controls and match player count (LLB-18)
+
+The control model is `presentation::ui::RowKind`, shared by the viewer and the staging codec.
+The current map supplies the available row count. Closed rows have no record, Open rows are
+explicit vacancies, and only Human and AI rows carry a faction, team and colour. AI rows retain
+their Easy, Medium or Hard level. There is no separate skirmish player-count selector before hosting.
+
+| Row | Host viewer | Joined human viewer | Source |
+|---|---|---|---|
+| Local host human | Fixed human; name, faction, team and colour editable | Read-only | Fixed local host: WSS-14. Network editing: project staging rule. |
+| Joined human | Cannot retype; Kick frees the row | Own name, faction, team and colour editable; may select a vacant Open row | Owner-requested protection and project staging rule (legacy EAWR-4041). Retail remote-human selector remains unverified. |
+| Open | Closed, Open, Easy AI, Medium AI, Hard AI | Read-only vacancy; own row selector can choose it | Choices: LLB-08 and WSS-14. Network join operation: owner-requested project rule. |
+| Closed | Same choices as Open | Read-only vacancy; cannot take it | Closed/none choice: LLB-08. Network admission: project rule. |
+| AI | Same choices as Open; faction, team, colour editable | Read-only; cannot replace it directly | AI choices: WSS-14 and LLB-08. Replacement: owner-requested project rule (legacy EAWR-4492). |
+
+A new human takes the lowest Open row. To make an AI row available, the host explicitly switches
+AI to Open first, then a newcomer joins it or an existing guest selects it. A leave, kick or move
+leaves Open; the host may close it or add an AI. These network transitions are project choices
+following the owner's request, not additional retail claims. An arrival with no Open row receives
+a named refusal without closing the host's room. New arrivals choose defaults only from loaded
+map teams, factions and unused multiplayer colours; vacancies keep no stale AI settings.
+As a project rule following the owner's request (legacy EAWR-4492), a vacated/Open row takes
+fresh loaded-team defaults when another human takes it, rather than the previous occupant's
+faction. A human staying in a row keeps their chosen faction, team and colour when the host
+changes Open/Closed/AI controls on other rows.
+
+Editable skirmish staging is version 3. Its ordered occupied records carry row kind and AI level;
+a separate ordered list names Open rows. Overlap, duplicate or out-of-range rows and unsupported
+versions are refused. The authoritative human roster overlays those bytes on every peer, including
+moves and departures. Match preparation receives only occupied rows: player count is Human + AI,
+with neither Open nor Closed producing an AI fallback or a simulation player. The existing final
+setup codec agrees those exact players, controller levels and setup bytes before the first tick.
+
+An online room can start below its transport capacity, including sparse transport indices. Every
+pair among the admitted humans must be verified and every human must accept. Roster-lock protocol 1
+compares the relay's exact membership revision and attached-seat mask. A pending reservation,
+attachment or membership change refuses Start without locking the room; the named reason asks
+players to wait for the roster and accept again. The host waits for the relay's locked-roster
+confirmation before publishing commitment. A relay predating this operation is refused by name
+and needs an update; the client never treats enqueueing Lock as confirmation. A departure or
+cancellation while confirmation is pending closes the room with a named instruction to create a
+new room, since the remote Lock may already have succeeded. An explicit service comparison refusal
+keeps staging open for another attempt. Galactic conquest
+keeps its existing staging and lock path.
 
 ## Fidelity list: gaps this note does not close
 

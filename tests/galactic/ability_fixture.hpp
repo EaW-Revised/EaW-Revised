@@ -107,7 +107,7 @@ inline void add_nested_creation(gc::GalacticSetup& s, std::initializer_list<gc::
 
 // Observer inputs for every player with all planets discovered; `types` are the original types the actors use.
 inline gc::ObserverSetup& add_observer(gc::GalacticSetup& s, gc::PlayerId local, std::initializer_list<gc::TypeId> types) {
-    auto& observer = s.observer.emplace(); observer.local_player = local;
+    auto& observer = s.observer.emplace(); observer.human_observers = {local}; observer.solo_reference_human = local;
     for (const gc::PlayerId id : all_players) observer.players.push_back({id, false, false, 0, 0, {}});
     for (const gc::TypeId type : types) observer.types.push_back({type, false, false, false});
     for (const auto& planet : s.planets) {

@@ -76,6 +76,9 @@ public:
     void setup(Setup setup);
     // The icons to draw, in slot order; redraws only when they change.
     void show(std::vector<Icon> friendly, std::vector<Icon> hostile);
+    // WHE-75/76: the caller resolves these identities again against live battle state.
+    using Click = std::function<void(Tray, const Icon&, bool right, bool double_click)>;
+    void set_click(Click click) { click_ = std::move(click); }
 
     [[nodiscard]] const std::vector<Icon>& icons(Tray tray) const noexcept {
         return icons_[static_cast<std::size_t>(tray)];
@@ -105,6 +108,7 @@ private:
                   std::int32_t level, double percent);
 
     Setup setup_;
+    Click click_;
     std::array<std::vector<Icon>, 2> icons_;
     std::optional<std::pair<Tray, std::size_t>> hovered_;
     godot::Vector2 laid_out_{-1.0F, -1.0F};

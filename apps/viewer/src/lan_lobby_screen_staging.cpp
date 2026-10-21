@@ -10,44 +10,50 @@ void EawrLanLobby::fill_host_seats(const std::uint32_t requested_count) {
     const skirmish::SetupMap* map = nullptr;
     if (impl_->map_index >= 0 && static_cast<std::size_t>(impl_->map_index) < resources_->maps.size())
         map = &resources_->maps[static_cast<std::size_t>(impl_->map_index)];
-    if (!map) {
-        // Before the first map choice, offer the largest loaded map; hosting selects a map that fits.
+    if (!map || impl_->host_options.game_type != galactic_game_type) {
+        // Reserve the largest loaded transport capacity; rows choose actual players.
         for (const auto& candidate : resources_->maps) {
             if (candidate.metadata.custom != impl_->custom_maps || !candidate.unavailable.empty()) continue;
             if (!map || network_row_count(candidate) > network_row_count(*map)) map = &candidate;
         }
     }
-    // LLB-08: every skirmish human occupies a separate authored player row.
+    // Transport capacity is an upper bound. The staging rows choose actual players (LLB-18).
+    // Campaign hosting retains its separate human-side configuration.
     const auto seat_limit = map ? network_row_count(*map) : 0U;
-    for (std::uint32_t humans = 2; humans <= seat_limit; ++humans)
-        seats->add_item(text(std::to_string(humans)), static_cast<int>(humans));
-    if (seat_limit >= 2) {
-        const auto count = std::clamp(requested_count == 0 ? static_cast<std::uint32_t>(impl_->human_owners.size())
-            : requested_count, 2U, seat_limit);
-        seats->select(static_cast<int>(count) - 2);
-        impl_->human_owners.resize(count);
-        std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U);
+    if (map && impl_->map_index < 0 && page_ == Page::host_options)
+        impl_->map_index = static_cast<int>(map - resources_->maps.data());
+    if (impl_->host_options.game_type != galactic_game_type) {
+        if (page_ == Page::host_options) {
+            impl_->human_owners.resize(seat_limit);
+            std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U);
+        }
+        seats->hide();
+        if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->hide();
+    } else {
+        seats->show();
+        if (auto* label = EAWR_CONTROL(EawrUiLabel, "IDC_TEXT_HOST_CLAN")) label->show();
+        for (std::uint32_t humans = 2; humans <= seat_limit; ++humans)
+            seats->add_item(text(std::to_string(humans)), static_cast<int>(humans));
+        if (seat_limit >= 2) {
+            const auto count = std::clamp(requested_count == 0 ? static_cast<std::uint32_t>(impl_->human_owners.size()) : requested_count, 2U, seat_limit);
+            seats->select(static_cast<int>(count) - 2);
+            impl_->human_owners.resize(count);
+            std::iota(impl_->human_owners.begin(), impl_->human_owners.end(), 1U);
+        }
+        seats->set_disabled(seat_limit < 2);
     }
-    seats->set_disabled(seat_limit < 2);
-    seats->set_tooltip_text("Each human has a player row. Set alliances with each row's Team in staging.");
     state_->loading = was_loading;
 }
 
 void EawrLanLobby::prepare_host_rows(const skirmish::SetupMap& map) {
-    const std::set<sim::tactical::PlayerId> owners(impl_->human_owners.begin(), impl_->human_owners.end());
-    for (const auto owner : owners) {
-        if (owner > network_row_count(map)) {
-            note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice,
-                "A planned human owner is outside this map's loaded rows.")));
-            return;
-        }
-        if (std::any_of(impl_->selection.slots.begin(), impl_->selection.slots.end(), [&](const auto& row) { return row.slot == owner; })) continue;
-        // Reuse data-driven defaults; a human row may join an existing team (LLB-08/09).
-        if (auto added = append_lan_ai_row(impl_->selection, map, owner, resources_->palette.size()); !added) {
-            note_chat(model::ChatKind::error, core::format_diagnostic(net::lobby_diagnostic(net::LobbyReason::invalid_choice, added.error().message)));
-            return;
-        }
+    std::erase_if(impl_->selection.open_slots, [&](const auto slot) { return slot > network_row_count(map); });
+    if (match_->lobby_state()) return; // Explicit Closed rows survive subsequent map edits.
+    for (std::uint32_t slot = 2; slot <= network_row_count(map); ++slot) {
+        if (std::none_of(impl_->selection.slots.begin(), impl_->selection.slots.end(), [&](const auto& row) { return row.slot == slot; })
+            && std::find(impl_->selection.open_slots.begin(), impl_->selection.open_slots.end(), slot) == impl_->selection.open_slots.end())
+            impl_->selection.open_slots.push_back(slot);
     }
+    std::sort(impl_->selection.open_slots.begin(), impl_->selection.open_slots.end());
 }
 
 void EawrLanLobby::begin_hosting() {
@@ -82,6 +88,7 @@ void EawrLanLobby::begin_hosting() {
         return;
     }
     match_->configure_seats(impl.human_owners);
+    match_->configure_staging_capacity(impl.host_options.game_type != galactic_game_type);
     match_->set_port_mapping(state_->port_mapping && state_->port_mapping->is_pressed());
     configure_staging();
     if (online) match_->set_public_invitation(impl.host_password.empty());
@@ -295,6 +302,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
         }
     } else {
         impl.selection = skirmish::SetupSelection{};
+        impl.selection.slots.resize(1); // The host starts alone; other rows are Open.
         impl.selection.match = resources.defaults;
         // Host options bounded the human count against this map; keep it for the new room.
         impl.remote_colour_applied = false;
@@ -332,14 +340,15 @@ void EawrLanLobby::fill_map_list() {
         impl.listed.push_back(index);
         list->add_item(text(map.name + (map.unavailable.empty() ? "" : " (unavailable)")));
         list->set_item_tooltip(list->get_item_count() - 1, text(map.unavailable.empty() ? map.path : map.unavailable));
-        list->set_item_disabled(list->get_item_count() - 1, network_row_count(map) < impl.human_owners.size());
+        list->set_item_disabled(list->get_item_count() - 1, !lan_map_supports_rows(map, impl.selection.slots));
+        list->set_item_selectable(list->get_item_count() - 1, lan_map_supports_rows(map, impl.selection.slots));
         if (map.path == previous) initial = list->get_item_count() - 1;
     }
     impl.map_index = -1;
     if (!impl.listed.empty()) {
-        if (network_row_count(resources.maps[impl.listed[static_cast<std::size_t>(initial)]]) < impl.human_owners.size()) {
+        if (!lan_map_supports_rows(resources.maps[impl.listed[static_cast<std::size_t>(initial)]], impl.selection.slots)) {
             const auto fitting = std::find_if(impl.listed.begin(), impl.listed.end(), [&](const auto index) {
-                return resources.maps[index].unavailable.empty() && network_row_count(resources.maps[index]) >= impl.human_owners.size();
+                return resources.maps[index].unavailable.empty() && lan_map_supports_rows(resources.maps[index], impl.selection.slots);
             });
             initial = fitting == impl.listed.end() ? -1 : static_cast<int>(fitting - impl.listed.begin());
         }

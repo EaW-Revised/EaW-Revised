@@ -372,7 +372,7 @@ core::Result<void> SpaceEntryPreparation::deploy_initial_forces() {
             // WGT-114: advance once for a qualifying transport, after all passengers.
             if (type->transport && std::any_of(input.riders.begin(), input.riders.end(), [&](const auto& rider) {
                 const auto* passenger = type_of(input, rider.force.type);
-                return rider.transport == id && passenger && (!passenger->unique_space_unit.empty()
+                return rider.transport == id && rider.force.owner == owner && passenger && (!passenger->unique_space_unit.empty()
                     || !passenger->attach_to_flagship || !flagships[owner].second);
             })) cursor = (cursor + 1) % sequence.size();
             // WGT-17/37: escort objects have child-only identities and are discarded on return.
@@ -417,8 +417,15 @@ core::Result<void> SpaceEntryPreparation::attach_passengers() {
         if (!type || rider.force.id == 0 || rider.force.id >= first_free || rider.force.id == record.id)
             return fail<void>("invalid passenger identity or binding");
         const auto transport = std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [&](const auto& f) { return f.id == rider.transport; });
-        if (transport == plan.conflict.forces.end() || transport->owner != rider.force.owner)
-            return fail<void>("passenger has no owning transport");
+        if (transport == plan.conflict.forces.end() || transport->owner != rider.force.owner) {
+            // A passenger whose transport is not in this entry (absent from the conflict forces, or held by
+            // another owner) cannot be carried into the scene. It is left out of the entry and stays in its
+            // campaign container untouched; the entry still starts.
+            plan.notes.push_back("passenger " + std::to_string(rider.force.id) + " left out of the space entry: transport "
+                + std::to_string(rider.transport) + (transport == plan.conflict.forces.end() ? " is not part of the conflict"
+                    : " belongs to another owner"));
+            continue;
+        }
         rider.force.tactical_type = battle::type_id(rider.tactical);
         rider.force.carrier = rider.transport;
         rider.force.role = transport->role == ForceRole::retained ? ForceRole::retained : ForceRole::reinforcement;
@@ -1003,6 +1010,7 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
     if (!built) return built;
     auto& entry = built.value();
     entry.scene_upgrades = std::move(upgrades).value();
+    entry.notes = plan.notes;
     if (modifier_count) {
         const auto translate = [&](sim::EntityId id) { return id >= modifier_first ? id + modifier_count : id; };
         if (*entry.start.setup.first_free_entity_id > std::numeric_limits<sim::EntityId>::max() - modifier_count)

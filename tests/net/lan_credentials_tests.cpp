@@ -1,5 +1,6 @@
 #include "setup_test_support.hpp"
 #include "eawr/net/lan_credentials.hpp"
+#include <array>
 #include <deque>
 #include <iostream>
 #include <cstdlib>
@@ -106,6 +107,39 @@ void provision(std::uint32_t count, bool mesh_repair = false) {
     auto erased = next; erased.erase();
     for (const auto& token : erased) expect(std::all_of(token.begin(), token.end(), [](auto byte) { return byte == 0; }), "owned token storage zeroized");
 }
+// NET-1020: an online room's transport table (capacity 8) is wider than the admitted roster (3 humans on dense peers 0..2, AI rows have no peer).
+void sparse_roster() {
+    auto agreed = offer(); agreed.recovery.reconnect = false;
+    agreed.setup = require(net::encode_skirmish_setup(human_setup(3)));
+    agreed.seats.clear();
+    const std::array<net::PeerIndex, 3> peers{0, 1, 2};
+    for (std::size_t row = 0; row < peers.size(); ++row) agreed.seats.push_back({peers[row], sim::SeatId{static_cast<unsigned>(row) + 1}, static_cast<unsigned>(row) + 1});
+    Stream host; host.count = 8;
+    net::LanReconnectCredentials provider;
+    const auto tokens = require(provider.provide_mesh_repair(agreed, host));
+    expect(tokens.size() == 8 && net::valid_reconnect_tokens(tokens, 0, 8), "host keys cover the whole transport table");
+    expect(host.sent.size() == 2 && host.sent[0].from == 1 && host.sent[1].from == 2, "credentials go only to admitted seats");
+    expect(!provider.delivered(), "no delivery before the admitted seats acknowledge");
+    for (const net::PeerIndex seat : {1U, 2U}) {
+        Stream join; join.index = seat; join.count = 8;
+        net::LanReconnectCredentials receiver;
+        auto delivery = std::move(host.sent.front()); host.sent.pop_front(); delivery.from = 0;
+        expect(require(receiver.receive(delivery, join)), "wide-table delivery consumed");
+        const auto row = require(receiver.provide_mesh_repair(agreed, join));
+        expect(row.size() == 8 && row[0] == tokens[seat], "seat receives its pair key with the host");
+        auto ack = std::move(join.sent.front()); ack.from = seat;
+        expect(require(provider.receive(ack, host)), "wide-table acknowledgement consumed");
+    }
+    expect(provider.delivered(), "delivery completes on the admitted seats alone");
+    Stream outsider; outsider.index = 5; outsider.count = 8;
+    net::LanReconnectCredentials stranger;
+    expect(!stranger.provide_mesh_repair(agreed, outsider), "a slot outside the roster is refused");
+    auto duplicate = agreed; duplicate.seats[2].peer = 1;
+    net::LanReconnectCredentials repeated; host.sent.clear();
+    expect(!repeated.provide_mesh_repair(duplicate, host), "duplicate roster peers refused");
+    auto beyond = agreed; beyond.seats[2].peer = 8;
+    expect(!repeated.provide_mesh_repair(beyond, host), "roster peer beyond the table refused");
+}
 void refusals() {
     auto agreed = offer(); agreed.recovery.reconnect = true;
     agreed.setup = require(net::encode_skirmish_setup(human_setup(3)));
@@ -178,6 +212,7 @@ int main() {
         Stream pair;
         net::LanReconnectCredentials pair_keys;
         expect(!pair_keys.provide_mesh_repair(offer(), pair), "mesh repair credentials require at least three room members");
+        sparse_roster();
         refusals();
         owned_destructor_erasure();
         std::cout << "LAN reconnect credential contracts passed\n";

@@ -18,12 +18,14 @@ struct ForcePlacement {
 struct ResolvedConflictEntry {
     ConflictRecord conflict;
     sim::tactical::TacticalContent content;
+    std::vector<std::string> notes{}; // entry-time drops (an orphan passenger), published once as diagnostics, never saved
 };
 struct ConflictEntry {
     ConflictRecord conflict;
     sim::tactical::TacticalContent content;
     battle::BattleStart start;
     std::vector<sim::tactical::CampaignUpgrade> scene_upgrades; // pre-force ledger inputs, WGT-113
+    std::vector<std::string> notes{}; // see ResolvedConflictEntry::notes
 };
 // first_free is the galaxy allocator after reserving the conflict and all persistent objects.
 // The returned setup advances it past battle-only map objects and squadron craft (ADR-014).

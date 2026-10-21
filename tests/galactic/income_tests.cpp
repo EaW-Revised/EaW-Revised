@@ -98,7 +98,7 @@ void ruined_income_readers() {
             config.control->planets[0].surface_accessible = false;
             config.ability_host->ruined_income[0].credits = f(base);
             // WGUI-13: this contract observes the complete income breakdown.
-            config.observer->local_player = config.planets[0].owner;
+            config.observer->human_observers = {config.planets[0].owner}; config.observer->solo_reference_human = config.planets[0].owner;
             const auto intelligence = gc::bit(gc::Intelligence::income_breakdown);
             for (auto& row : config.observer->players) row.default_intelligence = intelligence;
             for (auto& row : config.observer->records) row.mask = intelligence;
@@ -200,7 +200,7 @@ void nested_sources() {
         }
         std::sort(census.objects.begin(), census.objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         config.observer.emplace(); auto& observer = *config.observer;
-        observer.local_player = 1;
+        observer.human_observers = {1}; observer.solo_reference_human = 1;
         const auto intelligence = gc::bit(gc::Intelligence::income_breakdown);
         for (const auto& player : config.players) observer.players.push_back({player.player_id, false, false, intelligence});
         for (const auto& planet : config.planets) {
@@ -459,7 +459,7 @@ std::string planet_reduction_card(const gc::EconomicReduction& reduction, std::s
     config.income->types[0].reductions = {row};
     config.income->sources[0].owner = config.planets[0].owner;
     config.observer.emplace(); auto& observer = *config.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     observer.players = {{1, false, false, 0, 1, {}}, {2, true, false, 0, 1, {}}};
     observer.types = {{1000, false, false, false}};
     for (const auto& planet : config.planets) {
@@ -537,7 +537,7 @@ gc::GalacticSetup technology_setup(const gc::EconomicType& profile, gc::Producti
         gc::CorruptionEconomyPlayer row; row.player = player.player_id; row.faction = row.player * 10;
         row.human = row.playable = true; economy.players.push_back(row);
     }
-    config.observer.emplace(); auto& observer = *config.observer; observer.local_player = 1;
+    config.observer.emplace(); auto& observer = *config.observer; observer.human_observers = {1}; observer.solo_reference_human = 1;
     observer.players = {{1, false, false, 0, 1, {}}, {2, true, false, 0, 1, {}}};
     observer.types = {{1000, false, false, false}};
     for (auto& location : config.production->planets) {
@@ -811,7 +811,7 @@ void publication_cache() {
     config.income->types[1].gambling.reset();
     config.observer.emplace();
     auto& observer = *config.observer;
-    observer.local_player = 1;
+    observer.human_observers = {1}; observer.solo_reference_human = 1;
     // This source-publication fixture needs breakdown knowledge even after capture.
     // Discovery alone does not admit an income breakdown (WGUI-13).
     const auto intelligence = gc::bit(gc::Intelligence::income_breakdown);
@@ -934,7 +934,7 @@ void political_income_retention() {
         rules.factions = {{1, gc::IncomeAlignment::neutral}, {2, gc::IncomeAlignment::neutral}};
         for (const auto& planet : config.planets) {
             gc::ControlPlanet row; row.planet = planet.id; row.type = 900;
-            row.ground_base = {planet.owner, 1}; row.protected_control = true; control.planets.push_back(row);
+            row.ground_base = {planet.owner, 2}; control.planets.push_back(row);
             gc::PlanetControl state; state.planet = planet.id; state.initialized = true;
             state.current_player = state.target_player = planet.owner; state.current = state.target = f(2);
             state.political_income = f(-7); control.state.push_back(state);
@@ -979,7 +979,7 @@ void land_return_publication() {
     auto config = setup();
     config.income->types[1].gambling.reset();
     config.observer.emplace();
-    config.observer->local_player = 1;
+    config.observer->human_observers = {1}; config.observer->solo_reference_human = 1;
     const auto intelligence = gc::bit(gc::Intelligence::income_breakdown);
     for (const auto& player : config.players) config.observer->players.push_back({player.player_id, false, false, intelligence});
     for (const auto& planet : config.planets) {

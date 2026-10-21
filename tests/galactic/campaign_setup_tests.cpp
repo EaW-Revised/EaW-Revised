@@ -76,6 +76,7 @@ cp::CampaignSetupOptions options(gc::PlayerId human = 1) {
         {{3, 3, 0}, "UNDERWORLD", true}, {{4, 4, 0}, "NEUTRAL", true}};
     for (gc::PlayerId id = 1; id <= 3; ++id)
         o.seats.push_back({gc::SeatId{id}, id, id == human ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, id == human ? 1U : 0U});
+    o.solo_reference_human = human;
     o.types = {{7, "Ship"}, {8, "Base"}}; return o;
 }
 cp::CampaignSetupServices services(std::vector<std::string>& trace) {
@@ -304,12 +305,12 @@ void observer_start() {
     gc::ObserverPlanet explicit_planet; explicit_planet.space_stealth = true;
     const auto sourced_planet = cp::prepare_observer_planet(metadata_planet, explicit_planet);
     expect(!sourced_planet.space_stealth && sourced_planet.ground_stealth, "independent authored stealth flags override explicit producer values");
-    auto opts = options(); opts.local_observer = 1;
+    auto opts = options(); opts.solo_reference_human = 1;
     const auto selected = cp::plan_campaign_setup(data(), types(), "Ordinary", opts).value();
     std::vector<std::string> trace;
     auto live = services(trace);
     live.observer = [](const auto& context, const auto& setup) {
-        expect(context.local_observer() == gc::PlayerId{1} && setup.player_economy.has_value(), "observer install follows authored setup and economy");
+        expect(context.solo_reference_human() == gc::PlayerId{1} && setup.player_economy.has_value(), "observer install follows authored setup and economy");
         gc::ObserverSetup observer; observer.reveal_delay_seconds = f(1); observer.automatic_reveal_range = f(10);
         const auto metadata = data();
         for (std::size_t i = 0; i < setup.players.size(); ++i) {
@@ -362,7 +363,10 @@ void observer_start() {
     auto missing = cp::CampaignRoot::create(no_home, live).value();
     expect(std::none_of(missing.game()->galaxy().snapshot()->observations().begin(), missing.game()->galaxy().snapshot()->observations().end(),
         [](const auto& row) { return row.discovered; }), "missing home never invents a replacement or startup flood");
-    expect(!cp::CampaignRoot::create(plan(), live), "observer provider requires explicit local identity");
+    auto no_humans = options(); no_humans.solo_reference_human.reset();
+    for (auto& seat : no_humans.seats) { seat.kind = gc::SeatKind::ai; seat.human_side_id = 0; }
+    const auto no_human_plan = cp::plan_campaign_setup(data(), types(), "Ordinary", no_humans).value();
+    expect(!cp::CampaignRoot::create(no_human_plan, live), "observer provider requires a canonical human roster");
     auto retained = live;
     retained.observer = [live](const auto& context, const auto& setup) {
         auto result = live.observer(context, setup); result.value().records.push_back({}); return result;
@@ -602,8 +606,8 @@ void installed() {
             [&](const auto& binding) { return loaded.faction(binding.faction) == loaded.faction("UNDERWORLD"); });
         expect(local_binding != preview_options.players.end(), "stock preview binds the authored starting faction");
         if (local_binding == preview_options.players.end()) return;
-        preview_options.local_observer = local_binding->player.player_id;
-        for (auto& seat : preview_options.seats) if (seat.player == *preview_options.local_observer)
+        preview_options.solo_reference_human = local_binding->player.player_id;
+        for (auto& seat : preview_options.seats) if (seat.player == *preview_options.solo_reference_human)
             seat = {seat.seat_id, seat.player, gc::SeatKind::human, 0, true, 1};
         const auto prepared = eawr::platform::PreparedLiveCampaign::create(filesystem_owner, catalog.catalog,
             loaded, table, "Sandbox_Equal_Footing_Underworld", preview_options, "Normal_Default");
@@ -612,7 +616,7 @@ void installed() {
         const auto publication = prepared.value()->snapshot();
         expect(publication->observer().has_value(), "stock preview publishes the local observer");
         if (publication->observer()) {
-            const auto local = publication->observer()->local_player;
+            const auto local = publication->observer()->solo_reference_human;
             const auto sight = eawr::viewer::galactic::live_fleet_visibility(*publication);
             const auto fleets = gc::observed_fleets(*publication, local, {}, 8, sight);
             std::size_t home_fleets{};
@@ -717,7 +721,7 @@ void installed() {
         std::size_t rows{};
         const auto begin = std::chrono::steady_clock::now();
         for (std::size_t i = 0; i < iterations; ++i)
-            rows += gc::observed_planets(*layout.observer, layout.fleets).size();
+            rows += gc::observed_planets(*layout.observer, layout.fleets, {}).size();
         const auto end = std::chrono::steady_clock::now();
         const auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
         auto session = gc::GalacticSession::create(layout).value();

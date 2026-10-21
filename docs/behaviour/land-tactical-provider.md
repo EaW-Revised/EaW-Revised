@@ -1,15 +1,22 @@
 # Land tactical provider qualification
 
-The campaign owner retains its land tactical refusal. The current entry builder and
+The campaign layer dispatcher retains its land tactical refusal. The current entry builder and
 stock scene provider implement space; no land gameplay winner or scripted automatic
 result is supplied by this qualification. Ordinary auto-resolve remains its separately
 qualified world solver.
+
+Entry, content, scripts, child configuration and result decoration/application belong
+to the conflict's layer. Stock space services, including parent AI queries, are installed
+only for space and rebound there on restore. Land admission selects auto-resolve through
+the same dispatcher; a forced or direct land child request receives
+`EAWR-CONFLICT-TACTICAL-UNAVAILABLE` before any space hook runs. These provider bindings
+are runtime services, not new checkpoint fields or simulation state.
 
 | Required provider capability | Source | Current boundary |
 |---|---|---|
 | Land scene and persistent payload identities | [WGT-78..81](walks/gc-tactical.md) | Missing land entry owner: defender then attacker creation, transport-parent payloads, unique vehicle and structure-hosted hero branches cannot use the space builder. |
 | Capacity, allied landing points and constituent validation | [WR-79..84](walks/reinforcements.md), [WGA-239](walks/gc-ai.md) | Missing land population/pathfinder/reinforcement provider. Do not count transports as constituent capacity or accept a space reach bypass. |
-| Captured structures and persistent return | [WGT-82..85](walks/gc-tactical.md) | Missing land reconciliation owner; WGT-U12 retains callback qualification. |
+| Captured structures and persistent return | [WGT-82..85](walks/gc-tactical.md), [WGM-187](walks/gc-movement-control.md) | Per-planet tactical-built records retain type, fixed position, enable level and owner. The land result applier filters backwards to the winner on automatic and child returns, including fresh checkpoint owners. Land spawning and complete capture/holder callbacks remain missing under WGT-U12. |
 | Land AI player/type/difficulty and system initialization | [WGA-241..245](walks/gc-ai.md) | Missing land manager/provider, distinct from the hosted space goal engine. |
 | Retained battle accounts | [WGA-196..201/207](walks/gc-ai.md) | Pure funding transfers exist; actual shared-account enter/additional-release/shutdown routing and conflict/release keys remain unbound until the land lifecycle exists. |
 | Native child continuation | [WGS-66](walks/gc-session-save.md), [WGA-243..245](walks/gc-ai.md) | Space Engine/Freestore archives use the authoritative child host payload. Land reinforcement slots, factories and listeners require their actual owning land systems; WGT-U13 remains open. |

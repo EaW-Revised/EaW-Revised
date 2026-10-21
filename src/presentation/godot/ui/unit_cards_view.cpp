@@ -500,8 +500,9 @@ void EncyclopediaPopupRenderer::update(const EncyclopediaPopupStyle& setup,
     const bool against = !popup_content_.good_against_icons.empty() || !popup_content_.vulnerable_to_icons.empty();
     const Vector2 panel_size = art_size("e_against_frame.tga") * scale;
     const float icon = panel_size.x / 3.0F;
-    // WGUI-166 fleet cells: the unit icon at its texel size, halved from 52
-    // texels; a count-only cell (no icon) takes the first resolved icon's size.
+    // WGUI-166: the fleet list applies encyclopedia_icon's Size X after
+    // ordinary list-button setup, replacing its temporary icon scale. A
+    // count-only cell takes the first resolved icon's size.
     Vector2 blank = art_size(fallback_portrait);
     for (const auto& cell : popup_content_.cells) {
         if (const auto size = cell.icon.empty() ? Vector2() : art_size(cell.icon); size.x > 0.0F) { blank = size; break; }
@@ -512,10 +513,10 @@ void EncyclopediaPopupRenderer::update(const EncyclopediaPopupStyle& setup,
     for (const auto& cell : popup_content_.cells) {
         Vector2 size = cell.icon.empty() ? Vector2() : art_size(cell.icon);
         if (size.x <= 0.0F) size = blank;
-        if (size.x >= 52.0F) size *= 0.5F;
+        size *= setup.popup_icon_scale.x;
         if (cell_sizes.size() % model::encyclopedia_cell_columns == 0) { cells_height += row_height; row_height = 0.0F; }
         cell_sizes.push_back(size * scale);
-        row_height = std::max(row_height, size.y * scale);
+        row_height = std::max(row_height, std::ceil(size.y * scale));
     }
     if (!cell_sizes.empty()) cells_height += row_height + padding;
     const float height = padding * 3.0F + header_height + body_height + (against ? row + panel_size.y : 0.0F) + cells_height;
@@ -594,8 +595,9 @@ void EncyclopediaPopupRenderer::update(const EncyclopediaPopupStyle& setup,
         const Vector2 centre = box.get_center() + Vector2(setup.popup_cell_offset.x, setup.popup_cell_offset.y) * scale;
         popup_cell_text_[index]->draw(*popup_text_owner_, caption, count >= 2 ? String("x") + String::num_int64(count) : String(),
             Rect2(centre - Vector2(25.0F, 6.0F) * scale, Vector2(50.0F, 12.0F) * scale), HORIZONTAL_ALIGNMENT_CENTER, true, false, scale, 1.0F);
-        cell_at.x += box.size.x;
-        row_height = std::max(row_height, box.size.y);
+        // WGUI-166: list cells advance by whole display pixels.
+        cell_at.x += std::ceil(box.size.x);
+        row_height = std::max(row_height, std::ceil(box.size.y));
     }
 }
 

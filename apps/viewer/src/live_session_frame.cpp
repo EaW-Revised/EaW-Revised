@@ -54,6 +54,7 @@ constexpr std::size_t fading_log_limit = 8192;
 
 void LiveSessionView::apply_time() {
     if (!session_) return;
+    if (session_->agreed_pacing()) return; // loading, Begin and results are local presentation only
     session_->set_paused((phase_ != Phase::running && phase_ != Phase::quitting) || !time_.running());
     session_->set_target_rate(time_.target_rate());
 }
@@ -81,16 +82,29 @@ void LiveSessionView::press_pause() {
     if (options_.lan) return;
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
+    if (session_ && session_->agreed_pacing()) {
+        if (time_.press_pause(session_->completed_tick())) session_->set_paused(time_.paused());
+        return;
+    }
     if (session_ && time_.press_pause(session_->completed_tick())) apply_time();
 }
 
 bool LiveSessionView::request_speed(const std::uint32_t step) {
+    if (session_ && phase_ == Phase::running && session_->agreed_pacing()) {
+        if (step >= ui::speed_step_rates.size()) return false;
+        session_->set_target_rate(ui::speed_step_rates[step]);
+        return true;
+    }
     return options_.lan && phase_ == Phase::running && options_.lan->request_speed(step);
 }
 
 void LiveSessionView::press_fast_forward() {
     if (options_.lan) return;
     if (phase_ != Phase::running) return;
+    if (session_) if (const auto pace = session_->agreed_pacing()) {
+        if (!pace->paused && time_.press_fast_forward(session_->completed_tick())) session_->set_target_rate(time_.target_rate());
+        return;
+    }
     if (session_ && time_.press_fast_forward(session_->completed_tick())) apply_time();
 }
 
@@ -98,6 +112,9 @@ void LiveSessionView::resume() {
     if (options_.lan) return;
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
+    if (session_ && session_->agreed_pacing()) {
+        static_cast<void>(time_.resume(session_->completed_tick())); session_->set_paused(false); return;
+    }
     if (session_ && time_.resume(session_->completed_tick())) apply_time();
 }
 
@@ -126,7 +143,8 @@ void LiveSessionView::quit() {
     phase_ = Phase::quitting;
     // The scheduled command needs one tick even when Quit was pressed while paused.
     static_cast<void>(time_.resume(session_->completed_tick()));
-    apply_time();
+    if (session_->agreed_pacing()) session_->set_paused(false); // explicit Quit must reach an unpaused child
+    else apply_time();
     if (!options_.real_time) session_->advance_to(scheduler_->open_tick() + 1U);
 }
 
@@ -337,6 +355,19 @@ core::Diagnostic LiveSessionView::frame_failure(std::string message) const {
 }
 
 void LiveSessionView::synchronize_frame_lan() {
+    if (session_) if (const auto pace = session_->agreed_pacing()) {
+        const auto tick = session_->completed_tick();
+        const auto rate = std::find(ui::speed_step_rates.begin(), ui::speed_step_rates.end(), pace->target_rate);
+        if (rate != ui::speed_step_rates.end()) static_cast<void>(time_.set_speed_step(
+            static_cast<std::uint32_t>(rate - ui::speed_step_rates.begin()), tick));
+        if (pace->paused) {
+            if (!time_.paused()) static_cast<void>(time_.press_pause(tick));
+        } else {
+            static_cast<void>(time_.resume(tick));
+            if ((time_.state() == ui::TimeState::fast_forward) != (pace->target_rate == ui::fast_forward_rate))
+                static_cast<void>(time_.press_fast_forward(tick));
+        }
+    }
     if (options_.lan) {
         const auto view = options_.lan->view();
         if (lan_gameplay_enabled(view)) recovery_input_feedback_.clear();
@@ -928,6 +959,12 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(SpacePopula
                     const auto& turret = *pose.instance->object_turret;
                     placed.turret = SpacePopulation::LivePose::TurretPose{turret.yaw, turret.pitch,
                         pose.instance->object_turret_xy_only, pose.instance->object_turret_barrel};
+                }
+                // WAD-40: draw the mechanical pose that already gates the manual shot.
+                for (const auto& weapon : pose.instance->manual_weapons) {
+                    if (!weapon.admission_profile || !weapon.admission_profile->manual_turret) continue;
+                    placed.hardpoint_turrets.push_back({weapon.hardpoint,
+                        {weapon.yaw, weapon.pitch, false, weapon.admission_profile->manual_turret->barrel}});
                 }
                 for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
                     if (ability.kind == tactical::AbilityKind::defend && ability.active) placed.defend_active = true;

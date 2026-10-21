@@ -543,6 +543,10 @@ void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const dat
                     static_cast<std::uint32_t>(size.y)}, state.options.rules);
                 return model::build_theme_model(sources, space);
             };
+            // Match notices use the same kit controls as the menus. The command
+            // bar's mesh textures alone do not supply their frame/button slots.
+            // These notices lay out in a 1280x720 canvas and scale as a whole.
+            hud->set_theme(build_theme(theme_for(Vector2(1280, 720)), *textures, *state.fonts));
             overlay.results_dialog = [&state, skin, textures, fonts = state.fonts, theme_for](const Vector2 size) {
                 const auto* dialog = skin->script.find("IDD_BATTLE_END_DIALOG");
                 if (dialog == nullptr) {

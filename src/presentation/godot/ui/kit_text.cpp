@@ -1,3 +1,4 @@
+#include "gpu_debug_labels.hpp"
 #include "kit_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -82,6 +83,7 @@ void KitText::draw(CanvasItem& owner, const KitTextStyle& style, const String& t
         if (material_.is_null()) {
             Ref<Shader> shader;
             shader.instantiate();
+            name_canvas_shader(*shader.ptr(), "EAWR/UI/KitTextGradient");
             shader->set_code(gradient_shader);
             material_.instantiate();
             material_->set_shader(shader);
