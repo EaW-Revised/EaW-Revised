@@ -58,6 +58,8 @@ struct GalacticLanOptions {
     std::uint64_t exchange_every{30};          // desync monitor hash exchange period, completed ticks
     std::uint64_t completeness_timeout_ms{30'000};
     std::uint64_t waiting_notice_ms{3000};     // MP-33: show "waiting for <peer>" after this long
+    // A buffered transport must send its final hash exchange before the viewer may close it.
+    std::function<bool()> final_output_drained;
 };
 
 class GalacticLanMatch {

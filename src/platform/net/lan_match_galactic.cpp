@@ -90,6 +90,7 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
     GalacticLanOptions options;
     const auto& offer = lobby_result_->setup().offer();
     options.input_delay = offer.input_delay; options.final_tick_count = offer.final_tick_count;
+    options.final_output_drained = [this] { return !io_->transport.tcp->has_pending_output(); };
     for (const auto& seat : offer.seats) options.seats.push_back({seat.seat, true});
     if (lobby_stream_->self() >= offer.seats.size()) {
         set_failure(net::lobby_diagnostic(net::LobbyReason::invalid_choice, "The local campaign seat is absent.")); return {};

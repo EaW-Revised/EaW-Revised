@@ -101,8 +101,21 @@ bool GalacticMode::State::build_view() {
         auto text = data::ui::load_language_text_database(*filesystem, "english");
         production_art = galactic_view::load_production_art(loaded.value().catalog, text ? &text.value() : nullptr);
         if (synthetic && tables.value().campaigns.empty()) { failure = "no campaign provides galactic art settings"; return false; }
+        std::optional<std::string_view> multiplayer_observer_faction;
+        if (options.lan_start) {
+            const auto local = options.lan_start->snapshot(sim::SeatId{options.seat});
+            const auto bindings = options.lan_start->plan->player_bindings();
+            const auto binding = std::find_if(bindings.begin(), bindings.end(), [&](const auto& row) {
+                return local && local->view_player() && row.active && row.player.player_id == local->view_player();
+            });
+            if (binding == bindings.end() || binding->faction.empty()) {
+                failure = "multiplayer scene requires an active local observer faction";
+                return false;
+            }
+            multiplayer_observer_faction = binding->faction;
+        }
         auto scene = galactic_view::load_scene_content(*filesystem, loaded.value().catalog, tables.value(),
-            synthetic ? tables.value().campaigns.front().name : options.campaign);
+            synthetic ? tables.value().campaigns.front().name : options.campaign, multiplayer_observer_faction);
         if (!scene) { failure = core::format_diagnostic(scene.error()); return false; }
         content.emplace(std::move(scene.value()));
         if (synthetic) { content->art.clear(); content->snapshot = snapshot; content->route_styles.clear(); }

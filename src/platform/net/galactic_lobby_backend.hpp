@@ -61,6 +61,9 @@ public:
     [[nodiscard]] bool can_start() const noexcept { return static_cast<bool>(adapter_factory_); }
     // Qualification only, set before opening a room. The ordinary offer retains its default cap.
     void acceptance_final_tick(std::uint64_t tick) { acceptance_final_tick_ = tick; }
+    [[nodiscard]] std::uint64_t final_tick_count() const noexcept {
+        return acceptance_final_tick_ ? acceptance_final_tick_ : net::max_session_ticks;
+    }
 
     // Lobby hooks (net::LobbyHooks::validate / offer) for a room in Galactic Conquest mode.
     [[nodiscard]] core::Result<void> validate(const net::LobbySnapshot&, bool starting) const;

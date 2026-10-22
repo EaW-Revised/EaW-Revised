@@ -4,9 +4,9 @@ Release assets are built on the pool from the exact public tag. The public repos
 `.github/workflows/release.yml` only verifies native Linux ARM64 and Apple Silicon after publication. Nothing is published automatically: a maintainer
 reviews and publishes the **draft** release.
 
-## Current candidate: v0.2.7
+## Current candidate: v0.2.7.1
 
-The last published release is v0.1.6 (2026-10-07). The next candidate is v0.2.7: the portable player
+The last published release is v0.1.6 (2026-10-07). The next candidate is v0.2.7.1: the portable player
 download with its double-click launcher, a debug download, playable space skirmish, LAN and
 online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
@@ -83,8 +83,8 @@ The maintainer tags and pushes the reviewed public commit explicitly (never thro
 NO-PUSH remote):
 
 ```text
-git -C <public-clone> tag -s v0.2.7 <reviewed-public-commit> -m "EaW Revised v0.2.7"
-git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.2.7
+git -C <public-clone> tag -s v0.2.7.1 <reviewed-public-commit> -m "EaW Revised v0.2.7.1"
+git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.2.7.1
 ```
 
 The Windows publish scan must see the reviewed LF bytes of pinned text fixtures after

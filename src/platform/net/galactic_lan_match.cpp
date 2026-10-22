@@ -166,6 +166,14 @@ public:
             }
         }
         if (tick) clock_snapshot_ = tick->galaxy;
+        if (adapter_->completed_tick() >= options_.final_tick_count && monitor_->agreed_end()) {
+            if (options_.final_output_drained && !options_.final_output_drained()) {
+                if (!final_drain_started_) final_drain_started_ = now;
+                if (now - *final_drain_started_ >= options_.completeness_timeout_ms)
+                    return end_with_failure(make_diagnostic(net::session_errors::link_closed,
+                        "Final campaign hash output did not drain before the close deadline."));
+            } else final_drain_started_.reset();
+        }
         refresh(pumped.value(), context.advance_allowed, now);
         return Tick::success(std::move(tick));
     }
@@ -283,7 +291,7 @@ private:
             view_.message = "The match state of the players diverged.";
             return;
         }
-        if (view_.completed_tick >= options_.final_tick_count && monitor_->agreed_end()) {
+        if (view_.completed_tick >= options_.final_tick_count && monitor_->agreed_end() && !final_drain_started_) {
             view_.phase = GalacticLanPhase::ended;
             view_.reason = GalacticLanReason::completed;
             return;
@@ -311,6 +319,7 @@ private:
     std::shared_ptr<const galactic::GalacticSnapshot> clock_snapshot_;
     std::optional<core::Diagnostic> failed_;
     bool session_ended_{};
+    std::optional<std::uint64_t> final_drain_started_;
     // Declaration order is destruction order reversed: the session goes before the adapter, gate and monitor it uses.
     std::shared_ptr<void> lifetime_;
     std::shared_ptr<net::LobbyResult> admission_;

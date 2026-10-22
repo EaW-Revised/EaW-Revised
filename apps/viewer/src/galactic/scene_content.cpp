@@ -224,7 +224,8 @@ SceneLayer galactic_particle_layer(const data::Catalog& catalog, const std::stri
 }
 
 core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const data::Catalog& catalog,
-    const data::galactic::GalacticData& tables, std::string_view campaign_name) {
+    const data::galactic::GalacticData& tables, std::string_view campaign_name,
+    std::optional<std::string_view> multiplayer_observer_faction) {
     const auto* campaign = tables.campaign(campaign_name);
     if (!campaign) return core::Result<SceneContent>::failure(failure("unknown campaign " + std::string(campaign_name)));
     SceneContent result;
@@ -317,7 +318,12 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
     if (!affiliation_for_owner(result, std::nullopt)) {
         return core::Result<SceneContent>::failure(failure("campaign has no drawable Neutral faction Color"));
     }
-    auto active = players.find(folded(campaign->starting_active_player));
+    if (campaign->is_multiplayer.value_or(false)
+        && (!multiplayer_observer_faction || multiplayer_observer_faction->empty()))
+        return core::Result<SceneContent>::failure(failure("multiplayer scene requires a local observer faction"));
+    if (multiplayer_observer_faction && !campaign->is_multiplayer.value_or(false))
+        return core::Result<SceneContent>::failure(failure("observer faction override requires a multiplayer campaign"));
+    auto active = players.find(folded(multiplayer_observer_faction.value_or(campaign->starting_active_player)));
     if (active == players.end()) return core::Result<SceneContent>::failure(failure("campaign has no drawable active faction"));
     result.snapshot.seats = {{1, active->second, true, true}, {2, active->second, true, true}};
     // WGP-42: retain the first case-insensitive home for each faction even

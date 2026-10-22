@@ -122,7 +122,8 @@ void campaign_art_is_data_driven() {
     write(root, "Data/XML/Factions.xml", R"XML(<Factions><Faction Name="Test">
       <Faction_Leader>Modded_Ship</Faction_Leader>
       <Color>64,128,192,255</Color><Display_Font_Color>32,96,160,255</Display_Font_Color><Icon_Name>icon.tga</Icon_Name>
-    </Faction><Faction Name="Neutral"><Color>100,100,100,255</Color></Faction></Factions>)XML");
+    </Faction><Faction Name="Neutral"><Color>100,100,100,255</Color></Faction>
+      <Faction Name="Other"><Color>192,64,128,255</Color></Faction></Factions>)XML");
     write(root, "Data/XML/CampaignFiles.xml", "<Campaign_Files><File>Campaigns.xml</File></Campaign_Files>");
     write(root, "Data/XML/Campaigns.xml", R"XML(<Campaigns><Campaign Name="Art">
       <Locations>Backdrop,Alpha,Beta</Locations><Starting_Active_Player>Test</Starting_Active_Player>
@@ -162,6 +163,28 @@ void campaign_art_is_data_driven() {
     auto content = load_scene_content(filesystem.value(), catalog.value().catalog, tables.value(), "Art");
     if (!content) std::cerr << core::format_diagnostic(content.error()) << std::endl;
     assert(content);
+    // Stock MP campaigns have faction rows but no solo Starting_Active_Player.
+    auto multiplayer_tables = tables.value();
+    auto multiplayer = multiplayer_tables.campaigns.front();
+    multiplayer.name = "Multiplayer_Sandbox_Origin";
+    multiplayer.is_multiplayer = true;
+    multiplayer.starting_active_player.clear();
+    multiplayer_tables.campaigns.push_back(std::move(multiplayer));
+    const auto no_observer = load_scene_content(filesystem.value(), catalog.value().catalog, multiplayer_tables,
+        "Multiplayer_Sandbox_Origin");
+    assert(!no_observer && no_observer.error().message == "multiplayer scene requires a local observer faction");
+    for (const auto faction : {"Test", "Other"}) {
+        auto local = load_scene_content(filesystem.value(), catalog.value().catalog, multiplayer_tables,
+            "Multiplayer_Sandbox_Origin", faction);
+        assert(local);
+        const auto player = local.value().snapshot.seats.front().player;
+        assert(local.value().factions.at(player).faction == faction);
+    }
+    assert(!load_scene_content(filesystem.value(), catalog.value().catalog, multiplayer_tables,
+        "Multiplayer_Sandbox_Origin", ""));
+    assert(!load_scene_content(filesystem.value(), catalog.value().catalog, multiplayer_tables,
+        "Multiplayer_Sandbox_Origin", "Absent"));
+    assert(!load_scene_content(filesystem.value(), catalog.value().catalog, tables.value(), "Art", "Other"));
     const auto& scene = content.value();
     assert(std::abs(scene.corruption_parameters.brightness[0]-0.2F) < 0.00001F
         && std::abs(scene.corruption_parameters.brightness[1]-1.4F) < 0.00001F);

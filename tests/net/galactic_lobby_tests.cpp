@@ -733,10 +733,16 @@ void verify_launch(const std::vector<std::shared_ptr<viewer::GalacticLaunch>>& l
     for (const auto& game : games) expect(game->tick_hashes() == hashes, "lobby-launched peers have equal state hashes on every tick");
 }
 
-void viewer_staging_room() {
+void viewer_staging_room(std::uint64_t final_tick_count = 0) {
     Local host_content, guest_content;
     auto host_backend = std::make_shared<viewer::GalacticLobbyBackend>(host_content.content);
     auto guest_backend = std::make_shared<viewer::GalacticLobbyBackend>(guest_content.content);
+    expect(host_backend->final_tick_count() == net::max_session_ticks
+        && guest_backend->final_tick_count() == net::max_session_ticks, "ordinary GC keeps the default session cap");
+    if (final_tick_count) {
+        host_backend->acceptance_final_tick(final_tick_count);
+        guest_backend->acceptance_final_tick(final_tick_count);
+    }
     const viewer::LanLobbyBuilder builder = [](const auto&) {
         eawr::core::Diagnostic failure; failure.code = "EAWR-TEST-0002"; failure.message = "a campaign room never builds a skirmish setup";
         return eawr::core::Result<eawr::sim::tactical::TacticalSetup>::failure(std::move(failure));
@@ -1199,6 +1205,7 @@ int main(int argc, char** argv) {
         content_mismatch_returns_to_staging();
         reoffer_keeps_agreed_services();
         viewer_staging_room();
+        viewer_staging_room(12000);
         viewer_many_seat_launch(9);
         viewer_many_seat_launch(8);
         installed_observer_agreement();

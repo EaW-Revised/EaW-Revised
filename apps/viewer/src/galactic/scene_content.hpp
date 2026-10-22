@@ -104,7 +104,8 @@ struct SceneContent final {
 // object presentation, and the validated document loader for constants.
 [[nodiscard]] core::Result<SceneContent> load_scene_content(
     const vfs::Vfs& filesystem, const data::Catalog& catalog,
-    const data::galactic::GalacticData& tables, std::string_view campaign);
+    const data::galactic::GalacticData& tables, std::string_view campaign,
+    std::optional<std::string_view> multiplayer_observer_faction = {});
 [[nodiscard]] std::optional<presentation::particles::SystemDefinition> load_galactic_particle(
     const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string_view type);
 [[nodiscard]] SceneLayer galactic_particle_layer(const data::Catalog& catalog, std::string_view type);

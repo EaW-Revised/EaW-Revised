@@ -147,7 +147,8 @@ struct Pair {
         const LiveGameSession::Pacing pacing = LiveGameSession::Pacing::driven,
         const std::uint64_t notice_ms = 3000, const std::size_t started = 2,
         const std::uint64_t final_tick_count = net::max_session_ticks,
-        const net::GalacticClockPolicy clock_policy = net::GalacticClockPolicy::two_per_45_seconds)
+        const net::GalacticClockPolicy clock_policy = net::GalacticClockPolicy::two_per_45_seconds,
+        const std::function<void(viewer::GalacticLanOptions&, net::PeerIndex)>& configure = {})
         : setup(std::move(initial)), humans(human_seats(setup)), pipes(2), worker_counts(workers), pacing_(pacing) {
         if (humans.size() != 2) throw std::runtime_error("the fixture needs exactly two human seats");
         viewer::GalacticLanOptions options;
@@ -158,7 +159,9 @@ struct Pair {
         options.final_tick_count = final_tick_count;
         for (net::PeerIndex peer = 0; peer < 2; ++peer) {
             transports[peer] = std::make_unique<PipeTransport>(pipes, peer);
-            matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*transports[peer], options);
+            auto local_options = options;
+            if (configure) configure(local_options, peer);
+            matches[peer] = std::make_unique<viewer::GalacticLanMatch>(*transports[peer], std::move(local_options));
         }
         for (net::PeerIndex peer = 0; peer < started; ++peer) start(peer);
     }
@@ -1573,6 +1576,52 @@ void completed_match_idles_until_session_end() {
         && pair.lives[0]->completed_tick() == 0, "completed driver reuse fails before stepping");
 }
 
+void completed_match_waits_for_final_output() {
+    constexpr std::uint64_t final_tick = 20;
+    std::array<std::atomic<bool>, 2> drained{};
+    std::array<std::atomic<bool>, 2> queried{};
+    Pair pair(versus_setup(), {1, 4}, LiveGameSession::Pacing::driven, 3000, 2, final_tick,
+        net::GalacticClockPolicy::two_per_45_seconds, [&](auto& options, auto peer) {
+            options.final_output_drained = [&, peer] {
+                queried[peer].store(true);
+                return drained[peer].load();
+            };
+        });
+    expect(pair.run_to(final_tick), "queued final output does not prevent the final simulation tick");
+    expect(until([&] { return queried[0].load() && queried[1].load(); }, 5s),
+        "both peers check queued output after their final hash agreement");
+    for (net::PeerIndex peer = 0; peer < 2; ++peer)
+        expect(pair.matches[peer]->view().reason != viewer::GalacticLanReason::completed
+            && !pair.lives[peer]->failure() && pair.lives[peer]->completed_tick() == final_tick,
+            "a viewer cannot close while its final hash output is queued");
+    for (auto& ready : drained) ready.store(true);
+    expect(until([&] {
+        return pair.matches[0]->view().reason == viewer::GalacticLanReason::completed
+            && pair.matches[1]->view().reason == viewer::GalacticLanReason::completed;
+    }, 5s), "draining final output releases both viewers without another simulation tick");
+    for (auto& live : pair.lives) live->stop();
+    expect(pair.lives[0]->completed_tick() == final_tick && pair.lives[1]->completed_tick() == final_tick
+        && pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(), "final drain retains the identical tick prefix");
+}
+
+void final_output_drain_has_a_deadline() {
+    constexpr std::uint64_t final_tick = 20;
+    Pair pair(versus_setup(), {1, 4}, LiveGameSession::Pacing::driven, 3000, 2, final_tick,
+        net::GalacticClockPolicy::two_per_45_seconds, [](auto& options, auto) {
+            options.completeness_timeout_ms = 5000;
+            options.final_output_drained = [] { return false; };
+        });
+    expect(pair.run_to(final_tick), "stalled final output begins after the final simulation tick");
+    expect(until([&] { return pair.lives[0]->failure() && pair.lives[1]->failure(); }, 15s),
+        "a stalled final output drain fails within its configured deadline");
+    for (auto& live : pair.lives) {
+        live->stop();
+        expect(live->completed_tick() == final_tick
+            && live->failure() && live->failure()->message.find("Final campaign hash output did not drain") != std::string::npos,
+            "the final drain timeout is explicit and adds no simulation tick");
+    }
+}
+
 void acceptance_recorder_observes_without_changing_ticks() {
     const auto directory = std::filesystem::temp_directory_path() / ("eawr-gc-lan-acceptance-"
         + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -1843,6 +1892,8 @@ int main(int argc, char** argv) {
         saves_are_refused();
         driver_cannot_outlive_its_session();
         completed_match_idles_until_session_end();
+        completed_match_waits_for_final_output();
+        final_output_drain_has_a_deadline();
         acceptance_recorder_observes_without_changing_ticks();
         acceptance_script_changes_each_humans_speed();
         desync_remains_a_failure();

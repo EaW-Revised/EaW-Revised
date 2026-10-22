@@ -358,6 +358,7 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             }
             context.options.session.pending_input_epoch = [this] { return pending_input_epoch(); };
             if (net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic) {
+                if (galactic_) context.options.session.final_tick_count = galactic_->final_tick_count();
                 auto options = net::decode_galactic_lobby_game(staged.game);
                 if (!options) return core::Result<net::LobbySetupContext>::failure(options.error());
                 net::DesyncOptions monitor_options;
