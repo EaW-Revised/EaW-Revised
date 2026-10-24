@@ -53,7 +53,8 @@ struct GalacticSession::NativeActionShadow::Data {
     template<class Request> void record_request(Request request) {
         const auto first = action_requests.empty() ? first_id : action_requests.back().next_id;
         const auto first_request = action_requests.empty() ? first_invasion : action_requests.back().next_invasion;
-        action_requests.push_back({Intent{std::move(request)}, first, next_id, first_request, next_invasion});
+        // Built in place: moving a temporary record trips GCC 14's -Wmaybe-uninitialized at -O3.
+        action_requests.emplace_back(std::move(request), first, next_id, first_request, next_invasion);
         // Immediate Lua clones retain their own records. An accepted native
         // publication forwards them exactly once through publish_native_batch.
         if (intent_sink && !immediate_batch) intent_sink(player, action_requests.back());

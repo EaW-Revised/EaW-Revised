@@ -336,7 +336,7 @@ core::Result<void> GalacticWorld::prepare_catalog_slice(const sim::PartitionExec
     // Fixed sim-frame slices: no wall-clock budgets, worker timing or catch-up.
     if (count && slice < (jobs.size() + count - 1) / count) {
         const auto begin = static_cast<std::size_t>(slice) * count;
-        const auto end = std::min(jobs.size(), begin + count);
+        const auto end = std::min<std::size_t>(jobs.size(), begin + count);
         std::vector<std::optional<core::Diagnostic>> errors(end - begin);
         std::vector<std::uint64_t> prepared(end - begin);
         const auto phase = executor.execute_phase("galactic-ai-perception-catalog", sim::tick_partition_count, [&](std::size_t partition) {

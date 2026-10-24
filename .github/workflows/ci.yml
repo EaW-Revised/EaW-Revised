@@ -71,7 +71,8 @@ jobs:
   build-and-test:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # The MSVC build alone takes about 85 minutes on a hosted runner, before its serial test pass.
+    timeout-minutes: ${{ matrix.timeout || 90 }}
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -81,7 +82,7 @@ jobs:
           - { name: linux-x64-clang, preset: linux-x64-clang, os: ubuntu-latest, experimental: false }
           - { name: linux-arm64-gcc, preset: linux-arm64-gcc, os: ubuntu-24.04-arm, experimental: false }
           # The Windows presets require the VS 2022 toolchain on this image.
-          - { name: windows-msvc, preset: windows-msvc, os: windows-2022, experimental: false }
+          - { name: windows-msvc, preset: windows-msvc, os: windows-2022, experimental: false, timeout: 180 }
           - { name: windows-clang, preset: windows-clang, os: windows-2022, experimental: false }
           # No macOS preset or platform layer exists yet; this job reports how far a plain build gets.
           - { name: macos-clang (experimental), preset: "", os: macos-latest, experimental: true }

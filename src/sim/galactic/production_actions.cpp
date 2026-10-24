@@ -627,8 +627,10 @@ core::Result<std::shared_ptr<void>> GalacticSession::NativeActionBarrier::player
 }
 core::Result<void> GalacticSession::NativeActionBarrier::finish_independent_players(
     const std::function<core::Result<void>()>& commit) {
-    if (!state_ || state_->finished || state_->independent_players.empty() || !commit
-        || native_action_barrier_context.lock().get() != state_.get() || state_->closing.exchange(true, std::memory_order_acq_rel))
+    // The exchange stands alone: chained after the weak_ptr lock, GCC 14 reports it as a write to address zero.
+    const auto owned = state_ && !state_->finished && !state_->independent_players.empty() && commit
+        && native_action_barrier_context.lock().get() == state_.get();
+    if (!owned || state_->closing.exchange(true, std::memory_order_acq_rel))
         return invalid<void>("native independent join requires its owning barrier, joined players and one ordered commit");
     std::vector<std::unique_lock<std::recursive_mutex>> locks;
     std::size_t actions{}, journal_entries{};

@@ -631,7 +631,7 @@ struct CensusType {
     math::Fixed authored_price{};
     std::uint8_t sale_policy{}; // 0 default, 1 always, 2 never
     bool named_hero{}, superweapon{};
-    std::optional<HistoryType> history;
+    std::optional<HistoryType> history{};
     friend bool operator==(const CensusType&, const CensusType&) = default;
 };
 struct CensusObject {
