@@ -803,7 +803,7 @@ int case_galactic_movement_tests(int argc, const char* const argv[]) {
     try {
         if (argc == 3 && std::string_view(argv[1]) == "--generate") { generate(argv[2]); return 0; }
         if (argc == 2 && std::string_view(argv[1]) == "--installed") { installed(); return galactic_test::failures == 0 ? 0 : 1; }
-        staged_arrival_recheck_contracts(); native_movement_layers(); departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); orbit_placement_and_recheck(); transports(); adapter();
+        staged_arrival_recheck_contracts(); native_movement_layers(); departure(); mixed_squadron_packing(); move_after_merge(); roundtrip_and_parity(); arrival(); orbit_placement_and_recheck(); transports(); pathfinder_movement(); adapter();
     } catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

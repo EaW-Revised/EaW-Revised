@@ -145,7 +145,8 @@ jobs:
   viewer:
     name: viewer-${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # The Windows viewer build has taken 38-60 minutes on hosted runners.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

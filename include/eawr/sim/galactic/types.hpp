@@ -73,7 +73,7 @@ struct FactionController {
     PlayerId player{};
     FactionControl kind{FactionControl::ai};
     FactionControl dropout{FactionControl::ai};
-    std::vector<std::uint8_t> configuration, state;
+    std::vector<std::uint8_t> configuration{}, state{};
     friend bool operator==(const FactionController&, const FactionController&) = default;
 };
 struct SeatControlSetup {
@@ -340,15 +340,15 @@ struct ControlPlanet {
     TypeId type{}; // capture history is per original planet type, WGM-76
     bool surface_accessible{}, retains_residual{}, destroyed{};
     ControlBase ground_base{}, starbase{};
-    std::vector<SurfaceForce> landed; // live surface-list order, WGM-66
+    std::vector<SurfaceForce> landed{}; // live surface-list order, WGM-66
     std::array<PlayerId, 2> production_owner{}; // ground then space, WGM-66
     PlayerId leaning_player{};
     math::Fixed leaning{};
-    std::vector<math::Fixed> special_control; // ground then space; at most three, WGM-70
-    std::vector<ControlCap> caps;
-    std::vector<ControlTransitionModifier> transition_modifiers;
+    std::vector<math::Fixed> special_control{}; // ground then space; at most three, WGM-70
+    std::vector<ControlCap> caps{};
+    std::vector<ControlTransitionModifier> transition_modifiers{};
     math::Fixed capture_reward{};
-    std::vector<TacticalBuiltStructure> built_structures; // retained build order, WGT-84
+    std::vector<TacticalBuiltStructure> built_structures{}; // retained build order, WGT-84
     friend bool operator==(const ControlPlanet&, const ControlPlanet&) = default;
 };
 struct ControlRoute {
@@ -1051,15 +1051,15 @@ struct TheftAbilityProfile {
 };
 struct TheftTechnology {
     TypeId type{};
-    math::Fixed price;
+    math::Fixed price{};
     bool space{};
     friend bool operator==(const TheftTechnology&, const TheftTechnology&) = default;
 };
 struct TheftPlanet {
     PlanetId planet{};
-    math::Fixed availability, difficulty;
-    std::vector<TypeId> affinity_types;
-    std::optional<bool> auto_capture_minor;
+    math::Fixed availability{}, difficulty{};
+    std::vector<TypeId> affinity_types{};
+    std::optional<bool> auto_capture_minor{};
     friend bool operator==(const TheftPlanet&, const TheftPlanet&) = default;
 };
 // WGCH-143: authored destroyed base income, read when the control owner marks the planet ruined.
