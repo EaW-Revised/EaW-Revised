@@ -21,6 +21,12 @@ else()
     )
     if(EAWR_WARNINGS_AS_ERRORS)
         target_compile_options(eawr_project_warnings INTERFACE -Werror)
+        # GCC's flow-based diagnostics misfire on inlined std::variant and std::vector moves at -O3 and
+        # name only library internals; they stay visible as warnings but do not fail the build.
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(eawr_project_warnings INTERFACE
+                -Wno-error=maybe-uninitialized -Wno-error=nonnull -Wno-error=stringop-overflow)
+        endif()
     endif()
 endif()
 
