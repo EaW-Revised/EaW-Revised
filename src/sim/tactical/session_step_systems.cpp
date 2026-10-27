@@ -14,6 +14,7 @@
 #include "orders_internal.hpp"
 #include "staging.hpp"
 #include "session_tick.hpp"
+#include "session_combat_phases.hpp"
 #include "session_services.hpp"
 #include "tactical_internal.hpp"
 
@@ -836,26 +837,37 @@ core::Result<void> session_detail::Tick::systems() {
 }
 
 core::Result<void> session_detail::Tick::commit_survivors() {
-    auto& tick_work = gather_.value().tick_work.value();
-    auto& events = impacts_.value().events.value();
-    auto& killed = impacts_.value().killed.value();
-    auto& inputs = systems_.value().inputs.value();
-    auto& instances = systems_.value().instances.value();
-    const auto& serviced = systems_.value().serviced.value();
-    auto& pads = impl_->pad_stage.values;
-    auto& capture_jobs = impl_->capture_jobs;
+    return CombatPhases(*this).commit_survivors();
+}
+
+core::Result<void> session_detail::CombatPhases::commit_survivors() {
+    // Land has no space systems/capture stage. Its shared damage journal already owns all deaths.
+    if (context_.impl_->land) {
+        context_.mark("survivors", true);
+        context_.surviving_.emplace();
+        context_.surviving_->survivors.emplace(context_.tracked_->staged->release());
+        return core::Result<void>::success();
+    }
+    auto& tick_work = context_.gather_.value().tick_work.value();
+    auto& events = context_.impacts_.value().events.value();
+    auto& killed = context_.impacts_.value().killed.value();
+    auto& inputs = context_.systems_.value().inputs.value();
+    auto& instances = context_.systems_.value().instances.value();
+    const auto& serviced = context_.systems_.value().serviced.value();
+    auto& pads = context_.impl_->pad_stage.values;
+    auto& capture_jobs = context_.impl_->capture_jobs;
     // Serial, in ascending ID: destruction hooks already ran at delivery; dead units leave (HD-20).
-    mark("survivors", true);
-    surviving_.emplace();
-    auto& survivors = surviving_.value().survivors.emplace();
+    context_.mark("survivors", true);
+    context_.surviving_.emplace();
+    auto& survivors = context_.surviving_.value().survivors.emplace();
     std::vector<TacticalInstance> surviving_instances;
     survivors.reserve(inputs.size());
     surviving_instances.reserve(inputs.size());
-    auto& capture_candidates = surviving_.value().capture_candidates.emplace(0);
+    auto& capture_candidates = context_.surviving_.value().capture_candidates.emplace(0);
     for (const auto& job : capture_jobs) {
         capture_candidates += job.inspected;
         if (pads.at(job.id) != job.next) {
-            impl_->pad_stage.touch(job.id);
+            context_.impl_->pad_stage.touch(job.id);
             pads.at(job.id) = job.next;
         }
     }
@@ -865,9 +877,9 @@ core::Result<void> session_detail::Tick::commit_survivors() {
         if (job != capture_jobs.end() && job->id == inputs[index].state.entity_id && job->owner != job->before) {
             auto before = inputs[index].state;
             before.owner = job->before;
-            track_victory_change(&before, &inputs[index].state, true);
+            context_.track_victory_change(&before, &inputs[index].state, true);
             // WNO-23: sequence carries the previous owner for selection/control-group removal.
-            events.push_back(Event{tick, EventKind::pad_captured, job->owner, job->before, job->id});
+            events.push_back(Event{context_.tick, EventKind::pad_captured, job->owner, job->before, job->id});
         }
         tick_work.level_matrix_builds += inputs[index].matrix_builds;
         tick_work.banked_matrix_builds += inputs[index].banked_matrix_builds;

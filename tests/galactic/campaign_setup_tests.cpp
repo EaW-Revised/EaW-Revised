@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <limits>
 #include <span>
 #include <vector>
 #include <iostream>
@@ -11,6 +12,7 @@
 #include "../support/env.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/setup.hpp"
+#include "eawr/campaign/load_setup.hpp"
 #include "eawr/campaign/control.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -125,6 +127,143 @@ cp::CampaignSetupServices services(std::vector<std::string>& trace) {
 }
 cp::CampaignSetupPlan plan(std::string_view name = "Ordinary", gc::PlayerId human = 1) {
     return cp::plan_campaign_setup(data(), types(), name, options(human)).value();
+}
+void load_resource_guards() {
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        std::vector<std::string> trace;
+        auto providers = services(trace);
+        providers.object_budget = 3; // Two planets and their route consume the budget.
+        std::size_t placements{};
+        const auto place = providers.place;
+        providers.place = [&, place](const auto& request, auto next, const auto& setup) {
+            ++placements; return place(request, next, setup);
+        };
+        providers.political_control = [](const auto&, std::span<const cp::StartingAllegiance> targets, const auto&) {
+            expect(!targets.empty(), "skipped placement retains the authored political target");
+            return Result<gc::PlayerId>::success(targets.empty() ? 4U : targets.front().player);
+        };
+        providers.credit_cap = [](const auto&, const auto& setup) {
+            expect(setup.planets.front().owner == 1 && setup.planets.back().owner == 3,
+                "a capped force pass leaves every planet bound to an existing faction");
+            return Result<Fixed>::success(f(100));
+        };
+        auto root = cp::CampaignRoot::create(plan(), providers);
+        if (!root) std::cerr << root.error().message << '\n';
+        expect(bool(root), "object cap degrades complete placements instead of aborting the campaign");
+        if (!root) continue;
+        const auto& setup = root.value().game()->galaxy().setup();
+        expect(placements == 1 && setup.fleets.empty() && setup.players.size() == 4,
+            "first over-budget request is omitted and later requests never allocate or drop factions");
+        expect(root.value().game()->galaxy().next_entity_id() == plan().first_free_entity_id(),
+            "omitted placement does not consume the stable allocator frontier");
+        const auto notes = root.value().load_notes();
+        expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1033" && note.classification == eawr::core::LoadCategory::unknown_degrade
+                && note.action == eawr::core::LoadAction::skipped_placement;
+        }), "placement cap reaches the root-owned C note snapshot");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        static_cast<void>(root.value().game()->step(executor).value());
+        const auto hash = root.value().game()->state_sha256();
+        if (reference.empty()) reference = hash; else expect(hash == reference, "capped campaign steps equally on 1/2/4/8 workers");
+    }
+    auto unsupported = plan().galaxy();
+    unsupported.players.clear();
+    for (gc::PlayerId id = 1; id <= gc::galactic_max_players + 1; ++id) unsupported.players.push_back({id, id, 0});
+    const auto refused = gc::validate_setup(unsupported);
+    expect(!refused && refused.error().message.find("#4286") != std::string::npos
+        && refused.error().message.find(std::to_string(gc::galactic_max_players)) != std::string::npos,
+        "player-count implementation limit remains explicit and names its follow-up");
+
+    auto fiscal = plan().galaxy(); fiscal.rules.fiscal_cycle_frames = 1;
+    fiscal.player_economy.emplace(); fiscal.fiscal.emplace();
+    const auto maximum = std::numeric_limits<std::int64_t>::max();
+    fiscal.fiscal->credit_cap_per_planet = Fixed::from_raw(maximum);
+    for (const auto& player : fiscal.players) {
+        fiscal.player_economy->players.push_back({player.player_id, {}, Fixed::from_raw(maximum), 0, 0});
+        fiscal.fiscal->players.push_back({player.player_id, true, Fixed::from_raw(maximum)});
+    }
+    for (const auto& planet : fiscal.planets) fiscal.fiscal->planets.push_back({planet.id, Fixed::from_raw(maximum)});
+    eawr::core::LoadNoteBuffer notes; eawr::core::LoadNoteCollector collector;
+    expect(!gc::validate_setup(fiscal), "unbounded fiscal fixture exceeds current representation");
+    cp::normalize_campaign_fiscal(*fiscal.fiscal, fiscal.planets.size(), notes, "FiscalFixture");
+    expect(bool(gc::validate_setup(fiscal)), "fiscal sum, cap and difficulty products normalize before strict validation");
+    const auto effective = *fiscal.fiscal;
+    cp::normalize_campaign_fiscal(*fiscal.fiscal, fiscal.planets.size(), notes, "FiscalFixture");
+    expect(*fiscal.fiscal == effective, "fiscal normalization is idempotent");
+    auto game = gc::GalacticSession::create(fiscal);
+    expect(bool(game), "saturated fiscal setup reaches a real session");
+    if (game) {
+        eawr::sim::InlineExecutor executor;
+        const auto initial_cycle = game.value().clock().fiscal_cycle;
+        for (unsigned i = 0; i < 3 && game.value().clock().fiscal_cycle == initial_cycle; ++i) {
+            const auto advanced = game.value().step(executor);
+            expect(bool(advanced), "saturated fiscal setup completes its first fiscal payment");
+            if (!advanced) break;
+        }
+        expect(game.value().clock().fiscal_cycle == initial_cycle + 1, "repaired fiscal data is consumed by the fiscal service");
+    }
+    collector.merge(notes); const auto snapshot = collector.snapshot();
+    for (const auto* code : {"EAWR-LOAD-1020", "EAWR-LOAD-1021", "EAWR-LOAD-1022"})
+        expect(std::any_of(snapshot.begin(), snapshot.end(), [&](const auto& note) { return note.code == code; }),
+            "every fiscal degradation family emits a load note");
+    auto large = data(); auto& selected = large.campaigns.front();
+    selected.planets.clear(); selected.locations.clear(); selected.trade_routes.clear();
+    selected.starting_forces.clear(); selected.special_case_production.clear(); selected.home_locations.clear();
+    large.planets.clear();
+    for (std::size_t i = 0; i < 4097; ++i) {
+        dg::Planet planet; planet.name = "P" + std::to_string(i); planet.behaviors = {"PLANET"};
+        planet.galactic_position = dg::Position{f(static_cast<std::int64_t>(i) * 100), {}, {}};
+        selected.planets.push_back(planet.name); selected.locations.push_back(planet.name);
+        large.planets.push_back(std::move(planet));
+    }
+    const auto capped = cp::plan_campaign_setup(large, types(), "Ordinary", options());
+    expect(bool(capped), "graph resource cap runs before graph construction can abort");
+    if (capped) expect(capped.value().galaxy().planets.size() == 4096 && capped.value().locations().size() == 4096
+        && std::any_of(capped.value().load_notes().begin(), capped.value().load_notes().end(),
+            [](const auto& note) { return note.code == "EAWR-LOAD-1036"; }),
+        "graph cap retains source prefix and publishes a plan-owned C note");
+}
+void numeric_campaign_load() {
+    struct Tree {
+        std::filesystem::path root = std::filesystem::temp_directory_path() /
+            ("eawr-numeric-campaign-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ~Tree() { eawr::testing::remove_temp_directory(root); }
+    } tree;
+    std::filesystem::create_directories(tree.root / "XML");
+    const auto write = [&](const char* name, const std::string_view xml) { std::ofstream out(tree.root / "XML" / name); out << xml; };
+    write("GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write("FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
+    write("CampaignFiles.xml", "<Campaign_Files><File>Campaigns.xml</File></Campaign_Files>");
+    write("HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write("SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write("TradeRouteFiles.xml", "<Trade_Route_Files/>");
+    write("Objects.xml", R"xml(<Types><Planet Name="Place"><Behavior>PLANET</Behavior><Galactic_Position>0,0,0</Galactic_Position>
+        <Additional_Population_Capacity>2.9</Additional_Population_Capacity></Planet>
+        <SpaceUnit Name="NumericShip"><Behavior>DUMMY_STARSHIP</Behavior><Hyperspace_Speed>1</Hyperspace_Speed>
+        <Squadron_Capacity>-1.9</Squadron_Capacity><Tech_Level>text</Tech_Level>
+        <Build_Advances_Tech_Level>-1</Build_Advances_Tech_Level></SpaceUnit></Types>)xml");
+    write("Factions.xml", R"xml(<Factions><Faction Name="Side"><Is_Playable>Yes</Is_Playable>
+        <Base_Population_Capacity>2.9</Base_Population_Capacity></Faction>
+        <Faction Name="Neutral"><Is_Neutral>Yes</Is_Neutral></Faction></Factions>)xml");
+    write("Campaigns.xml", R"xml(<Campaigns><Campaign Name="Numeric"><Locations>Place</Locations>
+        <Sort_Order>2.9</Sort_Order><Starting_Forces>Side, Place, NumericShip</Starting_Forces></Campaign></Campaigns>)xml");
+    write("GameConstants.xml", "<GameConstants><MaximumFleetMovementDistance>10</MaximumFleetMovementDistance>"
+        "<Fiscal_Cycle_Time_In_Secs>1</Fiscal_Cycle_Time_In_Secs><AutoResolveDisplayTime>text</AutoResolveDisplayTime></GameConstants>");
+    const std::vector<eawr::vfs::MountSpec> mounts{{"numeric", tree.root, "data", {}}};
+    const auto files = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(files, eawr::data::Profile::foc).value();
+    const auto loaded = dg::load_galactic_data(files, catalog.catalog).value();
+    const auto parsed = eawr::units::galactic_type_table(catalog.catalog);
+    cp::CampaignSetupOptions opts;
+    opts.players = {{{1, 1, 0}, "Side", true}, {{2, 2, 0}, "Neutral", true}};
+    opts.types = {{1, "NumericShip"}};
+    const auto planned = cp::plan_campaign_setup(loaded, parsed, "Numeric", opts);
+    if (!planned) std::cerr << planned.error().message << '\n';
+    expect(static_cast<bool>(planned), "LSA-01/02/03/04/07/08/42 synthetic numeric fixture reaches campaign setup");
+    if (planned) expect(planned.value().original_type(1)->squadron_capacity == 4294967295LL
+        && planned.value().original_type(1)->build_advances_tech_level == 4294967295LL,
+        "campaign retains wrapped unsigned authoring rather than defaulting or rejecting");
 }
 void signed_loader_campaign() {
     expect(gc::observer_detail::nearby({}, {f(4), {}, {}}, f(-5))
@@ -312,8 +451,8 @@ void pause_policy_defaults() {
     expect(make(opts).galaxy().fleet_control->pause == gc::PausePolicy{}, "unspecified multiplayer pause policy defaults to refuse");
     opts.seat_control.emplace();
     opts.seat_control->teams = {{1, {1}, false}};
-    opts.seat_control->controllers = {{1, gc::FactionControl::human}, {2, gc::FactionControl::ai},
-        {3, gc::FactionControl::ai}, {4, gc::FactionControl::ai}};
+    opts.seat_control->controllers = {{1, gc::FactionControl::human, gc::FactionControl::ai, {}, {}}, {2, gc::FactionControl::ai, gc::FactionControl::ai, {}, {}},
+        {3, gc::FactionControl::ai, gc::FactionControl::ai, {}, {}}, {4, gc::FactionControl::ai, gc::FactionControl::ai, {}, {}}};
     const auto coop = make(opts);
     expect(coop.galaxy().fleet_control->pause == gc::PausePolicy::admit_all(), "one-team co-op pause policy defaults to admit");
     opts.seats[1].kind = gc::SeatKind::human; opts.seats[1].human_side_id = 2;
@@ -492,7 +631,7 @@ void provider_refusals() {
     std::vector<std::string> nested_trace;
     auto nested_services = services(nested_trace);
     nested_services.place = [](const cp::StartingForceRequest& request, const auto next, const auto&) {
-        return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next + 1, request.type}, {next + 2, 8}}}}, {}, next + 3, true, {}, {}, {}, {}, {}, 0, {}, {}});
+        return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next + 1, request.type}, {next + 2, 8}}}}, {}, next + 3, true, {}, {}, {}, {}, {}, 0, {}, {}, false, {}, 0});
     };
     const auto nested_root = cp::CampaignRoot::create(nested_plan, nested_services);
     expect(nested_root && nested_root.value().game()->galaxy().setup().fleet_control->types.size() == 2,
@@ -512,7 +651,7 @@ void provider_refusals() {
     expect(!cp::CampaignRoot::create(plan(), bad), "unimplemented nested production provider refuses instead of losing force");
     bad = services(trace);
     bad.place = [](const auto& request, const auto next, const auto&) {
-        return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next, request.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}});
+        return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next, request.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}, false, {}, 0});
     };
     expect(!cp::CampaignRoot::create(plan(), bad), "provider cannot alias fleet/member IDs");
     bad = services(trace);
@@ -647,7 +786,7 @@ void installed() {
             live.mark_initial_placement = [](const auto&) { return Result<void>::success(); };
             // Test representation only: production scene/ground/company dispatch remains WGS-U08.
             live.place = [](const cp::StartingForceRequest& request, const auto next, const auto&) {
-                return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next + 1, request.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}});
+                return Result<cp::StartingForcePlacement>::success({{{next, request.owner, request.planet, {{next + 1, request.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}, false, {}, 0});
             };
             live.unify_human_guard_fleets = [](const auto, const auto, const auto& setup) {
                 return Result<std::vector<gc::Fleet>>::success(setup.fleets);
@@ -825,6 +964,6 @@ void installed() {
 }
 } // namespace
 int case_galactic_campaign_setup_tests(int argc, const char* const[]) {
-    if (argc > 1) installed(); else { signed_loader_campaign(); full_initial_control(); victory_authoring_contracts(); planning(); pause_policy_defaults(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
+    if (argc > 1) installed(); else { load_resource_guards(); numeric_campaign_load(); signed_loader_campaign(); full_initial_control(); victory_authoring_contracts(); planning(); pause_policy_defaults(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

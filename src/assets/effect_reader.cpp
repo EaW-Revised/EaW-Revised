@@ -1,5 +1,6 @@
 #include "eawr/assets/effect.hpp"
 #include "asset_internal.hpp"
+#include "effect_program_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -252,7 +253,7 @@ class EffectReader final {
             if (frame.child) {
                 metadata(sizeof(EffectState) + sizeof(std::size_t), frame.cursor + 8U);
                 const auto index = result_.states.size();
-                result_.states.push_back({frame.pending_state[0], frame.pending_state[1], frame.child->index});
+                result_.states.push_back({frame.pending_state[0], frame.pending_state[1], frame.child->index, {}, frame.cursor + 8U});
                 result_.values[frame.index].sampler_elements[frame.element].states.push_back(index);
                 frame.child.reset(); frame.cursor += 16U; ++frame.state;
             }
@@ -273,10 +274,11 @@ class EffectReader final {
         return indices;
     }
     std::size_t state(std::size_t& cursor) {
+        const auto at = cursor;
         const auto id = take(cursor), selector = take(cursor), type_offset = take(cursor), value_offset = take(cursor);
         const auto ti = type(type_offset); const auto vi = value(ti, value_offset);
         metadata_items<EffectState>(1U, cursor); const auto index = result_.states.size();
-        result_.states.push_back({id, selector, vi}); return index;
+        result_.states.push_back({id, selector, vi, {}, at}); return index;
     }
     std::size_t target(const std::array<std::uint32_t, 4>& path, const std::size_t at) {
         constexpr auto absent = std::numeric_limits<std::uint32_t>::max();
@@ -326,6 +328,7 @@ class EffectReader final {
             const auto at = cursor; EffectInitializer item;
             for (auto& part : item.target) part = take(cursor);
             const auto kind = take(cursor), length = take(cursor);
+            item.byte_offset = cursor;
             item.bytes = payload(cursor, length);
             if (kind > 1U) stop(diagnostic_codes::unsupported, "compiled-effect initializer kind is unsupported", at);
             item.kind = static_cast<EffectInitializerKind>(kind); item.value = target(item.target, at);
@@ -334,8 +337,13 @@ class EffectReader final {
             if (item.kind == EffectInitializerKind::parameter_reference) {
                 item.parameter = parameter(terminated(item.bytes, at + 24U), at);
                 const auto& other = result_.values[result_.parameters[*item.parameter].value];
-                if (v.object_slots.size() != 1U || other.object_slots.size() != 1U ||
-                    !compatible(result_.types[v.type].kind, result_.types[other.type].kind))
+                const auto& own_type = result_.types[v.type];
+                const auto& other_type = result_.types[other.type];
+                if (!compatible(own_type.kind, other_type.kind) || own_type.value_class != other_type.value_class ||
+                    own_type.rows != other_type.rows || own_type.columns != other_type.columns ||
+                    own_type.array_count != other_type.array_count ||
+                    v.object_slots.size() != other.object_slots.size() || v.object_slots.size() > 1U ||
+                    own_type.value_class == EffectValueCategory::structure)
                     stop(diagnostic_codes::unsupported, "compiled-effect named reference shape is unsupported", at);
             }
             const auto index = result_.initializers.size(); v.initializer = index;
@@ -343,8 +351,42 @@ class EffectReader final {
                 if (slot == 0U || result_.objects[slot].has_payload || result_.objects[slot].initializer)
                     stop(diagnostic_codes::structure, "compiled-effect object has conflicting initializers", at);
                 result_.objects[slot].initializer = index;
+                result_.objects[slot].byte_offset = item.byte_offset;
             }
             metadata_items<EffectInitializer>(1U, at); result_.initializers.push_back(std::move(item));
+        }
+    }
+    void validate_value_references(const std::size_t at) {
+        struct Frame { std::size_t value{}, member{}, element{}, state{}; bool reference{}; };
+        metadata_items<unsigned char>(result_.values.size(), at);
+        metadata_items<Frame>(result_.values.size(), at);
+        std::vector<unsigned char> colours(result_.values.size());
+        std::vector<Frame> stack; stack.reserve(result_.values.size());
+        for (std::size_t start = 0U; start < result_.values.size(); ++start) {
+            if (colours[start] != 0U) continue;
+            colours[start] = 1U; stack.push_back({start});
+            while (!stack.empty()) {
+                auto& frame = stack.back(); step(1U, at);
+                const auto& value = result_.values[frame.value];
+                std::optional<std::size_t> child; auto location = at;
+                if (frame.member < value.members.size()) child = value.members[frame.member++];
+                else if (frame.element < value.sampler_elements.size()) {
+                    const auto& states = value.sampler_elements[frame.element].states;
+                    if (frame.state < states.size()) child = result_.states[states[frame.state++]].value;
+                    else { ++frame.element; frame.state = 0U; continue; }
+                } else if (!frame.reference) {
+                    frame.reference = true;
+                    if (value.initializer) {
+                        const auto& initializer = result_.initializers[*value.initializer];
+                        location = initializer.byte_offset;
+                        if (initializer.parameter) child = result_.parameters[*initializer.parameter].value;
+                    }
+                } else { colours[frame.value] = 2U; stack.pop_back(); continue; }
+                if (!child) continue;
+                if (colours[*child] == 1U)
+                    stop(diagnostic_codes::hierarchy_cycle, "compiled-effect named value reference cycle", location);
+                if (colours[*child] == 0U) { colours[*child] = 1U; stack.push_back({*child}); }
+            }
         }
     }
     void validate_objects(const std::size_t at) {
@@ -366,7 +408,136 @@ class EffectReader final {
                 const auto p = *result_.initializers[*initializer].parameter;
                 slot = result_.values[result_.parameters[p].value].object_slots.front();
             }
-            for (const auto visited : chain) colours[visited] = 2U;
+            const auto terminal = slot == 0U ? 0U : result_.objects[slot].resolved_object.value_or(static_cast<std::uint32_t>(slot));
+            for (const auto visited : chain) {
+                colours[visited] = 2U; result_.objects[visited].resolved_object = terminal;
+            }
+        }
+    }
+    void bind_constants(std::vector<EffectConstant>& constants, const std::size_t offset) {
+        for (auto& constant : constants) {
+            const auto found = names_.find(name_hash(constant.name, offset));
+            if (found == names_.end()) continue;
+            for (const auto index : found->second) {
+                const auto& v = result_.values[result_.parameters[index].value];
+                const auto name = result_.types[v.type].name;
+                step(std::max(name.size(), constant.name.size()) + 1U, offset);
+                if (name != constant.name) continue;
+                if (constant.parameter) stop(diagnostic_codes::structure, "shader constant parameter name is ambiguous", offset);
+                constant.parameter = index;
+            }
+        }
+    }
+    std::size_t expression(std::span<const std::byte> bytes, const std::size_t offset) {
+        metadata_items<EffectExpression>(1U, offset);
+        auto parsed = detail::read_effect_expression(bytes, result_.source, offset, metadata_left_, work_left_);
+        if (!parsed) throw parsed.error();
+        auto item = std::move(parsed).value(); bind_constants(item.inputs, offset);
+        const auto index = result_.expressions.size(); result_.expressions.push_back(std::move(item)); return index;
+    }
+    std::size_t program(std::span<const std::byte> bytes, const EffectValueKind kind) {
+        const auto offset = static_cast<std::size_t>(bytes.data() - input_.data());
+        metadata_items<EffectProgram>(1U, offset);
+        auto parsed = detail::read_effect_program(bytes, result_.source, offset, metadata_left_, work_left_);
+        if (!parsed) throw parsed.error();
+        auto item = std::move(parsed).value();
+        if ((item.stage == EffectProgramStage::vertex) != (kind == EffectValueKind::vertex_program))
+            stop(diagnostic_codes::structure, "compiled-effect shader stage differs from its typed reference", offset);
+        bind_constants(item.constants, offset);
+        for (auto& preshader : item.preshaders) bind_constants(preshader.inputs, preshader.byte_offset);
+        const auto index = result_.programs.size(); result_.programs.push_back(std::move(item)); return index;
+    }
+    void programs() {
+        const auto is_program = [](EffectValueKind kind) {
+            return kind == EffectValueKind::vertex_program || kind == EffectValueKind::pixel_program;
+        };
+        const auto null_program = [](std::span<const std::byte> bytes) {
+            return bytes.empty() || (bytes.size() == 4U && std::all_of(bytes.begin(), bytes.end(), [](std::byte b) { return b == std::byte{}; }));
+        };
+        const auto expression_payload = [&](std::span<const std::byte> bytes) {
+            if (bytes.size() < 4U) return false;
+            const auto tag = word(bytes, 0U, static_cast<std::size_t>(bytes.data() - input_.data()));
+            return tag == 0x46580200U || tag == 0x46580201U;
+        };
+        // Definitions precede aliases. A named alias borrows the terminal program
+        // descriptor rather than reparsing a shared bytecode span.
+        for (const auto i : result_.raw_object_order) {
+            auto& object = result_.objects[i];
+            if (!is_program(*object.kind) || object.resolved_object != i) continue;
+            if (object.has_payload) {
+                if (null_program(object.bytes)) object.resolved_object = 0U;
+                else if (expression_payload(object.bytes)) object.expression = expression(object.bytes, object.byte_offset);
+                else object.program = program(object.bytes, *object.kind);
+            }
+        }
+        for (auto& initializer : result_.initializers) {
+            const auto& value = result_.values[initializer.value]; const auto kind = result_.types[value.type].kind;
+            if (initializer.kind != EffectInitializerKind::expression) continue;
+            if (!is_program(kind)) {
+                if (initializer.bytes.size() >= 4U) initializer.expression_tag = word(initializer.bytes, 0U, initializer.byte_offset);
+                initializer.expression = expression(initializer.bytes, initializer.byte_offset);
+                for (const auto slot : value.object_slots) result_.objects[slot].expression = initializer.expression;
+                continue;
+            }
+            if (value.object_slots.size() != 1U) stop(diagnostic_codes::unsupported, "inline shader array initializer is unsupported", initializer.byte_offset);
+            auto& object = result_.objects[value.object_slots.front()];
+            if (null_program(initializer.bytes)) object.resolved_object = 0U;
+            else if (expression_payload(initializer.bytes)) {
+                initializer.expression = expression(initializer.bytes, initializer.byte_offset); object.expression = initializer.expression;
+            }
+            else { initializer.program = program(initializer.bytes, kind); object.program = initializer.program; }
+        }
+        for (std::size_t i = 1U; i < result_.objects.size(); ++i) {
+            auto& object = result_.objects[i]; const auto terminal = object.resolved_object.value_or(static_cast<std::uint32_t>(i));
+            if (terminal == 0U) continue;
+            object.program = result_.objects[terminal].program;
+            object.expression = result_.objects[terminal].expression;
+            object.resolved_object = result_.objects[terminal].resolved_object;
+        }
+        for (auto& initializer : result_.initializers) {
+            const auto& value = result_.values[initializer.value];
+            if (value.object_slots.size() == 1U) {
+                initializer.program = result_.objects[value.object_slots.front()].program;
+                initializer.expression = result_.objects[value.object_slots.front()].expression;
+            }
+        }
+    }
+    void shader_assignments() {
+        // EFX-10: independently authored native controls establish these two
+        // state identifiers. NULL is serialized as INTEGER zero here; the same
+        // integer in any other state remains ordinary numeric data.
+        for (auto& state : result_.states) {
+            if (state.identifier != 146U && state.identifier != 147U) continue;
+            const auto& value = result_.values[state.value];
+            const auto kind = result_.types[value.type].kind;
+            const auto offset = value.bytes.empty() ? state.byte_offset :
+                static_cast<std::size_t>(value.bytes.data() - input_.data()); step(1U, offset);
+            EffectShaderAssignment assignment;
+            assignment.stage = state.identifier == 146U ? EffectProgramStage::vertex : EffectProgramStage::pixel;
+            if (value.initializer) {
+                const auto& initializer = result_.initializers[*value.initializer];
+                assignment.parameter = initializer.parameter;
+                if (initializer.expression) {
+                    assignment.kind = EffectShaderAssignmentKind::expression; assignment.descriptor = initializer.expression;
+                    state.shader = assignment; continue;
+                }
+            }
+            if ((kind == EffectValueKind::vertex_program || kind == EffectValueKind::pixel_program) &&
+                value.object_slots.size() == 1U) {
+                const auto& object = result_.objects[value.object_slots.front()];
+                if (object.resolved_object == 0U) assignment.kind = EffectShaderAssignmentKind::null_shader;
+                else if (object.program) {
+                    assignment.kind = EffectShaderAssignmentKind::program; assignment.descriptor = object.program;
+                    if (result_.programs[*object.program].stage != assignment.stage)
+                        stop(diagnostic_codes::structure, "compiled-effect shader state has the wrong program stage", offset);
+                } else if (object.expression) {
+                    assignment.kind = EffectShaderAssignmentKind::expression; assignment.descriptor = object.expression;
+                } else stop(diagnostic_codes::unsupported, "compiled-effect shader state has no supported assignment", offset);
+            } else if (kind == EffectValueKind::integer && value.bytes.size() == 4U && !value.initializer &&
+                       word(value.bytes, 0U, offset) == 0U) {
+                assignment.kind = EffectShaderAssignmentKind::null_shader;
+            } else stop(diagnostic_codes::unsupported, "compiled-effect shader assignment shape is unsupported", offset);
+            state.shader = assignment;
         }
     }
 public:
@@ -391,6 +562,7 @@ public:
         if (objects == 0U || objects > input_.size() / 4U)
             stop(diagnostic_codes::bounds, "compiled-effect object count cannot fit the input", cursor - 4U);
         metadata_items<EffectObject>(objects, cursor); result_.objects.resize(objects);
+        result_.objects.front().resolved_object = 0U;
         count(parameters, cursor, 16U);
         for (std::uint32_t i = 0U; i < parameters; ++i) {
             const auto type_offset = take(cursor), value_offset = take(cursor), flags = take(cursor), number = take(cursor);
@@ -419,11 +591,12 @@ public:
             if (slot == 0U || slot >= result_.objects.size()) stop(diagnostic_codes::index, "compiled-effect payload object slot is invalid", at);
             auto& object = result_.objects[slot];
             if (object.has_payload) stop(diagnostic_codes::structure, "compiled-effect object has duplicate payloads", at);
-            object.bytes = payload(cursor, length); object.has_payload = true;
+            object.byte_offset = cursor; object.bytes = payload(cursor, length); object.has_payload = true;
+            metadata_items<std::uint32_t>(1U, at); result_.raw_object_order.push_back(slot);
         }
         initializers(cursor, references);
         if (cursor != input_.size()) stop(diagnostic_codes::structure, "compiled-effect trailing bytes are unsupported", cursor);
-        validate_objects(cursor); return std::move(result_);
+        validate_value_references(cursor); validate_objects(cursor); programs(); shader_assignments(); return std::move(result_);
     }
 };
 } // namespace
@@ -435,6 +608,8 @@ core::Result<EffectView> read_compiled_effect(const std::span<const std::byte> b
     } catch (const Stop& failure) {
         return core::Result<EffectView>::failure(detail::error(source, failure.code, failure.message,
                                                              static_cast<std::uint64_t>(failure.offset)));
+    } catch (const core::Diagnostic& failure) {
+        return core::Result<EffectView>::failure(failure);
     }
 }
 } // namespace eawr::assets

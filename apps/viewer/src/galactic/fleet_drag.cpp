@@ -117,8 +117,14 @@ void EawrFleetDrag::_drop_data(const Vector2& point, const Variant& data) {
         static_cast<void>(drop_(static_cast<std::uint64_t>(static_cast<std::int64_t>(data)), get_global_transform().xform(point), true));
 }
 void EawrFleetDrag::_gui_input(const Ref<InputEvent>& event) {
-    accept_event(); // Rejected drags and clicks belong to the GUI too.
     const auto* button = event.is_valid() ? Object::cast_to<InputEventMouseButton>(event.ptr()) : nullptr;
+    // This surface owns clicks and drags, but has no wheel action (#5085).
+    if (button && (button->get_button_index() == MOUSE_BUTTON_WHEEL_UP
+        || button->get_button_index() == MOUSE_BUTTON_WHEEL_DOWN)) {
+        if (get_viewport() && get_viewport()->gui_is_dragging()) accept_event();
+        return;
+    }
+    accept_event(); // Rejected drags and clicks belong to the GUI too.
     if (button && button->get_button_index() == MOUSE_BUTTON_RIGHT) {
         if (button->is_pressed() && right_) right_(get_global_transform().xform(button->get_position()));
         return;

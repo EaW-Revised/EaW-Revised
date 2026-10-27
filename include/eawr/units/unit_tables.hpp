@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/core/load_note.hpp"
+
 #include "eawr/units/unit_tables_combat.hpp"
 #include "eawr/units/unit_tables_abilities.hpp"
 #include "eawr/units/unit_tables_spawner.hpp"
@@ -212,6 +214,7 @@ struct UnitType final {
     bool influences_capture{true};
     bool ownership_sticks{};
     bool community_property{};
+    bool ai_community_property{}; // PE-34: tactical perception only, excluded from simulation identity.
     // WSU-16: station selection metadata, separate from capture-pad simulation identity.
     bool station_community_property{};
     bool construction_blocker{true};
@@ -244,6 +247,7 @@ struct UnitType final {
     bool creates_carried_heroes{};
     bool display_contained_hero_bars{};
     std::string replenish_team;
+    bool replenish_via_members{}; // WHE-70: TEAM dispatches this ability to its members.
     bool redirect_damage_to_teammates{};
     // WNO-29: authored order, resolved independently of ordinary weapons.
     std::vector<std::string> death_projectiles{};
@@ -349,12 +353,12 @@ struct LoadInput final {
 // The durability table of loaded tables (#72, docs/behaviour/space-hardpoints.md): one profile
 // per station, ship and craft with a Tactical_Health, keyed by the TED object-type CRC of its
 // name (assets::object_type_crc) and sorted by it. Health is scaled by
-// Object_Max_Health_Multiplier_Space. Fails when a scalar it needs is missing, a destroyable
-// hardpoint has no Health, two types share a type ID or validate_durability rejects the table.
+// Object_Max_Health_Multiplier_Space. Missing globals use stock values; duplicate IDs
+// retain the first profile. A destroyable hardpoint with an unparseable Health still fails.
 // FoC has no health cap (SKI-64): a scaled hull above sim::tactical::max_durability_health is held
 // at that bound and, when `notes` is given, reported there once per type as a warning.
 [[nodiscard]] core::Result<sim::tactical::DurabilityTable> durability_table(const UnitTables& tables,
-    std::vector<core::Diagnostic>* notes = nullptr);
+    std::vector<core::Diagnostic>* notes = nullptr, core::LoadNoteBuffer* load_notes = nullptr);
 
 // The damage and armor type names the tables use, lower case and sorted: the indices of the
 // damage rules' armor table (#74). Both durability_table and combat_table index by it.
@@ -405,7 +409,7 @@ struct SpawnPolicy final {
 // reserves and each owner's selected tech tier (WGT-10, WSL-04/16a).
 [[nodiscard]] core::Result<sim::tactical::MotionTable> motion_table(
     const UnitTables& tables, const SpawnPolicy& spawn_policy = {},
-    std::vector<core::Diagnostic>* notes = nullptr);
+    std::vector<core::Diagnostic>* notes = nullptr, core::LoadNoteBuffer* load_notes = nullptr);
 
 // What a content error in one object does to its table (#4589, docs/unit-data.md "Content errors").
 // strict: the table is refused (our CI and data checks). skip_object: FoC's way, the object's rows
@@ -422,7 +426,8 @@ enum class ContentErrors : std::uint8_t { strict, skip_object };
 // or validate_combat rejects the table. Under skip_object a type whose rows fail is left out and
 // appended to `skipped` (its message names the type) instead.
 [[nodiscard]] core::Result<sim::tactical::CombatTable> combat_table(const UnitTables& tables,
-    ContentErrors policy = ContentErrors::strict, std::vector<core::Diagnostic>* skipped = nullptr);
+    ContentErrors policy = ContentErrors::strict, std::vector<core::Diagnostic>* skipped = nullptr,
+    core::LoadNoteBuffer* load_notes = nullptr);
 
 // The ability table of loaded tables (#76, docs/behaviour/space-abilities.md AB-01 to AB-04): one
 // profile per station, ship and craft type that authors a modelled Unit_Ability (DEFEND, TURBO,
@@ -437,7 +442,7 @@ enum class ContentErrors : std::uint8_t { strict, skip_object };
     const UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {},
     bool (*allowed)(std::string_view unit, std::string_view ability) = nullptr,
     bool default_autofire = true, ContentErrors policy = ContentErrors::strict,
-    std::vector<core::Diagnostic>* skipped = nullptr);
+    std::vector<core::Diagnostic>* skipped = nullptr, core::LoadNoteBuffer* load_notes = nullptr);
 // Whether a type runs the PowerToShields object script (`Lua_Script`), whose DEFEND rule the
 // ability table's stand-in carries (AB-41).
 [[nodiscard]] bool runs_defend_script(const UnitType& type) noexcept;

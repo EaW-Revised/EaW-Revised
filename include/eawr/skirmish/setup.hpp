@@ -43,6 +43,8 @@ struct SetupMapQuery final {
     std::optional<std::uint32_t> owner, terrain;
     bool new_markers_only{};
     std::string game_type;
+    // Diagnostic: read every TED whole to check its header, as before the header-prefix read (#5197).
+    bool read_whole_headers{};
 
     friend bool operator==(const SetupMapQuery&, const SetupMapQuery&) = default;
 };

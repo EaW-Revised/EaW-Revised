@@ -53,6 +53,16 @@ struct SquadronOf {
     double health{1.0};       // the mean of its live craft's health (CARD-3, the debug build)
     std::uint32_t second_ability{ability_none};
 };
+// One standing member of a team and its display health.
+struct TeamMember {
+    sim::EntityId entity{};
+    double health{1.0};
+};
+// A team's card model (#5162): the members still standing, in roster order, and their mean display
+// health (L-9). Space squadrons and land squads share it: both are one card for one container.
+[[nodiscard]] SquadronOf make_squadron(sim::EntityId container, std::string type, std::uint32_t ability,
+                                       std::uint32_t second_ability, bool homogeneous,
+                                       std::span<const TeamMember> members);
 struct SelectedUnit {
     sim::EntityId entity{};
     std::string type;

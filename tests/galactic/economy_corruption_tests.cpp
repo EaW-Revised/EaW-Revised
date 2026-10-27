@@ -19,6 +19,9 @@
 #include "../../src/sim/galactic/encoding.hpp"
 
 #include <filesystem>
+#include <fstream>
+#include <chrono>
+#include "../support/temp_dir.hpp"
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -318,6 +321,79 @@ void replay_and_checkpoint() {
         }
     }
 }
+void authored_load_guards() {
+    namespace cp = eawr::campaign;
+    namespace dg = eawr::data::galactic;
+    const auto directory = std::filesystem::temp_directory_path() / ("gc-load-guards-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+    std::filesystem::create_directories(directory / "XML");
+    const auto write = [&](const char* file, std::string_view xml) { std::ofstream out(directory / "XML" / file); out << xml; };
+    write("GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write("FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
+    write("CampaignFiles.xml", "<Campaign_Files><File>Campaigns.xml</File></Campaign_Files>");
+    write("HardpointDataFiles.xml", "<Hard_Point_Files/>"); write("SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write("Objects.xml", R"xml(<Types><Planet Name="Place"><Behavior>PLANET</Behavior><Galactic_Position>0,0,0</Galactic_Position>
+        <Corruption_1_Type>CORRUPTION_PIRACY</Corruption_1_Type><Corruption_1_Required_Unit_Type>Missing</Corruption_1_Required_Unit_Type>
+        <Corruption_2_Type>CORRUPTION_BLACK_MARKET</Corruption_2_Type><Corruption_2_Tactical_Game_Mode>Unknown</Corruption_2_Tactical_Game_Mode>
+        </Planet><UniqueUnit Name="Buyer"><Abilities><Black_Market_Ability><Min_Respawn_Times>1 2</Min_Respawn_Times>
+        <Max_Respawn_Times>2 3 4 5 6</Max_Respawn_Times></Black_Market_Ability></Abilities></UniqueUnit></Types>)xml");
+    write("Factions.xml", R"xml(<Factions><Faction Name="Side"><Is_Playable>No</Is_Playable></Faction></Factions>)xml");
+    write("Campaigns.xml", R"xml(<Campaigns><Campaign Name="Tutorial"><Locations>Place</Locations><Tutorial>No</Tutorial></Campaign></Campaigns>)xml");
+    const std::vector<eawr::vfs::MountSpec> mounts{{"guard-fixture", directory, "data", {}}};
+    const auto files = take(eawr::vfs::Vfs::mount(mounts));
+    const auto loaded = take(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+    dg::GalacticData data;
+    dg::Faction faction; faction.name = "Side"; faction.is_neutral = true; data.factions.push_back(faction);
+    dg::Planet planet; planet.name = "Place"; planet.behaviors = {"PLANET"}; planet.galactic_position = dg::Position{}; data.planets.push_back(planet);
+    dg::Campaign campaign; campaign.name = "Tutorial"; campaign.locations = {"Place"}; campaign.planets = {"Place"}; data.campaigns.push_back(campaign);
+    data.constants = {{"MaximumFleetMovementDistance", "10", f(10)}, {"Fiscal_Cycle_Time_In_Secs", "1", f(1)}};
+    cp::CampaignSetupOptions options; options.players = {{{1, 1, 0}, "Side", true}};
+    const auto plan = take(cp::plan_campaign_setup(data, {}, "Tutorial", options));
+    auto config = plan.galaxy();
+    eawr::data::XmlDocument constants, market;
+    const auto xml = [](std::string name, std::string value) { eawr::data::XmlNode n; n.name = std::move(name); n.raw_text = std::move(value);
+        n.source = {"data/xml/blackmarketitems.xml", "guard-fixture", "guard-fixture", 7, 1}; return n; };
+    constants.root.children = {xml("Corruption_Choice_Income_Percentage", "1 1 1 1 1 1 1 1"),
+        xml("Black_Market_Income_Mult_Min", "1"), xml("Black_Market_Income_Mult_Max", "1")};
+    auto item = xml("Item", ""); item.children = {xml("Faction", "Side"), xml("Tech_Level", "3"), xml("Base_Cost_Credits", "27")};
+    auto ordinary_default = xml("Item", ""); ordinary_default.children = {xml("Faction", "Side")};
+    auto unbound = xml("Item", ""); unbound.children = {xml("Faction", "Missing")};
+    market.root.children = {item, ordinary_default, unbound};
+    eawr::core::LoadNoteBuffer buffer;
+    const auto economy = take(cp::prepare_corruption_economy(constants, market, loaded.catalog, plan, config, &buffer));
+    expect(!economy.tutorial && economy.items.size() == 2, "ordinary market loads, skipping only an unbound item");
+    expect(economy.items[0].tech == 3 && economy.items[0].base_cost == f(27), "ordinary item values survive loading");
+    expect(economy.items[1].tech == 1 && economy.items[1].base_cost == Fixed{} && economy.items[1].uncommon_multiplier == Fixed{}, "B WGEP-105 defaults are 1/0/0");
+    const auto buyer = take(cp::prepare_black_market_buyer(loaded.catalog, "Buyer", 10000, 2, true, &buffer));
+    expect(buyer.absence_min.empty() && buyer.absence_max.empty(), "B WGEP-107 clears both malformed respawn lists");
+    config.control.emplace(); config.census.emplace(); config.economy_corruption = economy;
+    gc::ControlPlanet political; political.planet = config.planets[0].id; political.type = 1; config.control->planets.push_back(political);
+    gc::GalacticAbilitySetup host;
+    take(cp::prepare_corruption_host(loaded.catalog, plan, config, host, [](std::string_view) { return gc::TypeId{}; }, &buffer));
+    expect(host.corruption_planets.size() == 1 && host.corruption_planets[0].slots[0].type == cf::Type::none
+        && host.corruption_planets[0].slots[1].type == cf::Type::none, "C unresolved slot and unknown mode become empty slots");
+    eawr::core::LoadNoteCollector notes; notes.merge(buffer); const auto snapshot = notes.snapshot();
+    const auto has = [&](std::string_view code, eawr::core::LoadCategory category, std::string_view tag) {
+        return std::any_of(snapshot.begin(), snapshot.end(), [&](const auto& note) { return note.code == code && note.classification == category && note.tag == tag; });
+    };
+    expect(has("EAWR-LOAD-1200", eawr::core::LoadCategory::retail_accepts, "Tech_Level")
+        && has("EAWR-LOAD-1207", eawr::core::LoadCategory::retail_accepts, "Min_Respawn_Times/Max_Respawn_Times")
+        && has("EAWR-LOAD-1205", eawr::core::LoadCategory::unknown_degrade, "Faction")
+        && has("EAWR-LOAD-1221", eawr::core::LoadCategory::unknown_degrade, "Corruption_2_Tactical_Game_Mode"), "family contracts retain B/C classifications and tags");
+    const auto default_note = std::find_if(snapshot.begin(), snapshot.end(), [](const auto& note) { return note.tag == "Tech_Level"; });
+    expect(default_note != snapshot.end() && default_note->file == "data/xml/blackmarketitems.xml" && default_note->line == 7
+        && default_note->layer.mod_id == "guard-fixture", "omitted ordinary field retains enclosing item provenance");
+    auto consumer = setup(); consumer.economy_corruption->items = economy.items;
+    consumer.economy_corruption->tutorial = false;
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(gc::GalacticSession::create(consumer)); std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 3; ++tick) hashes.push_back(take(game.step(executor)).state_hash.get());
+        if (workers == 1) baseline = hashes; else expect(hashes == baseline, "degraded market continues deterministically on 1/2/4/8 workers");
+    }
+}
 std::string game_root() {
     return eawr::testing::game_root(eawr::testing::EmptyEnvironment::present).value_or("");
 }
@@ -382,7 +458,7 @@ void installed() {
 }
 } // namespace
 int main(int argc, char**) {
-    try { if (argc > 1) installed(); else replay_and_checkpoint(); }
+    try { if (argc > 1) installed(); else { authored_load_guards(); replay_and_checkpoint(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

@@ -46,6 +46,35 @@ ui::CardUnit squadron(const sim::EntityId id, std::string type, const std::uint3
     return result;
 }
 
+// #5162: a land squad is one card, like a fighter squadron. Two squads of five troopers each are selected
+// by their members; the cards are the two squads, health is the mean of the troopers still standing, and a
+// card selects its squad's members.
+void test_land_squads_are_one_card_each() {
+    const std::vector<ui::TeamMember> first{{101, 1.0}, {102, 0.5}, {103, 1.0}, {104, 0.5}, {105, 0.9}};
+    const std::vector<ui::TeamMember> second{{201, 0.25}, {202, 0.7}};
+    const auto squad_a = ui::make_squadron(100, "Rebel_Infantry_Squad", ui::ability_none, ui::ability_none, true, first);
+    const auto squad_b = ui::make_squadron(200, "Rebel_Infantry_Squad", ui::ability_none, ui::ability_none, true, second);
+    expect(squad_a.container == 100 && squad_a.members == std::vector<sim::EntityId>{101, 102, 103, 104, 105},
+           "a team keeps its standing members in roster order");
+    expect(std::abs(squad_a.health - 0.78) < 1e-9 && std::abs(squad_b.health - 0.475) < 1e-9,
+           "team health is the mean of its members' display health");
+    expect(ui::make_squadron(300, "Rebel_Infantry_Squad", ui::ability_none, ui::ability_none, true, {}).health == 0.0,
+           "a team with no standing member has no health");
+    std::vector<ui::SelectedUnit> selection;
+    for (const auto& member : first) selection.push_back({member.entity, "Squad_Rebel_Trooper", ui::ability_none, member.health, std::nullopt, squad_a});
+    for (const auto& member : second) selection.push_back({member.entity, "Squad_Rebel_Trooper", ui::ability_none, member.health, std::nullopt, squad_b});
+    const auto cards = ui::card_units(selection);
+    expect(cards.size() == 2, "seven selected troopers of two squads are two cards, not seven");
+    expect(cards[0].squadron && cards[0].id == 100 && cards[0].type == "Rebel_Infantry_Squad",
+           "a squad card is the squad's own type, once");
+    expect(cards[1].squadron && cards[1].id == 200 && cards[1].members == std::vector<sim::EntityId>{201, 202},
+           "the second squad has its own card");
+    const auto layout = ui::layout_unit_cards(cards, 24);
+    expect(layout.cards.size() == 2, "two squads fill two card slots");
+    expect(layout.cards[0].health_level == 8 && layout.cards[1].health_level == 5,
+           "each squad card shows its aggregate health bar");
+}
+
 void test_ability_index() {
     expect(ui::ability_index("DEFEND") == defend, "DEFEND is UnitAbilityType 1");
     expect(ui::ability_index("power_to_weapons") == 29, "ability names match in any case (the Acclamator's)");
@@ -326,6 +355,7 @@ void test_battle_results() {
 
 int main() {
     test_ability_index();
+    test_land_squads_are_one_card_each();
     test_health_level();
     test_card_units_fold_squadrons();
     test_one_ship();

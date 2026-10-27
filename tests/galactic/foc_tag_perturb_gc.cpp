@@ -19,7 +19,7 @@ cp::CampaignSetupServices sandbox_services() {
     s.mark_initial_placement = [](const auto&) { return Result<void>::success(); };
     s.place = [](const cp::StartingForceRequest& r, const auto next, const auto&) {
         return Result<cp::StartingForcePlacement>::success(
-            {{{next, r.owner, r.planet, {{next + 1, r.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}});
+            {{{next, r.owner, r.planet, {{next + 1, r.type}}}}, {}, next + 2, true, {}, {}, {}, {}, {}, 0, {}, {}, false, {}, 0});
     };
     s.unify_human_guard_fleets = [](const auto, const auto, const auto& setup) {
         return Result<std::vector<gc::Fleet>>::success(setup.fleets);

@@ -97,6 +97,8 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_area_abi
     proxy.state = UnitState{next_id, ability.barrage_target_type, enemy->player_id,
         {payload.point.x, payload.point.y, z.value()}, math::identity_quat(), {}};
     proxy.state.barrage_source = unit_id;
+    // WAD-38/ADR-020: this artificial enemy-owned aim marker has no command seat.
+    // Controller validation recognizes its source relation, independently of mobile units.
     const auto proxy_id = next_id++;
     staged.emplace(proxy_id, std::move(proxy));
     phase.track_victory_change(nullptr, &staged.at(proxy_id).state, false);
@@ -191,6 +193,9 @@ core::Result<void> session_detail::Tick::CommandHandlers::special_fire(const Pla
     std::uint32_t index = 0;
     if (ai && (!player || !player->ai)) reason = RejectReason::ability_unavailable;
     else if (source == staged.end()) reason = RejectReason::unit_not_live;
+    else if (const auto control = controller_admission(phase.impl_->setup, command, source->second.state,
+        profile && (profile->star_base || profile->planetary_weapon));
+        control != RejectReason::none) reason = control;
     else if (!profile || !phase.impl_->special_weapons_enabled(issuer, ledgers, &staged, &phase.special_disabled_by_hardpoint_)) reason = RejectReason::ability_unavailable;
     else if (!phase.impl_->allied(issuer, source->second.state.owner)) reason = RejectReason::unit_not_owned;
     else if (profile->planetary_weapon) {

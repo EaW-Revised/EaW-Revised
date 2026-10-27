@@ -32,8 +32,9 @@ void start(ProductionEntry& entry, std::uint64_t frame) { session_detail::native
 Fixed paid(const ProductionEntry& entry) { return session_detail::native_production_paid(entry); }
 bool prerequisites(const PlanetProduction& planet, const ProductionOffer& type, std::span<const Fleet> fleets,
     bool servicing = true) {
-    if (servicing && (type.domain == ProductionDomain::ground ? type.required_ground_level > planet.ground_level
-            : type.required_space_level > planet.space_level)) return false;
+    // LSA-09: required levels retain signed parser bits but compare unsigned.
+    if (servicing && (type.domain == ProductionDomain::ground ? static_cast<std::uint32_t>(type.required_ground_level) > planet.ground_level
+            : static_cast<std::uint32_t>(type.required_space_level) > planet.space_level)) return false;
     for (const auto& group : type.required_structures) {
         if (std::none_of(group.begin(), group.end(), [&](auto wanted) {
             return std::any_of(planet.objects.begin(), planet.objects.end(), [&](const auto& object) { return object.type == wanted && object.kind == ProductionKind::structure; });
@@ -480,7 +481,8 @@ ProductionAdmission queried_admission(const ProductionAdmissionInputs& inputs,
     if (planet.target_owner != player.player || (type->domain == ProductionDomain::space && planet.starbase_owner != 0 && planet.starbase_owner != player.player)) return (ProductionAdmission::ownership);
     if (!prerequisites(planet, *type, inputs.fleets, false)) return (ProductionAdmission::prerequisites);
     if (account.current_tech < type->tech) return (ProductionAdmission::tech);
-    if (type->required_ground_level > planet.ground_level || type->required_space_level > planet.space_level) return (ProductionAdmission::prerequisites);
+    if (static_cast<std::uint32_t>(type->required_ground_level) > planet.ground_level
+        || static_cast<std::uint32_t>(type->required_space_level) > planet.space_level) return (ProductionAdmission::prerequisites);
     std::uint64_t local_count{}, slot_count{}, queued_count{};
     for (const auto& object : planet.objects) { if (object.type == type->type) ++local_count; if (object.kind == ProductionKind::structure && object.domain == type->domain) ++slot_count; }
     for (const auto& q : planet.queues) for (const auto& entry : q) {
@@ -535,7 +537,7 @@ core::Result<void> validate_production(const GalacticSetup& setup) {
     std::size_t affiliations{};
     for (const auto& type : p.technology_types) {
         affiliations += type.affiliated_players.size();
-        if (!type.type || type.tech < 0 || type.tech > std::numeric_limits<std::int32_t>::max()
+        if (!type.type || type.tech < std::numeric_limits<std::int32_t>::min() || type.tech > std::numeric_limits<std::int32_t>::max()
             || affiliations > galactic_max_objects
             || !ordered(type.affiliated_players, [](auto id) { return id; }))
             return invalid("invalid technology registry row");
@@ -636,10 +638,11 @@ core::Result<void> validate_production(const GalacticSetup& setup) {
             if (type.type == 0 || static_cast<unsigned>(type.domain) > 1 || static_cast<unsigned>(type.kind) > 3
                 || type.price.raw() % Fixed::scale != 0
                 || type.population.raw() < 0 || type.population.raw() > (std::int64_t{1} << 40)
-                || type.tech < 0 || type.tech > std::numeric_limits<std::int32_t>::max()
-                || type.target_tech < 0 || type.target_tech > std::numeric_limits<std::int32_t>::max()
-                || type.required_ground_level < 0 || type.required_ground_level > 5 || type.required_space_level < 0 || type.required_space_level > 5
-                || type.base_level < 0 || type.base_level > 5 || type.planet_limit < -1 || type.current_limit < -1 || type.lifetime_limit < -1
+                || type.tech < std::numeric_limits<std::int32_t>::min() || type.tech > std::numeric_limits<std::int32_t>::max()
+                || type.target_tech < 0 || static_cast<std::uint64_t>(type.target_tech) > std::numeric_limits<std::uint32_t>::max()
+                || type.required_ground_level < std::numeric_limits<std::int32_t>::min() || type.required_ground_level > std::numeric_limits<std::int32_t>::max()
+                || type.required_space_level < std::numeric_limits<std::int32_t>::min() || type.required_space_level > std::numeric_limits<std::int32_t>::max()
+                || type.base_level < std::numeric_limits<std::int32_t>::min() || type.base_level > std::numeric_limits<std::int32_t>::max()
                 || (type.kind == ProductionKind::starbase && type.domain != ProductionDomain::space))
                 return invalid("invalid offer price/time/type inputs");
             for (const auto& group : type.required_structures) if (group.empty() || std::any_of(group.begin(), group.end(), [](auto id) { return id == 0; })) return invalid("empty prerequisite group");

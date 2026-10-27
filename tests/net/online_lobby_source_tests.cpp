@@ -1,6 +1,8 @@
 #include "../support/check.hpp"
 #include "eawr/net/online_lobby_source.hpp"
 #include "relay_directory_codec.hpp"
+#include "menu_chat_poll.hpp"
+#include "eawr/net/relay_server.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -293,18 +295,25 @@ void menu_channel() {
     auto service = std::make_unique<FakeService>(); auto* fake = service.get(); fake->menu_supported = true;
     OnlineLobbyGameSource source(std::move(service), metadata());
     expect(source.menu_state() == OnlineMenuState::idle, "The channel is idle until the player has a name in the browser");
+    source.set_menu_focused(true);
     LobbyPresence presence; presence.place = LobbyPlace::lobby; presence.name = "Guest"; source.announce(presence);
     until([&] { return source.menu_state() == OnlineMenuState::active; });
     auto players = source.players(); expect(players.size() == 2 && players[0].name == "Alice" && players[1].name == "Guest" && players[0].place == LobbyPlace::lobby, "Menu players are listed in the lobby place");
     auto lines = source.take_chat(); expect(lines.size() == 1 && lines[0].scope == LobbyChatScope::lobby && lines[0].name == "Alice" && lines[0].text == "hello", "Recent menu lines arrive with the lobby scope");
+    const auto receive_started = std::chrono::steady_clock::now();
     fake->menu_push("Alice", "second");
     until([&] { source.pump(); lines = source.take_chat(); return !lines.empty(); });
     expect(lines.size() == 1 && lines[0].text == "second", "Polled menu lines arrive once");
+    expect(std::chrono::steady_clock::now() - receive_started < 1800ms, "A visible menu receives chat before the old two-second poll");
+    const auto send_started = std::chrono::steady_clock::now();
     source.send_chat(LobbyChatScope::lobby, "", "Guest", "hi there"); until([&] { return fake->menu_says == 1; });
     source.send_chat(LobbyChatScope::lobby, "", "Guest", std::string(129, 'x')); source.send_chat(LobbyChatScope::lobby, "", "Guest", " \n");
     std::this_thread::sleep_for(100ms); expect(fake->menu_says == 1, "An over-long or empty line is never sent");
     until([&] { source.pump(); lines = source.take_chat(); return !lines.empty(); });
     expect(lines[0].name == "Guest" && lines[0].text == "hi there", "The sender's own line comes back from the service");
+    expect(std::chrono::steady_clock::now() - send_started < 1800ms, "The sender echo shares the bounded foreground poll cadence");
+    std::this_thread::sleep_for(1300ms);
+    expect(source.take_chat().empty(), "The next periodic poll does not duplicate the sender echo");
     // Hosting a room leaves the channel: the room's roster and chat take over.
     presence.place = LobbyPlace::hosting; presence.game = "Room"; presence.map = "custom-map"; presence.game_type = "custom-mode"; presence.max_players = 9;
     source.announce(presence); until([&] { return fake->publishes == 1 && source.menu_state() == OnlineMenuState::idle; });
@@ -329,6 +338,61 @@ void menu_channel() {
     until([&] { return fake->menu_enters == 4 && source.menu_state() == OnlineMenuState::active; });
     expect(source.last_error() == std::nullopt || source.last_error()->code != "EAWR-NET-1521", "The channel never reports through the list error");
 }
+void menu_poll_policy() {
+    using Clock = MenuChatPollSchedule::Clock;
+    const Clock::time_point epoch{};
+    MenuChatPollSchedule schedule;
+    schedule.received(epoch);
+    expect(!schedule.due(epoch + 1999ms, false) && schedule.due(epoch + 2000ms, false), "Background polling stays at two seconds");
+    schedule.set_focused(true, epoch);
+    expect(!schedule.due(epoch + 1099ms, false) && schedule.due(epoch + 1100ms, false), "Focused polling uses the bounded faster cadence");
+    schedule.received(epoch + 1100ms);
+    expect(!schedule.due(epoch + 1200ms, true), "A send just after a poll cannot add another operation");
+    expect(schedule.due(epoch + 2200ms, true), "A sender echo polls when its spacing gate opens");
+    schedule.set_focused(false, epoch + 1200ms);
+    expect(!schedule.due(epoch + 3199ms, false) && schedule.due(epoch + 3200ms, false), "Focus loss restores the background cadence");
+    expect(schedule.due(epoch + 2200ms, true), "A background send can use the earlier bounded echo poll");
+
+    // The review's shared-prefix load: a 50 ms worker wait, 25 ms service calls,
+    // a directory list each second and a queued send every 1100 ms. Exercise the
+    // actual production policy, including focus transitions, without wall time.
+    const RelayServerOptions limits;
+    constexpr auto minute = std::chrono::duration_cast<std::chrono::milliseconds>(60s).count();
+    const auto max_polls = (minute + MenuChatPollSchedule::focused_interval.count() - 1) / MenuChatPollSchedule::focused_interval.count();
+    const auto max_sends = (minute + MenuChatPollSchedule::send_interval.count() - 1) / MenuChatPollSchedule::send_interval.count();
+    const auto max_operations = static_cast<std::size_t>(1 + max_polls + max_sends);
+    expect((limits.connections_per_ip / 2) * max_operations <= limits.menu_operations_per_minute,
+           "Even zero-RTT browsers at both spacing limits fit the shared-prefix budget");
+    for (const bool changing_focus : {false, true}) {
+        MenuChatPollSchedule policy;
+        auto now = epoch + 25ms;
+        policy.set_focused(true, now);
+        policy.received(now);
+        auto next_send = epoch, next_list = epoch;
+        std::size_t operations = 1; // menu_enter
+        while (now < epoch + 60s) {
+            now += 50ms;
+            if (changing_focus) policy.set_focused(((now - epoch) / 5s) % 2 == 0, now);
+            const bool sent = now >= next_send;
+            if (sent) {
+                next_send = now + MenuChatPollSchedule::send_interval;
+                if (now < epoch + 60s) ++operations;
+                now += 25ms;
+            }
+            if (policy.due(now, sent)) {
+                if (now < epoch + 60s) ++operations;
+                now += 25ms;
+                policy.received(now);
+            }
+            if (now >= next_list) { now += 25ms; next_list = now + 1s; }
+        }
+        for (const std::size_t clients : {8U, 9U}) {
+            expect(clients * 2 <= limits.connections_per_ip, "Shared-prefix case fits the two-connection browser limit");
+            expect(clients * operations <= limits.menu_operations_per_minute, "Shared-prefix sends and polls stay within the unchanged relay budget");
+        }
+        std::cout << "Menu budget: " << operations * 8 << " operations/8 browsers, " << operations * 9 << " operations/9 browsers, focus changes=" << changing_focus << "\n";
+    }
+}
 void menu_transient_failure() {
     auto service = std::make_unique<FakeService>(); auto* fake = service.get(); fake->menu_supported = true; fake->menu_fail_enters = 1;
     OnlineLobbyGameSource source(std::move(service), metadata());
@@ -340,6 +404,6 @@ void menu_transient_failure() {
 }
 }
 int main() {
-    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); menu_old_relay(); menu_channel(); menu_transient_failure(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
+    try { fixtures(); fixed_password_rooms(); live_source(); destruction_drains_off_frame(); bridge_publication_waits(); cancellation(); recovery_and_validation(); menu_old_relay(); menu_channel(); menu_poll_policy(); menu_transient_failure(); std::cout << "Online lobby source and cancellation contracts passed\n"; return 0; }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
 }

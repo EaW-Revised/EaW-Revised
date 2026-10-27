@@ -41,6 +41,11 @@ Output: the card in each slot, the column borders, and on a click the new select
   ([foc-battle-world-ui.md](foc-battle-world-ui.md), battle world UI and squadron selection), so the cards read a selected container
   as its live craft and a card stands for the containers of its craft: selecting or deselecting a
   squadron card (or a mixed squadron's craft card) selects or deselects the squadron as one unit.
+  A land squad is the same case: the selection holds the squad root, the card is the squad's own type (the
+  `Create_Team_Type` the company authors, else the company itself; its `Icon_Name` is the portrait; stock data authors the same icon on company and team), its
+  health is the same mean of the members still standing, and a click selects the squad. A selected squad is
+  one card, never one per trooper. Source: owner report and stock company/team data; the card art and health
+  rule for land are not debug-build verified separately (unverified, least visible choice: the space rule).
 - L-3 (CARD-2). The debug build's stacking compares the exact object type and ability
   status; ship class and shared ability do not merge different types into one stack. A stack keeps
   the ability of its first unit. Stacks keep first-seen order.

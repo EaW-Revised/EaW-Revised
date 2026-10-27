@@ -315,6 +315,7 @@ struct QueueEntry {
     std::uint32_t frames{};
     std::uint64_t complete_frame{};
     std::uint64_t entry_id{}; // PU-17: stable across queue shifts, never reused within a player's session.
+    SeatId controller_seat{}; // ADR-020: accepted buyer, retained through delayed output.
     friend constexpr bool operator==(const QueueEntry&, const QueueEntry&) noexcept = default;
 };
 
@@ -358,6 +359,7 @@ struct PlayerEconomy {
     std::uint64_t next_queue_entry_id{1};
     math::Fixed campaign_extra_releases{}; // WGA-54: authoritative credit bridge
     math::Fixed collected_bounty{}; // WGCH-65: rounded payments, independent of credit cap
+    std::map<std::uint64_t, SeatId> pool_controllers{}; // ADR-020: generated output, keyed by stable pool token.
     friend bool operator==(const PlayerEconomy&, const PlayerEconomy&) = default;
 };
 

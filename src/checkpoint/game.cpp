@@ -147,6 +147,13 @@ core::Result<Bytes> encode_child_host(const campaign::BattleCheckpoint& saved) {
     for (const auto& [player, sequence] : saved.sequences) { out.u32(player); out.u64(sequence); }
     out.u64(saved.killers.size());
     for (const auto& [id, killer] : saved.killers) { out.u64(id); out.u32(killer); }
+    if (saved.controller_inputs) {
+        out.u32(0x4c525443U); out.u32(4); out.u64(saved.controller_inputs->size());
+        for (const auto& input : *saved.controller_inputs) {
+            out.u64(input.outer.tick); out.u32(input.outer.seat.value); out.u64(input.outer.sequence);
+            out.u64(input.producer_sequence); blob(out, input.body);
+        }
+    }
     if (out.bytes().size() > max_bytes) return fail<Bytes>("child host exceeds limit", {}, diagnostic_codes::resource_limit);
     return core::Result<Bytes>::success(std::move(out.bytes()));
 }
@@ -197,6 +204,19 @@ core::Result<std::optional<campaign::BattleCheckpoint>> decode_child_host(std::s
     for (std::uint64_t i = 0; i < killers; ++i) {
         const auto id = in.u64(); const auto killer = in.u32();
         if (!saved.killers.emplace(id, killer).second) return fail<Save>("section scripts: duplicate child death", path);
+    }
+    if (in.remaining() != 0) {
+        if (in.u32() != 0x4c525443U || in.u32() != 4)
+            return fail<Save>("section scripts: unsupported child controller continuation", path);
+        const auto inputs = count(gc::galactic_max_commands, 36);
+        saved.controller_inputs.emplace();
+        for (std::uint64_t i = 0; i < inputs && !in.failed(); ++i) {
+            campaign::PendingBattleInput input;
+            input.outer.tick = in.u64(); input.outer.seat.value = in.u32(); input.outer.sequence = in.u64();
+            input.producer_sequence = in.u64(); const auto body = blob(in);
+            input.body.assign(body.begin(), body.end());
+            saved.controller_inputs->push_back(std::move(input));
+        }
     }
     if (in.failed() || in.remaining() != 0) return fail<Save>("section scripts: malformed child host", path);
     auto canonical = encode_child_host(saved);
@@ -672,7 +692,18 @@ core::Result<void> validate_checkpoint_recording(const Checkpoint& saved, campai
         // Final recapture below still compares every effective seat and exact saved section.
         auto initial = *active_conflict;
         const bool roles = recording.commands.setup.seat_control.has_value();
-        if (roles) initial.seats = entry.conflict.seats;
+        if (roles) {
+            initial.seats = entry.conflict.seats;
+            // ADR-020: tick-zero roles also evolve the effective controller roster
+            // and mobile seat assignments. All other setup/unit facts stay immutable;
+            // child restoration validates the saved policy and exact sections below.
+            if (initial.tactical.controllers && entry.conflict.tactical.controllers) {
+                initial.tactical.controllers = entry.conflict.tactical.controllers;
+                if (initial.tactical.units.size() == entry.conflict.tactical.units.size())
+                    for (std::size_t i = 0; i < initial.tactical.units.size(); ++i)
+                        initial.tactical.units[i].controller_seat = entry.conflict.tactical.units[i].controller_seat;
+            }
+        }
         if (entry.conflict != initial || entry.entry_tick >= completed) return false;
         const auto elapsed = completed - entry.entry_tick - 1;
         // Agreed multiplayer pauses advance the parent frontier while holding the child clock.

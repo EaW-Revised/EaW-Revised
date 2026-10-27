@@ -30,7 +30,7 @@ struct RelayServerOptions {
     // Secrets, used only by the cloudflare provider; never logged or placed in an error.
     std::string cloudflare_key_id;
     std::string cloudflare_api_token;
-    std::size_t cloudflare_calls_per_minute{30};
+    std::size_t cloudflare_calls_per_minute{120};
     std::chrono::milliseconds cloudflare_timeout{4000};
     // Contract seams for a local fake HTTPS endpoint; the host name stays rtc.live.cloudflare.com
     // and its certificate is still verified. Production leaves these at their defaults.
@@ -40,8 +40,8 @@ struct RelayServerOptions {
     // Receives sanitized warnings (e.g. EAWR-NET-1556 when Cloudflare is unreachable).
     // Called on the poll owner thread only.
     std::function<void(const core::Diagnostic&)> diagnostics;
-    std::size_t max_connections{128};
-    std::size_t max_sessions{64};
+    std::size_t max_connections{1024};
+    std::size_t max_sessions{512};
     // 18 = 2 x max_match_seats: nine room members behind one NAT, each with a directory and a room connection.
     std::size_t connections_per_ip{18};
     std::size_t unpaired_sessions_per_ip{2};
@@ -65,7 +65,7 @@ struct RelayServerOptions {
     // connections_per_ip menu connections (players behind one NAT); 30 polls a minute per client leave room for chat.
     std::size_t menu_operations_per_minute{1024};
     std::size_t menu_bytes_per_minute{4 * 1024 * 1024};
-    std::size_t menu_max_members{256};
+    std::size_t menu_max_members{512};
     std::size_t menu_recent_lines{50};
     std::chrono::milliseconds menu_line_lifetime{600000};
     // N-peer rooms (slice N3). Room members have budgets of their own, apart from the legacy per-session and

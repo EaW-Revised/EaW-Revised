@@ -5,6 +5,8 @@
 #include "eawr/skirmish/start.hpp"
 #include "eawr/sim/tactical/content.hpp"
 
+#include <optional>
+
 namespace eawr::campaign {
 
 // The admission/scene rule owners supply marker choices and the already split force record.
@@ -26,6 +28,8 @@ struct ConflictEntry {
     battle::BattleStart start;
     std::vector<sim::tactical::CampaignUpgrade> scene_upgrades; // pre-force ledger inputs, WGT-113
     std::vector<std::string> notes{}; // see ResolvedConflictEntry::notes
+    // Entry preparation defers this until campaign economy/population rules are bound.
+    std::optional<sim::tactical::BattleControllerPolicy> controller_policy{};
 };
 // first_free is the galaxy allocator after reserving the conflict and all persistent objects.
 // The returned setup advances it past battle-only map objects and squadron craft (ADR-014).

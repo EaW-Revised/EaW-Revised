@@ -1,6 +1,7 @@
 #include "map_camera_test_support.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <optional>
 #include <string>
@@ -162,6 +163,25 @@ void test_lifecycle_clears_stale_input() {
     expect(bridge.set_viewport(0.0F, 0.0F).has_value(), "minimize accepted");
     expect(!moved(), "minimize suspends and clears held pan");
     expect(bridge.set_viewport(1280.0F, 720.0F).has_value(), "restore accepted");
+
+    // A content scale factor makes the visible rect fractional (2558 x 1360 window): the
+    // frame, the adapter and the picking rect all take the same nearest whole pixels.
+    struct Scaled { float scale; float width; float height; std::uint32_t whole_width; std::uint32_t whole_height; };
+    const Scaled scaled[] = {{1.25F, 2046.4F, 1088.0F, 2046U, 1088U},
+                             {1.5F, 1705.3333F, 906.6667F, 1705U, 907U},
+                             {1.75F, 1461.7143F, 777.1429F, 1462U, 777U}};
+    for (const auto& entry : scaled) {
+        const std::string name = "scale " + std::to_string(entry.scale);
+        expect(bridge.set_viewport(entry.width, entry.height).has_value(), (name + " accepted"));
+        expect(bridge.frame().width == entry.whole_width && bridge.frame().height == entry.whole_height,
+               (name + " frame is whole pixels"));
+        expect(eawr::viewer::camera_input::whole_viewport_extent(entry.width) == static_cast<float>(entry.whole_width)
+            && eawr::viewer::camera_input::whole_viewport_extent(entry.height) == static_cast<float>(entry.whole_height),
+               (name + " picking rect matches the frame"));
+    }
+    expect(bridge.set_viewport(0.4F, 0.4F).has_value() && bridge.frame().width == 1U && bridge.frame().height == 1U,
+           "a sliver of a pixel stays one pixel");
+    expect(bridge.set_viewport(1280.0F, 720.0F).has_value(), "restore after fractional sizes");
     expect(!moved(), "restore does not resurrect held pan");
     expect(handled(bridge, key("D", false)), "release");
 
@@ -205,7 +225,8 @@ void test_failures_do_not_partially_mutate() {
 
     const auto generation = bridge.adapter().counters().viewport_generation;
     const auto sized = bridge.frame();
-    expect(!bridge.set_viewport(1.5F, 720.0F), "fractional viewport rejects");
+    expect(!bridge.set_viewport(-1.0F, 720.0F), "negative viewport rejects");
+    expect(!bridge.set_viewport(std::numeric_limits<float>::quiet_NaN(), 720.0F), "NaN viewport rejects");
     expect(!bridge.set_viewport(std::numeric_limits<float>::infinity(), 720.0F), "infinite viewport rejects");
     expect(bridge.frame() == sized && bridge.adapter().counters().viewport_generation == generation,
            "rejected viewport changes nothing");

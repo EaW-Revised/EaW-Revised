@@ -269,6 +269,12 @@ core::Result<void> session_detail::Tick::finalize_departures() {
                 basic_ai.insert(std::lower_bound(basic_ai.begin(), basic_ai.end(), quit.player), quit.player);
         }
         if (!recipients.empty()) {
+            // ADR-020: one event key per current root, including births earlier in this frame.
+            std::map<EntityId, EntityId> controller_roots;
+            if (impl_->setup.controllers) for (const auto& group : fighters_.value().squadrons.value()) {
+                controller_roots.emplace(group.container, group.container);
+                for (const auto member : group.members) controller_roots.emplace(member, group.container);
+            }
             std::vector<std::optional<UnitState>> before(survivors.size());
             std::vector<std::optional<core::Diagnostic>> errors(tick_partition_count);
             std::vector<CombatBonuses> categories(tick_partition_count * impl_->bonus_categories.size());
@@ -291,9 +297,13 @@ core::Result<void> session_detail::Tick::finalize_departures() {
                             partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
                         const auto bonuses = impl_->command_bonuses_for(unit, impl_->command_ledger,
                             staging_->ledgers.value(), containers, scratch, nullptr, true, recipient->second);
-                        auto changed = impl_->transfer_owner(unit, recipient->second, bonuses);
+                        const auto root = controller_roots.find(unit.state.entity_id);
+                        auto changed = impl_->transfer_owner(unit, recipient->second, bonuses,
+                            root != controller_roots.end() ? root->second : unit.state.entity_id);
                         if (!changed) { errors[partition] = changed.error(); break; }
                         instances[index].owner = recipient->second;
+                        instances[index].controller_seat = unit.state.controller_seat;
+                        instances[index].control = unit.state.control;
                     }
                 });
             if (!transferred) return transferred;
@@ -694,6 +704,7 @@ core::Result<void> session_detail::Tick::commit() {
     impl_->pending.erase(impl_->pending.begin(), due_end);
     commit_object_turn();
     ++impl_->completed_tick;
+    controller_committed_ = true;
     return core::Result<void>::success();
 }
 
@@ -758,7 +769,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         std::move(instances), std::move(events), std::move(combat_events), impl_->projectiles, impl_->outcome,
         std::move(spinning), std::move(squadron_targets), impl_->squadrons,
         impl_->economy_views(impl_->ledgers, impl_->shares), impl_->pad_views(), impl_->quits, impl_->losses, impl_->productions,
-        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons);
+        impl_->manual_clock_views(), impl_->economy_cues, impl_->ability_spawns, session_.retreat_views(), impl_->garrison_timer_views(), impl_->beacons, impl_->setup.controllers);
     std::vector<std::pair<EntityId, PlayerId>> deaths;
     if (impl_->setup.first_free_entity_id) {
         deaths.reserve(loss_killers_.size());

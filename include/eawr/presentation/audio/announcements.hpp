@@ -80,6 +80,12 @@ public:
         --size_;
     }
     [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    template<class Predicate>
+    [[nodiscard]] bool contains(const Predicate& predicate) const {
+        for (std::size_t i = 0; i < size_; ++i)
+            if (predicate(*entries_[(begin_ + i) % Capacity].event)) return true;
+        return false;
+    }
 private:
     std::array<Entry, Capacity> entries_{};
     std::size_t begin_{};

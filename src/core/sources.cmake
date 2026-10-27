@@ -7,6 +7,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrBuildIdentity.cmake")
 set(EAWR_CORE_SOURCES
     "${EAWR_BUILD_IDENTITY_CPP}"
     "${CMAKE_CURRENT_LIST_DIR}/diagnostic.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/load_note.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/json_text.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/sha256.cpp"
 )

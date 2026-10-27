@@ -1,5 +1,6 @@
 #include "eawr/net/galactic_adapter.hpp"
 #include "eawr/core/sha256.hpp"
+#include "eawr/sim/tactical/admission.hpp"
 
 #include <algorithm>
 #include <type_traits>
@@ -273,6 +274,27 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
             if (pause_request && !predicted_pause) pause_actor_ = command.key.seat;
             if (pause_request) predicted_pause = true;
             if (resume_request) predicted_pause = false;
+        }
+        if (const auto* nested = std::get_if<galactic::TacticalLayerCommand>(&command.payload);
+            nested && game_->battle() && game_->battle()->controller_policy()) {
+            namespace tactical = sim::tactical;
+            // Only the sealed executing tick may consult the canonical child.
+            // validate() above depends exclusively on the agreed static roster.
+            const auto& setup = game_->battle()->initial_setup();
+            const auto view = game_->battle_view(command.key.seat);
+            auto inner = tactical::decode_command_body(nested->body, setup,
+                view ? view.value().perspective : 0U);
+            const bool reserve = inner && std::holds_alternative<tactical::ReinforcePayload>(inner.value().payload);
+            if (!inner || tactical::command_body_opcode(inner.value()) != nested->opcode
+                || inner.value().origin == tactical::CommandOrigin::engine
+                || (inner.value().issuing_seat.value != 0 && inner.value().issuing_seat != command.key.seat)
+                || (!reserve && !tactical::human_wire_payload(inner.value().payload))) {
+                refused_.push_back(fail_with<void>(session_errors::admission,
+                    "forged or engine-only tactical route cannot cross the human wire").error());
+                tick_commands_.push_back(std::move(command));
+                continue;
+            }
+            // Reserve availability and per-source control are rechecked by the child.
         }
         if (auto submitted = game_->submit(command); !submitted) {
             // Installation is the executing sealed tick. An input that outlived its conflict is a shared

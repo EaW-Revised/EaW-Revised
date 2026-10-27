@@ -1,4 +1,6 @@
+#include "viewer_load_notes.hpp"
 #include "lan_lobby_screen_internal.hpp"
+#include <godot_cpp/classes/window.hpp>
 
 namespace eawr::presentation::godot_backend {
 EawrLanLobby::EawrLanLobby() {
@@ -82,12 +84,15 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
             return false;
         }
         auto filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted).value());
+        eawr::data::LoadOptions load_options;
+        load_options.parse_unregistered_xml = false;
         auto objects = eawr::data::load_catalog_strict(*filesystem, profile == "foc" ? eawr::data::Profile::foc
-                                                                               : eawr::data::Profile::remake);
+                                                                               : eawr::data::Profile::remake, load_options);
         if (!objects) {
             failure_ = core::format_diagnostic(objects.error());
             return false;
         }
+        publish_viewer_load_notes(std::move(objects.value().notes), layers);
         auto catalog = std::make_shared<const eawr::data::Catalog>(std::move(objects.value().catalog));
         resources.content = std::make_shared<const BattleContent>(
             BattleContent{std::move(filesystem), std::move(catalog), profile, std::move(layers)});
@@ -459,6 +464,13 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
 void EawrLanLobby::_process(const double) {
     if (!shown_ || !impl_) return;
     layout_page();
+    if (impl_->online_rooms) {
+        auto* window = get_window();
+        auto* chat = state_ ? EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT") : nullptr;
+        impl_->online_rooms->set_menu_focused(page_ == Page::lobby && is_visible()
+            && chat && chat->is_visible_in_tree()
+            && impl_->join_selection.source() == model::LobbySourceKind::online && window && window->has_focus());
+    }
     Impl& impl = *impl_;
     bool changed = false;
     const bool online = impl.join_selection.source() == model::LobbySourceKind::online;
@@ -688,7 +700,8 @@ std::uint32_t EawrLanLobby::player_colour() const { return impl_ ? impl_->colour
 
 EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     Snapshot shot;
-    if (!impl_) return shot;
+    if (!impl_ || !state_) return shot;
+    if (auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT")) shot.chat_focused = edit->has_focus();
     const Impl& impl = *impl_;
     static constexpr const char* pages[] = {"lobby", "host_options", "staging", "direct_connect", "filter"};
     shot.page = pages[static_cast<std::size_t>(page_)];

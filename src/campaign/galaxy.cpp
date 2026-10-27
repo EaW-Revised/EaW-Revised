@@ -94,10 +94,13 @@ core::Result<GalaxyModel> build_campaign_galaxy(const data::galactic::GalacticDa
             warn("campaign_route_duplicate_pair", "ignored later route for an already linked endpoint pair: " + name);
             continue;
         }
-        if (!route->hs_speed_factor || route->hs_speed_factor->raw() <= 0)
-            return invalid(campaign, "missing or invalid HS_Speed_Factor for " + name);
+        auto speed = route->hs_speed_factor;
+        if (!speed || speed->raw() <= 0) {
+            warn("campaign_route_speed_default", "missing or invalid HS_Speed_Factor for " + name + "; using 1.0");
+            speed = sim::math::Fixed::from_integer(1).value();
+        }
         const auto id = result.next_id++;
-        result.routes.push_back({id, a->second, b->second, *route->hs_speed_factor});
+        result.routes.push_back({id, a->second, b->second, *speed});
         result.names.push_back({id, route->name});
     }
     auto graph = sim::galactic::PlanetGraph::build(result.planets, result.routes, result.maximum_movement_distance);

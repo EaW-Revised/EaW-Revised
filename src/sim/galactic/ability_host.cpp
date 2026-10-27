@@ -124,7 +124,7 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (market.buyer || market.owner || !market.present || market.opposing_planet
             || market.despawn_requested || market.prepared_absence.raw()
             || (!profile.has_market && !profile.theft && !profile.corruption && !profile.lifecycle_only && !profile.hack && !profile.destruction
-            && !profile.sabotage && !profile.neutralize && !profile.spy) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
+            && !profile.sabotage && !profile.neutralize && !profile.spy && profile.auto_spies.empty()) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
             || market.absence_min.size() != market.absence_max.size()
             || (!market.absence_min.empty() && market.absence_min.size() != 5)
             || std::none_of(setup.census->types.begin(), setup.census->types.end(),
@@ -137,6 +137,11 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
             || profile.spy->name.empty() || profile.spy->name.size() > 4096 || profile.spy->name.find('\0') != std::string::npos
             || profile.spy->text_identity.size() > 1024 || profile.spy->text_identity.find('\0') != std::string::npos
             || (profile.spy->mask & ~all_intelligence) || profile.spy->duration <= math::Fixed{})) return bad();
+        if (profile.auto_spies.size() > 8) return bad();
+        for (const auto& automatic : profile.auto_spies)
+            if (!setup.observer || !setup.control || !automatic.identity || automatic.text_identity.size() > 1024
+                || automatic.text_identity.find('\0') != std::string::npos || (automatic.mask & ~all_intelligence)
+                || automatic.duration >= math::Fixed{}) return bad(); // WGUI-19: automatic duration is validated to -1
         previous = profile.type;
         for (std::size_t i = 0; i < market.absence_min.size(); ++i)
             if (market.absence_min[i].raw() < 0 || market.absence_min[i] > market.absence_max[i]) return bad();
@@ -301,6 +306,8 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
         [](const auto& p) { return p.type; });
     if (!profile || row.dead || row.delete_pending) { lose_ability_actor(row.id); return; }
     auto* state = find(ability_host->actors, row.id, [](const auto& a) { return a.actor; });
+    if (state && state->type != row.current_type) sync_auto_spies(row.id, state->type, nullptr);
+    sync_auto_spies(row.id, row.current_type, &row);
     const bool same_profile = state && state->type == row.current_type;
     if (!same_profile) {
         if (!state && ability_host->actors.size() >= galactic_max_objects) { failed = true; return; }
@@ -335,6 +342,7 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
 }
 void GalacticSession::Impl::lose_ability_actor(EntityId id) {
     if (!ability_host || !economy_corruption) return;
+    if (const auto* gone = find(ability_host->actors, id, [](const auto& row) { return row.actor; })) sync_auto_spies(id, gone->type, nullptr);
     if (id != consuming_spy) {
         const auto* state = find(ability_host->actors, id, [](const auto& row) { return row.actor; });
         if (state && !state->spy_targets.empty()) { const std::array gone{id}; detach_observer_sources(gone); }

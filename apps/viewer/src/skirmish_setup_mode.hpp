@@ -37,6 +37,7 @@ public:
     void process();
     void request_start();
     [[nodiscard]] std::optional<skirmish::FixtureOptions> take_start();
+    [[nodiscard]] const std::string& local_player_name() const;
     // A start was asked for and the host has not taken it yet (the front end stops the attract then).
     [[nodiscard]] bool start_pending() const;
     [[nodiscard]] std::shared_ptr<const BattleContent> content() const;

@@ -70,13 +70,28 @@ bool collides(Arithmetic& a, const LandMovingMember& x, const LandMovingSquad& x
     // WLPA-60: this bounded pair must observe the actual passive slot approach,
     // otherwise it loses its contact while a clamped parent's straggler is blocked.
     const bool slot_recovery = repulsion && x.squad != y.squad && moving(xs) != moving(ys)
-        && x.source.kind == units::LandObjectKind::infantry && y.source.kind == units::LandObjectKind::infantry;
+        && land_soft_collision_class(x.profile.collision_class) && land_soft_collision_class(y.profile.collision_class);
     const auto delta = a.sub(a.sub(prediction(a, x, xs, settings, slot_recovery), x.position),
         a.sub(prediction(a, y, ys, settings, slot_recovery), y.position));
     const auto length = a.dot(delta, delta);
     const auto t = length > zero ? std::clamp(a.div(a.sub(zero, a.dot(relative, delta)), length), zero, one) : zero;
     return a.length(a.add(relative, a.mul(delta, t))) < radius;
 }
+}
+
+// WLPA-83: two moving Infantry/Bike members of different squads, opposed or crossing, are a stateless soft pair:
+// no contact row, search, lock or deadlock state exists for them. Same-direction pairs keep the speed-cap row.
+// The contact layer and the movement pair guard share this one predicate.
+bool land_soft_opposed(const LandMovingMember& x, const LandMovingSquad& xs,
+    const LandMovingMember& y, const LandMovingSquad& ys, bool enabled) noexcept {
+    const auto moves = [](const LandMovingSquad& s) {
+        return s.order == LandMoveOrder::following || s.order == LandMoveOrder::recovering;
+    };
+    if (!enabled || x.squad == y.squad || xs.generic_team || ys.generic_team || !moves(xs) || !moves(ys)
+        || !land_soft_collision_class(x.profile.collision_class) || !land_soft_collision_class(y.profile.collision_class)) return false;
+    Arithmetic a;
+    const auto xa = math::sin_cos_turn(xs.facing), ya = math::sin_cos_turn(ys.facing);
+    return a.dot({xa.cosine, xa.sine}, {ya.cosine, ya.sine}) <= zero;
 }
 
 bool land_deadlock_visit(LandContact& c, Fixed x, Fixed y, Fixed cx, Fixed cy,
@@ -431,6 +446,8 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         const auto& bs = state_.squads[b.squad];
         Arithmetic arithmetic;
         const auto& observation = contact_observations_[static_cast<std::size_t>(&c - state_.contacts.data())];
+        // WLPA-83: a retained row of a pair that is now a stateless soft pair retires.
+        if (land_soft_opposed(a, as, b, bs, straggler_repulsion_)) { c.state = LandContactState::resolved; release(c); return; }
         // LR3-09 prediction recheck precedes all role or maneuver selection.
         if (!observation.predicts) {
             c.state = LandContactState::resolved; release(c); return;
@@ -471,10 +488,10 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
         c.primary = observation.primary;
         // LR3-17 / WLPA-57: infantry uses local repulsion against stopped infantry,
         // not a parent-owned detour that cannot advance while stragglers reform.
-        // Existing object-kind inputs are the bounded eligibility seam (WLPA-60).
+        // WLPA-82: the authored collision class of both members is the eligibility, not the object kind.
         if (straggler_repulsion_ && c.kind == LandContactKind::moving_stopped
-            && a.source.kind == units::LandObjectKind::infantry
-            && b.source.kind == units::LandObjectKind::infantry
+            && land_soft_collision_class(a.profile.collision_class)
+            && land_soft_collision_class(b.profile.collision_class)
             && (pathfinding || c.state == LandContactState::repulsion)) {
             c.state = LandContactState::repulsion;
             c.first_stopped = false; c.second_stopped = false;
@@ -582,7 +599,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
                     const auto end = prediction(a, m, state_.squads[m.squad], state_.contact_settings);
                     auto low = m.position, high = end;
                     const auto& squad = state_.squads[m.squad];
-                    if (straggler_repulsion_ && m.source.kind == units::LandObjectKind::infantry
+                    if (straggler_repulsion_ && land_soft_collision_class(m.profile.collision_class)
                         && squad.speed == zero && moving(squad) && squad.order != LandMoveOrder::yielded) {
                         const auto recovery = prediction(a, m, state_.squads[m.squad], state_.contact_settings, true);
                         low = {std::min({m.position.x, end.x, recovery.x}), std::min({m.position.y, end.y, recovery.y})};
@@ -624,6 +641,7 @@ core::Result<void> LandMovement::service_contacts(const LandOccupancy& grid,
             const auto visit = [&](std::size_t j) {
                 if (j == state_.members.size() || state_.members[j].object <= a.object) return;
                 const auto& b = state_.members[j]; const auto& bs = state_.squads[b.squad];
+                if (land_soft_opposed(a, as, b, bs, straggler_repulsion_)) return;
                 if (!collides(arithmetic, a, as, b, bs, profile, straggler_repulsion_)) return;
                 LandContact c; c.first = a.object; c.second = b.object;
                 c.kind = moving(as) && moving(bs) ? LandContactKind::moving_moving

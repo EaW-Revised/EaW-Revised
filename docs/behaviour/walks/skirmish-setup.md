@@ -310,7 +310,7 @@ Tickets consuming this walk must update class/tag coverage when they implement i
 | Faction `Space_Skirmish_AI_Default_Forces` | applied | Human and AI free rosters WSS-53 |
 | Faction `Space_Skirmish_Unit_Buy_Credits` | todo station purchasing and reinforcements (legacy EAWR-530) | Stock 100000 for all three; legacy purchase-budget boundary, not WSS-52 cash |
 | Faction `Space_Tactical_Unit_Cap` | todo: economy tag support (legacy EAWR-654) | Registry lags verified `read_start_inputs`/`economy_rules` application; future code/registry audit should reconcile, not hardcode |
-| Marker and MultiplayerStructureMarker `Marker_For_Specific_Object_Type` | applied | Station candidate boundary WSS-54 |
+| Marker and MultiplayerStructureMarker `Marker_For_Specific_Object_Type` | applied | Station candidate boundary WSS-54; CLI and viewer share SC-01 selected-root collection (fleet, faction starting forces and affiliated station candidates). Missing roots extend the unit-table dependency closure before start; an already loaded closure is unchanged. |
 | Starbase `Available_In_Skirmish` | todo: combat tag support (legacy EAWR-650) | Legacy purchase-catalog positive cost/affiliation/tab-or-availability filtering (SS-E32), not an ordinary local Start purchase step |
 | UpgradeObject `Is_Skirmish_Tactical_Super_Weapon` | todo: combat tag support (legacy EAWR-650) | Policy filter WSS-30/G4 |
 | Container, HeroUnit, Squadron, UniqueUnit `Is_Named_Hero` | todo: presentation tag support (legacy EAWR-653) | Named-hero option filter WSS-29/G4; land HeroCompany/Props_Story rows remain scoped |

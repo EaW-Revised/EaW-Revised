@@ -547,6 +547,16 @@ template <> struct Fields<DepartureControl> {
     template <class A, class T> static void apply(A& a, T& v) { a(v.player, v.controller, v.tick, v.basic_ai); }
 };
 
+template <> struct Fields<ControllerBinding> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.seat.value, v.player, v.kind, v.active); }
+};
+template <> struct Fields<ControllerFaction> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.player, v.mode); }
+};
+template <> struct Fields<BattleControllerPolicy> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.seats, v.factions); }
+};
+
 template <> struct Fields<BeaconState> {
     template <class A, class T> static void apply(A& a, T& v) { a(v.player, v.type, v.position, v.placed_tick, v.expires_tick, v.sequence); }
 };

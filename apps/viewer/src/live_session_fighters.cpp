@@ -169,6 +169,33 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
             ? battle::ArrivalSource::ability_object : source, near.state.entity_id);
         add_launch_slot(filesystem, catalog, model, near, colour, required_station, ability_proxy_owner);
     };
+    // A preview belongs to a selectable reserve type, independently of purchase menus.
+    std::set<tactical::TypeId> preview_types;
+    const auto add_preview_type = [&](const tactical::TypeId type, const tactical::TypeId deployed) {
+        if (!preview_types.insert(type).second) return;
+        const auto named = std::find_if(tables_->units.begin(), tables_->units.end(),
+            [&](const units::UnitType& unit) { return battle::type_id(unit.id) == deployed; });
+        if (named == tables_->units.end()) return;
+        // WR-12/13: private visual clones, never launch slots or live entities.
+        const auto add_preview = [&](const std::string& craft, const sim::math::Vec3 offset) {
+            BattleScene::PlacedUnit preview;
+            preview.object_id = craft;
+            preview.live_entity = std::numeric_limits<sim::EntityId>::max() / 8U + placement_clones_.size();
+            preview.placement_preview = true;
+            preview.launch_slot = true; // hidden until an explicit preview pose
+            preview.team_colour = model_colour(player_, craft);
+            const auto* footprint = economy_.footprint_of(battle::type_id(craft));
+            placement_clones_.push_back({type, placed_ships_.size(), offset, footprint ? footprint->layer_z : sim::math::Fixed{}});
+            placed_ships_.push_back(std::move(preview));
+        };
+        if (named->members.empty()) add_preview(named->id, {});
+        for (const auto& member : named->members) add_preview(member.craft, member.offset.value_or(sim::math::Vec3{}));
+    };
+    if (setup_ && setup_->campaign) {
+        for (const auto& reserve : setup_->campaign->reserves) {
+            if (reserve.owner == player_ && !reserve.restricted) add_preview_type(reserve.type, reserve.type);
+        }
+    }
     // WBP-29: one reusable replacement slot per initially placed respawnable object.
     for (const auto& unit : start_->units) {
         if (economy_.pads.replacement(unit.state.type_id) == nullptr) continue;
@@ -265,22 +292,7 @@ void LiveSessionView::prepare_launch_slots(const vfs::Vfs& filesystem, const dat
                 const auto named = std::find_if(tables_->units.begin(), tables_->units.end(),
                     [&](const units::UnitType& type) { return battle::type_id(type.id) == deployed; });
                 if (named == tables_->units.end()) continue;
-                // WR-12/13: separate preloaded visual clones, never launch slots or live entities.
-                if (buyer.player == player_) {
-                    const auto add_preview = [&](const std::string& craft, const sim::math::Vec3 offset) {
-                        BattleScene::PlacedUnit preview;
-                        preview.object_id = craft;
-                        preview.live_entity = std::numeric_limits<sim::EntityId>::max() / 8U + placement_clones_.size();
-                        preview.placement_preview = true;
-                        preview.launch_slot = true; // starts hidden until an explicit preview pose
-                        preview.team_colour = model_colour(owner->player.player_id, craft);
-                        const auto* footprint = economy_.footprint_of(battle::type_id(craft));
-                        placement_clones_.push_back({option.type, placed_ships_.size(), offset, footprint ? footprint->layer_z : sim::math::Fixed{}});
-                        placed_ships_.push_back(std::move(preview));
-                    };
-                    if (named->members.empty()) add_preview(named->id, {});
-                    for (const auto& member : named->members) add_preview(member.craft, member.offset.value_or(sim::math::Vec3{}));
-                }
+                if (buyer.player == player_) add_preview_type(option.type, deployed);
                 const std::uint32_t fits = option.population == 0 ? purchase_slots_per_type : buyer.population_cap / option.population;
                 for (std::uint32_t index = 0; index < std::min(fits, purchase_slots_per_type); ++index) {
                     if (named->members.empty()) add_slot(named->id, anchor, owner->colour, 0, false, battle::ArrivalSource::purchase);

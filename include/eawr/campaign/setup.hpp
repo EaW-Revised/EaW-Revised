@@ -2,7 +2,11 @@
 
 #include "eawr/campaign/setup_plan.hpp"
 #include "eawr/campaign/game_session.hpp"
+#include "eawr/core/load_note.hpp"
 #include <memory>
+#include <set>
+
+namespace eawr::diagnostics { class GcMemory; }
 
 namespace eawr::campaign {
 struct StartingForceInputs;
@@ -31,15 +35,15 @@ struct ProductionPreparation {
     bool tutorial{};
 };
 [[nodiscard]] core::Result<sim::galactic::ProductionOffer> prepare_production_offer(
-    const units::GalacticType&, sim::galactic::ProductionOffer admission, const ProductionPreparation&);
+    const units::GalacticType&, sim::galactic::ProductionOffer admission, const ProductionPreparation&, core::LoadNoteBuffer* notes = nullptr);
 // WGEP-69: effective inherited original-type values precede the shared zero defaults.
 [[nodiscard]] core::Result<sim::galactic::CensusType> prepare_census_type(
-    const units::GalacticType&, sim::galactic::TypeId, std::span<const FleetTypeBinding> bindings = {});
+    const units::GalacticType&, sim::galactic::TypeId, std::span<const FleetTypeBinding> bindings = {}, core::LoadNoteBuffer* notes = nullptr);
 // WGP-191: Planet data is separate from the ordinary starting-force type table.
 // The resolved object reader supplies power; an absent reader stays unknown.
 [[nodiscard]] core::Result<sim::galactic::CensusType> prepare_census_planet(
     const data::galactic::Planet&, sim::galactic::TypeId,
-    std::optional<sim::math::Fixed> combat_power = {});
+    std::optional<sim::math::Fixed> combat_power = {}, core::LoadNoteBuffer* notes = nullptr);
 [[nodiscard]] sim::galactic::CensusPlayer prepare_census_player(
     const data::galactic::Faction&, sim::galactic::PlayerId, std::vector<sim::galactic::PlanetId> unusable_planets);
 
@@ -76,6 +80,7 @@ struct CampaignPlacementContext {
     // Planet original identities are separate from the nested placement journal.
     // Root startup supplies their final owner after the complete control pass.
     std::vector<sim::galactic::CensusObject> location_originals;
+    std::set<sim::galactic::TypeId> omitted_templates;
 };
 struct StartingAllegiance {
     sim::galactic::PlayerId player{};
@@ -95,6 +100,14 @@ struct CampaignCreditCap {
 // Tech side effects, scene production and hero creation use their owning services. Influence,
 // plots/AI and object linking remain follow-up work (#1149).
 struct CampaignSetupServices {
+    // A load owner may choose a smaller resource budget; it cannot enlarge the
+    // representation's hard bound. Whole placement requests are admitted in order.
+    std::size_t object_budget{sim::galactic::galactic_max_objects};
+    // Per-load observations stay outside simulation identity and save/checkpoint bytes.
+    std::function<std::vector<core::LoadNote>()> load_notes;
+    std::function<void(std::span<core::LoadNote>)> annotate_load_notes;
+    // Optional read-only inventory of retained provider inputs, at a stopped tick.
+    std::function<void(diagnostics::GcMemory&)> memory_inventory;
     // What preparation found wrong in the data and went on without (CGS-05..07); never part of setup identity.
     std::vector<core::Diagnostic> load_diagnostics;
     std::function<core::Result<sim::galactic::GalacticAbilitySetup>(const CampaignSetupPlan&,
@@ -161,12 +174,15 @@ public:
     [[nodiscard]] const GameSession* game() const noexcept { return game_ ? &*game_ : nullptr; }
     [[nodiscard]] const CampaignSetupPlan* plan() const noexcept { return plan_ ? &*plan_ : nullptr; }
     [[nodiscard]] std::span<const CampaignCreditCap> credit_caps() const noexcept { return caps_; }
+    [[nodiscard]] std::span<const core::LoadNote> load_notes() const;
     void stop_root() noexcept;
 private:
     CampaignRoot(CampaignSetupPlan plan, GameSession game, std::vector<CampaignCreditCap> caps);
     std::optional<CampaignSetupPlan> plan_;
     std::optional<GameSession> game_;
     std::vector<CampaignCreditCap> caps_;
+    std::vector<core::LoadNote> load_notes_;
+    mutable std::vector<core::LoadNote> combined_load_notes_;
 };
 
 } // namespace eawr::campaign

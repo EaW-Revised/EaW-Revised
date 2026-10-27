@@ -1,4 +1,4 @@
-# `eawr_mods_service` protocol (`eawr-mods-protocol` 1.3)
+# `eawr_mods_service` protocol (`eawr-mods-protocol` 1.6)
 
 This is the contract between the game repository, which owns `eawr_mods_service` (`apps/mods_service`), and the
 launcher repository, whose Godot manager starts the service and talks to it. The design behind it is
@@ -71,7 +71,7 @@ Members of the request other than these three are ignored.
 
 ## 3. Versioning
 
-- The protocol version is `MAJOR.MINOR`, now **1.3**.
+- The protocol version is `MAJOR.MINOR`, now **1.6**.
   - A minor version only adds: new methods, new optional request members, new result members, new events, new
     error codes. A launcher written for 1.0 works against any 1.x service.
   - A major version may break anything. The service speaks exactly one major version.
@@ -111,7 +111,9 @@ codes below are protocol failures of a whole request.
 | `EAWR-MODS-SVC-0011` | internal error | the request's `id` | the service failed in a way that is its own bug, including an answer it could not fit into the line limit |
 
 `EAWR-MODS-SVC-0012` is reserved for the `game.find` **result diagnostic** "installation not found";
-it is not a whole-request error. Domain codes in result rows retain their core meanings:
+it is not a whole-request error. `EAWR-MODS-SVC-0013` is a load-check **warning diagnostic** for an
+unavailable optional file index (build, write, validation or installation failure); it does not fail the check.
+Domain codes in result rows retain their core meanings:
 
 | Code | Meaning |
 |---|---|
@@ -171,13 +173,14 @@ provisional shape; the ticket named builds them and fixes the shape in this file
 | `hello` | implemented (MM-S1a) | |
 | `shutdown` | implemented (MM-S1a) | |
 | `game.find` | implemented (MM-S1b) | |
+| `mods.changes` | implemented (1.5) | Workshop metadata polling |
 | `mods.discover` | implemented (MM-S1b) | |
 | `chain.resolve` | implemented (MM-S1b) | |
 | `chain.check` | implemented (MM-S1c, protocol 1.2) | |
 | `profile.list`, `profile.load`, `profile.save`, `profile.delete` | implemented (MM-S1b) | |
 | `loadcheck.start` | implemented (1.3) | long |
 | `loadcheck.cancel`, `loadcheck.result` | implemented (1.3) | |
-| `files.page` | planned (MM-7) | |
+| `files.page` | implemented (1.4) | cached file index |
 | `records.query`, `records.get` | planned (MM-10) | |
 | `source.get` | planned (MM-10) | |
 | `identity.codes` | planned (MM-14) | |
@@ -196,9 +199,9 @@ The first request of every session.
 - `protocol` (object, required): `major` (integer >= 0) and `min_minor` (integer >= 0).
 
 ```json
-{"id": 1, "result": {"protocol": {"major": 1, "minor": 2}, "service_version": "0.1.0",
+{"id": 1, "result": {"protocol": {"major": 1, "minor": 6}, "service_version": "0.1.0",
   "engine_build": "0.1.0+<commit>+gcsync3", "game_release": "0.1.0",
-  "capabilities": ["chain.check", "chain.resolve", "game.find", "hello", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "shutdown"]}}
+  "capabilities": ["chain.check", "chain.resolve", "files.page", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "mods.changes", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "shutdown"]}}
 ```
 
 - `protocol`: the version this service speaks.
@@ -230,6 +233,33 @@ other than `hello`.
 Finds the Forces of Corruption installation. Params: optional `hint` (an absolute folder the player picked). Result: the
 game root, the installation kind (Steam, other) and diagnostics rows; no root plus a stable code when none is
 found.
+
+### `mods.changes` (1.5)
+
+Params: `{previous?: string}`. `previous`, when present, is any string; an unknown, stale or malformed revision is a normal change, not an error.
+A non-string value is invalid params. Result: `{revision: string, changed: boolean, complete: boolean}`.
+An omitted `previous` establishes a baseline (`changed:false`). A complete call compares its opaque revision
+with `previous`; the method is stateless and does not refresh or modify the discovered catalog.
+
+The revision covers the resolved Steam libraries, the library map metadata, each library's
+`steamapps/workshop/appworkshop_32470.acf` size/mtime, and the immediate numeric directory listing and directory
+mtimes under `steamapps/workshop/content/32470`. It never walks item trees, opens asset bytes, downloads, or starts
+watcher threads. Resolving libraries reads Steam's small `libraryfolders.vdf` files through the existing adapter.
+Missing Workshop files/content are normal. An offline/inaccessible library, malformed library map, wrong file
+type, unstable ACF/listing during the check, or oversized listing yields `complete:false, changed:false, revision:""`.
+This is not a protocol error: clients retain their previous revision and rows and try again later.
+
+Clients poll at intervals of at least three seconds, only while the manager window is visible or focused.
+One `changed:true` schedules one discovery refresh (including its continuation pages); polls do not themselves
+refresh discovery. Preserve the selected profile and unsaved order. Services older than minor 5 keep manual
+Refresh with no unsupported request or error. Size/mtime polling cannot detect a deliberately rewritten file
+whose size and timestamp are both preserved.
+
+Workshop records distinguish `needs-update` (Steam lists an update, still usable) from `downloading` (Steam is
+fetching a newer item or has not installed it yet, never usable for Play). Both ordinary `WorkshopItemDetails`
+manifest/time and optional `latest_*` fields can identify newer items when the installed entry has a manifest and a positive update time. `NeedsDownload` changes a proven newer
+item to downloading; `NeedsUpdate` is parsed as an app-wide hint, not proof that every item needs an update.
+An unchanged unrelated item remains installed even when those app-wide hints are set.
 
 ### `mods.discover` (implemented, MM-S1b)
 
@@ -319,7 +349,7 @@ saved roots. Profile rows use the saved `order_source` (`chain` or `player`) as 
 retain each dependency edge's provenance. Status is `ok`, `missing` (a layer root is gone and its key has no
 available catalog root), or (list only) `invalid` (an unreadable, malformed or mismatched profile). `profile.delete {id}` returns `{deleted:true}`;
 a nonexistent profile is an error. Unsafe ids/folders and invalid profile content return `0005`; core profile
-errors carry `error.data.diagnostics:[{code,message}]`. Only the profile file is deleted.
+errors carry `error.data.diagnostics:[{code,message}]`. The profile file and its small per-profile load-check marker are deleted; a running check for that profile is cancelled so it cannot recreate the marker. Shared fingerprint-keyed report/index caches are retained.
 
 Both paged methods accept `limit` (default 100, maximum 500) and `cursor` (null/absent first page). Pages also
 stop before the transport byte limit. A single row that cannot fit yields `EAWR-MODS-SVC-0011`;
@@ -346,6 +376,13 @@ cached report for it, with diagnostics rows paged by `cursor`.
 
 Params are `{"profile":"<id>"}` for start and result; result additionally accepts `limit` (1..500,
 default 100) and an opaque `cursor`. Start returns `{"report":{scope,stage,ok,error_count,warning_count,content_code,requirements,diagnostics}}`.
+Protocol 1.6 adds `elapsed_ms` to each completed report: an integer, nonnegative wall-clock duration in
+milliseconds from helper process creation through observed exit, measured by the service with a monotonic
+clock. It includes helper setup and waits; cached reports retain the original duration. The helper itself
+cannot override this value. Earlier reports/clients may omit/ignore it. The service reserves 256 bytes
+of the 1 MiB line limit for the result envelope (id, cursor, status and fingerprint); a larger completed
+report is rejected before it or its per-profile marker is installed, so an accepted report remains retrievable.
+
 Each diagnostic group contains `code`, `severity` (`error`, `warning`, or `info`), `count` and at most three
 `examples`; examples are limited to 2048 bytes. Severity comes from `core::Diagnostic::severity`, as emitted by
 the VFS, catalog and content loaders. Rows without engine severity are errors only when they cause the stage
@@ -359,12 +396,24 @@ is deferred. It uses the digest from `compute_match_identity` after excluding `m
 including units and any skipped types, are retained. The code predicts content compatibility for this engine
 version; the multiplayer handshake remains authoritative.
 
-Result returns `{"report":null,"next_cursor":null}` before a cached run or when its chain changes. Otherwise
-it returns the same report with only the requested diagnostic groups and `next_cursor`. Cursors expire when
+Result retains `report` and `next_cursor` and, in 1.6, adds `chain_fingerprint` (the current key) and
+`status`, an extensible enum: `current` means the completed report matches this profile's current chain;
+`out_of_date` means a completed run is recorded but its fingerprint changed or its report is missing;
+`not_run` means no valid completed-run marker exists for this profile. Clients must tolerate unknown status
+strings by falling back to the report's presence and their older state logic. Stale/unavailable results
+always return `report:null,next_cursor:null`; stale diagnostics never authorize Play. Current results return
+the original report with only the requested diagnostic groups and `next_cursor`. Cursors expire when
 the chain or engine build changes. The cache under `<user-data>/mods/cache/loadcheck/` uses the engine build
 and ordered layer keys, roots and current tree fingerprints, including both base data layers; capped or
 incomplete walks refuse reuse. A tree change during the pass refuses to cache its report. Mod roots remain
 read-only. Cancelling never installs a partial report.
+
+A versioned `last-<sha256(profile-id)>.json` marker records the completed fingerprint and elapsed duration
+under this service user-data cache directory. There is at most one marker per profile, read with a hard
+256-byte bound, replaced atomically only after a completed valid report is installed, and removed with the
+profile. Shared keyed report bodies retain this profile marker's completed duration when returned. No marker or a corrupt/unsupported/redirected marker means `not_run` without an error. This state
+survives a service/launcher restart. Existing keyed caches without a marker do not claim that the profile
+was checked. A rerun and deletion serialize their marker commit/removal.
 
 The service stays a small static-CRT process. Its worker thread starts the adjacent GUI-subsystem
 `eawr_loadcheck.exe` with `CREATE_NO_WINDOW`, contained in a kill-on-close Windows job. Cancel terminates the
@@ -380,11 +429,80 @@ the helper beside the service.
 There is no watchdog timeout: a helper that stops producing output remains active until it exits or the
 client uses Cancel, shutdown or closes stdin. Only stdout's write end and the NUL stdin/stderr sink are inherited.
 
-### `files.page` (planned, MM-7)
+### `files.page` (1.4)
 
-The file-conflict view. Params: profile id, filters (layer, winner or loser, type, path text, identical copies),
-`cursor`, `limit`. Result: one row per logical path with its winner and every shadowed candidate in precedence
-order, per-candidate digests, and `next_cursor`.
+Pages the file index produced by the most recent load-check pass for this exact chain fingerprint and
+engine build. It never mounts assets or starts a load check. As for `loadcheck.result`, current root metadata
+fingerprints validate the cache; asset bytes are not read by this method. Clients written for earlier 1.x
+versions work unchanged and need not call this capability.
+
+```json
+{"id": 20, "method": "files.page", "params": {
+  "profile": "example", "limit": 100, "cursor": null,
+  "filters": {"layer": "", "role": "either", "type": "", "path": "",
+              "conflicts_only": false, "hide_identical": false}}}
+```
+
+- `profile`: required saved profile id. Its ordered roots are re-resolved through the existing profile API.
+- `limit`: optional integer 1..500, default 100. The 1 MiB response limit can shorten a page further.
+- `cursor`: absent/null for the first page, otherwise the opaque token from `next_cursor`. Keep profile and
+  filters unchanged. Limits may change. A changed chain, replaced cache, changed filters, different profile,
+  unknown or evicted cursor returns `EAWR-MODS-SVC-0005`; restart at the first page.
+- All filters are optional and combine with AND. `layer` matches an exact service layer key, or any layer when
+  empty. `role` is `winner`, `loser` or `either` (default), relative to that layer; without a layer it tests any
+  candidate. A sole provider also counts as a winner. A loser is a shadowed candidate, including an archive
+  shadowed by loose bytes within the same layer.
+- `type` is an ASCII-insensitive extension, with or without its dot. `path` is an ASCII-insensitive substring
+  of the canonical logical path. `conflicts_only` keeps paths with at least two candidates. `hide_identical`
+  hides paths where all candidates have identical bytes. Unknown layer keys simply match no rows.
+
+A ready response has `ready: true`, `requires_loadcheck: false`, `index_version: 1`, `chain_fingerprint`,
+`rows`, `layers`, `total` (matching path count), and `next_cursor` (string or null). Paths are sorted by
+canonical logical path. Each row contains:
+
+- `path`: the logical path;
+- `winner`: the first candidate, also present at the start of `candidates`;
+- `candidates`: every exact VFS candidate in precedence order, with `layer`, `origin` (`loose` or `archive`),
+  `source` (the VFS source id), `size` in bytes, `sha256`, `role` (`win`, `lose`, `only`), and
+  `identical_to_winner`;
+- `identical`: true only when there are multiple candidates and every digest matches the winner.
+
+Only paths with multiple candidates are opened and hashed. A sole-provider row has `sha256: null`,
+`role: "only"` and `identical_to_winner: false`; its size and provenance come from VFS metadata. Conflicting
+candidates have lowercase SHA-256 hex digests. A winning conflicting candidate has `role: "win"`; the rest
+have `role: "lose"`. Equality is by bytes, not file name, size or archive name.
+
+`layers` covers the entire unfiltered index in mount order, including empty mounted layers. A profile layer
+dropped during manifest resolution is not listed. Each entry has `key`,
+`files`, `wins`, `loses`, `only`. Each logical path counts once per contributing layer. `only` means that no
+other layer supplies the path, even if loose/archive copies coexist within it. `wins` counts paths won over
+another layer; `loses` counts paths won by another layer. Thus same-layer shadowed archive entries do not
+make that layer lose to itself. Nonzero counts are the layer's win/lose/only flags.
+
+When no current index exists, it is truncated/invalid, or its version differs, the result is:
+
+```json
+{"ready": false, "requires_loadcheck": true, "index_version": 1,
+ "chain_fingerprint": "<current fingerprint>", "rows": [], "layers": [], "total": 0, "next_cursor": null}
+```
+
+Run `loadcheck.start` explicitly to build it. No migration, guessed rows or partial cache is returned. An
+incomplete root fingerprint can leave `chain_fingerprint` empty in this unavailable response. A mounted VFS
+can still produce a valid file index when a later catalog/type stage reports content errors; file-conflict
+information remains available to diagnose those errors. A cancelled/failed helper's scratch index is removed.
+An index build/write failure continues the ordinary load check with warning `EAWR-MODS-SVC-0013` and discards
+partial output. The service likewise discards an invalid or un-installable index without failing the report;
+a failed rebuild removes any prior same-fingerprint index so `files.page` requires a new load check.
+
+The helper builds the index on its existing mount before catalog loading: one `enumerate_raw` supplies paths,
+`candidates` supplies exact precedence, and `open(candidate)` reads each conflicting provider once. Sole
+providers are never opened. Cache version 1 is a binary length-framed user-data file beside the load-check
+report, named by the same chain fingerprint. It starts with `EAWR-FILES` plus LF, a little-endian uint64 version,
+a length-framed fingerprint, layer count and length-framed layer keys, row count and length-framed row JSON.
+Every count/length is little-endian uint64; a row is bounded by the protocol line size. The service validates
+its structure/key and atomically installs it only after the chain's before/after fingerprints agree. A single
+validated parsed cache is retained in memory; replacing it invalidates its paging tokens. Mod roots remain
+read-only. No file index bytes are added to the profile or the 1.3 load-check report envelope.
 
 ### `records.query`, `records.get` (planned, MM-10)
 
@@ -429,7 +547,7 @@ its fake service. They are never edited by hand (hand-written drafts in the laun
 such, below).
 
 - File: `<name>.jsonl`, UTF-8, one JSON object per line, LF line ends.
-- Line 1 is a meta line: `{"dir": "meta", "msg": {"protocol": "1.3", "recorded_by": "eawr_mods_service"}}`. A
+- Line 1 is a meta line: `{"dir": "meta", "msg": {"protocol": "1.6", "recorded_by": "eawr_mods_service"}}`. A
   hand-written draft has `{"dir": "meta", "msg": {"draft": true, "protocol": "1.0"}}` instead.
 - Every other line is one exchanged message in the order it crossed the pipe:
   - `{"dir": "c2s", "msg": {...}}`: a request the service read;
@@ -459,3 +577,13 @@ Recorded transcripts (MM-S1c): `chain_check_clean.jsonl`, `chain_check_warning.j
 `chain_check_accepted.jsonl`, `chain_check_missing.jsonl` and `chain_check_unknown.jsonl` cover a clean
 player order, an unaccepted reversal, an accepted reversal, an omitted parent and an unknown key. Their
 synthetic fixture paths and separators are normalised in the same way as `model_methods.jsonl`.
+
+Name source order for discovery/presentation is player rename (launcher), explicit `modinfo.json` `name`,
+its nested `steamdata.title`, reviewed known-chains name, cached Steam title (launcher), then
+`Workshop item <id>`. The modinfo title fallback uses only an existing nonempty string, keeps the original
+metadata, and never performs a Steam request. A valid explicit name takes precedence even when steamdata
+is malformed; neither field supplies a name when its usable string is absent.
+
+Transcript comparison normalizes service-version/build/release hello values, integer `elapsed_ms` to zero,
+and native-root-dependent 64-hex `chain_fingerprint` values to 64 zeroes. Raw contract assertions validate
+duration type/wall time, fingerprint stability and changes, and status transitions before normalization.

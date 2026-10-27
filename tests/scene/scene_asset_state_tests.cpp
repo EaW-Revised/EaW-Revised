@@ -6,7 +6,15 @@
 namespace eawr::tests::scene_tests {
 
 namespace {
-void texture_name_contracts() {
+void asset_name_contracts() {
+    expect(eawr::assets::normalized_model_name(" Folder.With.Dots\\PLANET ") == "folder.with.dots/planet.alo",
+        "extensionless model leaf gains ALO after folding case, separators and whitespace");
+    expect(eawr::assets::normalized_model_name("Data\\Art\\Models\\PLANET.ALO") == "data/art/models/planet.alo",
+        "an existing mixed-case model extension stays single");
+    expect(eawr::assets::normalized_model_name("planet.other") == "planet.other"
+        && eawr::assets::normalized_model_name("planet.detail.alo") == "planet.detail.alo",
+        "existing extensions are preserved rather than replaced or appended");
+    expect(eawr::assets::normalized_model_name(" \t\r\n").empty(), "blank model stays absent");
     Assets assets;
     const auto access = assets.access();
     constexpr std::string_view root = "data/art/textures/";
@@ -323,7 +331,7 @@ void missing_material_effect_contracts() {
 } // namespace
 
 void selector_contracts() {
-    texture_name_contracts();
+    asset_name_contracts();
     expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",

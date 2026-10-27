@@ -75,10 +75,21 @@ struct ChildOwner {
     std::map<tactical::PlayerId, std::uint64_t> sequences{};
     std::map<EntityId, tactical::PlayerId> killers{};
     bool owns_pause{};
+    std::vector<campaign::PendingBattleInput> controller_inputs;
+};
+template <> struct Fields<campaign::PendingBattleInput> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.outer, v.body, v.producer_sequence); }
 };
 template <> struct Fields<ChildOwner> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.conflict, v.state, v.scripts, v.log, v.sequences, v.killers, v.owns_pause);
+        auto& conflict = v.conflict;
+        a(conflict, v.state, v.scripts, v.log, v.sequences, v.killers, v.owns_pause);
+        if (conflict.tactical.controllers) {
+            std::uint32_t tag{0x4c525443U}, version{4};
+            a(tag, version);
+            if (tag != 0x4c525443U || version != 4) throw Invalid("unsupported child controller continuation");
+            a(v.controller_inputs);
+        }
     }
 };
 } // namespace eawr::sim::galactic::checkpoint_detail

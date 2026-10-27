@@ -14,7 +14,7 @@ class LoadCheck;
 
 inline constexpr std::size_t kLineLimit = 1024 * 1024;
 inline constexpr int kProtocolMajor = 1;
-inline constexpr int kProtocolMinor = 3;
+inline constexpr int kProtocolMinor = 6;
 
 struct ServiceInfo {
     std::string service_version;

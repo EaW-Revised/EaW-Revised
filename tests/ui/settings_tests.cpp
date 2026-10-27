@@ -99,6 +99,29 @@ void test_online_settings() {
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings.network.allow_upnp, "service text cannot inject settings lines");
 }
 
+void test_reinforcement_area_settings() {
+    const ui::GameplaySettings defaults;
+    expect(defaults.reinforcement_areas_only_while_placing, "placement-only is the fresh default");
+    for (const bool only_placing : {false, true}) {
+        ui::PlayerSettings value;
+        value.gameplay.reinforcement_areas_only_while_placing = only_placing;
+        expect(ui::parse_settings(ui::serialize_settings(value)).settings == value, "reinforcement preference round trips");
+        for (const bool data_drag : {false, true}) {
+            for (const bool pane : {false, true}) {
+                for (const bool placing : {false, true}) {
+                    const bool expected = placing || (pane && !only_placing && !data_drag);
+                    expect(ui::reinforcement_areas_visible(value.gameplay, data_drag, pane, placing) == expected,
+                           "placement preference preserves data rule and all panel/placement transitions");
+                }
+            }
+        }
+    }
+    expect(ui::parse_settings("eawr-settings 1\n").settings.gameplay.reinforcement_areas_only_while_placing,
+           "old settings files get the new default");
+    expect(ui::parse_settings("eawr-settings 1\ngameplay.reinforcement_areas_only_while_placing=0\n")
+               .settings.gameplay.reinforcement_areas_only_while_placing == false, "retail preference loads");
+}
+
 void test_render_thread_settings() {
     expect(ui::PlayerSettings{}.video.render_thread == ui::RenderThreadSetting::separate,
            "Separate is the fresh default");
@@ -421,7 +444,20 @@ int main() {
     test_performance_deviations();
     test_online_settings();
     test_render_thread_settings();
+    test_reinforcement_area_settings();
     test_defaults();
+    expect(ui::hover_owner_names_enabled(ui::GameplaySettings{}, true), "hover names default on in multiplayer");
+    expect(!ui::hover_owner_names_enabled(ui::GameplaySettings{}, false), "hover names default off in solo");
+    ui::PlayerSettings hover_settings;
+    hover_settings.gameplay.hover_owner_names = false;
+    expect(!ui::parse_settings(ui::serialize_settings(hover_settings)).settings.gameplay.hover_owner_names,
+        "hover names disabled choice persists");
+    hover_settings.gameplay.hover_owner_names = 1;
+    expect(ui::hover_owner_names_enabled(ui::parse_settings(ui::serialize_settings(hover_settings)).settings.gameplay, false),
+        "hover names explicit on persists in solo");
+    hover_settings.gameplay.hover_owner_names = -1;
+    expect(ui::parse_settings(ui::serialize_settings(hover_settings)).settings.gameplay.hover_owner_names == -1,
+        "hover names mode default persists");
     test_camera_keys();
     test_frame_pacing();
     test_round_trip();

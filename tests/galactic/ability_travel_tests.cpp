@@ -263,7 +263,7 @@ void consumed_spy_arrival() {
 }
 void codecs() {
     const auto config = setup();
-    for (const gc::CommandPayload payload : {gc::CommandPayload{move(config)}, gc::CommandPayload{gc::LaunchFleet{{transport}, {2, 1}, {}, transport}}}) {
+    for (const gc::CommandPayload& payload : {gc::CommandPayload{move(config)}, gc::CommandPayload{gc::LaunchFleet{{transport}, {2, 1}, {}, transport}}}) {
         const auto bytes = gc::encode_payload(payload);
         expect(gc::decode_payload(gc::layer_of(payload), gc::opcode_of(payload), bytes) == payload, "destination command fields round trip");
         auto truncated = bytes; truncated.pop_back();

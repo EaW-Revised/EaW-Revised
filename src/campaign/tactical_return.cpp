@@ -23,8 +23,6 @@ core::Result<gc::PlanetId> retreat_destination(const gc::GalacticSnapshot& snaps
     const gc::PlayerId owner, const bool surface) {
     const auto src = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == source; });
     if (src == snapshot.planets().end()) return fail<gc::PlanetId>("retreat source is absent");
-    const auto orbital = [&](const auto id) { return std::any_of(snapshot.fleets().begin(), snapshot.fleets().end(),
-        [&](const auto& fleet) { return fleet.orbit == id && fleet.owner == owner; }); };
     const auto base = [&](const auto id) { return snapshot.control() && std::any_of(snapshot.control()->planets.begin(), snapshot.control()->planets.end(),
         [&](const auto& row) { return row.planet == id && (row.starbase.owner == owner || row.ground_base.owner == owner); }); };
     const auto neutral = [&](const auto player) { return snapshot.control() && std::any_of(snapshot.control()->players.begin(), snapshot.control()->players.end(),
@@ -34,8 +32,13 @@ core::Result<gc::PlanetId> retreat_destination(const gc::GalacticSnapshot& snaps
         // WGM-212 / WGS-184: planets have increasing creation IDs; live objects are front-inserted.
         for (auto at = snapshot.planets().rbegin(); at != snapshot.planets().rend(); ++at) {
             const auto& planet = *at;
-            if (planet.id == source || (tier == 0 && !(surface ? base(planet.id) : orbital(planet.id)))
-                || (tier == 1 && !(surface ? orbital(planet.id) : base(planet.id)))
+            if (planet.id == source) continue;
+            if (tier == (surface ? 1U : 0U)) {
+                const auto occupant = gc::orbital_occupation(snapshot.control(), planet.id, snapshot.fleets(),
+                    snapshot.movement(), snapshot.actor_records());
+                if (!occupant) return core::Result<gc::PlanetId>::failure(occupant.error());
+                if (occupant.value() != owner) continue;
+            } else if ((tier == (surface ? 0U : 1U) && !base(planet.id))
                 || (tier == 2 && !neutral(planet.owner))) continue;
             const auto x = sim::math::subtract(planet.position.x, src->position.x);
             const auto y = sim::math::subtract(planet.position.y, src->position.y);

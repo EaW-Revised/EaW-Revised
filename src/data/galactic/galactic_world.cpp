@@ -336,7 +336,10 @@ void load_constants(const vfs::Vfs& filesystem, GalacticData& data) {
             && tag != "Strategic_Queue_Tactical_Battles" && tag != "Political_Income_Curve"
             && tag != "AIUsesFogOfWarGalactic" && tag != "Raid_Force_Required_Faction"
             && tag != "Raid_Force_Free_Object_Category_Mask" && tag != "Raid_Force_Limited_Object_Category_Mask") {
-            constant.number = record.number(tag);
+            if (tag == "Raid_Force_Max_Heros" || tag == "Raid_Force_Max_Limited_Objects"
+                || tag == "Battle_Pending_Timeout_Seconds")
+                constant.number = Fixed::from_integer(retail::integer_constant(node->raw_text)).value();
+            else constant.number = record.number(tag);
         }
         data.constants.push_back(std::move(constant));
     }

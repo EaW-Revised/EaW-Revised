@@ -41,3 +41,13 @@ if(MSVC)
     target_link_options(eawr_launcher PRIVATE /MANIFEST:NO)
 endif()
 eawr_target_project_warnings(eawr_launcher)
+
+# Portable manager entry point: GUI subsystem, static CRT, Windows system libraries only.
+add_executable(eawr_mods_start WIN32 src/mods_start.cpp src/mods_start.rc)
+target_link_libraries(eawr_mods_start PRIVATE eawr_launcher_core)
+set_target_properties(eawr_mods_start PROPERTIES OUTPUT_NAME "EAWR Mods" MSVC_RUNTIME_LIBRARY "${EAWR_LAUNCHER_RUNTIME}")
+set_source_files_properties(src/mods_start.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/eawr_launcher.manifest")
+if(MSVC)
+    target_link_options(eawr_mods_start PRIVATE /MANIFEST:NO)
+endif()
+eawr_target_project_warnings(eawr_mods_start)

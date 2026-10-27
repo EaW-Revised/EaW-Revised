@@ -1077,23 +1077,31 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start_impl(
     // Retain the same initializer for recovery as for the original start. Replay
     // input is owned here, so a caller may release its parsed file after start().
     const auto recording = replay ? std::make_shared<const tactical::TacticalReplay>(*replay) : nullptr;
-    auto rebuild_world = [setup, rules = content, recording] {
+    auto rebuild_world = [setup, rules = content, recording](core::LoadNoteBuffer* load_notes = nullptr) {
         if (recording) {
             // Restore every non-player stream through the shared initializer.
             // Player commands enter at their ticks so live input can precede a
             // recording's future keys, just as in an ordinary live session.
             auto initial = *recording;
             initial.commands.clear();
-            if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::from_replay(initial, rules);
+            if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::from_replay(initial, rules, load_notes);
             return tactical::TacticalSession::from_replay(initial,
                 rules.sensors, rules.durability, rules.motion, rules.fog, rules.combat,
-                rules.victory, rules.abilities, rules.economy, rules.map_box);
+                rules.victory, rules.abilities, rules.economy, rules.map_box, load_notes);
         }
-        if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::create(setup, rules);
+        if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::create(setup, rules, load_notes);
         return tactical::TacticalSession::create(setup, rules.sensors, rules.durability, rules.motion,
-            rules.fog, rules.combat, rules.victory, rules.abilities, rules.economy, rules.map_box);
+            rules.fog, rules.combat, rules.victory, rules.abilities, rules.economy, rules.map_box, load_notes);
     };
-    auto session = rebuild_world();
+    core::LoadNoteBuffer load_notes;
+    auto session = rebuild_world(&load_notes);
+    if (options.load_note_sink) {
+        core::LoadNoteCollector collected;
+        for (const auto& note : content.load_notes) collected.append(note);
+        collected.merge(load_notes);
+        const auto notes = collected.snapshot();
+        options.load_note_sink(notes);
+    }
     if (!session) return StartResult::failure(session.error());
     if (recording) {
         options.command_source = [recording, local = std::move(options.command_source)](const std::uint64_t tick) {

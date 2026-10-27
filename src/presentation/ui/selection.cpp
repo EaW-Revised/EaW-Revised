@@ -7,6 +7,58 @@
 #include <unordered_set>
 
 namespace eawr::presentation::ui {
+
+bool can_control(const sim::SeatId local, const sim::tactical::TacticalInstance& instance,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy, const bool shared_authorized) noexcept {
+    if (!policy) return true;
+    const auto seat = std::lower_bound(policy->seats.begin(), policy->seats.end(), local,
+        [](const auto& row, const auto id) { return row.seat < id; });
+    if (seat == policy->seats.end() || seat->seat != local || !seat->active || seat->kind != sim::SeatKind::human) return false;
+    if (instance.control == sim::tactical::UnitControl::shared_structure)
+        return seat->player == instance.owner || shared_authorized;
+    if (instance.control == sim::tactical::UnitControl::none && shared_authorized
+        && std::none_of(policy->factions.begin(), policy->factions.end(),
+            [&](const auto& row) { return row.player == instance.owner; })) return true;
+    return seat->player == instance.owner && instance.control == sim::tactical::UnitControl::mobile
+        && instance.controller_seat == local;
+}
+
+std::vector<sim::SeatId> gift_recipients(const sim::SeatId local,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy) {
+    std::vector<sim::SeatId> result;
+    if (!policy) return result;
+    const auto sender = std::find_if(policy->seats.begin(), policy->seats.end(),
+        [local](const auto& row) { return row.seat == local; });
+    if (sender == policy->seats.end() || !sender->active || sender->kind != sim::SeatKind::human) return result;
+    for (const auto& seat : policy->seats)
+        if (seat.active && seat.kind == sim::SeatKind::human && seat.player == sender->player && seat.seat != local)
+            result.push_back(seat.seat);
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+std::vector<std::vector<sim::EntityId>> gift_chunks(const sim::SeatId local,
+    const std::span<const sim::EntityId> selected, const std::span<const sim::tactical::TacticalInstance> instances,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy) {
+    std::vector<std::vector<sim::EntityId>> result;
+    if (!policy) return result;
+    std::vector<sim::EntityId> roots;
+    for (const auto id : selected) {
+        const auto unit = std::lower_bound(instances.begin(), instances.end(), id,
+            [](const auto& row, const auto entity) { return row.entity_id < entity; });
+        if (unit != instances.end() && unit->entity_id == id && unit->control == sim::tactical::UnitControl::mobile
+            && (!unit->durability || unit->durability->hull.raw() > 0)
+            && can_control(local, *unit, policy)) roots.push_back(id);
+    }
+    std::sort(roots.begin(), roots.end());
+    roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
+    for (std::size_t start = 0; start < roots.size(); start += sim::tactical::max_units_per_command) {
+        const auto end = std::min(roots.size(), start + sim::tactical::max_units_per_command);
+        result.emplace_back(roots.begin() + static_cast<std::ptrdiff_t>(start), roots.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    return result;
+}
+
 namespace {
 
 [[nodiscard]] bool finite(const Vec3f& value) noexcept {
@@ -286,7 +338,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
         clear();
         return true;
     }
-    if (!unit->own || !unit->selectable || unit->neutral) {
+    if (!unit->own || !unit->controlled || !unit->selectable || unit->neutral) {
         // FoC: another player's unit gives no select action; with nothing selected the click
         // falls through to the deselect, which has nothing to clear.
         return false;
@@ -306,7 +358,7 @@ bool Selection::click(const std::optional<sim::EntityId> picked, const Modifiers
 bool Selection::double_click(const std::optional<sim::EntityId> picked, const std::span<const BattleUnit> units,
                              const ScreenRect& viewport) {
     const BattleUnit* unit = picked ? find(units, *picked) : nullptr;
-    if (unit == nullptr || !unit->own || !unit->selectable || unit->neutral) return false;
+    if (unit == nullptr || !unit->own || !unit->controlled || !unit->selectable || unit->neutral) return false;
     // WSU-18: the picked object's type; for a craft, the craft type, whose objects select as their
     // squadrons (the squadron's first craft stands for the one under the pointer; M2 squadrons are
     // of one craft type).
@@ -324,7 +376,7 @@ bool Selection::box(const ScreenRect& rect, const bool shift, const std::span<co
     }
     bool found = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.selectable || unit.neutral || !unit.locomotion || unit.decoration
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || !unit.locomotion || unit.decoration
             || !unit.screen || !rect.contains_origin(*unit.screen)) continue;
         if (!shift && !found) clear();
         found = true;
@@ -337,7 +389,7 @@ bool Selection::all(const std::span<const BattleUnit> units) {
     std::vector<sim::EntityId> next;
     for (const BattleUnit& unit : units) {
         // S-5a: global admission has no projection or pointer-sensitivity test.
-        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.selectable || unit.neutral
+        if (unit.entity == sim::invalid_entity_id || !unit.own || !unit.controlled || !unit.selectable || unit.neutral
             || !unit.locomotion || unit.decoration) continue;
         next.push_back(unit.entity);
     }
@@ -348,7 +400,7 @@ bool Selection::type_on_screen(const sim::tactical::TypeId type, const std::span
                                const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.selectable || unit.neutral || unit.decoration || unit.type != type
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || unit.decoration || unit.type != type
             || !unit.screen || !viewport.contains_origin(*unit.screen)) continue;
         if (append(unit.entity)) added = true;
     }
@@ -359,7 +411,7 @@ bool Selection::craft_type_on_screen(const sim::tactical::TypeId craft_type, con
                                      const ScreenRect& viewport) {
     bool added = false;
     for (const BattleUnit& unit : units) {
-        if (!unit.own || !unit.selectable || unit.neutral || unit.decoration
+        if (!unit.own || !unit.controlled || !unit.selectable || unit.neutral || unit.decoration
             || unit.part == sim::invalid_entity_id || unit.part_type != craft_type) continue;
         if (!unit.screen || !viewport.contains_origin(*unit.screen)) continue;
         if (append(unit.entity)) added = true;
@@ -418,6 +470,11 @@ void Selection::owner_changed(const sim::EntityId entity, const sim::tactical::P
     if (members_.erase(entity) != 0) std::erase(selected_, entity);
     for (auto& members : groups_) std::erase(members, entity);
     group_numbers_.erase(entity);
+}
+
+void Selection::controller_changed(const sim::EntityId entity, const sim::SeatId previous,
+    const sim::SeatId current, const sim::SeatId observer) {
+    owner_changed(entity, previous.value, current.value, observer.value);
 }
 
 void Selection::assign_group(const std::size_t group) {
@@ -480,6 +537,7 @@ std::optional<Vec3f> Selection::selected_group(const std::size_t group, const do
         const auto found = standing.find(entity);
         if (found == standing.end()) continue;
         const BattleUnit* unit = found->second;
+        if (!unit->controlled) continue;
         add(entity);
         sum_x += unit->position[0];
         sum_y += unit->position[1];

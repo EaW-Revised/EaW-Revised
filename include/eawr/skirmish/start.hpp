@@ -22,6 +22,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -203,6 +204,11 @@ struct StartInputs final {
 [[nodiscard]] std::optional<std::pair<std::uint32_t, std::uint32_t>> declared_extent_bits(
     std::span<const std::uint8_t> ted, const assets::Map& map);
 
+struct DataIdentity {
+    std::string script_manifest_digest, ai_data_digest;
+};
+[[nodiscard]] core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem);
+
 // Reads the fixture's map (checking its SHA-256), its placements, the lobby
 // factions' starting forces and the lobby colours from a mounted FoC view.
 [[nodiscard]] core::Result<StartInputs> read_start_inputs(
@@ -211,14 +217,24 @@ struct StartInputs final {
     const data::Catalog& catalog,
     const units::UnitTables& tables);
 
+// SC-01: selected fleet, faction forces and affiliated station-marker candidates
+// outside the loaded closure. Shared by CLI and viewer; names come from the data.
+[[nodiscard]] std::set<std::string> missing_start_types(
+    const Fixture& fixture, const StartInputs& inputs, const units::UnitTables& tables);
+
+// Load-local campaign preparation may reuse the identity of the same immutable
+// mounted view across its maps. All per-map reads and strict checks still run.
+[[nodiscard]] core::Result<StartInputs> read_start_inputs(
+    const Fixture& fixture,
+    const vfs::Vfs& filesystem,
+    const data::Catalog& catalog,
+    const units::UnitTables& tables,
+    const DataIdentity& identity);
+
 // `skipped_types` (skipped_type_ids): a start whose content skipped unit types (#4589) names them in the
 // "skipped-types" domain, so peers and replays with another skip set refuse each other; none adds nothing.
 [[nodiscard]] sim::MatchIdentity match_identity(const StartInputs& inputs, std::span<const std::string> skipped_types = {});
 
-struct DataIdentity {
-    std::string script_manifest_digest, ai_data_digest;
-};
-[[nodiscard]] core::Result<DataIdentity> read_data_identity(const vfs::Vfs& filesystem);
 [[nodiscard]] core::Result<void> validate_replay_identity(const sim::tactical::TacticalSetup& setup,
     const StartInputs& inputs);
 
@@ -263,7 +279,7 @@ using battle::tactical_super_weapon_targets;
 // units::sensor_range (REVEAL types with their own range, squadrons with their
 // team container's), keyed by type_id() and sorted by it. It is content the
 // tables' identity names, not replay data.
-[[nodiscard]] std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables);
+[[nodiscard]] std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables, core::LoadNoteBuffer* load_notes = nullptr);
 
 // The sensor table of a revealed map (the fixed-force recordings stage fog revealed,
 // docs/traces.md): every listed type sees revealed_sensor_range, so fog never hides a unit from
@@ -289,6 +305,7 @@ struct SessionContent final {
     std::optional<sim::tactical::FogRules> fog;
     // WDF-05: the space map's box, the fighter grids' low corner (map_box); the world origin when unset.
     sim::tactical::MapBox map_box;
+    std::vector<core::LoadNote> load_notes; // diagnostic sidecar, excluded from content identity
 };
 [[nodiscard]] core::Result<SessionContent> session_content(
     const units::UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {},
@@ -298,6 +315,8 @@ struct SessionContent final {
 
 // #4589: the unit type IDs a lenient load skipped (the "skipped unit type '<id>'" diagnostics), sorted, unique.
 [[nodiscard]] std::vector<std::string> skipped_type_ids(std::span<const core::Diagnostic> skipped);
+// Unique rejected types and retained types with warnings; other content warnings stay separate.
+[[nodiscard]] std::string content_load_summary(std::span<const core::Diagnostic> diagnostics);
 // The same for tables loaded leniently here (a replay checks its recorded "skipped-types" identity domain).
 [[nodiscard]] std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables);
 // A start that places a skipped type (a starting unit, a squadron's craft or a launch) fails with a

@@ -184,6 +184,7 @@ void EawrLoadingScreen::_notification(const int what) {
     if (what == NOTIFICATION_EXIT_TREE) { if (planet_) planet_->release(); set_3d(true); }
     if (what != NOTIFICATION_PROCESS) return;
     ++frames_;
+    if (dismiss_pending_ && (!dismiss_ready_ || dismiss_ready_())) dismiss();
     if (planet_ && shown_) planet_->advance(std::chrono::duration<double>(std::chrono::steady_clock::now() - planet_started_).count());
     if (planet_) set_meta("loading_planet", text(planet_->report_json()));
     // A load that ended before the screen could draw on the spot takes its ready still once the
@@ -659,8 +660,15 @@ void EawrLoadingScreen::request_begin() noexcept {
     if (ready_ && shown_) begin_pressed_ = true;
 }
 
+void EawrLoadingScreen::hold_dismiss(std::function<bool()> ready) {
+    dismiss_ready_ = std::move(ready);
+}
+
 void EawrLoadingScreen::dismiss() {
     if (!shown_) return;
+    if (dismiss_ready_ && !dismiss_ready_()) { dismiss_pending_ = true; return; }
+    dismiss_pending_ = false;
+    dismiss_ready_ = {};
     shown_ = false;
     if (planet_) planet_->release();
     hide();

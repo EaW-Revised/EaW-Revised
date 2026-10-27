@@ -3,6 +3,7 @@
 
 set(EAWR_ASSETS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/effect_reader.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/effect_program.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_decode.cpp"

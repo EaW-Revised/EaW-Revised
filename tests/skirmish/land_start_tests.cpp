@@ -61,7 +61,7 @@ skirmish::LandStartBindings explicit_bindings(const units::UnitTables& tables) {
             classes.insert(member.movement_class);
             // Explicit synthetic physical inputs: installed coverage tests L3's data/marker
             // path, not the pending L2b stock locomotion/collision adapter.
-            binding.members.push_back({skirmish::type_id(member.type), {whole(40), whole(120), whole(150), whole(2), whole(1), false}});
+            binding.members.push_back({skirmish::type_id(member.type), {whole(40), whole(120), whole(150), whole(2), whole(1), false}, 0, {}, {}, {}});
         }
         bindings.land.companies.push_back(std::move(binding));
     }
@@ -635,8 +635,8 @@ void naboo_turning_move(const vfs::Vfs& filesystem, const data::Catalog& catalog
         "stock land start with combat content builds deterministically");
     const auto domain = std::find_if(built.start.identity.domains.begin(), built.start.identity.domains.end(),
         [](const auto& row) { return row.name == "land-content"; });
-    expect(domain != built.start.identity.domains.end() && domain->version == 2,
-        "the land-content identity domain is version 2 with combat rows");
+    expect(domain != built.start.identity.domains.end() && domain->version == 3,
+        "the land-content identity domain is version 3 with active combat");
 }
 
 // #3776 L3 witness: the setup screen's selection becomes land FixtureOptions, and those options build the land start.

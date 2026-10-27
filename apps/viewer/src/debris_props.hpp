@@ -127,12 +127,12 @@ private:
     // ended by sample `due` is not started.
     [[nodiscard]] bool start(const std::string& particle, const space::DebrisPose& pose, std::uint64_t born,
                              std::uint64_t due, std::optional<std::uint64_t> follows, const std::string& reason);
-    [[nodiscard]] bool step(Effect& effect, std::uint64_t sample, bool& gone);
+    [[nodiscard]] bool step(Effect& effect, std::uint64_t sample, bool& gone, std::uint32_t elapsed = 1);
     // The frame a fire that follows its flight stands at in sample `sample`; false (failure() set)
     // when it was refused.
     [[nodiscard]] bool follow(const Effect& effect, std::uint64_t sample);
     // What follows an effect's advance: its age, detach and release; `gone` when it was released.
-    void after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone);
+    void after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone, std::uint32_t elapsed = 1);
     [[nodiscard]] bool advance_until(std::uint64_t target);
 
     godot::Node3D* host_;

@@ -1,17 +1,17 @@
-{"dir":"meta","msg":{"protocol":"1.3","recorded_by":"eawr_mods_service"}}
+{"dir":"meta","msg":{"protocol":"1.6","recorded_by":"eawr_mods_service"}}
 {"dir":"c2s","msg":{"id":1,"method":"hello","params":{"client":"eawr-launcher","client_version":"0.1.0","protocol":{"major":1,"min_minor":0}}}}
-{"dir":"s2c","msg":{"id":1,"result":{"protocol":{"major":1,"minor":3},"service_version":"0.0.0","engine_build":"0.0.0+transcript","game_release":"0.0.0","capabilities":["chain.check","chain.resolve","game.find","hello","loadcheck.cancel","loadcheck.result","loadcheck.start","mods.discover","profile.delete","profile.list","profile.load","profile.save","shutdown"]}}}
+{"dir":"s2c","msg":{"id":1,"result":{"protocol":{"major":1,"minor":6},"service_version":"0.0.0","engine_build":"0.0.0+transcript","game_release":"0.0.0","capabilities":["chain.check","chain.resolve","files.page","game.find","hello","loadcheck.cancel","loadcheck.result","loadcheck.start","mods.changes","mods.discover","profile.delete","profile.list","profile.load","profile.save","shutdown"]}}}
 {"dir":"c2s","msg":{"id":2,"method":"game.find","params":{"hint":"<game-root>"}}}
 {"dir":"s2c","msg":{"id":2,"result":{"root":"<game-root>","kind":"other","diagnostics":[]}}}
 {"dir":"c2s","msg":{"id":3,"method":"profile.save","params":{"profile":{"id":"changed","name":"changed","layers":[],"launch":{"frame_rate_limit":-1}}}}}
 {"dir":"s2c","msg":{"id":3,"result":{"profile":{"format":"eawr-mod-profile","version":1,"id":"changed","name":"changed","layers":[],"order_source":"chain","separators":[],"launch":{"mode":"front-end","render_thread":"safe","frame_rate_limit":-1},"accepted":{"chain_fingerprint":"","load_check":""}}}}}
 {"dir":"c2s","msg":{"id":4,"method":"loadcheck.result","params":{"profile":"changed"}}}
-{"dir":"s2c","msg":{"id":4,"result":{"report":null,"next_cursor":null}}}
+{"dir":"s2c","msg":{"id":4,"result":{"report":null,"next_cursor":null,"status":"not_run","chain_fingerprint":"0000000000000000000000000000000000000000000000000000000000000000"}}}
 {"dir":"c2s","msg":{"id":5,"method":"loadcheck.start","params":{"profile":"changed"}}}
 {"dir":"s2c","msg":{"event":"loadcheck.progress","id":5,"data":{"stage":"mount","done":0,"total":5}}}
 {"dir":"s2c","msg":{"event":"loadcheck.progress","id":5,"data":{"stage":"complete","done":5,"total":5}}}
 {"dir":"s2c","msg":{"id":5,"error":{"code":"EAWR-MODS-SVC-0011","message":"chain changed during load check","data":{"error_count":1,"warning_count":0,"diagnostics":[{"code":"EAWR-MODS-SVC-0011","severity":"error","count":1,"examples":["chain changed during load check"]}]}}}}
 {"dir":"c2s","msg":{"id":6,"method":"loadcheck.result","params":{"profile":"changed"}}}
-{"dir":"s2c","msg":{"id":6,"result":{"report":null,"next_cursor":null}}}
+{"dir":"s2c","msg":{"id":6,"result":{"report":null,"next_cursor":null,"status":"not_run","chain_fingerprint":"0000000000000000000000000000000000000000000000000000000000000000"}}}
 {"dir":"c2s","msg":{"id":7,"method":"shutdown","params":{}}}
 {"dir":"s2c","msg":{"id":7,"result":{}}}

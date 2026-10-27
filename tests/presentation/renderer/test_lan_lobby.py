@@ -612,6 +612,32 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertFalse(report["online"]["announced_private"])
         self.assertFalse(report["online"]["host_password_set"])
 
+    def test_chat_enter_keeps_focus_in_lan_online_and_room(self):
+        name = "chat-enter-focus"
+        steps = ("chat_enter:first LAN line", "sleep:2", "snapshot",
+                 "chat_enter:second LAN line", "sleep:2", "snapshot",
+                 "source:online", "online_menu:active", "sleep:2", "chat_enter:first online line", "sleep:2", "snapshot",
+                 "chat_enter:second online line", "sleep:2", "snapshot",
+                 "join:Open night", "wait:staging@30", "chat_enter:first room line", "sleep:2", "snapshot",
+                 "chat_enter:second room line", "sleep:2", "snapshot")
+        arguments = ["--eawr-lan-name", "Chat player", "--eawr-lan-fake", "joined",
+                     "--eawr-online-room", "Open night|Rex|Kessel|TEXT_GAME_TYPE_TEAM_SPACE|2/9"]
+        for step in steps:
+            arguments += ["--eawr-lan-do", step]
+        completed = subprocess.run(command(self.cache, name, self.directory, self.pictures / f"{name}.png",
+                                           *arguments), capture_output=True, text=True, timeout=120, check=False)
+        report = load(self, self.directory, name, completed)
+        snapshots = report["snapshots"]
+        self.assertEqual(len(snapshots), 6)
+        for shot in snapshots:
+            self.assertTrue(shot["chat_focused"], shot)
+        self.assertEqual([shot["page"] for shot in snapshots], ["lobby"] * 4 + ["staging"] * 2)
+        self.assertIn("Chat player: first LAN line", snapshots[1]["chat"])
+        self.assertIn("Chat player: second LAN line", snapshots[1]["chat"])
+        self.assertTrue(snapshots[3]["chat_open"])
+        self.assertIn("Chat player: first online line", report["online"]["sent_chat"])
+        self.assertIn("Chat player: second online line", report["online"]["sent_chat"])
+
     def test_online_list_failure_and_chat_window_use_the_same_screen(self):
         name = "online-unavailable"
         arguments = ["--eawr-lan-name", "Solo", "--eawr-lan-fake", "joined", "--eawr-online-list-failed", "true",

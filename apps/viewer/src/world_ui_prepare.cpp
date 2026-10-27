@@ -116,12 +116,25 @@ std::optional<Rect2> WorldUiView::atlas_region(const std::string& name) const {
 void WorldUiView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const LiveSessionView& live,
                           const std::shared_ptr<GodotShaderCache>& shaders) {
     prepare_waypoints(filesystem, shaders);
+    owner_shown_ = nullptr;
+    owner_roster_ = live.observer_owners();
+    owner_lines_.clear();
+    owner_pixels_ = 0;
+    for (std::size_t index = 0; index < owner_roster_.size(); ++index) {
+        Ref<TextLine> line;
+        line.instantiate();
+        owner_lines_.push_back(line);
+    }
     // WU-51/52: resolve text and fonts once; the reticle pass only selects a cached name.
     std::optional<data::ui::TextDatabase> text_database;
     if (auto loaded = data::ui::load_language_text_database(filesystem, "ENGLISH")) {
         text_database.emplace(std::move(loaded.value()));
     } else {
         unresolved_.push_back("hardpoint text: " + core::format_diagnostic(loaded.error()));
+    }
+    for (auto& owner : owner_roster_) {
+        if (const auto* entry = text_database && !owner.text_key.empty() ? text_database->find(owner.text_key) : nullptr)
+            owner.name = data::ui::to_utf8(entry->value);
     }
     std::string tooltip_face, tooltip_small_face;
     const auto reticle_art = ui::hardpoint_reticle_art(filesystem);

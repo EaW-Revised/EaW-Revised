@@ -372,7 +372,8 @@ bool LandOccupancy::admits_footprint(const std::uint32_t min_x, const std::uint3
 }
 
 LandSegmentResult LandTerrain::segment_intersection(
-    const math::Vec3& start, const math::Vec3& end, const LandSegmentOptions options) const {
+    const math::Vec3& start, const math::Vec3& end, const LandSegmentOptions options,
+    std::vector<Fixed>* const crossings) const {
     LandSegmentResult failure;
     failure.status = LandSegmentStatus::overflow;
     const Num ax = start.x, ay = start.y, az = start.z;
@@ -398,7 +399,9 @@ LandSegmentResult LandTerrain::segment_intersection(
     if (lo > hi) return {};
 
     // Breakpoints: where the segment crosses a grid line. Between two the segment stays in one cell.
-    std::vector<Fixed> ts{lo, hi};
+    std::vector<Fixed> local_crossings;
+    auto& ts = crossings ? *crossings : local_crossings;
+    ts.clear(); ts.push_back(lo); ts.push_back(hi);
     const auto grid_lines = [&](const Num a, const Num d, const std::uint32_t count) {
         if (d.value.raw() == 0 || count < 3) return true;
         const Num pa = a + Num(lo) * d, pb = a + Num(hi) * d;
@@ -471,10 +474,11 @@ LandSegmentResult LandTerrain::segment_intersection(
             if (!point_at(t0, x0, y0, z0) || !point_at(t1, x1, y1, z1)
                 || !point_at(middle(t0, t1), xm, ym, zm)) return failure;
             const Num side = local_u(cell, xm) - local_v(cell, ym);
+            if (!side.ok) return failure;
             const bool triangle_a = side.value.raw() >= 0;
             const Num f0 = z0 - plane_height(cell, triangle_a, x0, y0);
             const Num f1 = z1 - plane_height(cell, triangle_a, x1, y1);
-            if (!side.ok || !f0.ok || !f1.ok) return failure;
+            if (!f0.ok || !f1.ok) return failure;
             if (below(f0.value)) { // start below the surface (or the grid edge): contact at that start
                 terrain = {true, t0, cell, triangle_a};
             } else if (below(f1.value)) {

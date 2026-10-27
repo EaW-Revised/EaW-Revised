@@ -108,7 +108,7 @@ void campaign_art_is_data_driven() {
     write(root, "Data/XML/Planets.xml", R"XML(<Planets>
       <Planet Name="Backdrop"><Behavior>IDLE</Behavior><Galactic_Position>0,0,0</Galactic_Position><Galactic_Model_Name>galaxy.alo</Galactic_Model_Name>
       <Scale_Factor>1</Scale_Factor><In_Background>Yes</In_Background><Loop_Idle_Anim_00>Yes</Loop_Idle_Anim_00></Planet>
-      <Planet Name="Alpha"><Behavior>PLANET</Behavior><Galactic_Position>12,34,10</Galactic_Position><Galactic_Model_Name>alpha.alo</Galactic_Model_Name>
+      <Planet Name="Alpha"><Behavior>PLANET</Behavior><Galactic_Position>12,34,10</Galactic_Position><Galactic_Model_Name>Alpha</Galactic_Model_Name>
       <Scale_Factor>2.5</Scale_Factor><Show_Name>Yes</Show_Name><Name_Adjust>1,2,3</Name_Adjust>
       <Mouse_Collide_Override_Sphere_Radius>17</Mouse_Collide_Override_Sphere_Radius><Text_ID>ALPHA</Text_ID>
       <Planet_Ability_Name>BASE_NAME</Planet_Ability_Name><Planet_Ability_Description>BASE_DESCRIPTION</Planet_Ability_Description>
@@ -156,6 +156,7 @@ void campaign_art_is_data_driven() {
     vfs::MountSpec mount;
     mount.layer_id = "test";
     mount.data_root = root / "Data";
+    write(root, "Data/Art/Models/alpha.alo", "synthetic model lookup marker");
     const std::array<vfs::MountSpec, 1> mounts{mount};
     auto filesystem = vfs::Vfs::mount(mounts);
     assert(filesystem);
@@ -229,6 +230,9 @@ void campaign_art_is_data_driven() {
     assert(scene.snapshot.planets[1].position[0] == sim::math::Fixed::from_decimal("12").value());
     assert(scene.snapshot.planets[1].scale == sim::math::Fixed::from_decimal("2.5").value());
     assert(scene.snapshot.planets[2].scale == scene.snapshot.planets[1].scale);
+    assert(scene.snapshot.planets[1].model == "data/art/models/alpha.alo");
+    assert(scene.snapshot.planets[2].model == "data/art/models/alpha.alo"); // inherited extensionless name
+    assert(filesystem.value().stat(scene.snapshot.planets[1].model));
     assert(scene.snapshot.planets[1].owner && !scene.snapshot.planets[2].owner);
     assert(scene.factions.at(1).icon == "icon.tga");
     const auto* neutral = affiliation_for_owner(scene, scene.snapshot.planets[2].owner);

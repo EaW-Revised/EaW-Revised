@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/commands.hpp"
+#include "eawr/sim/seat.hpp"
 #include "eawr/sim/tactical/retreat_action.hpp"
 #include "eawr/sim/math/geometry.hpp"
 
@@ -24,6 +25,8 @@ inline constexpr std::uint32_t tactical_state_encoding_version = 1;
 inline constexpr std::uint32_t tactical_snapshot_encoding_version = 3;
 
 inline constexpr std::uint32_t max_players = 64;
+// Controller seats follow the GC envelope's resource bound, independently of faction count.
+inline constexpr std::uint32_t max_controller_seats = 256;
 inline constexpr std::uint32_t max_units_per_command = 1024;
 inline constexpr std::uint64_t max_units = 1'000'000;
 inline constexpr std::uint64_t max_commands = 1'000'000;
@@ -33,6 +36,28 @@ using PlayerId = std::uint32_t;
 using TeamId = std::uint32_t;
 using FactionId = std::uint64_t;
 using TypeId = std::uint64_t;
+
+// ADR-020: faction ownership and temporary battle control are separate identities.
+enum class UnitControl : std::uint32_t { none = 0, mobile = 1, shared_structure = 2 };
+enum class CommandOrigin : std::uint32_t { ordinary = 0, seat = 1, engine = 2 };
+enum class FactionController : std::uint32_t { humans = 1, ai = 2, passive = 3 };
+struct ControllerBinding {
+    SeatId seat{};
+    PlayerId player{};
+    SeatKind kind{SeatKind::human};
+    bool active{true};
+    friend bool operator==(const ControllerBinding&, const ControllerBinding&) = default;
+};
+struct ControllerFaction {
+    PlayerId player{};
+    FactionController mode{FactionController::humans};
+    friend bool operator==(const ControllerFaction&, const ControllerFaction&) = default;
+};
+struct BattleControllerPolicy {
+    std::vector<ControllerBinding> seats;
+    std::vector<ControllerFaction> factions;
+    friend bool operator==(const BattleControllerPolicy&, const BattleControllerPolicy&) = default;
+};
 
 // A fighter squadron (#271, docs/behaviour/space-visibility.md V-03): its team container,
 // a unit of its own that carries the squadron's sensor, and its craft in strictly increasing
@@ -117,6 +142,8 @@ enum class OrderKind : std::uint8_t {
     special_fire = 22, // coordinator-reserved: WSW-15/40/41, command only.
     campaign_credit_release = 24, // WGA-54: replay opcode 29
     beacon = 25, // coordinator-reserved: HCB-12, replay opcode 31, no unit order.
+    gift = 26, // ADR-020: controller transfer only, replay opcode 32, no unit order.
+    battle_control = 27, // ADR-020: trusted departure boundary, replay opcode 33.
 };
 
 // The order a unit last accepted: a move or face keeps its point in `destination`, an attack its
@@ -158,6 +185,8 @@ struct UnitState {
     std::uint64_t purchase_token{}; // SAE-11: admitted reserved purchase, zero for ordinary units
     EntityId barrage_source{}; // WAD-38: proxy owner entity; zero for ordinary units
     bool garrison_enabled{true}; // FL-13: marker-created skirmish stations disable authored garrisons
+    SeatId controller_seat{};
+    UnitControl control{UnitControl::none};
     friend constexpr bool operator==(const UnitState&, const UnitState&) noexcept = default;
 };
 
@@ -402,6 +431,20 @@ struct BeaconPayload {
     friend constexpr bool operator==(const BeaconPayload&, const BeaconPayload&) noexcept = default;
 };
 
+// ADR-020: transfer selected mobile roots to an active human on the same battle side.
+struct GiftPayload {
+    SeatId recipient{};
+    friend constexpr bool operator==(const GiftPayload&, const GiftPayload&) noexcept = default;
+};
+
+// An agreed engine boundary, never a human-wire request. The complete effective
+// roster makes standalone child playback independent of live disconnect events.
+struct BattleControlPayload {
+    SeatId departed{};
+    BattleControllerPolicy policy;
+    friend bool operator==(const BattleControlPayload&, const BattleControlPayload&) = default;
+};
+
 // HCB-12: bounded per-issuer state; these objects do not join unit services.
 struct BeaconState {
     PlayerId player{};
@@ -414,7 +457,7 @@ struct BeaconState {
 using CommandPayload = std::variant<StopPayload, MovePayload, AttackPayload, DamagePayload, FacePayload,
     AttackMovePayload, GuardPayload, AbilityPayload, BuyPayload, CancelPayload, ReinforcePayload, PadBuildPayload,
     CreditGrantPayload, QuitPayload, PadSellPayload, AreaAbilityPayload, ManualTargetPayload, RevealAllPayload,
-    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload>;
+    RepairHardpointPayload, AiReservationDebitPayload, SpecialFirePayload, CampaignCreditReleasePayload, RetreatPayload, RetreatCinematicPayload, BeaconPayload, GiftPayload, BattleControlPayload>;
 
 // Whether a command acts on the issuer's economy (#530) rather than on units.
 [[nodiscard]] constexpr bool economy_command(const CommandPayload& payload) noexcept {
@@ -430,6 +473,8 @@ struct PlayerCommand {
     CommandKey key;
     std::vector<EntityId> units;
     CommandPayload payload;
+    SeatId issuing_seat{};
+    CommandOrigin origin{CommandOrigin::ordinary};
     friend bool operator==(const PlayerCommand&, const PlayerCommand&) = default;
 };
 
@@ -441,6 +486,8 @@ struct PlayerCommand {
 }
 
 [[nodiscard]] constexpr OrderKind order_kind(const CommandPayload& payload) noexcept {
+    if (std::holds_alternative<GiftPayload>(payload)) return OrderKind::gift;
+    if (std::holds_alternative<BattleControlPayload>(payload)) return OrderKind::battle_control;
     if (std::holds_alternative<RetreatPayload>(payload) || std::holds_alternative<RetreatCinematicPayload>(payload)) return OrderKind::retreat;
     if (std::holds_alternative<BeaconPayload>(payload)) return OrderKind::beacon;
     if (std::holds_alternative<SpecialFirePayload>(payload)) return OrderKind::special_fire;
@@ -476,6 +523,7 @@ enum class EventKind : std::uint8_t {
     ability_ready = 17, // coordinator-reserved, WHZ-24; sequence carries AbilityKind
     special_weapon_fired = 18, // WSW-22/33: every wrapper pulse; sequence carries source index.
     special_weapon_ready = 19, // WSW-33: source recharge completed while enabled; sequence carries index.
+    controller_changed = 20, // ADR-020: one event per transferred live root/member, ordered by ID.
 };
 
 enum class RejectReason : std::uint8_t {
@@ -501,6 +549,8 @@ enum class RejectReason : std::uint8_t {
     battle_decided = 18,       // WR-19: pending victory forbids reinforcement
     target_hidden = 19,        // WST-11: a stealth-invisible enemy, for a type that cannot target stealth (coordinator-reserved)
     beacon_unavailable = 20, // coordinator-reserved: HCB-12, no agreed faction beacon rule.
+    unit_not_controlled = 21, // coordinator-reserved: #4590 P2, mobile unit not controlled by the issuing seat
+    gift_recipient_invalid = 22, // ADR-020: recipient must be another active human on the same side.
 };
 
 // One event per listed unit of an executed command, in command order then unit order, each
@@ -523,6 +573,7 @@ struct Event {
     RejectReason reason{RejectReason::none};
     std::uint8_t hardpoint{}; // hardpoint_destroyed only
     std::uint32_t special_pulse{}; // special_weapon_fired: 0 initial, 1..N continuation.
+    SeatId previous_controller{}, controller{}; // controller_changed only; faction owner stays in player.
     friend constexpr bool operator==(const Event&, const Event&) noexcept = default;
 };
 

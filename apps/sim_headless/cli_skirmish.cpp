@@ -146,6 +146,7 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
         ? eawr::units::ContentErrors::strict : eawr::units::ContentErrors::skip_object, &skipped);
     if (!content) return fail(content.error());
     for (const auto& warning : skipped) std::cerr << eawr::core::format_diagnostic(warning) << '\n';
+    if (!options.mod_root.empty()) std::cerr << "mod content: session bound, " << sk::content_load_summary(skipped) << '\n';
     if (auto placed = sk::refuse_skipped_starts(start, skipped); !placed) return fail(placed.error());
     const auto skipped_types = sk::skipped_type_ids(skipped);
     sk::bind_skipped_types(start, skipped_types);
@@ -169,6 +170,7 @@ int run_ai_battle(const Options& options, const LoadedTables& loaded,
     auto ai = eawr::platform::live_ai(start, inputs, tables, *loaded.filesystem,
         std::shared_ptr<const eawr::platform::BattleScoring>(std::move(scoring).value()), journal, tracing);
     if (!ai) return fail(ai.error());
+    for (const auto& note : ai.value().load_notes) std::cerr << eawr::core::format_diagnostic(note) << '\n';
     auto world = tactical::TacticalSession::create(sk::recording_setup(fixture, start), content.value().sensors,
         content.value().durability, content.value().motion, content.value().fog, content.value().combat,
         sk::victory_rules(start, tables), content.value().abilities, economy.value(), content.value().map_box);
@@ -369,7 +371,7 @@ int run_skirmish(const Options& options) {
     if (!loaded) return fail(loaded.error());
     const auto& filesystem = *loaded.value()->filesystem;
     const auto& catalog = loaded.value()->catalog->catalog;
-    const auto& tables = *loaded.value()->tables;
+    auto& tables = *loaded.value()->tables;
     // #4589: a mod start may name its own space map; the map's actual SHA-256 is bound as the viewer's lobby does.
     skirmish::Fixture selected = skirmish::m2_fixture();
     if (!options.map_path.empty()) {
@@ -382,6 +384,24 @@ int run_skirmish(const Options& options) {
     const auto& fixture = selected;
     auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, tables);
     if (!inputs) return fail(inputs.error());
+    // SC-01 / #5304: the selected start can require types outside the M2 roots.
+    // Share the viewer's collector and retain the old table bytes when none are missing.
+    const auto missing = skirmish::missing_start_types(fixture, inputs.value(), tables);
+    if (!missing.empty()) {
+        eawr::scene::VfsAssetCache cache(filesystem);
+        eawr::units::LoadInput unit_input;
+        unit_input.catalog = &catalog;
+        unit_input.filesystem = &filesystem;
+        unit_input.model = cache.access().model;
+        unit_input.space_map = fixture.map;
+        for (const auto type : eawr::units::pinned_m2_types()) unit_input.types.emplace_back(type);
+        unit_input.types.insert(unit_input.types.end(), missing.begin(), missing.end());
+        for (const auto type : eawr::units::pinned_m2_obstacles()) unit_input.obstacles.emplace_back(type);
+        auto extended = eawr::units::load_unit_tables(unit_input);
+        if (!extended) return fail(extended.error());
+        tables = std::move(extended).value();
+        inputs.value().tables = &tables;
+    }
     auto start = skirmish::build_start(fixture, inputs.value());
     if (!start) return fail(start.error());
     if (!options.ai_report_path.empty()) return run_ai_battle(options, *loaded.value(), fixture, inputs.value(), std::move(start).value());
@@ -407,7 +427,7 @@ int run_skirmish(const Options& options) {
             content.value().durability, content.value().motion, std::nullopt, content.value().combat,
             eawr::sim::tactical::VictoryRules{}, content.value().abilities);
         if (!modded) return fail(modded.error());
-        std::cerr << "mod content: session bound, " << skipped.size() << " unit types skipped\n";
+        std::cerr << "mod content: session bound, " << skirmish::content_load_summary(skipped) << '\n';
     }
 
     std::vector<eawr::platform::PublishedFile> outputs;

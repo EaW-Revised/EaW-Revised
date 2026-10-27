@@ -94,7 +94,7 @@ Scenario installed(const std::filesystem::path& root) {
     result.setup = start.setup;
     result.content = {content.sensors, content.durability, content.motion, require(skirmish::fog_rules(inputs)),
         content.combat, skirmish::victory_rules(start, tables), content.abilities,
-        require(skirmish::economy_rules(start, inputs, tables)), {}, {}};
+        require(skirmish::economy_rules(start, inputs, tables)), {}, {}, sim::tactical::BattleDomain::space, {}, {}, {}};
     result.purchase = skirmish::type_id("Rebel_X-Wing_Squadron");
     for (const auto& unit : start.units) {
         if (unit.state.owner == 1 && unit.role == skirmish::UnitRole::station) result.station = unit.state.entity_id;

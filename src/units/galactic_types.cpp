@@ -122,17 +122,12 @@ void issue(GalacticTypeTable& table, const GalacticType& type, const data::XmlNo
 }
 
 std::optional<Fixed> number(GalacticTypeTable& table, const GalacticType& type, const data::XmlNode& node) {
-    if (equal(node.name, "Hyperspace_Speed")) {
-        const auto value = data::retail::float_value(node.raw_text);
-        if (value && !value->exact) issue(table, type, node, IssueKind::trailing_text, "retail float conversion (LSA-P3)");
-        return value ? std::optional(value->value) : std::nullopt;
-    }
-    const auto value = data::retail::leading_number(node.raw_text);
+    const auto value = data::retail::float_value(node.raw_text);
     if (!value) {
         issue(table, type, node, IssueKind::bad_value, "not a number in Q24 range");
         return std::nullopt;
     }
-    if (value->trailing_text) issue(table, type, node, IssueKind::trailing_text, "read as its leading number (AU-82)");
+    if (!value->exact) issue(table, type, node, IssueKind::trailing_text, "read as its leading number (AU-82)");
     return value->value;
 }
 
@@ -201,7 +196,7 @@ core::Result<GalacticType> resolve_initial_galactic_type(const GalacticTypeTable
     // WGM-100/WGEP-92 omission defaults belong to movement and production
     // consumers. Retain authored absence in content-bearing original facts.
     if (type.build_advances_tech_level && (*type.build_advances_tech_level < 0
-            || *type.build_advances_tech_level > std::numeric_limits<std::int32_t>::max()))
+            || static_cast<std::uint64_t>(*type.build_advances_tech_level) > std::numeric_limits<std::uint32_t>::max()))
         return fail("invalid unsigned technology target");
     return core::Result<GalacticType>::success(std::move(type));
 }
@@ -265,10 +260,12 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
         for (const auto& field : counts) {
             const auto* at = node(field.tag);
             if (!at) continue;
-            const auto parsed = number(table, type, *at);
+            const auto parsed = data::retail::integer_value(at->raw_text);
             if (!parsed) continue;
-            if (parsed->raw() % Fixed::scale != 0) issue(table, type, *at, IssueKind::bad_value, "not a whole number");
-            else type.*field.member = parsed->raw() / Fixed::scale;
+            if (!parsed->exact) issue(table, type, *at, IssueKind::trailing_text, "read as a saturated leading integer (LSA-P1)");
+            // LSA-P2: these two fields retain the unsigned interpretation of the atoi bits.
+            type.*field.member = field.tag == "Squadron_Capacity" || field.tag == "Build_Advances_Tech_Level"
+                ? static_cast<std::int64_t>(static_cast<std::uint32_t>(parsed->value)) : parsed->value;
         }
         for (const auto& field : flags) if (const auto* at = node(field.tag)) type.*field.member = data::retail::boolean(at->raw_text);
         for (const auto& field : texts) if (const auto* at = node(field.tag)) type.*field.member = trim(at->raw_text);
@@ -285,16 +282,15 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
             for (const auto* at : data::retail::list(layers, tag, data::retail::ListRule::append)) {
                 relevant = true;
                 const auto row = names(at->raw_text);
-                const auto count = row.size() >= 2 ? data::retail::leading_number(row[1]) : std::nullopt;
-                if (!count || count->value.raw() % Fixed::scale != 0
-                    || count->value.trunc_to_integer() < std::numeric_limits<std::int32_t>::min()
-                    || count->value.trunc_to_integer() > std::numeric_limits<std::int32_t>::max()) {
-                    issue(table, type, *at, IssueKind::bad_value, "expected spawned type and whole count");
+                if (row.size() < 2) {
+                    issue(table, type, *at, IssueKind::bad_value, "expected spawned type and count");
                     continue;
                 }
-                if (row.size() > 2 || count->trailing_text)
+                // LSA-05: placeholders skip a whole key, not the numeric token of a pair.
+                const auto parsed_count = data::retail::integer_value(row[1]);
+                if (row.size() > 2 || !parsed_count || !parsed_count->exact)
                     issue(table, type, *at, IssueKind::trailing_text, "read the first type/count pair (AU-82)");
-                type.starting_spawned_units[tech].push_back({row[0], static_cast<std::int32_t>(count->value.trunc_to_integer())});
+                type.starting_spawned_units[tech].push_back({row[0], data::retail::integer_constant(row[1])});
             }
         }
         for (const auto* abilities : ability_blocks(layers)) {

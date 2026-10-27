@@ -35,6 +35,7 @@ class OwnerCensusContracts(unittest.TestCase):
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <new>
 #include <sstream>

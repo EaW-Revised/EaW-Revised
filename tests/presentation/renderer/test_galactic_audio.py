@@ -1,5 +1,6 @@
 """WGP-23/24 local-faction music through the installed XML and viewer adapter."""
 import json
+import math
 import subprocess
 import os
 import pathlib
@@ -7,6 +8,34 @@ import tempfile
 import unittest
 
 from tests.galactic.test_galactic_viewer_mode import run_viewer
+
+
+class GalacticMusicMixerContract(unittest.TestCase):
+    def test_samples_use_localize_category_without_duplicate_slider_gain(self):
+        root = pathlib.Path(__file__).resolve().parents[3]
+        source = (root / "apps/viewer/src/galactic/galactic_audio.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("audio::category_gain", source)
+        self.assertNotIn('set_bus_send(bus, "Master")', source)
+        self.assertIn("speech_player_->set_bus(audio_buses::names[audio_buses::voice])", source)
+        service = source.split("void GalacticAudio::service(", 1)[1].split("void GalacticAudio::record_start", 1)[0]
+        self.assertEqual(service.count("request.event->localized ? audio_buses::voice : audio_buses::sfx"), 2)
+        self.assertIn("voice.gain = start.volume;", service)
+        self.assertIn("audio::speech_sfx_gain(start.volume, speech_stream_.active(), false)", service)
+        self.assertIn("voice.gain * events_.fade(voice.handle) * audio::falloff_gain", service)
+
+    def test_opening_and_faded_tracks_use_options_buses_before_playback(self):
+        root = pathlib.Path(__file__).resolve().parents[3]
+        source = (root / "apps/viewer/src/galactic/galactic_audio.cpp").read_text(encoding="utf-8")
+        constructor = source.split("GalacticAudio::GalacticAudio(", 1)[1].split("GalacticAudio::~", 1)[0]
+        self.assertIn("audio_buses::ensure(saved ? mix_levels(saved->audio) : audio::MixLevels{})", constructor)
+        tracks = constructor.split("for (auto& track : tracks_)", 1)[1].split("speech_player_", 1)[0]
+        self.assertLess(tracks.index("set_bus(audio_buses::names[audio_buses::music])"),
+                        tracks.index("host.add_child(track.player)"))
+        playback = source.split("void GalacticAudio::play(", 1)[1].split("void GalacticAudio::write_report", 1)[0]
+        self.assertNotIn("default_volume_slider", playback)
+        self.assertIn("db(muted_ ? 0 : next.volume * next.fade.level)", playback)
+        self.assertIn("db(muted_ ? 0 : track.volume * track.fade.level)", playback)
+        self.assertLess(playback.index("music_starts_.push_back"), playback.index("next.player->play()"))
 
 
 class GalacticAdvisorDurationContract(unittest.TestCase):
@@ -42,6 +71,250 @@ int main() {
 @unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST")
                      and os.environ.get("EAWR_EAW_GAME_ROOT"), "requires viewer GPU host and game data")
 class GalacticAudioGpu(unittest.TestCase):
+    def test_opening_music_starts_at_saved_music_and_master_levels(self):
+        from tests.presentation.renderer.test_viewer_planet_hud_runtime import ROOT
+        with tempfile.TemporaryDirectory(prefix="galactic-opening-volume-") as temporary:
+            directory = pathlib.Path(temporary)
+            driver = directory / "input.gd"
+            driver.write_text('''extends SceneTree
+var frame = 0
+func _initialize():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func _process(_delta):
+    frame += 1
+    if frame == 20:
+        var button = root.find_child("b_play_pause", true, false)
+        assert(button != null)
+        assert(not button.disabled, "the audio input fixture must enable the pause control")
+        var motion = InputEventMouseMotion.new()
+        motion.position = button.get_global_rect().get_center()
+        motion.global_position = motion.position
+        Input.parse_input_event(motion)
+        for pressed in [true, false]:
+            var event = InputEventMouseButton.new()
+            event.position = button.get_global_rect().get_center()
+            event.global_position = event.position
+            event.button_index = MOUSE_BUTTON_LEFT
+            event.pressed = pressed
+            Input.parse_input_event(event)
+    if frame == 60:
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''', encoding="utf-8")
+            for master, music in ((40, 60), (0, 60), (40, 0)):
+                with self.subTest(master=master, music=music):
+                    name = f"master-{master}-music-{music}"
+                    settings = directory / "eawr-settings.cfg"
+                    settings.write_text(f"eawr-settings 1\naudio.master={master}\naudio.music={music}\n", encoding="utf-8")
+                    report = directory / (name + ".json")
+                    result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                        "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+                        "--eawr-galactic", "synthetic", "--eawr-galactic-seat", "1",
+                        "--eawr-galactic-hud-fixture", "accessible",
+                        "--eawr-galactic-paused", "yes",
+                        "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                        "--eawr-settings-file", str(settings), "--eawr-report", str(report)],
+                        cwd=ROOT, capture_output=True, text=True, timeout=300)
+                    (directory / (name + ".log")).write_text(result.stdout + result.stderr, encoding="utf-8")
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    data = json.loads(report.read_text(encoding="utf-8"))
+                    self.assertFalse(data["paused"], "the real click must resume the galaxy")
+                    audio = data["galactic_audio"]
+                    self.assertTrue(audio["music"], audio)
+                    self.assertTrue(audio["music_starts"], audio)
+                    db = lambda gain: -80.0 if gain <= 0.0001 else 20.0 * math.log10(gain)
+                    for start in audio["music_starts"]:
+                        self.assertEqual(start["bus"], "EAWR_Music", start)
+                        self.assertEqual(start["send"], "EAWR_Mix", start)
+                        self.assertAlmostEqual(start["music_db"], db(music / 100), delta=0.001)
+                        self.assertAlmostEqual(start["master_db"], db(master / 100), delta=0.001)
+                        gain = 0 if audio["muted"] else start["event_volume"] * start["fade"]
+                        self.assertAlmostEqual(start["stream_db"], db(gain), delta=0.001)
+
+    def mixer_run(self, directory, levels, preview=False):
+        from tests.presentation.renderer.test_viewer_planet_hud_runtime import ROOT
+        settings, report = directory / "settings.cfg", directory / "report.json"
+        settings.write_text("eawr-settings 1\n" + "".join(
+            f"audio.{key}={value}\n" for key, value in levels.items()), encoding="utf-8")
+        trace = directory / "mixer.json"
+        driver = directory / "input.gd"
+        driver.write_text(r'''extends SceneTree
+const SETTINGS = __SETTINGS__
+const TRACE = __TRACE__
+const PREVIEW = __PREVIEW__
+var instance
+var elapsed = 0.0
+var beat = 0.0
+var phase = 0
+var snapshots = []
+var sliders = ["IDC_SLIDER_MASTER_VOLUME", "IDC_SLIDER_SOUND_EFFECTS_VOLUME", "IDC_SLIDER_DIALOG_VOLUME", "IDC_SLIDER_MUSIC_VOLUME"]
+var changed = [25, 35, 45, 55]
+func _initialize():
+    # The in-game Options screen reads user://; seed only this launch's private profile.
+    DirAccess.copy_absolute(SETTINGS, ProjectSettings.globalize_path("user://eawr-settings.cfg"))
+    instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func visible(node, name):
+    if str(node.name) == name and node is Control and node.is_visible_in_tree(): return node
+    for child in node.get_children():
+        var found = visible(child, name)
+        if found != null: return found
+    return null
+func button(name):
+    var node = visible(root, name)
+    if node == null or node.disabled: return false
+    var motion = InputEventMouseMotion.new()
+    motion.position = node.get_global_rect().get_center()
+    motion.global_position = motion.position
+    Input.parse_input_event(motion)
+    for pressed in [true, false]:
+        var event = InputEventMouseButton.new()
+        event.position = motion.position
+        event.global_position = motion.position
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = pressed
+        Input.parse_input_event(event)
+    return true
+func escape():
+    for pressed in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = KEY_ESCAPE
+        event.pressed = pressed
+        Input.parse_input_event(event)
+func snapshot(label):
+    var buses = {}
+    for name in ["EAWR_Mix", "EAWR_SFX", "EAWR_Voice", "EAWR_Music"]:
+        var index = AudioServer.get_bus_index(name)
+        assert(index >= 0)
+        buses[name] = {"db": AudioServer.get_bus_volume_db(index), "send": str(AudioServer.get_bus_send(index))}
+    snapshots.append({"label": label, "buses": buses})
+func finish(error):
+    var file = FileAccess.open(TRACE, FileAccess.WRITE)
+    file.store_string(JSON.stringify({"error": error, "phase": phase, "snapshots": snapshots, "engine_arguments": OS.get_cmdline_args()}))
+    instance.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit(0 if error == "" else 2)
+func _process(delta):
+    elapsed += delta
+    beat += delta
+    if elapsed > 120:
+        finish("mixer driver timeout")
+        return false
+    if beat < 0.3: return false
+    beat = 0
+    match phase:
+        0:
+            if button("b_play_pause"): phase = 1
+        1:
+            if elapsed < 5: return false
+            snapshot("saved")
+            if not PREVIEW:
+                finish("")
+                return false
+            escape()
+            phase = 2
+        2:
+            if button("IDC_INGAME_OPTIONS"): phase = 3
+        3:
+            if button("IDC_IN_GAME_OPTIONS_AUDIO"): phase = 4
+        4, 5, 6, 7:
+            var slider = visible(root, sliders[phase - 4])
+            if slider == null: return false
+            slider.value = changed[phase - 4]
+            snapshot("preview-" + str(phase - 4))
+            phase += 1
+        8:
+            if button("IDC_CANCEL"): phase = 9
+        9:
+            snapshot("cancel")
+            if button("IDC_IN_GAME_OPTIONS_AUDIO"): phase = 10
+        10:
+            for index in range(4):
+                var slider = visible(root, sliders[index])
+                if slider == null: return false
+                slider.value = changed[index]
+            if button("IDC_OK"): phase = 11
+        11:
+            snapshot("accept")
+            finish("")
+    return false
+'''.replace("__SETTINGS__", json.dumps(settings.as_posix()))
+            .replace("__TRACE__", json.dumps(trace.as_posix()))
+            .replace("__PREVIEW__", "true" if preview else "false"), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate",
+            "--resolution", "1280x720",
+            "--path", str(ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-seat", "1",
+            "--eawr-galactic-hud-fixture", "audio-mixer", "--eawr-galactic-paused", "yes",
+            "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+            "--eawr-settings-file", str(settings), "--eawr-report", str(report)],
+            cwd=ROOT, capture_output=True, text=True, timeout=300)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        proof = json.loads(trace.read_text(encoding="utf-8"))
+        self.assertEqual(proof["error"], "", proof)
+        if not preview:
+            self.assertFalse(data["paused"], "real pause-button input must resume the galaxy")
+        return data, proof
+
+    def test_gc_samples_start_on_saved_independent_category_and_master_levels(self):
+        base = dict(master=40, sfx=60, speech=30, music=20)
+        for zero in (None, "master", "sfx", "speech", "music"):
+            with self.subTest(zero=zero), tempfile.TemporaryDirectory(prefix="galactic-sample-volume-") as temporary:
+                levels = dict(base)
+                if zero:
+                    levels[zero] = 0
+                data, _ = self.mixer_run(pathlib.Path(temporary), levels)
+                audio = data["galactic_audio"]
+                expected = {("pooled_2d", "GUI_Dial_Switch_SFX"): "EAWR_SFX",
+                            ("pooled_2d", "Unit_Fleet_Move_Star_Destroyer"): "EAWR_Voice",
+                            ("spatial", "Unit_Boron_Missile_Fire"): "EAWR_SFX",
+                            ("spatial", "Unit_Attacked_C3PO"): "EAWR_Voice",
+                            ("speech", "Speech_Death_Star_Build_Underway"): "EAWR_Voice"}
+                starts = {(row["kind"], row["event"]): row for row in audio["sample_starts"]}
+                db = lambda percent: -80.0 if percent == 0 else 20 * math.log10(percent / 100)
+                for key, category in expected.items():
+                    self.assertIn(key, starts, audio)
+                    start = starts[key]
+                    self.assertEqual(start["category"], category, start)
+                    self.assertEqual(start["send"], "EAWR_Mix", start)
+                    if key[0] == "pooled_2d":
+                        self.assertTrue(start["bus"].startswith("EAWR_GC_Pan_"), start)
+                    else:
+                        self.assertEqual(start["bus"], category, start)
+                    self.assertAlmostEqual(start["category_db"], db(levels["sfx" if category == "EAWR_SFX" else "speech"]), delta=0.001)
+                    self.assertAlmostEqual(start["master_db"], db(levels["master"]), delta=0.001)
+                    if key[0] != "speech":
+                        authored = {"GUI_Dial_Switch_SFX": 0.8, "Unit_Fleet_Move_Star_Destroyer": 0.9,
+                                    "Unit_Boron_Missile_Fire": 0.6, "Unit_Attacked_C3PO": 0.75}
+                        self.assertAlmostEqual(start["gain"], authored[key[1]], delta=0.001,
+                                               msg="authored volume must not include a second slider/master gain")
+                self.assertTrue(audio["music_starts"], audio)
+                for start in audio["music_starts"]:
+                    self.assertAlmostEqual(start["music_db"], db(levels["music"]), delta=0.001)
+                    self.assertAlmostEqual(start["master_db"], db(levels["master"]), delta=0.001)
+
+    def test_gc_options_preview_cancel_accept_reach_existing_category_routes(self):
+        base = dict(master=40, sfx=60, speech=30, music=20)
+        with tempfile.TemporaryDirectory(prefix="galactic-options-mixer-") as temporary:
+            _, proof = self.mixer_run(pathlib.Path(temporary), base, preview=True)
+            current = list(base.values())
+            wanted = {"saved": current.copy()}
+            for index, level in enumerate((25, 35, 45, 55)):
+                current[index] = level
+                wanted[f"preview-{index}"] = current.copy()
+            wanted["cancel"] = list(base.values())
+            wanted["accept"] = [25, 35, 45, 55]
+            self.assertEqual([row["label"] for row in proof["snapshots"]], list(wanted))
+            for snapshot in proof["snapshots"]:
+                for bus, percent in zip(("EAWR_Mix", "EAWR_SFX", "EAWR_Voice", "EAWR_Music"), wanted[snapshot["label"]]):
+                    self.assertAlmostEqual(snapshot["buses"][bus]["db"], 20 * math.log10(percent / 100), delta=0.001)
+                    self.assertEqual(snapshot["buses"][bus]["send"], "Master" if bus == "EAWR_Mix" else "EAWR_Mix")
+
     def test_qualified_construction_unlock_is_one_sfx_per_research(self):
         from tests.presentation.renderer import test_viewer_galactic_production_runtime as support
         for fixture, count in (("production", 0), ("production-unlocks", 1)):

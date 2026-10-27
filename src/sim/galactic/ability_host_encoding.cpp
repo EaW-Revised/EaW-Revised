@@ -118,7 +118,7 @@ std::optional<PreparedAbility> decode_prepared_ability(std::span<const std::uint
     p.absence = math::Fixed::from_raw(absence); p.owned = owned != 0; return p;
 }
 void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilitySetup& setup) {
-    put_u32(out, 9); put_i64(out, setup.default_hero_absence.raw()); // encoding 9 adds ground spy profiles
+    put_u32(out, 10); put_i64(out, setup.default_hero_absence.raw()); // encoding 9 adds ground spy profiles; 10 automatic spies
     put_u32(out, static_cast<std::uint32_t>(setup.profiles.size()));
     for (const auto& p : setup.profiles) {
         put_u8(out, static_cast<std::uint8_t>(p.ground_activated.size()));
@@ -128,6 +128,11 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
             const auto& s = *p.spy; text_value(out, s.name); text_value(out, s.text_identity);
             put_u64(out, s.identity); put_i64(out, s.duration.raw()); put_u32(out, s.mask);
             put_u8(out, s.initially_enabled ? 1 : 0); put_u8(out, s.causes_despawn ? 1 : 0); put_u8(out, s.hero ? 1 : 0);
+        }
+        put_u8(out, static_cast<std::uint8_t>(p.auto_spies.size()));
+        for (const auto& a : p.auto_spies) {
+            text_value(out, a.text_identity); put_u64(out, a.identity); put_i64(out, a.duration.raw());
+            put_i64(out, a.influence_range.raw()); put_u32(out, a.mask);
         }
         put_u64(out, p.type); put_i64(out, p.market.price_modifier.raw()); put_u8(out, p.market.causes_despawn ? 1 : 0);
         put_u8(out, p.named ? 1 : 0); put_u8(out, p.respawn_whole_team ? 1 : 0); put_u8(out, p.initially_enabled ? 1 : 0); put_u64(out, p.respawn_structure);
@@ -203,7 +208,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
 }
 std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::uint8_t> bytes) {
     sim::detail::Reader in(bytes); GalacticAbilitySetup result; std::uint32_t version{}, count{}; std::int64_t value{};
-    if (!in.read_u32(version) || version != 9 || !in.read_i64(value) || value <= 0
+    if (!in.read_u32(version) || version != 10 || !in.read_i64(value) || value <= 0
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 32) return {};
     result.default_hero_absence = math::Fixed::from_raw(value); TypeId previous{};
     for (std::uint32_t i = 0; i < count; ++i) {
@@ -225,6 +230,15 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
                 || !in.read_u32(s.mask) || (s.mask & ~all_intelligence)
                 || !in.read_u8(enabled) || enabled > 1 || !in.read_u8(consumes) || consumes > 1 || !in.read_u8(hero) || hero > 1) return {};
             s.duration = math::Fixed::from_raw(duration); s.initially_enabled = enabled != 0; s.causes_despawn = consumes != 0; s.hero = hero != 0;
+        }
+        std::uint8_t auto_count{};
+        if (!in.read_u8(auto_count) || auto_count > 8) return {};
+        for (std::uint8_t j = 0; j < auto_count; ++j) {
+            AutoSpyProfile a; std::int64_t duration{}, range{};
+            if (!text_value(in, a.text_identity) || a.text_identity.size() > 1024 || !in.read_u64(a.identity) || !a.identity
+                || !in.read_i64(duration) || duration >= 0 || !in.read_i64(range) || !in.read_u32(a.mask) || (a.mask & ~all_intelligence)) return {};
+            a.duration = math::Fixed::from_raw(duration); a.influence_range = math::Fixed::from_raw(range);
+            p.auto_spies.push_back(std::move(a));
         }
         std::uint8_t despawn{}, named{}, whole{}, enabled{}; std::uint32_t ranges{};
         if (!in.read_u64(p.type) || p.type <= previous || !in.read_i64(value) || value < 0
@@ -282,7 +296,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
             s.initially_enabled = flag != 0; s.cost_factor = math::Fixed::from_raw(factor);
         }
         if (!in.read_u8(has_neutralize) || has_neutralize > 1
-            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize && !has_spy)) return {};
+            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize && !has_spy && p.auto_spies.empty())) return {};
         if (has_neutralize) {
             auto& n = p.neutralize.emplace(); std::uint8_t flag{}, minor{}, major{};
             std::int64_t minor_mod{}, major_mod{}, a_lo{}, a_hi{}, t_lo{}, t_hi{};

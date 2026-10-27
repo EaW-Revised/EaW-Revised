@@ -1,4 +1,10 @@
 find_package(Threads REQUIRED)
+add_executable(eawr_shader_binding_contracts shader_binding_tests.cpp)
+target_link_libraries(eawr_shader_binding_contracts PRIVATE eawr::presentation)
+target_compile_features(eawr_shader_binding_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_shader_binding_contracts)
+add_test(NAME shader_binding_contracts COMMAND eawr_shader_binding_contracts)
+eawr_add_python_contract(python_presentation_renderer_battle_audio_preload tests.presentation.renderer.test_battle_audio_preload)
 add_executable(eawr_texture_recipe_contracts texture_recipe_tests.cpp)
 target_include_directories(eawr_texture_recipe_contracts PRIVATE
     "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src/presentation/godot")
@@ -291,3 +297,6 @@ eawr_add_python_contract(python_presentation_renderer_projectile_model_growth te
 
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_hero_bar_runtime tests.presentation.renderer.test_viewer_galactic_hero_bar_runtime)
 set_tests_properties(python_presentation_renderer_viewer_galactic_hero_bar_runtime PROPERTIES LABELS gpu)
+
+eawr_add_python_contract(python_presentation_renderer_gc_hologram_movies tests.presentation.renderer.test_gc_hologram_movies)
+set_tests_properties(python_presentation_renderer_gc_hologram_movies PROPERTIES LABELS gpu)

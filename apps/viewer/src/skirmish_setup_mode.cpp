@@ -1,6 +1,10 @@
+#include "viewer_load_notes.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/text.hpp"
 #include "skirmish_setup_mode.hpp"
+#include "menu_timeline.hpp"
+
+#include <cstdio>
 #include "lan_lobby_screen.hpp"
 #include "lan_broadcast_source.hpp"
 #include "battle_content.hpp"
@@ -293,8 +297,10 @@ bool SkirmishSetupMode::State::load() {
     }
     roots.emplace_back("expansion", expansion);
     roots.emplace_back("base", base);
+    MenuTimeline::mark("setup_load_begin");
     auto chain = vfs::resolve_manifest_chain(roots);
     if (!chain) { failure = core::format_diagnostic(chain.error()); return false; }
+    MenuTimeline::mark("manifest_chain_resolved");
     std::vector<vfs::MountSpec> specs;
     std::vector<std::string> layers;
     for (auto& manifest : chain.value()) {
@@ -304,12 +310,17 @@ bool SkirmishSetupMode::State::load() {
     auto mounted = vfs::Vfs::mount(specs);
     if (!mounted) { failure = core::format_diagnostic(mounted.error()); return false; }
     filesystem = std::make_shared<const vfs::Vfs>(std::move(mounted).value());
-    auto objects = data::load_catalog_strict(*filesystem, profile == "foc" ? data::Profile::foc : data::Profile::remake);
+    MenuTimeline::mark("vfs_mounted");
+    data::LoadOptions load_options;
+    load_options.parse_unregistered_xml = false;
+    auto objects = data::load_catalog_strict(*filesystem, profile == "foc" ? data::Profile::foc : data::Profile::remake, load_options);
     if (!objects) { failure = core::format_diagnostic(objects.error()); return false; }
+    publish_viewer_load_notes(std::move(objects.value().notes), layers);
     if (!objects.value().health.clean()) {
         UtilityFunctions::printerr(text("EAWR catalog load: " + data::describe_load_health(objects.value().health)));
     }
     catalog = std::make_shared<const data::Catalog>(std::move(objects.value().catalog));
+    MenuTimeline::mark("catalog_loaded");
     content = std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, std::move(layers)});
     auto colours = skirmish::read_lobby_colours(*filesystem);
     if (!colours) { failure = colours.error().message; return false; }
@@ -321,15 +332,32 @@ bool SkirmishSetupMode::State::load() {
     if (auto bounds = skirmish::read_credits_bounds(*filesystem)) credits_bounds = bounds.value();
     else UtilityFunctions::printerr(text("EAWR setup credits bounds: " + core::format_diagnostic(bounds.error())));
     selection.match = defaults;
+    MenuTimeline::mark("lobby_defaults_read");
     skirmish::SetupMapQuery query;
     query.custom.reset();
+    query.read_whole_headers = OS::get_singleton()->get_cmdline_user_args().has("--eawr-map-list-whole-read");
     auto found = all_maps.load(filesystem, catalog, query);
     if (!found) { failure = found.error().message; return false; }
     if (!all_maps.land_failure().empty()) UtilityFunctions::printerr(text(all_maps.land_failure()));
     for (const auto& map : all_maps) if (map.metadata.custom == false && map.domain == domain) maps.push_back(map);
+    MenuTimeline::mark("maps_listed");
+    if (MenuTimeline::enabled()) {
+        // Identity of the picker's list, so a change of how it is built can be shown to leave it alone.
+        std::uint64_t fingerprint = 1469598103934665603ULL;
+        for (const auto& map : maps) {
+            for (const char byte : map.path + "|" + map.name + "|" + map.unavailable + ";") {
+                fingerprint = (fingerprint ^ static_cast<unsigned char>(byte)) * 1099511628211ULL;
+            }
+        }
+        char label[96];
+        std::snprintf(label, sizeof(label), "maps_fingerprint_n%zu_%016llx", maps.size(),
+                      static_cast<unsigned long long>(fingerprint));
+        MenuTimeline::mark(label);
+    }
     auto skin = data::ui::load_dialog_catalog(*filesystem);
     if (!skin) { failure = skin.error().message; return false; }
     dialogs.emplace(std::move(skin).value());
+    MenuTimeline::mark("dialog_catalog_loaded");
     // Captions resolve through the text database (UI-T3); without one they show their keys.
     if (auto texts = data::ui::load_language_text_database(*filesystem, model::skirmish_setup_language)) {
         text_database.emplace(std::move(texts).value());
@@ -337,12 +365,14 @@ bool SkirmishSetupMode::State::load() {
     } else {
         UtilityFunctions::printerr(text("EAWR setup text database: " + core::format_diagnostic(texts.error())));
     }
+    MenuTimeline::mark("text_database_loaded");
     resolve_factions();
     auto page = assets::load_mega_texture_atlas(*filesystem, "data/art/textures/" + dialogs->skin.texture_file + ".mtd");
     if (!page) { failure = page.error().message; return false; }
     atlas.emplace(std::move(page).value());
     textures = std::make_unique<UiTextures>(*atlas, *filesystem);
     if (!textures->page_failure().empty()) { failure = textures->page_failure(); return false; }
+    MenuTimeline::mark("ui_atlas_loaded");
     std::filesystem::path cache;
     bool profile_named{};
     const auto args = OS::get_singleton()->get_cmdline_user_args();
@@ -1471,8 +1501,10 @@ const std::string& SkirmishSetupMode::failure() const { return state_->failure; 
 bool SkirmishSetupMode::ready(Node3D& host) {
     state_->host = &host;
     if (!state_->load()) { UtilityFunctions::printerr(text(state_->failure)); return false; }
+    MenuTimeline::mark("setup_loaded");
     if (state_->test) host.get_viewport()->set_embedding_subwindows(true);
     if (!state_->build()) { UtilityFunctions::printerr(text(state_->failure)); return false; }
+    MenuTimeline::mark("setup_built");
     // Probe for the GPU report: how many of the screen's own captions the installed text database lacks.
     std::int64_t missing_captions = 0;
     const auto keys = model::skirmish_setup_text_keys();
@@ -1832,6 +1864,7 @@ const skirmish::SetupMap* SkirmishSetupMode::map(const std::string& path) const 
     for (const auto& map : state_->all_maps) if (map.path == path) return &map;
     return nullptr;
 }
+const std::string& SkirmishSetupMode::local_player_name() const { return state_->local_name; }
 std::shared_ptr<GodotShaderCache> SkirmishSetupMode::shaders() const { return state_->shaders; }
 std::shared_ptr<LanMatch> SkirmishSetupMode::lan_match() const { return state_->lan; }
 const std::filesystem::path& SkirmishSetupMode::gc_acceptance_directory() const { return state_->gc_acceptance_out; }

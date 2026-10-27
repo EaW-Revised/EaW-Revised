@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <iterator>
 #include <set>
 
 namespace eawr::skirmish {
@@ -96,6 +97,8 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         type.space_special_weapon = unit.planetary_weapon.has_value();
         type.targeting = unit.targeting;
         type.unit_ai = unit.unit_ai;
+        type.community_property = unit.ai_community_property;
+        if (!unit.constructed_type.empty()) type.constructed_type = type_id(unit.constructed_type);
         type.capture_point = unit.capture_point;
         type.build_pad = unit.build_pad;
         type.tactical_cost = unit.production.build_cost_multiplayer.value_or(sim::math::Fixed{});
@@ -310,10 +313,13 @@ core::Result<void> enable_goal_system(const vfs::Vfs& files, script::foc::AiSetu
 }
 
 core::Result<std::map<std::string, std::string>> ai_modules(
-    const vfs::Vfs& files, const script::foc::AiSetup& setup, const bool plans) {
+    const vfs::Vfs& files, const script::foc::AiSetup& setup, const bool plans,
+    std::vector<core::Diagnostic>* const load_notes) {
     using ModulesResult = core::Result<std::map<std::string, std::string>>;
     std::map<std::string, std::string> modules;
     auto paths = script::foc::required_modules(setup);
+    const auto object_roots = script::foc::object_script_modules(setup);
+    const auto strict_roots = script::foc::required_modules(setup, false);
     if (plans) {
         const auto list = script::foc::plan_library_modules();
         paths.insert(paths.end(), list.begin(), list.end());
@@ -334,6 +340,8 @@ core::Result<std::map<std::string, std::string>> ai_modules(
     for (const std::string& path : paths) {
         if (modules.contains(path)) continue;
         auto entry = files.stat(path);
+        if (!entry && entry.error().code == vfs::diagnostic_codes::not_found && object_roots.contains(path)
+            && std::find(strict_roots.begin(), strict_roots.end(), path) == strict_roots.end()) continue;
         if (!entry) return ModulesResult::failure(entry.error());
         if (modules.size() >= quotas.identities || entry.value().size > quotas.memory_bytes - total_bytes) {
             core::Diagnostic diagnostic;
@@ -349,13 +357,20 @@ core::Result<std::map<std::string, std::string>> ai_modules(
         total_bytes += static_cast<std::uint64_t>(text.size());
         modules.emplace(path, std::move(text));
     }
+    if (load_notes) {
+        auto notes = script::foc::object_script_load_notes(setup, modules);
+        load_notes->insert(load_notes->end(), std::make_move_iterator(notes.begin()), std::make_move_iterator(notes.end()));
+    }
     return ModulesResult::success(std::move(modules));
 }
 
 core::Result<std::map<std::string, std::string>> select_ai_modules(
-    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, const bool plans) {
+    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, const bool plans,
+    std::vector<core::Diagnostic>* const load_notes) {
     using Result = core::Result<std::map<std::string, std::string>>;
     auto paths = script::foc::required_modules(setup);
+    const auto object_roots = script::foc::object_script_modules(setup);
+    const auto strict_roots = script::foc::required_modules(setup, false);
     if (plans) {
         const auto list = script::foc::plan_library_modules();
         paths.insert(paths.end(), list.begin(), list.end());
@@ -366,6 +381,8 @@ core::Result<std::map<std::string, std::string>> select_ai_modules(
             return script::authoritative::ModuleManifest::normalise(entry.first) == canonical;
         });
         if (found == cached.end()) {
+            if (canonical && object_roots.contains(path)
+                && std::find(strict_roots.begin(), strict_roots.end(), path) == strict_roots.end()) continue;
             core::Diagnostic diagnostic;
             diagnostic.code = std::string(script::authoritative::codes::module_rejected);
             diagnostic.message = "required module is not in the prepared cache: " + path;
@@ -398,6 +415,10 @@ core::Result<std::map<std::string, std::string>> select_ai_modules(
         selected.emplace(path, bytes);
     }
     // Keep dependencies, including dynamically constructed require names.
+    if (load_notes) {
+        auto notes = script::foc::object_script_load_notes(setup, selected);
+        load_notes->insert(load_notes->end(), std::make_move_iterator(notes.begin()), std::make_move_iterator(notes.end()));
+    }
     return Result::success(std::move(selected));
 }
 

@@ -22,9 +22,42 @@ REVIEWED = {
     # structurally and by pinned hash); the executable is not a mounted asset.
     "src/presentation/ui/font_extract.cpp": "font extraction from the player's own executable into user data",
     "include/eawr/presentation/ui/font_extract.hpp": "font extraction from the player's own executable into user data",
+    # Activation cache uses an injected dedicated player user-data directory and digest-only names;
+    # it never resolves effect/include paths or opens mounted assets. Payloads are owned and validated.
+    "src/presentation/shader_translation_cache.cpp": "bounded activation cache in dedicated player user data, no asset reads",
+    "include/eawr/presentation/shader_translation_cache.hpp": "injected player user-data cache adapter API, no asset reads",
+    # Identity-checked native DLL loader; no game-asset or VFS reads.
+    "include/eawr/presentation/shader_runtime.hpp": "identity-checked native DLL loader, no asset/VFS reads",
+    "src/presentation/shader_runtime.cpp": "identity-checked native DLL loader, no asset/VFS reads",
     # An opt-in diagnostic trace file written by the galactic AI barrier; it reads no asset.
     "src/campaign/game_session.cpp": "opt-in oracle trace output, no asset read",
 }
+
+
+# Write-only diagnostic sidecars (#5207 GC memory boundary): may create their output folder and write one file,
+# never read. Checked line by line, so a later read here fails like any other asset I/O.
+DIAGNOSTIC_WRITERS = {"include/eawr/diagnostics/gc_memory_boundary.hpp"}
+DIAGNOSTIC_READ = re.compile(
+    r"\b(?:fopen|CreateFile[AW]?|ReadFile|std::ifstream|std::fstream|std::wifstream|"
+    r"std::filesystem::(?:directory_iterator|recursive_directory_iterator|file_size|exists))\b"
+)
+DIAGNOSTIC_MUST_FAIL = ["std::ifstream input(path);", "std::fstream file(path);",
+                        "for (auto& entry : std::filesystem::directory_iterator(root)) {}"]
+DIAGNOSTIC_MUST_PASS = ["std::ofstream boundary(path, std::ios::binary | std::ios::trunc);",
+                        "std::filesystem::create_directories(path.parent_path(), error);"]
+
+
+def diagnostic_violations(relative: str, text: str) -> list[str]:
+    return [f"{relative}:{number}: diagnostic writer reads: {line.strip()}"
+            for number, line in enumerate(text.splitlines(), 1) if DIAGNOSTIC_READ.search(line.split("//", 1)[0])]
+
+
+def diagnostic_rule_self_check() -> list[str]:
+    errors = [f"diagnostic writer self-check: not caught: {line}"
+              for line in DIAGNOSTIC_MUST_FAIL if not diagnostic_violations("probe.hpp", line)]
+    for line in DIAGNOSTIC_MUST_PASS:
+        errors.extend(diagnostic_violations("probe.hpp", line))
+    return errors
 
 
 # The mod core is a native adapter for listings and Steam metadata. The profile format is the sole
@@ -70,6 +103,8 @@ def mods_violations(relative: str, text: str) -> list[str]:
     # Sole writer: caller-supplied user data, covered by mods_profile_contracts. No asset IO.
     profile = relative == "src/mods/profile.cpp"
     windows_profile = relative == "src/mods/profile_windows.cpp"
+    index_builder = relative == "src/mods/file_index_build.cpp"
+    index_model = relative in {"src/mods/file_index.cpp", "include/eawr/mods/file_index.hpp"}
     profile_fs = {"canonical", "create_directories", "create_directory", "is_symlink", "rename", "remove"}
     violations: list[str] = []
     for line_number, line in enumerate(text.splitlines(), 1):
@@ -83,12 +118,14 @@ def mods_violations(relative: str, text: str) -> list[str]:
         for kind, header in _INCLUDE.findall(code):
             if kind == '"':
                 if not header.startswith(("eawr/mods/", "eawr/core/")) and not (
-                        (profile or windows_profile) and header == "profile_io.hpp"):
+                        (profile or windows_profile) and header == "profile_io.hpp") and not (
+                        index_builder and header == "eawr/vfs/vfs.hpp"):
                     problems.append(f"include \"{header}\" is outside the mod core and eawr/core")
             elif not (header in MODS_HEADERS_ALLOWED
                       or (reader and header in MODS_TEXT_READER_ALLOWED)
                       or (profile and header == "fstream")
-                      or (windows_profile and header == "windows.h")):
+                      or (windows_profile and header == "windows.h")
+                      or (index_model and header in {"iosfwd", "istream", "ostream"})):
                 problems.append(f"include <{header}> is not an allowed header")
         body = _INCLUDE.sub("", code)   # headers are checked above
         for stream in _STREAM.findall(body):
@@ -100,6 +137,9 @@ def mods_violations(relative: str, text: str) -> list[str]:
             file_calls = re.sub(r"\bfs::(?:rename|remove)\b", "profile_file_operation", file_calls)
         if windows_profile:
             file_calls = file_calls.replace("MoveFileExW", "profile_atomic_replace")
+        if index_builder:
+            # This adapter receives a mounted Vfs, not a native path or stream.
+            file_calls = file_calls.replace("filesystem.open(", "vfs_candidate_read(")
         if _C_FILE_CALL.search(file_calls) or _WIN32_FILE_CALL.search(file_calls):
             problems.append("C or Win32 file calls are not used in the mod core")
         for problem in problems:
@@ -138,6 +178,12 @@ MODS_READER_MUST_PASS = [
 # Path-aware fixtures pin the sole writer to its user-data staging file and keep the private platform
 # primitive out of every other module. In particular, allowing ofstream here cannot grant a mod-root write.
 MODS_PATH_MUST_FAIL = [
+    ("src/mods/file_index_build.cpp", "std::ifstream input(mod_root);"),
+    ("src/mods/file_index_build.cpp", "std::ofstream output(mod_root);"),
+    ("src/mods/file_index_build.cpp", "fs::remove(path);"),
+    ("src/mods/file_index.cpp", "std::ifstream input(cache);"),
+    ("src/mods/file_index.cpp", "std::ofstream output(cache);"),
+    ("src/mods/discovery.cpp", '#include "eawr/vfs/vfs.hpp"'),
     ("src/mods/profile.cpp", "fs::remove_all(p);"),
     ("src/mods/profile.cpp", "std::ifstream in(path);"),
     ("src/mods/profile.cpp", "std::ofstream output(mod_root, std::ios::binary);"),
@@ -153,6 +199,11 @@ MODS_PATH_MUST_FAIL = [
     ("src/mods/profile_windows.cpp", "std::ofstream output(mod_root);"),
 ]
 MODS_PATH_MUST_PASS = [
+    ("src/mods/file_index_build.cpp", '#include "eawr/vfs/vfs.hpp"'),
+    ("src/mods/file_index_build.cpp", "auto bytes = filesystem.open(candidate);"),
+    ("src/mods/file_index.cpp", "#include <istream>"),
+    ("src/mods/file_index.cpp", "#include <ostream>"),
+    ("include/eawr/mods/file_index.hpp", "#include <iosfwd>"),
     ("src/mods/profile.cpp", "std::ofstream output(temp, std::ios::binary | std::ios::trunc);"),
     ("src/mods/profile.cpp", '#include "profile_io.hpp"'),
     ("src/mods/profile_windows.cpp", "MoveFileExW(a, b, 0);"),
@@ -184,7 +235,7 @@ def main() -> int:
     parser.add_argument("--root", required=True, type=Path)
     arguments = parser.parse_args()
     roots = [arguments.root / "src", arguments.root / "include" / "eawr"]
-    violations: list[str] = mods_rule_self_check()
+    violations: list[str] = mods_rule_self_check() + diagnostic_rule_self_check()
     for source_root in roots:
         for path in source_root.rglob("*"):
             if path.suffix.lower() not in {".cpp", ".cc", ".cxx", ".hpp", ".h"}:
@@ -194,6 +245,9 @@ def main() -> int:
             if relative.startswith(("src/vfs/", "src/platform/", "include/eawr/platform/", "include/eawr/vfs/")):
                 continue
             if relative in REVIEWED:
+                continue
+            if relative in DIAGNOSTIC_WRITERS:
+                violations.extend(diagnostic_violations(relative, path.read_text(encoding="utf-8")))
                 continue
             if relative.startswith(MODS_PREFIXES):
                 violations.extend(mods_violations(relative, path.read_text(encoding="utf-8")))

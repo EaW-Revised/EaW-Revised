@@ -43,6 +43,14 @@ template <typename Exists>
     return exists(candidate) ? candidate : std::string{};
 }
 
-// Model name rule: reserved for the model-acquisition follow-up (#5096).
+// Only an extensionless leaf gains the model suffix; authored extensions stay intact.
+[[nodiscard]] inline std::string normalized_model_name(const std::string_view name) {
+    std::string result = normalized_asset_name(name);
+    if (result.empty()) return {};
+    const auto slash = result.find_last_of('/');
+    if (result.find('.', slash == std::string::npos ? 0 : slash + 1) == std::string::npos)
+        result += ".alo";
+    return result;
+}
 
 } // namespace eawr::assets

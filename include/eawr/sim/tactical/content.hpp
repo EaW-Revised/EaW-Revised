@@ -36,6 +36,8 @@ struct TacticalContent {
     BattleDomain domain{BattleDomain::space};
     std::shared_ptr<const LandTerrain> land_terrain;
     LandSessionContent land;
+    // Loading diagnostics only: never read by simulation, serialization or hashes.
+    std::vector<core::LoadNote> load_notes;
 };
 
 } // namespace eawr::sim::tactical

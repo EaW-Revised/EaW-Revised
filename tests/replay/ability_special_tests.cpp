@@ -1060,25 +1060,85 @@ void test_barrage_proxy_and_override() {
     auto start = setup(); start.units[0].position = at(0, 0);
     const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(2000)}};
     const auto activate = command(0, 1, 1, 1, tactical::AreaAbilityPayload{tactical::AbilityKind::barrage, at(500, 0)});
-    std::vector<std::string> baseline;
+    for (const auto humans : {0U, 2U, 3U, 4U}) {
+      std::vector<std::string> baseline;
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
-        auto created = tactical::TacticalSession::create(start, sensors, durability(), motion(), std::nullopt,
-            combat, {}, ability_data);
+        auto battle = start;
+        tactical::EconomyRules money;
+        if (humans != 0) {
+            money.campaign = true;
+            for (const auto owner : {1U, 2U}) {
+                tactical::EconomyPlayer account;
+                account.player = owner; account.credit_cap = Fixed{}; account.population_cap = 20;
+                account.ai = owner == 2; money.players.push_back(account);
+            }
+            battle.first_free_entity_id = 4;
+            battle.campaign.emplace(); battle.campaign->players = money.players;
+            battle.controllers.emplace();
+            battle.controllers->factions = {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}};
+            for (std::uint32_t seat = 1; seat <= humans; ++seat)
+                battle.controllers->seats.push_back({{seat}, 1, eawr::sim::SeatKind::human, true});
+            battle.controllers->seats.push_back({{humans + 1}, 2, eawr::sim::SeatKind::ai, true});
+            for (auto& unit : battle.units) {
+                unit.control = tactical::UnitControl::mobile;
+                unit.controller_seat = {unit.owner == 1 ? humans : humans + 1};
+            }
+        }
+        auto created = tactical::TacticalSession::create(battle, sensors, durability(), motion(), std::nullopt,
+            combat, {}, ability_data, money);
         expect(static_cast<bool>(created), "WAD-38: barrage session binds");
         if (!created) return;
         auto session = std::move(created).value();
-        expect(static_cast<bool>(session.submit(activate)), "WAD-38: point command submits");
-        expect(static_cast<bool>(session.submit(command(2, 1, 2, 1,
-            tactical::AreaAbilityPayload{tactical::AbilityKind::barrage, at(700, 0)}))),
-            "WAD-38: repeated activation submits");
+        const auto issue = [&](tactical::PlayerCommand input) {
+            if (humans != 0) { input.origin = tactical::CommandOrigin::seat; input.issuing_seat = {humans}; }
+            expect(static_cast<bool>(session.submit(input)), "WAD-38: point command submits");
+        };
+        issue(activate);
+        issue(command(2, 1, 2, 1, tactical::AreaAbilityPayload{tactical::AbilityKind::barrage, at(700, 0)}));
         const eawr::platform::ThreadWorkerAdapter executor(workers);
         std::vector<std::string> hashes;
+        std::optional<tactical::TacticalSession> restored;
         std::size_t override_fired = 0;
         for (std::uint64_t tick = 0; tick < 305; ++tick) {
             auto stepped = session.step(executor);
             expect(static_cast<bool>(stepped), "WAD-38: barrage step succeeds");
             if (!stepped) return;
             hashes.push_back(stepped.value().state_sha256);
+            if (restored) {
+                const auto resumed = restored->step(executor);
+                expect(resumed && resumed.value().state_sha256 == stepped.value().state_sha256
+                    && resumed.value().snapshot->canonical_bytes() == stepped.value().snapshot->canonical_bytes(),
+                    "P3/WAD-38: co-op checkpoint continues exactly through barrage expiry");
+            }
+            if (humans != 0 && tick == 5) {
+                auto state = battle; state.units = session.units();
+                const auto runtime_marker = std::find_if(state.units.begin(), state.units.end(), [](const auto& unit) { return unit.barrage_source == 1; });
+                expect(runtime_marker != state.units.end() && runtime_marker->control == tactical::UnitControl::none
+                    && runtime_marker->controller_seat.value == 0 && tactical::validate_controllers(state),
+                    "P3/WAD-38: enemy-owned artificial marker has an explicit controller-free invariant");
+                if (runtime_marker != state.units.end()) {
+                    const auto index = static_cast<std::size_t>(runtime_marker - state.units.begin());
+                    auto invalid = state; invalid.units[index].controller_seat = {humans + 1};
+                    invalid.units[index].control = tactical::UnitControl::mobile;
+                    expect(!tactical::validate_controllers(invalid), "P3/WAD-38: a proxy cannot claim an enemy command seat");
+                    invalid = state; invalid.units[index].owner = 1;
+                    expect(!tactical::validate_controllers(invalid), "P3/WAD-38: a proxy must retain its hostile owner/source relation");
+                    invalid = state; invalid.units[index].barrage_source = invalid.units[index].entity_id;
+                    expect(!tactical::validate_controllers(invalid), "P3/WAD-38: a proxy cannot identify itself as its source");
+                }
+                const auto saved = session.save_checkpoint_state();
+                auto fresh = tactical::TacticalSession::from_replay(session.record(), sensors, durability(), motion(),
+                    std::nullopt, combat, {}, ability_data, money);
+                expect(saved && fresh, "P3/WAD-38: mid-barrage checkpoint factory creates");
+                if (saved && fresh) {
+                    const auto loaded = fresh.value().load_checkpoint_state(saved.value());
+                    expect(static_cast<bool>(loaded), "P3/WAD-38: controller-free proxy restores mid-barrage");
+                    if (!loaded) { std::cerr << loaded.error().message << '\n'; return; }
+                    const auto recaptured = fresh.value().save_checkpoint_state();
+                    expect(recaptured && recaptured.value() == saved.value(), "P3/WAD-38: artificial marker checkpoint round-trips exactly");
+                    restored.emplace(std::move(fresh).value());
+                }
+            }
             if (tick == 0 || tick == 2) {
                 const auto units_now = session.units();
                 const auto proxy = std::find_if(units_now.begin(), units_now.end(),
@@ -1119,7 +1179,7 @@ void test_barrage_proxy_and_override() {
         expect(parsed && parsed.value() == session.record(), "WAD-38: point commands round-trip without changing entity-target codec");
         if (parsed) {
             auto playback = tactical::TacticalSession::from_replay(parsed.value(), sensors, durability(), motion(),
-                std::nullopt, combat, {}, ability_data);
+                std::nullopt, combat, {}, ability_data, money);
             expect(static_cast<bool>(playback), "WAD-38: retained point replay binds");
             if (playback) {
                 std::vector<std::string> replay_hashes;
@@ -1132,6 +1192,7 @@ void test_barrage_proxy_and_override() {
         expect(replay_hashes == hashes, "WAD-38: recorded point activation/expiry reproduces every hash");
             }
         }
+    }
     }
     {
         auto costly = combat;
@@ -1539,7 +1600,121 @@ void test_mc30_proximity_sample() {
 }
 
 
+static void controller_delayed_spawn_attribution() {
+    constexpr tactical::TypeId team_type = 40, craft_type = 41, droid_type = 42;
+    for (const auto humans : {2U, 3U, 4U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{10, team_type, 1, at(0, 0)}, {11, craft_type, 1, at(0, 0)},
+                {20, team_type, 1, at(0, 2000)}, {21, craft_type, 1, at(0, 2000)},
+                {30, plain_type, 2, at(4000, 4000)}};
+            initial.squadrons = {{10, {11}}, {20, {21}}};
+            initial.first_free_entity_id = 31;
+            tactical::EconomyRules money; money.campaign = true;
+            for (const auto owner : {1U, 2U}) {
+                tactical::EconomyPlayer account;
+                account.player = owner; account.credit_cap = Fixed{}; account.population_cap = 20;
+                account.ai = owner == 2; money.players.push_back(account);
+            }
+            initial.campaign.emplace(); initial.campaign->players = money.players;
+            initial.controllers.emplace();
+            initial.controllers->factions = {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}};
+            for (std::uint32_t seat = 1; seat <= humans; ++seat)
+                initial.controllers->seats.push_back({{seat}, 1, eawr::sim::SeatKind::human, true});
+            initial.controllers->seats.push_back({{humans + 1}, 2, eawr::sim::SeatKind::ai, true});
+            for (auto& unit : initial.units) {
+                unit.control = tactical::UnitControl::mobile;
+                unit.controller_seat = {unit.owner == 1 ? humans : humans + 1};
+            }
+            auto health = durability();
+            for (const auto type : {team_type, craft_type, droid_type}) {
+                tactical::DurabilityProfile profile;
+                profile.type_id = type; profile.max_hull = units(20);
+                health.profiles.push_back(profile);
+            }
+            auto movement = motion();
+            tactical::CraftProfile craft;
+            craft.type_id = craft_type; craft.max_speed = units(3); craft.min_speed = units(2);
+            craft.rate_of_turn = units(6); craft.lift = units(6); craft.thrust = units(1);
+            craft.roll_rate = units(3); craft.bank_angle = units(70); craft.strafe_distance = units(500);
+            movement.squadrons.craft = {craft};
+            movement.squadrons.squadrons = {{team_type, {craft_type}, {at(0, 0)}, units(1000), units(200), units(300), units(25)}};
+            tactical::AbilityProfile buzz;
+            buzz.kind = tactical::AbilityKind::buzz_droids; buzz.recharge_frames = 60;
+            buzz.buzz = tactical::BuzzDroidsProfile{droid_type, units(5), units(400), units(300), units(50),
+                units(5), units(1), units(20), 1000, 2, 0};
+            tactical::AbilityTable abilities; abilities.profiles = {unit_of(team_type, buzz)};
+            auto made = tactical::TacticalSession::create(initial, {}, health, movement, std::nullopt, {}, {}, abilities, money);
+            expect(static_cast<bool>(made), "P3: delayed ability output fixture creates for 2/3/4 humans");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            tactical::AbilityPayload request{tactical::AbilityKind::buzz_droids, tactical::AbilityAction::activate};
+            request.position = at(500, 0);
+            auto accepted = command(0, 1, 0, 10, request);
+            accepted.origin = tactical::CommandOrigin::seat; accepted.issuing_seat = {humans};
+            expect(static_cast<bool>(world.submit(accepted)), "P3: authenticated out-of-range request submits");
+            request.position = at(5000, 2000);
+            auto cancelled = command(0, 1, 1, 20, request);
+            cancelled.origin = tactical::CommandOrigin::seat; cancelled.issuing_seat = {humans};
+            expect(static_cast<bool>(world.submit(cancelled)), "P3: separately cancelled request submits");
+            tactical::PlayerCommand stop{{1, 1, 2}, {20}, tactical::StopPayload{}};
+            stop.origin = tactical::CommandOrigin::seat; stop.issuing_seat = {humans};
+            expect(static_cast<bool>(world.submit(stop)), "P3: cancelling order submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::optional<tactical::TacticalSession> restored;
+            std::vector<std::string> hashes;
+            bool spawned{};
+            for (unsigned frame = 0; frame < 120; ++frame) {
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto advanced = world.step(executor);
+                expect(static_cast<bool>(advanced), "P3: pending ability attribution advances");
+                if (!advanced) { std::cerr << advanced.error().message << '\n'; break; }
+                hashes.push_back(advanced.value().state_sha256 + advanced.value().snapshot->sha256());
+                if (restored) {
+                    const auto resumed = restored->step(executor);
+                    expect(resumed && resumed.value().state_sha256 == advanced.value().state_sha256
+                        && resumed.value().snapshot->canonical_bytes() == advanced.value().snapshot->canonical_bytes(),
+                        "P3: pending ability checkpoint equals live after appearance and cancellation");
+                }
+                if (frame == 0) {
+                    const auto holder = world.ability_state(10);
+                    expect(holder && holder->pending_buzz_position && holder->pending_buzz_controller.value == humans,
+                        "P3: accepted pending request retains the authenticated caller before appearance");
+                    const auto saved = world.save_checkpoint_state();
+                    auto log = world.record(); const auto pending = world.pending_commands();
+                    log.commands.insert(log.commands.end(), pending.begin(), pending.end()); log.final_tick_count = 120;
+                    auto fresh = tactical::TacticalSession::from_replay(log, {}, health, movement, std::nullopt, {}, {}, abilities, money);
+                    expect(saved && fresh, "P3: delayed request checkpoint factory creates");
+                    if (saved && fresh) {
+                        const auto loaded = fresh.value().load_checkpoint_state(saved.value());
+                        expect(static_cast<bool>(loaded), "P3: pending ability caller loads");
+                        if (!loaded) { std::cerr << loaded.error().message << '\n'; break; }
+                        const auto recaptured = fresh.value().save_checkpoint_state();
+                        expect(recaptured && recaptured.value() == saved.value(), "P3: pending ability caller round-trips exactly");
+                        restored.emplace(std::move(fresh).value());
+                    }
+                }
+                if (frame >= 1) {
+                    const auto holder = world.ability_state(20);
+                    expect(holder && !holder->pending_buzz_position && holder->pending_buzz_controller.value == 0,
+                        "P3: cancelling a request retires its pending caller");
+                }
+                for (const auto& unit : world.units()) if (unit.type_id == droid_type) {
+                    spawned = true;
+                    expect(unit.control == tactical::UnitControl::mobile && unit.controller_seat.value == humans,
+                        "P3: delayed ability output belongs to its retained initiating seat");
+                }
+            }
+            expect(spawned, "P3: pending ability actually creates its attributed output");
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "P3: pending ability output equals on 1/2/4/8 workers");
+        }
+    }
+}
+
 void test_spawned_hero_abilities() {
+    controller_delayed_spawn_attribution();
     using K = tactical::AbilityKind;
     for (const auto kind : {K::harmonic_bomb, K::weaken_enemy, K::cluster_bomb, K::fow_reveal_ping}) {
         std::vector<std::string> reference;
@@ -1700,7 +1875,7 @@ void test_spawned_hero_abilities() {
 // 7 explicitly disabled CF; 8 explicitly disabled beam.
 void test_concentrate_autofire() {
     using K = tactical::AbilityKind;
-    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U}) {
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U, 10U}) {
         std::vector<std::string> baseline;
         for (const auto workers : {1U, 2U, 4U, 8U}) {
             auto initial = setup();
@@ -1744,7 +1919,7 @@ void test_concentrate_autofire() {
                 if (scenario == 4) std::swap(holder.special[0], holder.special[1]);
             }
             tactical::AbilityTable table; table.profiles = {holder};
-            if (scenario == 1 || scenario == 2) table.humans = {1};
+            if (scenario == 1 || scenario == 2 || scenario >= 9) table.humans = {1};
             tactical::CombatProfile source; source.type_id = corvette_type; source.category_bits = 1;
             tactical::WeaponProfile weapon;
             weapon.range = units(300); weapon.min_recharge_hundredths = 10; weapon.max_recharge_hundredths = 10;
@@ -1756,12 +1931,37 @@ void test_concentrate_autofire() {
             tactical::CombatTable combat; combat.profiles = {source, target};
             const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(1000)}, {frigate_type, units(1000)}};
             const auto movement = motion();
-            auto created = tactical::TacticalSession::create(initial, sensors, health, movement, std::nullopt, combat, {}, table);
+            tactical::EconomyRules money;
+            if (scenario >= 9) {
+                initial.first_free_entity_id = 4; initial.campaign.emplace();
+                initial.controllers = tactical::BattleControllerPolicy{
+                    {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
+                        {{3}, 2, eawr::sim::SeatKind::ai, true}},
+                    {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+                for (const auto player : {1U, 2U}) {
+                    tactical::EconomyPlayer account; account.player = player; account.credit_cap = Fixed{};
+                    initial.campaign->players.push_back(account);
+                }
+                money.campaign = true; money.players = initial.campaign->players;
+                for (auto& unit : initial.units) {
+                    unit.control = tactical::UnitControl::mobile;
+                    unit.controller_seat = {unit.entity_id == 1 ? 1U : unit.entity_id == 2 ? 3U : scenario == 10 ? 1U : 2U};
+                }
+            }
+            auto created = tactical::TacticalSession::create(initial, sensors, health, movement, std::nullopt, combat, {}, table, money);
             expect(static_cast<bool>(created), "WAB-36: concentrate autofire fixture binds");
             if (!created) { std::cerr << created.error().message << '\n'; continue; }
             auto world = std::move(created).value();
-            if (scenario == 2) expect(static_cast<bool>(world.submit(command(0, 1, 0, 1,
-                tactical::AbilityPayload{K::concentrate_fire, tactical::AbilityAction::autofire_on}))), "WAB-36: autofire switches on");
+            if (scenario == 2 || scenario >= 9) {
+                auto enable = command(0, 1, 0, 1, tactical::AbilityPayload{K::concentrate_fire, tactical::AbilityAction::autofire_on});
+                if (scenario >= 9) { enable.origin = tactical::CommandOrigin::seat; enable.issuing_seat = {1}; }
+                expect(static_cast<bool>(world.submit(enable)), "WAB-36/ADR-020: the human controller switches autofire on");
+            }
+            if (scenario >= 9) {
+                auto stop = command(0, 1, 1, 3, tactical::StopPayload{});
+                stop.origin = tactical::CommandOrigin::seat; stop.issuing_seat = {scenario == 9 ? 2U : 1U};
+                expect(static_cast<bool>(world.submit(stop)), "ADR-020: the ally controller installs its own held order");
+            }
             if (scenario == 6) expect(static_cast<bool>(world.submit({{0, 1, 0}, {}, tactical::QuitPayload{}})),
                 "WAB-36: the holder's issuer leaves without takeover");
             const eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -1817,17 +2017,18 @@ void test_concentrate_autofire() {
                     const auto attack = world.combat_state(1);
                     expect(attack && state->slots.front().target == attack->attack_target && state->slots.front().target == 2,
                         "WAB-36: concentrate fire locks the unit's own attack target");
-                    expect(state->concentrate_recruits == std::vector<eawr::sim::EntityId>{3},
-                        "WHE-24: the autofired activation recruits the same-owner ally near the target");
+                    expect(state->concentrate_recruits == (scenario == 9 ? std::vector<eawr::sim::EntityId>{} : std::vector<eawr::sim::EntityId>{3}),
+                        "WHE-24/ADR-020: autofire recruits the same-owner ally only within the source controller's scope");
                     const auto live_units = world.units();
                     const auto ally = std::find_if(live_units.begin(), live_units.end(), [](const auto& unit) { return unit.entity_id == 3; });
-                    expect(ally != live_units.end() && ally->order.kind == tactical::OrderKind::attack && ally->order.target == 2,
-                        "WHE-24: the recruited ally takes the ordinary attack order");
+                    expect(ally != live_units.end() && (scenario == 9 ? ally->order.kind == tactical::OrderKind::stop
+                        : ally->order.kind == tactical::OrderKind::attack && ally->order.target == 2),
+                        "WHE-24/ADR-020: an automatic batch cannot order another seat's mobile ally");
                 }
                 if (!restored && state && std::any_of(state->slots.begin(), state->slots.end(),
                         [](const auto& slot) { return slot.active; })) {
                     const auto checkpoint = world.save_checkpoint_state();
-                    auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, movement, std::nullopt, combat, {}, table);
+                    auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors, health, movement, std::nullopt, combat, {}, table, money);
                     expect(checkpoint && fresh, "WAB-36: checkpoint between passes and fresh session create");
                     if (checkpoint && fresh) {
                         restored.emplace(std::move(fresh).value());
@@ -1859,7 +2060,7 @@ void test_concentrate_autofire() {
             const auto parsed = bytes ? tactical::parse_replay(bytes.value()) : eawr::core::Result<tactical::TacticalReplay>::failure({});
             expect(parsed && parsed.value() == record, "WAB-36: the concentrate autofire record round-trips");
             if (parsed) {
-                auto replayed = tactical::TacticalSession::from_replay(parsed.value(), sensors, health, movement, std::nullopt, combat, {}, table);
+                auto replayed = tactical::TacticalSession::from_replay(parsed.value(), sensors, health, movement, std::nullopt, combat, {}, table, money);
                 expect(static_cast<bool>(replayed), "WAB-36: concentrate autofire replay binds");
                 if (replayed) for (const auto& hash : hashes)
                     expect(replayed.value().step(executor).value().state_sha256 == hash,

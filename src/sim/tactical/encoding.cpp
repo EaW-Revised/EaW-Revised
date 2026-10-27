@@ -11,6 +11,8 @@ namespace eawr::sim::tactical {
 
 std::string_view to_string(const OrderKind kind) noexcept {
     switch (kind) {
+    case OrderKind::battle_control: return "battle_control";
+    case OrderKind::gift: return "gift";
     case OrderKind::none:
         return "none";
     case OrderKind::stop:
@@ -60,6 +62,7 @@ std::string_view to_string(const OrderKind kind) noexcept {
 
 std::string_view to_string(const EventKind kind) noexcept {
     switch (kind) {
+    case EventKind::controller_changed: return "controller_changed";
     case EventKind::order_accepted:
         return "order_accepted";
     case EventKind::order_rejected:
@@ -94,12 +97,15 @@ std::string_view to_string(const EventKind kind) noexcept {
 
 std::string_view to_string(const RejectReason reason) noexcept {
     switch (reason) {
+    case RejectReason::gift_recipient_invalid: return "gift_recipient_invalid";
     case RejectReason::none:
         return "none";
     case RejectReason::unit_not_live:
         return "unit_not_live";
     case RejectReason::unit_not_owned:
         return "unit_not_owned";
+    case RejectReason::unit_not_controlled:
+        return "unit_not_controlled";
     case RejectReason::target_not_live:
         return "target_not_live";
     case RejectReason::target_not_hostile:
@@ -161,6 +167,7 @@ core::Diagnostic diagnostic(
 
 std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     switch (opcode) {
+    case opcode_battle_control: return 16; // departing seat, version and bounded roster counts
     case 1:
         return 0;
     case 2:
@@ -182,6 +189,7 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
     case opcode_manual_target:
     case opcode_special_fire:
         return 16;
+    case opcode_gift: // ADR-020: recipient seat and reserved word
     case 9:  // #530 buy: type
     case opcode_retreat: // action and reserved word
     case opcode_retreat_cinematic:
@@ -209,6 +217,8 @@ std::size_t payload_prefix_size(const std::uint8_t opcode) noexcept {
 }
 
 std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
+    if (std::holds_alternative<BattleControlPayload>(command.payload)) return opcode_battle_control;
+    if (std::holds_alternative<GiftPayload>(command.payload)) return opcode_gift;
     if (std::holds_alternative<RetreatPayload>(command.payload)) return opcode_retreat;
     if (std::holds_alternative<RetreatCinematicPayload>(command.payload)) return opcode_retreat_cinematic;
     if (std::holds_alternative<BeaconPayload>(command.payload)) return opcode_beacon;
@@ -241,13 +251,38 @@ std::uint8_t command_opcode(const PlayerCommand& command) noexcept {
     return static_cast<std::uint8_t>(order_kind(command.payload));
 }
 
+void append_controller_policy(std::vector<std::uint8_t>& bytes, const BattleControllerPolicy& policy,
+    const std::uint32_t version) {
+    sim::detail::append_u32(bytes, version);
+    sim::detail::append_u32(bytes, static_cast<std::uint32_t>(policy.seats.size()));
+    for (const auto& row : policy.seats) {
+        sim::detail::append_u32(bytes, row.seat.value);
+        sim::detail::append_u32(bytes, row.player);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(row.kind));
+        sim::detail::append_u32(bytes, row.active ? 1U : 0U);
+    }
+    sim::detail::append_u32(bytes, static_cast<std::uint32_t>(policy.factions.size()));
+    for (const auto& row : policy.factions) {
+        sim::detail::append_u32(bytes, row.player);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(row.mode));
+    }
+}
+void append_controller_unit(std::vector<std::uint8_t>& bytes, const UnitState& unit) {
+    sim::detail::append_u64(bytes, unit.entity_id);
+    sim::detail::append_u32(bytes, unit.controller_seat.value);
+    sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.control));
+}
+
 std::size_t command_body_size(const PlayerCommand& command) noexcept {
     // A targeted ability command (#561) appends its uint64 target.
     const auto* ability = std::get_if<AbilityPayload>(&command.payload);
     const std::size_t target = ability != nullptr ? (ability->position ? 24U : ability->target != invalid_entity_id ? 8U : 0U) : 0U;
-    return command_common_size
+    const auto* control = std::get_if<BattleControlPayload>(&command.payload);
+    const auto roster = control ? 16U * control->policy.seats.size() + 8U * control->policy.factions.size() : 0U;
+    return command_common_size + roster
         + payload_prefix_size(command_opcode(command)) + target
         + unit_list_header_size + 8U * command.units.size()
+        + (command.origin != CommandOrigin::ordinary ? 16U : 0U)
         + (std::get_if<MovePayload>(&command.payload) != nullptr
             && std::get<MovePayload>(command.payload).append ? 8U : 0U);
 }
@@ -293,7 +328,13 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
     bytes.push_back(command_opcode(command));
     bytes.push_back(0);
     sim::detail::append_u16(bytes, 0);
-    if (const auto* beacon = std::get_if<BeaconPayload>(&command.payload)) {
+    if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, control->departed.value);
+        append_controller_policy(bytes, control->policy, 4);
+    } else if (const auto* gift = std::get_if<GiftPayload>(&command.payload)) {
+        sim::detail::append_u32(bytes, gift->recipient.value);
+        sim::detail::append_u32(bytes, 0);
+    } else if (const auto* beacon = std::get_if<BeaconPayload>(&command.payload)) {
         sim::detail::append_i64(bytes, beacon->position.x.raw());
         sim::detail::append_i64(bytes, beacon->position.y.raw());
         sim::detail::append_i64(bytes, beacon->position.z.raw());
@@ -396,6 +437,12 @@ void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& comma
         sim::detail::append_u32(bytes, 1); // HCB-57 tail version
         sim::detail::append_u32(bytes, 1); // append; no other flags in version 1
     }
+    if (command.origin != CommandOrigin::ordinary) {
+        sim::detail::append_u32(bytes, 0x4c525443U); // CTRL: optional provenance tail
+        sim::detail::append_u32(bytes, 1);
+        sim::detail::append_u32(bytes, command.issuing_seat.value);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(command.origin));
+    }
 }
 
 void append_event(std::vector<std::uint8_t>& bytes, const Event& event) {
@@ -408,6 +455,10 @@ void append_event(std::vector<std::uint8_t>& bytes, const Event& event) {
     sim::detail::append_u64(bytes, event.sequence);
     sim::detail::append_u64(bytes, event.unit);
     if (event.kind == EventKind::special_weapon_fired) sim::detail::append_u32(bytes, event.special_pulse);
+    if (event.kind == EventKind::controller_changed) {
+        sim::detail::append_u32(bytes, event.previous_controller.value);
+        sim::detail::append_u32(bytes, event.controller.value);
+    }
 }
 
 core::Result<void> validate_command_shape(
@@ -429,6 +480,18 @@ core::Result<void> validate_command_shape(
         return core::Result<void>::failure(diagnostic(diagnostic_codes::resource_limit,
             std::string(context) + ": unit list exceeds the per-command limit", logical_path));
     }
+    if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
+        if (command.origin != CommandOrigin::engine || command.issuing_seat.value != 0
+            || control->departed.value == 0 || !command.units.empty()
+            || control->policy.seats.empty() || control->policy.seats.size() > max_controller_seats
+            || control->policy.factions.size() != 1)
+            return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+                std::string(context) + ": invalid engine battle-control boundary", logical_path));
+        return core::Result<void>::success();
+    }
+    if (const auto* gift = std::get_if<GiftPayload>(&command.payload); gift && gift->recipient.value == 0)
+        return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,
+            std::string(context) + ": gift requires a recipient seat", logical_path));
     if (const auto* repair = std::get_if<RepairHardpointPayload>(&command.payload);
         repair != nullptr && (command.units.size() != 1 || repair->hardpoint >= 255)) {
         return core::Result<void>::failure(diagnostic(diagnostic_codes::invalid_command,

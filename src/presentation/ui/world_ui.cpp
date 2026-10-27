@@ -11,6 +11,38 @@
 
 namespace eawr::presentation::ui {
 
+std::string_view resolve_owner_name(const sim::tactical::PlayerId player,
+    const std::span<const ObserverOwner> seats, const std::string_view shared_name,
+    const std::string_view unnamed_name, const sim::tactical::BattleControllerPolicy* controllers) noexcept {
+    const ObserverOwner* found = nullptr;
+    for (const auto& seat : seats) {
+        if (seat.player != player) continue;
+        if (found) return shared_name;
+        found = &seat;
+    }
+    if (found && !found->name.empty()) return found->name;
+    if (!unnamed_name.empty()) return unnamed_name;
+    // Cooperative lobby owners may deliberately have no player-level name.
+    // Shared structures still need the faction fallback; mobile seats resolve separately.
+    if (controllers && std::any_of(controllers->factions.begin(), controllers->factions.end(),
+        [player](const auto& row) { return row.player == player && row.mode == sim::tactical::FactionController::humans; }))
+        return shared_name;
+    return {};
+}
+
+const ObserverOwner* display_owner(const sim::tactical::TacticalInstance& instance,
+    const std::span<const ObserverOwner> roster, const bool visible, const bool enabled, const bool controller_policy) noexcept {
+    if (!visible || !enabled) return nullptr;
+    if (controller_policy && instance.control == sim::tactical::UnitControl::mobile) {
+        for (const auto& owner : roster)
+            if (owner.seat == instance.controller_seat && owner.player == instance.owner && !owner.name.empty()) return &owner;
+    }
+    for (const auto& owner : roster)
+        if (owner.seat.value == 0 && owner.player == instance.owner && !owner.name.empty()) return &owner;
+    return nullptr;
+}
+
+
 double WaypointDashClock::sample(const bool shown, const double presented_tick,
                                 const double velocity, const double period) noexcept {
     if (!shown) { start_tick_.reset(); return 0.0; }

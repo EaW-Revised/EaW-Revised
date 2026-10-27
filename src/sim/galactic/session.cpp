@@ -58,6 +58,11 @@ constexpr std::size_t gather_single_partition_below = 256;
 
 } // namespace
 
+std::size_t GalacticSession::load_note_count() const noexcept { return impl_->load_note_count; }
+std::vector<core::LoadNote> GalacticSession::load_notes() const {
+    return impl_->load_note_collector.snapshot();
+}
+
 core::Result<std::vector<std::uint8_t>> GalacticSession::save_checkpoint_state() const {
     using namespace checkpoint_detail;
     try {
@@ -698,6 +703,17 @@ core::Result<void> GalacticSession::Impl::service_tick_objects(GalacticSession& 
 core::Result<void> GalacticSession::Impl::service_tick_fiscal(const PartitionExecutor& executor, const std::uint64_t executing,
     std::vector<GalacticEvent>& events, GalacticTick& tick, const std::uint32_t duration) {
     auto& impl = *this;
+    // This ordered reduction consumes stable planet/player order, independent of
+    // executor partitions. Only diagnostics are deduplicated; values are pure state.
+    const auto degraded = [&](std::string_view code, PlayerId player, const core::Diagnostic& error, math::Fixed effective) {
+        core::LoadNote note; note.code = code; note.object = std::to_string(player);
+        note.tag = "Fiscal_Income"; note.phase = core::LoadPhase::runtime;
+        note.action = core::LoadAction::runtime_degraded;
+        note.diagnostic_code = error.code; note.message = error.message;
+        note.effective_value = std::to_string(effective.raw());
+        core::LoadNoteBuffer buffer; buffer.runtime(std::move(note)); impl.merge_load_notes(buffer);
+    };
+
     auto& tick_clock = impl.clock;
     gc_profile::Scope fiscal_scope(gc_profile::Phase::tick_fiscal);
     if (impl.setup.fiscal) {
@@ -739,10 +755,11 @@ core::Result<void> GalacticSession::Impl::service_tick_fiscal(const PartitionExe
             const auto index = static_cast<std::size_t>(player - fiscal.players.begin());
             auto sum = math::add(totals[index], contributions.value()[i].total);
             if (!sum) {
-                impl.failed = true;
-                return fail<void>(diagnostic_codes::worker_failure, sum.error().message);
-            }
-            totals[index] = sum.value();
+                const auto saturated = math::Fixed::from_raw(contributions.value()[i].total.raw() < 0
+                    ? std::numeric_limits<std::int64_t>::min() : std::numeric_limits<std::int64_t>::max());
+                degraded("EAWR-LOAD-1110", player->player, sum.error(), saturated);
+                totals[index] = saturated;
+            } else totals[index] = sum.value();
         }
         // WGEP-03/15/16: one nonzero aggregate per player, no maintenance/tax
         // debit. WGEP-112/WGA-13..15: commit the account first, then
@@ -755,8 +772,16 @@ core::Result<void> GalacticSession::Impl::service_tick_fiscal(const PartitionExe
             auto result = adjusted_credits(ledger.players[i].credits, totals[i],
                 fiscal.players[i].positive_credit_multiplier, ledger.players[i].credit_cap);
             if (!result) {
-                impl.failed = true;
-                return fail<void>(diagnostic_codes::worker_failure, "fiscal ledger: " + result.error().message);
+                // Saturate each failed arithmetic consumer before the normal account clamp.
+                auto delta = totals[i];
+                if (delta.raw() > 0 && !math::try_multiply(delta, fiscal.players[i].positive_credit_multiplier, delta))
+                    delta = math::Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+                math::Fixed total{};
+                if (!math::try_add(ledger.players[i].credits, delta, total))
+                    total = math::Fixed::from_raw(delta.raw() < 0 ? std::numeric_limits<std::int64_t>::min() : std::numeric_limits<std::int64_t>::max());
+                const auto effective = std::clamp(total, math::Fixed{}, ledger.players[i].credit_cap);
+                degraded("EAWR-LOAD-1111", ledger.players[i].player, result.error(), effective);
+                result = core::Result<math::Fixed>::success(effective);
             }
             if (ledger.players[i].credits != result.value()) {
                 ledger.players[i].credits = result.value();

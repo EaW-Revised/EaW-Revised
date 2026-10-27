@@ -49,10 +49,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 import symbol_store  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "release"))
 import launcher_artifact  # noqa: E402
+from shader_runtime_package import package as shader_runtime_package  # noqa: E402
 
 TOOLS = ("sim_headless", "sim_bench", "path_bench", "asset_scan", "asset_validate", "xml_scan", "scene_scan",
          "sky_scan", "unit_scan", "script_smoke", "hud_movie_prepare")
-DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md", "README.md")
+DOCS = ("LICENSE", "THIRD_PARTY_NOTICES.md")
 VIEWER_PROJECT = ROOT / "apps" / "viewer" / "project"
 PLATFORMS = {
     "linux-x64": {"exe": "", "extension": "libeawr_viewer.linux.template_release.x86_64.so"},
@@ -140,9 +141,10 @@ def find_tool(build_dir: Path, name: str, suffix: str, configuration: str = "Rel
     raise FileNotFoundError(f"{name}{suffix} not built under {build_dir}/apps/{name}")
 
 
-def add_docs(archive: zipfile.ZipFile, top: str) -> None:
+def add_docs(archive: zipfile.ZipFile, top: str, readme: str) -> None:
     for name in DOCS:
         archive.write(ROOT / name, f"{top}/{name}")
+    archive.write(ROOT / "tools" / "release" / readme, f"{top}/README.md")
 
 
 def godot_import(godot: Path, project: Path) -> Optional[str]:
@@ -174,7 +176,8 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
                  importer: Callable[[Path, Path], Optional[str]] = godot_import,
                  debug_build_dir: Optional[Path] = None, mods_service: Optional[Path] = None,
                  manager_artifact: Optional[Path] = None,
-                 launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False) -> Path:
+                 launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
+                 shader_runtime: Optional[Path] = None) -> Path:
     """The portable Windows player folder as a zip: launcher slot, pinned Godot GUI runtime, pre-imported project.
 
     With debug_build_dir (the Debug configuration of the root build) the same folder is written as the debug
@@ -222,6 +225,7 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
         else:
             print(f"package_release: no --launcher: the player zip has no {PLAYER_LAUNCHER} yet", file=sys.stderr)
         if with_mods_manager:
+            shutil.copyfile(launcher_artifact.require_start_stub(launcher.parent), folder / "EAWR Mods.exe")
             launcher_artifact.install_manager(folder, mods_service, manager_artifact, launcher_pin)
         preimport_project(folder / PLAYER_GODOT, project, importer)
         for name in ("LICENSE", "THIRD_PARTY_NOTICES.md"):
@@ -243,6 +247,11 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
                 shutil.copyfile(symbols, folder / "tools" / symbols.name)
                 tool_sha256[binary.name] = sha256_file(binary)
         export_package.bundle_licenses(folder)
+        if shader_runtime is not None:
+            # Verify the exact third-party file set. These DLLs have upstream
+            # identities, and never exempt project binaries from verify_identity.
+            shader_runtime_package.stage(shader_runtime, folder / "shader-runtime")
+            shutil.copyfile(folder / "shader-runtime" / "SOURCE-OFFER.md", folder / "SHADER_RUNTIME_SOURCE-OFFER.md")
         runtime = {
             "schema": "eawr-player-runtime/1",
             "variant": variant,
@@ -251,6 +260,8 @@ def build_player(stem: str, spec: dict, out: Path, godot: Path, launcher: Option
             "launcher_sha256": launcher_sha,
             "extension_sha256": sha256_file(extension),
         }
+        if shader_runtime is not None:
+            runtime["shader_runtime_manifest_sha256"] = sha256_file(folder / "shader-runtime" / "manifest.json")
         if debug:
             runtime["configuration"] = "Debug"
             runtime["tools_sha256"] = tool_sha256
@@ -278,8 +289,12 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             importer: Callable[[Path, Path], Optional[str]] = godot_import,
             mods_service: Optional[Path] = None, manager_artifact: Optional[Path] = None,
             launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
-            expect_identity: Optional[str] = None) -> list[Path]:
+            expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None) -> list[Path]:
     spec = PLATFORMS[platform]
+    if shader_runtime is not None:
+        if platform != "windows-x64":
+            raise ValueError("shader runtime package is qualified for Windows x64 only")
+        shader_runtime_package.verify(shader_runtime)
     if with_mods_manager and godot is None:
         raise ValueError("manager packaging needs the player folder (--godot)")
     if godot is not None and platform != "windows-x64":
@@ -296,7 +311,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             info.external_attr = 0o755 << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, binary.read_bytes())
-        add_docs(archive, f"{stem}-tools")
+        add_docs(archive, f"{stem}-tools", "readme-tools.md")
 
     extension = VIEWER_PROJECT / "bin" / spec["extension"]
     if not extension.is_file():
@@ -312,7 +327,15 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
             if relative.startswith("bin/") and path.name != spec["extension"]:
                 continue  # another platform's extension, or build leftovers
             archive.write(path, f"{stem}-viewer/project/{relative}")
-        add_docs(archive, f"{stem}-viewer")
+        add_docs(archive, f"{stem}-viewer", "readme-viewer.md")
+        if shader_runtime is not None:
+            with tempfile.TemporaryDirectory(prefix="shader-runtime-", dir=out) as temporary:
+                staged = Path(temporary) / "shader-runtime"
+                shader_runtime_package.stage(shader_runtime, staged)
+                for path in sorted(staged.rglob("*")):
+                    if path.is_file():
+                        archive.write(path, f"{stem}-viewer/shader-runtime/{path.relative_to(staged).as_posix()}")
+                archive.write(staged / "SOURCE-OFFER.md", f"{stem}-viewer/SHADER_RUNTIME_SOURCE-OFFER.md")
         for name in ("play-demo.cmd", "play-demo.sh", "demo.py"):
             path = ROOT / "tools" / "release" / name
             info = zipfile.ZipInfo.from_file(path, f"{stem}-viewer/{name}")
@@ -324,7 +347,7 @@ def package(build_dir: Path, platform: str, version: str, out: Path, godot: Opti
     if godot is not None:
         files.append(build_player(stem, spec, out, godot, launcher, importer, mods_service=mods_service,
                                   manager_artifact=manager_artifact, launcher_pin=launcher_pin,
-                                  with_mods_manager=with_mods_manager))
+                                  with_mods_manager=with_mods_manager, shader_runtime=shader_runtime))
     return files
 
 
@@ -332,7 +355,7 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
                   importer: Callable[[Path, Path], Optional[str]] = godot_import,
                   mods_service: Optional[Path] = None, manager_artifact: Optional[Path] = None,
                   launcher_pin: Path = launcher_artifact.DEFAULT_PIN, with_mods_manager: bool = False,
-                  expect_identity: Optional[str] = None) -> Path:
+                  expect_identity: Optional[str] = None, shader_runtime: Optional[Path] = None) -> Path:
     """The Windows x64 debug variant (eaw-revised-<version>-windows-x64-debug.zip).
 
     build_dir is the root build's Debug configuration; the viewer project's bin/ must hold the Debug extension
@@ -341,7 +364,7 @@ def package_debug(build_dir: Path, version: str, out: Path, godot: Path, launche
     spec = PLATFORMS["windows-x64"]
     verify_identity(expect_identity, identity_binaries(spec, build_dir, "Debug", launcher, mods_service))
     out.mkdir(parents=True, exist_ok=True)
-    return build_player(f"eaw-revised-{version}-windows-x64", spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager)
+    return build_player(f"eaw-revised-{version}-windows-x64", spec, out, godot, launcher, importer, build_dir, mods_service, manager_artifact, launcher_pin, with_mods_manager, shader_runtime)
 
 
 def write_sums(files: list[Path], out: Path) -> Path:
@@ -392,6 +415,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--launcher-artifact", type=Path, help="local pinned manager zip; otherwise GitHub release")
     parser.add_argument("--launcher-pin", type=Path, default=launcher_artifact.DEFAULT_PIN)
     parser.add_argument("--with-mods-manager", action="store_true", help="include the pinned manager and mods service")
+    parser.add_argument("--shader-runtime", type=Path, help="offline verified optional shader DLL package; activation stays off")
     args = parser.parse_args(argv)
     sums = None
     try:
@@ -428,12 +452,12 @@ def main(argv: list[str]) -> int:
                     files = [package_debug(args.build_dir, args.version, args.out, args.godot, args.launcher,
                                            mods_service=args.mods_service, manager_artifact=args.launcher_artifact,
                                            launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
-                                           expect_identity=args.expect_identity)]
+                                           expect_identity=args.expect_identity, shader_runtime=args.shader_runtime)]
                 else:
                     files = package(args.build_dir, args.platform, args.version, args.out, args.godot, args.launcher,
                                     mods_service=args.mods_service, manager_artifact=args.launcher_artifact,
                                     launcher_pin=args.launcher_pin, with_mods_manager=args.with_mods_manager,
-                                    expect_identity=args.expect_identity)
+                                    expect_identity=args.expect_identity, shader_runtime=args.shader_runtime)
             if not args.debug:
                 sums = write_sums(files, args.out)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:

@@ -1,4 +1,5 @@
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/diagnostics/gc_memory_watch.hpp"
 #include "eawr/core/gc_load_trace.hpp"
 #include "eawr/platform/live_game_lockstep.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
@@ -32,6 +33,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <set>
 #include <deque>
 #include <mutex>
 #include <numeric>
@@ -238,11 +240,13 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         return Result::failure(configured.error());
     auto configuration = std::make_shared<CampaignServiceConfiguration>();
     const auto space = provider.value();
+    diagnostics::GcMemoryWatch memory_watch;
     configuration->restore.content = [space](const auto& conflict) { return space->content(conflict); };
     // The restore adapter retains the immutable mounted VFS independently of presentation.
     // All other provider inputs are copied once; every restore gets fresh deterministic adapters.
-    configuration->restore.configure_session = [filesystem = std::move(filesystem_owner), catalog = std::make_shared<data::Catalog>(catalog),
-        data = std::make_shared<data::galactic::GalacticData>(data), types = std::make_shared<units::GalacticTypeTable>(types),
+    configuration->restore.configure_session = [filesystem = std::move(filesystem_owner), catalog = memory_watch.watch("gc.restore.catalog", std::make_shared<data::Catalog>(catalog)),
+        data = memory_watch.watch("gc.restore.galactic_data", std::make_shared<data::galactic::GalacticData>(data)),
+        types = memory_watch.watch("gc.restore.types", std::make_shared<units::GalacticTypeTable>(types)),
         plan = std::make_shared<campaign::CampaignSetupPlan>(*root.value().plan()), space](auto& game) {
         return campaign::configure_live_campaign_conflicts(game, *filesystem, *catalog, *data, *types, *plan, space);
     };
@@ -252,7 +256,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         return space->presentation(conflict, content.value());
     };
     configuration->loading_descriptor = [plan = std::make_shared<campaign::CampaignSetupPlan>(*root.value().plan()),
-        data = std::make_shared<data::galactic::GalacticData>(data)](const auto& conflict, const auto& snapshot) {
+        data = memory_watch.watch("gc.loading.galactic_data", std::make_shared<data::galactic::GalacticData>(data))](const auto& conflict, const auto& snapshot) {
         CampaignLoadingDescriptor descriptor;
         descriptor.conflict = conflict.id; descriptor.planet = conflict.planet; descriptor.layer = conflict.layer;
         descriptor.invader = conflict.invader; descriptor.defender = conflict.defender;
@@ -290,8 +294,8 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         // saved ledger; everything it reads is copied here, once.
         auto scoring = std::make_shared<CampaignScoringSource>();
         scoring->files = scoring_files;
-        scoring->catalog = std::make_shared<const data::Catalog>(catalog);
-        scoring->types = std::make_shared<const units::GalacticTypeTable>(types);
+        scoring->catalog = memory_watch.watch("gc.scoring.catalog", std::make_shared<const data::Catalog>(catalog));
+        scoring->types = memory_watch.watch("gc.scoring.types", std::make_shared<const units::GalacticTypeTable>(types));
         scoring->campaign_name = std::string(root.value().plan()->campaign_name());
         for (const auto& binding : root.value().plan()->type_bindings())
             scoring->type_names.emplace(binding.id, binding.original_type);
@@ -323,7 +327,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
         prevented_types.emplace(assets::object_type_crc(type.name), prevents);
     }
     configuration->retreat_policy = [plan = std::make_shared<campaign::CampaignSetupPlan>(*root.value().plan()),
-        data = std::make_shared<data::galactic::GalacticData>(data), prevented_types = std::move(prevented_types)](
+        data = memory_watch.watch("gc.retreat.galactic_data", std::make_shared<data::galactic::GalacticData>(data)), prevented_types = std::move(prevented_types)](
         const campaign::ConflictRecord& conflict) -> std::optional<CampaignRetreatPolicy> {
         const auto* rules = data->campaign(plan->campaign_name());
         if (!rules) return std::nullopt;
@@ -407,14 +411,17 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     auto impl = std::make_unique<Impl>(std::move(root).value(), std::move(configuration));
     impl->native_ai_players = std::move(native_ai_players);
     if (installed_runtime) impl->native_ai_diagnostics = installed_runtime->load_diagnostics; // includes what the install skipped
-    if (installed_runtime && (observe_native_ai || diagnostics::GcMemory::enabled()))
-        impl->native_ai_goal_reader = [setup = installed_runtime, observed_view, space, scripts = impl->root.game()->galactic_scripts()] {
+    if ((installed_runtime && observe_native_ai) || diagnostics::GcMemory::enabled())
+        impl->native_ai_goal_reader = [setup = installed_runtime, observed_view, space, scripts = impl->root.game()->galactic_scripts(),
+            memory_watch = std::move(memory_watch), provider_memory = services.value().memory_inventory] {
             if (diagnostics::GcMemory::enabled()) {
                 diagnostics::GcMemory memory;
+                memory_watch.read(memory);
+                if (provider_memory) provider_memory(memory);
                 if (const auto world = observed_view->world.lock()) world->memory_inventory(memory);
                 if (const auto engine = observed_view->engine.lock()) engine->memory_inventory(memory);
                 space->memory_inventory(memory);
-                memory.row("gc.ai.modules", setup->modules, setup->content_identity);
+                if (setup) memory.row("gc.ai.modules", setup->modules, setup->content_identity);
                 if (scripts)
                     memory.rows["lua.story_vm_lower_bound"] += scripts->story_scheduler().diagnostic_lua_bytes();
                 std::ostringstream output;
@@ -490,6 +497,12 @@ public:
         initialize();
     }
     void initialize() {
+        // Root startup already published its initial notes on this caller.
+        if (std::holds_alternative<campaign::CampaignRoot>(owner_))
+            published_load_note_count_ = session_->galaxy().load_note_count();
+        if (options_.load_note_sink && published_load_note_count_) {
+            for (const auto& note : session_->galaxy().load_notes()) staged_load_note_keys_.emplace(note.code, note.object);
+        }
         if (options_.interactive_seat.value) {
             auto configured = session_->set_interactive_seat(options_.interactive_seat);
             if (!configured) throw std::invalid_argument(configured.error().message);
@@ -853,6 +866,10 @@ public:
     }
 
     void publish_story_notices(core::Result<campaign::GameTick>& stepped, const galactic::PlayerId observer) {
+        for (auto& event : stepped.value().story_presentation) { // WST-58: unhashed holocron goal requests
+            story_presentation_.push_back({++story_cursor_, std::move(event)});
+            if (story_presentation_.size() > 256) story_presentation_.pop_front(); // a presentation bound, not a gameplay limit
+        }
         story_notice_publications_.clear();
         frame_.story_notices.reset();
         if (!stepped.value().story_notices.empty()) {
@@ -933,6 +950,16 @@ public:
                 {{"command-source", ms(step_started, source_done)}, {"session-step", ms(source_done, step_done)}}};
             costs_.push_back(std::move(cost));
             if (costs_.size() > tick_cost_history) costs_.pop_front();
+        }
+        // Stage new diagnostics after the deterministic owner commit. Normal
+        // ticks read only the cached count; the presentation caller owns sink I/O.
+        const auto note_count = session_->galaxy().load_note_count();
+        if (options_.load_note_sink && note_count != published_load_note_count_) {
+            for (auto note : session_->galaxy().load_notes()) {
+                if (staged_load_note_keys_.emplace(note.code, note.object).second)
+                    pending_load_notes_.push_back(std::move(note));
+            }
+            published_load_note_count_ = note_count;
         }
         capture_saves(stepped.value(), orders, commands);
         hashes_.push_back(std::move(stepped.value().state_hash));
@@ -1498,6 +1525,15 @@ public:
         }
     }
 
+    // Called by the presentation owner, outside the simulation worker and mutex.
+    void publish_load_notes() {
+        std::vector<core::LoadNote> notes;
+        { const std::lock_guard lock(mutex_); notes.swap(pending_load_notes_); }
+        if (!notes.empty() && options_.load_note_sink) options_.load_note_sink(notes);
+    }
+    std::size_t published_load_note_count_{};
+    std::set<std::pair<std::string, std::string>> staged_load_note_keys_;
+    std::vector<core::LoadNote> pending_load_notes_;
     std::variant<std::monostate, campaign::GameSession, campaign::CampaignRoot, std::shared_ptr<campaign::GameSession>> owner_;
     campaign::GameSession* session_;
     std::optional<galactic::GalacticReplay> ended_record_;
@@ -1534,6 +1570,8 @@ public:
     LiveEventLog battle_events_{LiveEventLog::Bounds{}};
     std::uint64_t galactic_cursor_{};
     std::deque<LiveGalacticEvent> galactic_events_;
+    std::uint64_t story_cursor_{};
+    std::deque<LiveStoryPresentation> story_presentation_;
     std::vector<galactic::GalacticFeedbackNotice> pending_feedback_; // simulation thread only
     GalacticApproachThrottle approach_throttle_;
     std::map<galactic::PlanetId, galactic::PlayerId> published_owners_;
@@ -1867,6 +1905,7 @@ core::Result<std::unique_ptr<LiveGameSession>> LiveGameSession::start(campaign::
             auto configured = options.services->configure_native_ai(*root.game());
             if (!configured) return Result::failure(configured.error());
         }
+        if (options.load_note_sink) options.load_note_sink(root.load_notes());
         auto impl = std::make_shared<Impl>(std::move(root), std::move(options));
         impl->start();
         return Result::success(std::unique_ptr<LiveGameSession>(new LiveGameSession(std::move(impl))));
@@ -2041,10 +2080,12 @@ bool LiveGameSession::wait_for(const std::uint64_t tick, const std::chrono::mill
     return impl_->frame_.session_tick >= tick;
 }
 LiveGameFrame LiveGameSession::frame() const {
+    impl_->publish_load_notes();
     const std::lock_guard lock(impl_->mutex_);
     auto result = impl_->frame_; result.campaign_end = impl_->default_end_; return result;
 }
 LiveGameFrame LiveGameSession::frame(galactic::SeatId observer) const {
+    impl_->publish_load_notes();
     const std::lock_guard lock(impl_->mutex_);
     auto result = impl_->frame_;
     result.campaign_end.reset();
@@ -2120,6 +2161,17 @@ LiveGalacticEvents LiveGameSession::galactic_events_after(const std::uint64_t cu
             || event.event.kind == Kind::intelligence_refreshed) && event.event.value != player) continue;
         result.events.push_back(event);
     }
+    return result;
+}
+LiveStoryPresentations LiveGameSession::story_presentation_after(const std::uint64_t cursor, const galactic::SeatId seat) const {
+    const std::lock_guard lock(impl_->mutex_);
+    LiveStoryPresentations result; result.through = impl_->story_cursor_;
+    result.incomplete = !impl_->story_presentation_.empty() && cursor < impl_->story_presentation_.front().cursor - 1;
+    const auto view = impl_->view_frames_.find(seat);
+    if (view == impl_->view_frames_.end() || !view->second.latest) return result;
+    const auto player = view->second.latest->view_player();
+    for (const auto& row : impl_->story_presentation_)
+        if (row.cursor > cursor && row.event.owner == player) result.events.push_back(row);
     return result;
 }
 std::uint64_t LiveGameSession::completed_tick() const { return frame().session_tick; }

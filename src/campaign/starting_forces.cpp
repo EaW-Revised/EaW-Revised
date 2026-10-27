@@ -1,4 +1,5 @@
 #include "eawr/campaign/starting_forces.hpp"
+#include "eawr/campaign/load_notes.hpp"
 
 #include "eawr/sim/galactic/production.hpp"
 
@@ -42,8 +43,10 @@ gc::ActorCombatRole combat_role(const units::GalacticType& type) {
 }
 } // namespace
 
-core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs& inputs) {
+core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForceInputs& inputs,
+    core::LoadNoteBuffer* notes, std::set<gc::TypeId>* omitted) {
     gc::NestedCreationSetup result; result.fleet_type = inputs.fleet_type; result.squadron_type = inputs.squadron_type;
+    std::size_t remaining = gc::galactic_max_objects;
     for (const auto& binding : inputs.bindings) {
         const auto* source = original(inputs, binding.id); const auto* live = runtime(inputs, binding.id);
         if (!source || !live) return refuse<gc::NestedCreationSetup>("missing nested original/runtime binding");
@@ -55,10 +58,21 @@ core::Result<gc::NestedCreationSetup> prepare_nested_creation(const StartingForc
             row.role = gc::NestedCreationRole::company; row.transport = identity(inputs, source->company_transport);
         } else if (behaves(*source, "DUMMY_SPACE_FIGHTER_SQUADRON")) row.role = gc::NestedCreationRole::squadron;
         const auto& members = row.role == gc::NestedCreationRole::company ? source->company_units : source->squadron_units;
+        bool degraded = members.size() > remaining;
         for (const auto& name : members) {
             const auto id = identity(inputs, name);
-            if (!id) return refuse<gc::NestedCreationSetup>("unbound nested member: " + name);
+            if (!id) { degraded = true; continue; }
+            if (!remaining) break;
             row.members.push_back(id);
+            --remaining;
+        }
+        if ((row.role == gc::NestedCreationRole::company && (!row.transport || row.members.empty()))
+            || (row.role == gc::NestedCreationRole::squadron && row.members.empty())) degraded = true;
+        if (degraded) {
+            campaign_type_note(notes, "EAWR-LOAD-1032", *source, "Nested_Members", std::to_string(members.size()),
+                "invalid or over-budget template omitted", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+            if (omitted) omitted->insert(row.type);
+            row.role = gc::NestedCreationRole::other; row.transport = 0; row.members.clear();
         }
         result.types.push_back(std::move(row));
     }

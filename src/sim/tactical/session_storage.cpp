@@ -69,6 +69,8 @@ LiveUnit TacticalSession::Impl::live_at(const EntityId id, const entt::entity ha
                 identity.purchase_token,
                 identity.barrage_source,
                 identity.garrison_enabled,
+                identity.controller_seat,
+                identity.control,
             },
             health != nullptr ? std::optional(health->value) : std::nullopt,
             moving != nullptr ? std::optional(moving->value) : std::nullopt,
@@ -131,7 +133,7 @@ void TacticalSession::Impl::rebuild(const std::vector<LiveUnit>& units, const bo
             emplace_component<StableId>(handle, state.entity_id);
             if (unit.garrison_unit) emplace_component<GarrisonUnit>(handle);
             emplace_component<Identity>(handle, state.type_id, state.owner, state.purchase_type,
-                state.purchase_token, state.barrage_source, state.garrison_enabled);
+                state.purchase_token, state.barrage_source, state.garrison_enabled, state.controller_seat, state.control);
             emplace_component<Placement>(handle, state.position, state.rotation);
             emplace_component<CurrentOrder>(handle, state.order);
             if (!state.contained.empty()) emplace_component<CarriedHeroes>(handle, state.contained);
@@ -231,7 +233,7 @@ void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units, std::uint
                 handles.emplace(state.entity_id, handle);
                 emplace_component<StableId>(handle, state.entity_id);
                 emplace_component<Identity>(handle, state.type_id, state.owner, state.purchase_type,
-                    state.purchase_token, state.barrage_source, state.garrison_enabled);
+                    state.purchase_token, state.barrage_source, state.garrison_enabled, state.controller_seat, state.control);
                 emplace_component<Placement>(handle, state.position, state.rotation);
                 emplace_component<CurrentOrder>(handle, state.order);
                 writes += 4;
@@ -239,13 +241,14 @@ void TacticalSession::Impl::commit_units(std::vector<LiveUnit>& units, std::uint
                 auto& identity = registry.get<Identity>(handle);
                 if (identity.type_id != state.type_id || identity.owner != state.owner || identity.purchase_type != state.purchase_type
                     || identity.purchase_token != state.purchase_token || identity.barrage_source != state.barrage_source
-                    || identity.garrison_enabled != state.garrison_enabled) {
+                    || identity.garrison_enabled != state.garrison_enabled
+                    || identity.controller_seat != state.controller_seat || identity.control != state.control) {
                     const auto before = ownership_slot(identity.owner, identity.purchase_type != 0 ? identity.purchase_type : identity.type_id);
                     const auto after = ownership_slot(state.owner, purchase_identity(state));
                     if (before != ownership_keys.size()) --committed_ownership_counts[before];
                     if (after != ownership_keys.size()) ++committed_ownership_counts[after];
                     identity = {state.type_id, state.owner, state.purchase_type, state.purchase_token,
-                        state.barrage_source, state.garrison_enabled}; ++writes;
+                        state.barrage_source, state.garrison_enabled, state.controller_seat, state.control}; ++writes;
                 }
                 auto& placement = registry.get<Placement>(handle);
                 if (placement.position != state.position || placement.rotation != state.rotation) {

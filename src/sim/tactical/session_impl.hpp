@@ -98,7 +98,7 @@ public:
     bool publish_damage_changes{true}; // transient observer switch, never canonical
     std::unique_ptr<session_detail::LandSession> land;
     [[nodiscard]] core::Result<void> initialize_land(const TacticalContent& content);
-    [[nodiscard]] core::Result<TacticalTick> step_land(const PartitionExecutor& executor);
+    [[nodiscard]] core::Result<TacticalTick> step_land(TacticalSession& session, const PartitionExecutor& executor);
     [[nodiscard]] std::vector<std::uint8_t> land_bytes(bool partitioned) const;
     void encode_land_partition(std::size_t partition) const;
     [[nodiscard]] core::Result<void> restore_land(std::span<const std::uint8_t> bytes);
@@ -188,7 +188,11 @@ public:
     [[nodiscard]] core::Result<void> apply_bonuses(LiveUnit& unit, const CombatBonuses& bonuses,
         BonusAdjustment adjustment = BonusAdjustment::legacy, const DurabilityProfile* previous = nullptr) const;
     [[nodiscard]] core::Result<void> transfer_owner(LiveUnit& unit, PlayerId owner,
-        const CombatBonuses& bonuses) const;
+        const CombatBonuses& bonuses, EntityId controller_root = invalid_entity_id) const;
+    [[nodiscard]] SeatId output_controller(PlayerId owner, SeatId preferred, std::uint64_t ordinal) const;
+    [[nodiscard]] bool shared_controller_type(TypeId type) const;
+    [[nodiscard]] core::Result<void> attribute_output(UnitState& unit, SeatId preferred = {},
+        std::uint64_t ordinal = 0) const;
 
     [[nodiscard]] ProductionCounts production_counts(const PlayerId buyer, const TypeId type,
         const std::vector<PlayerEconomy>& accounts, const bool committed = false) const;
@@ -213,7 +217,8 @@ public:
     void register_tractor(const LiveUnit&, const LiveUnit*);
     [[nodiscard]] core::Result<void> service_beams(std::vector<LiveUnit>&, std::uint64_t, const PartitionExecutor&);
     [[nodiscard]] bool buzz_request_ready(const LiveUnit&, math::Vec3, std::uint64_t) const;
-    [[nodiscard]] LiveUnit create_buzz_droids(LiveUnit&, math::Vec3, std::uint64_t, EntityId& allocated_next_id);
+    [[nodiscard]] core::Result<LiveUnit> create_buzz_droids(LiveUnit&, math::Vec3, std::uint64_t,
+        EntityId& allocated_next_id, SeatId controller = {});
     // WLD-03..WLD-05: active LASER_DEFENSE looks for a hostile shot to shoot down before the shots fly.
     [[nodiscard]] core::Result<void> service_laser_defence(const std::vector<LiveUnit>&, std::uint64_t,
         const PartitionExecutor&, std::vector<CombatEvent>& zaps);
@@ -319,7 +324,7 @@ public:
         std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
         detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
         TypeId free_type = 0, PlayerId free_owner = 0, std::vector<EntityId>* registered = nullptr,
-        std::map<EntityId, ArrivalState>* lane_arrivals = nullptr) const;
+        std::map<EntityId, ArrivalState>* lane_arrivals = nullptr, SeatId controller = {}) const;
 
     // Publishes the snapshot of the staged units at the completed tick, with the given events.
     void publish_staged(const std::vector<LiveUnit>& live, std::vector<Event> events,

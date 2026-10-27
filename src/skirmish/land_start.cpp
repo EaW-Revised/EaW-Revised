@@ -299,8 +299,8 @@ core::Result<LandStart> build_land_start(const Fixture& fixture, const LandStart
     // including the land terrain and effective physical bindings.
     for (auto& domain : start.identity.domains)
         if (domain.name == "units") domain.digest = start.setup.content_identity;
-    // Version 2 (LS shoot PR 1): the land combat and durability rows join the content.
-    start.identity.domains.push_back(sim::IdentityDomain{"land-content", 2, start.setup.content_identity});
+    // Version 3: active land combat policy and the authored combat/durability rows.
+    start.identity.domains.push_back(sim::IdentityDomain{"land-content", 3, start.setup.content_identity});
     start.identity = sim::compute_match_identity(std::move(start.identity));
     const auto binding_for = [&](TypeId type) {
         return std::find_if(bindings.land.companies.begin(), bindings.land.companies.end(),

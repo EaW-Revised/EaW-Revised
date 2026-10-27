@@ -13,6 +13,8 @@
 #include "orders_internal.hpp"
 #include "staging.hpp"
 #include "session_tick.hpp"
+#include "session_combat_phases.hpp"
+#include "session_land_combat_internal.hpp"
 #include "session_services.hpp"
 #include "tactical_internal.hpp"
 
@@ -323,6 +325,9 @@ core::Result<void> session_detail::Tick::projectile_inputs() {
                     continue;
                 }
                 auto stepped = detail::step_projectile(view, flying[index], scratch);
+                if (stepped && impl_->land)
+                    stepped = land_projectile_contact(impl_->land->occupancy.terrain(), std::move(stepped).value(),
+                        &impl_->land->projectile_crossings[partition]);
                 if (!stepped) {
                     flight_errors[index] = detail::diagnostic(diagnostic_codes::worker_failure, "tick "
                         + std::to_string(tick) + " projectile " + std::to_string(flying[index].id) + ": "
@@ -390,13 +395,17 @@ core::Result<void> session_detail::Tick::projectile_inputs() {
 }
 
 core::Result<void> session_detail::Tick::launch_shots() {
-    const auto& moving = gather_->moving.value();
-    const auto& combat_events = targets_->combat_events.value();
-    const auto& aim_offsets = targets_->aim_offsets.value();
-    const auto& view = targets_->world.value().value();
-    const auto* damage_rules = flights_->damage_rules.value();
-    auto& launched = flights_->launched.value();
-    auto& next_projectile = flights_->next_projectile.value();
+    return CombatPhases(*this).launch_shots();
+}
+
+core::Result<void> session_detail::CombatPhases::launch_shots() {
+    const auto& moving = context_.gather_->moving.value();
+    const auto& combat_events = context_.targets_->combat_events.value();
+    const auto& aim_offsets = context_.targets_->aim_offsets.value();
+    const auto& view = context_.targets_->world.value().value();
+    const auto* damage_rules = context_.flights_->damage_rules.value();
+    auto& launched = context_.flights_->launched.value();
+    auto& next_projectile = context_.flights_->next_projectile.value();
     launched.clear();
     if (damage_rules != nullptr) {
         struct LaunchInput {
@@ -427,7 +436,7 @@ core::Result<void> session_detail::Tick::launch_shots() {
         }
         std::vector<std::optional<Projectile>> prepared(inputs.size());
         std::vector<std::optional<core::Diagnostic>> errors(inputs.size());
-        const auto launches = !inputs.empty() ? executor.execute_phase("projectile-launches", tick_partition_count, [&](const std::size_t partition) {
+        const auto launches = !inputs.empty() ? context_.executor.execute_phase("projectile-launches", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, inputs.size());
             for (auto index = range.begin; index < range.end; ++index) {
                 const auto& input = inputs[index];
@@ -452,7 +461,7 @@ core::Result<void> session_detail::Tick::launch_shots() {
                     input.id, input.offset, target_radius.value());
                 if (!projectile) {
                     errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
-                        "tick " + std::to_string(tick) + " unit " + std::to_string(event.shooter) + ": "
+                        "tick " + std::to_string(context_.tick) + " unit " + std::to_string(event.shooter) + ": "
                             + projectile.error().message);
                     continue;
                 }
@@ -466,7 +475,7 @@ core::Result<void> session_detail::Tick::launch_shots() {
                     if (!multiplied) { errors[index] = multiplied.error(); continue; }
                     projectile.value().damage = multiplied.value();
                 }
-                const auto source = live_unit(moving, event.shooter);
+                const auto source = context_.live_unit(moving, event.shooter);
                 if (source != nullptr && source->upgrade_bonuses[1].raw() != 0) {
                     // Retain the separate delayed-area input; immediate delivery uses EUS-16 below.
                     projectile.value().source_damage_factor = math::Fixed::from_raw(
@@ -828,23 +837,31 @@ core::Result<void> session_detail::Tick::apply_direct_impact(const UnitStage::it
         Hit& hit, std::uint32_t& hardpoint, std::optional<detail::ProjectileStep>& flight,
         std::vector<CombatEvent>& combat_events, std::vector<Event>& events, std::vector<UnitState>& killed,
         UnitStage& staged, auto& deliver_blast, std::size_t& flight_index) {
+    return CombatPhases(*this).apply_direct_impact(target, damage_rules, profile, projectile, hit, hardpoint, flight, combat_events, events, killed, staged, deliver_blast, flight_index);
+}
+
+core::Result<void> session_detail::CombatPhases::apply_direct_impact(const UnitStage::iterator& target,
+        const DamageRules* const& damage_rules, const DurabilityProfile& profile, const Projectile& projectile,
+        Hit& hit, std::uint32_t& hardpoint, std::optional<detail::ProjectileStep>& flight,
+        std::vector<CombatEvent>& combat_events, std::vector<Event>& events, std::vector<UnitState>& killed,
+        UnitStage& staged, auto& deliver_blast, std::size_t& flight_index) {
     const auto hull_before = target->second.durability->hull;
     const auto shields_before = target->second.durability->shields;
-    auto outcome = apply_hit(profile, *damage_rules, *target->second.durability, hit, tick);
+    auto outcome = apply_hit(profile, *damage_rules, *target->second.durability, hit, context_.tick);
     if (!outcome) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
-            "tick " + std::to_string(tick) + " projectile " + std::to_string(projectile.id) + ": "
+            "tick " + std::to_string(context_.tick) + " projectile " + std::to_string(projectile.id) + ": "
                 + outcome.error().message));
     }
-    impl_->track_damage(target->second, hull_before, shields_before);
-    record_damage_change(target->second, hull_before, projectile.shooter, &staged);
-    if (!outcome.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.amount);
-    impl_->end_depleted_defend(target->second, tick, outcome.value().storm_shield_branch);
+    context_.impl_->track_damage(target->second, hull_before, shields_before);
+    context_.record_damage_change(target->second, hull_before, projectile.shooter, &staged);
+    if (!outcome.value().cancelled) context_.notify_retaliation(target->second, projectile.shooter, hit.amount);
+    context_.impl_->end_depleted_defend(target->second, context_.tick, outcome.value().storm_shield_branch);
     // EN-08: only a positive energy drain disables engines; no locomotor means no effect.
     if (projectile.disable_engines_frames && outcome.value().drained.raw() > 0
         && profile.max_speed && !outcome.value().damage.unit_destroyed) {
         const bool was_online = engines_online(profile, *target->second.durability);
-        disable_engines(*target->second.durability, *projectile.disable_engines_frames, tick);
+        disable_engines(*target->second.durability, *projectile.disable_engines_frames, context_.tick);
         // EN-09: discard a pending group/search speed cap, retaining its destination.
         // FD-64/UFS-33: a failed search has no path to replan; keep its strict cooldown.
         const bool waited = target->second.formation && !target->second.formation->failure_frame;
@@ -854,12 +871,12 @@ core::Result<void> session_detail::Tick::apply_direct_impact(const UnitStage::it
             target->second.formation.reset();
         }
         if ((was_online || waited) && target->second.motion && target->second.motion->kind == MotionKind::path) {
-            tracked_.value().replans.value().push_back(target->first);
+            context_.tracked_.value().replans.value().push_back(target->first);
         }
     }
     // IS-01, IS-02: an ion shot stuns a unit whose type has the ion-stun behaviour.
     if (projectile.ion_stun && profile.ion_stun_effect && !outcome.value().damage.unit_destroyed) {
-        impl_->ion_stun_unit(target->second, *projectile.ion_stun, tick);
+        context_.impl_->ion_stun_unit(target->second, *projectile.ion_stun, context_.tick);
     }
     // How the hit was taken, for the impact effect only (#80, docs/behaviour/battle-presentation.md).
     std::uint32_t taken = 0;
@@ -869,18 +886,18 @@ core::Result<void> session_detail::Tick::apply_direct_impact(const UnitStage::it
     } else if (outcome.value().armor_multiplier <= armor_reduced_limit) {
         taken |= hit_outcome_armor_reduced;
     }
-    combat_events.push_back(CombatEvent{tick, CombatEventKind::projectile_hit, projectile.shooter,
+    combat_events.push_back(CombatEvent{context_.tick, CombatEventKind::projectile_hit, projectile.shooter,
         projectile.weapon, *flight->hit, hardpoint == hull_target ? no_hardpoint : hardpoint, flight->from,
         flight->contact, taken, projectile.target});
     const auto& result = outcome.value().damage;
     if (result.destroyed_hardpoint) {
-        events.push_back(destruction_event(
-            tick, EventKind::hardpoint_destroyed, target->second.state, *result.destroyed_hardpoint));
+        events.push_back(context_.destruction_event(
+            context_.tick, EventKind::hardpoint_destroyed, target->second.state, *result.destroyed_hardpoint));
     }
     if (result.unit_destroyed) {
-        events.push_back(destruction_event(tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
+        events.push_back(context_.destruction_event(context_.tick, EventKind::unit_destroyed, target->second.state, 0, projectile.owner));
         killed.push_back(target->second.state);
-        impl_->adjust_owned(target->second.state, false);
+        context_.impl_->adjust_owned(target->second.state, false);
         staged.erase(target);
     }
     // WAD-03: ordinary direct routing and its single impact event precede secondary damage.
@@ -1095,23 +1112,27 @@ core::Result<void> session_detail::Tick::commit_projectile_flight(std::size_t& f
 }
 
 core::Result<void> session_detail::Tick::impacts() {
-    impl_->impact_bonus_bases.clear();
-    impl_->impact_bonus_containers.clear();
-    impl_->impact_bonus_containers_ready = false;
-    const auto& arrivals = staging_.value().arrivals.value();
-    const auto& unloaded = staging_.value().unloaded.value();
-    const auto& craft_defense = moved_.value().craft_defense.value();
-    auto& combat_events = targets_.value().combat_events.value();
-    const auto& damage_rules = flights_.value().damage_rules.value();
-    auto& flights = flights_.value().flights.value();
-    const auto& blasts = flights_.value().blasts.value();
-    auto& blasts_without_source = flights_.value().blasts_without_source.value();
-    auto& launched = flights_.value().launched.value();
-    auto& staged = tracked_.value().staged.value();
-    impacts_.emplace();
-    auto& events = impacts_.value().events.emplace(std::move(manual_feedback_));
+    return CombatPhases(*this).impacts();
+}
+
+core::Result<void> session_detail::CombatPhases::impacts() {
+    context_.impl_->impact_bonus_bases.clear();
+    context_.impl_->impact_bonus_containers.clear();
+    context_.impl_->impact_bonus_containers_ready = false;
+    const auto& arrivals = context_.staging_.value().arrivals.value();
+    const auto& unloaded = context_.staging_.value().unloaded.value();
+    const auto& craft_defense = context_.moved_.value().craft_defense.value();
+    auto& combat_events = context_.targets_.value().combat_events.value();
+    const auto& damage_rules = context_.flights_.value().damage_rules.value();
+    auto& flights = context_.flights_.value().flights.value();
+    const auto& blasts = context_.flights_.value().blasts.value();
+    auto& blasts_without_source = context_.flights_.value().blasts_without_source.value();
+    auto& launched = context_.flights_.value().launched.value();
+    auto& staged = context_.tracked_.value().staged.value();
+    context_.impacts_.emplace();
+    auto& events = context_.impacts_.value().events.emplace(std::move(context_.manual_feedback_));
     // Ordered commit of the environmental workers' signals; crafts address their container.
-    for (const auto& signals : impl_->nebula_scratch.events) {
+    for (const auto& signals : context_.impl_->nebula_scratch.events) {
         events.insert(events.end(), signals.begin(), signals.end());
     }
     std::sort(events.begin(), events.end(), [](const Event& left, const Event& right) {
@@ -1122,31 +1143,31 @@ core::Result<void> session_detail::Tick::impacts() {
     // Visibility is reevaluated below from that pose every tick, including this completion tick.
     for (const auto id : unloaded) {
         if (const auto found = staged.find(id); found != staged.end()) {
-            events.push_back(Event{tick, EventKind::reinforcement_unloaded, found->second.state.owner, 0, id});
+            events.push_back(Event{context_.tick, EventKind::reinforcement_unloaded, found->second.state.owner, 0, id});
         }
     }
     // #447: every unit killed this tick as it stood when it died, in destruction order.
-    auto& killed = impacts_.value().killed.emplace();
-    auto& pending_blast_damage = impacts_.value().pending_blast_damage.emplace(impl_->pending_blast_damage);
+    auto& killed = context_.impacts_.value().killed.emplace();
+    auto& pending_blast_damage = context_.impacts_.value().pending_blast_damage.emplace(context_.impl_->pending_blast_damage);
     const auto deliver_redirected = [&](const EntityId id, Hit hit, const PlayerId killer, const EntityId attacker) -> core::Result<void> {
-        return deliver_redirected_impact(id, hit, killer, attacker, staged, arrivals, craft_defense, damage_rules, events, killed);
+        return context_.deliver_redirected_impact(id, hit, killer, attacker, staged, arrivals, craft_defense, damage_rules, events, killed);
     };
     // WAD-21/25: each prepared share enters ordinary damage in authored order, so state
     // changes (shield-generator loss, last-hit frame) are visible to later deliveries.
     const auto deliver_area = [&](const Projectile& projectile, const detail::BlastRecipient& recipient) -> core::Result<void> {
-        return deliver_area_impact(projectile, recipient, staged, arrivals, craft_defense, damage_rules, deliver_redirected, events, killed);
+        return context_.deliver_area_impact(projectile, recipient, staged, arrivals, craft_defense, damage_rules, deliver_redirected, events, killed);
     };
     // WAD-26/WFO-14: deliver stored metadata independently of projectile/shooter lifetime.
     // The phase service retains the project ordering in due-frame/creation order.
     std::stable_sort(pending_blast_damage.begin(), pending_blast_damage.end(),
         [](const auto& left, const auto& right) { return left.due < right.due; });
     auto blast_due_end = pending_blast_damage.begin();
-    while (blast_due_end != pending_blast_damage.end() && blast_due_end->due <= tick) {
+    while (blast_due_end != pending_blast_damage.end() && blast_due_end->due <= context_.tick) {
         const auto target = staged.find(blast_due_end->recipient);
-        const auto* profile = target == staged.end() ? nullptr : impl_->combat.find(target->second.state.type_id);
+        const auto* profile = target == staged.end() ? nullptr : context_.impl_->combat.find(target->second.state.type_id);
         const auto hit = detail::delayed_damage_hit(blast_due_end->amount, blast_due_end->damage_type,
             blast_due_end->internal_damage_misc, blast_due_end->contacted_mesh, profile);
-        auto redirected = redirect_damage(blast_due_end->recipient, hit, [&](const EntityId id, const Hit share) {
+        auto redirected = context_.redirect_damage(blast_due_end->recipient, hit, [&](const EntityId id, const Hit share) {
             return deliver_redirected(id, share, blast_due_end->owner, invalid_entity_id);
         });
         if (!redirected) return core::Result<void>::failure(redirected.error());
@@ -1158,15 +1179,15 @@ core::Result<void> session_detail::Tick::impacts() {
     }
     pending_blast_damage.erase(pending_blast_damage.begin(), blast_due_end);
     const auto queue_damage = [&](const Projectile& source, const detail::BlastRecipient& recipient) {
-        queue_delayed_impact(source, recipient, staged, pending_blast_damage);
+        context_.queue_delayed_impact(source, recipient, staged, pending_blast_damage);
     };
     const auto deliver_blast = [&](const std::size_t index) -> core::Result<void> {
-        return deliver_blast_impact(index, blasts, blasts_without_source, staged, flights, deliver_area, queue_damage);
+        return context_.deliver_blast_impact(index, blasts, blasts_without_source, staged, flights, deliver_area, queue_damage);
     };
-    auto& projectiles = impacts_.value().projectiles.emplace();
+    auto& projectiles = context_.impacts_.value().projectiles.emplace();
     projectiles.reserve(flights.size() + launched.size());
     for (std::size_t flight_index = 0; flight_index < flights.size(); ++flight_index) {
-        if (auto result = commit_projectile_flight(flight_index, flights, staged, projectiles, combat_events, deliver_blast, arrivals, craft_defense, damage_rules, launched, deliver_redirected, queue_damage, events, killed); !result) return result;
+        if (auto result = context_.commit_projectile_flight(flight_index, flights, staged, projectiles, combat_events, deliver_blast, arrivals, craft_defense, damage_rules, launched, deliver_redirected, queue_damage, events, killed); !result) return result;
     }
     projectiles.insert(projectiles.end(), launched.begin(), launched.end());
     return core::Result<void>::success();

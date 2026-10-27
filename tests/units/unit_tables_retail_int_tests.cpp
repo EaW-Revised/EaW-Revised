@@ -89,10 +89,12 @@ void boundary(const Case& test) {
         == static_cast<std::uint32_t>(test.expected.value_or(5)), "SKI-19: beam frames parse with the retail default");
     const auto lure = std::find_if(ship->abilities.begin(), ship->abilities.end(),
         [](const auto& row) { return row.type == "LURE"; });
-    const auto pulses = test.expected ? std::optional{static_cast<std::uint32_t>(*test.expected)} : std::nullopt;
-    expect(lure != ship->abilities.end() && lure->max_pulses == pulses, "SKI-21: lure count retains retail values or stays absent");
-    const auto animation = test.expected ? pulses : std::nullopt;
-    expect(ship->neutral_fog_animation_index == animation, "SKI-43: faction pair index has no 16-bit restriction");
+    const auto matches_expected = [&test](const std::optional<std::uint32_t>& actual) {
+        if (!test.expected) return !actual;
+        return actual && *actual == static_cast<std::uint32_t>(*test.expected);
+    };
+    expect(lure != ship->abilities.end() && matches_expected(lure->max_pulses), "SKI-21: lure count retains retail values or stays absent");
+    expect(matches_expected(ship->neutral_fog_animation_index), "SKI-43: faction pair index has no 16-bit restriction");
     expect(station->spawner && station->spawner->reserves.size() == (test.expected ? 2U : 1U),
         "SKI-34: malformed numeric count retains the pair; empty count skips the incomplete pair");
     if (station->spawner && test.expected && station->spawner->reserves.size() == 2)
@@ -132,8 +134,8 @@ void boundary(const Case& test) {
     if (!land.tables) return;
     const auto company = std::find_if(land.tables->land_companies.begin(), land.tables->land_companies.end(),
         [](const auto& row) { return row.id == "Test_Frigate"; });
-    const auto size = test.expected && *test.expected > 0 ? pulses : std::nullopt;
-    expect(company != land.tables->land_companies.end() && company->max_squad_size == size,
+    expect(company != land.tables->land_companies.end()
+        && (test.expected && *test.expected > 0 ? matches_expected(company->max_squad_size) : !company->max_squad_size),
         "SKI-36: land size truncates/saturates, with nonpositive grouping left to the land consumer");
 }
 void appearance_contexts() {

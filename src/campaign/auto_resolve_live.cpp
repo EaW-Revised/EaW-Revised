@@ -747,13 +747,13 @@ core::Result<void> install_live_conflict_adapters(GameSession& game, const vfs::
     AutoResolveTimeProvider time, std::shared_ptr<const StockSpaceEntry> space) {
     if (plan.mode() == CampaignSetupMode::multiplayer) {
         const auto* authored = data.constant("Battle_Pending_Timeout_Seconds");
-        const auto seconds = authored ? data::retail::leading_number(authored->text) : std::nullopt;
-        if (!seconds || seconds->value.raw() < 0)
-            return fail<void>("missing or invalid multiplayer battle vote timeout");
-        // WGM-47 / D9: convert authored seconds once to the agreed 30 Hz frontier.
-        const auto ticks = sim::math::multiply(seconds->value, Fixed::from_integer(gc::galactic_frames_per_second).value());
-        if (!ticks) return core::Result<void>::failure(ticks.error());
-        if (auto configured = game.configure_multiplayer_votes(static_cast<std::uint64_t>(ticks.value().trunc_to_integer())); !configured)
+        if (!authored) return fail<void>("missing multiplayer battle vote timeout");
+        // LSA-40: signed atoi seconds; a negative timeout is already elapsed.
+        const auto seconds = std::max<std::int64_t>(0, data::retail::integer_constant(authored->text));
+        // A timeout beyond the campaign's entire representable lifetime cannot expire.
+        const auto ticks = std::min<std::uint64_t>(static_cast<std::uint64_t>(seconds) * gc::galactic_frames_per_second,
+            gc::galactic_max_ticks - 1);
+        if (auto configured = game.configure_multiplayer_votes(ticks); !configured)
             return configured;
     }
     bind_story_identities(game, plan); // also rebuilt for fresh checkpoint owners

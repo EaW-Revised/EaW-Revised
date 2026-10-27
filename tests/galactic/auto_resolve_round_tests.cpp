@@ -90,6 +90,11 @@ void defaults() {
     const auto loaded = auto_resolve_round_rules(data);
     expect(loaded && loaded.value().winner_attrition == d("0.75") && loaded.value().display_seconds == d("0.01"), "authored constants win");
     data.constants[0].number.reset(); expect(!auto_resolve_round_rules(data), "malformed authored constant rejected");
+    data.constants = {{"AutoResolveDisplayTime", "-2.5", d("-2.5")},
+        {"Auto_Resolve_Tactical_Multiplier", "-1.5", d("-1.5")}};
+    const auto negative = auto_resolve_round_rules(data);
+    expect(negative && negative.value().display_seconds == d("-2.5")
+        && negative.value().tactical_multiplier == d("-1.5"), "LSA-38 negative float constants remain authored");
     auto tactical_rules = defaults; tactical_rules.tactical_multiplier = d("0.5");
     expect(auto_resolve_survival_budget(f(100), tactical_rules, false).value() == f(100)
         && auto_resolve_survival_budget(f(100), tactical_rules, true).value() == f(50),

@@ -397,7 +397,8 @@ core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
 }
 
 core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy,
-    std::vector<core::Diagnostic>* const notes) {
+    std::vector<core::Diagnostic>* const notes, core::LoadNoteBuffer* load_notes) {
+    (void)load_notes;
     using Result = core::Result<tactical::MotionTable>;
     const bool campaign = spawn_policy.mode == SpawnPolicy::Mode::campaign;
     for (const auto& owner : spawn_policy.owners)

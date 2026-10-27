@@ -293,7 +293,7 @@ std::vector<std::string> required_xml(const tactical::BattleDomain domain) {
     return paths;
 }
 
-std::vector<std::string> required_modules(const AiSetup& setup) {
+std::vector<std::string> required_modules(const AiSetup& setup, const bool include_object_roots) {
     std::vector<std::string> paths{
         "Data/Scripts/Library/PGCommands.lua",
         "Data/Scripts/Library/PGBaseDefinitions.lua",
@@ -319,8 +319,59 @@ std::vector<std::string> required_modules(const AiSetup& setup) {
     if (!objects.empty()) paths.push_back("Data/Scripts/Library/PGStateMachine.lua");
     // SOS-17: the stock Sundered Heart script also requires its hero-plan library.
     if (objects.contains("SUNDERED_HEART")) paths.push_back("Data/Scripts/GameObject/HeroPlanAttach.lua");
-    for (const auto& script : objects) paths.push_back("Data/Scripts/GameObject/" + script + ".lua");
+    if (include_object_roots)
+        for (const auto& script : objects) paths.push_back("Data/Scripts/GameObject/" + script + ".lua");
     return paths;
+}
+
+std::map<std::string, std::vector<std::string>> object_script_modules(const AiSetup& setup) {
+    std::map<std::string, std::vector<std::string>> roots;
+    for (const auto& type : setup.content.types) {
+        const auto script = upper(type.lua_script);
+        if (!admitted_object_script(script)) continue;
+        const auto path = "Data/Scripts/GameObject/" + script + ".lua";
+        // An invalid logical path remains a hard admission failure, not a missing attachment.
+        if (!authoritative::ModuleManifest::normalise(path)) continue;
+        roots[path].push_back(type.name.empty() ? "type " + std::to_string(type.type_id) : type.name);
+    }
+    for (auto& [path, types] : roots) {
+        static_cast<void>(path);
+        std::sort(types.begin(), types.end());
+        types.erase(std::unique(types.begin(), types.end()), types.end());
+    }
+    return roots;
+}
+
+std::vector<core::Diagnostic> object_script_load_notes(
+    const AiSetup& setup, const std::map<std::string, std::string>& modules) {
+    std::set<std::string> present;
+    for (const auto& [path, bytes] : modules) {
+        static_cast<void>(bytes);
+        if (const auto canonical = authoritative::ModuleManifest::normalise(path)) present.insert(*canonical);
+    }
+    std::vector<core::Diagnostic> notes;
+    std::set<std::string> strict_roots;
+    for (const auto& path : required_modules(setup, false)) {
+        if (const auto canonical = authoritative::ModuleManifest::normalise(path)) strict_roots.insert(*canonical);
+    }
+    for (const auto& [path, types] : object_script_modules(setup)) {
+        const auto canonical = authoritative::ModuleManifest::normalise(path);
+        if (present.contains(*canonical)) continue;
+        if (strict_roots.contains(*canonical)) continue;
+        core::Diagnostic note;
+        note.code = std::string(authoritative::codes::script_warning);
+        note.severity = core::Severity::warning;
+        note.logical_path = path;
+        note.message = "missing object Lua root; omitting only its attachment for unit types: ";
+        bool first = true;
+        for (const auto& type : types) {
+            if (!first) note.message += ", ";
+            first = false;
+            note.message += type;
+        }
+        notes.push_back(std::move(note));
+    }
+    return notes;
 }
 
 std::string freestore_module(const AiSetup& setup, const AiPlayer& player) {

@@ -494,6 +494,8 @@ core::Result<void> session_detail::Tick::commands() {
     auto& concentrate_batches = lanes.concentrate_batches;
     auto& concentrate_new_bodies = lanes.concentrate_new_bodies;
     auto& concentrate_command_key = lanes.concentrate_command_key;
+    auto concentrate_origin = impl_->setup.controllers ? CommandOrigin::engine : CommandOrigin::ordinary;
+    SeatId concentrate_seat{};
     auto& waypoint_legs = lanes.waypoint_legs;
     auto& autofire_commands = lanes.autofire_commands;
     auto& autofire_switched = lanes.autofire_switched;
@@ -515,6 +517,14 @@ core::Result<void> session_detail::Tick::commands() {
     };
 
     if (auto prepared = lanes.prepare_commands(); !prepared) return prepared;
+    // ADR-020: rare human gifts build this index lazily, including non-flying members.
+    // No allocation/traversal, retained state or rollback work on idle/disabled ticks.
+    struct GiftIndex {
+        std::size_t arrivals_indexed{};
+        std::map<EntityId, EntityId> members;
+        std::map<EntityId, std::size_t> arrivals;
+    };
+    std::optional<GiftIndex> gift_index;
     auto& diagnostics = commands_->diagnostics.value();
     auto& searches = commands_->searches;
     // WAB-36: one authored-order holder pass through ordinary command admission. Immutable
@@ -543,12 +553,15 @@ core::Result<void> session_detail::Tick::commands() {
         }
         PlayerCommand current;
         const bool waypoint_resume = (waypoint_legs && !waypoint_legs->empty());
+        const bool engine_command = waypoint_resume || (concentrate_batches.empty() && !autofire_commands.empty());
         if (waypoint_resume) {
             current = std::move(waypoint_legs->front());
             waypoint_legs->pop_front();
         } else if (!concentrate_batches.empty()) {
             current = std::move(concentrate_batches.front());
             concentrate_batches.pop_front();
+            current.origin = concentrate_origin;
+            current.issuing_seat = concentrate_seat;
         } else if (!autofire_commands.empty()) {
             current = std::move(autofire_commands.front());
             autofire_commands.pop_front();
@@ -556,6 +569,10 @@ core::Result<void> session_detail::Tick::commands() {
         } else {
             current = due_end->second;
             ++due_end;
+        }
+        if (engine_command && impl_->setup.controllers) {
+            current.origin = CommandOrigin::engine;
+            current.issuing_seat = {};
         }
         // WAB-36: a synthesised command and the batch it recruits announce no order events.
         const bool silent = waypoint_resume || synthesised_command(current.key);
@@ -580,11 +597,13 @@ core::Result<void> session_detail::Tick::commands() {
                 for (const auto id : selected_units) {
                     const auto found = staged.find(id);
                     if (found != staged.end() && found->second.state.owner == current.key.player_id
+                        && session_detail::controller_admission(impl_->setup, current, found->second.state) == RejectReason::none
                         && found->second.waypoints && found->second.waypoints->coordinator)
                         coordinators.insert(*found->second.waypoints->coordinator);
                 }
                 for (const auto& [id, member] : staged) {
-                    if (member.state.owner == current.key.player_id && member.waypoints
+                    if (member.state.owner == current.key.player_id
+                        && session_detail::controller_admission(impl_->setup, current, member.state) == RejectReason::none && member.waypoints
                         && member.waypoints->coordinator && coordinators.contains(*member.waypoints->coordinator)
                         && std::find(current.units.begin(), current.units.end(), id) == current.units.end())
                         current.units.push_back(id);
@@ -607,11 +626,70 @@ core::Result<void> session_detail::Tick::commands() {
             : std::holds_alternative<ReinforcePayload>(command.payload) ? "serial.commands.reinforce"
             : "serial.commands.other");
         concentrate_command_key = command.key;
+        concentrate_origin = command.origin;
+        concentrate_seat = command.issuing_seat;
         // A command other than a move may read or change what the queued searches read.
         if (!std::holds_alternative<MovePayload>(command.payload) && !pending.empty()) {
             if (auto failed = plan_pending()) return unit_failure(failed->first, failed->second);
         }
         const auto issuer = command.key.player_id;
+        if (const auto* control = std::get_if<BattleControlPayload>(&command.payload)) {
+            if (!controller_rollback_) controller_rollback_ = impl_->setup.controllers;
+            if (auto applied = detail::apply_battle_control_policy(impl_->setup, command); !applied) return applied;
+            // Departure is a rare command-boundary transaction, never an entity
+            // service pass. Count only mobile roots; attached craft follow them.
+            std::map<EntityId, EntityId> members;
+            const auto index_group = [&](const auto& group) {
+                for (const auto id : group.members) members.emplace(id, group.container);
+            };
+            for (const auto& group : impl_->squadrons) index_group(group);
+            for (const auto& group : staging_->arrived_squadrons.value()) index_group(group);
+            std::map<SeatId, std::size_t> counts;
+            const auto mode = control->policy.factions.front().mode;
+            for (const auto& row : control->policy.seats)
+                if (row.active && row.kind == (mode == FactionController::humans ? SeatKind::human : SeatKind::ai))
+                    counts.emplace(row.seat, 0);
+            if (counts.empty()) {
+                if (mode == FactionController::passive) continue; // unavailable provider: preserve current, now inactive identities
+                return core::Result<void>::failure(detail::diagnostic(
+                    diagnostic_codes::invalid_command, "departure has no configured fallback seat"));
+            }
+            std::vector<EntityId> roots;
+            for (const auto& [id, unit] : staged) {
+                if (unit.state.owner != issuer || unit.state.control != UnitControl::mobile || members.contains(id)) continue;
+                const auto present = counts.find(unit.state.controller_seat);
+                if (present != counts.end()) ++present->second;
+                else roots.push_back(id);
+            }
+            std::sort(roots.begin(), roots.end());
+            std::map<EntityId, SeatId> assigned;
+            for (const auto id : roots) {
+                const auto recipient = std::min_element(counts.begin(), counts.end(), [](const auto& a, const auto& b) {
+                    return a.second != b.second ? a.second < b.second : a.first < b.first;
+                });
+                assigned.emplace(id, recipient->first); ++recipient->second;
+            }
+            for (auto [id, unit] : staged) {
+                const auto member = members.find(id);
+                const auto found = assigned.find(member == members.end() ? id : member->second);
+                if (found == assigned.end() || unit.state.owner != issuer || unit.state.control != UnitControl::mobile) continue;
+                Event event{tick, EventKind::controller_changed, issuer, command.key.sequence, id, OrderKind::battle_control};
+                event.previous_controller = unit.state.controller_seat; event.controller = found->second;
+                unit.state.controller_seat = found->second; events.push_back(event);
+            }
+            continue;
+        }
+        if (impl_->setup.controllers && command.origin == CommandOrigin::seat) {
+            const auto& seats = impl_->setup.controllers->seats;
+            const auto seat = std::find_if(seats.begin(), seats.end(), [&](const auto& row) {
+                return row.seat == command.issuing_seat && row.player == issuer && row.active;
+            });
+            if (seat == seats.end()) {
+                events.push_back(Event{tick, EventKind::order_rejected, issuer, command.key.sequence,
+                    invalid_entity_id, order_kind(command.payload), RejectReason::unit_not_controlled});
+                continue;
+            }
+        }
         const bool departed = std::any_of(impl_->quits.begin(), impl_->quits.end(),
             [&](const PlayerQuit& quit) { return quit.player == issuer; });
         const bool quitting = std::holds_alternative<QuitPayload>(command.payload);
@@ -629,6 +707,85 @@ core::Result<void> session_detail::Tick::commands() {
             // WBF-48: notify in command order; deactivation/results processing is after end-frame.
             pending_quits_.push_back(PlayerQuit{issuer, tick});
             events.push_back(Event{tick, EventKind::player_quit, issuer, command.key.sequence});
+            continue;
+        }
+        if (const auto* gift = std::get_if<GiftPayload>(&command.payload)) {
+            // Admission and commit share the ordered staged world: a preceding gift changes
+            // the authority of the very next command, including another gift.
+            auto reason = RejectReason::none;
+            if (!impl_->setup.controllers || command.origin != CommandOrigin::seat)
+                reason = RejectReason::unit_not_controlled;
+            if (reason == RejectReason::none) {
+                const auto& seats = impl_->setup.controllers->seats;
+                const auto find_seat = [&](const SeatId id) {
+                    return std::lower_bound(seats.begin(), seats.end(), id,
+                        [](const auto& row, const auto value) { return row.seat < value; });
+                };
+                const auto sender = find_seat(command.issuing_seat);
+                const auto recipient = find_seat(gift->recipient);
+                if (sender == seats.end() || sender->seat != command.issuing_seat || !sender->active
+                    || sender->kind != SeatKind::human || sender->player != issuer)
+                    reason = RejectReason::unit_not_controlled;
+                else if (recipient == seats.end() || recipient->seat != gift->recipient || !recipient->active
+                    || recipient->kind != SeatKind::human || recipient->player != issuer
+                    || recipient->seat == sender->seat)
+                    reason = RejectReason::gift_recipient_invalid;
+            }
+            std::set<EntityId> transfers;
+            if (reason == RejectReason::none) {
+                if (!gift_index) {
+                    gift_index.emplace();
+                    for (const auto& group : impl_->squadrons)
+                        for (const auto member : group.members) gift_index->members[member] = group.container;
+                }
+                const auto& born = staging_->arrived_squadrons.value();
+                while (gift_index->arrivals_indexed < born.size()) {
+                    const auto index = gift_index->arrivals_indexed++;
+                    const auto& group = born[index];
+                    gift_index->arrivals[group.container] = index;
+                    for (const auto id : group.members) gift_index->members[id] = group.container;
+                }
+                std::set<EntityId> roots;
+                for (const auto id : command.units) {
+                    if (staged.find(id) == staged.end()) { reason = RejectReason::unit_not_live; break; }
+                    const auto membership = gift_index->members.find(id);
+                    const auto root = membership != gift_index->members.end() ? membership->second : id;
+                    if (!roots.insert(root).second) continue;
+                    transfers.insert(root);
+                    const auto arrival = gift_index->arrivals.find(root);
+                    const auto group = std::lower_bound(impl_->squadrons.begin(), impl_->squadrons.end(), root,
+                        [](const auto& row, const EntityId value) { return row.container < value; });
+                    const auto* members = arrival != gift_index->arrivals.end() ? &born[arrival->second].members
+                        : group != impl_->squadrons.end() && group->container == root ? &group->members : nullptr;
+                    if (members) for (const auto attached_id : *members)
+                        if (staged.find(attached_id) != staged.end()) transfers.insert(attached_id);
+                }
+                if (reason == RejectReason::none) for (const auto id : transfers) {
+                    const auto unit = staged.find(id);
+                    if (unit == staged.end()) { reason = RejectReason::unit_not_live; break; }
+                    if (unit->second.state.owner != issuer || unit->second.state.control != UnitControl::mobile
+                        || session_detail::controller_admission(impl_->setup, command, unit->second.state) != RejectReason::none) {
+                        reason = RejectReason::unit_not_controlled;
+                        break;
+                    }
+                }
+            }
+            if (reason != RejectReason::none) {
+                events.push_back(Event{tick, EventKind::order_rejected, issuer, command.key.sequence,
+                    invalid_entity_id, OrderKind::gift, reason});
+                diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                    command_context(command.key) + ": gift rejected (" + std::string(to_string(reason)) + ")",
+                    {}, core::Severity::warning));
+                continue;
+            }
+            for (const auto id : transfers) {
+                auto& state = staged.find(id)->second.state; // every lookup validated before any mutation
+                Event event{tick, EventKind::controller_changed, issuer, command.key.sequence, id, OrderKind::gift};
+                event.previous_controller = state.controller_seat;
+                event.controller = gift->recipient;
+                state.controller_seat = gift->recipient;
+                events.push_back(event);
+            }
             continue;
         }
         if (const auto* cinematic = std::get_if<RetreatCinematicPayload>(&command.payload)) {
@@ -715,10 +872,13 @@ core::Result<void> session_detail::Tick::commands() {
                     }
                 } else if (unit->second.state.owner != issuer) {
                     reason = RejectReason::unit_not_owned;
+                } else if (const auto control = session_detail::controller_admission(impl_->setup, command, unit->second.state);
+                    control != RejectReason::none) {
+                    reason = control;
                 } else if (arrivals.contains(unit_id)) {
                     reason = RejectReason::arriving; // #530 PU-39
                 } else if (const auto* ability = std::get_if<AbilityPayload>(&command.payload)) {
-                    auto applied = apply_ability(unit_id, *ability);
+                    auto applied = handlers.apply_ability(unit_id, *ability, command.issuing_seat);
                     if (!applied) {
                         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::worker_failure,
                             command_context(command.key) + " unit " + std::to_string(unit_id) + ": "

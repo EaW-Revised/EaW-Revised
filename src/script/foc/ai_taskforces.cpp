@@ -451,7 +451,8 @@ void Engine::service_point_defence() {
     const WorldView& view = *host_->view;
     for (const ViewUnit& unit : view.units) {
         const AiType* type = host_->type(unit.type);
-        if (type == nullptr || !type->point_defence_script || static_cast<std::uint64_t>(frame_) % 30 != unit.id % 30) continue;
+        if (type == nullptr || !type->point_defence_script || host_->object_script_omitted(*type)
+            || static_cast<std::uint64_t>(frame_) % 30 != unit.id % 30) continue;
         if (player_ai(unit.owner) == nullptr) continue;
         const auto ability = detail::ability_view(*host_, unit, tactical::AbilityKind::laser_defense);
         if (!ability.has || !ability.ready || ability.active) continue;
@@ -539,7 +540,7 @@ void Engine::service_corrupt_systems() {
     const WorldView& view = *host_->view;
     for (const ViewUnit& source : view.units) {
         const AiType* type = host_->type(source.type);
-        if (type == nullptr || !type->corrupt_systems_script) continue;
+        if (type == nullptr || !type->corrupt_systems_script || host_->object_script_omitted(*type)) continue;
         auto* player = player_ai(source.owner);
         if (player == nullptr || host_->neutral(source.owner)
             || static_cast<std::uint64_t>(frame_) % 30 != source.id % 30) continue;

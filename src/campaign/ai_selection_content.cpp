@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <charconv>
+#include <functional>
 #include <limits>
+#include <set>
 #include <stdexcept>
 
 namespace eawr::campaign {
@@ -156,13 +158,46 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             }
             return at->second;
         };
-        const auto bits = [&](std::string_view names) {
+        const auto bits = [&](std::string_view names, std::string_view where, std::uint64_t prior) {
             std::uint64_t result{};
+            bool invalid = false;
             for (const auto& name : ai::split_names(names, ", |\t\r\n")) {
                 const auto at = out->ai.categories.find(ai::upper_case(name));
-                if (at == out->ai.categories.end()) throw std::runtime_error("unqualified selection category " + name);
+                if (at == out->ai.categories.end()) {
+                    out->unresolved_names.push_back(std::string(where) + ": " + name);
+                    invalid = true;
+                    continue;
+                }
                 result |= at->second;
             }
+            return invalid ? prior : result;
+        };
+        const auto field_bits = [&](const data::EffectiveObject& object, std::string_view tag, std::uint64_t initial) {
+            auto result = initial;
+            for (auto layer = object.chain.rbegin(); layer != object.chain.rend(); ++layer) {
+                const auto* definition = catalog.find(*layer, data::Category::game_object);
+                if (!definition) throw std::runtime_error("selection category authoring layer unavailable");
+                for (const auto& node : definition->root.children) {
+                    if (ai::upper_case(node.name) == ai::upper_case(tag) && !data::retail::is_placeholder(node.raw_text))
+                        result = bits(node.raw_text, object.object_id + " " + std::string(tag), result);
+                }
+            }
+            return result;
+        };
+        std::set<std::string> category_stack;
+        std::function<std::uint64_t(const units::GalacticType&)> type_categories;
+        type_categories = [&](const units::GalacticType& type) {
+            const auto name = ai::upper_case(type.name);
+            if (!category_stack.insert(name).second) return std::uint64_t{};
+            const auto object = required(catalog.resolve(type.name, data::Category::game_object));
+            auto result = field_bits(object, "CategoryMask", 0);
+            for (const auto* members : {&type.company_units, &type.squadron_units}) {
+                if (members->empty()) continue;
+                result = 0;
+                for (const auto& member : *members)
+                    if (const auto* found = all_types.find(member)) result |= type_categories(*found);
+            }
+            category_stack.erase(name);
             return result;
         };
         for (const auto& binding : bindings) {
@@ -179,8 +214,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             row.value.special_weapon = row.special_weapon;
             // WGA-183: the space-structure metric has its own mask; omitted
             // authoring keeps Capital rather than the ordinary CategoryMask.
-            const auto garrison = text(object, "Garrison_Category");
-            row.garrison_categories = bits(garrison.empty() ? "Capital" : garrison);
+            row.garrison_categories = field_bits(object, "Garrison_Category", bits("Capital", source.name + " Garrison_Category", 0));
             row.value.hero = row.named_hero || flag(object, "Is_Generic_Hero") || row.special_weapon;
             row.value.structure = behaves(source, "DUMMY_GROUND_STRUCTURE") || behaves(source, "DUMMY_ORBITAL_STRUCTURE");
             row.value.channel = units::built_on_ground(source) ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
@@ -197,7 +231,12 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                     if (!text(required(catalog.resolve(found->name, data::Category::game_object)), "Lua_Script").empty()) row.member_script = true;
                 }
                 if (!flag(original, "Create_Team")) row.survival_type = ai::upper_case(member->name);
-                if (!source.company_transport.empty()) row.hyperspace_speed = script::numeric::from_fixed(required(units::resolve_initial_galactic_type(types, source.company_transport)).hyperspace_speed.value());
+                if (!source.company_transport.empty()) {
+                    if (!types.find(source.company_transport))
+                        out->unresolved_names.push_back(source.name + " Company_Transport_Unit: " + source.company_transport);
+                    else
+                        row.hyperspace_speed = script::numeric::from_fixed(required(units::resolve_initial_galactic_type(types, source.company_transport)).hyperspace_speed.value());
+                }
             }
             // WGEP-92/69, WGS-91 and WGA-289: only genuine constructor
             // omissions become zero. Malformed effective authoring refuses.
@@ -219,7 +258,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             const auto* tactical_type = vocabulary.find(source.name);
             if (!tactical_type) throw std::runtime_error("selection type lacks tactical behavior flags");
             type.targeting = tactical_type->targeting; type.unit_ai = tactical_type->unit_ai;
-            for (const auto& category : source.category_mask) type.category_bits |= bits(category);
+            type.category_bits = type_categories(source);
             type.combat_power = ai::to_single(script::numeric::from_fixed(source.ai_combat_power.value_or(sim::math::Fixed{})));
             type.tech_level = row.value.tech; type.base_level = static_cast<std::uint32_t>(std::max<std::int64_t>(source.base_level.value_or(0), 0));
             type.star_base = row.starbase; type.craft = row.craft; type.squadron = !source.squadron_units.empty(); type.space_special_weapon = row.special_weapon;
@@ -248,7 +287,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         for (const auto& location : plan.locations()) if (location.planet) {
             const auto object = required(catalog.resolve(location.original_type, data::Category::game_object));
             ai::GalacticSelectionContentPlanet row; row.terrain = text(object, "Terrain");
-            row.restricted_categories = bits(text(object, "Planet_Restricted_Unit_Categories"));
+            row.restricted_categories = field_bits(object, "Planet_Restricted_Unit_Categories", 0);
             for (const auto& name : ai::split_names(text(object, "Planet_Restricted_Unit_Types"), ", |\t\r\n"))
                 if (const auto id = identity(name, location.original_type + " Planet_Restricted_Unit_Types")) row.restricted_types.push_back(*id);
             // WGA-272/279: copied base list, then each ordered occurrence

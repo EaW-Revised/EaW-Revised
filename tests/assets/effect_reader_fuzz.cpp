@@ -13,6 +13,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, const std::size_
         std::as_bytes(std::span(data, size)), {}, eawr::assets::EffectReadLimits{2U * 1024U * 1024U});
     if (!result && (result.error().code.empty() || !result.error().column))
         std::abort(); // A fuzz contract violation must terminate the C ABI entry.
+    const auto program = eawr::assets::read_shader_program(
+        std::as_bytes(std::span(data, size)), {}, eawr::assets::EffectReadLimits{2U * 1024U * 1024U});
+    if (!program && (program.error().code.empty() || !program.error().column)) std::abort();
     return 0;
 }
 

@@ -8,8 +8,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from native_cpp_fixture import compile_fixture, select_toolchain
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from viewer_mode_sources import source_text  # noqa: E402
 
 
 def extract_function(source, signature):
@@ -143,6 +141,55 @@ int main() {
 '''
 
 class PreparedCampaignViewContracts(unittest.TestCase):
+    def test_missing_preview_colours_keep_visible_models_and_report_a_note(self):
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest('requires C++ compiler')
+        source = (ROOT / 'apps/viewer/src/live_session_prepare.cpp').read_text(encoding='utf-8')
+        begin = source.index('    auto preview_colours = ui::reinforcement_colours(filesystem);')
+        block = source[begin:source.index('    deployment_facing_.reset();', begin)]
+        harness = r'''
+#include <array>
+#include <string>
+#include <vector>
+std::vector<std::string> notes;
+namespace vfs { struct Vfs { bool colours; }; }
+namespace core { std::string format_diagnostic(const std::string& error) { return error; } }
+namespace godot {
+using String = std::string;
+struct UtilityFunctions { static void printerr(const String& text) { notes.push_back(text); } };
+}
+namespace ui {
+using ReinforcementColours = std::array<std::array<float, 3>, 2>;
+const ReinforcementColours authored{{{0.1F, 0.6F, 0.2F}, {0.8F, 0.3F, 0.4F}}};
+struct Loaded { bool found; explicit operator bool() const { return found; }
+ ReinforcementColours value() const { return authored; }
+ std::string error() const { return "missing preview constants"; }
+};
+Loaded reinforcement_colours(const vfs::Vfs& files) { return {files.colours}; }
+}
+struct View {
+ ui::ReinforcementColours preview_colours_{};
+ bool prepare(const vfs::Vfs& filesystem) {
+__COLOURS__
+  return true;
+ }
+};
+int main() {
+ View view;
+ if (!view.prepare({true}) || view.preview_colours_ != ui::authored || !notes.empty()) return 1;
+ if (!view.prepare({false}) || notes.size() != 1 || notes.front().find("missing preview constants") == std::string::npos) return 2;
+ for (const auto& colour : view.preview_colours_) for (const auto scale : colour) if (scale != 1.0F) return 3;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='eawr-preview-colours-') as temp:
+            directory = Path(temp)
+            cpp, exe = directory / 'colours.cpp', directory / ('colours.exe' if os.name == 'nt' else 'colours')
+            cpp.write_text(harness.replace('__COLOURS__', block), encoding='utf-8')
+            compile_fixture(toolchain, cpp, exe)
+            ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
+
     def test_prepared_campaign_and_standalone_capacity(self):
         toolchain = select_toolchain()
         if toolchain is None:

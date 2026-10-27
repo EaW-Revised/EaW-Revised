@@ -120,6 +120,7 @@ struct RespawnState {
     PlayerId owner{};
     math::Vec3 position{};
     math::Quat rotation{};
+    SeatId controller_seat{}; // ADR-020: automatic replacement retains its last controller.
     friend bool operator==(const RespawnState&, const RespawnState&) = default;
 };
 // WHZ-52: death clones never enter the ordinary destruction schedule.

@@ -369,7 +369,8 @@ void loader(const std::filesystem::path& root) {
   <Event Name="start_it"><Event_Type>STORY_TECH_LEVEL</Event_Type><Event_Param1>2</Event_Param1></Event>
 </Story>)");
     write(data / "xml" / "sub_two.xml", "<Story><Event Name=\"Only\"><Event_Type>STORY_TRIGGER</Event_Type></Event></Story>");
-    write(data / "xml" / "sub_three.xml", "<Story><Event Name=\"Third\"><Event_Type>STORY_TRIGGER</Event_Type></Event></Story>");
+    write(data / "xml" / "sub_three.xml", "<Story><Event Name=\"Third\"><Event_Type>STORY_ELAPSED</Event_Type>"
+        "<Event_Param1>0</Event_Param1><Story_Dialog>Incoming_Dialog</Story_Dialog><Story_Incoming>incoming_only</Story_Incoming></Event></Story>");
     eawr::vfs::MountSpec mount; mount.layer_id = "story-test"; mount.data_root = data;
     const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
     cpn::StoryPlots plots;
@@ -392,8 +393,15 @@ void loader(const std::filesystem::path& root) {
         "WST-05 token lists split on spaces, commas and line breaks");
     expect(give.prereqs == (std::vector<std::vector<std::string>>{{"START_IT"}, {"A", "B"}}), "WST-06 each Prereq is one group of upper-cased names");
     expect(give.branch == "BR" && give.perpetual && !give.multiplayer && give.dialog == "Dialog_X" && give.chapter == 3
-        && give.tag == "new_tag" && !give.popup && give.sound && give.inactive_delay == sec(12) && give.timeout == Fixed{},
+        && give.tag == "new_tag" && give.authored_tag_present == true && !give.popup && give.sound && give.inactive_delay == sec(12) && give.timeout == Fixed{},
         "WST-05/70 flags, dialog fields, Story_Incoming over Story_Tag, TBD ignored, defaults");
+    const auto& incoming = plots.subplots[2].events.front();
+    expect(incoming.tag == "incoming_only" && incoming.authored_tag_present == false, "WST-58/70 incoming is separate from authored tag presence");
+    auto incoming_engine = engine({sub("incoming.xml", 7, {incoming})});
+    take(incoming_engine.service(sec(0), false));
+    const auto incoming_rows = incoming_engine.take_triggered();
+    expect(incoming_rows.size() == 1 && incoming_rows.front().tag == "incoming_only" && incoming_rows.front().remove_after_viewed,
+        "WST-58 the loader and engine retain removal-after-viewing for incoming-only dialogs");
     expect(std::any_of(plots.notes.begin(), plots.notes.end(), [](const auto& n) { return n.find("OTHER") != std::string::npos; })
         && plots.notes.size() >= 5, "dropped and skipped entries are reported");
 
@@ -647,6 +655,76 @@ void session() {
     }
 }
 
+// #2044 / WST-58: the story dialog of a triggered event becomes a holocron goal of the plot's owner, once. The summary
+// request is the unhashed presentation output; the goal rows ride the checkpoint but not the state digest.
+std::vector<st::SubPlotDef> holocron_plots() {
+    auto intro = make("INTRO", "STORY_ELAPSED", {"1"});
+    intro.dialog = "Dialog_Intro"; intro.chapter = 4; intro.tag = "Intro_Tag"; intro.variable = "Var";
+    auto hint = make("HINT", "STORY_ELAPSED", {"2"}); // no tag, quiet: the button-flash path
+    hint.dialog = "Dialog_Hint"; hint.chapter = 1; hint.popup = false;
+    hint.tag = "Incoming_Hint"; hint.authored_tag_present = false; // incoming override, no authored Story_Tag
+    return {sub("H.xml", 1, {intro, hint})};
+}
+void holocron_goals() {
+    const auto setup = session_setup();
+    const auto ids = cp::game_identities(setup);
+    const auto install_holocron = [](eawr::campaign::GameSession& game) { return game.install_story({}, {{1, "h.xml"}}, holocron_plots()); };
+    std::string baseline;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(eawr::campaign::GameSession::create(setup));
+        take(install_holocron(game));
+        std::string signature;
+        std::size_t opens{}, intro_rows{}, flashes{};
+        std::uint64_t opened_at{};
+        for (int i = 0; i < 100; ++i) {
+            const auto tick = take(game.step(executor));
+            for (const auto& event : tick.story_presentation) {
+                expect(event.owner == 1, "WST-58 the goal belongs to the plot's owner");
+                if (const auto* goal = std::get_if<st::GoalChanged>(&event.payload)) {
+                    signature += "G:" + goal->tag + ";";
+                    if (goal->tag == "Intro_Tag") ++intro_rows;
+                } else if (const auto* summary = std::get_if<st::SummaryRequest>(&event.payload)) {
+                    signature += "S:" + std::to_string(static_cast<int>(summary->action)) + ":" + summary->tag + ":" + std::to_string(summary->chapter) + ";";
+                    if (summary->action == st::SummaryAction::open) { ++opens; opened_at = tick.completed_tick; }
+                    if (summary->action == st::SummaryAction::refresh_or_flash) ++flashes;
+                }
+            }
+        }
+        expect(opens == 1 && intro_rows == 1, "WST-58 the intro goal appears once and opens its summary once (popup is the default)");
+        expect(flashes == 1, "WST-70 a quiet plot defers refresh-or-flash to the actual local summary state");
+        // WST-70 advisor/history and mission-sound admission is an unwired goals_policy_seam, not an absence contract.
+        expect(opened_at > 25 && opened_at < 40, "the one-second elapsed event opens the summary after about thirty galactic frames");
+        const auto* goals = game.story_goals(1);
+        expect(goals && goals->goals.size() == 2 && goals->goals[1].tag == "Intro_Tag" && goals->goals[1].chapter == 4
+            && !goals->goals[1].completed && !goals->goals[1].remove_after_viewed,
+            "WST-58 the tagged intro goal is kept");
+        expect(goals && goals->goals.size() == 2 && goals->goals[0].tag == "Incoming_Hint" && goals->goals[0].remove_after_viewed,
+            "WST-58 the new incoming-only goal is first and goes once viewed");
+        expect(!game.story_goals(2), "the other owner has no goals");
+        auto copy = take(eawr::campaign::GameSession::create(setup));
+        take(install_holocron(copy));
+        for (int i = 0; i < 100; ++i) static_cast<void>(take(copy.step(executor)));
+        expect(copy.state_sha256() == game.state_sha256() && copy.story_goals(1) && copy.story_goals(1)->goals == goals->goals,
+            "the same plots and ticks give the same digest and goals");
+
+        // WST-60..62 through the game checkpoint: the goals ride the save and a load shows nothing again.
+        cp::GameLoadOptions options;
+        options.configure_session = [&](eawr::campaign::GameSession& fresh) { return install_holocron(fresh); };
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto restored = take(cp::load_game_checkpoint(saved, ids, options, executor));
+        const auto* back = restored.session.story_goals(1);
+        expect(back && goals && back->goals == goals->goals && back->objectives_visible == goals->objectives_visible,
+            "the goals are restored with the checkpoint");
+        expect(take(cp::save_game_checkpoint(restored.session, ids)) == saved, "the restored session saves the same bytes");
+        std::size_t again{};
+        for (int i = 0; i < 40; ++i) again += take(restored.session.step(executor)).story_presentation.size();
+        expect(again == 0, "WST-58 a loaded game does not show the intro again");
+        if (workers == 1) baseline = signature;
+        else expect(baseline == signature, "1/2/4/8 workers publish the same presentation requests in the same order");
+    }
+}
+
 // #683 part 2: the apply loop of the session. Rewards run once per step after the service, in trigger order; a reward
 // that changes the tech level triggers a further event that runs in the same step; refusals are published once.
 void session_rewards() {
@@ -705,7 +783,7 @@ int case_galactic_story_engine_tests(int argc, char** argv) {
         land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); construction_refusals(); save_and_restore();
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
-        session(); session_rewards();
+        session(); holocron_goals(); session_rewards();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

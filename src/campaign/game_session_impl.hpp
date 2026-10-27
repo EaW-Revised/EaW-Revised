@@ -64,6 +64,12 @@ public:
     // assigned-technology notice, serviced once per galaxy step (GFS-15).
     std::optional<galactic::story::Engine> story_engine;
     std::vector<galactic::story::Triggered> story_triggers; // current publication only
+    // WST-58: the holocron goals per plot owner. Checkpointed after the plot state but outside the state digest on
+    // purpose: a goal row exists only because a digested plot event triggered once, so it carries no state a peer
+    // could disagree on. The presentation vector is the current publication only.
+    std::map<galactic::story::Player, galactic::story::Goals> story_goals;
+    std::vector<galactic::story::PresentationEvent> story_presentation;
+    void apply_story_dialog(const galactic::story::Triggered& record);
     galactic::GalacticSession::TechnologyNoticeHandler technology_handler; // caller's, run after the story saw the notice
     std::vector<std::string> story_notes; // published once as diagnostics of the next step
     std::vector<std::string> entry_notes; // passengers an entry left out; same publication, never saved or hashed
@@ -113,6 +119,7 @@ public:
         // Observation only: never enters deterministic state or recording.
         std::shared_ptr<const void> lifetime{std::make_shared<const int>(0)};
         bool owns_pause{};
+        std::vector<PendingBattleInput> controller_inputs;
         std::string context_hash() const;
     };
     struct Layer {
@@ -177,7 +184,7 @@ public:
     bool human_side(const galactic::PlayerId owner) const;
     tactical::PlayerId player(const galactic::SeatId id) const;
     tactical::CampaignReserveAdmission reserve_admission(const tactical::PlayerId owner) const;
-    core::Result<void> refresh_battle_seats();
+    core::Result<void> refresh_battle_seats(bool initial_policy = true);
     bool role_pending() const;
     std::string queued_context(std::string digest) const;
     std::string child_context_hash() const;

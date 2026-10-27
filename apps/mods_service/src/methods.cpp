@@ -1,6 +1,7 @@
 #include "methods.hpp"
 #include "model_methods.hpp"
 #include "loadcheck.hpp"
+#include "file_methods.hpp"
 
 #include "eawr/mods/steam/text_formats.hpp"
 
@@ -79,11 +80,13 @@ Reply method_shutdown(Service& service, const JsonValue&) {
 constexpr std::array kMethods{
     MethodEntry{"chain.check", &method_chain_check, false},
     MethodEntry{"chain.resolve", &method_chain_resolve, false},
+    MethodEntry{"files.page", &method_files_page, false},
     MethodEntry{"game.find", &method_game_find, false},
     MethodEntry{"hello", &method_hello, true},
     MethodEntry{"loadcheck.cancel", &method_loadcheck_cancel, false},
     MethodEntry{"loadcheck.result", &method_loadcheck_result, false},
     MethodEntry{"loadcheck.start", &method_loadcheck_start, false},
+    MethodEntry{"mods.changes", &method_mods_changes, false},
     MethodEntry{"mods.discover", &method_mods_discover, false},
     MethodEntry{"profile.delete", &method_profile_delete, false},
     MethodEntry{"profile.list", &method_profile_list, false},

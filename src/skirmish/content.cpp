@@ -15,21 +15,25 @@ core::Result<SessionContent> session_content(
     std::vector<core::Diagnostic>* const skipped) {
     using ContentResult = core::Result<SessionContent>;
     SessionContent content;
-    content.sensors = sensor_table(tables);
-    auto durability = units::durability_table(tables, skipped);
+    core::LoadNoteBuffer load_notes;
+    content.sensors = sensor_table(tables, &load_notes);
+    auto durability = units::durability_table(tables, skipped, &load_notes);
     if (!durability) return ContentResult::failure(durability.error());
     content.durability = std::move(durability).value();
-    auto motion = units::motion_table(tables, spawn_policy, skipped);
+    auto motion = units::motion_table(tables, spawn_policy, skipped, &load_notes);
     if (!motion) return ContentResult::failure(motion.error());
     content.motion = std::move(motion).value();
-    auto combat = units::combat_table(tables, errors, skipped);
+    auto combat = units::combat_table(tables, errors, skipped, &load_notes);
     if (!combat) return ContentResult::failure(combat.error());
     content.combat = std::move(combat).value();
     auto abilities = units::ability_table(tables, humans,
         [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); },
-        true, errors, skipped);
+        true, errors, skipped, &load_notes);
     if (!abilities) return ContentResult::failure(abilities.error());
     content.abilities = std::move(abilities).value();
+    core::LoadNoteCollector collected;
+    collected.merge(load_notes);
+    content.load_notes = collected.snapshot();
     return ContentResult::success(std::move(content));
 }
 
@@ -74,6 +78,31 @@ std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables) {
     (void)units::combat_table(tables, units::ContentErrors::skip_object, &skipped);
     (void)units::ability_table(tables, {}, nullptr, true, units::ContentErrors::skip_object, &skipped);
     return skipped_type_ids(skipped);
+}
+
+std::string content_load_summary(const std::span<const core::Diagnostic> diagnostics) {
+    const auto rejected = skipped_type_ids(diagnostics);
+    std::vector<std::string> warned;
+    std::size_t other_warnings = 0;
+    for (const auto& diagnostic : diagnostics) {
+        if (diagnostic.severity != core::Severity::warning) continue;
+        std::string name;
+        for (const std::string_view prefix : {"unit '", "unit type '"}) {
+            const std::string_view message = diagnostic.message;
+            if (!message.starts_with(prefix)) continue;
+            const auto end = message.find('\'', prefix.size());
+            if (end != std::string_view::npos) name = message.substr(prefix.size(), end - prefix.size());
+        }
+        if (name.empty()) { ++other_warnings; continue; }
+        const auto same = [&](const auto& id) { return detail::iequals(id, name); };
+        if (std::none_of(rejected.begin(), rejected.end(), same)
+            && std::none_of(warned.begin(), warned.end(), same)) warned.push_back(std::move(name));
+    }
+    std::string summary = std::to_string(rejected.size()) + (rejected.size() == 1 ? " unit type skipped, " : " unit types skipped, ")
+        + std::to_string(warned.size()) + (warned.size() == 1 ? " unit with content warnings" : " units with content warnings");
+    if (other_warnings != 0) summary += ", " + std::to_string(other_warnings)
+        + (other_warnings == 1 ? " other content warning" : " other content warnings");
+    return summary;
 }
 
 core::Result<void> refuse_skipped_starts(const SkirmishStart& start, const std::span<const core::Diagnostic> skipped) {

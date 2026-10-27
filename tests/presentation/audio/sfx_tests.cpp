@@ -193,6 +193,8 @@ struct LifecycleRig final {
     std::vector<audio::EventQueue::Sample> starts;
     std::vector<audio::EventQueue::Chain> chains;
     bool missing{};
+    bool assets_ready{true};
+    std::vector<audio::EventQueue::Sample> ready_checks;
     std::uint64_t stops{};
     audio::EventQueue::Backend backend() {
         return {
@@ -210,7 +212,8 @@ struct LifecycleRig final {
             },
             [this](const std::size_t voice) { return playing[voice]; },
             [this](const std::size_t voice) { playing[voice] = false; voices.finished(voice); ++stops; },
-            [this](const std::size_t voice) { voices.set_fading(voice); }
+            [this](const std::size_t voice) { voices.set_fading(voice); },
+            [this](const audio::EventQueue::Sample& cue) { ready_checks.push_back(cue); return assets_ready; }
         };
     }
     void step(const double ms = 0.0, const bool paused = false) {
@@ -220,6 +223,45 @@ struct LifecycleRig final {
     void pump(const int count) { for (int i = 0; i < count; ++i) step(); }
     void finish() { playing.fill(false); }
 };
+
+void deferred_sample_readiness() {
+    LifecycleRig rig;
+    auto cue = event("DeferredVariant", false, 1);
+    cue.samples = {"first", "second", "third"};
+    cue.min_volume = 30; cue.max_volume = 90;
+    cue.min_pitch = 80; cue.max_pitch = 120;
+    cue.min_pan = 10; cue.max_pan = 80;
+    rig.assets_ready = false;
+    const auto accepted = rig.queue.admit({{&cue, std::nullopt}}, rig.random);
+    rig.step(); // initialize playback values
+    rig.step(); // choose one sample and defer before allocation
+    const auto selected = rig.ready_checks.front().values;
+    auto expected_random = rig.random;
+    rig.pump(30);
+    auto after_wait = rig.random;
+    expect(expected_random.between(0, 1000000) == after_wait.between(0, 1000000),
+           "deferred readiness never consumes another random draw");
+    expect(rig.starts.empty() && rig.voices.playing_count() == 0 && accepted.handle
+           && rig.queue.active(*accepted.handle), "asset wait retains admission without allocating a voice");
+    for (const auto& check : rig.ready_checks)
+        expect(check.values.sample == selected.sample && check.values.volume == selected.volume
+               && check.values.pan == selected.pan && check.values.pitch == selected.pitch,
+               "selected sample and playback values survive repeated deferred services");
+    rig.assets_ready = true;
+    rig.step();
+    expect(rig.starts.size() == 1 && rig.starts.front().values.sample == selected.sample,
+           "ready sample starts once with its original variant");
+
+    LifecycleRig cancelled;
+    cancelled.assets_ready = false;
+    const auto waiting = cancelled.queue.admit({{&cue, std::nullopt}}, cancelled.random);
+    cancelled.pump(4);
+    if (waiting.handle) cancelled.queue.stop(*waiting.handle, cancelled.backend());
+    cancelled.assets_ready = true;
+    cancelled.pump(8);
+    expect(cancelled.starts.empty() && (!waiting.handle || !cancelled.queue.active(*waiting.handle)),
+           "cancellation while waiting cannot resurrect a late cue");
+}
 
 void event_lifecycle() {
     for (const bool spatial : {false, true}) {
@@ -1126,12 +1168,17 @@ void announcements() {
     expect(queue.push(&one, "first") && queue.push(&one, "duplicate") && queue.push(&two, "last"),
            "FIFO retains duplicates without priority or cooldown");
     expect(!queue.push(&two, "overflow") && queue.size() == 3, "bounded storage reports overflow");
+    const auto has_one = [&] { return queue.contains([](int value) { return value == 1; }); };
+    expect(has_one(), "speech-presence observer includes queued duplicate identities");
     expect(queue.front()->event == &one && queue.front()->reason == "first", "first speech at front");
     queue.pop();
     expect(queue.front()->reason == "duplicate", "completion/failure removes exactly one front");
+    expect(has_one(), "removing the front retains a duplicate movie speech identity");
     expect(queue.push(&two, "wrapped"), "queue reuses released storage");
     queue.pop();
     expect(queue.front()->reason == "last", "wrapped insertion preserves FIFO");
+    expect(!has_one() && queue.contains([](int value) { return value == 2; }),
+        "presence observer respects removal and ring-buffer wrap");
     queue.pop(); queue.pop(); queue.pop();
     expect(!queue.front() && !queue.push(nullptr, "missing"), "empty and missing event are safe");
 
@@ -1239,6 +1286,7 @@ int main() {
     health_warnings();
     hardpoint_loss();
     event_lifecycle();
+    deferred_sample_readiness();
     stolen_event_completion();
     wave_files();
     sample_paths();

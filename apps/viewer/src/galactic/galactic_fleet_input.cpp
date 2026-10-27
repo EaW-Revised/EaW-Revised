@@ -378,6 +378,9 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     for (const auto& [planet, slot] : destruction_hud.raid_slots)
         if (slot.button && slot.button->is_visible_in_tree() && slot.button->get_global_rect().has_point(point))
             return drop_raid(id, planet, submit);
+    for (const auto& [planet, slot] : destruction_hud.ability_slots)
+        if (slot.button && slot.button->is_visible_in_tree() && slot.button->get_global_rect().has_point(point))
+            return drop_hero_ability(id, submit, planet);
     // WGCH-154: the first galaxy special slot consumes its own release before
     // ordinary fleet movement. A rejection cannot fall through into the world.
     if (destruction_hud.slot && destruction_hud.slot->is_visible_in_tree()

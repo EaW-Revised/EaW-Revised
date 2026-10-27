@@ -2,6 +2,7 @@
 
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/sim/tactical/types.hpp"
+#include "eawr/sim/tactical/snapshot.hpp"
 
 #include <array>
 #include <cstddef>
@@ -21,6 +22,17 @@
 // Geometry is in the source basis (+Z up, the battle plane is Z = 0) and screen positions are
 // viewport pixels with +Y down, as the host's pointer reports them.
 namespace eawr::presentation::ui {
+
+// ADR-020: presentation authority is independent of faction colour. With the
+// opt-in policy absent, callers keep their existing ownership/visibility gates.
+[[nodiscard]] bool can_control(sim::SeatId local, const sim::tactical::TacticalInstance& instance,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy, bool shared_authorized = false) noexcept;
+[[nodiscard]] std::vector<sim::SeatId> gift_recipients(sim::SeatId local,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy);
+// Inputs are command roots, including selected offscreen roots; instances are ID sorted.
+[[nodiscard]] std::vector<std::vector<sim::EntityId>> gift_chunks(sim::SeatId local,
+    std::span<const sim::EntityId> selected, std::span<const sim::tactical::TacticalInstance> instances,
+    const std::optional<sim::tactical::BattleControllerPolicy>& policy);
 
 // GameConstants.xml (FoC): MinimumDragSelectDistance and MinimumDragDistance, in cursor pixels. A
 // left drag whose larger side exceeds the select distance box-selects on release; anything smaller
@@ -87,6 +99,7 @@ struct BattleUnit {
     std::optional<std::array<float, 2>> screen{};
     bool neutral{}; // WSU-63: no selection or combat overlays for neutral scenery
     bool mouse_sensitive{true}; // WSU-13: admission before testing the pick geometry
+    bool controlled{true}; // ADR-020: separate from faction ownership and colour.
 };
 
 struct ScreenRect {
@@ -208,6 +221,8 @@ public:
     // WNO-23/42: only the previous owner's memberships leave on a real transfer.
     void owner_changed(sim::EntityId entity, sim::tactical::PlayerId previous,
                        sim::tactical::PlayerId current, sim::tactical::PlayerId observer);
+    void controller_changed(sim::EntityId entity, sim::SeatId previous,
+                            sim::SeatId current, sim::SeatId observer);
 
     // Control groups. Ctrl+n: the selection becomes group n. Alt+n: the selection joins group n,
     // which is then selected. A unit belongs to one group at most.

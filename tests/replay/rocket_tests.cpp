@@ -192,6 +192,99 @@ void unsupported_and_encoding() {
     expect(before != after, "RFL-01: retained aim height participates in projectile hash");
 }
 
+void oversized_flight_allowance() {
+    const auto parsed = Fixed::from_decimal("549755813887.999999940395355224609375");
+    expect(parsed && parsed.value().raw() == std::numeric_limits<std::int64_t>::max(),
+        "RFL-16: largest positive Q24 authored allowance parses exactly");
+    if (!parsed) return;
+    std::vector<std::uint8_t> reference;
+    std::vector<std::string> reference_diagnostics;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        std::vector<t::Projectile> flying;
+        for (std::size_t index = 0; index < 16; ++index) {
+            auto flight = rocket_profile();
+            flight.authored_distance = index % 2 == 0 ? q(9999999) : parsed.value();
+            flight.target_radius = index % 4 < 2;
+            // Target-radius cases exercise the reported nonzero-offset geometry.
+            // Extension cases keep storage small while retaining a ten-unit sample delta.
+            flight.curve_distance = flight.target_radius ? q(450) : q(200000);
+            flight.curve_offset = flight.target_radius ? q(90) : Fixed{};
+            flight.straight_distance = q(250);
+            auto projectile = launch(flight, at(1800), q(9999999));
+            projectile.id = index + 1;
+            flying.push_back(projectile);
+        }
+        const auto original = flying;
+        std::vector<std::uint8_t> terminal(16), prepared(16), atomic(16), succeeded(16, 1), moved(16);
+        std::vector<unsigned> diagnostic_count(16);
+        std::vector<std::string> diagnostics(16);
+        d::CollectionTrees collidables;
+        d::CombatWorld world; world.seed = 5062; world.projectile_collection = &collidables;
+        for (std::uint64_t frame = 1; frame <= 8; ++frame) {
+            world.frame = frame;
+            const auto ran = pool.execute_phase("rocket-large-allowance", flying.size(), [&](const std::size_t index) {
+                if (terminal[index]) return;
+                if (frame == 1) {
+                    auto candidate = flying[index];
+                    t::CombatRandom random(world.seed, frame, candidate.id, t::rocket_path_slot);
+                    const auto built = d::prepare_rocket_path(candidate, &random);
+                    prepared[index] = built ? 1 : 0;
+                    atomic[index] = !built && candidate == flying[index] ? 1 : 0;
+                }
+                d::ProjectileScratch scratch;
+                const auto result = d::step_projectile(world, flying[index], scratch);
+                if (!result) { succeeded[index] = 0; terminal[index] = 1; return; }
+                const auto& step = result.value();
+                if (step.projectile.position != flying[index].position) moved[index] = 1;
+                if (step.path_diagnostic) {
+                    ++diagnostic_count[index]; diagnostics[index] += step.path_diagnostic->message;
+                }
+                flying[index] = step.projectile;
+                terminal[index] = step.expired ? 1 : 0;
+            });
+            expect(static_cast<bool>(ran), "RFL-16: partitioned oversized flight completes");
+        }
+        std::vector<std::uint8_t> bytes;
+        for (std::size_t index = 0; index < flying.size(); ++index) {
+            const bool overflow = index % 4 == 3;
+            expect(succeeded[index] && (prepared[index] != 0) == !overflow,
+                "RFL-16: huge extension and maximum target-radius allowance construct; actual overflow refuses");
+            expect(flying[index].flight->profile.authored_distance == original[index].flight->profile.authored_distance,
+                "RFL-16: authored allowance is preserved without clamping");
+            if (overflow) {
+                expect(atomic[index] && terminal[index] && !moved[index] && diagnostic_count[index] == 1
+                    && !flying[index].flight->path_initialized
+                    && diagnostics[index].find("rocket extension construction") != std::string::npos,
+                    "RFL-09/16: actual extension overflow is atomic, terminal at current pose, diagnostic once");
+            } else {
+                expect(moved[index] && !terminal[index] && diagnostic_count[index] == 0,
+                    "RFL-16: representable oversized profiles continue flying through later ticks");
+            }
+            d::append_projectile(bytes, flying[index]);
+        }
+        if (workers == 1) { reference = bytes; reference_diagnostics = diagnostics; }
+        else expect(bytes == reference && diagnostics == reference_diagnostics,
+            "RFL-09/16: large-allowance paths, overflow and diagnostics agree on 1/2/4/8 workers");
+    }
+    t::CombatTable table; table.profiles.emplace_back(); table.profiles.back().type_id = 1;
+    t::WeaponProfile weapon; weapon.shot.emplace(); weapon.shot->speed = q(25);
+    weapon.shot->flight = rocket_profile(); weapon.shot->flight->curve_distance = {};
+    table.profiles.back().weapons.push_back(weapon);
+    const auto invalid = t::validate_combat(table);
+    expect(!invalid && invalid.error().message.find("object weapon") != std::string::npos
+        && invalid.error().message.find("Projectile_Rocket_Curve_Distance must be positive") != std::string::npos
+        && invalid.error().message.find("4294967295") == std::string::npos,
+        "RFL-09/16: malformed subdivision reports the object weapon and actual tag, without a sentinel");
+    table.profiles.back().weapons.back().hardpoint = 3;
+    const auto invalid_hardpoint = t::validate_combat(table);
+    expect(!invalid_hardpoint && invalid_hardpoint.error().message.find("hardpoint 3") != std::string::npos
+        && invalid_hardpoint.error().message.find("Projectile_Rocket_Curve_Distance must be positive") != std::string::npos,
+        "RFL-09/16: direct hardpoint profile errors identify their slot and failed input");
+    auto zero = rocket_profile(); zero.authored_distance = {};
+    expect(d::valid_flight(zero), "RFL-16: zero allowance keeps the existing accepted domain");
+}
+
 m::Vec3 spline_end(const t::FlightState& flight) {
     if (flight.path.empty()) return {};
     const auto& last = flight.path.back();
@@ -500,7 +593,7 @@ void refusal_and_dynamic_workers() {
         "RFL-09: unrepresentable geometry expires only its projectile at current pose");
 }
 
-void refusal_session_contract() {
+void refusal_session_case(const bool oversized_allowance) {
     t::TacticalSetup setup;
     setup.seed = 73;
     setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
@@ -522,6 +615,13 @@ void refusal_session_contract() {
             auto flight = rocket_profile(); flight.straight_distance = {};
             // Count division itself is unrepresentable, before any large allocation.
             flight.curve_distance = type == 1 ? Fixed::from_raw(1) : q(500);
+            if (oversized_allowance) {
+                flight.authored_distance = type == 1
+                    ? Fixed::from_raw(std::numeric_limits<std::int64_t>::max()) : q(9999999);
+                flight.target_radius = type != 1;
+                flight.straight_distance = q(250);
+                flight.curve_distance = type == 1 ? q(200000) : q(450);
+            }
             weapon.shot->flight = flight; profile.weapons.push_back(weapon);
         }
         combat.profiles.push_back(profile);
@@ -563,6 +663,10 @@ void refusal_session_contract() {
         if (workers == 1) reference = hashes;
         else expect(hashes == reference, "RFL-09: real session hashes and diagnostic order equal on 1/2/4/8 workers");
     }
+}
+void refusal_session_contract() {
+    refusal_session_case(false);
+    refusal_session_case(true); // RFL-16: overflowing extension and unrelated huge-allowance flight.
 }
 
 void dynamic_detour_contracts() {
@@ -838,9 +942,11 @@ void rocket_defence_contracts() {
     auto profile = rocket_profile(); profile.authored_distance = q(500); profile.curve_distance = q(10);
     auto original = launch(profile, at(500), q(900)); original.owner = 1;
     const auto linear = [](t::Projectile& projectile) {
-        projectile.flight->path_initialized = true;
+        auto& flight = projectile.flight.value();
+        flight.path_initialized = true;
         // A power-of-two arc length makes the boundary point exactly 25 in Q24.
-        projectile.flight->path = {{at(0), at(512), {}, {}, q(512)}};
+        flight.path.clear();
+        flight.path.push_back({at(0), at(512), {}, {}, q(512)});
         projectile.position = at(0); projectile.step = at(25);
     };
     linear(original);
@@ -987,6 +1093,7 @@ int main() {
     run("cubic_height_and_boundary", cubic_height_and_boundary);
     run("default_endpoints_and_lifetime", default_endpoints_and_lifetime);
     run("unsupported_and_encoding", unsupported_and_encoding);
+    run("oversized_flight_allowance", oversized_flight_allowance);
     run("seeded_spatial_offsets", seeded_spatial_offsets);
     run("extension_and_construction_states", extension_and_construction_states);
     run("seeded_worker_and_target_independence", seeded_worker_and_target_independence);

@@ -79,6 +79,40 @@ void retained_campaign_root() {
     expect(!LiveGameSession::start(std::move(root).value(), {}), "stopped root starts no thread");
 }
 
+void runtime_note_publication() {
+    const auto f = [](std::int64_t value) { return Fixed::from_integer(value).value(); };
+    const auto caller = std::this_thread::get_id();
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto initial = setup(); initial.rules.fiscal_cycle_frames = 3;
+        initial.player_economy.emplace(); initial.fiscal.emplace();
+        initial.fiscal->credit_cap_per_planet = f(100);
+        for (const auto& player : initial.players) {
+            initial.player_economy->players.push_back({player.player_id,
+                player.player_id == 1 ? Fixed::from_raw(std::numeric_limits<std::int64_t>::max()) : f(0), f(100), 0, 0});
+            initial.fiscal->players.push_back({player.player_id, true, f(1)});
+        }
+        for (const auto& planet : initial.planets) initial.fiscal->planets.push_back({planet.id, f(10)});
+        std::vector<eawr::core::LoadNote> received;
+        bool presentation_thread = true;
+        LiveGameSession::Options options; options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
+        options.load_note_sink = [&](std::span<const eawr::core::LoadNote> notes) {
+            presentation_thread = presentation_thread && std::this_thread::get_id() == caller;
+            received.insert(received.end(), notes.begin(), notes.end());
+        };
+        auto started = LiveGameSession::start(initial, std::move(options));
+        expect(static_cast<bool>(started), "live fiscal degradation fixture starts"); if (!started) continue;
+        auto& live = *started.value(); live.advance_to(5);
+        expect(live.wait_for(5, 10s), "live GC continues after fiscal overflow");
+        expect(received.empty(), "simulation worker stages notes without calling the presentation sink");
+        (void)live.frame(); (void)live.frame(initial.seats.front().seat_id);
+        expect(received.size() == 1 && received[0].code == "EAWR-LOAD-1111" && presentation_thread,
+            "new runtime note reaches the sink exactly once on the presentation caller");
+        live.advance_to(10); expect(live.wait_for(10, 10s), "live GC keeps stepping after note publication");
+        (void)live.frame(); (void)live.frame();
+        expect(received.size() == 1, "later ticks and repeated frame reads do not republish old notes");
+        live.stop(); expect(!live.failure(), "runtime note publication leaves the session healthy");
+    }
+}
 void replay_parity() {
     const auto initial = setup();
     const auto input = script(initial, 50);
@@ -1463,6 +1497,7 @@ void invasion_accept_command() {
 }
 
 int case_galactic_live_game_session_tests() {
+    runtime_note_publication();
     retained_campaign_root();
     intervals();
     applied_speed_schedule();

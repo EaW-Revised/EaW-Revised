@@ -1332,7 +1332,127 @@ void allied_resource_upgrade_selection() {
 }
 
 
+static void tactical_has_unit() {
+    namespace t = eawr::sim::tactical;
+    const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        t::TacticalSetup start;
+        start.players = {{1, 1, 100, 1}, {2, 1, 100, 1}, {3, 2, 200, 1}, {4, 1, 300, 1}};
+        start.units = {{1, 10, 1}, {2, 20, 1}, {3, 20, 2}, {4, 20, 3}, {5, 20, 4}, {6, 21, 2}, {7, 30, 1}, {8, 20, 2}};
+        start.units[1].purchase_type = 21;
+        start.first_free_entity_id = 9;
+        t::EconomyRules rules;
+        for (const auto player : {1U, 2U, 3U, 4U}) rules.players.push_back({player, q(1000), 20});
+        rules.menus = {{10, 100, {{50, t::BuildKind::unit, t::BuildQueue::units, q(100), 3, 3, 0, true},
+                                 {51, t::BuildKind::unit, t::BuildQueue::units, q(100), 30, 30, 0, true}}},
+                      {30, 100, {{31, t::BuildKind::structure, t::BuildQueue::units, q(100), 30, 30, 0, true}}}};
+        rules.pads.neutral = 4;
+        rules.pads.capture = {{30, q(100), q(1), {100, 200, 300}, true, true, true}};
+        rules.pads.construction = {{31, 32, q(100), 1, 1}};
+        rules.pads.influence = {{10, false}, {20, false}, {30, false}, {31, false}, {32, false}};
+        t::DurabilityTable health;
+        for (const auto type : {30U, 31U, 32U}) {
+            t::DurabilityProfile row; row.type_id = type; row.max_hull = q(300); health.profiles.push_back(row);
+        }
+        auto made = t::TacticalSession::create(start, {}, health, {}, {}, {}, {}, {}, rules);
+        expect(made.has_value(), "PE-34: tactical HasUnit fixture creates");
+        if (!made) { std::cerr << made.error().message << '\n'; continue; }
+        auto& world = made.value();
+        auto host = ai::make_tactical_host(); host->world = &world;
+        host->setup.perception.campaign_game = false;
+        for (const auto& [type, name] : {std::pair{10U, "FACTORY"}, {20U, "SHIP"}, {21U, "ALLY_ONLY"},
+                {30U, "PAD"}, {31U, "UNFINISHED"}, {32U, "BUILDING"}, {50U, "RESERVE"}, {51U, "QUEUED"}}) {
+            foc::AiType row; row.type_id = type; row.name = name; host->setup.content.types.push_back(row);
+        }
+        host->setup.content.types[4].constructed_type = 32;
+        for (const auto& type : host->setup.content.types) {
+            host->types.emplace(type.type_id, &type); host->types_by_name.emplace(type.name, &type);
+        }
+        host->setup.players = {{1, "EMPIRE", false, false, ""}, {2, "EMPIRE", false, false, ""},
+            {3, "REBEL", false, false, ""}, {4, "NEUTRAL", true, false, ""}};
+        for (const auto& player : host->setup.players) host->players.emplace(player.player, &player);
+        const auto refresh = [&] {
+            host->snapshot = world.snapshot(); host->view = foc::detail::build_view(world, *host->snapshot, &executor);
+        };
+        refresh();
+        const ai::ConverterFunction converters = [](std::string_view, std::string_view) -> std::optional<Real> { return std::nullopt; };
+        std::string xml = "<Root>";
+        const auto equation = [&](std::string_view name, std::string_view parameters) {
+            xml += "<" + std::string(name) + ">Variable_Self.HasUnit" + std::string(parameters) + "</" + std::string(name) + ">";
+        };
+        equation("Owned", "{Parameter_Type=\"SHIP\"}");
+        equation("Two", "{Parameter_Type=\"SHIP\", Parameter_Count=2}");
+        equation("Three", "{Parameter_Type=\"SHIP\", Parameter_Count=3}");
+        equation("Ally", "{Parameter_Type=\"ALLY_ONLY\"}");
+        equation("Repeated", "{Parameter_Type=\"SHIP\", Parameter_Type=\"SHIP\", Parameter_Count=2}");
+        equation("Multiple", "{Parameter_Type=\"SHIP\", Parameter_Type=\"FACTORY\", Parameter_Count=2, Parameter_Category=0}");
+        equation("Unknown", "{Parameter_Type=\"UNKNOWN\"}");
+        equation("Mixed", "{Parameter_Type=\"UNKNOWN\", Parameter_Type=\"SHIP\"}");
+        equation("Empty", "");
+        equation("Zero", "{Parameter_Type=\"UNKNOWN\", Parameter_Count=0}");
+        equation("OutOfRange", "{Parameter_Type=\"SHIP\", Parameter_Count=2147483648}");
+        equation("BothConstructionTypes", "{Parameter_Type=\"UNFINISHED\", Parameter_Type=\"BUILDING\", Parameter_Count=2}");
+        for (const auto& name : {"RESERVE", "QUEUED", "UNFINISHED", "BUILDING"}) {
+            equation(name, "{Parameter_Type=\"" + std::string(name) + "\"}");
+            equation(std::string(name) + "Complete", "{Parameter_Type=\"" + std::string(name) + "\", Parameter_Only_Consider_Complete=1}");
+        }
+        xml += "<FailedBranch>0 * Function_Empty.Evaluate</FailedBranch>"
+            "<Aggressive_FreeStore_Allowed>(1 - Game.IsCampaignGame) + Game.IsCampaignGame * (1 - Function_Owned.Evaluate)</Aggressive_FreeStore_Allowed></Root>";
+        auto parsed = ai::EquationSet::parse({{"hasunit.xml", xml}}, converters);
+        expect(parsed.has_value(), "PE-34: synthetic mod-shaped equations parse");
+        if (!parsed) continue;
+        ai::AiData data; data.equations = std::move(parsed).value();
+        ai::Engine engine(host, std::move(data), {});
+        const auto value = [&](std::string_view name, t::PlayerId player = 1) {
+            const auto* definition = engine.data().equations.find(name);
+            ai::AiRandom random;
+            return host->ai_world->perception(engine, *definition, ai::Context{player, 3, {}, nullptr}, random);
+        };
+        expect(value("Owned") == ai::real(1) && value("Two") == Real{} && value("Ally") == Real{},
+            "PE-34: active own originals count; ordinary allies and enemies do not");
+        expect(value("Repeated") == Real{} && value("Multiple") == ai::real(1) && value("Mixed") == ai::real(1),
+            "PE-34: distinct exact types accumulate, duplicate filters do not, category is ignored");
+        expect(value("Unknown") == Real{} && !value("Empty") && !value("Owned", 99)
+            && value("Zero") == ai::real(1) && !value("FailedBranch") && !value("OutOfRange"),
+            "PE-34: unknown type is absent; empty types and invalid player fail");
+        expect(value("Aggressive_FreeStore_Allowed") == ai::real(1),
+            "PE-34: skirmish mod-shaped equation succeeds even with its multiplied campaign branch");
+        host->setup.content.types[1].community_property = true;
+        host->setup.content.types[2].community_property = true;
+        expect(value("Two") == ai::real(1) && value("Three") == Real{} && value("Ally") == ai::real(1),
+            "PE-34: community types count one original per ally/type, excluding enemy and same-team neutral originals");
+        expect(world.submit({{0, 1, 0}, {1}, t::BuyPayload{50}}).has_value()
+            && world.submit({{0, 1, 1}, {1}, t::BuyPayload{51}}).has_value()
+            && world.submit({{0, 1, 2}, {7}, t::PadBuildPayload{31}}).has_value()
+            && world.step(executor).has_value(), "PE-34: queue and actual unfinished representation start");
+        refresh();
+        expect(value("QUEUED") == ai::real(1) && value("QUEUEDComplete") == Real{},
+            "PE-34: own queued production counts only without complete-only");
+        expect(world.pads().at(7).under_construction != 0 && value("UNFINISHED") == ai::real(1)
+            && value("UNFINISHEDComplete") == ai::real(1) && value("BUILDING") == ai::real(1)
+            && value("BUILDINGComplete") == Real{},
+            "PE-34: exact unfinished original always counts; complete-only disables only its constructed alias");
+        expect(value("BothConstructionTypes") == Real{}, "PE-34: one own construction cannot satisfy a count of two");
+        for (int frame = 0; frame < 4; ++frame) expect(world.step(executor).has_value(), "PE-34: first queue entry completes");
+        refresh();
+        expect(value("RESERVE") == ai::real(1) && value("RESERVEComplete") == ai::real(1),
+            "PE-34: skirmish reserve counts even with complete-only");
+        host->setup.content.types[6].community_property = true;
+        expect(value("RESERVE", 2) == Real{} && value("QUEUED", 2) == Real{},
+            "PE-34: community property never shares another player's reserves or production queue");
+        host->setup.perception.campaign_game = true;
+        expect(value("RESERVEComplete") == ai::real(1), "PE-34: reserve query has no inferred campaign-context exclusion");
+        host->setup.perception.campaign_game = false;
+        for (int frame = 0; frame < 32; ++frame) expect(world.step(executor).has_value(), "PE-34: construction completes");
+        refresh();
+        expect(value("UNFINISHED") == Real{} && value("BUILDINGComplete") == ai::real(1),
+            "PE-34: completed representation replaces the unfinished original");
+    }
+}
+
 void completed_purchases_are_available() {
+    tactical_has_unit();
     namespace t = eawr::sim::tactical;
     const auto q = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
     t::TacticalSetup start;

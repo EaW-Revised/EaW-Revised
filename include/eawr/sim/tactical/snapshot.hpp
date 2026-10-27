@@ -166,6 +166,8 @@ struct TacticalInstance {
     std::vector<CarriedObject> contained{};
     // WRA-02: frozen admission input; the ability slot already carries the hashed state.
     bool rocket_attack{};
+    SeatId controller_seat{};
+    UnitControl control{UnitControl::none};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 
@@ -283,8 +285,10 @@ public:
         std::vector<AbilitySpawnState> ability_spawns = {},
         std::vector<RetreatView> retreat_views = {},
         std::vector<GarrisonTimerView> garrison_timers = {},
-        std::vector<BeaconState> beacons = {});
+        std::vector<BeaconState> beacons = {},
+        std::optional<BattleControllerPolicy> controllers = std::nullopt);
 
+    [[nodiscard]] const std::optional<BattleControllerPolicy>& controller_policy() const noexcept { return controllers_; }
     [[nodiscard]] std::span<const RetreatView> retreat_views() const noexcept { return retreat_views_; }
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::span<const SnapshotPlayer> players() const noexcept;
@@ -330,6 +334,7 @@ private:
     std::vector<Projectile> projectiles_;
     std::vector<AbilitySpawnState> ability_spawns_;
     std::vector<BeaconState> beacons_;
+    std::optional<BattleControllerPolicy> controllers_;
     std::vector<GarrisonTimerView> garrison_timers_;
     std::optional<BattleOutcome> outcome_;
     std::vector<SpinningCraft> spinning_;

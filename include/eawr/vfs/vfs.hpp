@@ -117,6 +117,10 @@ public:
     [[nodiscard]] static core::Result<Vfs> mount(std::span<const MountSpec> ordered_layers);
 
     [[nodiscard]] core::Result<std::vector<std::byte>> open(std::string_view logical_path) const;
+    // The first min(size, max_bytes) bytes of the effective winner, read without the rest of the asset (#5197: a picker
+    // that needs only a header does not read every file whole).
+    [[nodiscard]] core::Result<std::vector<std::byte>> open_prefix(std::string_view logical_path,
+                                                                   std::uint64_t max_bytes) const;
     // Read one exact candidate returned by this mounted VFS. This lets callers
     // qualify archive entry names independently of their logical mount prefix.
     // When archive_name is supplied, an archive candidate must bear that exact

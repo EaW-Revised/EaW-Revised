@@ -57,7 +57,41 @@ core::Result<void> parse_commands(
                     + " is shorter than its fixed payload" + at,
                 logical_path);
         }
-        if (opcode == detail::opcode_beacon) {
+        std::size_t roster_bytes{};
+        if (opcode == detail::opcode_battle_control) {
+            BattleControlPayload control;
+            std::uint32_t version{}, count{};
+            if (!reader.read_u32(control.departed.value) || !reader.read_u32(version)
+                || version != 4 || !reader.read_u32(count) || count == 0 || count > max_controller_seats
+                || 16ULL * count + 16ULL > body_size - detail::command_common_size)
+                return fail<Parsed>(diagnostic_codes::malformed, "invalid battle-control roster" + at, logical_path);
+            for (std::uint32_t seat = 0; seat < count; ++seat) {
+                ControllerBinding row;
+                std::uint32_t kind{}, active{};
+                if (!reader.read_u32(row.seat.value) || !reader.read_u32(row.player)
+                    || !reader.read_u32(kind) || kind > 255 || !reader.read_u32(active) || active > 1)
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated battle-control seat" + at, logical_path);
+                row.kind = static_cast<SeatKind>(kind); row.active = active != 0;
+                control.policy.seats.push_back(row);
+            }
+            roster_bytes = 16U * count;
+            if (!reader.read_u32(count) || count != 1)
+                return fail<Parsed>(diagnostic_codes::malformed, "invalid battle-control faction count" + at, logical_path);
+            ControllerFaction faction;
+            std::uint32_t mode{};
+            if (!reader.read_u32(faction.player) || !reader.read_u32(mode))
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated battle-control faction" + at, logical_path);
+            faction.mode = static_cast<FactionController>(mode);
+            control.policy.factions.push_back(faction);
+            roster_bytes += 8U;
+            command.payload = std::move(control);
+        } else if (opcode == detail::opcode_gift) {
+            GiftPayload gift;
+            std::uint32_t gift_reserved{};
+            if (!reader.read_u32(gift.recipient.value) || !reader.read_u32(gift_reserved) || gift_reserved != 0)
+                return fail<Parsed>(diagnostic_codes::invalid_command, "invalid gift payload" + at, logical_path);
+            command.payload = gift;
+        } else if (opcode == detail::opcode_beacon) {
             BeaconPayload beacon;
             if (!read_vec3(reader, beacon.position))
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated beacon position" + at, logical_path);
@@ -301,11 +335,13 @@ core::Result<void> parse_commands(
         }
         const auto* aimed = std::get_if<AbilityPayload>(&command.payload);
         const std::size_t target_bytes = aimed != nullptr ? (aimed->position ? 24U : aimed->target != invalid_entity_id ? 8U : 0U) : 0U;
-        const auto expected = detail::command_common_size + prefix + target_bytes + detail::unit_list_header_size
+        const auto expected = detail::command_common_size + prefix + target_bytes + roster_bytes + detail::unit_list_header_size
             + 8U * static_cast<std::size_t>(listed);
+        const auto tail_size = body_size >= expected ? body_size - expected : 0U;
+        const bool provenance_tail = tail_size == 16U || tail_size == 24U;
         const bool append_tail = (opcode == 2 || opcode == detail::opcode_hazard_move)
-            && body_size == expected + 8U;
-        if (body_size != expected && !append_tail) {
+            && (tail_size == 8U || tail_size == 24U);
+        if (body_size < expected || tail_size != (append_tail ? 8U : 0U) + (provenance_tail ? 16U : 0U)) {
             return fail<Parsed>(diagnostic_codes::malformed,
                 "opcode " + std::to_string(opcode) + " with " + std::to_string(listed)
                     + " units requires body length " + std::to_string(expected) + ", found "
@@ -327,6 +363,18 @@ core::Result<void> parse_commands(
                 return fail<Parsed>(diagnostic_codes::malformed, "unsupported waypoint tail" + at, logical_path);
             }
             std::get<MovePayload>(command.payload).append = true;
+        }
+        if (provenance_tail) {
+            std::uint32_t tag{}, version{}, origin{};
+            if (!reader.read_u32(tag) || !reader.read_u32(version)
+                || !reader.read_u32(command.issuing_seat.value) || !reader.read_u32(origin))
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated controller provenance" + at, logical_path);
+            if (tag != 0x4c525443U || version != 1)
+                return fail<Parsed>(diagnostic_codes::version, "unsupported controller provenance tail" + at, logical_path);
+            command.origin = static_cast<CommandOrigin>(origin);
+            if ((command.origin != CommandOrigin::seat && command.origin != CommandOrigin::engine)
+                || ((command.origin == CommandOrigin::seat) != (command.issuing_seat.value != 0)))
+                return fail<Parsed>(diagnostic_codes::invalid_issuer, "invalid controller provenance shape" + at, logical_path);
         }
         replay.commands.push_back(std::move(command));
     }
@@ -367,3 +415,49 @@ core::Result<void> parse_object_turns(
 }
 
 } // namespace eawr::sim::tactical::replay_parse_detail
+
+namespace eawr::sim::tactical {
+std::uint8_t command_body_opcode(const PlayerCommand& command) noexcept { return detail::command_opcode(command); }
+core::Result<PlayerCommand> decode_command_body(const std::span<const std::uint8_t> bytes, const TacticalSetup& setup,
+    const std::optional<PlayerId> authenticated_player) {
+    using namespace replay_detail;
+    if (bytes.size() > 16384U)
+        return fail<PlayerCommand>(diagnostic_codes::resource_limit, "command body exceeds routing limit", {});
+    std::vector<std::uint8_t> framed;
+    sim::detail::append_u32(framed, static_cast<std::uint32_t>(bytes.size()));
+    framed.insert(framed.end(), bytes.begin(), bytes.end());
+    Reader reader(framed);
+    TacticalReplay replay;
+    if (auto parsed = replay_parse_detail::parse_commands(reader, {}, replay, 1); !parsed)
+        return core::Result<PlayerCommand>::failure(parsed.error());
+    if (reader.remaining() != 0)
+        return fail<PlayerCommand>(diagnostic_codes::malformed, "trailing command body bytes", {});
+    auto command = std::move(replay.commands.front());
+    if (authenticated_player) command.key.player_id = *authenticated_player;
+    if (std::holds_alternative<GiftPayload>(command.payload) && !setup.controllers)
+        return fail<PlayerCommand>(diagnostic_codes::invalid_command, "gift requires a controller policy", {});
+    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {}); !shape)
+        return core::Result<PlayerCommand>::failure(shape.error());
+    if (command.origin != CommandOrigin::ordinary || std::holds_alternative<GiftPayload>(command.payload)) {
+        if (auto valid = validate_command_provenance(command, setup); !valid)
+            return core::Result<PlayerCommand>::failure(valid.error());
+    }
+    if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+        cancel && cancel->entry_id != 0 && !setup.queue_identities)
+        return fail<PlayerCommand>(diagnostic_codes::invalid_command, "cancel entry requires QIDS extension", {});
+    return core::Result<PlayerCommand>::success(std::move(command));
+}
+core::Result<std::vector<std::uint8_t>> encode_command_body(const PlayerCommand& command, const TacticalSetup& setup) {
+    if (auto shape = detail::validate_command_shape(command, setup.players, "command body", {}); !shape)
+        return core::Result<std::vector<std::uint8_t>>::failure(shape.error());
+    if (auto provenance = validate_command_provenance(command, setup); !provenance)
+        return core::Result<std::vector<std::uint8_t>>::failure(provenance.error());
+    if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
+        cancel && cancel->entry_id != 0 && !setup.queue_identities)
+        return replay_detail::fail<std::vector<std::uint8_t>>(diagnostic_codes::invalid_command, "cancel entry requires QIDS extension", {});
+    std::vector<std::uint8_t> bytes;
+    detail::append_command(bytes, command);
+    bytes.erase(bytes.begin(), bytes.begin() + 4);
+    return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes));
+}
+} // namespace eawr::sim::tactical

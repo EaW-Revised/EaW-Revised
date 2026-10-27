@@ -1,11 +1,13 @@
 #pragma once
 
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
 #include "eawr/sim/galactic/hero_return.hpp"
+#include "eawr/sim/galactic/story_goals.hpp"
 #include "eawr/campaign/conflict.hpp"
 #include "eawr/campaign/invasion_offer.hpp"
 #include "eawr/campaign/conflict_policy.hpp"
@@ -143,7 +145,9 @@ public:
     [[nodiscard]] const std::vector<std::string>& native_ai_diagnostics() const noexcept;
     // Only with observe_native_ai (which also turns the engine's refusal counters on): a reader of the native AI's goals, one line
     // per AI player, valid after this campaign moves into a LiveGameSession. Call it only while the session is between ticks
-    // (driven pacing, after wait_for). Empty when the native AI is not installed. Never saved, hashed or read by a decision.
+    // (driven pacing, after wait_for). Census mode returns listed retained bytes,
+    // including when native AI is off. Otherwise empty without native AI.
+    // Never saved, hashed or read by a decision.
     [[nodiscard]] std::function<std::vector<std::string>()> native_ai_goal_reader() const;
 private:
     friend class LiveGameSession;
@@ -267,6 +271,17 @@ struct LiveGalacticEvent {
     std::optional<sim::galactic::PlayerId> construction_options_player{};
     std::optional<sim::galactic::GalacticFeedbackNotice> feedback{};
 };
+// WST-58: a holocron goal's presentation request for the plot owner's seat, in trigger order. Local rendering input
+// only (never saved, hashed or replayed); a reader that falls behind the bounded window sees `incomplete`.
+struct LiveStoryPresentation {
+    std::uint64_t cursor{};
+    sim::galactic::story::PresentationEvent event;
+};
+struct LiveStoryPresentations {
+    std::uint64_t through{};
+    bool incomplete{};
+    std::vector<LiveStoryPresentation> events;
+};
 struct LiveGalacticEvents {
     std::uint64_t through{};
     bool incomplete{}; // reader fell behind the bounded retention window
@@ -346,6 +361,9 @@ public:
         // notes), under the session state mutex like command_source: it must not call back into the session.
         // Headless reports use it; presentation does not.
         std::function<void(std::span<const core::Diagnostic>)> tick_diagnostics{};
+        // Startup notes run synchronously at root start; new runtime notes drain
+        // once from frame() on the presentation caller, outside session locks.
+        std::function<void(std::span<const core::LoadNote>)> load_note_sink{};
         // Deterministic conflict-service inputs, until the fleet entry service is wired.
         struct Entry {
             std::uint64_t tick{};
@@ -419,6 +437,8 @@ public:
     [[nodiscard]] std::optional<LiveSaveOutcome> terminal_save_outcome(std::uint64_t token) const;
     [[nodiscard]] LiveGalacticEvents galactic_events_after(std::uint64_t cursor) const;
     [[nodiscard]] LiveGalacticEvents galactic_events_after(std::uint64_t cursor, sim::galactic::SeatId) const;
+    // WST-58: the seat's holocron goal requests after `cursor` (0 for all retained).
+    [[nodiscard]] LiveStoryPresentations story_presentation_after(std::uint64_t cursor, sim::galactic::SeatId) const;
     // Returns a conflict-scoped feed. Stale feeds cannot start or command a later child.
     // Readiness belongs to the live pacer; it never enters GameSession's state or replay.
     [[nodiscard]] std::shared_ptr<TacticalFeed> battle_feed(sim::EntityId conflict, sim::galactic::SeatId seat);

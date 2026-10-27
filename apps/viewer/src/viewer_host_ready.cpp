@@ -4,8 +4,10 @@
 #include "audio_output.hpp"
 #include "font_provision.hpp"
 #include "gpu_memory_trace.hpp"
+#include "menu_timeline.hpp"
 #include "settings_store.hpp"
 #include "startup_trace.hpp"
+#include "galactic/gc_setup_memory.hpp"
 #include "eawr/presentation/render_categories.hpp"
 #include <chrono>
 #include <sstream>
@@ -92,6 +94,8 @@ void ViewerHost::_ready() try {
     if (render_categories::enabled) RenderingServer::get_singleton()->connect("frame_post_draw",
         callable_mp(this, &ViewerHost::record_render_categories));
     read_host_options(arguments);
+    if (options_->front_end || options_->skirmish_setup) MenuTimeline::begin();
+    MenuTimeline::mark("host_ready_options");
     const auto& profile_options = viewer_profile_options();
     for (const auto& line : profile_options.report) UtilityFunctions::print(String::utf8(line.c_str()));
     if (profile_options.error) options_->profile_error = profile_options.error->code + ": " + profile_options.error->message;
@@ -125,6 +129,7 @@ void ViewerHost::_ready() try {
         return;
     }
 
+    MenuTimeline::mark("host_ready_profile");
     // #3963: a player's fonts are extracted natively into user data before any screen reads the cache.
     if (const std::string fonts = provision_fonts(options_->game_root, options_->allow_unknown_build,
                                                   options_->skirmish_setup || options_->front_end);
@@ -141,6 +146,7 @@ void ViewerHost::_ready() try {
         return;
     }
 
+    MenuTimeline::mark("fonts_provisioned");
     // #2927: a player's view takes the saved settings (the window, vsync, the render profile, and
     // through ActiveSettings the battle's volumes and speed step); a capture, report or test run
     // never does, so evidence runs do not depend on the machine's settings file.
@@ -277,12 +283,15 @@ void ViewerHost::ready_battle_setup() {
         options_->game_root, options_->mod_root, options_->report_path,
         options_->front_end ? std::filesystem::path{} : options_->capture_path,
         options_->profile, options_->cache_shaders});
+    MenuTimeline::mark("setup_construct");
     if (!skirmish_setup_->ready(*this)) {
         status_message_ = skirmish_setup_->failure();
         static_cast<void>(write_report("failed"));
         stop(2);
         return;
     }
+    MenuTimeline::mark("setup_ready");
+    MenuTimeline::report("setup_ready");
     gpu_memory_trace.sample("setup_ready");
     if (options_->front_end) {
         skirmish_setup_->leave();
@@ -290,6 +299,7 @@ void ViewerHost::ready_battle_setup() {
             options_->capture_path, options_->game_root, options_->mod_root, options_->profile);
         // The campaign hand-offs: a refused start owns only its own subtree and leaves the menu usable.
         const auto start_galactic = [this](GalacticMode::Options campaign_options) {
+            register_gc_setup_memory(skirmish_setup_->content());
             campaign_options.game_root = options_->game_root;
             campaign_options.mod_root = options_->mod_root;
             auto* campaign_host = memnew(Node3D);
@@ -329,6 +339,8 @@ void ViewerHost::ready_battle_setup() {
             stop(2);
             return;
         }
+        MenuTimeline::mark("front_end_ready");
+        MenuTimeline::report("front_end_ready");
     }
     skirmish_setup_->start_button()->connect("pressed", callable_mp(this, &ViewerHost::on_skirmish_start));
     set_process_input(true);

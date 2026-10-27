@@ -348,13 +348,50 @@ void spy_cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string
         expect(game.galaxy().ability_state()->results.empty(), "allied target or remote invocation refuses without consumption");
     }
 }
+// WGUI-19/101: a unit with an automatic spy informs its current owner at its planet without any activation.
+void auto_spy_cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = spy_setup(false); const auto actor = buyer(config);
+    const auto planet = std::find_if(config.census->objects.begin(), config.census->objects.end(), [&](const auto& o) { return o.id == actor; })->planet;
+    auto& profile = config.ability_host->profiles[0];
+    profile.spy.reset(); profile.ground_activated.clear(); config.ability_host->activated_spy_abilities.clear();
+    profile.auto_spies = {{"automatic probe", 9, Fixed::from_raw(-Fixed::scale), {},
+        gc::bit(gc::Intelligence::fleet_contents)}};
+    auto game = take(eawr::campaign::GameSession::create(config));
+    hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto holders = [&](const gc::ObserverSetup& observer) {
+        std::vector<std::pair<gc::PlayerId, gc::PlanetId>> rows;
+        for (const auto& r : observer.records) if (std::any_of(r.sources.begin(), r.sources.end(), [&](const auto& s) { return s.source == actor && s.ability == 9; }))
+            rows.emplace_back(r.player, r.planet);
+        return rows;
+    };
+    const auto before = holders(*game.galaxy().snapshot()->observer());
+    if (!(before.size() == 1 && before[0] == std::pair{gc::PlayerId{2}, planet})) {
+        const auto observer = game.galaxy().snapshot()->observer();
+        const auto row = std::find_if(config.census->objects.begin(), config.census->objects.end(), [&](const auto& o) { return o.id == actor; });
+        std::cerr << "auto spy diag: rows=" << before.size() << " actor=" << static_cast<unsigned long long>(actor) << " owner=" << static_cast<unsigned long long>(row->owner) << " planet=" << static_cast<unsigned long long>(row->planet)
+                  << " type=" << static_cast<unsigned long long>(row->current_type) << " profile_type=" << static_cast<unsigned long long>(profile.type) << " auto_spies=" << profile.auto_spies.size()
+                  << " players=" << observer->players.size() << " planets=" << observer->planets.size() << " records=" << observer->records.size()
+                  << " fps=" << observer->logical_fps;
+        for (const auto& r : before) std::cerr << " row(" << static_cast<unsigned long long>(r.first) << "," << static_cast<unsigned long long>(r.second) << ")";
+        std::cerr << std::endl;
+    }
+    expect(before.size() == 1 && before[0] == std::pair{gc::PlayerId{2}, planet}, "automatic spy informs only its owner at its own planet");
+    const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
+    auto loaded = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+    expect(take(cp::save_game_checkpoint(loaded.session, ids)) == saved
+        && holders(*loaded.session.galaxy().snapshot()->observer()) == before, "automatic spy restores without a second application");
+    hashes.push_back(loaded.session.state_sha256());
+    auto standalone = take(gc::GalacticSession::create(config));
+    const std::array gone{actor}; take(standalone.apply_battle_losses(gone));
+    expect(holders(*standalone.snapshot()->observer()).empty(), "automatic spy source loss removes its intelligence");
+}
 } // namespace
 int case_galactic_ability_theft_tests() {
     ability_fixture::arm_watchdog();
     try {
-        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline);
+        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline); auto_spy_cases(one, baseline);
         for (std::size_t workers : {2U, 4U, 8U}) {
-            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes);
+            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes); auto_spy_cases(pool, hashes);
             expect(hashes == baseline, "theft effects and restore hashes equal on1/2/4/8");
         }
         observer_and_idle();

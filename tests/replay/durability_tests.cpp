@@ -9,6 +9,7 @@
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -103,12 +104,27 @@ void test_validation() {
     }
     auto healthless = foc_table();
     healthless.profiles[0].hardpoints[0].max_health = Fixed{};
-    expect(!tactical::validate_durability(healthless), "a destroyable hardpoint needs health");
+    healthless.difficulty = {{1, units(2), units(1), units(1)}};
+    expect(static_cast<bool>(tactical::validate_durability(healthless)),
+        "HD-06: zero hardpoint Health validates before and after difficulty scaling");
+    healthless.profiles[0].hardpoints[0].max_health = units(-1);
+    expect(!tactical::validate_durability(healthless), "negative hardpoint Health still fails");
+    healthless.profiles[0].hardpoints[0].max_health = units(tactical::max_durability_health + 1);
+    expect(!tactical::validate_durability(healthless), "hardpoint Health above the bound still fails");
     auto fast = foc_table();
     fast.rules.engines_disabled_speed = units(2);
     expect(!tactical::validate_durability(fast), "the engines-off modifier may not exceed 1");
     auto setup = tactical::TacticalSetup{};
-    expect(!tactical::TacticalSession::create(setup, {}, unordered), "a session rejects an invalid table");
+    eawr::core::LoadNoteBuffer notes;
+    auto prepared = tactical::prepare_durability(unordered, notes);
+    eawr::core::LoadNoteCollector collector;
+    collector.merge(notes);
+    const auto captured = collector.snapshot();
+    expect(prepared && tactical::TacticalSession::create(setup, {}, unordered),
+        "a session accepts an unordered table after normalization");
+    expect(std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0104";
+    }), "unordered profile normalization records a note");
 }
 
 void test_rules() {
@@ -176,6 +192,41 @@ void test_rules() {
     const auto last = tactical::apply_damage(fragile, shell, 4, units(390));
     expect(last.destroyed_hardpoint == 4U && last.unit_destroyed && shell.hull == Fixed{},
            "HD-21: the last hardpoint takes the unit with it");
+}
+
+void test_zero_health_recovery() {
+    auto zero = hardpoint(tactical::HardpointRole::weapon, 0);
+    zero.destroyable = true;
+    const tactical::DurabilityProfile next{10, units(100), std::nullopt, true,
+        {zero, hardpoint(tactical::HardpointRole::weapon, 100)}};
+    for (const std::int64_t previous_maximum : {0, 100}) {
+        auto previous_profile = next;
+        previous_profile.hardpoints[0].max_health = units(previous_maximum);
+        auto previous = tactical::full_durability(previous_profile);
+        previous.hardpoints[0] = {};
+        auto after = tactical::full_durability(next);
+        tactical::carry_station_hardpoints(previous_profile, previous, next, after);
+        expect(after.hardpoints[0].raw() == 0 && !tactical::weapon_enabled(next, after, 0),
+            "HD-06: destroyed carry never seeds positive health into a zero-max replacement");
+        previous.hardpoints[0] = decimal("0.1");
+        previous.repairing_players = {{1}, {}};
+        tactical::carry_station_hardpoints(previous_profile, previous, next, after);
+        expect(after.hardpoints[0].raw() == 0 && after.repairing_players[0].empty(),
+            "HD-06: repairing carry cannot copy positive health or payers into a zero-max slot");
+    }
+    // Defend the recovery APIs even if a caller supplies the former upgrade's invalid state.
+    auto state = tactical::full_durability(next);
+    state.hardpoints = {decimal("0.1"), units(50)};
+    expect(tactical::healing_fraction(next, state) == decimal("0.5"),
+        "HD-06: healing fraction excludes zero-max hardpoints");
+    const auto healed = tactical::heal_health(next, state, {}, units(10));
+    expect(healed && healed.value() == 1U && state.hardpoints[0].raw() == 0
+        && state.hardpoints[1] == units(60), "HD-06: healing skips zero denominators and still heals a live point");
+    state.hardpoints[0] = decimal("0.1"); state.disabled = {true, false};
+    const auto repaired = tactical::repair_frame(next, state, 0, units(100));
+    expect(repaired && repaired.value().stopped && !repaired.value().paid
+        && state.hardpoints[0].raw() == 0 && !tactical::weapon_enabled(next, state, 0),
+        "HD-06: repair normalizes a zero-max slot without charging or enabling its weapon");
 }
 
 void test_service() {
@@ -376,6 +427,87 @@ struct Run {
     return nullptr;
 }
 
+void test_zero_health_weapon() {
+    // HD-06: retain a lone destroyed weapon without disabling or deleting its ship.
+    // The otherwise identical positive-health control must actually fire.
+    for (const std::int64_t health : {0, 100}) {
+        auto point = hardpoint(tactical::HardpointRole::weapon, health);
+        point.destroyable = true;
+        tactical::DurabilityTable durability;
+        durability.rules = foc_table().rules;
+        durability.profiles = {{10, units(5000), std::nullopt, true, {point}},
+            {30, units(2000), std::nullopt, false, {}}};
+        durability.difficulty = {{1, units(2), units(1), units(1)}};
+        tactical::WeaponProfile weapon;
+        weapon.hardpoint = 0;
+        weapon.range = units(1000);
+        weapon.min_recharge_hundredths = 100;
+        weapon.max_recharge_hundredths = 100;
+        weapon.cone_width = units(360);
+        weapon.cone_height = units(180);
+        weapon.opportunity_when_idle = weapon.opportunity_when_targeting = true;
+        tactical::CombatProfile shooter;
+        shooter.type_id = 10;
+        shooter.category_bits = 1;
+        shooter.priority_set = 0;
+        shooter.max_attack_distance = units(1000);
+        shooter.weapons = {weapon};
+        shooter.hardpoints = {{0, {}, true}};
+        tactical::CombatProfile target;
+        target.type_id = 30;
+        target.category_bits = 1;
+        tactical::CombatTable combat;
+        combat.profiles = {shooter, target};
+        combat.priority_sets.emplace_back();
+        combat.priority_sets[0].unlisted = units(1);
+        tactical::TacticalSetup setup;
+        setup.seed = 606;
+        setup.players = {{1, 1, 1, tactical::player_flag_commandable},
+            {2, 2, 2, tactical::player_flag_commandable}};
+        setup.units = {{1, 10, 1, {}, math::identity_quat(), {}},
+            {2, 30, 2, {units(100), {}, {}}, math::identity_quat(), {}}};
+        const std::vector<tactical::SensorProfile> sensors{{10, units(2000)}, {30, units(2000)}};
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            for (const bool scramble : {false, true}) {
+                auto made = tactical::TacticalSession::create(setup, sensors,
+                    durability, {}, std::nullopt, combat);
+                expect(static_cast<bool>(made), "HD-06: single destroyable hardpoint session creates");
+                if (!made) continue;
+                auto session = std::move(made).value();
+                const auto* start = durability_of(*session.snapshot(), 1);
+                expect(start && start->hull == units(10000) && start->hardpoints.size() == 1
+                    && start->hardpoints[0].health == units(health * 2)
+                    && start->hardpoints[0].enabled == (health > 0)
+                    && start->hardpoints[0].state == (health == 0
+                        ? tactical::HardpointState::destroyed : tactical::HardpointState::intact),
+                    "HD-06: tick zero retains the scaled hull and zero-health destroyed weapon");
+                expect(static_cast<bool>(session.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+                    "HD-06: the retained ship still accepts an attack order");
+                const eawr::platform::ThreadWorkerAdapter executor(workers);
+                std::vector<std::string> hashes{session.snapshot()->sha256()};
+                std::size_t shots = 0;
+                for (unsigned tick = 0; tick < 120; ++tick) {
+                    if (scramble) session.scramble_storage_for_testing();
+                    const auto step = session.step(executor);
+                    expect(static_cast<bool>(step), "HD-06: zero-total-hardpoint-health ship advances normally");
+                    if (!step) break;
+                    hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+                    for (const auto& event : step.value().snapshot->combat_events())
+                        if (event.kind == tactical::CombatEventKind::weapon_fired && event.shooter == 1) ++shots;
+                    const auto* ship = durability_of(*step.value().snapshot, 1);
+                    expect(ship && ship->hull == units(10000) && ship->hardpoints[0].health == units(health * 2),
+                        "HD-06: the ship and its authored hardpoint remain in the session");
+                }
+                expect(health == 0 ? shots == 0 : shots > 0,
+                    "HD-06: destroyed weapon never fires while the healthy control fires");
+                if (reference.empty()) reference = hashes;
+                expect(hashes == reference, "HD-06: 1/2/4/8 workers and storage orders give identical hashes");
+            }
+        }
+    }
+}
+
 void check_consequences(const Run& result, const tactical::DurabilityTable& table) {
     using State = tactical::HardpointState;
     const auto& published = result.published;
@@ -507,8 +639,10 @@ int main(const int argc, char** argv) {
     }
     test_validation();
     test_rules();
+    test_zero_health_recovery();
     test_service();
     test_repair();
+    test_zero_health_weapon();
     test_fixture(argv[1]);
     if (failures != 0) {
         std::cerr << failures << " durability contract(s) failed\n";

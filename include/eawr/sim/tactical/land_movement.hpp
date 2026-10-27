@@ -26,6 +26,12 @@ struct LandLocomotionProfile {
     friend bool operator==(const LandLocomotionProfile&, const LandLocomotionProfile&) = default;
 };
 
+// WLPA-82: the authored UnitCollisionClass (WLPA-73), never the object kind, makes a moving/stopped pair
+// repulse: Infantry and Bike are soft. Every other class keeps the hard pair guard and the path-around.
+[[nodiscard]] constexpr bool land_soft_collision_class(units::LandCollisionGroup group) noexcept {
+    return group == units::LandCollisionGroup::infantry || group == units::LandCollisionGroup::bike;
+}
+
 // Authoritative animation admission, distinct from presentation playback. R13-16..21:
 // callers publish clip completion/stop-point and attack/deploy gates, never a guessed tick delay.
 struct LandMotionGates {
@@ -83,6 +89,11 @@ struct LandMovingSquad {
     friend bool operator==(const LandMovingSquad&, const LandMovingSquad&) = default;
 };
 
+// WLPA-83: two moving Infantry/Bike members of different squads whose headings are opposed or crossing
+// (dot <= 0) are a stateless soft pair. One predicate for the contact layer and the movement pair guard.
+[[nodiscard]] bool land_soft_opposed(const LandMovingMember& x, const LandMovingSquad& xs,
+    const LandMovingMember& y, const LandMovingSquad& ys, bool enabled) noexcept;
+
 // LR3-14/15: exposed for exact boundary tests; turning requests zero before acceleration.
 [[nodiscard]] math::Fixed land_member_desired_speed(math::Fixed parent_speed, math::Fixed maximum,
     math::Fixed longitudinal_error, bool turning) noexcept;
@@ -91,6 +102,11 @@ struct LandMovingSquad {
 // LR1-03/D5: caller runs ordinary motion once, before late contact/coordinator publication.
 class LandMovement final {
 public:
+    // Deterministic work counts of the last ordinary step (scratch, never serialized or hashed): retained
+    // contact rows, contact-row visits made by the squad and member proposal phases, and pair-sweep candidates.
+    struct StepWork {
+        std::uint64_t contact_rows{}, contact_visits{}, pair_candidates{};
+    };
     struct Checkpoint {
         std::uint64_t tick{};
         std::vector<LandMovingSquad> squads;
@@ -106,6 +122,7 @@ public:
     [[nodiscard]] Checkpoint checkpoint() const { return state_; }
     // Borrowed view for encoders that must not deep-copy the retained state each tick.
     [[nodiscard]] const Checkpoint& state() const noexcept { return state_; }
+    [[nodiscard]] const StepWork& last_step_work() const noexcept { return work_; }
     [[nodiscard]] std::span<const LandMovingSquad> squads() const noexcept { return state_.squads; }
     [[nodiscard]] std::span<const LandMovingMember> members() const noexcept { return state_.members; }
     [[nodiscard]] bool install_path(std::size_t squad, LandPath path, std::uint64_t following_start);
@@ -113,6 +130,8 @@ public:
     // Explicit coordinator recovery uses observed blocker progress; pair service qualifies deadlock separately.
     [[nodiscard]] bool observe_progress(std::size_t squad, EntityId blocker, std::uint64_t progress);
     [[nodiscard]] bool drop_order(std::size_t squad);
+    // Sparse death commit: preserves surviving slots, removes contacts, and erases an empty squad.
+    [[nodiscard]] bool remove_member(EntityId member);
     [[nodiscard]] bool set_gates(EntityId member, LandMotionGates gates);
     [[nodiscard]] bool set_walk_state(EntityId member, LandWalkState state);
     [[nodiscard]] bool set_animation_progress(EntityId member, math::Fixed transition_frame, math::Fixed deployment_frame);
@@ -136,6 +155,14 @@ private:
     bool straggler_repulsion_{true};
     LandNeighbours neighbours_;
     std::vector<std::vector<std::size_t>> neighbour_candidates_;
+    // Scratch rebuilt every step. Contact adjacency is a CSR over member indices (rows touching a member);
+    // avoid_peers_ holds the member-steering peers (WLPA-59: retained idle peers plus WLPA-83 moving soft peers).
+    std::vector<std::uint32_t> adjacency_offset_, adjacency_cursor_, adjacency_row_;
+    std::vector<std::vector<std::size_t>> avoid_peers_, soft_candidates_;
+    std::vector<std::size_t> member_rank_;
+    std::vector<std::uint32_t> member_visits_, squad_visits_, pair_visits_;
+    LandNeighbours soft_index_;
+    StepWork work_;
     void invalidate_contacts(std::size_t squad);
     Checkpoint state_;
     // Only physical proposal fields are staged: no string/vector copies or allocations per member/tick.

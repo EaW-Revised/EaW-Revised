@@ -247,7 +247,7 @@ void build_unit_cards(HudState& state, const vfs::Vfs& filesystem, const data::u
         }
         EawrUnitCards::Setup cards;
         // UI-12: every tactical hover source draws above the HUD's panel plane.
-        cards.tooltip_z_index = 1;
+        cards.tooltip_z_index = 2;
         cards.slots = state.shell.card_slots;
         cards.borders = state.shell.card_borders;
         cards.texture = [&state](const std::string& name) { return state.command_texture(name, "unit card"); };
@@ -623,6 +623,11 @@ bool TacticalHud::build(const vfs::Vfs& filesystem, const data::Catalog* objects
     }
     for (const auto& diagnostic : anchors.value().diagnostics) state.diagnostics.push_back(diagnostic);
     state.shell = model::hud_shell(anchors.value().shell, catalog, state.options.faction);
+    if (const auto* bone = anchors.value().shell.find_bone("Movie_tactical"))
+        state.movie_bone = model::ReferencePoint{bone->origin.x, bone->origin.y};
+    else if (const auto* anchor = anchors.value().shell.find("Movie_tactical"))
+        state.movie_bone = model::ReferencePoint{anchor->origin ? anchor->origin->x : anchor->rect.x,
+            anchor->origin ? anchor->origin->y : anchor->rect.y};
     for (const auto& diagnostic : state.shell.diagnostics) state.diagnostics.push_back(diagnostic);
 
     EawrTacticalHud::Setup setup;

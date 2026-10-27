@@ -15,9 +15,9 @@ core::Result<LiveAi> live_ai(const battle::BattleStart& start, const skirmish::S
     setup.trace_proposals = trace_proposals;
     // #449: the goal system runs the retail space plans beside the freestore.
     if (auto enabled = skirmish::enable_goal_system(files, setup); !enabled) return core::Result<LiveAi>::failure(enabled.error());
-    auto modules = skirmish::ai_modules(files, setup);
-    if (!modules) return core::Result<LiveAi>::failure(modules.error());
     LiveAi out;
+    auto modules = skirmish::ai_modules(files, setup, false, &out.load_notes);
+    if (!modules) return core::Result<LiveAi>::failure(modules.error());
     for (const auto& player : setup.players) {
         if (player.ai) out.players.push_back(player.player);
     }

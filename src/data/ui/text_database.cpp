@@ -196,13 +196,15 @@ const TextEntry* TextDatabase::find(const std::string_view key) const noexcept {
 
 namespace {
 
-// The retail executable registers these two defaults when the database lacks the key (observed in
-// the retail capture and the debug build); the text database does not ship them.
+// The Mods defaults follow the retail capture and debug-build evidence; the
+// cooperative Gift caption is project-authored. Language databases override both.
 struct BuiltinText final {
     std::string_view key;
     std::u16string_view value;
 };
-constexpr std::array<BuiltinText, 2> builtin_texts{{
+constexpr std::array<BuiltinText, 3> builtin_texts{{
+    // ADR-020 project caption; an authored language database overrides this default.
+    {"TEXT_EAWR_GIFT_UNITS", u"Gift"},
     {"TEXT_MODS_OPTIONS", u"Mods"},
     {"TEXT_SELECT_MOD_TITLE", u"Select Mod"},
 }};

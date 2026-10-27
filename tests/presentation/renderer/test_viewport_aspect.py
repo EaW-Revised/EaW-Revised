@@ -41,7 +41,7 @@ class ViewportAspect(unittest.TestCase):
         settings = configparser.ConfigParser(comment_prefixes=(";",))
         # Godot permits config_version before the first section; INI parsers require one.
         settings.read_string("[project]\n" + (PROJECT / "project.godot").read_text(encoding="utf-8"))
-        self.assertEqual(settings.getint("rendering", "limits/global_shader_variables/buffer_size"), 262144,
+        self.assertEqual(settings.getint("rendering", "limits/global_shader_variables/buffer_size"), 1310720,
                          "large mod fleets must not exhaust the shader instance-uniform buffer")
 
     def test_sources_are_found(self):

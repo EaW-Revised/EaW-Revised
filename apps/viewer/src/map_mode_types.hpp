@@ -237,6 +237,7 @@ struct MapMode::State final {
     // #425, #454, #530: the command bar's card slots (the selection's unit cards, or the station's
     // build buttons while it is the production object, PU-60) and the ability bar.
     void sync_cards();
+    std::optional<bool> hud_shortcut_wasd;
     // The unit tables' type names by session type ID (filled once).
     void fill_type_names();
     // #530 (PU-63 to PU-68): the build queue, credits, pool pane and population from the local

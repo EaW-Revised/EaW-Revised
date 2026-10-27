@@ -167,6 +167,13 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
     result.proposals_.resize(result.state_.members.size());
     result.neighbours_.resize(result.state_.members.size());
     result.neighbour_candidates_.resize(result.state_.members.size());
+    result.avoid_peers_.resize(result.state_.members.size());
+    result.soft_candidates_.resize(result.state_.members.size());
+    result.soft_index_.resize(result.state_.members.size());
+    result.member_visits_.resize(result.state_.members.size());
+    result.pair_visits_.resize(result.state_.members.size());
+    result.squad_visits_.resize(result.state_.squads.size());
+    result.member_rank_.resize(result.state_.members.size());
     result.squad_proposals_.resize(result.state_.squads.size());
     result.member_order_.resize(result.state_.members.size());
     result.squad_members_.resize(result.state_.squads.size());
@@ -189,7 +196,43 @@ std::optional<LandMovement> LandMovement::from_checkpoint(Checkpoint saved) {
     std::sort(result.member_order_.begin(), result.member_order_.end(), [&](auto x, auto y) {
         return result.state_.members[x].object < result.state_.members[y].object;
     });
+    for (std::size_t rank = 0; rank < result.member_order_.size(); ++rank) result.member_rank_[result.member_order_[rank]] = rank;
     return result;
+}
+
+bool LandMovement::remove_member(const EntityId object) {
+    const auto member = std::lower_bound(state_.members.begin(), state_.members.end(), object,
+        [](const auto& row, EntityId id) { return row.object < id; });
+    if (member == state_.members.end() || member->object != object) return false;
+    const auto squad_index = member->squad;
+    const auto squad_id = state_.squads[squad_index].object;
+    // A removed endpoint cannot retain a late contact or a temporary route in another squad.
+    for (std::size_t i = 0; i < state_.squads.size(); ++i) {
+        auto& squad = state_.squads[i];
+        if (squad.temporary_first == object || squad.temporary_second == object) {
+            squad.temporary_path = {}; squad.temporary_next = 0;
+            squad.temporary_first = 0; squad.temporary_second = 0;
+            for (auto& survivor : state_.members) if (survivor.squad == i) survivor.temporary_next = 0;
+        }
+        if (squad.yielding_to == object || squad.yielding_to == squad_id) {
+            squad.yielding_to = 0; squad.blocker_progress = 0;
+            if (squad.order == LandMoveOrder::yielded) squad.order = LandMoveOrder::recovering;
+        }
+    }
+    std::erase_if(state_.contacts, [object](const auto& row) { return row.first == object || row.second == object; });
+    state_.members.erase(member);
+    if (std::none_of(state_.members.begin(), state_.members.end(), [squad_index](const auto& row) { return row.squad == squad_index; })) {
+        state_.squads.erase(state_.squads.begin() + static_cast<std::ptrdiff_t>(squad_index));
+        for (auto& survivor : state_.members) if (survivor.squad > squad_index) --survivor.squad;
+    }
+    // Death is a sparse ordered lifecycle operation. Rebuild scratch once per removal;
+    // ordinary per-member movement and occupancy preparation remain partitioned.
+    auto rebuilt = from_checkpoint(std::move(state_));
+    if (!rebuilt) return false;
+    const bool reference = reference_pair_scans_, repulsion = straggler_repulsion_;
+    *this = std::move(*rebuilt);
+    reference_pair_scans_ = reference; straggler_repulsion_ = repulsion;
+    return true;
 }
 
 // WLPA-45: notification invalidates both endpoints immediately, before another ordinary turn.
@@ -302,14 +345,41 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
         neighbour_candidates_[first].push_back(second);
         neighbour_candidates_[second].push_back(first);
     }
+    // Contact adjacency (CSR over member indices): the proposal phases and the pair guard visit only the rows that
+    // touch a member instead of every retained row. Built here, in the ordered pre-pass, from the committed rows.
+    {
+        const auto members = state_.members.size();
+        adjacency_offset_.assign(members + 1, 0);
+        for (const auto& contact : state_.contacts) {
+            const auto first = member_index(contact.first);
+            if (first < members) ++adjacency_offset_[first + 1];
+            if (contact.second) {
+                const auto second = member_index(contact.second);
+                if (second < members) ++adjacency_offset_[second + 1];
+            }
+        }
+        for (std::size_t i = 0; i < members; ++i) adjacency_offset_[i + 1] += adjacency_offset_[i];
+        adjacency_row_.resize(adjacency_offset_[members]);
+        adjacency_cursor_.assign(adjacency_offset_.begin(), adjacency_offset_.end() - 1);
+        for (std::size_t row = 0; row < state_.contacts.size(); ++row) {
+            const auto& contact = state_.contacts[row];
+            const auto first = member_index(contact.first);
+            if (first < members) adjacency_row_[adjacency_cursor_[first]++] = static_cast<std::uint32_t>(row);
+            if (contact.second) {
+                const auto second = member_index(contact.second);
+                if (second < members) adjacency_row_[adjacency_cursor_[second]++] = static_cast<std::uint32_t>(row);
+            }
+        }
+    }
     // The two barriers use the same named phase. Squads produce immutable parent inputs first;
     // members then propose into disjoint slots, independently of worker traversal order.
-    struct Context { LandOccupancy& grid; Fixed seconds; } context{grid, seconds};
+    struct Context { LandOccupancy& grid; Fixed seconds; bool soft_peers{}, soft_indexed{}; } context{grid, seconds};
     auto run = executor.execute_phase("land-member-proposals", tick_partition_count, [this, &context](std::size_t partition) {
         const auto range = partition_range(partition, state_.squads.size());
         for (auto i = range.begin; i < range.end; ++i) {
             const auto& s = state_.squads[i];
             auto& p = squad_proposals_[i];
+            squad_visits_[i] = 0;
             p = {true, s.position, s.facing, zero, s.next_node, s.progress};
             p.temporary_next = s.temporary_next;
             p.turning = s.turning;
@@ -360,11 +430,14 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                 continue;
             }
             auto speed = s.maximum_speed;
-            for (const auto& contact : state_.contacts) {
-                if (contact.state == LandContactState::resolved) continue;
-                if (contact.state == LandContactState::follower_speed || contact.state == LandContactState::offset_exchange) continue;
-                for (const auto index : squad_members_[i]) {
-                    const auto id = state_.members[index].object;
+            // Only rows that touch a member of this squad can match, so visit the members' adjacency lists.
+            for (const auto index : squad_members_[i]) {
+                const auto id = state_.members[index].object;
+                for (auto k = adjacency_offset_[index]; k < adjacency_offset_[index + 1]; ++k) {
+                    ++squad_visits_[i];
+                    const auto& contact = state_.contacts[adjacency_row_[k]];
+                    if (contact.state == LandContactState::resolved) continue;
+                    if (contact.state == LandContactState::follower_speed || contact.state == LandContactState::offset_exchange) continue;
                     if ((id == contact.first && contact.first_stopped) || (id == contact.second && contact.second_stopped))
                         speed = zero;
                     if (id == contact.first && contact.first_speed_limit) speed = std::min(speed, *contact.first_speed_limit);
@@ -420,6 +493,25 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
     });
     if (!run) return run;
     for (const auto& p : squad_proposals_) if (!p.valid) return overflow();
+    // WLPA-83: moving Infantry/Bike pairs of different squads are stateless soft pairs; the member steering finds its
+    // moving soft peers from this index of the committed positions (reach 1.3 x the body radius, WLPA-59).
+    context.soft_peers = straggler_repulsion_;
+    if (straggler_repulsion_ && !reference_pair_scans_) {
+        core::tick_profile::Scope phase("land-movement-index");
+        run = executor.execute_phase("land-member-proposals", tick_partition_count, [this](std::size_t partition) {
+            const auto range = partition_range(partition, member_order_.size());
+            for (auto rank = range.begin; rank < range.end; ++rank) {
+                const auto& m = state_.members[member_order_[rank]];
+                Arithmetic a;
+                const auto reach = a.mul(m.profile.radius, Fixed::from_ratio(13, 10).value());
+                soft_index_.bodies[rank] = {m.position, m.position, reach, true, a.valid};
+            }
+        });
+        if (!run) return run;
+        core::tick_profile::Scope build("land-movement-index-build");
+        soft_index_.build(grid.terrain().spacing());
+        context.soft_indexed = soft_index_.safe();
+    }
     run = executor.execute_phase("land-member-proposals", tick_partition_count, [this, &context](std::size_t partition) {
         const auto range = partition_range(partition, state_.members.size());
         for (auto i = range.begin; i < range.end; ++i) {
@@ -432,9 +524,16 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             p.terrain_target = parent.terrain_target;
             // WLPA-69: a member's own refused step stays 'own' while its terrain contact is live, so the late
             // service still plans the member detour after the member stopped re-testing the blocked cell.
-            p.own_terrain_block = m.own_terrain_block && std::any_of(state_.contacts.begin(), state_.contacts.end(), [&m](const auto& c) {
-                return c.first == m.object && c.second == 0 && c.kind == LandContactKind::terrain && c.state != LandContactState::resolved;
-            });
+            member_visits_[i] = 0;
+            if (m.own_terrain_block) {
+                bool live = false;
+                for (auto k = adjacency_offset_[i]; k < adjacency_offset_[i + 1] && !live; ++k) {
+                    ++member_visits_[i];
+                    const auto& c = state_.contacts[adjacency_row_[k]];
+                    live = c.first == m.object && c.second == 0 && c.kind == LandContactKind::terrain && c.state != LandContactState::resolved;
+                }
+                p.own_terrain_block = live;
+            } else p.own_terrain_block = false;
             p.next_node = m.next_node; p.temporary_next = m.temporary_next; p.detour_next = m.detour_next;
             Arithmetic a;
             const auto axis = forward(parent.facing);
@@ -465,8 +564,27 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             }
             // WLPA-58/59: member-local avoidance remains available while the parent
             // waits for lagging slots. Read immutable contacts and write only this proposal.
-            const auto& repulsion_peers = neighbour_candidates_[i];
-            if (!s.generic_team && straggler_repulsion_ && active(s.order) && distance > zero && !repulsion_peers.empty()) {
+            auto& repulsion_peers = avoid_peers_[i];
+            repulsion_peers.clear();
+            if (!s.generic_team && straggler_repulsion_ && active(s.order) && distance > zero) {
+                // Retained idle peers (WLPA-57/60/81), then the moving soft peers of other squads (WLPA-83).
+                for (const auto peer : neighbour_candidates_[i]) repulsion_peers.push_back(peer);
+                if (context.soft_peers && land_soft_collision_class(m.profile.collision_class)) {
+                    const auto consider = [&](std::size_t j) {
+                        if (j == i) return;
+                        const auto& other = state_.members[j];
+                        if (other.squad == m.squad || !land_soft_collision_class(other.profile.collision_class)) return;
+                        const auto& other_squad = state_.squads[other.squad];
+                        if (other_squad.generic_team || !active(other_squad.order)) return;
+                        repulsion_peers.push_back(j);
+                    };
+                    if (context.soft_indexed) {
+                        soft_index_.query(member_rank_[i], soft_candidates_[i]);
+                        for (const auto rank : soft_candidates_[i]) consider(member_order_[rank]);
+                    } else for (const auto j : member_order_) consider(j);
+                }
+            }
+            if (!repulsion_peers.empty()) {
                 const auto length = a.length(direction);
                 if (length > zero) direction = a.mul(direction, a.div(one, length));
                 const auto requested = parent.speed == zero || detouring ? std::min(m.profile.maximum_speed, a.div(distance, context.seconds))
@@ -545,16 +663,25 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     : land_member_desired_speed(parent.speed, m.profile.maximum_speed, dot(a, error, axis), turning);
                 if (turning) desired = zero;
             }
-            for (const auto& contact : state_.contacts) {
-                if (contact.state == LandContactState::resolved) continue;
-                const auto apply = [&](EntityId id) {
-                    if ((id == contact.first && contact.first_stopped) || (id == contact.second && contact.second_stopped)) desired = zero;
-                    if (id == contact.first && contact.first_speed_limit) desired = std::min(desired, *contact.first_speed_limit);
-                    if (id == contact.second && contact.second_speed_limit) desired = std::min(desired, *contact.second_speed_limit);
+            {
+                // The rows that touch this member, or (non-generic squads) any member of its squad: every other row
+                // fails the identity test in the original full scan. follower/offset rows and generic teams act on
+                // the member alone.
+                const auto scan = [&](std::size_t holder) {
+                    const auto id = state_.members[holder].object;
+                    for (auto k = adjacency_offset_[holder]; k < adjacency_offset_[holder + 1]; ++k) {
+                        ++member_visits_[i];
+                        const auto& contact = state_.contacts[adjacency_row_[k]];
+                        if (contact.state == LandContactState::resolved) continue;
+                        if ((contact.state == LandContactState::follower_speed || contact.state == LandContactState::offset_exchange)
+                            && holder != i) continue;
+                        if ((id == contact.first && contact.first_stopped) || (id == contact.second && contact.second_stopped)) desired = zero;
+                        if (id == contact.first && contact.first_speed_limit) desired = std::min(desired, *contact.first_speed_limit);
+                        if (id == contact.second && contact.second_speed_limit) desired = std::min(desired, *contact.second_speed_limit);
+                    }
                 };
-                if (contact.state == LandContactState::follower_speed || contact.state == LandContactState::offset_exchange) apply(m.object);
-                else if (s.generic_team) apply(m.object);
-                else for (const auto member : squad_members_[m.squad]) apply(state_.members[member].object);
+                if (s.generic_team) scan(i);
+                else for (const auto holder : squad_members_[m.squad]) scan(holder);
             }
             if ((!allowed || desired == zero) && (p.state == LandWalkState::moving || p.state == LandWalkState::turning)) {
                 p.state = LandWalkState::stopping; p.stop_velocity = m.speed;
@@ -608,11 +735,13 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             const auto& m = state_.members[i];
             const auto& p = proposals_[i];
             pair_blocked_[i] = 0;
+            pair_visits_[i] = 0;
             if (m.profile.radius <= zero) continue;
             Arithmetic a;
             auto& candidates = neighbour_candidates_[i];
             if (indexed) neighbours_.query(rank, candidates);
             const auto count = indexed ? candidates.size() : member_order_.size();
+            pair_visits_[i] = static_cast<std::uint32_t>(count);
             for (std::size_t candidate = 0; candidate < count; ++candidate) {
                 const auto j = member_order_[indexed ? candidates[candidate] : candidate];
                 const auto& other = state_.members[j];
@@ -626,22 +755,28 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
                     ? std::clamp(a.div(a.sub(zero, dot(a, offset, delta)), length_squared), zero, one) : zero;
                 const auto closest = a.length(a.add(offset, a.mul(delta, t)));
                 if (closest < radius && p.position != m.position) {
-                    // WLPA-60: retained stopped-infantry repulsion is a soft pair.
+                    // WLPA-83: two moving Infantry/Bike members of different squads with opposed or crossing headings
+                    // never veto each other; the member steering (WLPA-59) separates them. Stateless: no contact row.
+                    // Same-direction pairs keep the hard veto.
+                    if (land_soft_opposed(m, state_.squads[m.squad], other, state_.squads[other.squad], straggler_repulsion_)) continue;
+                    // WLPA-60/82: retained stopped-infantry repulsion is a soft pair. Eligibility is the authored
+                    // collision class of BOTH members (Infantry or Bike), never the land object kind.
                     // Retail member displacement does not apply this extra hard-disc
                     // veto. Keep terrain admission and every other pair policy intact.
                     // Consult canonical contacts only for an otherwise blocked proposal.
                     if (straggler_repulsion_ && active(state_.squads[m.squad].order)
                         && !active(state_.squads[other.squad].order)
                         && state_.squads[other.squad].order != LandMoveOrder::yielded
-                        && m.source.kind == units::LandObjectKind::infantry
-                        && other.source.kind == units::LandObjectKind::infantry) {
+                        && land_soft_collision_class(m.profile.collision_class)
+                        && land_soft_collision_class(other.profile.collision_class)) {
                         // WLPA-81: the retained row is only a witness that this member is in straggler
                         // repulsion; a second idle peer inside the hard disc is soft as well, because the
                         // retained set need not list every adjacent peer (#4840 Dantooine member 1103).
-                        const auto repulsed = std::any_of(state_.contacts.begin(), state_.contacts.end(), [&](const auto& entry) {
-                            return (entry.first == m.object || entry.second == m.object)
-                                && entry.kind == LandContactKind::moving_stopped && entry.state == LandContactState::repulsion;
-                        });
+                        bool repulsed = false;
+                        for (auto k = adjacency_offset_[i]; k < adjacency_offset_[i + 1] && !repulsed; ++k) {
+                            const auto& entry = state_.contacts[adjacency_row_[k]];
+                            repulsed = entry.kind == LandContactKind::moving_stopped && entry.state == LandContactState::repulsion;
+                        }
                         if (repulsed) continue;
                     }
                     // Existing overlap may separate, but never deepen.
@@ -736,6 +871,11 @@ core::Result<void> LandMovement::step(LandOccupancy& grid, const PartitionExecut
             }
         }
     }
+    work_ = {};
+    work_.contact_rows = state_.contacts.size();
+    for (const auto v : member_visits_) work_.contact_visits += v;
+    for (const auto v : squad_visits_) work_.contact_visits += v;
+    for (const auto v : pair_visits_) work_.pair_candidates += v;
     ++state_.tick;
     return core::Result<void>::success();
 }

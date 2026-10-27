@@ -443,6 +443,7 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
     EffectiveObject result{
         .object_id = top.id,
         .type_name = top.type_name,
+        .class_origin = {},
         .category = top.category,
         .chain = std::move(chain_names),
         .values = {},

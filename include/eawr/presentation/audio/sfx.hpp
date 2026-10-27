@@ -366,6 +366,9 @@ public:
         std::function<bool(std::size_t)> playing;
         std::function<void(std::size_t)> stop;
         std::function<void(std::size_t)> fading;
+        // Optional nonblocking asset gate. False retains the selected sample
+        // and all random values until a later service; no voice is allocated.
+        std::function<bool(const Sample&)> ready{};
     };
     Accepted admit(const Request& request, Random& random, const Admission& admission = {});
     std::vector<Chain> service(double elapsed_ms, bool paused, const Vec3& listener, Random& random,
@@ -387,6 +390,7 @@ private:
         Stage stage{Stage::initialize};
         std::optional<std::size_t> voice;
         Start values;
+        bool sample_pending{};
         double delay_ms{};
         double postdelay_ms{};
         int completed{};

@@ -85,6 +85,8 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("gameplay.scroll_stop", gameplay.scroll_stop, 0, scroll_last),
     EAWR_SETTINGS_FIELD("gameplay.absolute_scrolling", gameplay.absolute_scrolling, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.delay_tooltips", gameplay.delay_tooltips, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.reinforcement_areas_only_while_placing", gameplay.reinforcement_areas_only_while_placing, 0, 1),
+    EAWR_SETTINGS_FIELD("gameplay.hover_owner_names", gameplay.hover_owner_names, -1, 1),
     EAWR_SETTINGS_FIELD("gameplay.right_button_scroll", gameplay.right_button_scroll, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.both_buttons_rotate", gameplay.both_buttons_rotate, 0, 1),
     EAWR_SETTINGS_FIELD("gameplay.alternate_mouse", gameplay.alternate_mouse, 0, 1),

@@ -180,6 +180,45 @@ void BattleAudio::write_report(std::ostream& output) const {
     for (const auto& name : preloaded_samples_) output << (preloaded_index++ ? ", " : "") << json(name);
     output << "]";
     output << ", \"synchronous_runtime_loads\": " << synchronous_runtime_loads_;
+    std::vector<double> publish_ms, runtime_publish_ms;
+    for (const auto& row : audio_load_rows_) {
+        publish_ms.push_back(row.commit_ms);
+        if (row.runtime) runtime_publish_ms.push_back(row.commit_ms);
+    }
+    std::sort(publish_ms.begin(), publish_ms.end());
+    std::sort(runtime_publish_ms.begin(), runtime_publish_ms.end());
+    const auto median = [](const std::vector<double>& values) {
+        if (values.empty()) return 0.0;
+        const auto middle = values.size() / 2;
+        return values.size() % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2.0;
+    };
+    output << ", \"audio_preparation\": {\"preload_enabled\": " << (options_.preload ? "true" : "false")
+           << ", \"wall_ms\": " << audio_prepare_wall_ms_
+           << ", \"workers\": " << audio_worker_count_
+           << ", \"deferred_runtime_requests\": " << deferred_audio_requests_
+           << ", \"queue_retries\": " << audio_queue_retries_
+           << ", \"pending\": " << pending_audio_.size()
+           << ", \"publish_p50_ms\": " << median(publish_ms)
+           << ", \"publish_max_ms\": " << (publish_ms.empty() ? 0.0 : publish_ms.back())
+           << ", \"runtime_publish_p50_ms\": " << median(runtime_publish_ms)
+           << ", \"runtime_publish_max_ms\": " << (runtime_publish_ms.empty() ? 0.0 : runtime_publish_ms.back())
+           << ", \"timing_policy\": \"open/WAV decode are worker elapsed times that may overlap; commit includes main resource creation and MP3 metadata; PCM bytes apply to WAV only; runtime publication is one file per frame\"}"
+           << ", \"audio_loads\": [";
+    bool first_load = true;
+    for (const auto& row : audio_load_rows_) {
+        const auto* kind = row.key.first == LoadKind::sfx ? "sfx" : row.key.first == LoadKind::speech ? "speech" : "music";
+        output << (first_load ? "" : ", ") << "{\"kind\": " << json(kind) << ", \"file\": " << json(row.key.second)
+               << ", \"runtime\": " << (row.runtime ? "true" : "false")
+               << ", \"first_touch\": true, \"reader_thread\": " << json(row.reader_thread)
+               << ", \"reader_on_main\": " << (row.reader_on_main ? "true" : "false")
+               << ", \"requested_frame\": " << row.requested_frame << ", \"committed_frame\": " << row.committed_frame
+               << ", \"requested_tick\": " << row.requested_tick << ", \"committed_tick\": " << row.committed_tick
+               << ", \"encoded_bytes\": " << row.encoded_bytes << ", \"pcm_bytes\": " << row.pcm_bytes
+               << ", \"open_ms\": " << row.open_ms << ", \"decode_ms\": " << row.decode_ms
+               << ", \"commit_ms\": " << row.commit_ms << ", \"cause\": " << json(row.cause) << "}";
+        first_load = false;
+    }
+    output << "]";
 
     // #1708: totals per cause, so a mod run shows at a glance how many sounds never played.
     {

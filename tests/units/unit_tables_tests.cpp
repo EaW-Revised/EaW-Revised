@@ -208,7 +208,7 @@ void indexed_collision_geometry() {
         // Picking consumes unscaled model-space values, even when scale is zero or non-invertible.
         const auto pick = [](const auto& triangles) {
             std::vector<std::array<ui::Vec3f, 3>> result;
-            for (const auto triangle : triangles) {
+            for (const auto& triangle : triangles) {
                 std::array<ui::Vec3f, 3> corners{};
                 for (std::size_t corner = 0; corner < 3; ++corner) {
                     const auto& p = triangle[corner];

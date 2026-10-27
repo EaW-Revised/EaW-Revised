@@ -8,6 +8,7 @@
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
 #include "eawr/presentation/live/live_units.hpp"
+#include <godot_cpp/classes/os.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -17,6 +18,7 @@
 #include <utility>
 
 #include "unit_emitters_internal.hpp"
+#include "particle_prewarm.hpp"
 #include "space_populate_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
@@ -97,6 +99,7 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
     const auto began = std::chrono::steady_clock::now();
     std::set<std::string> models, frames, systems, sources, attached_models;
     std::map<std::string, std::string> attached_paths;
+    std::vector<const EffectSystem*> reachable_systems;
     const auto source = [&](const std::string& path) {
         if (sources.insert(path).second) {
             if (const auto entry = filesystem_->stat(path)) prepared_source_bytes_ += entry.value().size;
@@ -106,7 +109,11 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
         if (path.empty() || !systems.insert(path).second) return;
         ++prepared_system_requests_;
         source(path);
-        if (effect_system(path).system) ++prepared_systems_;
+        const EffectSystem& prepared = effect_system(path);
+        if (prepared.system) {
+            ++prepared_systems_;
+            reachable_systems.push_back(&prepared);
+        }
     };
     const auto prepare_model = [&](const scene::Placement& placement, const bool death_clone) {
         const auto& path = placement.model_path;
@@ -157,6 +164,34 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
         }
     }
     asset_prepare_ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
+    // Warm the same authored closure before Begin, in population reference order.
+    // Dormant backend holds pin shared textures/programs, without spawning
+    // logical effects or consuming their entity seeds, ages or live draw order.
+    const auto warm_began = std::chrono::steady_clock::now();
+    std::vector<particles::EmitterRenderPlan> reachable_plans;
+    for (const EffectSystem* system : reachable_systems) {
+        auto plans = particles::plan_system(*system->system);
+        for (auto& plan : plans) {
+            if (!plan.drawable) continue;
+            backend_->inventory_prewarm_emitter(plan);
+            reachable_plans.push_back(std::move(plan));
+        }
+    }
+    const auto coverage = detail::prewarm_particle_plans(reachable_plans, [this](const auto& plan) {
+        return backend_->prewarm_emitter(plan);
+    });
+    backend_warm_requested_ += coverage.requested;
+    backend_warm_admitted_ += coverage.admitted;
+    backend_warm_refused_ += coverage.refused;
+    if (auto* os = OS::get_singleton(); os != nullptr
+        && os->get_cmdline_user_args().has("--eawr-emitter-prewarm-zero-holders")) {
+        backend_->retain_prewarm_cache_only();
+    }
+    backend_warm_work_ = backend_->emitter_prewarm_work();
+    backend_warm_policies_ = backend_->prewarmed_emitters();
+    backend_warm_texture_bytes_ = backend_->prewarmed_texture_bytes();
+    backend_warm_ms_ = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - warm_began).count();
     assets_prepared_ = true;
 }
 

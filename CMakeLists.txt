@@ -106,7 +106,7 @@ if(MSVC)
     set(EAWR_SYMBOL_TARGETS sim_headless sim_bench path_bench asset_scan asset_validate
         xml_scan scene_scan sky_scan unit_scan script_smoke hud_movie_prepare)
     if(WIN32)
-        list(APPEND EAWR_SYMBOL_TARGETS eawr_launcher)
+        list(APPEND EAWR_SYMBOL_TARGETS eawr_launcher eawr_mods_start)
     endif()
     set(EAWR_SYMBOL_INPUTS "")
     foreach(target IN LISTS EAWR_SYMBOL_TARGETS)

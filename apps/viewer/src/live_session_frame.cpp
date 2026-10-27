@@ -171,6 +171,16 @@ bool LiveSessionView::leave() {
     return true;
 }
 
+std::optional<double> LiveSessionView::clone_birth_tick(const std::size_t ship) const {
+    for (const auto* clones : {&active_clones_, &retiring_clones_}) {
+        for (const auto& active : *clones) {
+            if (death_clones_.at(active.unit).ship == ship)
+                return static_cast<double>(active.death_tick > 0 ? active.death_tick - 1U : 0U);
+        }
+    }
+    return std::nullopt;
+}
+
 core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population, GodotRenderer& renderer,
                                                      const double delta) {
     FrameTimer frame_timer(trace_frames_ ? &live_frame_ms_ : nullptr);

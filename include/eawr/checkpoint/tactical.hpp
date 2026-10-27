@@ -49,7 +49,7 @@ struct Seat {
 
 inline constexpr std::uint16_t child_log_section_version = 1;
 inline constexpr std::uint16_t child_state_section_version = 8; // Combined campaign and Skirmish continuation with retained squadron hardpoints and the station ship ledger (#3956), section 11
-inline constexpr std::uint16_t land_state_section_version = 5;
+inline constexpr std::uint16_t land_state_section_version = 6;
 // The conflict record is the galactic session's (FT-08); the container bounds it only.
 inline constexpr std::size_t max_conflict_record_bytes = 1U * 1024U * 1024U;
 

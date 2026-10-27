@@ -127,7 +127,8 @@ audio::EventQueue::Backend BattleAudio::event_backend() {
             voices_.finished(voice);
             end_voice(voice);
         },
-        [this](const std::size_t voice) { voices_.set_fading(voice); }
+        [this](const std::size_t voice) { voices_.set_fading(voice); },
+        [this](const audio::EventQueue::Sample& cue) { return audio_ready({LoadKind::sfx, cue.values.sample}); }
     };
 }
 
@@ -563,6 +564,11 @@ void BattleAudio::update_speech(const bool paused) {
         return;
     }
     const SpeechEvent& speech = *front->event;
+    // A first-seen speech event keeps its FIFO position while its files load.
+    // No RNG is drawn, stream admitted, or prior voice stopped while waiting.
+    bool ready = true;
+    for (const auto& file : speech.files) ready = audio_ready({LoadKind::speech, file}) && ready;
+    if (!ready) return;
     // SND-44/48: normal priority, centered pan and zero fade; FIFO service
     // attempts one front per frame, with no priority ordering or cooldown.
     if (!speech_stream_.admit(3)) {
@@ -571,18 +577,19 @@ void BattleAudio::update_speech(const bool paused) {
         return;
     }
     speech_player_->stop();
-    if (speech.streams.empty()) {
+    if (speech.files.empty()) {
         ++speech_failed_;
         speech_queue_.pop();
         return;
     }
-    const auto index = static_cast<std::size_t>(random_.between(0, static_cast<int>(speech.streams.size()) - 1));
-    if (!speech.streams[index].is_valid()) {
+    const auto index = static_cast<std::size_t>(random_.between(0, static_cast<int>(speech.files.size()) - 1));
+    const auto stream = speech_streams_.at(speech.files[index]);
+    if (!stream.is_valid()) {
         ++speech_failed_;
         speech_queue_.pop();
         return;
     }
-    speech_player_->set_stream(speech.streams[index]);
+    speech_player_->set_stream(stream);
     speech_player_->set_volume_db(decibels(speech.volume));
     speech_player_->set_pitch_scale(1.0F);
     speech_player_->play();
@@ -599,6 +606,12 @@ void BattleAudio::update_speech(const bool paused) {
 void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
     // MAT-18: also covers direct summary stings and their subsequent files/loops.
     if (!admits_battle_audio()) return;
+    if (!audio_ready({LoadKind::music, cue.file})) {
+        pending_music_ = cue; // Retain the director's selected file; never reroll.
+        return;
+    }
+    const godot::Ref<godot::AudioStream> stream = music_stream(cue.file);
+    pending_music_.reset();
     const char* mode = cue.mode == audio::MusicDirector::Mode::battle ? "battle"
         : cue.mode == audio::MusicDirector::Mode::victory ? "victory"
         : cue.mode == audio::MusicDirector::Mode::defeat ? "defeat"
@@ -609,7 +622,8 @@ void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
     const auto record = [this](const std::string& message) {
         if (music_stream_log_.size() < log_limit) music_stream_log_.push_back(std::to_string(clock_) + " " + message);
     };
-    // SND-72: retire before opening. A failed replacement cannot revive the old active stream.
+    // SND-72: retire before publishing the ready replacement. A failed
+    // replacement cannot revive the old active stream.
     MusicTrack& previous = music_tracks_[music_current_];
     if (previous.player->get_stream().is_valid()) {
         MusicTrack& older = music_tracks_[1 - music_current_];
@@ -627,7 +641,6 @@ void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
         music_current_ = 1 - music_current_;
     }
     MusicTrack& next = music_tracks_[music_current_];
-    const godot::Ref<godot::AudioStream> stream = music_stream(cue.file);
     if (!stream.is_valid()) {
         record("open_failed " + cue.file);
         return;
@@ -643,6 +656,12 @@ void BattleAudio::cue_music(const audio::MusicDirector::Cue& cue) {
 }
 
 void BattleAudio::update_music(const double delta) {
+    // Respect the frame's recovery-silence gate before starting deferred music.
+    if (pending_music_ && music_streams_.contains(pending_music_->file)) {
+        const auto cue = std::move(*pending_music_);
+        pending_music_.reset();
+        cue_music(cue);
+    }
     for (std::size_t index = 0; index < music_tracks_.size(); ++index) {
         MusicTrack& track = music_tracks_[index];
         if (!track.playing) continue;
@@ -653,7 +672,7 @@ void BattleAudio::update_music(const double delta) {
         if (previous_level > 0.0 && track.fade.ending && track.fade.level == 0.0 && music_stream_log_.size() < log_limit) {
             music_stream_log_.push_back(std::to_string(clock_) + " silent " + track.file);
         }
-        if (index == music_current_ && !track.fade.ending && !track.player->is_playing()) {
+        if (index == music_current_ && !pending_music_ && !track.fade.ending && !track.player->is_playing()) {
             track.playing = false;
             if (summary_event_) {
                 if (summary_event_->loop || summary_next_file_ < summary_event_->files.size()) {
@@ -1734,6 +1753,8 @@ void BattleAudio::frame(const LiveSessionView& live, std::vector<BattleInput::Ac
     if (released_) return;
     const bool recovery_quiet = live.multiplayer() && lan_recovery_audio_suppressed(live.lan_view());
     ++frames_;
+    presented_tick_ = live.battle_frame().presented_tick;
+    commit_ready_audio(); // One ready buffer; no file I/O or worker wait.
     gui_dialog_ = live.time().paused(); // the viewer's pause banner is its modal dialog
     event_delta_ms_ = std::max(0.0, delta) * 1000.0;
     clock_ += delta;

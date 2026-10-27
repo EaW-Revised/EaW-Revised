@@ -271,7 +271,8 @@ TacticalSnapshot::TacticalSnapshot(
     std::vector<AbilitySpawnState> ability_spawns,
     std::vector<RetreatView> retreat_views,
     std::vector<GarrisonTimerView> garrison_timers,
-    std::vector<BeaconState> beacons)
+    std::vector<BeaconState> beacons,
+    std::optional<BattleControllerPolicy> controllers)
     : completed_tick_(completed_tick), players_(std::move(players)), instances_(std::move(instances)),
       events_(std::move(events)), combat_events_(std::move(combat_events)), projectiles_(std::move(projectiles)),
       outcome_(outcome), spinning_(std::move(spinning)), squadron_targets_(std::move(squadron_targets)),
@@ -282,6 +283,7 @@ TacticalSnapshot::TacticalSnapshot(
     ability_spawns_ = std::move(ability_spawns);
     garrison_timers_ = std::move(garrison_timers);
     beacons_ = std::move(beacons);
+    controllers_ = std::move(controllers);
     // WST-13: publish the same team visibility as combat and command admission. This folds
     // completed member flags only, including initial/restored snapshots; no ability is serviced here.
     const auto find = [&](const EntityId id) {
@@ -375,6 +377,10 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
         sim::detail::append_u64(bytes, instance.type_id);
         sim::detail::append_u32(bytes, instance.owner);
         sim::detail::append_u32(bytes, instance.team);
+        if (controllers_) {
+            sim::detail::append_u32(bytes, instance.controller_seat.value);
+            sim::detail::append_u32(bytes, static_cast<std::uint32_t>(instance.control));
+        }
         for (const auto& row : instance.fixed_transform.rows) {
             for (const auto value : row) {
                 sim::detail::append_i64(bytes, value.raw());
@@ -608,6 +614,21 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
             sim::detail::append_u32(bytes, view.state.pulses_left);
             sim::detail::append_u32(bytes, view.state.instances);
             append_fixed(bytes, view.readiness);
+        }
+    }
+    if (controllers_) {
+        sim::detail::append_u32(bytes, 0x4c525443U); // CTRL optional snapshot domain
+        detail::append_controller_policy(bytes, *controllers_, 4);
+        sim::detail::append_u64(bytes, economy_.size());
+        for (const auto& ledger : economy_) {
+            sim::detail::append_u32(bytes, ledger.player);
+            for (const auto& queue : ledger.queues) {
+                sim::detail::append_u64(bytes, queue.size());
+                for (const auto& entry : queue) {
+                    sim::detail::append_u64(bytes, entry.entry_id);
+                    sim::detail::append_u32(bytes, entry.controller_seat.value);
+                }
+            }
         }
     }
     return bytes;

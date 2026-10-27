@@ -128,8 +128,13 @@ core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
         for (const auto& group : unit.production.buildable_campaign) for (const auto& name : group.types) append(name);
         if (unit.buzz_droids) append(unit.buzz_droids->object_type);
         if (unit.team_buzz_droids) append(unit.team_buzz_droids->object_type);
-        if (unit.weapon) projectile(unit.weapon->projectile_index);
-        for (const auto& hp : unit.hardpoints) if (hp.weapon) projectile(hp.weapon->projectile_index);
+        if (unit.weapon) {
+            projectile(unit.weapon->projectile_index); projectile(unit.weapon->charged_projectile_index);
+        }
+        for (const auto& hp : unit.hardpoints) if (hp.weapon) {
+            projectile(hp.weapon->projectile_index); projectile(hp.weapon->charged_projectile_index);
+        }
+        if (unit.cluster_bomb) projectile(unit.cluster_bomb->projectile_index);
         for (const auto* abilities : {&unit.abilities, &unit.team_abilities}) for (const auto& ability : *abilities) {
             projectile(ability.projectile_index); projectile(ability.spawned_projectile_index);
             if (key(ability.type) == "BARRAGE") append("Dummy_Barrage_Target");
@@ -171,8 +176,13 @@ core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
         const auto at = mapping.find(index); index = at == mapping.end() ? units::no_index : at->second;
     };
     for (auto& unit : out.units) {
-        if (unit.weapon) remap(unit.weapon->projectile_index, projectile_remap);
-        for (auto& hp : unit.hardpoints) if (hp.weapon) remap(hp.weapon->projectile_index, projectile_remap);
+        if (unit.weapon) {
+            remap(unit.weapon->projectile_index, projectile_remap); remap(unit.weapon->charged_projectile_index, projectile_remap);
+        }
+        for (auto& hp : unit.hardpoints) if (hp.weapon) {
+            remap(hp.weapon->projectile_index, projectile_remap); remap(hp.weapon->charged_projectile_index, projectile_remap);
+        }
+        if (unit.cluster_bomb) remap(unit.cluster_bomb->projectile_index, projectile_remap);
         for (auto* abilities : {&unit.abilities, &unit.team_abilities}) for (auto& ability : *abilities) {
             remap(ability.projectile_index, projectile_remap); remap(ability.spawned_projectile_index, projectile_remap);
         }
@@ -504,12 +514,20 @@ core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(c
         if (!bytes) { impl->ai_module_refusals.emplace(path, bytes.error()); continue; }
         impl->ai_modules.emplace(path, std::string(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
     }
+    std::optional<skirmish::DataIdentity> data_identity;
     for (const auto& path : maps) {
+        // Hash the immutable mounted closure at the first original identity-read
+        // point, preserving refusal order and avoiding work for an empty map set.
+        if (!data_identity) {
+            auto identity = skirmish::read_data_identity(filesystem);
+            if (!identity) return Result::failure(identity.error());
+            data_identity = std::move(identity).value();
+        }
         // Campaign maps have campaign markers and need not satisfy skirmish lobby
         // capacity/team eligibility. Decode the actual map, then read its scene facts.
         skirmish::Fixture fixture; fixture.map = path;
         for (const auto& side : impl->sides) fixture.slots.push_back({side.player, side.faction, 0, side.human, {}});
-        auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned);
+        auto inputs = skirmish::read_start_inputs(fixture, filesystem, catalog, *pinned, *data_identity);
         if (!inputs) return Result::failure(inputs.error());
         const auto diagnostic = reachable_tables(*pinned, {}, inputs.value().placements, true, true);
         impl->maps.emplace(path, StockSpaceEntry::Impl::MapContent{pinned, std::move(inputs).value(),
@@ -933,6 +951,13 @@ core::Result<script::foc::PreparedAiSession> StockSpaceEntry::prepare_ai(const C
         const auto slot = std::find_if(record.tactical.skirmish->slots.begin(), record.tactical.skirmish->slots.end(), [&](const auto& row) { return row.player == player.player_id; });
         p.lobby = slot != record.tactical.skirmish->slots.end(); p.human = p.lobby && slot->human;
         if (p.lobby && !p.human) p.difficulty = slot->difficulty;
+        if (record.tactical.controllers && p.lobby) {
+            // Prepare a dormant, authored fallback for opt-in sides. Completed
+            // child policy admits its service only after the last human leaves.
+            const bool fallback = std::any_of(record.tactical.controllers->seats.begin(), record.tactical.controllers->seats.end(),
+                [&](const auto& row) { return row.player == player.player_id && row.kind == sim::SeatKind::ai; });
+            if (fallback) { p.human = false; p.difficulty = slot->difficulty; }
+        }
         start.players.push_back(std::move(p));
     }
     auto setup = skirmish::ai_setup(start, inputs, tables.value());
@@ -949,9 +974,13 @@ core::Result<script::foc::PreparedAiSession> StockSpaceEntry::prepare_ai(const C
         auto command = tt::retreat_command({0, player, 0}, tt::RetreatAction::start);
         return core::Result<script::authoritative::TacticalOrder>::success({player, std::move(command.units), std::move(command.payload)});
     };
+    const auto object_roots = script::foc::object_script_modules(setup);
+    const auto strict_roots = script::foc::required_modules(setup, false);
     for (const auto& path : script::foc::required_modules(setup)) {
         const auto refusal = impl_->ai_module_refusals.find(path);
-        if (refusal != impl_->ai_module_refusals.end())
+        if (refusal != impl_->ai_module_refusals.end()
+            && !(refusal->second.code == vfs::diagnostic_codes::not_found && object_roots.contains(path)
+                && std::find(strict_roots.begin(), strict_roots.end(), path) == strict_roots.end()))
             return core::Result<script::foc::PreparedAiSession>::failure(refusal->second);
     }
     auto modules = skirmish::select_ai_modules(impl_->ai_modules, setup, true);
@@ -1055,6 +1084,7 @@ core::Result<std::shared_ptr<const platform::PreparedCampaignBattle>> StockSpace
         if (!start) return Result::failure(start.error());
         view->start = std::move(start).value();
     }
+    view->content.load_notes = content.load_notes;
     view->content.sensors = content.sensors; view->content.durability = content.durability;
     view->content.motion = content.motion; view->content.combat = content.combat; view->content.abilities = content.abilities;
     view->content.fog = content.fog; view->content.map_box = content.map_box;

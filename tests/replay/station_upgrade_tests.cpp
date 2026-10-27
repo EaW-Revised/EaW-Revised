@@ -638,6 +638,101 @@ void test_roster_gate() {
         }), "RG-04: disabled replacement produces no station");
     }
 }
+void test_zero_health_replacement() {
+    for (const std::int64_t maximum : {0, 100}) {
+        auto health = durability();
+        health.rules.hull_vs_hardpoints = whole(1);
+        for (auto& profile : health.profiles) {
+            profile.max_shields = {};
+            if (profile.type_id != 40 && profile.type_id != 41) continue;
+            profile.destroyed_with_hardpoints = true;
+            for (auto& point : profile.hardpoints) {
+                point.max_health = whole(maximum);
+                point.repair_amount_per_frame = whole(100);
+                point.repair_cost_per_frame = whole(1);
+            }
+        }
+        t::CombatTable combat;
+        combat.priority_sets.emplace_back();
+        combat.priority_sets[0].unlisted = whole(1);
+        for (const t::TypeId type : {10U, 40U, 41U}) {
+            t::CombatProfile profile; profile.type_id = type; profile.category_bits = 1;
+            if (type == 41) {
+                profile.priority_set = 0; profile.max_attack_distance = whole(1000);
+                t::WeaponProfile gun; gun.hardpoint = 0; gun.range = whole(1000);
+                gun.cone_width = gun.cone_height = whole(360);
+                profile.weapons = {gun};
+            }
+            combat.profiles.push_back(profile);
+        }
+        t::SpecialAbilityProfile pulse;
+        pulse.name = "Repair"; pulse.kind = t::SpecialAbilityKind::force_healing;
+        pulse.style = t::SpecialActivationStyle::space_automatic; pulse.initially_enabled = true;
+        pulse.heal_range = whole(1000); pulse.heal_amount = whole(100); pulse.heal_interval_frames = 1;
+        pulse.filter.applicable_types = {41};
+        t::UnitAbilityProfile healer; healer.type_id = 10; healer.special = {pulse};
+        t::AbilityTable abilities; abilities.profiles = {healer};
+        auto initial = setup();
+        initial.units.back().position.x = whole(100);
+        const std::vector<t::SensorProfile> sensors{{10, whole(1000)}, {40, whole(1000)}, {41, whole(1000)}};
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool scramble : {false, true}) {
+            auto made = t::TacticalSession::create(initial, sensors, health, {}, std::nullopt,
+                combat, {}, abilities, economy());
+            expect(static_cast<bool>(made), "HD-06: zero-health replacement fixture creates");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            expect(static_cast<bool>(world.submit({{0, 1, 0}, {1}, t::DamagePayload{whole(100), 0}})),
+                "HD-06: destroy the positive control weapon before upgrading");
+            expect(static_cast<bool>(world.submit(buy(0, 1, 1, 1, 91))), "HD-06: level-up submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            eawr::sim::EntityId replacement{};
+            bool saw_heal = false;
+            std::size_t shots = 0;
+            std::vector<std::string> hashes;
+            const auto step = [&]() {
+                if (scramble) world.scramble_storage_for_testing();
+                const auto result = world.step(executor);
+                expect(static_cast<bool>(result), "HD-06: upgrade/heal/repair advances without a zero denominator");
+                if (!result) return false;
+                hashes.push_back(result.value().state_sha256 + result.value().snapshot->sha256());
+                for (const auto& event : result.value().snapshot->events())
+                    if (event.kind == t::EventKind::station_replaced && event.unit == 1) replacement = event.sequence;
+                for (const auto& event : result.value().snapshot->combat_events()) {
+                    if (event.kind == t::CombatEventKind::heal_pulse && event.target == replacement) saw_heal = true;
+                    if (event.kind == t::CombatEventKind::weapon_fired && event.shooter == replacement) ++shots;
+                }
+                if (replacement && maximum == 0) {
+                    const auto state = world.durability_state(replacement);
+                    expect(state && state->hull == whole(1000) && state->hardpoints.size() == 2
+                        && state->hardpoints[0].raw() == 0 && state->hardpoints[1].raw() == 0
+                        && !t::weapon_enabled(*health.find(41), *state, 0),
+                        "HD-06: replacement and healing keep zero-max slots destroyed and nonfiring");
+                }
+                return true;
+            };
+            while (world.completed_tick() < 7) if (!step()) break;
+            expect(replacement != 0, "HD-06: the station is replaced");
+            if (!replacement) continue;
+            if (maximum > 0) expect(t::hardpoint_disabled(*world.durability_state(replacement), 0),
+                "HD-06: positive control remains disabled after automatic healing alone");
+            const auto credits = account(world, 1).credits;
+            expect(static_cast<bool>(world.submit({{7, 1, 2}, {replacement}, t::RepairHardpointPayload{0}})),
+                "HD-06: repair attempt submits for the replacement");
+            expect(static_cast<bool>(world.submit({{7, 1, 3}, {replacement}, t::AttackPayload{5}})),
+                "HD-06: replacement attack order submits");
+            while (world.completed_tick() < 15) if (!step()) break;
+            expect(saw_heal, "HD-06: automatic healing visits the replacement");
+            expect(maximum == 0 ? shots == 0 : shots > 0,
+                "HD-06: repair never revives the zero-max weapon, but the repaired control fires");
+            expect(account(world, 1).credits == credits,
+                "HD-06: zero-health refusal and already-healed completion spend no repair credits");
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "HD-06: upgrade/heal/repair is deterministic on 1/2/4/8 and shuffled storage");
+        }
+    }
+}
+
 void test_repair_carryover() {
     const auto profile = durability().profiles[1];
     auto before = t::full_durability(profile);
@@ -647,7 +742,7 @@ void test_repair_carryover() {
     auto next_profile = profile;
     next_profile.hardpoints.push_back({t::HardpointRole::weapon, true, whole(100), {}, {}});
     auto after = t::full_durability(next_profile);
-    t::carry_station_hardpoints(profile, before, after);
+    t::carry_station_hardpoints(profile, before, next_profile, after);
     expect(after.hardpoints[0] == whole(40) && after.repairing_players[0] == std::vector<t::PlayerId>{2, 3}
         && after.disabled[0], "WPR-52 repairing hardpoint preserves health and repairing players");
     expect(after.hardpoints[1] == decimal("0.1") && after.disabled[1], "WPR-52 disabled live hardpoint returns at 0.1");
@@ -713,6 +808,7 @@ int main() {
     test_free_garrison_replay();
     test_teammate_level_up();
     test_teammate_level_up_one_at_a_time();
+    test_zero_health_replacement();
     test_no_upgrade_layout(); test_replacement_attack(); test_order_after_reinforcement(); test_replacement_projectiles(); test_destroyed_station(); test_hangar_replacement(); test_production_work(); test_census_recount();
     test_staged_source_removal();
     test_upgrade_holder_loss();

@@ -136,6 +136,12 @@
     "constant": "replay_extension_battle_domain",
     "name": "battle domain",
     "documented": true
+   },
+   {
+    "tag": 18,
+    "constant": "replay_extension_controllers",
+    "name": "cooperative controllers",
+    "documented": true
    }
   ],
   "opcodes": [
@@ -324,6 +330,18 @@
     "constant": "opcode_beacon",
     "name": "beacon",
     "documented": false
+   },
+   {
+    "value": 32,
+    "constant": "opcode_gift",
+    "name": "gift",
+    "documented": false
+   },
+   {
+    "value": 33,
+    "constant": "opcode_battle_control",
+    "name": "battle control transition",
+    "documented": true
    }
   ]
  },

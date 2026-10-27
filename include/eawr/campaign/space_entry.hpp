@@ -81,6 +81,9 @@ struct SpaceEntryInputs {
 };
 
 struct SpaceEntryPlan;
+// ADR-020: final setup only; controller policy remains explicitly opt-in.
+[[nodiscard]] core::Result<void> prepare_battle_controllers(sim::tactical::TacticalSetup&,
+    const sim::tactical::TacticalContent&);
 // Retained rows whose type has no upgrade object in `tables` (planetary corruption markers, a mod's galactic-only
 // upgrade). Entry skips them without refusing; the return keeps them untouched, like another layer's rows (WGT-14).
 [[nodiscard]] std::vector<ReturnedUpgrade> space_entry_unbound_upgrades(const ConflictRecord&, const units::UnitTables& tables);

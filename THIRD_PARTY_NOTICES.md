@@ -3,6 +3,28 @@
 This file lists the third-party code the project vendors, links, derives from or fetches,
 with its licence. Each section below names the pinned version and where it appears:
 
+The optional Windows x64 shader runtime package contains **vkd3d 2.1** as an
+unmodified, dynamically loaded LGPL-2.1-or-later DLL, and **SPIRV-Cross
+vulkan-sdk-1.3.290.0** as an unmodified shared public C API library under
+Apache-2.0. Translation activation is disabled until integration and qualification.
+The exact upstream URLs, source hashes, build recipes, toolchains, artifact
+hashes and transitive DLL closure are in
+[`third_party/shader_runtime/lock.json`](third_party/shader_runtime/lock.json).
+The source archives are <https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz>
+(SHA-256 `7510146aff2adfb4ae07ab890701a607e5ff7c66e57100cfc9f630ec92eeda6a`)
+and <https://github.com/KhronosGroup/SPIRV-Cross/archive/refs/tags/vulkan-sdk-1.3.290.0.tar.gz>
+(SHA-256 `1333fd2a05ab8a0572106e3b7fb8161ea0b67ab7d0a1b8bdd14b47f89ac8a611`).
+They are not vendored into the MIT implementation. When explicitly packaged,
+`shader-runtime/` carries both complete unmodified source archives, public
+headers, upstream licence texts and attribution beside its DLLs. Its separate
+`libgcc_s_seh-1.dll` and embedded GCC C++ runtime use GPL-3.0-or-later with the
+GCC Runtime Library Exception 3.1; the applicable licence/exception and MinGW-w64
+notices accompany them. Only Windows system `kernel32.dll` and `msvcrt.dll` are
+external to this verified closure; they are not redistributed.
+See [source availability and replacement terms](third_party/shader_runtime/SOURCE-OFFER.md)
+and [attribution](third_party/shader_runtime/ATTRIBUTION.md). No static LGPL
+linkage, modified vkd3d, mod shader files or converted shader text is distributed.
+
 - **Vendored and linked:** Lua 5.0.2, EnTT, pugixml, stb_image (under `third_party/`).
 - **Code derived or ported (MIT):** alo-viewer; semantics cross-checked against
   pg-starwarsgame-lsp, PetroglyphTools and eaw-schema.

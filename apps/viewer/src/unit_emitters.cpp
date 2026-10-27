@@ -25,7 +25,8 @@ UnitEmitters::UnitEmitters(godot::Node3D& host, const vfs::Vfs& filesystem,
                            const std::span<const sim::tactical::DurabilityProfile> durability)
     : host_(&host), filesystem_(&filesystem), cache_(filesystem),
       backend_(std::make_unique<GodotParticleBackend>(
-          host, [this](const std::string_view name) { return resolve_texture(name); })),
+          host, [this](const std::string_view name) { return resolve_texture(name); },
+          GodotParticleBackend::FogCallbacks{}, 512, 96U * 1024U * 1024U)),
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
     // IS-09: only types carrying ION_STUN_EFFECT initialize their ion emitters hidden.
     for (const auto& profile : durability) {

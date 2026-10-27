@@ -1203,6 +1203,10 @@ void child_battle_uses_the_agreed_frontier(const std::array<std::size_t, 2> work
     for (net::PeerIndex peer = 0; peer < 2; ++peer) feeds[peer] = pair.lives[peer]->battle_feed(conflict, pair.humans[peer]);
     expect(feeds[0] && feeds[1], label + "both human seats have the published tactical feed");
     if (!feeds[0] || !feeds[1]) return;
+    const auto first_peer_executions = std::make_shared<std::atomic<std::uint64_t>>(0);
+    feeds[0]->set_execution_observer([first_peer_executions](const std::uint64_t, const std::uint64_t) {
+        first_peer_executions->fetch_add(1);
+    });
     // A truncated nested replay key is refused before routing/publication can read its producer sequence.
     pair.order(0, galactic::TacticalLayerCommand{conflict, 5, std::vector<std::uint8_t>(19)});
     expect(feeds[0]->agreed_pacing() && feeds[1]->agreed_pacing(), label + "only the shared child publishes agreed pacing");
@@ -1269,6 +1273,9 @@ void child_battle_uses_the_agreed_frontier(const std::array<std::size_t, 2> work
         && pair.lives[0]->frame().battle->completed_tick() > paused_tick, label + "child resumes on both peers");
     expect(acknowledged->load() == 1 && execution_tick->load() >= paused_tick,
         label + "the authenticated producer receives its actual shared execution tick");
+    // This seat has issued only one valid Stop; the malformed producer key must not add an acknowledgement.
+    expect(first_peer_executions->load() == 1,
+        label + "a short nested producer key is refused safely without execution acknowledgement");
     scheduler->present_snapshot(feeds[1]->completed_tick());
     expect(scheduler->reservations().empty(), label + "presenting the executed child tick retires pending UI input");
     expect(pair.galaxy_frame(0) == frozen_galaxy && pair.galaxy_frame(1) == frozen_galaxy,
@@ -1320,9 +1327,10 @@ void child_battle_uses_the_agreed_frontier(const std::array<std::size_t, 2> work
     expect(std::any_of(rejected_a.begin(), rejected_a.end(), [](const auto& row) {
         return row.message.find("engine-only") != std::string::npos;
     }), label + "a human cannot inject engine tactical effects in a policy-free multiplayer setup");
-    expect(std::any_of(rejected_a.begin(), rejected_a.end(), [](const auto& row) {
-        return row.message.find("invalid tactical command body") != std::string::npos;
-    }), label + "a short nested producer key is refused safely without execution acknowledgement");
+    const auto malformed_body = [](const auto& row) { return row.code == tactical::diagnostic_codes::malformed; };
+    expect(std::count_if(rejected_a.begin(), rejected_a.end(), malformed_body) == 1
+        && std::count_if(rejected_b.begin(), rejected_b.end(), malformed_body) == 1,
+        label + "both peers retain exactly one malformed-body refusal for the short nested producer key");
     const auto recorded = pair.lives[0]->record().commands;
     expect(std::count_if(recorded.begin(), recorded.end(), [](const auto& row) {
         return std::holds_alternative<galactic::TacticalLayerCommand>(row.payload);
@@ -1754,6 +1762,219 @@ void engine_commands_run_on_each_peer() {
 // Co-op over two live peers (owner update 10-21): both humans share faction 1 against the AI faction 2. The side is human,
 // so the conflict opens the same Begin / Auto-Resolve vote on both peers and holds the strategic clock; one teammate's Begin
 // opens the tactical child with both seats bound to the one tactical player; the campaign resumes when both are back.
+void controller_wire_and_peer_gates() {
+    namespace tactical = eawr::sim::tactical;
+    namespace campaign = eawr::campaign;
+    for (const auto humans : {2U, 3U, 4U})
+      for (const auto counts : {std::array<std::size_t, 2>{1, 8}, std::array<std::size_t, 2>{2, 4}}) {
+        auto initial = multiplayer_child_setup(3);
+        for (auto& seat : initial.seats) {
+            if (seat.seat_id.value == 2) { seat.player = 1; seat.human_side_id = 1; }
+            if (seat.seat_id.value == 3) seat.player = 2;
+        }
+        for (std::uint32_t seat = 4; seat <= humans + 1; ++seat) {
+            galactic::Seat teammate;
+            teammate.seat_id = {seat}; teammate.player = 1;
+            teammate.kind = eawr::sim::SeatKind::human; teammate.active = true;
+            teammate.lobby_slot = seat - 2; teammate.human_side_id = 1;
+            initial.seats.push_back(teammate);
+        }
+        initial.observer->human_observers = {1};
+        for (auto& player : initial.observer->players) player.ai = player.player != 1;
+        for (auto& player : initial.victory->context.players) { player.human = player.player == 1; player.ai = !player.human; }
+        initial.seat_control.emplace(); initial.seat_control->teams = {{1, {1}, false}};
+        for (const auto& player : initial.players) initial.seat_control->controllers.push_back({player.player_id,
+            player.player_id == 1 ? galactic::FactionControl::human : galactic::FactionControl::ai, galactic::FactionControl::ai, {}, {}});
+        campaign::ConflictRecord record;
+        auto first = require(campaign::GameSession::create(initial));
+        record.id = first.galaxy().next_entity_id(); record.planet = initial.planets.front().id;
+        record.invader = 1; record.defender = 2; record.tactical.first_free_entity_id = record.id + 1;
+        record.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+        record.tactical.content_identity = initial.content_identity;
+        for (const auto& fleet : initial.fleets) if (fleet.owner == 1 || fleet.owner == 2) {
+            const auto member = fleet.members.front();
+            record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+            record.tactical.units.push_back({member.id, member.type, fleet.owner});
+        }
+        std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        std::sort(record.tactical.units.begin(), record.tactical.units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
+        record.tactical.campaign.emplace(); record.tactical.controllers.emplace();
+        const auto reserve_fleet = std::find_if(initial.fleets.begin(), initial.fleets.end(), [](const auto& fleet) { return fleet.owner == 1; });
+        expect(reserve_fleet != initial.fleets.end() && reserve_fleet->members.size() >= 2,
+            "P3: live fixture supplies a separate persistent reserve");
+        if (reserve_fleet == initial.fleets.end() || reserve_fleet->members.size() < 2) continue;
+        const auto reserve = reserve_fleet->members[1];
+        record.forces.push_back({reserve.id, reserve.type, 1, reserve_fleet->id, campaign::ForceRole::reinforcement});
+        std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        record.tactical.campaign->reserves = {{reserve.id, reserve.type, 1, false, 0, {}}};
+        for (const auto owner : {1U, 2U}) {
+            tactical::EconomyPlayer account; account.player = owner; account.credit_cap = math::Fixed{};
+            account.population_cap = 20;
+            account.ai = owner == 2;
+            record.tactical.campaign->players.push_back(account);
+            record.tactical.controllers->factions.push_back({owner,
+                owner == 1 ? tactical::FactionController::humans : tactical::FactionController::ai});
+        }
+        for (const auto& seat : initial.seats) if (seat.active && seat.player <= 2) {
+            record.seats.push_back({seat.seat_id, seat.player});
+            record.tactical.controllers->seats.push_back({seat.seat_id, seat.player, seat.kind, true});
+        }
+        tactical::TacticalContent content;
+        content.economy.campaign = true; content.economy.players = record.tactical.campaign->players;
+        content.economy.campaign_population = {{reserve.type, 1}};
+        auto second = require(campaign::GameSession::create(initial));
+        eawr::platform::ThreadWorkerAdapter a_executor(counts[0]), b_executor(counts[1]);
+        require(first.stage_battle(record, content, campaign::ScriptRequirement::none));
+        require(second.stage_battle(record, content, campaign::ScriptRequirement::none));
+        (void)require(first.step(a_executor)); (void)require(second.step(b_executor));
+        net::GalacticSessionAdapter a(first, a_executor), b(second, b_executor);
+        const auto& setup = first.battle()->initial_setup();
+        const auto root = std::find_if(setup.units.begin(), setup.units.end(), [](const auto& row) { return row.owner == 1; });
+        expect(root != setup.units.end() && root->controller_seat.value == 1, "two-peer setup gives the first root to the first human");
+        if (root == setup.units.end()) continue;
+        std::vector<net::SeatInput> inputs;
+        const auto packet = [&](const std::uint32_t outer_seat, const std::uint64_t sequence, tactical::PlayerCommand command) {
+            const auto body = require(tactical::encode_command_body(command, setup));
+            galactic::TacticalLayerCommand nested{record.id, tactical::command_body_opcode(command), body};
+            const eawr::sim::SeatCommandKey key{first.completed_tick(), {outer_seat}, sequence};
+            inputs.push_back({key, require(net::encode_galactic_input(key, nested))});
+        };
+        tactical::PlayerCommand own{{0, 1, 1}, {root->entity_id}, tactical::StopPayload{}};
+        own.origin = tactical::CommandOrigin::seat; own.issuing_seat = {1}; packet(1, 1, own);
+        auto forged = own; forged.issuing_seat = {2}; packet(2, 1, forged);
+        packet(2, 2, own); // authenticated seat mismatch
+        auto engine = own; engine.origin = tactical::CommandOrigin::engine; engine.issuing_seat = {}; packet(2, 3, engine);
+        auto special = forged; special.payload = tactical::SpecialFirePayload{root->entity_id, tactical::SpecialFireAdmission::ai_object}; packet(2, 4, special);
+        auto prepaid = forged; prepaid.payload = tactical::BuyPayload{root->type_id, true}; packet(2, 5, prepaid);
+        auto damage = forged; damage.payload = tactical::DamagePayload{math::Fixed::from_integer(1).value()}; packet(2, 6, damage);
+        tactical::PlayerCommand call{{0, 1, 7}, {}, tactical::ReinforcePayload{reserve.type, {}, reserve.id}};
+        call.origin = tactical::CommandOrigin::seat; call.issuing_seat = {2}; packet(2, 7, call);
+        call.issuing_seat = {1}; packet(1, 8, call);
+        auto gift = own; gift.payload = tactical::GiftPayload{{2}}; packet(1, 9, gift);
+        packet(1, 10, own); // ordered after gifting: source control has already moved
+        gift.issuing_seat = {2}; gift.payload = tactical::GiftPayload{{1}}; packet(2, 8, gift);
+        auto control = own; control.origin = tactical::CommandOrigin::engine; control.issuing_seat = {}; control.units.clear();
+        tactical::BattleControlPayload departure; departure.departed = {1};
+        for (const auto& row : setup.controllers->seats) if (row.player == 1) departure.policy.seats.push_back(row);
+        departure.policy.factions.push_back({1, tactical::FactionController::humans});
+        control.payload = departure; packet(2, 9, control);
+        for (const auto& input : inputs) expect(a.validate(input) && b.validate(input),
+            "static transport admission does not consult a local child publication");
+        // The adapter consumes a sealed batch, after transport arrival order is canonicalized.
+        std::sort(inputs.begin(), inputs.end(), [](const auto& x, const auto& y) { return x.key < y.key; });
+        require(a.install(inputs));
+        std::reverse(inputs.begin(), inputs.end());
+        std::sort(inputs.begin(), inputs.end(), [](const auto& x, const auto& y) { return x.key < y.key; });
+        require(b.install(inputs));
+        const auto a_tick = require(a.step()), b_tick = require(b.step());
+        expect(a_tick.state_sha256 == b_tick.state_sha256 && a.canonical_state() == b.canonical_state()
+            && require(a.canonical_input()) == require(b.canonical_input()),
+            "two peers agree on all digests and sealed bytes despite input arrival order and worker count");
+        const auto tick = a.take_tick();
+        expect(tick && tick->battle && std::any_of(tick->battle->events().begin(), tick->battle->events().end(), [](const auto& row) {
+            return row.kind == tactical::EventKind::order_accepted;
+        }) && std::any_of(tick->battle->events().begin(), tick->battle->events().end(), [](const auto& row) {
+            return row.reason == tactical::RejectReason::unit_not_controlled;
+        }), "own seat executes while the same-faction forged seat is refused by the child");
+        expect(a.refused().size() == 6 && b.refused().size() == 6,
+            "both peers reject mismatched provenance, engine origin, AI special-fire, prepaid, damage and departure wire routes");
+        const auto replay = first.battle_record();
+        expect(replay && replay->commands.size() == 7, "forged wire authority never enters the child command stream, authenticated gifts do");
+        expect(tick && tick->battle && std::count_if(tick->battle->events().begin(), tick->battle->events().end(), [](const auto& row) {
+            return row.kind == tactical::EventKind::controller_changed;
+        }) == 2, "two peers apply both authenticated gifts in outer seat/sequence order");
+        const auto born = first.battle()->units();
+        const auto admitted = std::find_if(born.begin(), born.end(), [&](const auto& unit) { return unit.entity_id == reserve.id; });
+        // The authenticated outer-seat ordering is canonical: seat 1 wins the shared token.
+        expect(admitted != born.end() && admitted->controller_seat.value == 1
+            && admitted->control == tactical::UnitControl::mobile,
+            "P3: both peers attribute a contested persistent reserve to its canonical authenticated caller");
+        if (replay) {
+            auto standalone = require(tactical::TacticalSession::from_replay(*replay, content));
+            while (standalone.completed_tick() < replay->final_tick_count) (void)require(standalone.step(a_executor));
+            expect(standalone.state_sha256() == first.battle()->state_sha256(),
+                "standalone child replay enforces the same authenticated controller gates");
+        }
+    }
+}
+
+void dormant_freestore_admission() {
+    namespace tactical = eawr::sim::tactical;
+    namespace foc = eawr::script::foc;
+    namespace auth = eawr::script::authoritative;
+    using Number = eawr::script::numeric::LuaNumber;
+    for (const bool passive : {false, true}) {
+        std::vector<std::string> golden;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.first_free_entity_id = 1;
+            setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+            setup.campaign.emplace();
+            for (const auto player : {1U, 2U}) {
+                tactical::EconomyPlayer account; account.player = player; account.credit_cap = math::Fixed{};
+                setup.campaign->players.push_back(account);
+            }
+            setup.controllers = tactical::BattleControllerPolicy{
+                {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, false},
+                    {{3}, 1, eawr::sim::SeatKind::ai, false}, {{4}, 2, eawr::sim::SeatKind::ai, true}},
+                {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+            tactical::EconomyRules economy; economy.campaign = true; economy.players = setup.campaign->players;
+            foc::AiSetup provider;
+            provider.players = {{1, "SYNTHETIC", false, true, ""}, {2, "SYNTHETIC", false, true, ""}};
+            provider.player_ai_start_ticks[2] = 5;
+            provider.freestore_module = "DormantProbe.lua";
+            const std::map<std::string, std::string> modules{
+                {"DormantProbe.lua", "function Base_Definitions() ServiceRate=0; UnitServiceRate=0; pumps=0 end\n"
+                    "function main() while true do pumps=pumps+1; coroutine.yield(true) end end"},
+                {"data/scripts/library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={}; FriendlyContrastTypes={} end"}};
+            auto world = require(tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy));
+            auto session = require(foc::create_session(std::move(world), provider, modules));
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned frame = 1; frame <= 8; ++frame) {
+                std::vector<tactical::PlayerCommand> inputs;
+                if (frame == 3) {
+                    tactical::BattleControlPayload change; change.departed = {1};
+                    for (auto row : setup.controllers->seats) if (row.player == 1) {
+                        row.active = row.kind == eawr::sim::SeatKind::ai; change.policy.seats.push_back(row);
+                    }
+                    change.policy.factions.push_back({1, passive ? tactical::FactionController::passive : tactical::FactionController::ai});
+                    tactical::PlayerCommand command{{session.completed_tick(), 1, 1}, {}, std::move(change)};
+                    command.origin = tactical::CommandOrigin::engine; inputs.push_back(std::move(command));
+                }
+                auto tick = require(session.step(executor, inputs));
+                hashes.push_back(tick.state_sha256);
+                auto saved = require(session.save_scripts());
+                auto inspector = require(foc::prepare_session(provider, modules));
+                require(inspector.scripts.load(saved.scheduler));
+                for (const auto player : {1U, 2U}) {
+                    const auto count = require(inspector.scripts.read_global(foc::freestore_instance(player), "pumps"));
+                    const auto first = player == 1 ? 3U : 5U;
+                    const auto expected = frame < first || (player == 1 && passive) ? 0U : frame - first + 1;
+                    expect(count && std::get<Number>(count->data) == Number(expected),
+                        "prepared freestore initializes once, stays dormant, and pumps only after its controller/admission boundary");
+                }
+                if (frame == 2 || frame == 4) {
+                    const auto checkpoint = require(session.world().save_checkpoint_state());
+                    auto rebuilt_world = require(tactical::TacticalSession::from_replay(session.world().record(),
+                        {}, {}, {}, std::nullopt, {}, {}, {}, economy));
+                    require(rebuilt_world.load_checkpoint_state(checkpoint));
+                    auto prepared = require(foc::prepare_session(provider, modules));
+                    auto rebuilt = require(auth::ScriptedTacticalSession::restore(std::move(rebuilt_world),
+                        std::move(prepared.scripts), saved));
+                    require(prepared.bind(rebuilt));
+                    const auto restored = require(rebuilt.save_scripts());
+                    expect(restored.scheduler == saved.scheduler && restored.native == saved.native,
+                        "dormant and activated freestore checkpoints preserve initialized threads and admission state");
+                    session = std::move(rebuilt);
+                }
+            }
+            if (golden.empty()) golden = hashes;
+            else expect(golden == hashes, "real dormant provider continuation agrees on 1/2/4/8 workers");
+        }
+    }
+}
+
 void multiplayer_coop_battle() {
     auto initial = multiplayer_child_setup(3);
     for (auto& seat : initial.seats) {
@@ -1870,6 +2091,8 @@ int main(int argc, char** argv) {
             return galactic_test::checker.finish();
         }
         if (argc == 2 && std::string_view(argv[1]) == "--coop") {
+            controller_wire_and_peer_gates();
+            dormant_freestore_admission();
             multiplayer_coop_battle();
             multiplayer_ai_vote_human_leaves();
             return galactic_test::checker.finish();
@@ -1878,6 +2101,7 @@ int main(int argc, char** argv) {
             raid_commands_and_digests();
             return galactic_test::checker.finish();
         }
+        controller_wire_and_peer_gates();
         raid_commands_and_digests();
         const std::array<std::array<std::size_t, 2>, 4> combinations{{{1, 8}, {2, 4}, {4, 1}, {8, 2}}};
         for (const auto& workers : combinations) {

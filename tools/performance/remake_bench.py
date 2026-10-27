@@ -153,7 +153,13 @@ def build_scenes() -> dict[str, dict]:
         live(f"remake-dev{n}", mod=True, map_path="data/art/maps/korriban.ted",
              fleets={1: TARGETS, 2: FIGHT * n},
              note=f"provisional additive fleet: {n} x Devastator vs fixed targets, plus default forces/stations, Korriban",
+             ticks=1500, window=(600, 1400),
              tags=("smoke",) if n == 4 else ())
+        scene = spec[f"remake-dev{n}"]
+        scene["fixed_window"] = True
+        scene["args"][0:0] = ["--eawr-profile", "remake"]
+        scene["args"][scene["args"].index("--eawr-live-capture-ticks") + 1] = "0"
+    spec["remake-dev4"]["owner_census"] = True
     live("remake-fighters", mod=True, map_path="data/art/maps/korriban.ted",
          fleets={1: FIGHTERS_REBEL, 2: FIGHTERS_EMPIRE},
          note="fighter-heavy additive fleet: 6+2 Rebel vs 6+2 Empire squadrons plus default forces/stations, Korriban")
@@ -287,7 +293,8 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
         args = [mod_root if a == REMAKE_CHAIN else raw_mod_root if a == RAW_CHAIN else a for a in args]
         args += ["--eawr-settings-file", "{out}/" + name + "-settings.cfg",
                  "--eawr-save-dir", "{out}/saves"]
-        engine = ["--max-fps", "120"] if pacing == "audio" else ["--max-fps", "0"]
+        engine = (["--max-fps", "120"] if pacing == "audio" else ["--max-fps", "0"])
+        engine += ["--render-thread", "separate"]
         if pacing == "free":
             args += ["--eawr-diagnostic-vsync", "0", "--eawr-diagnostic-max-fps", "0"]
         recipe = None
@@ -300,6 +307,11 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
                 if not preparations or name not in preparations:
                     raise ValueError(f"{name}: native preparation report required before measurement")
                 recipe = engagement_recipe(preparations[name])
+                if scene.get("owner_census"):
+                    expected = ["1:attack_move:2+3+4+5+6+7+8+9@103.177246,-720.166992,0",
+                                "1:attack_move:11+12+13+14+15+16+17@103.177246,-720.166992,0"]
+                    if recipe["map"] != scene["map"] or recipe["orders"] != expected:
+                        raise ValueError("remake-dev4 native start does not match the owner census engagement")
                 write_engagement_camera(cameras / f"{name}.xml", recipe)
                 args += ["--eawr-map-camera-config", "{in}/engagement/" + name + ".xml"]
                 for order in recipe["orders"]:
@@ -314,11 +326,12 @@ def write_spec(path: pathlib.Path, scenes: list[str], pacing: str, mod_root: str
                          benchmark=dict(note=scene["note"], seed=SEED, ticks=1 if prepare else scene["ticks"],
                                         window=scene["window"], fleets=scene.get("fleets"),
                                         phase="prepare" if prepare else "measure", pacing=pacing, engagement=recipe,
+                                        render_thread="separate",
                                         observer="buffered-post-draw-v2" if not prepare else None,
                                         log_mode=scene.get("log_mode", "pipe"),
                                         log_counter="stream-markers-v3",
                                         camera="fixed native-spawn midpoint" if recipe else "native initial view"))
-        entry.update(driver="perf-sample.ps1", driverArgs=dict(intervalMs=2000))
+        entry.update(driver="perf-sample.ps1", driverArgs=dict(intervalMs=2000, freeFloorGiB=4))
         runs.append(entry)
     observer = path.parent / "observer"
     observer.mkdir(exist_ok=True)
@@ -408,7 +421,7 @@ def process_stats(directory: pathlib.Path, name: str, first_s: float | None) -> 
         busy = sorted(((v[-1][1] - v[0][1]) / ((v[-1][0] - v[0][0]) / 1000), tid)
                       for tid, v in per.items() if len(v) >= 2 and v[-1][0] > v[0][0])
         result["busiest_thread_fraction"] = busy[-1][0] if busy else None
-        result["top_threads"] = [dict(thread=tid, cores=round(frac, 3)) for frac, tid in reversed(busy[-5:])]
+        result["top_threads"] = [dict(thread=tid, cores=round(frac, 3)) for frac, tid in reversed(busy[-10:])]
     return result
 
 
@@ -482,6 +495,11 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
     if run_spec.exists():
         definition = next((r.get("benchmark", {}) for r in json.loads(run_spec.read_text(encoding="utf-8-sig"))["runs"]
                            if r["name"] == name), {})
+    if definition.get("render_thread") == "separate":
+        log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+        row["render_thread_observed"] = "separate rendering thread feature is experimental" in log.lower()
+        if not row["render_thread_observed"]:
+            row["measurement_error"] = "engine log does not prove Separate rendering"
     row["recorded_protocol_window"] = definition.get("window")
     row["analysis_window_post_hoc"] = bool(definition.get("window") and
                                            list(definition["window"]) != list(scene["window"]))
@@ -627,6 +645,10 @@ def analyse_scene(directory: pathlib.Path, name: str, scene: dict) -> dict:
         row["hardpoint_slots_composed"] = sum(p.get("hardpoints", 0) for p in placements) if placements else None
     elif scene.get("mod_kind") == "raw":
         row["measurement_error"] = "missing native report; the actual RaW starting fleet cannot be verified"
+    floor_receipt = directory / f"{name}.floor.json"
+    if floor_receipt.exists():
+        row["floor_stop"] = json.loads(floor_receipt.read_text(encoding="utf-8-sig"))
+        row["measurement_error"] = "4 GiB free-RAM floor reached; see floor_stop for the memory result"
     return row
 
 
@@ -706,6 +728,8 @@ def analyse(directory: pathlib.Path, meta: dict) -> bool:
         protocol_errors.append("the rig did not use a private desktop")
     if meta.get("rig", {}).get("timedOut", False):
         protocol_errors.append("the rig timed out")
+    if any(r.get("render_thread_observed") is False for r in rows):
+        protocol_errors.append("engine log does not prove Separate rendering for every scene")
     valid = not any(r.get("measurement_error") for r in rows) and not protocol_errors
     (directory / "results.json").write_text(json.dumps(dict(meta=meta, valid=valid, protocol_errors=protocol_errors, scenes=rows), indent=2, allow_nan=False), encoding="utf-8")
     text = render_markdown(rows, meta) + per_ship_table(rows)

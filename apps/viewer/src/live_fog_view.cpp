@@ -3,6 +3,7 @@
 #include "live_fog_view.hpp"
 
 #include "stored_output.hpp"
+#include "settings_store.hpp"
 #include "ui/theme_builder.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -227,9 +228,13 @@ void LiveFogView::frame(const LiveSessionView& live, const std::optional<camera:
         field_->advance_rows(fog->values, static_cast<double>(since), frames);
         cell_tick_ = fog->tick;
     }
-    // FW-23/WR-17: the pane normally owns the mode; data can restrict it to a drag.
+    // FW-23/PD-01: idle panels do no blocked-grid work with the default preference.
+    const auto* active = ActiveSettings::get();
+    static constexpr presentation::ui::GameplaySettings defaults;
+    const auto& gameplay = active ? active->gameplay : defaults;
     const bool overlay = reinforce_grid_.is_valid() && (force_deploy_overlay_
-        || (live.reinforcement_allowed() && (looks_.reinforce_only_while_dragging ? dragging : pane_open || dragging)));
+        || (live.reinforcement_allowed() && presentation::ui::reinforcement_areas_visible(
+            gameplay, looks_.reinforce_only_while_dragging, pane_open, dragging)));
     const bool mode_changed = overlay != deploy_overlay_;
     if (mode_changed || (overlay && (overlay_snapshot_ != battle.latest || overlay_fog_ != fog))) {
         deploy_overlay_ = overlay;

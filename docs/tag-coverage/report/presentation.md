@@ -5,15 +5,15 @@
 | Status | Space skirmish | Everything |
 |---|---:|---:|
 | applied | 861 | 861 |
-| partial | 497 | 497 |
+| partial | 499 | 499 |
 | todo | 1174 | 1174 |
-| presentation-later | 0 | 440 |
+| presentation-later | 0 | 438 |
 | foc-ignores | 95 | 95 |
 | deferred | 45 | 45 |
 | by-design | 8 | 8 |
 | land-or-galactic | 0 | 32 |
 | multiplayer | 0 | 0 |
-| **Total** | **2680** | **3152** |
+| **Total** | **2682** | **3152** |
 
 Tables group the exact object class families listed together in the registry. Object kinds
 are station, ship, squadron or craft when specified; an empty kind list means the whole
@@ -873,7 +873,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Star_Base_Icon_Name | todo | application not recorded | — | 653 | — | Code review: confirmed gap; family=hud-radar. No named reader of Star_Base_Icon_Name in src/, apps/ or include/; wire the authored value into the matching UI, path overlay or text presentation. Reader walk pending (10-25): FoC debug-build tag-table row located; consumer not traced.; basis: reviewed |
 | Strategic_Map_Music_Event | applied | whole class (apps/viewer/src/galactic/galactic_audio.cpp) | WGP-23 | — | apps/viewer/src/galactic/galactic_audio.cpp | basis: reviewed |
 | Superweapon_Win_Movie | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
-| Tactical_Intro_Command_Bar_Movie_Name | partial | prepared campaign battle briefings (src/campaign/space_entry_stock.cpp); missing: Runtime briefing and cinematic presentation gates | SND-41, SND-49 | 2007 | src/campaign/space_entry_stock.cpp |  Campaign authored-map space entry scope: docs/behaviour/galactic-space-entry.md.; SCOPE-MENU; basis: reviewed |
+| Tactical_Intro_Command_Bar_Movie_Name | partial | runtime campaign space briefing movies (apps/viewer/src/galactic/galactic_handoff.cpp); prepared campaign battle briefings (src/campaign/space_entry_stock.cpp); missing: campaign land briefing movies | SND-41, SND-69; SND-41, SND-49 | 1669 | apps/viewer/src/galactic/galactic_handoff.cpp; src/campaign/space_entry_stock.cpp | Campaign space briefings play the authored movie through the shared HUD movie consumer; absent or undecodable assets leave speech running.; SCOPE-MENU; basis: reviewed |
 | Text_Nickname_ID | todo | application not recorded | — | 653 | — | Code review: confirmed gap; family=hud-radar. No named reader of Text_Nickname_ID in src/, apps/ or include/; wire the authored value into the matching UI, path overlay or text presentation.; basis: reviewed |
 | Vehicle_Icon_Name | todo | application not recorded | — | 653 | — | Code review: confirmed gap; family=hud-radar. No named reader of Vehicle_Icon_Name in src/, apps/ or include/; wire the authored value into the matching UI, path overlay or text presentation. Reader walk pending (10-25): FoC debug-build tag-table row located; consumer not traced.; basis: reviewed |
 | Victory_Text | applied | campaign score screen (src/platform/galactic/campaign_end_inputs.cpp) | WGP-37, WGP-38 | — | src/platform/galactic/campaign_end_inputs.cpp | The campaign score list shows the local faction's authored victory text (GHUD-S48).; basis: reviewed |
@@ -910,8 +910,8 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Camera_Z_Position | todo | application not recorded | — | 653 | — | sk-tagrev B1 10-25: confirmed gap &#91;hud-radar&#93;: no reader under src/apps/include.; basis: reviewed |
 | CB_Flash_Count | todo | application not recorded | — | 653 | — | debug build: pool addition passes this value but the continuous flag bypasses its application (PU-71); other command bar flashes remain pending sk-tagrev B1 10-25: confirmed gap &#91;vfx-models&#93;: no reader under src/apps/include.; basis: reviewed |
 | CB_Flash_Duration | todo | application not recorded | — | 653 | — | sk-tagrev B1 10-25: confirmed gap &#91;vfx-models&#93;: no reader under src/apps/include.; basis: reviewed |
-| CB_Movie_Color | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
-| CB_Movie_Offset | presentation-later | application not recorded | — | — | — | SCOPE-MENU |
+| CB_Movie_Color | partial | campaign space briefing movies (src/presentation/godot/ui/movie_player.cpp); missing: galactic corruption and story movie producers | SND-69 | 1669 | src/presentation/godot/ui/movie_player.cpp | basis: reviewed |
+| CB_Movie_Offset | partial | campaign space briefing movies (src/presentation/godot/ui/movie_player.cpp); missing: galactic corruption and story movie producers | SND-69 | 1669 | src/presentation/godot/ui/movie_player.cpp | basis: reviewed |
 | Command_Bar_Default_Font_Name | todo | application not recorded | — | 653 | — | sk-tagrev B1 10-25: confirmed gap &#91;hud-radar&#93;: no reader under src/apps/include.; basis: reviewed |
 | Command_Bar_Default_Font_Size | presentation-later | application not recorded | — | 828 | — | debug build: read only by the default font size of UI text components |
 | Corruption_Line_Grow_Seconds | applied | observer-admitted galactic corruption (apps/viewer/src/galactic/corruption_particles.cpp); whole class (apps/viewer/src/galactic/scene_content.cpp) | WGP-20, WGP-21, WGP-49; WGP-20, WGP-21, WGP-49 | — | apps/viewer/src/galactic/corruption_particles.cpp; apps/viewer/src/galactic/scene_content.cpp | basis: reviewed |
@@ -1166,7 +1166,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Neutralize_Hero_Ability/SFXEvent_Activate | todo | application not recorded | — | 653 | — | The neutralize activation cue is not played by the galactic ability host.; basis: reviewed |
 | Abilities/Remote_Bomb_Ability/@Name | todo | application not recorded | — | 3243 | — | Shared unit-table loader parses this field; no land session path applies this ability on land (no ability hook in session_land*.cpp).; basis: reviewed |
 | Abilities/Remote_Bomb_Ability/Toss_Anim | todo | application not recorded | — | 3243 | — | Shared unit-table loader parses this field; no land session path applies this ability on land (no ability hook in session_land*.cpp).; basis: reviewed |
-| Abilities/System_Spy_Ability/@Name | partial | ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: automatic unit/structure spy influence invocation | WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence invocation remains deferred. |
+| Abilities/System_Spy_Ability/@Name | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Blob_Shadow_Bone_Name | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
 | Blob_Shadow_Material_Name | todo | application not recorded | — | 3776 | — | no code reads this tag on origin/main (exact and case-insensitive grep); basis: reviewed |
 | Blob_Shadow_Scale | todo | application not recorded | — | 3776 | — | no code on the land path reads this tag; basis: reviewed |
@@ -1720,7 +1720,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 | Abilities/Summon_Ability/@Name | todo | application not recorded | — | 3240 | — | no code reads Summon_Ability on origin/main; land summon not built; basis: reviewed |
 | Abilities/Summon_Ability/SFXEvent_Unit_Summoned | todo | application not recorded | — | 3240 | — | no code reads Summon_Ability on origin/main; basis: reviewed |
 | Abilities/Summon_Ability/Target_Particle_Effect | todo | application not recorded | — | 3240 | — | no code reads Summon_Ability on origin/main; basis: reviewed |
-| Abilities/System_Spy_Ability/@Name | partial | ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: automatic unit/structure spy influence invocation | WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence invocation remains deferred. |
+| Abilities/System_Spy_Ability/@Name | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 | Abilities/Tactical_Bribe_Ability/@Name | todo | application not recorded | — | 3244 | — | no code reads Tactical_Bribe_Ability on origin/main; land bribe not built; basis: reviewed |
 | Abilities/Tactical_Bribe_Ability/Effect_Z_Offset | todo | application not recorded | — | 3244 | — | no code reads Tactical_Bribe_Ability on origin/main; basis: reviewed |
 | Abilities/Tactical_Bribe_Ability/SFXEvent_Fail | todo | application not recorded | — | 3244 | — | no code reads Tactical_Bribe_Ability on origin/main; basis: reviewed |
@@ -2997,7 +2997,7 @@ and are plain numbers. Code locations are repository paths without identifier an
 
 | Tag | Status | Object kinds / missing kinds | Rule IDs | Ticket | Code paths | Note / evidence |
 |---|---|---|---|---|---|---|
-| Abilities/System_Spy_Ability/@Name | partial | ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: automatic unit/structure spy influence invocation | WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence invocation remains deferred. |
+| Abilities/System_Spy_Ability/@Name | partial | automatic unit/structure spy influence (src/sim/galactic/ability_auto_spy.cpp); ground-activated galactic spy (src/sim/galactic/ability_theft.cpp); missing: fleet-member versus non-fleet influencing source distinction (WGUI-101) | WGCH-41, WGUI-101, WGUI-102, WGUI-19, WGUI-20, WGUI-21, WGUI-22, WGUI-23; WGCH-108, WGCH-41, WGCH-56, WGCH-70, WGUI-101, WGUI-19, WGUI-20, WGUI-21, WGUI-23 | 1143 | src/sim/galactic/ability_auto_spy.cpp; src/sim/galactic/ability_theft.cpp | Ground-activated authored spy profiles and preview routing invoke current-owner source-keyed intelligence with success-only consumption; automatic unit/structure spy influence applies to the source's current owner at its current planet (nearby planets for a positive influence range) and is removed on loss, departure, type change or owner change; the fleet-member versus non-fleet influencing-source split of WGUI-101 is not separated yet. |
 
 ## Squadron
 

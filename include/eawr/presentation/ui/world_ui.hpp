@@ -29,6 +29,24 @@ namespace eawr::presentation::ui {
 
 using Rgb = std::array<std::uint8_t, 3>;
 
+// #5130 project policy: observer-only identity, never simulation/replay metadata.
+// The resolver is the extension seam for per-unit controller seats (#4590).
+struct ObserverOwner final {
+    sim::tactical::PlayerId player{};
+    std::string name;
+    Rgb colour{};
+    std::string text_key{}; // Optional AI caption key; human names are always literal.
+    sim::SeatId seat{}; // Observer identity; zero denotes the faction/player fallback.
+    friend bool operator==(const ObserverOwner&, const ObserverOwner&) = default;
+};
+// Unique human identity; shared owners use the supplied faction label.
+[[nodiscard]] std::string_view resolve_owner_name(sim::tactical::PlayerId player,
+    std::span<const ObserverOwner> seats, std::string_view shared_name, std::string_view unnamed_name = {},
+    const sim::tactical::BattleControllerPolicy* controllers = nullptr) noexcept;
+[[nodiscard]] const ObserverOwner* display_owner(
+    const sim::tactical::TacticalInstance& instance, std::span<const ObserverOwner> roster,
+    bool visible, bool enabled = true, bool controller_policy = false) noexcept;
+
 // OF-05: model vertices are already in render basis; only the destination
 // translation changes from source (x, y, z) to render (x, z, -y).
 [[nodiscard]] constexpr sim::math::Mat3x4 waypoint_flag_transform(sim::math::Vec3 destination) noexcept {

@@ -438,7 +438,9 @@ hardpoints, turret poses, abilities or production are read for land. The land ta
 `durability_table` and `combat_table` the space start uses, with the land health multiplier), and
 `build_land_start` places them in `TacticalContent`. A table without a damageable or armed type binds empty
 tables. `LandContentInputs::content_errors` defaults to `skip_object`: a type with a bad combat row is left
-out and named in the binding notes. The land step does not read the tables yet, so there is no behaviour
-change; the `land-content` identity domain is version 2 and the adapter fingerprint `land-content-adapter-v4`.
+out and named in the binding notes. The land step reads the tables: Attack orders, target choice, weapon fire,
+projectiles, damage and death run from them (docs/behaviour/land-combat-slice.md), so this is a behaviour
+change; the `land-content` identity domain is version 3, the adapter fingerprint `land-content-adapter-v5` and
+the land checkpoint section 18 is v6.
 A caller that wants the map's statics in the combat tables passes their names in `LoadInput::obstacles`
 (`read_land_start_inputs` returns them in `static_tables`).

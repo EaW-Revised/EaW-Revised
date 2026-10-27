@@ -362,6 +362,7 @@ reserved (zero) and unit_count uint64 entity IDs, nonzero and strictly increasin
 | 24 | Prepaid AI buy (WAS-26) | uint64 type ID; one station unit | 48 |
 | 25 | Repair hardpoint (WSL-40; OrderKind 21) | uint32 authored hardpoint index below 255, uint32 reserved (zero); exactly one listed station | 48 |
 | 26 | Reinforce with explicit facing (WR-X01) | uint64 type ID, three int64 point raw values, uint64 pool token (zero for ordinary admission), int64 yaw raw in [0, 360) degrees; no unit | 80 |
+| 33 | Battle control transition (ADR-020; OrderKind 27) | uint32 departed seat, CTRL policy v4 for exactly one faction; no unit list entries; engine provenance only | 64 + 16s + 8f |
 
 The explicit-facing reinforcement command is an EAWR extension. Its facing drives both the arrival-lane placement sweep and the spawned unit's rotation and flight direction. Each drop carries the local player's chosen value; absence of a wheel choice retains opcodes 11/19 and the player's authored FoC facing, including their existing bytes. A present zero yaw is an explicit choice. Negative yaw and yaw at or above 360 degrees are rejected during command validation.
 
@@ -1431,3 +1432,105 @@ Standalone playback binds the recorded combat and scene content; restoring a cam
 with its borrowed native child remains the route for parent-owned return and retreat
 services. The native file header's size limits apply at file export/load, never to live
 campaign admission.
+
+## Optional cooperative battle controllers
+
+Tag 18 (`replay_extension_controllers`) is the optional controller foundation of ADR-020.
+It uses the existing uint16 tag/length framing and a version-4 body: uint32 version,
+uint32 seat count, then `(uint32 seat, player, kind, active)` rows in ascending seat order;
+uint32 faction count, then `(uint32 player, mode)` rows in ascending player order;
+uint32 unit count, then `(uint64 entity, uint32 controller_seat, control)` rows matching
+the complete setup unit table. Seat kinds are human=1 and AI=2; active is 0 or 1.
+Modes are humans=1, AI=2 and passive=3. Unit control is none=0 (unmapped objects),
+mobile=1 or shared structure=2. A mobile controller is an active seat of its faction
+and effective control mode, except that a passive side may retain its inactive
+controller identities after an unsupported takeover. Those seats authorize no input.
+Shared structures carry zero; zero cannot authorize a
+mobile unit. Squadron roots and attached members have identical controller fields.
+The policy requires campaign metadata and a cooperative human side; skirmish and
+solo battle creation leave it absent. Native campaign SKSU is loader metadata and
+may coexist with the policy. The controller roster uses the GC envelope resource
+bound of 256 seats, independently of the tactical faction count. Classification is explicit setup metadata;
+this foundation does not infer structure capabilities or enable command gates.
+
+A command may append a 16-byte `CTRL` tail after its unit list and any waypoint tail:
+uint32 tag `0x4c525443`, uint32 version=1, uint32 issuing seat, uint32 origin.
+Origins are seat=1 (nonzero seat) and trusted engine=2 (zero seat); an absent tail
+means ordinary player commands when controller policy is disabled. Enabled policy
+requires explicit seat or engine provenance. Unknown tail versions, inconsistent origins/seats
+and incorrect lengths fail. The common key and opcode positions stay unchanged.
+The checked command-body codec excludes the uint32 record length and applies the
+same parser and payload shape checks as complete recordings. GC replaces the key
+and stamps the outer authenticated seat at execution when the policy is enabled;
+nested engine provenance or another seat is refused. Producer sequence extraction
+uses that codec as well. Trusted script routing explicitly supplies engine provenance.
+
+Canonical state and snapshot bytes append a `CTRL` version-4 roster/faction domain
+only with an enabled policy. Controller seat and control kind (two uint32 values)
+are encoded inside each existing unit record after its order, and each snapshot
+instance after its team. Unit state also encodes the uint32 pending Buzz request
+seat there. Following the roster/faction domain, canonical state retains queue
+initiators, sparse pool token/controller bindings, respawn controllers and spawner
+output ordinals in the same identity/count order as the version-4 checkpoint tail.
+Snapshots append the published economy's player/queue/entry-ID/initiator records.
+The setup extension and command provenance tail remain version 1; the state and
+snapshot domains replace version 2 without changing the replay wire layout.
+State encoding uses the existing partitioned per-unit pass;
+no extra per-tick entity traversal is added. The existing global versions,
+disabled-policy bytes and corpus pins are unchanged. Names and presentation
+preferences are excluded.
+
+### Cooperative gift command
+
+ADR-020 reserves tactical opcode 32 (`GiftPayload`, order kind 26) for an explicit
+controller transfer. After the unchanged 24-byte common command body it writes
+uint32 recipient seat and uint32 zero reserved word, then the ordinary unit-list
+header and ascending uint64 unit IDs. A complete version-1 seat-provenance tail is
+required. The body length is `56 + 8 * unit_count`; global replay/rules/encoding
+versions, header offsets and policy-disabled recordings are unchanged. Unknown,
+oversized, empty, duplicate, unsorted, truncated or unprovenanced commands fail the
+same checked codec used by nested GC commands and standalone child recordings.
+
+At the ordered command boundary, both sender and recipient must be active humans
+of the unit's tactical owner; the recipient must differ from the sender. Spectators
+have no binding. Every listed source must be live, mobile and controlled by the
+sender. Naming an attached member normalizes to its root, and duplicate roots from
+that normalization are transferred once. A temporary reverse index is built only
+on a gift tick, including attachments without flight profiles; same-batch births
+extend that index. All sources and their live attachments validate before any
+controller changes, so an invalid list rejects atomically. Rejection reason 21
+denotes source authority, and reason 22 denotes an ineligible recipient.
+
+Event kind 20 (`controller_changed`) publishes every transferred identity in ascending
+ID order, with faction owner in `player`, command sequence in `sequence`, and explicit
+previous/current controller seats. Only this event appends those two uint32 seats to
+its canonical snapshot event record. Existing immutable instances publish the new
+controller in the same snapshot. Gifts retain orders, faction ownership, shared
+credits/population/fog and campaign return identity. Heroes and arriving called-in
+units are transferable; shared structures are not. A carrier's launched squadrons
+remain independent, while future launches inherit its new controller. There is no
+cooldown, transfer history, reclaim or automatic rebalance. The policy remains opt-in.
+
+### Engine departure boundaries
+
+Opcode 33 records the agreed departure of one active human seat. Its policy uses
+version 4 and contains all seat bindings of exactly the affected faction, including
+inactive human history, and its resulting humans/AI/passive mode. The departing
+seat becomes inactive; no human binding is added or reactivated. Other factions
+are independent. The 24-byte common command header, unit-list framing and v1
+provenance tail retain their layout. The complete body is 64 + 16s + 8f bytes,
+including the required engine provenance tail (f is exactly one).
+
+Within a faction, the parent assigns child sequences in outer tick/seat/sequence
+order across ordinary input, gifts and departures. Paused input retains that order
+until the child resumes. Only roots whose controller becomes ineligible transfer,
+in root-ID order, to the seat with the fewest current mobile roots; ties use seat
+ID. Attached members follow their root. No orders or faction assets change.
+The last human's roots move to its configured AI seat; passive policy keeps the
+provider suspended. An unavailable provider or missing AI seat records passive mode with a clear
+diagnostic and keeps the match running. Its roots keep their current, now inactive
+controller identities; this never grants command authority or reports AI takeover. No faction quit is generated for a departure.
+
+The optional controller setup extension now requires v4. Its field layout is
+unchanged. All co-op synthetic fixtures use the current extension; older opt-in
+extensions are rejected. Policy-disabled replay and encoding bytes are unchanged.

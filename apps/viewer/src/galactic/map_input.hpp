@@ -499,7 +499,9 @@ public:
         for (const auto id : multiselection) if (id != dragged) drop(id);
         dragged = 0; double_release = false; return true;
     }
-    [[nodiscard]] bool wheel_zoom() const { return gates.world_allowed() && !held_scroll && !held_rotate; }
+    [[nodiscard]] bool wheel_zoom() const {
+        return gates.world_allowed() && !held_scroll && !held_rotate && !box_start && !dragged;
+    }
     [[nodiscard]] std::optional<Vec3> radar(PointerPoint point, float width, float height) const {
         if (!gates.tutorial_scroll || !gates.world_allowed()) return std::nullopt;
         return radar_to_world({point.x, point.y, 0}, width, height);

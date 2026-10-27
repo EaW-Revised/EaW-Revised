@@ -142,6 +142,7 @@ core::Result<void> session_detail::Tick::pad_lifecycle() {
             position.z = raised.value();
             auto final = impl_->new_unit(UnitState{final_id, profile->constructed, state.builder,
                 position, parent->state.rotation, {}}, tick);
+            if (auto assigned = impl_->attribute_output(final.state, child->state.controller_seat); !assigned) return assigned;
             const auto fraction = math::divide(child->durability->hull,
                 impl_->base_profile(child->state.owner, child->state.type_id)->max_hull);
             if (!fraction) return core::Result<void>::failure(fraction.error());
@@ -268,11 +269,13 @@ core::Result<void> session_detail::Tick::station_upgrades() {
             const auto replacement_id = next_id++;
             auto replacement = impl_->new_unit(UnitState{replacement_id, menu->next_level, old.state.owner,
                 old.state.position, old.state.rotation, {}}, tick);
+            if (auto assigned = impl_->attribute_output(replacement.state, old.state.controller_seat); !assigned) return assigned;
             replacement.state.garrison_enabled = old.state.garrison_enabled; // FL-13: upgrades preserve the object flag
             replacement.garrison_unit = old.garrison_unit; // WU-37: replacement retains object provenance
             // 2. Carry hardpoints by list index; disabled/destroyed become disabled at 0.1.
             if (replacement.durability && old.durability) {
-                carry_station_hardpoints(*impl_->health_profile(old), *old.durability, *replacement.durability);
+                carry_station_hardpoints(*impl_->health_profile(old), *old.durability,
+                    *impl_->health_profile(replacement), *replacement.durability);
             }
             // WSW-48: transferred disabled state immediately updates the allied gate.
             publish_special_hardpoints(replacement);
@@ -528,6 +531,13 @@ core::Result<void> session_detail::Tick::economy() {
                 return option != nullptr ? option->kind : BuildKind::unit;
             },
             [&](const QueueEntry& entry) {
+                if (impl_->setup.controllers && entry.controller_seat.value != 0
+                    && !ledger.pool_tokens.empty()) {
+                    const auto* station = survivor(entry.station);
+                    const auto* option = station != nullptr ? impl_->build_option(*station, ledger.player, entry.type) : nullptr;
+                    if (option != nullptr && option->kind == BuildKind::unit)
+                        ledger.pool_controllers.emplace(ledger.pool_tokens.back(), entry.controller_seat);
+                }
                 const auto* upgrade = impl_->economy.upgrade(entry.type);
                 pending_productions_.push_back({ledger.player, entry.type, tick});
                 if (upgrade == nullptr) return;

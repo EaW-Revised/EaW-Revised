@@ -244,22 +244,28 @@ bool TacticalSession::Impl::buzz_request_ready(const LiveUnit& source, const mat
             || !within_range(source.state.position, point, buzz.min_range, RangeMetric::planar));
 }
 
-LiveUnit TacticalSession::Impl::create_buzz_droids(LiveUnit& source, const math::Vec3 point,
-    const std::uint64_t tick, EntityId& allocated_next_id) {
+core::Result<LiveUnit> TacticalSession::Impl::create_buzz_droids(LiveUnit& source, const math::Vec3 point,
+    const std::uint64_t tick, EntityId& allocated_next_id, const SeatId controller) {
     const auto& profile = *abilities.find(source.state.type_id);
     const auto index = *ability_slot(profile, AbilityKind::buzz_droids);
     const auto& ability = profile.abilities[index];
+    UnitState droid{allocated_next_id, ability.buzz->droid_type, source.state.owner, point, math::identity_quat(), {}};
+    const auto preferred = controller.value != 0 ? controller
+        : source.abilities->pending_buzz_controller.value != 0 ? source.abilities->pending_buzz_controller
+        : source.state.controller_seat;
+    if (auto assigned = attribute_output(droid, preferred, allocated_next_id); !assigned)
+        return core::Result<LiveUnit>::failure(assigned.error());
     auto& slot = source.abilities->slots[index];
     // WAB-71/FS-08: creation and full recharge belong to successful application.
     slot.started_tick = tick;
     slot.ready_tick = tick + ability.recharge_frames;
     source.abilities->pending_buzz_position.reset();
+    source.abilities->pending_buzz_controller = {};
     source.state.order = Order{OrderKind::stop, tick};
-    const UnitState droid{allocated_next_id, ability.buzz->droid_type, source.state.owner, point, math::identity_quat(), {}};
     allocated_next_id = allocated_next_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : allocated_next_id + 1;
     adjust_owned(droid, true);
     buzz_droids.push_back({droid.entity_id, profile.type_id, point, tick + ability.buzz->activation_frames});
-    return new_unit(droid, tick);
+    return core::Result<LiveUnit>::success(new_unit(droid, tick));
 }
 
 const SpecialAbilityProfile* TacticalSession::Impl::beam_profile(const LiveUnit& unit, const AbilityKind kind) const {

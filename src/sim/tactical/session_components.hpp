@@ -18,6 +18,8 @@ struct Identity {
     std::uint64_t purchase_token{};
     EntityId barrage_source{};
     bool garrison_enabled{true};
+    SeatId controller_seat{};
+    UnitControl control{UnitControl::none};
 };
 
 // WHE-06/07: sparse carried identities survive ECS gather and ordered commit.

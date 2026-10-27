@@ -244,6 +244,7 @@ void encode(Encoder& out, const UnitType& unit) {
     if (!unit.replenish_team.empty() || unit.redirect_damage_to_teammates) {
         out.text("hero-wingmen-v1"); out.text(unit.replenish_team); out.flag(unit.redirect_damage_to_teammates);
     }
+    if (unit.replenish_via_members) out.text("member-replenishment-v1");
     out.fixed(unit.team_reveal_range);
     out.flag(unit.victory_relevant);
     out.flag(unit.destroyed_with_hardpoints);

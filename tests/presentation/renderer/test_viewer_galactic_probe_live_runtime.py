@@ -76,6 +76,18 @@ func click(point, button=MOUSE_BUTTON_LEFT, twice=false):
 func click_name(name):
     notes.append({"click":name,"found":centre(name)!=null,"elapsed":elapsed})
     await click(centre(name))
+func story_ok(node):
+    if node is Button and node.is_visible_in_tree() and node.text == "OK":
+        return node.get_global_rect().get_center()
+    for child in node.get_children():
+        var found = story_ok(child)
+        if found != null: return found
+    return null
+func dismiss_story():
+    var point = story_ok(viewport)
+    if point != null:
+        await click(point)
+        await wait(0.5)
 func collect(node, rows):
     if node is Control and node.is_visible_in_tree():
         var row = {"name":str(node.name),"rect":str(node.get_global_rect()),"tooltip":node.tooltip_text}
@@ -224,15 +236,15 @@ func drag_probe(special):
             await wait(1.0)
             await shot("hold-"+probe["kind"])
             notes.append({"target_kind":probe["kind"],"target":probe["id"],
-                "slot":str(centre("galaxy_destruction_first_slot")),
-                "slot_visible":centre("galaxy_destruction_first_slot")!=null,"native_drag":viewport.gui_is_dragging()})
+                "slot":str(centre("galaxy_ability_slot_"+str(probe["id"]))),
+                "slot_visible":centre("galaxy_ability_slot_"+str(probe["id"]))!=null,"native_drag":viewport.gui_is_dragging()})
         mouse(source,false)
         return true
     motion(planet_point(),true)
     await wait(0.7)
     await shot("04-drag-preview")
     if mode == "held-enemy": return true
-    var slot = centre("galaxy_destruction_first_slot")
+    var slot = centre("galaxy_ability_slot_"+str(destination))
     notes.append({"special_slot":str(slot),"native_drag":viewport.gui_is_dragging(),"elapsed":elapsed})
     var target = slot if special and slot != null else planet_point()
     motion(target,true)
@@ -280,6 +292,7 @@ func ground_attempt(target_name):
                 await shot("ground-return-attempt")
 func run():
     await wait(3.0)
+    await dismiss_story()
     await shot("00-start")
     await click_name("b_space_tab")
     await wait(0.5)
@@ -292,6 +305,11 @@ func run():
         await wait(0.5)
         var head = viewport.find_child("queue00",true,false)
         if head == null or not head.is_visible_in_tree(): break
+    # The production queue may not be visible until the next UI publication.
+    # Wait for the actual fleet badge instead of treating that transient as completion.
+    while elapsed < deadline and probe_source() == null:
+        await dismiss_story()
+        await wait(0.5)
     await wait(2.0)
     await shot("02-produced")
     await click(probe_source())
@@ -451,6 +469,9 @@ class GalacticProbeLiveRuntime(unittest.TestCase):
                 targets = {row["target_kind"]: row for row in notes if "target_kind" in row}
                 self.assertTrue(targets["enemy"]["native_drag"])
                 self.assertTrue(targets["enemy"]["slot_visible"])
+                enemy_frame = next(row for row in notes if row.get("shot") == "hold-enemy")
+                self.assertGreaterEqual(sum(row["name"].startswith("galaxy_ability_slot_")
+                                            for row in enemy_frame["ui"]), 2)
                 self.assertFalse(targets["own"]["slot_visible"])
             if mode in ("visibility", "ground-grid"):
                 attempts = [row for row in notes if "ground_source" in row]
@@ -497,6 +518,9 @@ class GalacticProbeLiveRuntime(unittest.TestCase):
 
     def test_stock_probe_world_and_special_slot(self):
         self.run_stock_cases(("world", "slot", "ground-grid", "visibility", "right-click"))
+
+    def test_spy_slots_all_planets(self):
+        self.run_stock_cases(("visibility",))
 
     def test_stock_probe_held_enemy(self):
         self.run_stock_cases(("held-enemy",))

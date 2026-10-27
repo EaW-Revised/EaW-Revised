@@ -167,7 +167,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         const auto y = scene::fixed_from_binary32((*point)[1]);
         if (!x || !y) return;
         const sim::math::Vec3 destination{x.value(), y.value(), {}};
-        input->set_selection(selection_.units());
+        input->set_selection(controlled_selection(live));
         const auto issued = input->world_command(ui::WorldPick{destination}, ui::CommandOrigin::world_click,
             ui::OrderModifiers{modifiers.ctrl, modifiers.alt, false});
         if (issued && issued.value()) {
@@ -214,7 +214,9 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     if (drag.moved && ui::drag_extent(drag.start, at) > ui::minimum_drag_select_distance) {
         ++boxes_;
         if (!modifiers.shift) inspect_.reset(); // #4919: a box drag leaves the inspect card
-        if (selection_.box(ui::drag_rect(drag.start, at), modifiers.shift, units_, world_ui_->box_icons())) {
+        auto icons = world_ui_->box_icons();
+        if (live.controller_policy_enabled()) std::erase_if(icons, [&](const auto& icon) { return !live.can_control(icon.entity); });
+        if (selection_.box(ui::drag_rect(drag.start, at), modifiers.shift, units_, icons)) {
             note("box select");
             acknowledge(Acknowledgement::Kind::select);
         }
@@ -427,7 +429,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     ui::WorldPick pick{{x.value(), y.value(), sim::math::Fixed{}}, over ? over->entity : sim::invalid_entity_id,
                        over != nullptr && over->hostile, over != nullptr && over->own, over_selected};
     if (reticle && over != nullptr && over->hostile) pick.hardpoint = reticle->hardpoint;
-    input->set_selection(selection_.units());
+    input->set_selection(controlled_selection(live));
     const std::uint64_t tick = live.order_tick();
     auto issued = input->world_command(pick, ui::CommandOrigin::world_click, ui::OrderModifiers{modifiers.ctrl, modifiers.alt, right_double_click_});
     if (issued && issued.value()) {
@@ -474,7 +476,7 @@ bool BattleInput::minimap_move(const double x, const double y, const bool double
     auto fixed_y = scene::fixed_from_binary32(static_cast<float>(y));
     if (!fixed_x || !fixed_y) return false;
     const ui::WorldPick pick{{fixed_x.value(), fixed_y.value(), sim::math::Fixed{}}, sim::invalid_entity_id, false};
-    input->set_selection(selection_.units());
+    input->set_selection(controlled_selection(live));
     const std::uint64_t tick = live.order_tick();
     const ui::OrderMode mode = input->mode();
     auto issued = input->world_command(pick, ui::CommandOrigin::minimap);
@@ -493,10 +495,16 @@ bool BattleInput::minimap_move(const double x, const double y, const bool double
     return true;
 }
 
+std::vector<sim::EntityId> BattleInput::controlled_selection(const LiveSessionView& live) const {
+    auto selected = selection_.units();
+    if (live.controller_policy_enabled()) std::erase_if(selected, [&](const auto id) { return !live.can_control(id); });
+    return selected;
+}
+
 bool BattleInput::local_order_selection(const LiveSessionView& live) const {
     return std::any_of(selection_.units().begin(), selection_.units().end(), [&](const auto entity) {
         const auto* instance = live.snapshot_index().instance(entity);
-        return instance != nullptr && instance->owner == live.local_player();
+        return instance != nullptr && instance->owner == live.local_player() && live.can_control(*instance);
     });
 }
 
@@ -537,7 +545,7 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
         for (auto& unit : own_units) {
             // S-5a: allied community property is click-selectable, but select-all is owner-only.
             const auto* instance = live.snapshot_index().instance(unit.entity);
-            unit.own = instance != nullptr && instance->owner == live.local_player();
+            unit.own = instance != nullptr && instance->owner == live.local_player() && live.can_control(*instance);
         }
         inspect_.reset();
         selection_.all(own_units);
@@ -659,7 +667,7 @@ bool BattleInput::command_click(const ui::OrderMode mode, const bool stop, LiveS
     if (placing_) cancel_placement(live);
     audio::CommandCue cue = audio::CommandCue::none;
     if (stop) {
-        input->set_selection(selection_.units());
+        input->set_selection(controlled_selection(live));
         if (!selection_.empty()) {
             if (auto stopped = input->stop(origin); stopped) {
                 ++orders_;

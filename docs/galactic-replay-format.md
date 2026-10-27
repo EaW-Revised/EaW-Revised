@@ -2,9 +2,16 @@
 
 Current compatibility identities are replay format 10, galactic rules 6 and state
 encoding 15 (hash domain `eawr-galactic-state-v8`); published snapshot encoding is 8.
-Checkpoint galaxy section version 47 retains the arrival landing request, as well as spy enabled/cancelled facts and registered
+Checkpoint galaxy section version 48 retains the arrival landing request, as well as spy enabled/cancelled facts and registered
 spy targets in the ability host. Ability setup/state encoding 9 adds authored ground
-spy profiles and runtime fields; the observer section owns timed visibility sources. Older project formats are rejected.
+spy profiles and runtime fields; ability setup encoding 10 adds each profile's initially enabled Galactic_Automatic spies
+(`u8` count, then per spy a text identity, `u64` identity, `i64` duration, `i64` influence range, `u32` mask), which the
+session applies from the live census without persisted state; the observer section owns timed visibility sources. Older project formats are rejected.
+
+Checkpoint section 48 appends the story goals and objectives per plot owner to the campaign owner payload, after the plot
+state (goal rows: dialog, variable, tag, chapter, completed, hidden, remove-after-viewed; objective rows; the objective
+display flag). They are deliberately outside the state hash: a goal row exists only because a hashed plot event triggered
+once, so it adds nothing a peer could disagree on. Replay format and recordings are unchanged.
 
 Format 10 (WGM-84/85): each movement extension type row ends with the type's Cheap_Bribe_Cost and Expensive_Bribe_Cost
 (two `i64` fixed point values, zero when the type authors none) after the piracy value, and each movement player row ends with

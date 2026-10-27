@@ -353,6 +353,9 @@ public:
     // reference path retains the full-system stream input for paired profiling.
     // Live and idle layouts retain their construction-time setting until evicted.
     static void set_stream_bucketing_default(bool on) noexcept;
+    // Diagnostic comparison of folded and per-sample presentation in one binary.
+    static void set_catchup_folding_default(bool on) noexcept;
+    [[nodiscard]] static bool catchup_folding_default() noexcept;
     ~EffectRegistry();
     EffectRegistry(const EffectRegistry&) = delete;
     EffectRegistry& operator=(const EffectRegistry&) = delete;
@@ -370,6 +373,19 @@ public:
     [[nodiscard]] core::Result<void> set_brightness(EffectHandle handle, float brightness);
     [[nodiscard]] core::Result<void> set_dynamic(EffectHandle handle, float size, float energy);
     [[nodiscard]] core::Result<void> set_pinched_cylinder(EffectHandle handle, float radius, float height, float fraction);
+    // A rendered frame may advance several logical samples. Keep their CPU/statistics
+    // work, but submit only the last stream of each surviving effect to the backend.
+    class FrameUploads final {
+    public:
+        explicit FrameUploads(EffectRegistry& registry, bool enabled) noexcept;
+        ~FrameUploads();
+        FrameUploads(const FrameUploads&) = delete;
+        FrameUploads& operator=(const FrameUploads&) = delete;
+    private:
+        EffectRegistry& registry_;
+        bool enabled_;
+    };
+    [[nodiscard]] FrameUploads defer_uploads(bool enabled = true) noexcept { return FrameUploads(*this, enabled); }
     [[nodiscard]] core::Result<EffectFrameStats> advance(
         EffectHandle handle, float delta_seconds, const CameraFrame& camera);
     // A drawn frame between advances (#433): the particles that live in their emitter's frame
@@ -436,6 +452,7 @@ private:
         std::optional<MeshBinding> mesh_binding);
     struct Instance;
     struct LayoutTelemetry;
+    std::size_t upload_scopes_{};
     bool measure_{};
     RegistryTimings timings_;
     // Caller-owned dispatch scratch keeps worker callbacks within std::function's
@@ -453,6 +470,7 @@ private:
     void step(Instance& instance, float delta_seconds, EffectFrameStats& stats) const;
     // Hands the instance's built streams to the backend (the calling thread only) and counts the work.
     void upload(Instance& instance, bool stepped, bool hashed);
+    void commit_upload(Instance& instance);
     // Resolves `handles` to live, distinct instances into batch_, or records the diagnostic.
     [[nodiscard]] core::Result<void> resolve(std::span<const EffectHandle> handles);
     [[nodiscard]] core::Result<void> advance_batch(std::span<const EffectHandle> handles, float uniform_delta,

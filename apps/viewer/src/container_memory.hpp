@@ -208,7 +208,8 @@ diagnostics::MemoryCapacity BattleAudio::memory_capacity() const {
     };
     for (const auto& entry : samples_) visit(entry.second.stream);
     for (const auto& entry : music_streams_) visit(entry.second);
-    for (const auto& entry : speech_events_) for (const auto& stream : entry.second.streams) visit(stream);
+    for (const auto& entry : speech_streams_) visit(entry.second);
+    result.vector("audio", "load_diagnostics", audio_load_rows_);
     result.add("audio_godot_overlap", "unique_wav_data_size", wav_bytes, seen.size());
     result.add("audio_godot_overlap", "unique_mp3_data_size", mp3_bytes);
     result.add("audio_godot_overlap", "unknown_stream_types", 0, unknown);

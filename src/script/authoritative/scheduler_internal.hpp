@@ -78,6 +78,8 @@ struct Instance {
     bool exit_requested{};
     InstanceOutcome outcome{InstanceOutcome::running};
     bool rolled_back{}; // invocation-local; not saved or hashed
+    bool tracking_initial_syntax{};
+    std::string initial_syntax_message;
     std::map<std::string, std::vector<Handler>, std::less<>> handlers;
     std::map<std::pair<std::uint32_t, std::uint64_t>, ProximityList> proximities;
     std::uint64_t next_handler_id{1};

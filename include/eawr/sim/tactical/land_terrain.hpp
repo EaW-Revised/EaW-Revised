@@ -91,7 +91,7 @@ public:
     // (LR2-15/16). The surface is the two-triangle cell mesh (00,10,11)/(00,11,01), not the
     // bilinear height_at sampler. Parts of the segment outside the sampled grid do not collide.
     [[nodiscard]] LandSegmentResult segment_intersection(const math::Vec3& start, const math::Vec3& end,
-        LandSegmentOptions options = {}) const;
+        LandSegmentOptions options = {}, std::vector<math::Fixed>* crossings = nullptr) const;
 private:
     [[nodiscard]] std::int32_t nearest_vertex_surface(math::Fixed x, math::Fixed y) const;
     explicit LandTerrain(LandTerrainInput input, std::optional<LandBounds> bounds) : input_(std::move(input)), bounds_(bounds) {}

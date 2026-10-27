@@ -1137,6 +1137,7 @@ int main(int argc, char** argv) {
         free_fleet_signal_contracts();
         real_factory_contracts();
         real_factory_contracts(true);
+        real_factory_contracts(false, true);
     } catch (const std::exception& error) {
         if (argc > 1 && (std::string_view(argv[1]) == "--release" || std::string_view(argv[1]) == "--release-benchmark")) {
             const std::filesystem::path directory = argc > 2 ? argv[2] : "out/galactic-ai-campaign-gate";

@@ -1,3 +1,4 @@
+#include "../viewer_load_notes.hpp"
 #include "../viewer_profile_arguments.hpp"
 #include "live_battle_bounty.hpp"
 #include "galactic_mode_internal.hpp"
@@ -56,6 +57,7 @@ platform::LiveGameFrame GalacticMode::State::battle_dialog_frame() const {
     return galactic_view::frame_with_auto_summary(std::move(frame), restored_auto_summary);
 }
 bool GalacticMode::State::build_view() {
+    enable_galactic_memory_census(*this);
     if (options.native_ai_invalid) {
         failure = "--eawr-galactic-ai expects on or off";
         return false;
@@ -99,6 +101,7 @@ bool GalacticMode::State::build_view() {
         auto loaded = data::load_catalog_strict(*filesystem, profile == "remake" ? data::Profile::remake
             : (profile == "foc" ? data::Profile::foc : data::Profile::eaw));
         if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
+        publish_viewer_load_notes(std::move(loaded.value().notes), layers);
         step.emplace("gc.build_view.galactic_data");
         auto tables = data::galactic::load_galactic_data(*filesystem, loaded.value().catalog);
         if (!tables) { failure = core::format_diagnostic(tables.error()); return false; }
@@ -307,6 +310,10 @@ bool GalacticMode::State::build_view() {
 }
 
 bool GalacticMode::State::start_game(platform::LiveGameSession::Options live_options) {
+    live_options.load_note_sink = [](std::span<const core::LoadNote> notes) {
+        publish_viewer_load_notes({notes.begin(), notes.end()}, {}, true);
+    };
+    capture_galactic_memory(*this, "post_load", true);
     if (!options.lan_acceptance_directory.empty()) {
         if (!options.lan_match || !options.lan_start) { failure = "GC acceptance needs an agreed lobby launch"; return false; }
         options.lan_match->configure_acceptance(options.lan_acceptance_directory, options.campaign, options.mod_root.empty());
@@ -617,8 +624,8 @@ galactic_view::PlanetCamera& GalacticMode::State::seat_flight() {
     return flights.try_emplace(galaxy->local.seat, camera_constants).first->second;
 }
 
-const galactic_view::PlanetView* GalacticMode::State::picked_planet(const float x, const float y) const {
-    if (hud && pointer_over_panel(*hud, Vector2(x, y))) return nullptr;
+const galactic_view::PlanetView* GalacticMode::State::picked_planet(const float x, const float y, const bool through_panel) const {
+    if (!through_panel && hud && pointer_over_panel(*hud, Vector2(x, y))) return nullptr;
     // Project picking: project planet centres through the current camera; the
     // HUD's discovery/selection gates will replace this synthetic-world seam.
     const Vector3 eye(camera.eye[0], camera.eye[1], camera.eye[2]);
@@ -1455,6 +1462,7 @@ std::optional<int> GalacticMode::process(const double delta) {
     }
     if (state.ai_activity && !state.options.all_ai_capture && state.displayed_snapshot)
         state.capture_metrics.sample(*state.displayed_snapshot); // end checkpoint
+    if (!proof_more) capture_galactic_memory(state, "steady", false);
     if (state.options.all_ai_capture) {
         state.capture_metrics.sample(*state.displayed_snapshot);
         state.game->stop();
@@ -1501,8 +1509,13 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
     if (!state.interactive || state.completed || event.is_null() || !state.galaxy) return;
     if (!state.map_input.gates.world_allowed()) return;
     if (state.map_input.gates.tutorial_locked) { cancel_input(); return; }
+    const auto* wheel_button = Object::cast_to<InputEventMouseButton>(event.ptr());
+    const bool wheel = wheel_button && (wheel_button->get_button_index() == MOUSE_BUTTON_WHEEL_UP
+        || wheel_button->get_button_index() == MOUSE_BUTTON_WHEEL_DOWN);
+    // GUI wheel consumers have already handled their events. An unused wheel
+    // may zoom over the shell; clicks and held pointer motion still belong to it.
     if (const auto* mouse = Object::cast_to<InputEventMouse>(event.ptr());
-        mouse && state.hud && pointer_over_panel(*state.hud, mouse->get_position())) {
+        mouse && !wheel && state.hud && pointer_over_panel(*state.hud, mouse->get_position())) {
         state.scrolling = state.orbiting = false;
         state.pointer_warp.reset();
         state.map_input.held_scroll = state.map_input.held_rotate = false;
@@ -1575,13 +1588,13 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
         if (index != MOUSE_BUTTON_LEFT && index != MOUSE_BUTTON_WHEEL_UP && index != MOUSE_BUTTON_WHEEL_DOWN) return;
         const auto planets = index == MOUSE_BUTTON_WHEEL_DOWN ? std::vector<galactic_view::InputPlanet>{} : state.selection_planets();
         const auto position = button->get_position();
-        const auto* picked = state.picked_planet(position.x, position.y);
+        const auto* picked = state.picked_planet(position.x, position.y, wheel);
         if (index == MOUSE_BUTTON_LEFT && picked) {
             state.apply_selection(state.map_input.world_select(planets, picked->id, flight.state(), button->is_double_click()));
         } else if (index == MOUSE_BUTTON_LEFT) {
             state.apply_selection(state.map_input.cancel_world(planets, flight.state()));
         }
-        if (!state.map_input.wheel_zoom()) return; // WGUI-78: wheel consumed during drag.
+        if (!state.map_input.wheel_zoom() || state.host->get_viewport()->gui_is_dragging()) return;
         if (index == MOUSE_BUTTON_WHEEL_UP) {
             if (picked && flight.state() == galactic_view::CameraState::overview)
                 state.apply_selection(state.map_input.world_select(planets, picked->id, flight.state()));

@@ -585,6 +585,49 @@ core::Result<void> parse_header_extensions(
                 return fail<Parsed>(diagnostic_codes::malformed, "replay header extension tags must increase", logical_path);
             }
             previous_tag = tag;
+            if (tag == replay_extension_controllers) {
+                Reader body(bytes.subspan(reader.offset(), length));
+                const auto end = reader.offset() + length;
+                std::uint32_t version{}, controller_count{};
+                BattleControllerPolicy policy;
+                if (!body.read_u32(version) || version != 4)
+                    return fail<Parsed>(diagnostic_codes::version, "unsupported controller policy version", logical_path);
+                if (!body.read_u32(controller_count) || controller_count > max_controller_seats || controller_count > body.remaining() / 16U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid controller roster length", logical_path);
+                policy.seats.resize(controller_count);
+                for (auto& seat : policy.seats) {
+                    std::uint32_t kind{}, active{};
+                    if (!body.read_u32(seat.seat.value) || !body.read_u32(seat.player)
+                        || !body.read_u32(kind) || kind > 255 || !body.read_u32(active) || active > 1)
+                        return fail<Parsed>(diagnostic_codes::malformed, "invalid controller seat", logical_path);
+                    seat.kind = static_cast<SeatKind>(kind); seat.active = active != 0;
+                }
+                if (!body.read_u32(controller_count) || controller_count > max_players || controller_count > body.remaining() / 8U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid controller faction length", logical_path);
+                policy.factions.resize(controller_count);
+                for (auto& faction : policy.factions) {
+                    std::uint32_t mode{};
+                    if (!body.read_u32(faction.player) || !body.read_u32(mode))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated controller faction", logical_path);
+                    faction.mode = static_cast<FactionController>(mode);
+                }
+                if (!body.read_u32(controller_count) || controller_count > max_units || controller_count > body.remaining() / 16U)
+                    return fail<Parsed>(diagnostic_codes::malformed, "invalid controller unit table length", logical_path);
+                replay.setup.units.resize(controller_count);
+                for (auto& unit : replay.setup.units) {
+                    std::uint32_t control{};
+                    if (!body.read_u64(unit.entity_id) || !body.read_u32(unit.controller_seat.value) || !body.read_u32(control))
+                        return fail<Parsed>(diagnostic_codes::malformed, "truncated controller unit", logical_path);
+                    unit.control = static_cast<UnitControl>(control);
+                }
+                if (body.remaining() != 0)
+                    return fail<Parsed>(diagnostic_codes::malformed, "controller extension length mismatch", logical_path);
+                std::vector<std::uint8_t> consumed(length);
+                if (!reader.read_bytes(consumed) || reader.offset() != end)
+                    return fail<Parsed>(diagnostic_codes::malformed, "truncated controller extension", logical_path);
+                replay.setup.controllers = std::move(policy);
+                continue;
+            }
             if (tag == replay_extension_battle_domain) {
                 std::uint32_t version{}, domain{};
                 if (length != 8 || !reader.read_u32(version) || !reader.read_u32(domain)) {

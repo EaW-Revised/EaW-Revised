@@ -559,7 +559,9 @@ core::Result<void> ScriptScheduler::register_managed_handles(ManagedHandlePolicy
 void ScriptScheduler::set_managed_handle_roots(::std::function<ValueList()> roots) { impl_->managed_roots = ::std::move(roots); }
 ManagedHandleWork ScriptScheduler::managed_handle_work() const noexcept { return impl_->managed_work; }
 
-core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::std::string_view root_module) {
+core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::std::string_view root_module,
+    bool* initial_syntax_error) {
+    if (initial_syntax_error) *initial_syntax_error = false;
     using namespace ::eawr::script::sflua;
     if (auto usable = impl_->check_usable(); !usable) return usable;
     if (id == 0 || impl_->instances.contains(id)) {
@@ -614,15 +616,25 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
             lua_settop(state, 0);
         }
         const ::std::string chunk_name = "@" + *ModuleManifest::normalise(root_module);
-        if (instance->sandbox->load_source(*bytes, chunk_name) != 0) {
+        const int loaded = instance->sandbox->load_source(*bytes, chunk_name);
+        if (loaded != 0) {
+            if (initial_syntax_error && loaded == LUA_ERRSYNTAX && (bytes->empty() || bytes->front() != '\x1b'))
+                *initial_syntax_error = true;
             return core::Result<void>::failure(detail::make_error(codes::module_rejected, detail::error_text(state)));
         }
+        instance->tracking_initial_syntax = initial_syntax_error != nullptr;
         const int status = lua_pcall(state, 0, 0, 0);
+        instance->tracking_initial_syntax = false;
         if (instance->sandbox->fault() != detail::sf::SandboxFault::none) {
             return core::Result<void>::failure(detail::make_error(
                 detail::fault_code(instance->sandbox->fault()), "instance chunk faulted: " + detail::error_text(state)));
         }
-        if (status != 0) return core::Result<void>::failure(detail::make_error(codes::script_error, detail::error_text(state)));
+        if (status != 0) {
+            const auto message = detail::error_text(state);
+            if (initial_syntax_error && !instance->initial_syntax_message.empty() && message == instance->initial_syntax_message)
+                *initial_syntax_error = true;
+            return core::Result<void>::failure(detail::make_error(codes::script_error, message));
+        }
         lua_settop(state, 0);
         instance->sandbox->settle_memory();
         if (instance->sandbox->fault() != detail::sf::SandboxFault::none) {

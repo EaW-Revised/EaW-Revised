@@ -2,6 +2,7 @@
 #include "eawr/core/text.hpp"
 
 #include "attract_runner.hpp"
+#include "menu_timeline.hpp"
 #include "audio_buses.hpp"
 #include "battle_content.hpp"
 #include "campaign_setup_screen.hpp"
@@ -541,12 +542,15 @@ void FrontEndMode::State::sync_attract() {
     }
     if (!attract_tried) {
         attract_tried = true;
+        MenuTimeline::mark("attract_start_begin");
         if (attract->start(*host)) {
             attract_started = true;
             UtilityFunctions::print("EAWR front end attract started");
         }
         else if (!attract->failure().empty())
             UtilityFunctions::printerr("EAWR front end attract: ", text(attract->failure()));
+        MenuTimeline::mark("attract_start_end");
+        MenuTimeline::report("attract_start_end");
     }
     if (attract->running()) {
         const bool focused = DisplayServer::get_singleton()->window_is_focused();
@@ -1506,12 +1510,16 @@ bool FrontEndMode::ready(Node3D& host, SkirmishSetupMode& setup) {
     } else {
         state.notes.push_back("text database: " + core::format_diagnostic(loaded.error()) + "; captions show their keys");
     }
+    MenuTimeline::mark("fe_text_database");
     if (!state.build()) return false;
+    MenuTimeline::mark("fe_built");
     state.build_campaign_screen();
+    MenuTimeline::mark("fe_campaign_screen");
     setup.enable_back(state.caption("TEXT_BUTTON_BACK"));
     if (state.options.audio) {
         state.audio = std::make_unique<MenuAudio>(host, *state.resources.filesystem, *state.resources.catalog);
     }
+    MenuTimeline::mark("fe_audio");
     for (const std::string& note : state.notes) UtilityFunctions::print("EAWR front end note: ", text(note));
     if (state.audio) {
         for (const std::string& problem : state.audio->problems())
@@ -1570,6 +1578,7 @@ bool FrontEndMode::owns_frame() const {
 
 std::optional<int> FrontEndMode::process() {
     State& state = *state_;
+    MenuTimeline::frame(state.attract != nullptr && state.attract->running());
     state.layout();
     if (state.fading) {
         const double elapsed = (Time::get_singleton()->get_ticks_msec() - state.fade_started_ms) / 1000.0;
@@ -1607,6 +1616,7 @@ std::optional<int> FrontEndMode::process() {
     }
     state.show_screen();
     state.sync_attract();
+    if (state.frames == 600) MenuTimeline::end("frame_600");
     if (state.options.test && state.options.start_battle && state.setup->start_pending()) {
         UtilityFunctions::print("EAWR front end start pressed: attract running ",
                                 state.attract != nullptr && state.attract->running());

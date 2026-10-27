@@ -102,7 +102,11 @@ void ViewerHost::start_skirmish_battle() {
         .interactive = !options_->skirmish_setup_test, .setup = std::move(selected),
         .content = options_->cache_content ? skirmish_setup_->content() : nullptr,
         .shaders = skirmish_setup_->shaders(),
-        .loading = skirmish_loading_, .lan = skirmish_setup_->lan_match()});
+        .loading = skirmish_loading_,
+        .observer_names = skirmish_setup_->lan_match()
+            ? std::vector<std::pair<sim::tactical::PlayerId, std::string>>{}
+            : std::vector<std::pair<sim::tactical::PlayerId, std::string>>{{1, skirmish_setup_->local_player_name()}},
+        .lan = skirmish_setup_->lan_match()});
     if (!map_mode_->ready(*skirmish_battle_host_)) {
         // A land battle names why it refused (for example a company or locomotion the authored tables lack).
         const std::string reason = land ? std::string(map_mode_->failure()) : std::string{};

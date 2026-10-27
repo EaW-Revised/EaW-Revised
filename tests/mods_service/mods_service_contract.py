@@ -4,8 +4,8 @@
 Drives the built service through its stdio pipes, the way the launcher's Godot manager does
 (OS.execute_with_pipe): every implemented method and error code, the 1 MiB line limit, the framing rules, the exit
 on a closed stdin and after shutdown, and the GUI subsystem of the Windows executable (no console window). It also
-re-records the committed transcripts in transcripts/ and compares them byte for byte, after normalising the three
-build-specific hello values (protocol doc, section 9).
+re-records committed transcripts and compares them byte for byte after normalising build-specific hello
+values, service run time and native-root-dependent chain keys (protocol doc, section 9).
 
 Usage: mods_service_contract.py <eawr_mods_service> [--update-transcripts]
   --update-transcripts  rewrite transcripts/*.jsonl from this build instead of comparing
@@ -50,7 +50,7 @@ def request(request_id: int, method: str, **params: object) -> dict:
 # The committed transcripts: each is one session, stdin closed after the last line.
 TRANSCRIPT_SESSIONS: dict[str, list[str]] = {
     "hello": [wire(hello()), wire(request(2, "shutdown"))],
-    "unknown_method": [wire(hello()), wire(request(2, "files.page")), wire(request(3, "no.such.method"))],
+    "unknown_method": [wire(hello()), wire(request(2, "records.query")), wire(request(3, "no.such.method"))],
     "malformed": ["not json", "[1,2]", wire({"method": "hello"}), wire(request(1, "shutdown")), wire(hello(2))],
 }
 
@@ -59,7 +59,11 @@ NORMALISED = {b"service_version": b"0.0.0", b"engine_build": b"0.0.0+transcript"
 
 
 def normalise(data: bytes) -> bytes:
-    return VOLATILE.sub(lambda match: b'"' + match.group(1) + b'":"' + NORMALISED[match.group(1)] + b'"', data)
+    data = VOLATILE.sub(lambda match: b'"' + match.group(1) + b'":"' + NORMALISED[match.group(1)] + b'"', data)
+    # Only service-owned timing and native-root-dependent cache keys are volatile.
+    # Raw types, duration and key transitions are asserted in loadcheck_contract.py.
+    data = re.sub(rb'"elapsed_ms":\d+', b'"elapsed_ms":0', data)
+    return re.sub(rb'"chain_fingerprint":"[0-9a-f]{64}"', b'"chain_fingerprint":"' + b'0' * 64 + b'"', data)
 
 
 def to_bytes(lines: list[str | bytes]) -> bytes:
@@ -144,8 +148,8 @@ class ServiceContract(unittest.TestCase):
         self.assertTrue(message["error"]["message"])
 
     def assert_hello_result(self, result: dict) -> None:
-        self.assertEqual(result["protocol"], {"major": 1, "minor": 3})
-        self.assertEqual(result["capabilities"], ["chain.check", "chain.resolve", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "shutdown"])
+        self.assertEqual(result["protocol"], {"major": 1, "minor": 6})
+        self.assertEqual(result["capabilities"], ["chain.check", "chain.resolve", "files.page", "game.find", "hello", "loadcheck.cancel", "loadcheck.result", "loadcheck.start", "mods.changes", "mods.discover", "profile.delete", "profile.list", "profile.load", "profile.save", "shutdown"])
         self.assertEqual(result["capabilities"], sorted(result["capabilities"]))
         self.assertRegex(result["service_version"], r"^\d+\.\d+\.\d+$")
         self.assertEqual(result["game_release"], result["service_version"])
@@ -188,7 +192,7 @@ class ServiceContract(unittest.TestCase):
                 self.assert_error(messages[0], 3, "EAWR-MODS-SVC-0005")
 
     def test_protocol_mismatch_reports_the_service_version(self):
-        for protocol in ({"major": 2}, {"major": 0}, {"major": 1, "min_minor": 4}):
+        for protocol in ({"major": 2}, {"major": 0}, {"major": 1, "min_minor": 7}):
             with self.subTest(protocol=protocol):
                 messages = session([wire(hello(4, **protocol)), wire(request(5, "shutdown"))])
                 self.assert_error(messages[0], 4, "EAWR-MODS-SVC-0006")
@@ -205,7 +209,7 @@ class ServiceContract(unittest.TestCase):
 
     def test_unknown_method(self):
         long_name = "x" * 5000
-        messages = session([wire(request(9, "no.such.method")), wire(hello(10)), wire(request(11, "files.page")),
+        messages = session([wire(request(9, "no.such.method")), wire(hello(10)), wire(request(11, "records.query")),
                             wire(request(12, long_name))])
         self.assert_error(messages[0], 9, "EAWR-MODS-SVC-0004")
         self.assert_error(messages[2], 11, "EAWR-MODS-SVC-0004")
@@ -365,6 +369,81 @@ class ServiceContract(unittest.TestCase):
         finally:
             service.close()
             service.kill()
+
+    def test_workshop_changes_and_states(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = pathlib.Path(temporary).resolve()
+            library = base / "library"
+            content = library / "steamapps/workshop/content/32470"
+            item = content / "77"
+            (item / "Data/XML").mkdir(parents=True)
+            asset = item / "Data/XML/synthetic.xml"
+            asset.write_text("synthetic asset", encoding="utf-8")
+            acf = library / "steamapps/workshop/appworkshop_32470.acf"
+            def manifest(installed="old", latest="old", downloading=0, update=0):
+                acf.write_text('"AppWorkshop" { "NeedsDownload" "' + str(downloading)
+                               + '" "NeedsUpdate" "' + str(update) + '" "WorkshopItemsInstalled" { "77" {'
+                               + '"manifest" "' + installed + '" "timeupdated" "1000" } } '
+                               + '"WorkshopItemDetails" { "77" { "manifest" "' + latest
+                               + '" "timeupdated" "1000" } } }', encoding="utf-8")
+            manifest()
+            service = Interactive(args=["--user-data", str(base / "user")])
+            try:
+                service.send(hello())
+                self.assertIn("mods.changes", service.receive()["result"]["capabilities"])
+                counter = 1
+                def call(method, **params):
+                    nonlocal counter
+                    counter += 1
+                    service.send(request(counter, method, **params))
+                    return service.receive()
+                def discover():
+                    return call("mods.discover", walk_trees=False)["result"]["records"][0]
+                call("mods.discover", steam_roots=[], steam_libraries=[str(library)], walk_trees=False)
+                initial = call("mods.changes")["result"]
+                self.assertEqual(initial["complete"], True)
+                self.assertEqual(initial["changed"], False)
+                revision = initial["revision"]
+                self.assertRegex(revision, r"^[0-9a-f]{64}$")
+                self.assertEqual(call("mods.changes", previous=revision)["result"], initial)
+                # Asset edits leave the immediate directory timestamp unchanged: no recursive scan.
+                asset.write_text("changed asset content", encoding="utf-8")
+                self.assertFalse(call("mods.changes", previous=revision)["result"]["changed"])
+                manifest(latest="new-longer", update=1)
+                updated = call("mods.changes", previous=revision)["result"]
+                self.assertTrue(updated["changed"])
+                self.assertTrue(updated["complete"])
+                self.assertEqual(discover()["state"], "needs-update")
+                manifest(latest="new-longer", downloading=1, update=1)
+                self.assertEqual(discover()["state"], "downloading")
+                blocked = call("chain.check", layers=[{"key": "workshop:77"}])["result"]
+                self.assertFalse(blocked["launchable"])
+                self.assertTrue(any(d["code"] == "EAWR-MODS-0010" for d in blocked["diagnostics"]))
+                manifest(installed="new-longer", latest="new-longer")
+                self.assertEqual(discover()["state"], "installed")
+                revision = call("mods.changes")["result"]["revision"]
+                (content / "78").mkdir()
+                self.assertTrue(call("mods.changes", previous=revision)["result"]["changed"])
+                revision = call("mods.changes")["result"]["revision"]
+                (content / "78").rmdir()
+                self.assertTrue(call("mods.changes", previous=revision)["result"]["changed"])
+                # A wrong-type ACF is a deterministic unreadable-source case on every platform.
+                acf.unlink()
+                acf.mkdir()
+                self.assertEqual(call("mods.changes", previous=revision)["result"],
+                                 {"revision": "", "changed": False, "complete": False})
+                acf.rmdir()
+                manifest()
+                self.assertTrue(call("mods.changes", previous=revision)["result"]["complete"])
+                for previous in ("", "x" * 64, "0" * 63, "A" * 64, "stale-after-restart"):
+                    self.assertTrue(call("mods.changes", previous=previous)["result"]["changed"])
+                for previous in (None, 1, {}, []):
+                    self.assert_error(call("mods.changes", previous=previous), counter, "EAWR-MODS-SVC-0005")
+                call("shutdown")
+                self.assertEqual(service.wait(), 0)
+            finally:
+                service.close()
+                service.kill()
 
     def test_pages_and_profile_errors(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -637,7 +716,7 @@ class ServiceContract(unittest.TestCase):
                                  f"{committed.name} differs from this build; rerun with --update-transcripts")
                 entries = [json.loads(line) for line in data.decode("utf-8").splitlines()]
                 self.assertEqual(entries[0], {"dir": "meta",
-                                              "msg": {"protocol": "1.3", "recorded_by": "eawr_mods_service"}})
+                                              "msg": {"protocol": "1.6", "recorded_by": "eawr_mods_service"}})
                 self.assertTrue(all(entry["dir"] in ("c2s", "s2c") for entry in entries[1:]))
 
 

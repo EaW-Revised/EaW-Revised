@@ -8,6 +8,7 @@
 #include "render_profile_viewport.hpp"
 #include "settings_store.hpp"
 #include "viewer_path.hpp"
+#include "viewer_load_notes.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
 
@@ -389,6 +390,14 @@ bool MapMode::State::configure_ready_options(std::string& lighting_argument, std
         state.live_options.player = state.options.lan ? state.options.lan->local_player() : 1U;
         if (state.options.lan) { state.live_options.begin_barrier = false; state.live_options.reveal = false; }
     }
+    for (const auto& identity : state.options.observer_names) {
+        const auto found = std::find_if(state.live_options.observer_names.begin(), state.live_options.observer_names.end(),
+            [&](const auto& supplied) { return supplied.first == identity.first; });
+        if (found == state.live_options.observer_names.end()) state.live_options.observer_names.push_back(identity);
+    }
+    state.live_options.observer_multiplayer = state.options.observer_multiplayer;
+    if (state.options.controller_seat.value != 0) state.live_options.controller_seat = state.options.controller_seat;
+    if (!state.options.controller_names.empty()) state.live_options.controller_names = state.options.controller_names;
     if (state.options.borrowed_battle && state.options.borrowed_feed) {
         state.live_options.fixture = "replay";
         state.live_options.borrowed_battle = state.options.borrowed_battle;
@@ -636,7 +645,10 @@ bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_ca
         // a silently skipped skydome.
         const data::Profile catalog_profile = state.profile == "remake" ? data::Profile::remake
             : state.profile == "foc" ? data::Profile::foc : data::Profile::eaw;
-        if (auto loaded = data::load_catalog(*state.filesystem, catalog_profile)) {
+        data::LoadOptions load_options;
+        load_options.parse_unregistered_xml = false;
+        if (auto loaded = data::load_catalog(*state.filesystem, catalog_profile, load_options)) {
+            publish_viewer_load_notes(std::move(loaded.value().notes), state.layers);
             // Map mode also runs on partial synthetic trees, so a failed registry does not stop it, but it is
             // never silent (R-10, R-13, C-06).
             if (!loaded.value().health.clean()) {
@@ -665,9 +677,11 @@ bool MapMode::State::activate_land_camera(Node3D& host, const assets::Map& map, 
     state.map_camera_constant_overrides = std::move(source.overrides);
     const auto viewport = host.get_viewport()->get_visible_rect().size;
     const std::uint32_t width = state.options.capture_path.empty()
-        ? static_cast<std::uint32_t>(viewport.x) : state.camera.width;
+        ? static_cast<std::uint32_t>(eawr::viewer::camera_input::whole_viewport_extent(viewport.x))
+        : state.camera.width;
     const std::uint32_t height = state.options.capture_path.empty()
-        ? static_cast<std::uint32_t>(viewport.y) : state.camera.height;
+        ? static_cast<std::uint32_t>(eawr::viewer::camera_input::whole_viewport_extent(viewport.y))
+        : state.camera.height;
     auto* display = DisplayServer::get_singleton();
     auto bridge = std::make_unique<eawr::viewer::MapCameraBridge>(
         display && display->window_is_focused());

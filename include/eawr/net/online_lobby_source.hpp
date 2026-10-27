@@ -48,6 +48,8 @@ public:
     // The browser tells whether the player is looking at the online room list; the channel is left while it is not
     // (the LAN tab, or the screen closed) and reopened when it is.
     virtual void set_menu_visible(bool) {}
+    // Presentation supplies window focus and chat visibility; background polling stays at two seconds.
+    virtual void set_menu_focused(bool) {}
     // Empty until the room is published, and again once it is removed or lost.
     virtual std::optional<OnlineHostedRoom> hosted_room() const { return {}; }
     // Stops the source's worker and waits for it (the room is removed, a held admission is left). Blocks for at most the
@@ -72,6 +74,7 @@ public:
     std::vector<core::Diagnostic> take_notices() override;
     OnlineMenuState menu_state() const override;
     void set_menu_visible(bool visible) override;
+    void set_menu_focused(bool focused) override;
     std::optional<OnlineHostedRoom> hosted_room() const override;
     void close() override;
     void announce(const presentation::ui::LobbyPresence&) override;

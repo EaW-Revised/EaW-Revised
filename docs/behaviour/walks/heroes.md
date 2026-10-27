@@ -586,6 +586,21 @@ they do not reclassify the company's authored ground abilities.
 
 ### G9 implementation defaults (U-08)
 
+| Rule | Behaviour | Evidence |
+| --- | --- | --- |
+| WHE-70 | A `TEAM` object dispatches `REPLENISH_WINGMEN` to members that own the ability and returns without executing a container-local replenishment handler. The container declaration remains display data and needs no `Create_Team_Type`; it does not imply a self-team. Each executing member uses its own `Create_Team_Type` and WHE-63 composition. A container without an eligible living member has no refill to execute. This admission depends on effective `TEAM` behaviour, not an XML class name. Stock FoC already authors the ability on Vader's display container without a creation-team reference. | debug build EHR-RW-01..04; stock container and leader XML; AB-15; WHE-63 |
+
+EHR-RW-01 traces the ordinary activation dispatcher: non-team abilities visit owning
+members of a `TEAM`, then return before the local ability switch (the separate
+spread-out exception does not apply to replenishment). EHR-RW-02 traces the ability
+classification defaults and initialization: replenishment keeps the non-team default.
+EHR-RW-03 traces the member replenishment handler reading its own creation-team type.
+EHR-RW-04 checks stock authoring: `Darth_Vader_TIE_Fighter_Container` declares the
+button without `Create_Team_Type`, while `TIE_Prototype` declares the executable
+ability and `Darth_Vader_TIE_Fighter_Squadron` as its creation team. Loading a standalone
+TEAM declaration retains its authored abilities and emits one informational note for
+member dispatch; its executable ability table omits the container-local refill.
+
 WHE-63/64 now use the current staged parent roster and ordinary per-recipient damage consumers. Replenishment appends new stable IDs and preserves survivors, charges only a changed team and exposes its start tick solely to presentation. Direct, projectile, blast, environmental and privileged Lua routes use ordered recipient commit; Lua additionally damages the leader. A retained standalone leader acquires flight state when its new team forms. An internal self-group is replaced by the authored team without deleting the retained craft. Births copy leader identity/pose before vector insertion and re-resolve the ability slot afterward; environmental routing reads the systems input vector after its journal is released. All emitted particles are presentation only.
 
 For the selected squadron, the debug command bar reads its original display type. Team

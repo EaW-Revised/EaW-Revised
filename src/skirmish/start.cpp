@@ -1063,7 +1063,8 @@ std::map<sim::tactical::TypeId, std::string> map_object_type_names(const std::ve
     return names;
 }
 
-std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables) {
+std::vector<sim::tactical::SensorProfile> sensor_table(const units::UnitTables& tables, core::LoadNoteBuffer* load_notes) {
+    (void)load_notes;
     std::map<sim::tactical::TypeId, sim::tactical::SensorProfile> profiles;
     for (const auto& type : tables.units) {
         const auto range = units::sensor_range(type);

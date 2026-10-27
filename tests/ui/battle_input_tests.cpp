@@ -1337,6 +1337,91 @@ void retention_has_no_frame_allocations() {
            "#1067: empty alive input clears groups without allocation");
 }
 
+// ADR-020: the same local model serves space and the eventual land provider.
+static void cooperative_control() {
+    using namespace eawr;
+    namespace tactical = sim::tactical;
+    namespace ui = presentation::ui;
+    using test::ui::expect;
+    for (const auto humans : {2U, 3U, 4U}) {
+        std::optional<tactical::BattleControllerPolicy> policy{std::in_place};
+        for (std::uint32_t seat = 1; seat <= humans; ++seat) policy->seats.push_back({{seat}, 1, sim::SeatKind::human, true});
+        policy->seats.push_back({{humans + 1}, 2, sim::SeatKind::human, true});
+        policy->seats.push_back({{humans + 2}, 1, sim::SeatKind::human, false});
+        policy->seats.push_back({{humans + 3}, 1, sim::SeatKind::ai, true});
+        const auto recipients = ui::gift_recipients({1}, policy);
+        expect(recipients.size() == humans - 1 && recipients.front() == sim::SeatId{2}
+            && recipients.back() == sim::SeatId{humans}, "gift lists only other active same-side humans in seat order");
+        expect(ui::gift_recipients({humans + 2}, policy).empty(), "inactive donor has no recipient list");
+        std::vector<tactical::TacticalInstance> instances(tactical::max_units_per_command + 3);
+        std::vector<sim::EntityId> selected;
+        for (std::size_t i = 0; i < instances.size(); ++i) {
+            auto& instance = instances[i];
+            instance.entity_id = i + 1; instance.owner = 1;
+            instance.control = tactical::UnitControl::mobile; instance.controller_seat = {1};
+            selected.push_back(instance.entity_id);
+        }
+        expect(ui::can_control({1}, instances[0], policy) && !ui::can_control({2}, instances[0], policy),
+            "mobile authority follows controller instead of shared faction ownership");
+        auto& structure = instances.back(); structure.control = tactical::UnitControl::shared_structure; structure.controller_seat = {};
+        expect(ui::can_control({1}, structure, policy) && ui::can_control({2}, structure, policy)
+            && !ui::can_control({humans + 1}, structure, policy), "shared structure remains commandable by both side seats only");
+        auto community = structure; community.owner = 99;
+        expect(ui::can_control({1}, community, policy, true) && !ui::can_control({1}, community, policy),
+            "authored allied community structure retains existing admission without granting arbitrary shared sources");
+        community.control = tactical::UnitControl::none;
+        expect(ui::can_control({1}, community, policy, true), "unmapped authored community pad keeps its shared exception");
+        community.control = tactical::UnitControl::mobile; community.controller_seat = {2};
+        expect(!ui::can_control({1}, community, policy, true), "shared exception never grants mobile authority");
+        expect(ui::gift_chunks({1}, {}, instances, policy).empty(), "empty selection cannot gift an army");
+        expect(ui::gift_chunks({1}, std::array<sim::EntityId, 1>{structure.entity_id}, instances, policy).empty(),
+            "structure-only selection disables gifting");
+        std::reverse(selected.begin(), selected.end()); selected.push_back(1); selected.push_back(999999);
+        const auto chunks = ui::gift_chunks({1}, selected, instances, policy);
+        expect(chunks.size() == 2 && chunks[0].size() == tactical::max_units_per_command && chunks[1].size() == 2,
+            "mixed/offscreen selection filters structures/stale IDs, deduplicates and uses exact transport bound");
+        expect(chunks.front().front() == 1 && chunks.back().back() == instances.size() - 1,
+            "chunks are globally ascending despite selection order");
+        instances[1].durability.emplace();
+        expect(ui::gift_chunks({1}, std::array<sim::EntityId, 1>{2}, instances, policy).empty(),
+            "dead mobile snapshots do not enable gifting");
+        instances[1].durability.reset();
+        ui::Selection donor, receiver;
+        donor.replace(std::array<sim::EntityId, 2>{1, structure.entity_id}); donor.assign_group(3);
+        instances[0].controller_seat = {2};
+        donor.controller_changed(1, {1}, {2}, {1}); receiver.controller_changed(1, {1}, {2}, {2});
+        expect(!donor.contains(1) && !donor.group_of(1) && donor.contains(structure.entity_id)
+            && receiver.empty(), "gift prunes donor selection/groups without receiver auto-selection or structure loss");
+        expect(!ui::can_control({1}, instances[0], policy) && ui::can_control({2}, instances[0], policy),
+            "current immutable instance switches command rights immediately");
+        auto controlled = unit(1, 1, true, {}, std::array<float, 2>{20, 20}); controlled.controlled = false;
+        std::array<ui::BattleUnit, 1> visible{controlled};
+        const ui::ScreenRect control_viewport{0, 0, 100, 100};
+        expect(!donor.click(1, {}, visible, control_viewport) && !donor.double_click(1, visible, control_viewport)
+            && !donor.type_on_screen(1, visible, control_viewport) && !donor.box(control_viewport, false, visible),
+            "same-faction foreign mobile is soft-locked on click/double/type/box paths");
+        ui::Selection locked;
+        locked.all(visible);
+        visible[0].part = 2; visible[0].part_type = 1;
+        expect(locked.empty() && !locked.craft_type_on_screen(1, visible, control_viewport),
+            "select-all and craft-type hotkeys use the same control gate");
+        donor.replace(std::array<sim::EntityId, 1>{1}); donor.assign_group(4); donor.clear();
+        donor.recall_group(4, false, 0, visible);
+        expect(donor.empty(), "late group recall cannot recover a transferred root");
+        policy->seats[1].active = false;
+        const auto late = ui::gift_recipients({1}, policy);
+        expect(std::find(late.begin(), late.end(), sim::SeatId{2}) == late.end(),
+            "recipient departure-like publication invalidates a late click");
+        expect(ui::gift_chunks({1}, std::array<sim::EntityId, 1>{1}, instances, policy).empty(),
+            "late donor click filters a transferred mobile");
+        policy.reset();
+        expect(ui::can_control({}, instances[0], policy) && ui::gift_recipients({}, policy).empty()
+            && ui::gift_chunks({}, selected, instances, policy).empty(), "policy OFF preserves legacy authority and offers no gift commands");
+        visible[0].controlled = true;
+        expect(donor.click(1, {}, visible, control_viewport), "policy OFF keeps same-faction selection unchanged");
+    }
+}
+
 int main() {
     {
         ui::Selection previous, allied;
@@ -1375,6 +1460,7 @@ int main() {
         expect(selected.units() == std::vector<sim::EntityId>({10, 2}) && selected.group(1) == selected.units(),
             "WPR-52: selected station and group transfer together");
     }
+    cooperative_control();
     picking();
     neutral_props();
     pick_volumes();

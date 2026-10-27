@@ -386,6 +386,29 @@ void preview(bool trade = false) {
     auto missing = take(galactic::GalacticSession::create(config));
     expect(!missing.snapshot()->economy_forecast(), "no observer means no local forecast");
 }
+void runtime_saturation() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto config = setup();
+        config.player_economy->players[0].credits = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        auto game = take(galactic::GalacticSession::create(config));
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        for (std::size_t i = 0; i < 10; ++i) {
+            auto tick = game.step(pool);
+            expect(tick.has_value(), "C overflowing fiscal account saturates and GC keeps stepping");
+            if (!tick) break;
+            if (workers == 1) reference.push_back(tick.value().state_hash.get());
+            else expect(tick.value().state_hash.get() == reference[i], "fiscal saturation matches on 1/2/4/8 workers");
+        }
+        expect(balance(game, 0) == f(100), "overflowing positive fiscal addition uses the account cap");
+        const auto notes = game.load_notes();
+        expect(std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1111" && note.object == "1"
+                && note.phase == eawr::core::LoadPhase::runtime
+                && note.effective_value == std::to_string(f(100).raw()) && !note.diagnostic_code.empty();
+        }) == 1, "C fiscal note once per player/code with effective cap and original diagnostic");
+    }
+}
 void accounts() {
     expect(take(galactic::adjusted_credits(f(10), f(10), take(Fixed::from_decimal("0.5")), f(100))) == f(15), "AI positive additions use difficulty");
     expect(take(galactic::adjusted_credits(f(10), f(-8), f(2), f(100))) == f(2), "debit is unmultiplied");
@@ -601,7 +624,7 @@ void replay_and_checkpoint() {
 }
 }
 int case_galactic_fiscal_tests() {
-    try { retail_c01(); contribution_math(); unclamped_alignment(); trade_and_alignment(); malformed_static_tail(); preview(); preview(true); accounts(); signed_planet_income(); boundaries(); ownership_at_deadline(); combined_extensions(); replay_and_checkpoint(); }
+    try { runtime_saturation(); retail_c01(); contribution_math(); unclamped_alignment(); trade_and_alignment(); malformed_static_tail(); preview(); preview(true); accounts(); signed_planet_income(); boundaries(); ownership_at_deadline(); combined_extensions(); replay_and_checkpoint(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;
 }

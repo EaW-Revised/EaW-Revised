@@ -134,17 +134,58 @@ project-authored Theora fixture that plays, loops and composites its alpha; 0702
 
 ## Binding to the shell
 
-This playback component builds no shell. The tactical HUD binding needs to:
+Campaign space briefings now deliver their authored speech/movie pair to
+`CommandBarMovie`, which uses the existing `attach_hud_movie` renderer. It
+resolves the registry and movie bytes through the effective VFS, including mod
+chains. The cache comes from `--eawr-movie-cache`, then `EAWR_MOVIE_CACHE`, then
+`user://hud-movies`. Conversion remains a separate player-side operation.
+
+The SND-69 debug-build command-bar playback check establishes the placement:
+the movie's top-left is the shell movie bone plus GameConstants
+`CB_Movie_Offset` plus `Commandbar_Offset`, projected through the shell camera;
+the movie uses its native dimensions and `CB_Movie_Color` tint. The shared
+consumer applies that rule with the viewer's existing shell placement and
+decoded size, correcting for the packed alpha half. Resize updates placement.
+
+The same check returns failure when opening the movie fails, without cancelling
+speech. Missing registry/file/cache entries and failed decoding therefore leave
+the slot empty and retain the accepted speech; a diagnostic is reported.
+The viewer checks an undecodable stream after one second of unpaused wall time
+(a project recovery policy). SND-69 retains the movie while any queued
+or playing speech has its tracked name, including duplicates; WBF-53 pauses
+its backend separately. Reports distinguish decoded playback from a request.
+Registry/source resolution, hashing, style, cache selection, stream opening and
+player/shader/material creation happen behind the loading screen. The briefing
+frame attaches the prepared node and starts playback. During loading the real
+player draws at a 2x2 in-viewport rectangle with 1/64 alpha (above the engine's
+canvas-culling threshold) until two
+decoded frames have drawn, then stops, rewinds, hides and detaches. This warms
+the actual material/texture pipeline before battle; the loading-only callback
+is removed on completion. Its one-second recovery window starts at the first
+warm-up callback after synchronous loading; the loading screen retains its
+cover until warm-up completes or fails. An unused prepared node is released by its consumer
+owner; an attached node follows scene ownership.
+Speech-presence queries run only while a movie node is live and compare names
+without allocation. SND-69 starts the movie on the queue request; audible onset
+relative to an asynchronously loaded voice remains a capture question.
+
+The galaxy-map corruption and story producers still need their authored
+speech/movie requests (legacy EAWR-4528, EAWR-1669). Ordinary notification SFX have no
+implied movie association. The production-hover encyclopedia is a separate
+model renderer, rather than a HUD movie provider. A retail capture remains
+required for the visible portrait placement and blend comparison.
+
+This playback component builds no shell. Future story/galactic bindings need to:
 
 1. Take the movie name from the request: `COMMANDBAR_MOVIE` parameter 1, `MULTIMEDIA`
    parameter 9 unless `-1`, or the faction's `Tactical_Intro_Command_Bar_Movie_Name`
    at tactical start. Resolve it with `resolve_hud_movie`; on an error, log it once
    and leave the slot empty.
-2. Take the rect from the shell anchor `Movie_tactical` (tactical) or
-   `Movie_galactic` (galactic) (`ShellAnchors`, reference units to pixels by the UI-L3
-   scale), moved by the movie's `offset_x`/`offset_y` (`Commandbar_Offset`).
-3. Call `attach_hud_movie(slot_parent, movie, cache, rect, true)` and keep the node.
-   One movie per slot: a new request frees the previous node.
+2. Supply the `Movie_tactical` or `Movie_galactic` shell bone and current shell
+   placement, applying the offset, native size and tint rule above.
+3. Reuse `CommandBarMovie` and the existing player. One movie per slot:
+   a new accepted request frees the previous node; external hologram admission
+   still belongs to the caller and follows SND-69's occupied-request gate.
 4. On `STOP_COMMANDBAR_MOVIE`, stop and free the node.
 5. A few frames after attaching, call `validate_hud_movie` and log EAWR-UI-0708 once.
 6. Choose the production cache directory (the viewer takes `--eawr-movie-cache`) and

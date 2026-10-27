@@ -103,7 +103,8 @@ bool runs_self_destruct_script(const UnitType& type) noexcept {
 
 core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std::span<const tactical::PlayerId> humans,
     bool (*allowed)(std::string_view, std::string_view), const bool default_autofire, const ContentErrors policy,
-    std::vector<core::Diagnostic>* const skipped) {
+    std::vector<core::Diagnostic>* const skipped, core::LoadNoteBuffer* load_notes) {
+    (void)load_notes;
     using Result = core::Result<tactical::AbilityTable>;
     tactical::AbilityTable table;
     const auto damage_types = damage_type_index(tables);
@@ -163,6 +164,8 @@ core::Result<tactical::AbilityTable> ability_table(const UnitTables& tables, std
         }
         for (const auto& ability : unit.abilities) {
             if (allowed != nullptr && !allowed(unit.id, ability.type)) continue;
+            // WHE-70: keep authored display data, but execute on the owning member.
+            if (unit.replenish_via_members && iequals(ability.type, "REPLENISH_WINGMEN")) continue;
             const auto kind = tactical::ability_kind(ability.type);
             if (kind == tactical::AbilityKind::none) continue; // AB-03: not modelled
             // WAB-70: a squadron's buzz droids belong to its team container (AB-60), not each craft.

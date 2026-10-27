@@ -1,8 +1,10 @@
 #pragma once
+#include "eawr/core/text.hpp"
 
 #include "eawr/diagnostics/memory_capacity.hpp"
 
 #include "battle_input.hpp"
+#include "battle_audio_load_queue.hpp"
 #include "live_session_view.hpp"
 
 #include "eawr/data/xml.hpp"
@@ -37,6 +39,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace eawr::presentation::godot_backend {
@@ -58,6 +62,8 @@ public:
         bool attract_silent{};
         audio::MixLevels levels{};
         audio::Admission admission{};
+        // Hidden diagnostic opt-out for same-binary loading comparisons.
+        bool preload{true};
     };
     BattleAudio(godot::Node3D& host, std::shared_ptr<const vfs::Vfs> filesystem, const data::Catalog& catalog, Options options);
     ~BattleAudio();
@@ -79,6 +85,9 @@ public:
     void retreat_refused(sim::tactical::RetreatRefusal refusal);
     void loading_complete();
     [[nodiscard]] bool briefing_queue_empty() const { return speech_queue_.size() == 0; }
+    [[nodiscard]] bool contains_speech(std::string_view name) const {
+        return speech_queue_.contains([name](const auto& event) { return core::iequals(event.name, name); });
+    }
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
     void set_mix_levels(const audio::MixLevels& levels);
     void set_admission(const audio::Admission& admission) { options_.admission = admission; }
@@ -162,7 +171,6 @@ private:
         const audio::SfxEvent* build_cancelled{};
         struct SpeechEvent final {
             std::string name;
-            std::vector<godot::Ref<godot::AudioStream>> streams;
             std::vector<std::string> files;
             double volume{1.0};
         };
@@ -226,13 +234,23 @@ private:
     // BA-85: countdown-spawned projectiles retain their own detonation cue.
     std::map<sim::tactical::TypeId, const audio::SfxEvent*> projectile_detonations_;
     std::map<sim::tactical::TypeId, const audio::SfxEvent*> terminal_detonations_;
-    struct DecodedSample final {
-        std::uint32_t rate{};
-        std::uint16_t channels{};
-        std::vector<std::byte> pcm;
+    enum class LoadKind { sfx, speech, music };
+    using LoadKey = std::pair<LoadKind, std::string>;
+    struct PreparedAudio final {
+        // The PCM view may borrow bytes; vector moves preserve its buffer.
+        std::vector<std::byte> bytes;
+        std::optional<audio::WavPcm> pcm;
         std::string cause;
+        std::uint64_t encoded_bytes{}, pcm_bytes{};
+        double open_ms{}, decode_ms{};
+        std::thread::id reader_thread;
     };
-    [[nodiscard]] DecodedSample decode_sample(const std::string& name) const;
+    [[nodiscard]] static PreparedAudio prepare_audio(const std::shared_ptr<const vfs::Vfs>& filesystem,
+                                                    const LoadKey& key);
+    void prepare_audio_batch(const std::set<LoadKey>& keys);
+    void commit_audio(const LoadKey& key, PreparedAudio prepared, bool runtime);
+    [[nodiscard]] bool audio_ready(const LoadKey& key);
+    void commit_ready_audio();
     struct Sample final {
         godot::Ref<godot::AudioStream> stream;
         std::string cause;  // why it did not load
@@ -421,6 +439,26 @@ private:
     std::set<std::string> preloaded_samples_;
     bool samples_prepared_{};
     std::uint64_t synchronous_runtime_loads_{};
+    const std::thread::id audio_owner_thread_{std::this_thread::get_id()};
+    std::unique_ptr<BattleAudioLoadQueue<LoadKey, PreparedAudio>> audio_loader_;
+    std::map<LoadKey, std::pair<std::uint64_t, double>> pending_audio_;
+    std::map<std::string, godot::Ref<godot::AudioStream>> speech_streams_;
+    std::set<std::string> preload_speech_events_, preload_music_files_;
+    Sample pending_sample_;
+    struct AudioLoadRow final {
+        LoadKey key;
+        std::uint64_t requested_frame{}, committed_frame{};
+        double requested_tick{}, committed_tick{};
+        bool runtime{};
+        std::uint64_t encoded_bytes{}, pcm_bytes{};
+        double open_ms{}, decode_ms{}, commit_ms{};
+        std::string cause;
+        std::string reader_thread;
+        bool reader_on_main{};
+    };
+    std::vector<AudioLoadRow> audio_load_rows_;
+    double audio_prepare_wall_ms_{};
+    std::uint64_t audio_worker_count_{}, deferred_audio_requests_{}, audio_queue_retries_{};
 
     std::vector<audio::MusicEvent> music_events_;
     std::vector<audio::Field> tactical_music_fields_;
@@ -431,6 +469,7 @@ private:
     std::array<const audio::SfxEvent*, 2> outcome_events_{}; // local faction's space win, lose
     bool outcome_shown_{};
     std::unique_ptr<audio::MusicDirector> music_;
+    std::optional<audio::MusicDirector::Cue> pending_music_;
     godot::SubViewport* listener_viewport_{};
     godot::Camera3D* listener_camera_{};
     godot::AudioListener3D* listener_{};

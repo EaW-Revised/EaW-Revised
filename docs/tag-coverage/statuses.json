@@ -39,6 +39,7 @@
     "WFP-02": "debug build and stock XML; docs/behaviour/walks/abilities.md WFP-02",
     "WFP-03": "debug build and stock XML; docs/behaviour/walks/abilities.md WFP-03",
     "WGA-10": "debug build: AI template budget child names are converted through the goal-category enum, and mode-prefixed freestore script names are parsed dynamically; literal tag-table absence does not establish that FoC ignores them (docs/behaviour/walks/gc-ai.md WGA-10)",
+    "WHE-70": "debug build: TEAM dispatches REPLENISH_WINGMEN to owning members and does not execute a container-local refill; each member uses its own Create_Team_Type (docs/behaviour/walks/heroes.md EHR-RW-01..04)",
     "WLS-MULTIPLAYER": "debug build: both black-market availability gates return true in multiplayer tactical mode; WLS-01",
     "WLU-03": "debug build ELU-02/ELU-03: the lure service pulses on its own schedule and never reads Is_Pulsing (docs/behaviour/walks/abilities.md WLU-03)",
     "WMV-40": "debug build: ordinary layered ship path flight ignores Max_Thrust and Max_Lift; craft flight consumes them (docs/behaviour/walks/movement.md WMV-40). Max_Thrust also has an optional Keep_Moving_In_Battle attack-positioning consumer, retained as an explicit gap.",

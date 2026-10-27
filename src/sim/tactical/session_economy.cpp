@@ -423,15 +423,86 @@ bool TacticalSession::Impl::prune_upgrade_holders(std::vector<PlayerEconomy>& ac
         return changed;
     }
 
+SeatId TacticalSession::Impl::output_controller(const PlayerId owner, const SeatId preferred,
+    const std::uint64_t ordinal) const {
+    if (!setup.controllers) return {};
+    const auto& policy = *setup.controllers;
+    const auto faction = std::find_if(policy.factions.begin(), policy.factions.end(),
+        [&](const auto& row) { return row.player == owner; });
+    if (faction == policy.factions.end()) return {};
+    const auto kind = faction->mode == FactionController::humans ? SeatKind::human : SeatKind::ai;
+    const auto eligible = [&](const auto& row) { return row.player == owner && row.active && row.kind == kind; };
+    const auto count = std::count_if(policy.seats.begin(), policy.seats.end(), eligible);
+    if (count == 0 && faction->mode == FactionController::passive) {
+        for (const auto& row : policy.seats) if (row.player == owner && row.seat == preferred) return preferred;
+        for (const auto& row : policy.seats) if (row.player == owner) return row.seat;
+    }
+    if (count == 0) return {};
+    for (const auto& row : policy.seats)
+        if (eligible(row) && row.seat == preferred) return preferred;
+    auto choice = ordinal % static_cast<std::uint64_t>(count);
+    for (const auto& row : policy.seats) if (eligible(row)) {
+        if (choice == 0) return row.seat;
+        --choice;
+    }
+    return {};
+}
+
+bool TacticalSession::Impl::shared_controller_type(const TypeId type) const {
+    const auto* profile = combat.find(type);
+    const auto* footprint = motion.footprint(type);
+    const bool mobile = motion.find(type) || (footprint && footprint->locomotor)
+        || motion.squadrons.find_squadron(type) || motion.squadrons.find_craft(type);
+    return (profile && (profile->star_base || profile->planetary_weapon))
+        || economy.pads.point(type) != nullptr
+        || std::any_of(economy.pads.construction.begin(), economy.pads.construction.end(),
+            [&](const auto& row) { return row.type == type || row.constructed == type; })
+        || (!mobile && std::any_of(economy.menus.begin(), economy.menus.end(),
+            [&](const auto& menu) { return menu.station == type; }))
+        || (footprint && footprint->layer == SpaceLayer::static_object && !footprint->locomotor);
+}
+
+core::Result<void> TacticalSession::Impl::attribute_output(UnitState& unit, const SeatId preferred,
+    const std::uint64_t ordinal) const {
+    if (!setup.controllers) return core::Result<void>::success();
+    unit.controller_seat = {};
+    unit.control = UnitControl::none;
+    if (unit.barrage_source != invalid_entity_id) return core::Result<void>::success();
+    if (std::none_of(setup.controllers->factions.begin(), setup.controllers->factions.end(),
+            [&](const auto& row) { return row.player == unit.owner; })) return core::Result<void>::success();
+    if (shared_controller_type(unit.type_id)) {
+        unit.control = UnitControl::shared_structure;
+        return core::Result<void>::success();
+    }
+    unit.controller_seat = output_controller(unit.owner, preferred, ordinal);
+    if (unit.controller_seat.value == 0) return core::Result<void>::failure(
+        detail::diagnostic(diagnostic_codes::invalid_command, "battle output has no eligible controller"));
+    unit.control = UnitControl::mobile;
+    return core::Result<void>::success();
+}
+
 core::Result<void> TacticalSession::Impl::transfer_owner(LiveUnit& unit, const PlayerId owner,
-    const CombatBonuses& bonuses) const {
+    const CombatBonuses& bonuses, const EntityId controller_root) const {
     // WTA-46: a unit moving between players whose difficulty scales its health or shield differently
     // keeps its hull and shield percentages against the new owner's maxima (WNO-42).
     std::optional<DurabilityProfile> before;
     if (!owner_profiles.empty() && unit.durability && unit.state.owner != owner
         && base_profile(unit.state.owner, unit.state.type_id) != base_profile(owner, unit.state.type_id))
         if (const auto* current = health_profile(unit)) before = *current;
+    UnitState controller{unit.state.entity_id, unit.state.type_id, owner};
+    controller.barrage_source = unit.state.barrage_source;
+    controller.control = unit.state.control;
+    controller.controller_seat = unit.state.controller_seat;
+    if (unit.state.owner != owner) {
+        if (auto assigned = attribute_output(controller, {}, controller_root != invalid_entity_id
+                ? controller_root : unit.state.entity_id); !assigned) return assigned;
+    }
     return session_detail::transfer_owner(unit, owner, [&](LiveUnit& changed) {
+        changed.state.control = controller.control;
+        changed.state.controller_seat = controller.controller_seat;
+        if (setup.controllers && changed.abilities && changed.abilities->pending_buzz_position)
+            changed.abilities->pending_buzz_controller = output_controller(owner, controller.controller_seat,
+                controller_root != invalid_entity_id ? controller_root : unit.state.entity_id);
         return apply_bonuses(changed, bonuses, BonusAdjustment::ownership, before ? &*before : nullptr);
     });
 }
@@ -642,8 +713,9 @@ core::Result<bool> TacticalSession::Impl::replenish_wingmen(const EntityId leade
         const auto placed = math::transform_point(transform.value(), profile->offsets[index]);
         if (!placed) return core::Result<void>::failure(placed.error());
         const auto id = stage.next_id;
-        const UnitState state{id, profile->members[index], source_state.owner,
+        UnitState state{id, profile->members[index], source_state.owner,
             placed.value(), source_state.rotation, {}};
+        if (auto assigned = attribute_output(state, source_state.controller_seat); !assigned) return assigned;
         units.emplace(id, new_unit(state, tick));
         adjust_owned(state, true);
         if (motion.squadrons.find_craft(state.type_id)) {
@@ -667,8 +739,10 @@ core::Result<bool> TacticalSession::Impl::replenish_wingmen(const EntityId leade
         if (stage.next_id == invalid_entity_id) return Result::failure(
             detail::diagnostic(diagnostic_codes::resource_limit, "wingman team stable ID space exhausted"));
         next.container = stage.next_id;
-        const UnitState state{next.container, team, source_state.owner,
+        UnitState state{next.container, team, source_state.owner,
             source_state.position, math::identity_quat(), {}};
+        if (auto assigned = attribute_output(state, source_state.controller_seat); !assigned)
+            return Result::failure(assigned.error());
         units.emplace(next.container, new_unit(state, tick));
         adjust_owned(state, true);
         stage.next_id = next.container == std::numeric_limits<EntityId>::max() ? invalid_entity_id : next.container + 1;
@@ -1046,7 +1120,9 @@ std::optional<core::Result<void>> execute_economy_production(auto& impl, const P
         if (!position) return Void::failure(position.error());
         const auto id = stage.next_id;
         const auto pad_id = pad->first; // UnitStage insertion can move the pad.
-        auto created = impl.new_unit(UnitState{id, child->type, issuer, position.value(), pad->second.state.rotation, {}}, tick);
+        UnitState child_state{id, child->type, issuer, position.value(), pad->second.state.rotation, {}};
+        if (auto assigned = impl.attribute_output(child_state, command.issuing_seat); !assigned) return assigned;
+        auto created = impl.new_unit(child_state, tick);
         created.durability->hull = initial_construction_hull;
         staged.emplace(id, std::move(created));
         stage.construction_stage.touch(id);
@@ -1069,7 +1145,26 @@ std::optional<core::Result<void>> execute_economy_production(auto& impl, const P
             [&](const TypeId type) { return impl.production_counts(issuer, type, stage.ledgers); })) {
             return finish(RejectReason::cannot_produce);
         }
+        const auto entry_id = ledger->next_queue_entry_id;
+        const auto preferred = command.origin == CommandOrigin::seat ? command.issuing_seat
+            : station->second.state.controller_seat;
+        const auto caller = impl.output_controller(issuer, preferred, entry_id - 1);
+        if (impl.setup.controllers && option->kind == BuildKind::unit
+            && std::any_of(impl.setup.controllers->factions.begin(), impl.setup.controllers->factions.end(),
+                [&](const auto& row) { return row.player == issuer; }) && caller.value == 0)
+            return finish(RejectReason::cannot_produce);
         const auto result = queue_build(*ledger, *player, impl.economy, *option, station->first, tick, buy->prepaid);
+        if (result == RejectReason::none && impl.setup.controllers) {
+            QueueEntry* added = nullptr;
+            for (auto& queue : ledger->queues) {
+                const auto found = std::find_if(queue.begin(), queue.end(),
+                    [&](const auto& row) { return row.entry_id == entry_id; });
+                if (found != queue.end()) { added = &*found; break; }
+            }
+            if (added == nullptr) return Void::failure(detail::diagnostic(
+                diagnostic_codes::worker_failure, "accepted build lost its queue identity"));
+            added->controller_seat = caller;
+        }
         if (result == RejectReason::none) stage.cues.push_back({issuer, buy->type, tick, BattleEconomyCue::Kind::started});
         return finish(result);
     }
@@ -1213,6 +1308,8 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
         }
     }
     if (pooled == ledger->pool.end()) return finish(RejectReason::not_in_pool);
+    const auto pool_index = static_cast<std::size_t>(pooled - ledger->pool.begin());
+    const auto pool_token = pool_index < ledger->pool_tokens.size() ? ledger->pool_tokens[pool_index] : 0;
     std::int64_t owned = 0;
     for (const auto& [id, share] : stage.shares) {
         static_cast<void>(id);
@@ -1241,6 +1338,12 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
     if (!direction || !rotation) {
         return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "reinforcement facing"));
     }
+    const auto* hero = impl.economy.hero(reinforce.type);
+    const auto deployed = hero != nullptr ? hero->deployed : reinforce.type;
+    const auto preferred = command.origin == CommandOrigin::seat ? command.issuing_seat : SeatId{};
+    UnitState attribution{0, deployed, issuer};
+    if (auto assigned = impl.attribute_output(attribution, preferred, pool_token); !assigned)
+        return finish(RejectReason::cannot_produce);
     // PU-34, PU-35: a new unit at the start of its lane, arriving at `exit`.
     const auto add = [&](const TypeId type, const math::Vec3& exit, const math::Quat& facing,
                          const std::int64_t share, const bool root = false) -> core::Result<EntityId> {
@@ -1255,7 +1358,10 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
         const ArrivalState arrival{0, exit, direction.value()};
         auto start = arrival_position(arrival);
         if (!start) return core::Result<EntityId>::failure(start.error());
-        staged.emplace(id, impl.new_unit(UnitState{id, type, issuer, start.value(), facing, {}}, tick));
+        UnitState state{id, type, issuer, start.value(), facing, {}};
+        state.control = attribution.control;
+        state.controller_seat = attribution.controller_seat;
+        staged.emplace(id, impl.new_unit(state, tick));
         impl.adjust_owned(staged.at(id).state, true);
         // WR-32/41: a squadron's craft receive the modifier; its container does not.
         if ((impl.motion.squadrons.find_squadron(type) == nullptr || impl.motion.squadrons.find_craft(type) != nullptr)
@@ -1273,8 +1379,6 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
     // PL-08: the arrival point is on the plane (height 0). A created unit is then raised by its
     // type's Layer_Z_Adjust (LZ-01): a single ship here, each squadron craft below.
     const math::Vec3 point{reinforce.position.x, reinforce.position.y, {}};
-    const auto* hero = impl.economy.hero(reinforce.type);
-    const auto deployed = hero != nullptr ? hero->deployed : reinforce.type;
     const auto* squadron = impl.motion.squadrons.find_squadron(deployed);
     const auto* solo = impl.motion.squadrons.find_craft(deployed);
     if (auto deployed_result = execute_reinforcement_deployment(impl, staged, stage, event, tick,
@@ -1306,7 +1410,7 @@ core::Result<void> execute_economy_reinforcement(auto& impl, const PlayerCommand
         }
     }
     staged.at(event.unit).state.purchase_token = reinforce.pool_token;
-    const auto pool_index = static_cast<std::size_t>(pooled - ledger->pool.begin());
+    ledger->pool_controllers.erase(pool_token);
     if (pool_index < ledger->pool_tokens.size())
         ledger->pool_tokens.erase(ledger->pool_tokens.begin() + static_cast<std::ptrdiff_t>(pool_index));
     ledger->pool.erase(pooled);

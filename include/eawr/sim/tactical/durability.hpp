@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/sim/tactical/types.hpp"
 
 #include <cstddef>
@@ -9,6 +10,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Hull and hardpoint health, hardpoint loss, unit death and hardpoint repair (P2-09, #72;
@@ -49,6 +51,7 @@ struct DamageRules {
     math::Fixed depleted_increment_seconds{};// Depleted_Shield_Damage_Increment
     math::Fixed depleted_regen_cap{};        // Depleted_Shield_Regen_Cap
     std::vector<CurvePoint> diminishing;     // Diminishing_Firepower, strictly increasing x
+    bool diminishing_linear_fallback{}; // unsafe spline uses bounded linear interpolation
     std::uint32_t damage_types{};
     std::uint32_t armor_types{};
     std::vector<math::Fixed> armor_mods;     // damage_types x armor_types, row by damage type
@@ -141,6 +144,8 @@ struct DurabilityTable {
     // Content, not replay data: resolved by the setup code from each AI slot's level and the
     // difficulty XML. Strictly increasing player; empty keeps every player at Normal.
     std::vector<DifficultyScale> difficulty;
+    // Diagnostic-only deduplication, never part of replay or checkpoint state.
+    std::vector<std::string> noted_scaled_health;
     [[nodiscard]] const DurabilityProfile* find(TypeId type_id) const noexcept;
     [[nodiscard]] const DifficultyScale* difficulty_of(PlayerId player) const noexcept;
     friend bool operator==(const DurabilityTable&, const DurabilityTable&) = default;
@@ -168,10 +173,14 @@ inline constexpr std::int64_t max_hit_damage = std::int64_t{1} << 20;
 // speeds and the three rules are >= 0 and bounded by max_durability_health, and the speed
 // modifier and the damaged fraction are at most 1.
 [[nodiscard]] core::Result<void> validate_durability(const DurabilityTable& table);
+// Session entry points copy and normalize before retaining the final invariant check.
+void normalize_durability(DurabilityTable& owned, core::LoadNoteBuffer& notes);
+[[nodiscard]] core::Result<DurabilityTable> prepare_durability(
+    const DurabilityTable& source, core::LoadNoteBuffer& notes);
 
 // WTA-46: `profile` as `factors.player`'s objects have it: the maximum hull and each destroyable
 // hardpoint's maximum health times the health scale, the maximum shield times the shield scale
-// (one rounding per product). Fails only on an arithmetic overflow.
+// (one rounding per product). Unsupported maxima saturate to the representable range.
 [[nodiscard]] core::Result<DurabilityProfile> scale_profile(const DurabilityProfile& profile, const DifficultyScale& factors);
 
 // A durable unit's health: its hull and each hardpoint's health by index (zero for a hardpoint
@@ -205,8 +214,9 @@ struct DurabilityState {
 [[nodiscard]] DurabilityState full_durability(const DurabilityProfile& profile);
 
 // WPR-52 step 2: carry repairing/disabled hardpoints by index into a full new station.
+// HD-06: a zero-maximum replacement slot remains destroyed with zero current health.
 void carry_station_hardpoints(const DurabilityProfile& previous_profile, const DurabilityState& previous,
-    DurabilityState& replacement);
+    const DurabilityProfile& replacement_profile, DurabilityState& replacement);
 
 // Presentation state of one hardpoint (the #136 hook): destroyed at zero health, damaged while
 // alive below damaged_fraction of its maximum, intact otherwise. A hardpoint that is not

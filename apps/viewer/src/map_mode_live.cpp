@@ -693,6 +693,9 @@ std::optional<int> MapMode::process(const double delta) {
     state.sync_perf_overlay();
     if (state.space) {
         const std::optional<int> finished = state.space->process(delta);
+        if (state.hud && state.hud->command_bar_movie_active() && state.battle_audio && state.live_session)
+            state.hud->service_command_bar_movie(state.battle_audio->contains_speech(state.hud->command_bar_movie_speech()),
+                state.live_session->time().paused());
         state.update_attract_camera(delta, finished);
         // #82: selection and orders see the frame the view just drew.
         // #848: the overview level the camera just took decides what the battle UI draws this frame.

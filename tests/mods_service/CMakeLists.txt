@@ -10,11 +10,19 @@ target_link_libraries(loadcheck_tests PRIVATE eawr::core)
 eawr_target_project_warnings(loadcheck_tests)
 add_test(NAME loadcheck_units COMMAND loadcheck_tests)
 add_executable(fake_loadcheck WIN32 fake_loadcheck.cpp)
-target_link_libraries(fake_loadcheck PRIVATE shell32)
+target_link_libraries(fake_loadcheck PRIVATE shell32 eawr::mods)
 eawr_target_project_warnings(fake_loadcheck)
 add_test(NAME loadcheck_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/loadcheck_contract.py"
     "$<TARGET_FILE:eawr_mods_service>" "$<TARGET_FILE:fake_loadcheck>" "$<TARGET_FILE:eawr_loadcheck>")
 set_tests_properties(loadcheck_contract PROPERTIES TIMEOUT 300)
 
+
+add_test(NAME files_page_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/files_page_contract.py"
+    "$<TARGET_FILE:eawr_mods_service>" "$<TARGET_FILE:fake_loadcheck>" "$<TARGET_FILE:eawr_loadcheck>")
+set_tests_properties(files_page_contract PROPERTIES TIMEOUT 300)
+
+add_test(NAME load_notes_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/load_notes_contract.py"
+    "$<TARGET_FILE:eawr_loadcheck>" "$<TARGET_FILE:eawr_mods_service>")
+set_tests_properties(load_notes_contract PROPERTIES TIMEOUT 120)
 
 eawr_label_tests()

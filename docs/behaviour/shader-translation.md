@@ -18,6 +18,31 @@ Scope: `MeshGloss.fx`, `MeshBumpColorize.fx`, `RSkinGlossColorize.fx`, `MeshShie
 | S-10 | Lower each fixed-function texture-stage chain to an explicit programmable equivalent or fail with a named unsupported feature. Never silently discard a stage. Cleanup passes that only restore device state are metadata/state restoration, not geometry draw passes. |
 | S-11 | Successful source translation, SPIR-V validation, and ingestion by the target renderer are three separate results. A manifest must report each result and exact tool version independently. |
 | S-12 | Fixed-function color and alpha cascades are independent. `CURRENT` is the preceding stage result (and diffuse at stage zero); disabling color at a stage ends that stage and all later stages. The equations below use the component-wise Direct3D 9 operations exactly as documented; backend precision and final framebuffer representation are validated separately. |
+| S-13 | Project binding policy: build an activation-time plan in CTAB order. Resolve each used constant to its exact effect parameter name and numeric shape, or an explicit compiler register default. Preserve boolean, integer and floating register sets; reject overlapping ranges, ambiguous names, unsupported conversions and unknown used semantics. Numeric material defaults use the effect's packed logical values and the reflected register orientation, including array-element padding. |
+| S-14 | Project update ownership: material values retain their own defaults; engine semantics retain scene or instance providers and never freeze their effect defaults. Light and SH providers follow R-LIT-03..07 of `p1-effective-environment.md`. A program with preshaders or initialized numeric expressions requires the expression evaluation route before admission; collecting its dependencies does not execute them. |
+| S-15 | Project stage-interface policy: declarations retain semantic index, register and component mask. Vertex inputs, including integer-like palette selectors, are vertex-only; linked varyings retain perspective interpolation unless public backend reflection specifies another supported mode. Missing legacy output declarations require reflection before linking. Unknown semantics fail rather than inheriting a gate register manifest. |
+| S-16 | Project skin policy: Godot-pre-skinned input cannot consume a source skin palette. Source-palette input is a separate explicit prerequisite; declaring it is not proof that arbitrary shader-dependent skinning is supported. Matrix/coordinate and GPU fidelity admission remains subject to the controlled opaque and normal/skin cases. |
+| S-17 | Independently authored native-compiler controls establish the sampler texture-state identifier as 164 and class-two matrix defaults as packed logical rows, with successive array elements adjacent. A Texture-only sampler resolves its one state to the named texture parameter. Distinct non-square matrices authored with both matrix qualifiers retain their initializer row order; this is independent of CTAB register orientation. |
+
+S-13 distinguishes effect-container value storage from CTAB register orientation.
+The observed class-two effect defaults are packed in logical row order (S-17);
+CTAB row/column classes then decide register packing. The reader's unestablished
+effect-container class-three default layout remains an explicit refusal. A
+source producer must supply the same established logical value representation,
+not copy CTAB register-padded bytes into effect parameter defaults.
+
+S-17's invented native control uses two 2-by-3 matrices initialized by distinct
+rows and a two-element matrix array. Native output retains `(11,12,13,21,22,23)`
+for the first matrix and the corresponding ordered values for the other matrix
+and both array elements, including the `column_major` declaration. A separate
+sampler with only `Texture = <ProbeImage>` emits one state: identifier 164,
+texture kind, and a named initializer targeting `ProbeImage`. The system native
+compiler succeeded and produced a 576-byte effect. Private metadata receipt
+`native_binding_probe.json` records source hash
+`70d26d2d515bd6f1fc07951f068559673ced12d4cfbfd5ac68cb32ed8e283f05`,
+compiler hash `0f89c19165fd83a05e39bea601a06007e6a8814d55e2adf913902926231f843e`,
+and output hash `eff1204d7d58ea9426876f5ebefc455f7f2c6e5b543c796782036f37187bdf53`.
+No installed input or third-party reader supplied either observation.
 
 The render-state baseline follows Microsoft's [Direct3D 9 defaults](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3drenderstatetype); fixed stages use its [texture operations](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dtextureop) and [arguments](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dta).
 

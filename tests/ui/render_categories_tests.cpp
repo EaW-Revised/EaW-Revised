@@ -31,7 +31,7 @@ void expect(bool condition, const char* message) { eawr::test::ui::expect(condit
 
 int main() {
     Fixture main;
-    main.pieces = {{categories::Role::hull, 10, true, 3}, {categories::Role::hardpoint, 10, true, 1},
+    main.pieces = std::vector<Piece>{{categories::Role::hull, 10, true, 3}, {categories::Role::hardpoint, 10, true, 1},
                    {categories::Role::effect, 9, false, 2}, {categories::Role::unknown, 10, false, 0}};
     categories::enabled = false;
     auto sample = categories::Source::capture(10, 7);
@@ -39,10 +39,10 @@ int main() {
     categories::enabled = true;
     Fixture other_viewport;
     other_viewport.viewport = 8;
-    other_viewport.pieces = {{categories::Role::hull, 10, true, 99}};
+    other_viewport.pieces = std::vector<Piece>{{categories::Role::hull, 10, true, 99}};
     {
         Fixture particles;
-        particles.pieces = {{categories::Role::particle, 10, false, 1}};
+        particles.pieces = std::vector<Piece>{{categories::Role::particle, 10, false, 1}};
         sample = categories::Source::capture(10, 7);
         expect(other_viewport.reads == 0, "root sample does not traverse other viewport instances");
         std::uint64_t submitted{}, retained{}, casters{}, surfaces{};

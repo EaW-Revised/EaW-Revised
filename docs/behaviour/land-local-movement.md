@@ -105,6 +105,19 @@ Pass admission, offset compatibility, path acceptance, collision lock and the
 two escape-direction admissions are explicit instance inputs. Crush/flee and
 attack decisions are outside this service.
 
+Repulsion eligibility (WLPA-82): the moving/stopped repulsion of WLPA-57/60/81 applies when both members'
+authored collision class is Infantry or Bike; the object kind is not read. Any other class keeps the
+path-around response. The class is the one carried on the member profile (WLPA-73/74); no state is added.
+
+Soft moving infantry pairs (WLPA-83): two moving members of different squads whose authored class is Infantry or
+Bike are stateless. Opposed or crossing pairs create no contact row; their members pass through each other while
+the member avoidance of WLPA-59 steers them apart (the neighbours come from a spatial index of the committed
+positions), and the swept pair guard does not veto them. Same-direction pairs keep the swept hard veto and the retained follower speed
+cap. Vehicles, large vehicles, giants and unclassed members keep the hard guard and the maneuvers above.
+The proposal phases and the pair guard visit the contact rows that touch a member (a per-step adjacency over
+member indices), not every retained row. `LandMovement::last_step_work` reports retained rows, row visits and
+pair-sweep candidates for the work-count budget test. No checkpoint field is added.
+
 Requesting contacts sort by ascending distance score, with canonical object
 IDs supplying a total-order tie break. Distance is the alternative planner's
 explicit score, not a claim to have recovered every retail virtual score.

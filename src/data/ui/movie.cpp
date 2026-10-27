@@ -2,12 +2,15 @@
 #include "eawr/core/text.hpp"
 
 #include "eawr/core/sha256.hpp"
+#include "eawr/data/tag_trace.hpp"
 
 #include "ui_internal.hpp"
 // Relative: the viewer build compiles this file without src/data on its path.
 #include "../xml_internal.hpp"
 
 #include <cstdint>
+#include <algorithm>
+#include <cmath>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -126,6 +129,38 @@ core::Result<HudMovie> resolve_hud_movie(const vfs::Vfs& filesystem, const std::
 
 std::string movie_cache_file(const HudMovie& movie) {
     return movie.cache_key + ".ogv";
+}
+
+core::Result<SpeechMovie> resolve_speech_movie(const vfs::Vfs& filesystem, const SpeechMovieRequest& request) {
+    auto movie = resolve_hud_movie(filesystem, request.movie);
+    if (!movie) return core::Result<SpeechMovie>::failure(movie.error());
+    return core::Result<SpeechMovie>::success({request.speech, std::move(movie.value())});
+}
+
+CommandBarMovieStyle command_bar_movie_style(const vfs::Vfs& filesystem) {
+    CommandBarMovieStyle style;
+    const auto document = load_document(filesystem, "data/xml/gameconstants.xml");
+    if (!document) return style;
+    for (const auto& node : document.value().root.children) {
+        if (detail::iequals(node.name, "CB_Movie_Offset")) {
+            std::istringstream input(node.raw_text);
+            float x{}, y{};
+            if (input >> x >> y && std::isfinite(x) && std::isfinite(y)) {
+                style.offset_x = x; style.offset_y = y;
+            }
+            tag_trace::used(node);
+        } else if (detail::iequals(node.name, "CB_Movie_Color")) {
+            std::istringstream input(node.raw_text);
+            std::array<float, 4> colour{};
+            if (input >> colour[0] >> colour[1] >> colour[2] >> colour[3]
+                && std::all_of(colour.begin(), colour.end(), [](float v) { return std::isfinite(v); })) {
+                for (auto& channel : colour) channel = std::clamp(channel / 255.0F, 0.0F, 1.0F);
+                style.colour = colour;
+            }
+            tag_trace::used(node);
+        }
+    }
+    return style;
 }
 
 } // namespace eawr::data::ui

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/sim/galactic/types.hpp"
+#include "eawr/core/load_note.hpp"
 
 #include <span>
 #include <map>
@@ -9,7 +10,8 @@ namespace eawr::sim::galactic {
 
 struct ControlStep {
     PlanetControl state;
-    bool owner_changed{}, stop_production{};
+    core::LoadNoteBuffer notes; // one staged owner per planet, merged after phase join
+    bool owner_changed{}, stop_production{}, degraded{};
     std::uint64_t route_visits{}, member_visits{}; // deterministic work, never state
 };
 
@@ -22,6 +24,9 @@ bool erase_control_actor(PoliticalControlSetup&, EntityId);
 // No recursive capability or independent payload death filter is applied.
 [[nodiscard]] core::Result<bool> has_ground_capability(const PoliticalControlSetup&,
     FleetMember, const MovementSetup*);
+// WGM-C01/C03 and WGM-27: live occupation, independent of political ownership.
+[[nodiscard]] core::Result<PlayerId> orbital_occupation(const PoliticalControlSetup*,
+    PlanetId, std::span<const Fleet>, const MovementSetup*, std::span<const CensusObject> = {});
 // WGM-65..74: one planet from immutable copied live presence and previous control.
 [[nodiscard]] core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& inputs,
     const ControlPlanet& planet, const PlanetControl& previous, std::span<const Fleet> orbit,

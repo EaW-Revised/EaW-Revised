@@ -45,7 +45,7 @@ std::optional<RespawnState> respawn_after_death(const UnitState& unit, const Pad
     const auto* profile = rules.replacement(unit.type_id);
     if (death_clone || profile == nullptr) return std::nullopt;
     return RespawnState{unit.type_id, rules.point(unit.type_id) != nullptr ? rules.neutral : unit.owner,
-        unit.position, unit.rotation};
+        unit.position, unit.rotation, rules.point(unit.type_id) != nullptr ? SeatId{} : unit.controller_seat};
 }
 
 math::Fixed pad_cooldown_progress(const PadState& state, const std::uint64_t frame) noexcept {

@@ -74,8 +74,10 @@ bool SpaceEnvironment::State::activate_camera(Node3D& node) {
     // the authored initial pose in the current host viewport is the camera.
     const bool locked = !options.capture_path.empty();
     const Vector2 viewport = node.get_viewport()->get_visible_rect().size;
-    const std::uint32_t width = locked ? camera.width : static_cast<std::uint32_t>(viewport.x);
-    const std::uint32_t height = locked ? camera.height : static_cast<std::uint32_t>(viewport.y);
+    const std::uint32_t width = locked ? camera.width
+        : static_cast<std::uint32_t>(viewer::camera_input::whole_viewport_extent(viewport.x));
+    const std::uint32_t height = locked ? camera.height
+        : static_cast<std::uint32_t>(viewer::camera_input::whole_viewport_extent(viewport.y));
     auto* display = DisplayServer::get_singleton();
     const bool terminal_probe = options.camera_terminal_baseline_test
         || options.camera_terminal_hold_test || options.camera_terminal_release_test;

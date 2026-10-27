@@ -10,6 +10,7 @@
 #include "battle_content.hpp"
 #include "map_mode_internal.hpp"
 #include "memory_attribution.hpp"
+#include "menu_timeline.hpp"
 #include "viewer_path.hpp"
 #include "ui/kit.hpp"
 
@@ -17,6 +18,7 @@
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
+#include <godot_cpp/core/object.hpp>
 
 #include "eawr/battle/start.hpp"
 
@@ -238,6 +240,7 @@ bool MapMode::State::open_game_menu() {
         screen_options.game_root = options.game_root;
         screen_options.mod_root = options.mod_root;
         screen_options.context = EawrOptionsScreen::Context::in_game;
+        screen_options.multiplayer = live_session->observer_multiplayer();
         screen_options.apply_window = options.capture_path.empty();
         if (!screen->build(std::move(screen_options))) {
             UtilityFunctions::printerr("EAWR in-game menu: ", String::utf8(screen->failure().c_str()));
@@ -308,6 +311,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         }
     }
     hud = std::make_unique<TacticalHud>(*hud_options);
+    hud_shortcut_wasd.reset();
     // Over the 3D view on its own canvas layer. The host routes world input after
     // the GUI, so the HUD's hit mask keeps its clicks off the world (UI-I1).
     const auto& planet_context = options.campaign_planet ? options.campaign_planet : context_name;
@@ -317,6 +321,17 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
         return false;
     }
     host.set_process_input(true);
+    if (!options.campaign_briefing_movie.empty()) {
+        hud->prepare_command_bar_movie(*filesystem, options.campaign_briefing_movie);
+        if (loading && hud->hud()) {
+            const auto identity = static_cast<uint64_t>(hud->hud()->get_instance_id());
+            loading->hold_dismiss([identity] {
+                // The child HUD may leave before its loading screen during teardown.
+                const auto* node = godot::ObjectDB::get_instance(identity);
+                return !node || static_cast<bool>(node->get_meta("eawr_movie_ready", true));
+            });
+        }
+    }
     host.set_process_unhandled_input(true);
     // #459 and #453: the time panel's buttons, the pause banner's Resume Game and the end panel's
     // Quit Game drive the live session; scripted hud=<name> gestures find them by name.
@@ -346,6 +361,7 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
             BattleInput* input = battle.get();
             hud->set_special_weapon_handler([input, live] { input->special_weapon_click(*live); });
             hud->set_beacon_handler([input, live] { input->beacon_click(*live); });
+            hud->set_gift_handler([input, live](const sim::SeatId recipient) { input->gift_click(recipient, *live); });
             hud->set_order_handler([input, live](const std::string_view name) {
                 const ui::OrderMode mode = name == "attack" ? ui::OrderMode::attack
                     : name == "attack_move" ? ui::OrderMode::attack_move : name == "guard" ? ui::OrderMode::guard
@@ -1039,6 +1055,10 @@ void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
 
 void MapMode::State::load_report(const std::size_t stage, const std::uint64_t done, const std::uint64_t total) {
     load_progress.report(stage, done, total);
+    if (done == total && MenuTimeline::active()) {
+        const std::string label = "battle_stage" + std::to_string(stage);
+        MenuTimeline::mark(label.c_str());
+    }
     if (done == total && MemoryAttribution::enabled()) {
         const std::string label = "stage" + std::to_string(stage);
         MemoryAttribution::load_mark(label.c_str(), filesystem ? scene::VfsAssetCache(*filesystem).model_stats().cache_retained_bytes : 0);
@@ -1062,10 +1082,13 @@ void MapMode::State::sync_battle_hud() {
     if (!hud) return;
     const auto* saved_keys = ActiveSettings::get();
     const bool wasd = saved_keys && saved_keys->camera_wasd;
-    for (const auto& [order, control] : std::array<std::pair<const char*, const char*>, 3>{{
+    if (hud_shortcut_wasd != wasd) {
+        hud_shortcut_wasd = wasd;
+        for (const auto& [order, control] : std::array<std::pair<const char*, const char*>, 3>{{
              {"attack", "IDC_EDIT_ATTACK"}, {"stop", "IDC_EDIT_STOP"}, {"waypoint", "IDC_EDIT_WAYPOINT"}}}) {
-        hud->set_order_shortcut(order, std::string(order) + " ("
-            + keyboard_key_label(ui::project_key_for(control, wasd)) + ")");
+            hud->set_order_shortcut(order, std::string(order) + " ("
+                + keyboard_key_label(ui::project_key_for(control, wasd)) + ")");
+        }
     }
     const presentation::ui::TimeControls& time = live_session->time();
     const bool running = live_session->phase() == LiveSessionView::Phase::running;
@@ -1076,6 +1099,10 @@ void MapMode::State::sync_battle_hud() {
     if (battle) {
         hud->set_special_weapon(battle->special_weapon_button(*live_session));
         hud->set_beacon(battle->beacon_enabled(*live_session), battle->beacon_targeting());
+        const bool gift_enabled = battle->gift_enabled(*live_session);
+        static const std::vector<ui::ObserverOwner> no_recipients;
+        hud->set_gift(live_session->controller_policy_enabled(), gift_enabled,
+            gift_enabled ? live_session->gift_recipients() : no_recipients);
     }
     hud->set_begin(live_session->phase() == LiveSessionView::Phase::ready && (loading == nullptr || !loading->shown()));
     const auto child_pause_notice = options.shared_pause_notice ? options.shared_pause_notice() : std::string{};

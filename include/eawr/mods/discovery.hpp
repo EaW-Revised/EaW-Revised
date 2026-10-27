@@ -38,6 +38,14 @@ struct DiscoveryInput {
 // a Workshop item's first copy without a folder gives way to a later library's copy with one.
 [[nodiscard]] Catalog discover(const DiscoveryInput& input);
 
+struct WorkshopSnapshot {
+    std::string revision;  // opaque metadata digest; empty when incomplete
+    bool complete = true;
+};
+// Steam library map, ACF size/mtime and immediate numeric item directories only. No asset bytes or tree walks.
+// Missing Workshop content is normal; an inaccessible/offline library makes the snapshot incomplete.
+[[nodiscard]] WorkshopSnapshot workshop_snapshot(const DiscoveryInput& input);
+
 // Workshop items of every library (libraries in order, ids in numeric order within a library).
 //  - listed in WorkshopItemsInstalled with a folder: installed, or needs-update when WorkshopItemDetails names a
 //    newer manifest or time (downloading instead while Steam's NeedsDownload is set);

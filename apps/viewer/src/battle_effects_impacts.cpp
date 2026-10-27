@@ -146,8 +146,14 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
         }
         // Born before the clock's present (a tick the frames had already passed): it catches up.
         bool gone = false;
-        for (std::uint64_t sample = birth_; sample < samples_ && !gone; ++sample) {
-            if (!step_effect(effect, gone)) return {SpawnState::fatal};
+        for (std::uint64_t sample = birth_; sample < samples_ && !gone;) {
+            auto count = particles::EffectRegistry::catchup_folding_default() && samples_ - sample > 2 ? samples_ - sample : 1U;
+            count = std::min<std::uint64_t>(count, std::numeric_limits<std::uint32_t>::max() - effect.age);
+            if (!effect.detached) count = std::min<std::uint64_t>(count,
+                effect.lifetime > effect.age ? effect.lifetime - effect.age : 1U);
+            if (count == 0) break;
+            if (!step_effect(effect, gone, static_cast<std::uint32_t>(count))) return {SpawnState::fatal};
+            sample += count;
             if (gone) unpublished.handle = 0;
         }
         if (!gone) effects_.push_back(std::move(effect));
@@ -167,21 +173,21 @@ BattleEffects::SpawnOutcome BattleEffects::spawn(const std::string& particle, co
     return {SpawnState::refused, particles::EffectRegistry::Refusal::allocation_failed};
 }
 
-bool BattleEffects::step_effect(LiveEffect& effect, bool& gone) {
+bool BattleEffects::step_effect(LiveEffect& effect, bool& gone, const std::uint32_t elapsed) {
     gone = false;
-    auto advanced = registry_->advance(effect.handle, presentation_constants::logical_frame_seconds, camera_frame_);
+    auto advanced = registry_->advance(effect.handle, static_cast<float>(elapsed) * presentation_constants::logical_frame_seconds, camera_frame_);
     if (!advanced) {
         failure_ = "battle effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
     }
-    after_step(effect, advanced.value(), gone);
+    after_step(effect, advanced.value(), gone, elapsed);
     return true;
 }
 
-void BattleEffects::after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone) {
+void BattleEffects::after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone, const std::uint32_t elapsed) {
     gone = false;
     particles_ += advanced.particles;
-    ++effect.age;
+    effect.age += elapsed;
     if (effect.log < spawn_log_.size() && contact_samples_.size() < 8192
         && (spawn_log_[effect.log].key.starts_with("damage_hit:") || spawn_log_[effect.log].key.starts_with("shield_hit:"))) {
         contact_samples_.push_back({samples_, effect.handle, spawn_log_[effect.log].key, effect.age, effect.contact,
@@ -261,6 +267,57 @@ bool BattleEffects::follow_contacts(const tactical::TacticalSnapshot& latest) {
 }
 
 bool BattleEffects::advance_until(const std::uint64_t target) {
+    // Ordinary frames retain their exact sample path. A stalled frame folds all
+    // elapsed time into at most two worker batches per effect: live, then drain.
+    if (particles::EffectRegistry::catchup_folding_default() && target > samples_ && target - samples_ > 2) {
+        std::vector<float> deltas;
+        std::vector<std::uint32_t> elapsed;
+        std::map<particles::EffectHandle, std::size_t> final_particles;
+        for (unsigned phase = 0; phase < 2; ++phase) {
+            batch_handles_.clear();
+            deltas.clear();
+            elapsed.clear();
+            for (const auto& effect : effects_) {
+                const auto start = std::max(samples_, effect.born);
+                const auto consumed = static_cast<std::uint64_t>(effect.age);
+                const auto wanted = target > effect.born ? target - effect.born : 0U;
+                if (start >= target || consumed >= wanted) continue;
+                const auto room = std::numeric_limits<std::uint32_t>::max() - effect.age;
+                auto count = std::min<std::uint64_t>(wanted - consumed, room);
+                if (!effect.detached) count = std::min<std::uint64_t>(count,
+                    effect.lifetime > effect.age ? effect.lifetime - effect.age : 1U);
+                if (count == 0) continue;
+
+                batch_handles_.push_back(effect.handle);
+                elapsed.push_back(static_cast<std::uint32_t>(count));
+                deltas.push_back(static_cast<float>(count) * presentation_constants::logical_frame_seconds);
+            }
+            if (auto advanced = registry_->advance_all(batch_handles_, deltas, camera_frame_, batch_stats_); !advanced) {
+                failure_ = "folded effect: " + core::format_diagnostic(advanced.error());
+                return false;
+            }
+            std::size_t next = 0;
+            particles_ = 0;
+            auto kept = effects_.begin();
+            for (auto effect = effects_.begin(); effect != effects_.end(); ++effect) {
+                bool gone = false;
+                if (next != batch_handles_.size() && batch_handles_[next] == effect->handle) {
+                    final_particles[effect->handle] = batch_stats_[next].particles;
+                    after_step(*effect, batch_stats_[next], gone, elapsed[next]);
+                    ++next;
+                }
+                if (!gone) {
+                    if (kept != effect) *kept = std::move(*effect);
+                    ++kept;
+                }
+            }
+            effects_.erase(kept, effects_.end());
+        }
+        particles_ = 0;
+        for (const auto& effect : effects_) particles_ += final_particles[effect.handle];
+        samples_ = target;
+        return true;
+    }
     for (; samples_ < target; ++samples_) {
         particles_ = 0;
         // #638: the effects born by this sample step in one batch on the particle workers; each
@@ -684,7 +741,7 @@ bool BattleEffects::present_reached_effects(const std::span<const platform::Live
     // already live are aged up to each tick's birth before its effects are born.
     for (const platform::LiveTickEvents& record : reached) {
         birth_ = sample_of(static_cast<double>(record.tick) - 1.0);
-        if (!advance_until(std::min(birth_, due))) return false;
+        if (!fold_catchup_ && !advance_until(std::min(birth_, due))) return false;
         // WHE-63: successful refill emits the authored particle on every current team member.
         // A full-team no-op leaves started_tick/recharge unchanged and emits nothing.
         const auto* after_refill = snapshot_for(record.tick);
@@ -895,6 +952,9 @@ bool BattleEffects::frame(const std::span<const platform::LiveTickEvents> reache
     };
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
     due_ = due;
+    fold_catchup_ = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
+    // Ordinary frames submit immediately, without a frame-end registry scan.
+    const auto frame_uploads = registry_->defer_uploads(fold_catchup_);
     note_types(previous, latest);
     owner_setup.finish();
     FrameTimer owner_lookup(measure_owner_ ? &owner_timings_[1] : nullptr);

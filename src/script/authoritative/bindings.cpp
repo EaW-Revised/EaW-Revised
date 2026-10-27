@@ -634,6 +634,10 @@ int require_module(lua_State* state) {
         return luaL_error(state, "EAWR-SCRIPT-0207: module `%s' is not in the session manifest", lua_tostring(state, 1));
     }
     const int status = instance.sandbox->load_source(*bytes, chunk_name);
+    if (status == LUA_ERRSYNTAX && instance.tracking_initial_syntax && (bytes->empty() || bytes->front() != '\x1b')) {
+        const char* message = lua_tostring(instance.sandbox->state(), -1);
+        if (message) instance.initial_syntax_message = message;
+    }
     // Compilation records prototypes on the sandbox's main stack. A lazy
     // require may run inside a coroutine: transfer its chunk (or error) before
     // using the caller's stack, which currently ends with the module cache.

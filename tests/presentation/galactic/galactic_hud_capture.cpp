@@ -153,6 +153,17 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
     auto& production_names = state.production_names;
     auto& audio_catalog = state.audio_catalog;
     auto& content = state.content;
+    if (synthetic_ && name_ == "audio-mixer" && audio_catalog) {
+        // In-memory qualification data only; installed XML and mods stay untouched.
+        std::vector<data::ValueOverride> overrides;
+        for (const auto* faction : {"Rebel", "Empire"}) {
+            overrides.push_back({faction, "SFXEvent_Planet_Gained_Control", {"Unit_Boron_Missile_Fire"}});
+            overrides.push_back({faction, "SFXEvent_Planet_Lost_Control", {"Unit_Attacked_C3PO"}});
+        }
+        auto overridden = data::with_overrides(*audio_catalog, overrides);
+        if (!overridden) { failure = core::format_diagnostic(overridden.error()); return false; }
+        audio_catalog = std::make_shared<const data::Catalog>(std::move(overridden).value());
+    }
     if (synthetic_ && name_ == "history")
         galactic_view::configure_history_hud_fixture(galaxy_setup, galaxy->local.player);
     if (options.campaign == galactic_view::synthetic_campaign && galactic_view::fleet_hud_fixture(options.hud_fixture)
@@ -434,6 +445,7 @@ bool CaptureHudFixture::configure_hud(GalacticMode::State& state) {
         if (options.campaign != galactic_view::synthetic_campaign
             || (options.hud_fixture != "accessible" && options.hud_fixture != "inaccessible"
                 && options.hud_fixture != "objectives-audio"
+                && options.hud_fixture != "audio-mixer"
                 && options.hud_fixture != "known" && options.hud_fixture != "masked" && options.hud_fixture != "history"
                 && options.hud_fixture != "known-zero" && options.hud_fixture != "discovered-only"
                 && options.hud_fixture != "production" && options.hud_fixture != "production-unlocks"
@@ -478,6 +490,13 @@ void CaptureHudFixture::update_hud(GalacticMode::State& state) {
     auto& audio = state.audio;
     auto& command_catalog = state.command_catalog;
     auto& hud_updates = state.hud_updates;
+    if (synthetic_ && name_ == "audio-mixer" && audio) {
+        if (hud_updates == 5) audio->ui_sound("GUI_Dial_Switch_SFX");
+        if (hud_updates == 10) audio->ui_sound("Unit_Fleet_Move_Star_Destroyer");
+        if (hud_updates == 15) audio->sound(audio::GalacticSound::planet_gained, audio::Vec3{0, 0, 0});
+        if (hud_updates == 20) audio->sound(audio::GalacticSound::planet_lost, audio::Vec3{0, 0, 0});
+        if (hud_updates == 25) audio->build(audio::GalacticBuildCue::underway, "Death_Star", true);
+    }
     if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "objectives-audio" && audio) {
         if (const auto* icon = command_catalog.find("objective_icon"); icon && hud_updates == 5) {
             audio->objectives_rebuilt(*icon, false);

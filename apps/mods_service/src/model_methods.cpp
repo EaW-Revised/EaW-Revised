@@ -1,4 +1,5 @@
 #include "model_methods.hpp"
+#include "loadcheck.hpp"
 #include "eawr/mods/chain.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/mods/profile.hpp"
@@ -204,6 +205,16 @@ Reply method_game_find(Service& service, const J& params) {
     return Reply::ok("{\"root\":" + (root.empty() ? std::string("null") : json_quote(path_to_utf8(root)))
         + ",\"kind\":" + json_quote(kind) + ",\"diagnostics\":" + warnings(diagnostics) + '}');
 }
+Reply method_mods_changes(Service& service, const J& params) {
+    const auto* previous = params.member("previous");
+    if (previous && previous->kind != J::Kind::string)
+        return invalid("previous must be a string");
+    const auto snapshot = mods::workshop_snapshot(service.model.discovery);
+    const bool changed = snapshot.complete && previous && previous->string != snapshot.revision;
+    return Reply::ok("{\"revision\":" + json_quote(snapshot.revision)
+        + ",\"changed\":" + (changed ? "true" : "false")
+        + ",\"complete\":" + (snapshot.complete ? "true" : "false") + '}');
+}
 Reply method_mods_discover(Service& service, const J& params) {
     auto& m = service.model;
     auto input = m.discovery;
@@ -338,6 +349,7 @@ Reply method_profile_delete(Service& service, const J& params) {
     if (!file) return invalid("invalid profile id or unsafe profile folder");
     std::error_code ec;
     if (!fs::is_regular_file(*file, ec)) return failure({std::string(mods::codes::profile_io), "Profile is not a file"});
+    service.loadcheck().forget_profile(*id);
     const bool removed = fs::remove(*file, ec);
     if (ec || !removed) return failure({std::string(mods::codes::profile_io), "Cannot delete profile"});
     m.pages.clear();

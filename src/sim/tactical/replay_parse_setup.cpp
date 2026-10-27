@@ -59,6 +59,10 @@ core::Result<void> parse_units(
         return fail<Parsed>(diagnostic_codes::malformed,
             "truncated unit table for declared count " + std::to_string(unit_count), logical_path);
     }
+    auto controller_units = std::move(replay.setup.units);
+    replay.setup.units.clear();
+    if (replay.setup.controllers && controller_units.size() != unit_count)
+        return fail<Parsed>(diagnostic_codes::malformed, "controller table must cover every setup unit", logical_path);
     replay.setup.units.reserve(static_cast<std::size_t>(unit_count));
     for (std::uint64_t index = 0; index < unit_count; ++index) {
         UnitState unit;
@@ -72,6 +76,13 @@ core::Result<void> parse_units(
         if (reserved != 0) {
             return fail<Parsed>(diagnostic_codes::version,
                 "nonzero reserved unit field at index " + std::to_string(index), logical_path);
+        }
+        if (replay.setup.controllers) {
+            const auto& control = controller_units[static_cast<std::size_t>(index)];
+            if (control.entity_id != unit.entity_id)
+                return fail<Parsed>(diagnostic_codes::malformed, "controller unit order/identity mismatch", logical_path);
+            unit.controller_seat = control.controller_seat;
+            unit.control = control.control;
         }
         replay.setup.units.push_back(unit);
     }

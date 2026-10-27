@@ -505,7 +505,7 @@ LandMovement::Checkpoint straggler_contact(const sim::PartitionExecutor& executo
             : at(80 + static_cast<std::int64_t>(i) * 10, 100);
         m.slot = at(0, static_cast<std::int64_t>(i) * 10);
         if (i >= 3) m.slot = {};
-        m.profile = {whole(30), whole(90), whole(90), whole(2), wedge ? Fixed::from_ratio(9, 2).value() : whole(3), false, eawr::units::LandCollisionGroup::none};
+        m.profile = {whole(30), whole(90), whole(90), whole(2), wedge ? Fixed::from_ratio(9, 2).value() : whole(3), false, eawr::units::LandCollisionGroup::infantry};
         m.mask = walker;
         saved.members.push_back(m);
     }
@@ -583,7 +583,7 @@ CornerOutcome member_corner(const sim::PartitionExecutor& executor, bool restore
         m.slot = at(0, reverse ? -offset : offset);
         m.position = at(reverse ? 500 : 80, 20 + offset);
         m.facing = squad.facing;
-        m.profile = {whole(30), whole(90), whole(90), whole(2), whole(3), false};
+        m.profile = {whole(30), whole(90), whole(90), whole(2), whole(3), false, eawr::units::LandCollisionGroup::infantry};
         m.mask = walker;
         saved.members.push_back(m);
     }
@@ -719,9 +719,375 @@ void squad_turning_state() {
     expect(stuck.squads()[0].position != start, "zero turn rate squad still translates");
 }
 
+// WLPA-82 (#4841 PR B): the authored UnitCollisionClass (WLPA-73), never the object kind, decides which
+// moving/stopped pairs repulse. Infantry and Bike are soft; every other class keeps the path-around.
+LandContact moving_stopped_after_service(units::LandObjectKind kind, units::LandCollisionGroup mover,
+    units::LandCollisionGroup idle) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    saved.squads[0].speed = whole(20); // a squad at speed zero predicts toward its slot instead of along its path
+    saved.contacts.push_back(retained(LandContactKind::moving_stopped));
+    saved.members[0].profile.collision_class = mover; saved.members[1].profile.collision_class = idle;
+    saved.members[0].source.kind = kind; saved.members[1].source.kind = kind;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    sim::InlineExecutor serial;
+    expect(static_cast<bool>(movement.service_contacts(field.occupancy, serial, 1)), "authored-class late service");
+    expect(movement.contacts().size() == 1, "authored-class pair keeps its canonical contact");
+    if (movement.contacts().empty()) return {};
+    return movement.contacts()[0];
+}
+
+void authored_class_eligibility() {
+    using units::LandCollisionGroup;
+    using units::LandObjectKind;
+    const auto soft = moving_stopped_after_service(LandObjectKind::vehicle, LandCollisionGroup::infantry, LandCollisionGroup::infantry);
+    expect(soft.state == LandContactState::repulsion && !soft.installed,
+        "WLPA-82 a vehicle-kind type authored Infantry repulses (the class decides)");
+    const auto bike = moving_stopped_after_service(LandObjectKind::vehicle, LandCollisionGroup::bike, LandCollisionGroup::infantry);
+    expect(bike.state == LandContactState::repulsion, "WLPA-82 a Bike mover repulses an Infantry peer");
+    const auto bike_peer = moving_stopped_after_service(LandObjectKind::vehicle, LandCollisionGroup::infantry, LandCollisionGroup::bike);
+    expect(bike_peer.state == LandContactState::repulsion, "WLPA-82 an Infantry mover repulses a Bike peer");
+    const auto vehicle = moving_stopped_after_service(LandObjectKind::infantry, LandCollisionGroup::vehicle, LandCollisionGroup::vehicle);
+    expect(vehicle.state != LandContactState::repulsion,
+        "WLPA-82 an infantry-kind type authored Vehicle stays hard (path-around)");
+    const auto unclassed = moving_stopped_after_service(LandObjectKind::infantry, LandCollisionGroup::none, LandCollisionGroup::none);
+    expect(unclassed.state != LandContactState::repulsion, "WLPA-82 infantry-kind members without a class are not soft");
+    const auto mixed = moving_stopped_after_service(LandObjectKind::infantry, LandCollisionGroup::infantry, LandCollisionGroup::vehicle);
+    expect(mixed.state != LandContactState::repulsion, "WLPA-82 both members must be Infantry or Bike: a vehicle peer is hard");
+    const auto giant = moving_stopped_after_service(LandObjectKind::infantry, LandCollisionGroup::giant_vehicle, LandCollisionGroup::infantry);
+    expect(giant.state != LandContactState::repulsion, "WLPA-82 a giant mover is hard");
+}
+
+// WLPA-82 in step(): the pair-sweep exemption reads BOTH members' authored class. A mover that holds a retained
+// repulsion row steps into an idle peer's hard disc only when the peer is Infantry or Bike as well.
+Fixed guard_displacement(units::LandCollisionGroup mover, units::LandCollisionGroup idle) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, true);
+    saved.squads[0].position = at(100, 60);
+    saved.squads[0].path = {LandPathStatus::found, {at(100, 60), at(260, 60)}, whole(160)};
+    saved.squads[1].position = at(110, 60);
+    saved.members[0].position = at(100, 60); saved.members[1].position = at(110, 60);
+    saved.members[0].profile.collision_class = mover; saved.members[1].profile.collision_class = idle;
+    auto row = retained(LandContactKind::moving_stopped);
+    row.state = LandContactState::repulsion;
+    saved.contacts.push_back(row);
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    sim::InlineExecutor serial;
+    expect(static_cast<bool>(movement.step(field.occupancy, serial, dt)), "peer-guard ordinary motion");
+    return distance(saved.members[0].position, movement.members()[0].position);
+}
+
+void peer_guard_reads_both_classes() {
+    using units::LandCollisionGroup;
+    expect(guard_displacement(LandCollisionGroup::infantry, LandCollisionGroup::infantry) > Fixed{},
+        "WLPA-82 an Infantry mover steps into an Infantry idle peer (soft)");
+    expect(guard_displacement(LandCollisionGroup::infantry, LandCollisionGroup::vehicle) == Fixed{},
+        "WLPA-82 an Infantry mover is blocked by a Vehicle idle peer (hard)");
+    expect(guard_displacement(LandCollisionGroup::vehicle, LandCollisionGroup::infantry) == Fixed{},
+        "WLPA-82 a Vehicle mover is blocked by an Infantry idle peer (hard)");
+}
+
+// WLPA-83 in step(): the pair guard exempts a moving/moving pair of different squads only when both authored classes are
+// Infantry or Bike AND the headings are opposed or crossing. Two single-member squads start inside each other's hard disc
+// and step toward each other; a soft pair moves, a hard pair is vetoed (displacement zero).
+Fixed moving_pair_displacement(units::LandObjectKind kind, units::LandCollisionGroup mover, units::LandCollisionGroup peer,
+    bool opposed) {
+    auto field = make_field(std::vector<std::string>(9, std::string(15, '.')));
+    auto saved = seed(field, false);
+    saved.squads[0].position = at(100, 60);
+    saved.squads[0].path = {LandPathStatus::found, {at(100, 60), at(260, 60)}, whole(160)};
+    saved.squads[1].position = at(110, 60);
+    saved.squads[1].facing = opposed ? Fixed::from_ratio(1, 2).value() : Fixed{};
+    saved.squads[1].path = opposed ? LandPath{LandPathStatus::found, {at(110, 60), at(20, 60)}, whole(90)}
+        : LandPath{LandPathStatus::found, {at(110, 60), at(270, 60)}, whole(160)};
+    saved.members[0].position = at(100, 60); saved.members[1].position = at(110, 60);
+    saved.members[1].facing = saved.squads[1].facing;
+    saved.members[0].profile.collision_class = mover; saved.members[1].profile.collision_class = peer;
+    saved.members[0].source.kind = kind; saved.members[1].source.kind = kind;
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    sim::InlineExecutor serial;
+    expect(static_cast<bool>(movement.step(field.occupancy, serial, dt)), "moving-pair ordinary motion");
+    return distance(saved.members[0].position, movement.members()[0].position);
+}
+
+void moving_pair_peer_classes() {
+    using units::LandCollisionGroup;
+    using units::LandObjectKind;
+    const auto displaced = [](LandObjectKind kind, LandCollisionGroup a, LandCollisionGroup b, bool opposed) {
+        return moving_pair_displacement(kind, a, b, opposed) > Fixed{};
+    };
+    expect(displaced(LandObjectKind::infantry, LandCollisionGroup::infantry, LandCollisionGroup::infantry, true),
+        "WLPA-83 opposed Infantry/Infantry moving pair is soft (the guard does not veto)");
+    expect(displaced(LandObjectKind::infantry, LandCollisionGroup::bike, LandCollisionGroup::infantry, true)
+        && displaced(LandObjectKind::infantry, LandCollisionGroup::infantry, LandCollisionGroup::bike, true)
+        && displaced(LandObjectKind::infantry, LandCollisionGroup::bike, LandCollisionGroup::bike, true),
+        "WLPA-83 Bike is soft against Infantry and Bike on the moving path");
+    expect(!displaced(LandObjectKind::infantry, LandCollisionGroup::infantry, LandCollisionGroup::vehicle, true)
+        && !displaced(LandObjectKind::infantry, LandCollisionGroup::vehicle, LandCollisionGroup::infantry, true),
+        "WLPA-83 an Infantry mover against a Vehicle peer stays hard on the moving path (both directions)");
+    expect(!displaced(LandObjectKind::infantry, LandCollisionGroup::vehicle, LandCollisionGroup::vehicle, true),
+        "WLPA-83 an infantry-kind type authored Vehicle stays hard (the class decides, not the kind)");
+    expect(displaced(LandObjectKind::vehicle, LandCollisionGroup::infantry, LandCollisionGroup::infantry, true),
+        "WLPA-83 a vehicle-kind type authored Infantry is soft (the class decides, not the kind)");
+    expect(!displaced(LandObjectKind::infantry, LandCollisionGroup::giant_vehicle, LandCollisionGroup::giant_vehicle, true)
+        && !displaced(LandObjectKind::infantry, LandCollisionGroup::none, LandCollisionGroup::none, true),
+        "WLPA-83 giant and unclassed moving pairs stay hard");
+    expect(!displaced(LandObjectKind::infantry, LandCollisionGroup::infantry, LandCollisionGroup::infantry, false),
+        "WLPA-83 a same-direction Infantry pair keeps the hard veto in the sweep (only opposed or crossing pairs are soft)");
+}
+
+// WLPA-83: moving Infantry/Bike members of different squads are a stateless soft pair. Two squads of five cross at
+// right angles and meet at the crossing point at the same time.
+struct CrossingOutcome {
+    LandMovement::Checkpoint state;
+    bool both_reached{}, maneuvered{}, locked{};
+    std::uint64_t ticks{}, longest_standstill{}, overlap_ticks{}, longest_overlap{};
+    Fixed minimum_gap{}, resting_gap{};
+    std::uint64_t orders_reached_tick{}; // the first tick every squad order is `reached` (members caught up); 0 = never
+};
+CrossingOutcome soft_crossing(const sim::PartitionExecutor& executor, bool restore, units::LandCollisionGroup group,
+    bool second_squad = true) {
+    auto field = make_field(std::vector<std::string>(20, std::string(30, '.')));
+    LandMovement::Checkpoint saved;
+    saved.contact_settings = {100000, 5, whole(2), whole(120)};
+    constexpr std::size_t per_squad = 5;
+    for (std::size_t i = 0; i < (second_squad ? 2U : 1U); ++i) {
+        const bool east = i == 0;
+        LandMovingSquad squad;
+        squad.object = static_cast<sim::EntityId>(1000 + i);
+        squad.maximum_speed = whole(30); squad.formation_length = whole(40);
+        // A five-member rows squad has a rear extent of 6.56 at the stock spawn (L6 rows figure); the WLPA-30 gate allows that
+        // plus 2 of lag. An abreast line with none would be slowed by any sidestep, which no spawned squad is.
+        squad.rear_extent = Fixed::from_ratio(656, 100).value();
+        squad.position = east ? at(160, 200) : at(300, 60);
+        squad.facing = east ? Fixed{} : Fixed::from_ratio(1, 4).value();
+        const auto goal = east ? at(440, 200) : at(300, 340);
+        squad.path = {LandPathStatus::found, {squad.position, goal}, whole(280)};
+        squad.next_node = 1; squad.order = LandMoveOrder::following;
+        saved.squads.push_back(squad);
+        for (std::size_t j = 0; j < per_squad; ++j) {
+            LandMovingMember m;
+            m.object = static_cast<sim::EntityId>(1 + i * per_squad + j); m.squad = i;
+            m.source.type = "synthetic-member";
+            const auto lateral = static_cast<std::int64_t>(j) * 8 - 16;
+            m.slot = at(0, lateral);
+            m.position = east ? at(160, 200 + lateral) : at(300 - lateral, 60);
+            m.facing = squad.facing;
+            m.profile = {whole(30), whole(90), whole(90), whole(2), whole(3), false, group};
+            m.mask = walker;
+            saved.members.push_back(m);
+        }
+    }
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    CrossingOutcome out;
+    out.minimum_gap = whole(1000); out.resting_gap = whole(1000);
+    const auto count = saved.members.size();
+    // Summed radii of two crossing members (radius 3 each). Overlap below it is "ghosting"; resting pairs must keep half of it.
+    const auto summed = whole(6);
+    std::vector<std::uint64_t> still(count), overlap_run(count * count);
+    constexpr std::uint64_t limit = 700;
+    std::uint64_t settle_until = limit;
+    for (std::uint64_t tick = 0; tick < limit; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "crossing ordinary motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "crossing late contacts");
+        const auto members = movement.members();
+        bool any_overlap = false;
+        for (std::size_t i = 0; i < count; ++i) {
+            // A member waits for nothing once its parent has walked the whole path: standstill counts only while the parent is under way.
+            const auto& parent = movement.squads()[members[i].squad];
+            const bool ordered = parent.order == LandMoveOrder::following && parent.next_node < parent.path.nodes.size();
+            still[i] = ordered && members[i].speed == Fixed{} ? still[i] + 1 : 0;
+            out.longest_standstill = std::max(out.longest_standstill, still[i]);
+            for (std::size_t k = i + 1; k < count; ++k) if (members[i].squad != members[k].squad) {
+                const auto gap = distance(members[i].position, members[k].position);
+                out.minimum_gap = std::min(out.minimum_gap, gap);
+                if (members[i].speed == Fixed{} && members[k].speed == Fixed{}) out.resting_gap = std::min(out.resting_gap, gap);
+                auto& run = overlap_run[i * count + k];
+                run = gap < summed ? run + 1 : 0;
+                any_overlap |= gap < summed;
+                out.longest_overlap = std::max(out.longest_overlap, run);
+            }
+        }
+        out.overlap_ticks += any_overlap ? 1U : 0U;
+        for (const auto& c : movement.contacts())
+            out.maneuvered |= c.state == LandContactState::path_around || c.state == LandContactState::pass
+                || c.state == LandContactState::deadlocked || c.state == LandContactState::recovery
+                || c.state == LandContactState::unresolvable || c.installed;
+        for (const auto& s : movement.squads()) out.locked |= s.temporary_first != 0;
+        for (const auto& m : members) out.locked |= m.collision_lock != 0;
+        if (restore && tick == 120) {
+            const auto checkpoint = movement.checkpoint();
+            auto resumed = LandMovement::from_checkpoint(checkpoint);
+            expect(resumed && resumed->checkpoint() == checkpoint, "crossing checkpoint round trip");
+            if (resumed) movement = std::move(*resumed);
+        }
+        // The arrival time is the first tick every parent has walked its whole path (independent of when a squad's order is
+        // marked reached); the run goes on for 60 settling ticks so that the resting gap between squads is measured on members
+        // that have stopped, and until every order is reached.
+        bool walked = true, all = true;
+        for (const auto& s : movement.squads()) {
+            walked &= s.next_node >= s.path.nodes.size();
+            all &= s.order == LandMoveOrder::reached;
+        }
+        if (walked && out.ticks == 0) { out.ticks = tick + 1; settle_until = tick + 61; }
+        out.both_reached |= all;
+        if (all && out.orders_reached_tick == 0) out.orders_reached_tick = tick + 1;
+        if (out.ticks != 0 && out.both_reached && tick + 1 >= settle_until) break;
+    }
+    out.state = movement.checkpoint();
+    return out;
+}
+
+void soft_crossing_contracts() {
+    using units::LandCollisionGroup;
+    sim::InlineExecutor serial;
+    const auto open = soft_crossing(serial, false, LandCollisionGroup::infantry, false);
+    expect(open.both_reached, "open-ground squad of five reaches its destination");
+    const auto crossing = soft_crossing(serial, false, LandCollisionGroup::infantry);
+    // Retail figures (rig capture, two companies crossing at right angles): no standstill above 3.0 s (90 ticks),
+    // arrival within the open-ground time, soldiers overlapped in 4 of 78 samples, minimum soldier distance 0.4.
+    std::cout << "land soft crossing ticks=" << crossing.ticks << " open=" << open.ticks << " standstill=" << crossing.longest_standstill
+        << " overlap_ticks=" << crossing.overlap_ticks << " longest_overlap=" << crossing.longest_overlap
+        << " min_gap=" << static_cast<double>(crossing.minimum_gap.raw()) / Fixed::scale
+        << " resting_gap=" << static_cast<double>(crossing.resting_gap.raw()) / Fixed::scale
+        << " orders_reached_tick=" << crossing.orders_reached_tick << " open_orders_reached_tick=" << open.orders_reached_tick
+        << " maneuvered=" << crossing.maneuvered << '\n';
+    expect(crossing.both_reached, "WLPA-83 two infantry squads crossing at right angles both reach their destinations");
+    expect(crossing.ticks * 4 <= open.ticks * 5 + 20, "WLPA-83 the crossing costs at most 25% over open ground");
+    expect(crossing.longest_standstill <= 120, "WLPA-83 no member of a crossing infantry squad stands still more than 120 ticks (retail 90)");
+    expect(!crossing.maneuvered && !crossing.locked,
+        "WLPA-83 soft crossing installs no path-around, pass, deadlock escape, temporary route or collision lock");
+    // Design bounds (review-5163-design change 8): retail overlapped in 4 of 78 samples. Overlap is a centre distance below
+    // the summed radii (6); bounded in both directions so squads can neither stack nor ghost through each other.
+    expect(crossing.overlap_ticks * 10 <= crossing.ticks,
+        "WLPA-83 crossing squads do not ghost through each other: overlap in at most 10% of ticks");
+    expect(crossing.longest_overlap <= 30, "WLPA-83 no crossing pair overlaps for more than 30 ticks");
+    expect(crossing.resting_gap >= whole(3), "WLPA-83 no two resting members of different squads sit closer than half the summed radii");
+    const auto hard = soft_crossing(serial, false, LandCollisionGroup::vehicle);
+    expect(hard.minimum_gap >= whole(6), "WLPA-83 vehicle squads keep the hard pair guard: no cross-squad overlap");
+    const auto restored = soft_crossing(serial, true, LandCollisionGroup::infantry);
+    expect(restored.state == crossing.state, "soft crossing restore equals uninterrupted motion");
+    const auto bikes = soft_crossing(serial, false, LandCollisionGroup::bike);
+    expect(bikes.both_reached && !bikes.maneuvered && !bikes.locked && bikes.ticks == crossing.ticks,
+        "WLPA-83 Bike squads cross exactly like Infantry squads (same authored soft class)");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        expect(soft_crossing(threads, true, LandCollisionGroup::infantry).state == crossing.state,
+            "soft crossing equals at 1/2/4/8 workers");
+        test_support::ReverseOrderExecutor reverse(workers);
+        expect(soft_crossing(reverse, true, LandCollisionGroup::infantry).state == crossing.state,
+            "soft crossing equals with reverse partitions");
+    }
+}
+
+// Work-count budget (owner rule: budgets count work, not wall time): two blocks of 88 five-member infantry squads
+// (880 members) walk through each other. Counts are per ordinary step and deterministic.
+struct CrowdOutcome {
+    LandMovement::Checkpoint state;
+    std::uint64_t ticks{}, rows_sum{}, rows_max{}, visits_sum{}, pair_sum{}, members{}, reached_at{};
+    bool maneuvered{};
+};
+// soft_pairs=false is the main-code policy for moving/moving pairs (retained rows, maneuvers); reference_scans makes
+// every member sweep every member (the pre-index pair policy). Both only measure baselines.
+CrowdOutcome soft_crowd(const sim::PartitionExecutor& executor, std::uint64_t ticks, bool soft_pairs = true,
+    bool reference_scans = false) {
+    auto field = make_field(std::vector<std::string>(64, std::string(128, '.')));
+    LandMovement::Checkpoint saved;
+    saved.contact_settings = {100000, 5, whole(2), whole(120)};
+    constexpr std::size_t per_squad = 5;
+    sim::EntityId next_member = 1;
+    for (std::size_t block = 0; block < 2; ++block) for (std::size_t column = 0; column < 8; ++column)
+        for (std::size_t row = 0; row < 11; ++row) {
+            const bool east = block == 0;
+            // The west block starts 880 east of the east block, so both goals (x +- 700) stay inside the field (2560 wide).
+            const auto x = east ? 100 + static_cast<std::int64_t>(column) * 60 : 980 + static_cast<std::int64_t>(column) * 60;
+            const auto y = (east ? 100 : 130) + static_cast<std::int64_t>(row) * 60;
+            LandMovingSquad squad;
+            squad.object = static_cast<sim::EntityId>(1000 + saved.squads.size());
+            squad.maximum_speed = whole(30); squad.formation_length = whole(40);
+            squad.position = at(x, y);
+            squad.facing = east ? Fixed{} : Fixed::from_ratio(1, 2).value();
+            squad.path = {LandPathStatus::found, {squad.position, at(east ? x + 700 : x - 700, y)}, whole(700)};
+            squad.next_node = 1; squad.order = LandMoveOrder::following;
+            const auto index = saved.squads.size();
+            saved.squads.push_back(squad);
+            for (std::size_t j = 0; j < per_squad; ++j) {
+                LandMovingMember m;
+                m.object = next_member++; m.squad = index;
+                m.source.type = "synthetic-member";
+                const auto lateral = static_cast<std::int64_t>(j) * 8 - 16;
+                m.slot = at(0, lateral);
+                m.position = at(x, east ? y + lateral : y - lateral);
+                m.facing = squad.facing;
+                m.profile = {whole(30), whole(90), whole(90), whole(2), whole(3), false, units::LandCollisionGroup::infantry};
+                m.mask = walker;
+                saved.members.push_back(m);
+            }
+        }
+    auto movement = LandMovement::from_checkpoint(saved).value(); publish(field, movement);
+    movement.set_reference_pair_scans(reference_scans); movement.set_straggler_repulsion(soft_pairs);
+    CrowdOutcome out;
+    out.members = saved.members.size();
+    for (std::uint64_t tick = 0; tick < ticks; ++tick) {
+        expect(static_cast<bool>(movement.step(field.occupancy, executor, dt)), "crowd ordinary motion");
+        expect(static_cast<bool>(movement.service_contacts(field.occupancy, executor, tick)), "crowd late contacts");
+        const auto& work = movement.last_step_work();
+        out.rows_sum += work.contact_rows; out.rows_max = std::max(out.rows_max, work.contact_rows);
+        out.visits_sum += work.contact_visits; out.pair_sum += work.pair_candidates;
+        for (const auto& c : movement.contacts())
+            out.maneuvered |= c.state == LandContactState::path_around || c.state == LandContactState::pass
+                || c.state == LandContactState::deadlocked || c.state == LandContactState::recovery || c.installed;
+        bool all = true;
+        for (const auto& s : movement.squads()) all &= s.order == LandMoveOrder::reached;
+        if (all) { out.reached_at = tick + 1; ticks = tick + 1; break; }
+    }
+    out.ticks = ticks;
+    out.state = movement.checkpoint();
+    return out;
+}
+
+void soft_crowd_contracts() {
+    sim::InlineExecutor serial;
+    constexpr std::uint64_t pass_limit = 1000, window = 300;
+    // The full pass: the blocks meet near tick 230 and every squad arrives (700 units at 30 u/s is about 700 ticks).
+    const auto crowd = soft_crowd(serial, pass_limit);
+    // Baselines measured on the main-code policy over the contact window: retained rows and maneuvers of hard moving/moving
+    // pairs, and the all-pairs sweep (reference scans), both on the same fixture.
+    const auto soft_window = soft_crowd(serial, window);
+    const auto hard_window = soft_crowd(serial, window, false);
+    const auto sweep = soft_crowd(serial, 30, true, true);
+    const auto sweep_per_tick = sweep.pair_sum / sweep.ticks;
+    // The pre-adjacency code visited every retained row for every member in each of the two proposal phases.
+    const auto visits_before = 2 * crowd.members * crowd.rows_sum;
+    std::cout << "land soft crowd members=" << crowd.members << " reached_at=" << crowd.reached_at << " ticks=" << crowd.ticks
+        << " rows_max=" << crowd.rows_max << " rows_sum=" << crowd.rows_sum << " contact_visits=" << crowd.visits_sum
+        << " (full-scan equivalent " << visits_before << ") pair_candidates=" << crowd.pair_sum
+        << " (all-pairs " << sweep_per_tick * crowd.ticks << ") maneuvered=" << crowd.maneuvered << '\n';
+    std::cout << "land soft crowd baseline window=" << window << " main-policy rows_sum=" << hard_window.rows_sum
+        << " rows_max=" << hard_window.rows_max << " maneuvered=" << hard_window.maneuvered << " soft rows_sum=" << soft_window.rows_sum
+        << " rows_max=" << soft_window.rows_max << '\n';
+    expect(crowd.reached_at > 0, "WLPA-83 the 880-member blocks pass through each other and every squad arrives");
+    expect(!crowd.maneuvered, "WLPA-83 880 infantry members crossing run no path-around, pass, deadlock escape or installed route");
+    expect(sweep_per_tick == crowd.members * crowd.members, "the reference scan visits every member from every member");
+    expect(hard_window.rows_sum > 0, "the baseline policy retains rows for the same crossing (the fixture does contend)");
+    expect(soft_window.rows_sum * 4 <= hard_window.rows_sum, "WLPA-83 opposed soft pairs keep at least 4x fewer rows than the main-code policy");
+    expect(crowd.visits_sum * 50 <= visits_before, "contact adjacency: row visits are at least 50x below rows x members x 2");
+    expect(crowd.pair_sum * 8 <= sweep_per_tick * crowd.ticks, "pair-sweep candidates come from the spatial index: at least 8x below all-pairs");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        platform::ThreadWorkerAdapter threads(workers);
+        const auto parallel = soft_crowd(threads, pass_limit);
+        expect(parallel.state == crowd.state && parallel.visits_sum == crowd.visits_sum && parallel.pair_sum == crowd.pair_sum,
+            "soft crowd and its work counts equal at 1/2/4/8 workers");
+    }
+    test_support::ReverseOrderExecutor reverse(4);
+    const auto reversed = soft_crowd(reverse, pass_limit);
+    expect(reversed.state == crowd.state && reversed.visits_sum == crowd.visits_sum, "soft crowd equals with reverse partitions");
+}
+
 int main() {
     quota_and_states(); roles_and_prediction(); terrain_and_dynamic_inputs(); live_subtype_and_bounded_escape_retries();
     deadlock(); head_on(); stopped_path_around(); squad_turning_state(); member_terrain_detours();
+    authored_class_eligibility(); peer_guard_reads_both_classes(); moving_pair_peer_classes(); soft_crossing_contracts(); soft_crowd_contracts();
     sim::InlineExecutor serial;
     const auto stragglers = straggler_contact(serial, false, true);
     const auto wedge = straggler_contact(serial, false, true, true);

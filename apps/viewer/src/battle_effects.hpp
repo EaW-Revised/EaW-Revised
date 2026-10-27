@@ -120,6 +120,9 @@ public:
                                 std::vector<SpacePopulation::LivePose>& live,
                                 BattleScene* population = nullptr, GodotRenderer* renderer = nullptr);
     using SnapshotAt = std::function<std::shared_ptr<const sim::tactical::TacticalSnapshot>(std::uint64_t)>;
+    // Birth of the currently bound projectile, independent of the previous-frame pose binding.
+    [[nodiscard]] std::optional<std::pair<double, std::uint64_t>> projectile_model_birth(std::size_t ship,
+        const sim::tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at);
     // The pose of the projectile placed ship `ship` holds at presented tick `tick`, from the
     // snapshots of that tick (for UnitEmitters' catch-up samples); nullopt when `ship` is no
     // model slot, holds nothing, or its projectile was not in flight then.
@@ -436,10 +439,10 @@ private:
     // Runs the effect clock up to `target` samples; each effect takes the samples from its birth.
     [[nodiscard]] bool advance_until(std::uint64_t target);
     // One 30 Hz sample of one effect; `gone` when it was released.
-    [[nodiscard]] bool step_effect(LiveEffect& effect, bool& gone);
+    [[nodiscard]] bool step_effect(LiveEffect& effect, bool& gone, std::uint32_t elapsed = 1);
     // What follows an effect's advance: its age, its detach at the end of its lifetime and its
     // release once drained; `gone` when it was released.
-    void after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone);
+    void after_step(LiveEffect& effect, const particles::EffectFrameStats& advanced, bool& gone, std::uint32_t elapsed = 1);
     [[nodiscard]] Batch* batch(Render render);
     // The look of a projectile's weapon: its shooter's type (remembered while it flies, the
     // shooter may have died) and weapon slot. Null when unknown.
@@ -511,6 +514,7 @@ private:
     };
     std::map<std::string, ModelPool> model_pools_;
     std::map<std::size_t, std::pair<std::string, std::size_t>> model_ship_slot_;
+    std::map<std::uint64_t, double> model_births_;
     std::vector<std::uint64_t> modelled_now_;  // ascending
     std::uint64_t models_drawn_{};
     // #491: each model projectile's last posed tick (this frame's own draw or a catch-up sample,
@@ -526,6 +530,7 @@ private:
     // presents, and the frame's camera.
     std::uint64_t birth_{};
     std::uint64_t due_{};
+    bool fold_catchup_{};
     particles::CameraFrame camera_frame_{};
     std::uint32_t seed_{1};
     // Report counters.

@@ -93,7 +93,15 @@ std::string TacticalHud::report_json() const {
     const State& state = *state_;
     std::ostringstream output;
     const auto& special = state.special_view;
-    output << "{\"movie_camera\": {\"active\": " << (state.movie ? "true" : "false")
+    output << "{\"gift\": {\"visible\": " << (state.gift_button && state.gift_button->is_visible_in_tree() ? "true" : "false")
+        << ", \"enabled\": " << (state.gift_enabled ? "true" : "false")
+        << ", \"open\": " << (state.gift_open ? "true" : "false")
+        << ", \"presses\": " << state.gift_presses << ", \"submissions\": " << state.gift_submissions << ", \"recipients\": [";
+    for (std::size_t i = 0; i < state.gift_recipients.size(); ++i)
+        output << (i ? ", " : "") << "{\"seat\": " << state.gift_recipients[i].seat.value
+            << ", \"name\": " << json(state.gift_recipients[i].name) << "}";
+    output << "]}, ";
+    output << "\"movie_camera\": {\"active\": " << (state.movie ? "true" : "false")
            << ", \"presses\": " << (state.movie_button ? state.movie_button->presses() : 0)
            << ", \"letterbox_height\": ";
     if (state.movie_height) output << *state.movie_height;

@@ -1,6 +1,7 @@
 #include "world_ui_view.hpp"
 
 #include "ui/theme_builder.hpp"
+#include "settings_store.hpp"
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/core/diagnostic.hpp"
@@ -37,10 +38,19 @@ using namespace world_ui_detail;
 
 WorldUiView::WorldUiView(Node3D& host) : host_(&host) {
     if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
+    owner_layer_ = memnew(CanvasLayer);
+    owner_layer_->set_layer(40); // #5130: above the battle HUD, below modal menus and the cursor.
+    host.add_child(owner_layer_);
+    if (auto* rendering = RenderingServer::get_singleton()) {
+        owner_canvas_ = rendering->canvas_item_create();
+        rendering->canvas_item_set_parent(owner_canvas_, owner_layer_->get_canvas());
+    }
 }
 
 WorldUiView::~WorldUiView() {
     RenderingServer* rendering = RenderingServer::get_singleton();
+    if (rendering && owner_canvas_.is_valid()) rendering->free_rid(owner_canvas_);
+    if (owner_layer_) memdelete(owner_layer_);
     if (rendering == nullptr) return;
     for (const RID& circle : circles_) {
         if (circle.is_valid()) rendering->free_rid(circle);
@@ -48,6 +58,7 @@ WorldUiView::~WorldUiView() {
 }
 
 void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
+    draw_owner_name(frame);
     draw_waypoints(frame, canvas_item);
     if (!frame.visible) {
         if (auto* rendering = RenderingServer::get_singleton()) {
@@ -84,6 +95,50 @@ void WorldUiView::draw(const Frame& frame, const RID canvas_item) {
     }
     draw_reticles(frame, canvas_item);
     draw_icons(frame, canvas_item, ui_scale);
+}
+
+void WorldUiView::draw_owner_name(const Frame& frame) {
+    auto* rendering = RenderingServer::get_singleton();
+    owner_shown_ = nullptr;
+    if (!rendering || !owner_canvas_.is_valid()) return;
+    rendering->canvas_item_clear(owner_canvas_);
+    const auto* settings = ActiveSettings::get();
+    if (!frame.visible || !frame.live || !frame.units || !frame.pointer) return;
+    const bool enabled = ui::hover_owner_names_enabled(settings ? settings->gameplay : ui::GameplaySettings{},
+        frame.live->observer_multiplayer());
+    sim::EntityId entity{};
+    if (frame.hovered && *frame.hovered < frame.units->size()) {
+        const auto& unit = (*frame.units)[*frame.hovered];
+        entity = unit.part != sim::invalid_entity_id ? unit.part : unit.entity;
+    } else if (frame.hovered_icon) entity = *frame.hovered_icon;
+    else return;
+    // Exactly one indexed hovered-instance lookup. Picking already uses visible units;
+    // recheck current observer visibility so stale hover state cannot leak through fog.
+    const auto* instance = frame.live->snapshot_index().instance(entity);
+    if (!instance) return;
+    const auto& visible = frame.live->snapshot_index().visible();
+    const bool seen = std::binary_search(visible.begin(), visible.end(), entity);
+    const auto* owner = ui::display_owner(*instance, owner_roster_, seen, enabled, frame.live->controller_policy_enabled());
+    if (!owner || tooltip_font_.is_null()) return;
+    const int pixels = ui::font_pixels({tooltip_points_, false, 1.0},
+        static_cast<std::uint32_t>(frame.viewport[1])).em_height;
+    if (pixels != owner_pixels_) {
+        owner_pixels_ = pixels;
+        for (std::size_t index = 0; index < owner_roster_.size(); ++index) {
+            auto& line = owner_lines_[index];
+            line->clear();
+            line->add_string(String::utf8(owner_roster_[index].name.c_str()), tooltip_font_, pixels);
+            static_cast<void>(line->get_size()); // Shape once at this font size, before per-frame drawing.
+        }
+    }
+    const auto index = static_cast<std::size_t>(owner - owner_roster_.data());
+    const auto& line = owner_lines_[index];
+    const auto size = line->get_size();
+    const Vector2 origin(std::clamp((*frame.pointer)[0] + 14.0F, 0.0F, std::max(0.0F, frame.viewport[0] - size.x)),
+        std::clamp((*frame.pointer)[1] - size.y - 8.0F, 0.0F, std::max(0.0F, frame.viewport[1] - size.y)));
+    line->draw(owner_canvas_, origin, colour(owner->colour));
+    owner_shown_ = owner;
+    owner_entity_ = entity;
 }
 
 void WorldUiView::follow_waypoint_lighting(const GodotRenderer& renderer) {

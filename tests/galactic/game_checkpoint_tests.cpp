@@ -1158,7 +1158,7 @@ void direct_child_refusals() {
     for (int tick = 0; tick < 3; ++tick) (void)take(game.step(executor));
     const auto battle = *take(game.save_battle_checkpoint());
     archive::ChildOwner owner{*game.conflict(), battle.state, battle.scripts,
-        *game.battle_record(), battle.sequences, battle.killers, false};
+        *game.battle_record(), battle.sequences, battle.killers, false, {}};
     const auto timeline = take(game.child_timeline_reader_factory()(
         {campaign::SessionMode::battle, record.id})());
     const auto encode_tail = [&](const archive::ChildOwner& row, campaign::ModeTimelineSnapshot clock) {
@@ -1167,7 +1167,7 @@ void direct_child_refusals() {
             std::uint32_t{0}, eawr::sim::EntityId{0}, // interactive seat and summary hold
             std::uint64_t{0}, // story callback sequence
             std::optional(row), std::optional<archive::ChildOwner>{}, std::optional<Bytes>{},
-            std::optional<galactic::story::State>{});
+            std::optional<galactic::story::State>{}, std::vector<galactic::story::OwnerGoals>{}); // plot state, goals
         return out.bytes;
     };
     const auto bytes = take(game.save_checkpoint_state());

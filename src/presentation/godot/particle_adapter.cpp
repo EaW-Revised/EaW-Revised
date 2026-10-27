@@ -341,8 +341,10 @@ public:
         Array arrays;
     };
 
-    Impl(Node3D& host, TextureResolver resolver, GodotParticleBackend::FogCallbacks fog)
-        : resolver_(std::move(resolver)), fog_(std::move(fog)), spawn_journal_(spawn_trace_requested()) {
+    Impl(Node3D& host, TextureResolver resolver, GodotParticleBackend::FogCallbacks fog,
+         const std::size_t warm_policy_limit, const std::uint64_t warm_texture_limit)
+        : resolver_(std::move(resolver)), fog_(std::move(fog)),
+          warm_budget_(warm_policy_limit, warm_texture_limit), spawn_journal_(spawn_trace_requested()) {
         trace_residency_ = residency_trace_requested();
         if (trace_residency_) census_backends_.push_back(this);
         if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
@@ -714,31 +716,80 @@ public:
         }
     }
 
-    bool prewarm(const particles::EmitterRenderPlan& plan){
+    detail::ParticleWarmPolicy warm_policy(const particles::EmitterRenderPlan& plan) const {
         const auto material=GodotParticleBackend::material_for(plan,static_cast<bool>(fog_.register_material));
-        const detail::ParticleWarmPolicy policy{plan.texture,
+        return {plan.texture,
             plan.blend==particles::Blend::bump_alpha?plan.normal_texture:std::string{},material.program,
             render_pass_priority(material.pass)+static_cast<std::int32_t>(std::min<std::uint32_t>(plan.order_in_phase,7U))};
-        if(warm_budget_.contains(policy))return true;
-        if(warm_budget_.emitters()>=detail::ParticleWarmBudget::max_emitters)return false;
-        std::vector<detail::ParticleWarmBudget::TextureCharge> charges;
-        for(const auto& name : {policy.texture,policy.normal}){
-            if(name.empty())continue;
-            const auto* source=resolver_?resolver_(name):nullptr;
-            if(!source)return false;
-            charges.emplace_back(name,detail::texture_item(*source).bytes);
+    }
+    bool warm_charges(const detail::ParticleWarmPolicy& policy,
+                      std::vector<detail::ParticleWarmBudget::TextureCharge>& charges) {
+        bool resolved = true;
+        for (const auto& name : {policy.texture, policy.normal}) {
+            if (name.empty()) continue;
+            auto [entry, inserted] = warm_texture_charges_.try_emplace(name);
+            if (inserted) {
+                if (const auto* source = resolver_ ? resolver_(name) : nullptr)
+                    entry->second = detail::texture_item(*source).bytes;
+            }
+            if (entry->second) charges.emplace_back(name, *entry->second);
+            else resolved = false;
         }
-        if(!warm_budget_.admits(policy,charges))return false;
+        return resolved;
+    }
+    void inventory_prewarm(const particles::EmitterRenderPlan& plan) {
+        if (!plan.drawable) return;
+        const auto policy = warm_policy(plan);
+        std::vector<detail::ParticleWarmBudget::TextureCharge> charges;
+        const bool resolved = warm_charges(policy, charges);
+        warm_demand_.observe(policy, charges, resolved);
+    }
+    bool prewarm(const particles::EmitterRenderPlan& plan){
+        const auto policy = warm_policy(plan);
+        if(warm_budget_.contains(policy))return true;
+        if(warm_budget_.emitters()>=warm_budget_.policy_limit()) {
+            ++warm_emitter_work_.refused_policy_limit;
+            return false;
+        }
+        std::vector<detail::ParticleWarmBudget::TextureCharge> charges;
+        if (!warm_charges(policy, charges)) {
+            ++warm_emitter_work_.refused_missing_texture;
+            return false;
+        }
+        if(!warm_budget_.admits(policy,charges)) {
+            ++warm_emitter_work_.refused_texture_limit;
+            return false;
+        }
         const auto id=create(plan);
-        if(id==0)return false;
+        if(id==0) {
+            ++warm_emitter_work_.refused_backend;
+            return false;
+        }
         auto& emitter=emitters_.at(id);
         submit_visible(*RenderingServer::get_singleton(), emitter, false);
         RenderingServer::get_singleton()->instance_set_scenario(emitter.instance,RID{});
         emitter.submission.reset();
-        // No surface is created: the retained instance can never submit a primitive.
+        // Keep shared shader/texture refs only. Even an empty detached instance
+        // must not remain active or retain draw RIDs throughout gameplay.
+        suspend(emitter, RenderingServer::get_singleton(), true);
         warm_ids_.push_back(id);
         warm_budget_.commit(policy,charges);
         return true;
+    }
+    void retain_warm_cache_only() {
+        warm_cache_refs_.reserve(warm_cache_refs_.size() + warm_ids_.size());
+        for (const auto id : warm_ids_) {
+            const auto found = emitters_.find(id);
+            if (found == emitters_.end()) continue;
+            const auto& emitter = found->second;
+            assert(!emitter.material.is_valid() && emitter.active_index == inactive_index);
+            // Copy before erasing: an allocation failure leaves either the
+            // original owner or the cache ledger responsible for each ref.
+            warm_cache_refs_.push_back({emitter.texture_key, emitter.normal_key,
+                emitter.shader_key, emitter.owns_textures});
+            emitters_.erase(found);
+        }
+        warm_ids_.clear();
     }
     bool prewarm_program(const particles::EmitterRenderPlan& plan) {
         ++warm_program_work_.requested;
@@ -763,7 +814,20 @@ public:
     void release_warm() {
         for (const auto id : warm_ids_) destroy(id);
         warm_ids_.clear();
+        if (RenderingServer* const rendering = RenderingServer::get_singleton()) {
+            for (const auto& refs : warm_cache_refs_) {
+                release_shader(*rendering, refs.shader);
+                if (refs.owns_textures) {
+                    release_texture(*rendering, refs.texture);
+                    if (!refs.normal.empty()) release_texture(*rendering, refs.normal);
+                }
+            }
+        }
+        warm_cache_refs_.clear();
         warm_budget_.clear();
+        warm_demand_.clear();
+        warm_texture_charges_.clear();
+        warm_emitter_work_ = {};
         if (RenderingServer* const rendering = RenderingServer::get_singleton()) {
             for (const auto& program : warm_program_budget_.programs()) release_shader(*rendering, program);
         }
@@ -1235,7 +1299,15 @@ private:
     std::uint64_t reuse_frame_{};
     bool reuse_enabled_{};
     std::vector<std::uint64_t> warm_ids_;
+    struct WarmCacheRefs final {
+        std::string texture, normal, shader;
+        bool owns_textures{};
+    };
+    std::vector<WarmCacheRefs> warm_cache_refs_;
     detail::ParticleWarmBudget warm_budget_;
+    detail::ParticleWarmDemand warm_demand_;
+    std::map<std::string, std::optional<std::uint64_t>> warm_texture_charges_;
+    EmitterPrewarmWork warm_emitter_work_;
     detail::ParticleProgramWarmBudget warm_program_budget_;
     ProgramPrewarmWork warm_program_work_;
     std::map<std::string, Shared> textures_;
@@ -1255,8 +1327,9 @@ private:
     std::string failure_;
 };
 
-GodotParticleBackend::GodotParticleBackend(Node3D& host, TextureResolver resolver, FogCallbacks fog)
-    : impl_(std::make_unique<Impl>(host, std::move(resolver), std::move(fog))) {}
+GodotParticleBackend::GodotParticleBackend(Node3D& host, TextureResolver resolver, FogCallbacks fog,
+                                         const std::size_t warm_policy_limit, const std::uint64_t warm_texture_limit)
+    : impl_(std::make_unique<Impl>(host, std::move(resolver), std::move(fog), warm_policy_limit, warm_texture_limit)) {}
 
 GodotParticleBackend::~GodotParticleBackend() = default;
 
@@ -1281,6 +1354,24 @@ void GodotParticleBackend::set_spawn_context(const std::string_view effect, cons
     impl_->spawn_tick_ = tick;
 }
 bool GodotParticleBackend::prewarm_emitter(const particles::EmitterRenderPlan& plan){return impl_->prewarm(plan);}
+void GodotParticleBackend::retain_prewarm_cache_only() { impl_->retain_warm_cache_only(); }
+void GodotParticleBackend::inventory_prewarm_emitter(const particles::EmitterRenderPlan& plan) {
+    impl_->inventory_prewarm(plan);
+}
+GodotParticleBackend::EmitterPrewarmWork GodotParticleBackend::emitter_prewarm_work() const noexcept {
+    auto work = impl_->warm_emitter_work_;
+    work.demand_references = impl_->warm_demand_.references();
+    work.demand_policies = impl_->warm_demand_.policies();
+    work.demand_textures = impl_->warm_demand_.textures();
+    work.unresolved_policies = impl_->warm_demand_.unresolved();
+    work.demand_texture_bytes = impl_->warm_demand_.texture_bytes();
+    work.demand_complete = impl_->warm_demand_.complete();
+    work.policy_limit = impl_->warm_budget_.policy_limit();
+    work.texture_limit = impl_->warm_budget_.texture_limit();
+    work.retained_holders = impl_->warm_ids_.size();
+    work.cache_only_policies = impl_->warm_cache_refs_.size();
+    return work;
+}
 bool GodotParticleBackend::prewarm_program(const particles::EmitterRenderPlan& plan) { return impl_->prewarm_program(plan); }
 void GodotParticleBackend::release_prewarm(){impl_->release_warm();}
 std::size_t GodotParticleBackend::prewarm_program_limit() noexcept { return detail::ParticleProgramWarmBudget::max_programs; }

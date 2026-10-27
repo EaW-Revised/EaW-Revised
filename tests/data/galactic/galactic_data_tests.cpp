@@ -327,6 +327,45 @@ void story_name_contracts() {
         && has_issue(*overlong, IssueKind::bad_value, "Limits", "Story_Name"), "WST-86 oversized parser inputs are diagnosed");
 }
 
+void retail_numeric_contracts() {
+    const std::array<std::pair<std::string_view, std::int64_t>, 6> cases{{
+        {"2.9", 2}, {"-2.9", -2}, {"text", 0}, {"1e3", 1},
+        {"9999999999999999999999", 2147483647}, {"-9999999999999999999999", -2147483648LL}}};
+    for (const auto& [text, expected] : cases) {
+        TempTree tree;
+        const auto value = std::string(text);
+        write_tree(tree.root, "<Campaigns><Campaign Name=\"Numeric\"><Locations>NumericWorld</Locations>"
+            "<Sort_Order>" + value + "</Sort_Order><Min_Custom_Tech_Level>" + value + "</Min_Custom_Tech_Level>"
+            "<AI_Victory_Cycle_Limit>" + value + "</AI_Victory_Cycle_Limit></Campaign></Campaigns>");
+        write(tree.root / "XML/Planets.xml", "<Planets><Planet Name=\"NumericWorld\"><Behavior>PLANET</Behavior>"
+            "<Galactic_Position>0,0,0</Galactic_Position><Max_Space_Base>" + value + "</Max_Space_Base>"
+            "<Population_Value>" + value + "</Population_Value><Additional_Population_Capacity>" + value
+            + "</Additional_Population_Capacity></Planet></Planets>");
+        write(tree.root / "XML/Factions.xml", "<Factions><Faction Name=\"NumericSide\"><Base_Population_Capacity>"
+            + value + "</Base_Population_Capacity><Displayed_Tech_Level_Adjustment>" + value
+            + "</Displayed_Tech_Level_Adjustment></Faction></Factions>");
+        write(tree.root / "XML/GameConstants.xml", "<GameConstants><Raid_Force_Max_Heros>" + value
+            + "</Raid_Force_Max_Heros><Battle_Pending_Timeout_Seconds>" + value
+            + "</Battle_Pending_Timeout_Seconds><AutoResolveDisplayTime>text</AutoResolveDisplayTime></GameConstants>");
+        const auto loaded = load_tree(tree.root);
+        expect(static_cast<bool>(loaded), "LSA numeric fixture loads every retail-accepted input");
+        if (!loaded) continue;
+        const auto* planet = loaded->planet("NumericWorld");
+        const auto* faction = loaded->faction("NumericSide");
+        const auto* campaign = loaded->campaign("Numeric");
+        expect(planet && planet->max_space_base == expected && planet->population_value == expected
+            && planet->additional_population_capacity == expected, "LSA-01 atoi values retained by planet loader");
+        expect(faction && faction->base_population_capacity == expected && faction->displayed_tech_level_adjustment == expected,
+            "LSA-02 atoi values retained by faction loader");
+        expect(campaign && campaign->sort_order == expected && campaign->minimum_custom_tech == expected
+            && campaign->ai_victory_cycle_limit == expected, "LSA-03 atoi values retained by campaign loader");
+        expect(loaded->constant("Raid_Force_Max_Heros")->number == Fixed::from_integer(expected).value()
+            && loaded->constant("Battle_Pending_Timeout_Seconds")->number == Fixed::from_integer(expected).value(),
+            "LSA-36/40 integer constants use atoi rather than atof");
+        expect(loaded->constant("AutoResolveDisplayTime")->number == Fixed{}, "LSA-42 float text reads zero");
+    }
+}
+
 void empty_raid_masks() {
     TempTree tree;
     write_tree(tree.root, campaigns_xml);
@@ -443,11 +482,11 @@ void world_contracts(const galactic::GalacticData& data) {
         && beta->planet_surface_accessible == false && beta->space_tactical_map == "_Space_Planet_Alpha.ted",
         "AU-80/81/83: a variant planet inherits, and a TBD value keeps the base's");
     expect(has_issue(data, IssueKind::trailing_text, "Beta", "Max_Space_Base", "2 bases"), "trailing text on a count");
-    expect(gamma && !gamma->galactic_position && !gamma->planet_credit_value
+    expect(gamma && !gamma->galactic_position && gamma->planet_credit_value == Fixed{}
         && has_issue(data, IssueKind::bad_value, "Gamma", "Galactic_Position", "1.0, 2.0")
         && has_issue(data, IssueKind::missing_required, "Gamma", "Galactic_Position")
-        && has_issue(data, IssueKind::bad_value, "Gamma", "Planet_Credit_Value", "lots"),
-        "a malformed position or number is reported and left absent");
+        && !has_issue(data, IssueKind::bad_value, "Gamma", "Planet_Credit_Value", "lots"),
+        "LSA-42 text reads zero while malformed vector shape remains diagnosed");
     expect(has_issue(data, IssueKind::unknown_tag, "Alpha", "Bogus_Planet_Tag"), "unknown planet tag");
 
     expect(data.trade_routes.size() == 4, "trade routes load; a repeated name keeps one record");
@@ -754,6 +793,7 @@ int main() {
     synthetic_contracts();
     movement_float_parsing();
     empty_raid_masks();
+    retail_numeric_contracts();
     art_contracts();
     foc_contracts();
     if (failures == 0) std::cout << "galactic data contracts passed\n";

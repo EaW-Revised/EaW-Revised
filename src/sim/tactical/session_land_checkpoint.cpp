@@ -6,9 +6,9 @@
 
 namespace eawr::sim::tactical {
 namespace {
-// Coordinator-reserved section 18, version 5. Also frames the land-only canonical tail.
+// Coordinator-reserved section 18, version 6. Also frames the land-only canonical tail.
 constexpr auto section_id = static_cast<std::uint16_t>(checkpoint::SectionId::land_state);
-constexpr std::uint16_t section_version = 5;
+constexpr std::uint16_t section_version = 6;
 }
 
 namespace {
@@ -67,7 +67,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::land_bytes(const bool partition
     records(moving.squads, state.squad_parts);
     records(moving.members, state.member_parts);
     out(moving.contact_settings, moving.contacts, moving.contact_complexity, moving.last_contact_frame,
-        moving.contacts_serviced, state.requests);
+        moving.contacts_serviced, state.requests, state.combat_state);
     out(static_cast<std::uint64_t>(state.searches.size()));
     for (const auto& [id, search] : state.searches) out(id, LandPathService::checkpoint(search));
     state.canonical_size_hint = out.bytes.size();
@@ -92,46 +92,66 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
         LandOccupancy::Checkpoint occupancy;
         LandMovement::Checkpoint moving;
         std::map<EntityId, LandPathRequest> requests;
-        in(id, version, terrain_identity, clear_bit, occupancy, moving, requests);
+        session_detail::LandCombatState combat_state;
+        in(id, version, terrain_identity, clear_bit, occupancy, moving, requests, combat_state);
         if (id != section_id || version != section_version || terrain_identity != land->occupancy.terrain().identity()
             || clear_bit != land->content.clear_bit || moving.tick != completed_tick)
             throw Invalid("land section terrain, version or tick disagrees with session");
         const auto original = land->movement.checkpoint();
-        if (moving.members.size() != original.members.size() || moving.squads.size() != original.squads.size()
-            || moving.contact_settings != land->content.contacts || requests.size() != land->requests.size())
+        if (moving.members.size() > original.members.size() || moving.squads.size() > original.squads.size()
+            || moving.contact_settings != land->content.contacts || requests.size() != moving.squads.size()
+            || combat_state.targets.size() != moving.squads.size())
             throw Invalid("land section roster disagrees with content");
-        // Static roster/poses rederive from setup and immutable content; occupations
-        // are archived alongside the version 3 member trackers and detours.
+        const auto live = sorted_live();
+        const auto alive = [&](EntityId object) {
+            const auto unit = std::lower_bound(live.begin(), live.end(), object,
+                [](const auto& row, EntityId id) { return row.state.entity_id < id; });
+            return unit != live.end() && unit->state.entity_id == object;
+        };
+        // Version 6 permits deaths, never new identities or rebindings. Immutable slots survive
+        // squad-index compaction; compare the bound squad identity rather than its old index.
         for (const auto& expected : land->content.occupations) {
             const auto saved = std::find_if(occupancy.occupations.begin(), occupancy.occupations.end(),
                 [&](const auto& row) { return row.object == expected.object; });
-            if (saved == occupancy.occupations.end() || *saved != expected)
-                throw Invalid("land static occupation disagrees with content");
+            if (alive(expected.object) ? saved == occupancy.occupations.end() || *saved != expected
+                                      : saved != occupancy.occupations.end())
+                throw Invalid("land static occupation disagrees with live content");
         }
         for (const auto& saved : occupancy.occupations) {
-            const auto member = std::find_if(original.members.begin(), original.members.end(),
+            const auto member = std::find_if(moving.members.begin(), moving.members.end(),
                 [&](const auto& row) { return row.object == saved.object; });
             const auto fixed = std::find_if(land->content.occupations.begin(), land->content.occupations.end(),
                 [&](const auto& row) { return row.object == saved.object; });
-            if (member == original.members.end() && fixed == land->content.occupations.end())
+            if (!alive(saved.object) || (member == moving.members.end() && fixed == land->content.occupations.end()))
                 throw Invalid("land section contains an unbound occupation");
         }
-        for (std::size_t i = 0; i < moving.members.size(); ++i) {
-            const auto& saved = moving.members[i]; const auto& source = original.members[i];
-            if (saved.object != source.object || saved.squad != source.squad || saved.source != source.source
-                || saved.profile != source.profile || saved.mask != source.mask || saved.slot != source.slot)
+        EntityId last_member{};
+        for (const auto& saved : moving.members) {
+            const auto source = std::lower_bound(original.members.begin(), original.members.end(), saved.object,
+                [](const auto& row, EntityId id) { return row.object < id; });
+            if (saved.object <= last_member || source == original.members.end() || source->object != saved.object
+                || saved.squad >= moving.squads.size() || saved.source != source->source
+                || moving.squads[saved.squad].object != original.squads[source->squad].object
+                || saved.profile != source->profile || saved.mask != source->mask || saved.slot != source->slot)
                 throw Invalid("land member binding disagrees with content");
+            last_member = saved.object;
         }
-        for (std::size_t i = 0; i < moving.squads.size(); ++i) {
-            const auto& saved = moving.squads[i]; const auto& source = original.squads[i];
+        for (const auto& saved : moving.squads) {
+            const auto source = std::find_if(original.squads.begin(), original.squads.end(),
+                [&](const auto& row) { return row.object == saved.object; });
             const auto request = requests.find(saved.object);
-            const auto bound = land->requests.find(source.object);
-            if (saved.object != source.object || saved.maximum_speed != source.maximum_speed
-                || saved.has_formation != source.has_formation || saved.generic_team != source.generic_team
-                || request == requests.end() || bound == land->requests.end()
+            const auto bound = land->requests.find(saved.object);
+            const auto target = combat_state.targets.find(saved.object);
+            const auto index = static_cast<std::size_t>(&saved - moving.squads.data());
+            if (source == original.squads.end() || saved.maximum_speed != source->maximum_speed
+                || saved.has_formation != source->has_formation || saved.generic_team != source->generic_team
+                || request == requests.end() || bound == land->requests.end() || target == combat_state.targets.end()
+                || (target->second.first && !land->bindings.contains(target->second.first))
+                || std::none_of(moving.members.begin(), moving.members.end(),
+                    [index](const auto& row) { return row.squad == index; })
                 || request->second.entity != saved.object || request->second.mask != bound->second.mask
                 || request->second.radius != bound->second.radius || request->second.width != bound->second.width)
-                throw Invalid("land squad/path binding disagrees with content");
+                throw Invalid("land squad/path/combat binding disagrees with content");
         }
         auto field = LandOccupancy::from_checkpoint(land->occupancy.terrain_handle(), clear_bit, occupancy);
         // Terrain is immutable; searches below reference the new stable field, never the old host.
@@ -140,8 +160,11 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
         auto movement = LandMovement::from_checkpoint(std::move(moving));
         if (!movement) throw Invalid("invalid retained land movement or contacts");
         restored->movement = std::move(*movement); restored->requests = std::move(requests);
+        restored->combat_state = std::move(combat_state);
+        restored->target_query_margin = land->target_query_margin;
         restored->bindings = land->bindings;
-        restored->static_roots = land->static_roots;
+        for (const auto& [object, pose] : land->static_roots)
+            if (alive(object)) restored->static_roots.emplace(object, pose);
         const auto count = in.count();
         EntityId previous{};
         for (std::uint64_t i = 0; i < count; ++i) {
@@ -157,7 +180,6 @@ core::Result<void> TacticalSession::Impl::restore_land(const std::span<const std
             restored->searches.emplace(object, std::move(result).value());
         }
         if (in.remaining()) throw Invalid("trailing land section bytes");
-        const auto live = sorted_live();
         if (live.size() != restored->movement.members().size() + restored->movement.squads().size() + restored->static_roots.size())
             throw Invalid("land section and child-state object counts disagree");
         for (const auto& unit : live) {

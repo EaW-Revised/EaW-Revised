@@ -204,6 +204,70 @@ void particle_prewarm_contracts(){
     budget.clear();
     check(!budget.admits(policy,huge),"oversized mod texture cannot overflow warm admission");
     check(budget.texture_bytes()==0&&budget.emitters()==0,"warm release clears all retained-policy charges");
+    ParticleWarmBudget units(512, 96U * 1024U * 1024U);
+    const std::array lens{ParticleWarmBudget::TextureCharge{"lens", 4U * 1024U * 1024U}};
+    for (std::int32_t priority = 0; priority < 512; ++priority) {
+        const ParticleWarmPolicy next{"lens", "", "program", priority};
+        check(units.admits(next, lens), "unit policy allowance admits shared texture policies beyond default32");
+        units.commit(next, lens);
+    }
+    check(units.texture_bytes() == 4U * 1024U * 1024U,
+          "larger unit policy allowance still charges each shared texture only once");
+    check(!units.admits({"lens", "", "program", 512}, lens), "configured policy cap remains bounded");
+    units.clear();
+    const std::array full{ParticleWarmBudget::TextureCharge{"full", 96U * 1024U * 1024U}};
+    check(units.admits(policy, full), "configured texture allowance admits exact boundary");
+    units.commit(policy, full);
+    check(!units.admits({"new", "", "program", 0}, extra), "configured texture cap refuses one extra byte");
+    ParticleWarmBudget unchanged;
+    check(unchanged.policy_limit() == 32 && unchanged.texture_limit() == 8U * 1024U * 1024U,
+          "other backends keep their original warm limits");
+    ParticleWarmDemand demand;
+    demand.observe(policy, charges, true);
+    demand.observe(policy, charges, true);
+    demand.observe({"missing", "normal", "shader", 1}, std::span(charges).subspan(1), false);
+    check(demand.references() == 3 && demand.policies() == 2 && demand.textures() == 2
+              && demand.texture_bytes() == 3072 && demand.unresolved() == 1 && !demand.complete(),
+          "demand includes refused/missing policies, deduplicates shared bindings and labels incomplete bytes");
+    demand.clear();
+    check(demand.references() == 0 && demand.policies() == 0 && demand.texture_bytes() == 0 && demand.complete(),
+          "demand ownership clears at teardown");
+}
+
+void reachable_particle_prewarm_contracts() {
+    using namespace eawr::presentation::godot_backend::detail;
+    struct Plan final {
+        bool drawable;
+        int identity;
+        ParticleWarmPolicy policy;
+        std::uint64_t texture_bytes;
+    };
+    const ParticleWarmPolicy shared{"shared", "", "program", 1};
+    const std::array plans{
+        Plan{false, 0, {}, 0},
+        Plan{true, 1, shared, 1024},
+        Plan{true, 1, shared, 1024},
+        Plan{true, 2, {"oversized", "", "program", 1}, ParticleWarmBudget::max_texture_bytes + 1},
+        Plan{true, 3, {"other", "", "program", 1}, 512},
+        Plan{true, 1, shared, 1024}};
+    ParticleWarmBudget budget;
+    std::vector<int> visits;
+    const auto coverage = prewarm_particle_plans(plans, [&](const Plan& plan) {
+        visits.push_back(plan.identity);
+        const std::array charges{ParticleWarmBudget::TextureCharge{plan.policy.texture, plan.texture_bytes}};
+        if (!budget.admits(plan.policy, charges)) return false;
+        budget.commit(plan.policy, charges);
+        return true;
+    });
+    check(visits == std::vector<int>{1, 1, 2, 3, 1}, "warm visits drawable references in input order after a refusal");
+    check(coverage.requested == 5 && coverage.admitted == 4 && coverage.refused == 1,
+        "partial warm coverage reports refused references without dropping later plans");
+    check(budget.emitters() == 2 && budget.texture_bytes() == 1536,
+        "shared references retain one bounded backend hold and charge per creation identity");
+    budget.clear();
+    check(budget.emitters() == 0 && budget.texture_bytes() == 0, "load warm ownership releases at teardown");
+    const auto empty = prewarm_particle_plans(std::array<Plan, 0>{}, [](const Plan&) { return false; });
+    check(empty.requested == 0 && empty.admitted == 0 && empty.refused == 0, "empty closure has no warm work");
 }
 
 } // namespace eawr_renderer_test
@@ -213,6 +277,7 @@ int main() {
     churn_contracts();
     particle_texture_contracts();
     particle_prewarm_contracts();
+    reachable_particle_prewarm_contracts();
     particle_program_prewarm_contracts();
     particle_spawn_journal_contracts();
     particle_upload_contracts();

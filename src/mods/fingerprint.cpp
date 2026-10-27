@@ -1,4 +1,5 @@
 #include "eawr/mods/fingerprint.hpp"
+#include "eawr/mods/profile.hpp"
 
 #include "eawr/core/sha256.hpp"
 
@@ -11,6 +12,22 @@
 namespace eawr::mods {
 
 namespace fs = steam::fs;
+
+std::string loadcheck_chain_fingerprint(const Profile& profile, const fs::path& game, std::string_view engine) {
+    std::string material(engine);
+    const auto append = [&](const fs::path& root) {
+        const auto tree = tree_fingerprint(root);
+        if (tree.capped || tree.incomplete || tree.tree.empty()) return false;
+        material += '\n' + steam::path_to_utf8(root) + '\n' + tree.tree;
+        return true;
+    };
+    for (const auto& layer : profile.layers) {
+        material += '\n' + layer.key;
+        if (!append(steam::path_from_utf8(layer.root))) return {};
+    }
+    if (!append(game / "corruption/Data") || !append(game / "GameData/Data")) return {};
+    return core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(material.data()), material.size()));
+}
 
 TreeFingerprint tree_fingerprint(const fs::path& root, std::uint64_t entry_cap) {
     TreeFingerprint result;

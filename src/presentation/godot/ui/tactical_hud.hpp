@@ -40,6 +40,7 @@
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/unit_cards.hpp"
 #include "eawr/presentation/ui/team_dock.hpp"
+#include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/ui/retreat_button.hpp"
 #include "eawr/presentation/ui/special_weapon.hpp"
 #include "eawr/vfs/vfs.hpp"
@@ -55,6 +56,7 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <string>
 #include <vector>
@@ -123,6 +125,8 @@ public:
     [[nodiscard]] int planet_pixels() const { return planet_pixels_; }
     // Runs `probe` once, on the first frame after the HUD is laid out.
     void set_probe(std::function<void()> probe);
+    // Loading-only work; callback returns true when complete and is discarded.
+    void set_movie_warmup(std::function<bool()> warmup);
     // The shell's alternate index: meshes with an _ALT<n> suffix show only when n matches (none when unset).
     // `alpha` tints those meshes (the unseen-contents dimming of the focused diorama).
     void set_alternate(std::optional<std::uint32_t> index, float alpha = 1.0F);
@@ -145,6 +149,7 @@ private:
     std::optional<std::uint32_t> alternate_;
     float alternate_alpha_{1.0F};
     std::function<void()> probe_;
+    std::function<bool()> movie_warmup_;
 };
 
 // Owns the HUD: loads the shell, its textures, fonts and the planet name from
@@ -182,6 +187,13 @@ public:
     [[nodiscard]] const std::string& failure() const noexcept;
     [[nodiscard]] int options_presses() const noexcept;
     [[nodiscard]] EawrTacticalHud* hud() const noexcept;
+    void prepare_command_bar_movie(const vfs::Vfs&, std::string_view movie);
+    [[nodiscard]] bool play_command_bar_movie(std::string_view speech);
+    void service_command_bar_movie(bool speech_present, bool paused);
+    [[nodiscard]] bool command_bar_movie_playing() const;
+    [[nodiscard]] bool command_bar_movie_active() const;
+    [[nodiscard]] std::string_view command_bar_movie_speech() const;
+    void write_command_bar_movie_report(std::ostream&) const;
     [[nodiscard]] std::string localized_text(std::string_view key, std::string_view fallback) const;
     // The host saw `event` reach the world (it passed the GUI and the policy).
     void world_input(const godot::Ref<godot::InputEvent>& event);
@@ -252,6 +264,8 @@ public:
     // The options button (b_option_t, tooltip TEXT_BUTTON_MAIN_MENU): what a press does, the in-game menu.
     // Without a handler the press only counts.
     void set_options_handler(std::function<void()> handler);
+    void set_gift_handler(std::function<void(sim::SeatId)> handler);
+    void set_gift(bool policy, bool enabled, const std::vector<presentation::ui::ObserverOwner>& recipients);
     void set_beacon_handler(std::function<void()> handler);
     void set_beacon(bool enabled, bool targeting);
     void set_movie_mode(bool on);

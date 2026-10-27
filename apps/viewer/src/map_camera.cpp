@@ -771,24 +771,23 @@ core::Result<void> MapCameraBridge::step(const float seconds) {
     return core::Result<void>::success();
 }
 
-core::Result<void> MapCameraBridge::set_viewport(const float width, const float height) {
+core::Result<void> MapCameraBridge::set_viewport(const float requested_width, const float requested_height) {
     if (!controller_) return core::Result<void>::failure(invalid("map camera is not active"));
     if (controller_->capture_locked()) return core::Result<void>::success();
-    if (!std::isfinite(width) || !std::isfinite(height)
-        || width < 0.0F || height < 0.0F
-        || static_cast<double>(width) > std::numeric_limits<std::uint32_t>::max()
-        || static_cast<double>(height) > std::numeric_limits<std::uint32_t>::max()) {
+    if (!std::isfinite(requested_width) || !std::isfinite(requested_height)
+        || requested_width < 0.0F || requested_height < 0.0F
+        || static_cast<double>(requested_width) > std::numeric_limits<std::uint32_t>::max()
+        || static_cast<double>(requested_height) > std::numeric_limits<std::uint32_t>::max()) {
         return core::Result<void>::failure(invalid("map camera viewport is invalid"));
     }
-    if (width == 0.0F || height == 0.0F) {
+    if (requested_width == 0.0F || requested_height == 0.0F) {
         auto suspended = adapter_.set_viewport(0.0F, 0.0F);
         if (suspended) controller_->stop_pan();
         return suspended;
     }
-    if (width < 1.0F || height < 1.0F
-        || std::floor(width) != width || std::floor(height) != height) {
-        return core::Result<void>::failure(invalid("map camera viewport needs whole, positive pixels"));
-    }
+    // A fractional rect (content scale 1.25, 1.5, 1.75) becomes whole pixels here.
+    const float width = camera_input::whole_viewport_extent(requested_width);
+    const float height = camera_input::whole_viewport_extent(requested_height);
     if (auto resized = controller_->set_viewport(static_cast<std::uint32_t>(width),
             static_cast<std::uint32_t>(height)); !resized) return resized;
     controller_->stop_pan();

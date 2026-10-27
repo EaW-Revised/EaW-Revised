@@ -10,6 +10,7 @@ set(EAWR_SIM_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_movement.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/land_contacts.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land_combat.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land_checkpoint.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/replay.cpp"

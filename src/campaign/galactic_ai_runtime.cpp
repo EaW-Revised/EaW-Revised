@@ -544,8 +544,11 @@ public:
             if (!module.empty()) {
                 // Player identities occupy the freestore instance domain; plans
                 // use the shared engine's separate first_plan_instance domain.
-                if (auto created = active_scripts->create_instance(player, "Data/Scripts/FreeStore/" + std::string(module) + ".lua"); !created) return created;
-                if (auto attached = ga::attach_freestore(*active_scripts, {player, player}, true); !attached) return attached;
+                bool syntax_error = false;
+                if (auto created = active_scripts->create_instance(player, "Data/Scripts/FreeStore/" + std::string(module) + ".lua", &syntax_error); !created) {
+                    if (!syntax_error) return created;
+                    setup->load_diagnostics.push_back("galactic freestore disabled for player " + std::to_string(player) + ": " + created.error().message);
+                } else if (auto attached = ga::attach_freestore(*active_scripts, {player, player}, true); !attached) return attached;
             }
             if (providers.initialize_freestore) {
                 if (auto initialized = providers.initialize_freestore(player, *actions, *galaxy->snapshot(), *current_executor()); !initialized) return initialized;
@@ -611,9 +614,12 @@ public:
                     if (providers.publish_freestore)
                         if (auto published = providers.publish_freestore(*actions, *pool, *galaxy->snapshot(), *current_executor()); !published) return published;
                 }
-                auto serviced = ga::service_freestore(scripts, {input.player, input.player}, *pool->pool, input.clocks.mode,
-                    pool->pool->qualified ? &actions->qualified_freestore() : nullptr);
-                if (!serviced) return serviced;
+                const auto instances = scripts.instances();
+                if (std::find(instances.begin(), instances.end(), input.player) != instances.end()) {
+                    auto serviced = ga::service_freestore(scripts, {input.player, input.player}, *pool->pool, input.clocks.mode,
+                        pool->pool->qualified ? &actions->qualified_freestore() : nullptr);
+                    if (!serviced) return serviced;
+                }
             }
         }
         if (input.service != ga::Service::execution)

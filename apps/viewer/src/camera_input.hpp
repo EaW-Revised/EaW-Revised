@@ -5,7 +5,9 @@
 #include "eawr/presentation/camera/free_camera.hpp"
 #include "eawr/presentation/camera/input.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -436,5 +438,16 @@ struct TacticalPose final {
 [[nodiscard]] core::Result<TacticalPose> advance_pose(
     const camera::Constants& constants, const TacticalPose& pose,
     const StepIntent& intent, float default_zoom, float delta_seconds);
+
+// The one place a viewport extent becomes whole pixels. Godot's visible rect is
+// fractional under a content scale factor (1705.33 x 906.67 at 1.5 on 2558 x 1360),
+// while the render target and the camera frame are whole pixels. A positive extent
+// rounds to the nearest pixel, never below one; zero, negative and non-finite input
+// passes through unchanged so the caller still judges it (zero suspends, the rest is
+// invalid). The camera, its input adapter and picking all take their rect from here.
+[[nodiscard]] inline float whole_viewport_extent(const float extent) noexcept {
+    if (!std::isfinite(extent) || extent <= 0.0F) return extent;
+    return std::max(1.0F, std::round(extent));
+}
 
 } // namespace eawr::viewer::camera_input

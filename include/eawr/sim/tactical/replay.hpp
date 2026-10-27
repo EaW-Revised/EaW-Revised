@@ -47,6 +47,7 @@ inline constexpr std::uint16_t replay_extension_attract_pool = 13; // MAT-15 ATR
 inline constexpr std::uint16_t replay_extension_native_scene = 15; // optional native campaign content selection
 inline constexpr std::uint16_t replay_extension_object_turn = 16; // #3644: object-turn uses follow the commands
 inline constexpr std::uint16_t replay_extension_battle_domain = 17; // BF-1: absent is space
+inline constexpr std::uint16_t replay_extension_controllers = 18; // ADR-020: versioned optional controller policy
 inline constexpr std::size_t replay_max_bytes = 256U * 1024U * 1024U;
 
 // Recorded lobby settings are load-time metadata, never part of canonical simulation state.
@@ -172,6 +173,7 @@ struct TacticalSetup {
     std::optional<ReplayNativeScene> native_scene{};
     std::optional<AttractPoolReturn> attract_pool; // MAT-15/16: the demo attract's pool return, opt-in
     BattleDomain domain{BattleDomain::space};
+    std::optional<BattleControllerPolicy> controllers{};
     friend bool operator==(const TacticalSetup&, const TacticalSetup&) = default;
 };
 
@@ -188,6 +190,19 @@ struct TacticalReplay {
     std::vector<ObjectTurnRecord> object_turns{};
     friend bool operator==(const TacticalReplay&, const TacticalReplay&) = default;
 };
+
+[[nodiscard]] std::uint8_t command_body_opcode(const PlayerCommand& command) noexcept;
+
+// Command bodies exclude the replay's four-byte record length. Both entry points apply
+// the ordinary payload/issuer shape checks, without constructing a replay header.
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> encode_command_body(
+    const PlayerCommand& command, const TacticalSetup& setup);
+[[nodiscard]] core::Result<PlayerCommand> decode_command_body(
+    std::span<const std::uint8_t> bytes, const TacticalSetup& setup,
+    std::optional<PlayerId> authenticated_player = std::nullopt);
+[[nodiscard]] core::Result<void> validate_controllers(const TacticalSetup& setup);
+[[nodiscard]] core::Result<void> validate_command_provenance(
+    const PlayerCommand& command, const TacticalSetup& setup);
 
 // Reads the shared EAWRPLY magic and format version without validating the rest, so a
 // caller can route v1 and v2 files. Returns no value for short input or another magic.

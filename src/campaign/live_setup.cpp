@@ -1,7 +1,10 @@
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/core/text.hpp"
+#include "eawr/diagnostics/gc_memory.hpp"
 #include "eawr/campaign/planet_economy.hpp"
 #include "eawr/campaign/control.hpp"
 #include "eawr/campaign/setup_plan.hpp"
+#include "eawr/campaign/load_setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/story_plots.hpp"
 #include "eawr/data/retail_values.hpp"
@@ -96,16 +99,13 @@ core::Result<Fixed> number(const data::XmlNode* node, std::optional<Fixed> omitt
         return refuse<Fixed>("missing numeric input");
     }
     data::tag_trace::used(node);
-    if (key(node->name) == "PRODUCTION_SPEED_FACTOR" || key(node->name).starts_with("PRODUCTION_SPEED_MOD_BASE_VS_TECH_")
-        || key(node->name) == "GALACTIC_BUILD_TIME_MULTIPLIER") {
-        const auto value = data::retail::float_value(node->raw_text);
-        if (value) return core::Result<Fixed>::success(value->value);
-    }
-    const auto value = data::retail::leading_number(node->raw_text);
+    const auto value = data::retail::float_value(node->raw_text);
     if (!value) return refuse<Fixed>("invalid " + node->name);
     return core::Result<Fixed>::success(value->value);
 }
 struct Prepared {
+    mutable core::LoadNoteBuffer load_buffer;
+    mutable core::LoadNoteCollector load_collector;
     data::Catalog catalog;
     data::galactic::GalacticData data;
     StartingForceInputs starting;
@@ -183,9 +183,8 @@ core::Result<gc::ProductionOffer> offer(const Prepared& p, const CampaignSetupPl
         if (!flag) return refuse<gc::ProductionOffer>("invalid slicer flag");
         admission.slicer_unlockable = *flag;
     }
-    auto limit = number(data::retail::single(original, "Build_Max_Instances_Per_Planet"), Fixed::from_integer(-1).value());
-    if (!limit || limit.value().raw() % Fixed::scale) return refuse<gc::ProductionOffer>("invalid per-planet production limit");
-    admission.planet_limit = limit.value().trunc_to_integer();
+    const auto* limit = data::retail::single(original, "Build_Max_Instances_Per_Planet");
+    admission.planet_limit = limit ? data::retail::integer_constant(limit->raw_text) : -1; // LSA-06
     for (const auto& name : type.required_orbiting_units) {
         const auto id = p.identity(name);
         if (!id) {
@@ -262,7 +261,7 @@ core::Result<gc::ProductionOffer> offer(const Prepared& p, const CampaignSetupPl
         *unrounded_price = gc::production_product(adjusted.build_cost_credits.value_or(Fixed{}),
             *quantities.corruption_price_multiplier);
     }
-    return prepare_production_offer(adjusted, std::move(admission), quantities);
+    return prepare_production_offer(adjusted, std::move(admission), quantities, &p.load_buffer);
 }
 core::Result<bool> fleet_skips(const Prepared& p, const gc::GalacticSetup& setup, const gc::Fleet& fleet) {
     if (!setup.movement) return refuse<bool>("missing movement contents");
@@ -307,8 +306,12 @@ core::Result<gc::ProductionSetup> complete_production(const Prepared& p, const C
             if (!flag) return refuse<gc::ProductionSetup>("invalid registered slicer flag");
             row.slicer_unlockable = *flag;
         }
-        if (row.tech < 0 || row.tech > std::numeric_limits<std::int32_t>::max())
-            return refuse<gc::ProductionSetup>("invalid registered technology level");
+        const auto authored_tech = row.tech;
+        row.tech = std::clamp(row.tech, static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()),
+            static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()));
+        if (authored_tech < 0 || row.tech != authored_tech) campaign_type_note(&p.load_buffer, "EAWR-LOAD-1001", *type,
+            "Tech_Level", std::to_string(authored_tech), std::to_string(row.tech), "LSA-09: signed technology reaches availability comparison",
+            core::LoadCategory::retail_accepts, core::LoadAction::accepted);
         for (const auto& owner : plan.player_bindings())
             if (contains(type->affiliation, owner.faction)) row.affiliated_players.push_back(owner.player.player_id);
         std::sort(row.affiliated_players.begin(), row.affiliated_players.end());
@@ -395,7 +398,7 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
     for (std::size_t i = 0; i < p.starting.bindings.size(); ++i) {
         const auto& binding = p.starting.bindings[i]; const auto* type = p.starting.types.find(binding.original_type);
         if (!type) return refuse<CampaignPlacementContext>("unbound original type");
-        auto census = prepare_census_type(*type, binding.id, p.starting.bindings);
+        auto census = prepare_census_type(*type, binding.id, p.starting.bindings, &p.load_buffer);
         if (!census) return core::Result<CampaignPlacementContext>::failure(census.error());
         context.census.types.push_back(std::move(census).value());
         control_types.push_back({binding.id, binding.original_type, p.starting.runtime_types[i].skips_combat, false});
@@ -466,7 +469,7 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
             if (!power) return core::Result<CampaignPlacementContext>::failure(power.error());
             history_power = power.value();
         }
-        auto census = prepare_census_planet(*source, planet_type, history_power);
+        auto census = prepare_census_planet(*source, planet_type, history_power, &p.load_buffer);
         if (!census) return core::Result<CampaignPlacementContext>::failure(census.error());
         context.census.types.push_back(std::move(census).value());
         context.location_originals.push_back({control.planet, planet_type, location.initial_owner, control.planet, 0, false, false, 0, 0, gc::ActorCombatRole::unavailable, {}, {}});
@@ -487,8 +490,10 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
     for (std::size_t i = 0; i < plan.galaxy().routes.size(); ++i) {
         const auto& route = plan.galaxy().routes[i];
         const auto* source = p.data.trade_route(plan.route_names()[i]); // WGS-01 authored graph order.
-        if (!source || !source->political_control_gain) return refuse<CampaignPlacementContext>("missing route control input");
-        context.control.routes.push_back({route.id, *source->political_control_gain});
+        if (!source) return refuse<CampaignPlacementContext>("missing route control input");
+        if (!source->political_control_gain)
+            p.note("campaign_route_control_default", source->name + ": omitted Political_Control_Gain; using 0");
+        context.control.routes.push_back({route.id, source->political_control_gain.value_or(Fixed{})});
         control_routes.push_back({route.id, source->name});
     }
     // Binding overlays authored values. Omission defaults are already resolved
@@ -498,7 +503,9 @@ core::Result<CampaignPlacementContext> prepare_context(const vfs::Vfs& filesyste
         source.political_control = source.political_control.value_or(Fixed{});
         source.planet_capture_bonus_reward = source.planet_capture_bonus_reward.value_or(0);
     }
-    auto bound = bind_control_data(effective, p.starting.types, context.control, control_types, control_planets, control_routes);
+    for (auto& source : effective.trade_routes)
+        source.political_control_gain = source.political_control_gain.value_or(Fixed{});
+    auto bound = bind_control_data(effective, p.starting.types, context.control, control_types, control_planets, control_routes, &p.load_buffer);
     if (!bound) return core::Result<CampaignPlacementContext>::failure(bound.error());
     context.control = std::move(bound).value();
     auto ground = prepare_ground_capability_types(p.starting.types, p.starting.bindings);
@@ -541,6 +548,10 @@ core::Result<void> prepare_live_relations(Prepared& p, const data::galactic::Gal
             return refuse<void>("invalid authored " + issue.tag + " on " + issue.owner);
     }
     for (auto& faction : p.data.factions) {
+        if (!faction.benefits_from_corruption && std::any_of(plan.player_bindings().begin(), plan.player_bindings().end(),
+                [&](const auto& row) { return key(row.faction) == key(faction.name); }))
+            p.note("campaign_omitted_faction_tag", faction.name
+                + ": Benefits_From_Corruption is omitted; using the false constructor default (WGS-94)");
         faction.hyperspace_speed_factor = faction.hyperspace_speed_factor.value_or(one);
         faction.benefits_from_corruption = faction.benefits_from_corruption.value_or(false);
         faction.minimum_visible_base_level = faction.minimum_visible_base_level.value_or(0);
@@ -710,17 +721,20 @@ void install_live_placement_services(CampaignSetupServices& services,
     const std::shared_ptr<const Prepared>& owned, const CampaignSetupPlan& plan) {
     services.stock_starting_forces = std::make_shared<const StartingForceInputs>(owned->starting);
     services.placement_context = [owned](const auto&) { return core::Result<CampaignPlacementContext>::success(owned->context); };
-    services.location = [owned](const CampaignLocation& location) {
-        if (!owned->catalog.find(location.original_type, data::Category::game_object))
-            return refuse<void>("unbound scene location " + location.original_type);
+    services.location = [](const CampaignLocation&) {
+        // RGC-80/81: unresolved locations retain their authored slot, create nothing and do not stop setup.
+        // The load note is collected before services are published; planet/force passes skip null slots.
         return core::Result<void>::success();
     };
-    services.credit_cap = [per_planet = plan.fiscal()->credit_cap_per_planet](const gc::GalacticPlayer& player, const gc::GalacticSetup& setup) {
+    services.credit_cap = [owned, per_planet = plan.fiscal()->credit_cap_per_planet](const gc::GalacticPlayer& player, const gc::GalacticSetup& setup) {
         const auto count = static_cast<std::int64_t>(std::count_if(setup.planets.begin(), setup.planets.end(),
             [&](const auto& planet) { return planet.owner == player.player_id; }));
         Fixed cap; const auto planets = Fixed::from_integer(count);
-        if (!planets || !sim::math::try_multiply(planets.value(), per_planet, cap))
-            return refuse<Fixed>("credit-cap multiplication overflow");
+        if (!planets || !sim::math::try_multiply(planets.value(), per_planet, cap)) {
+            cap = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+            setup_load_note(owned->load_buffer, "EAWR-LOAD-1021", std::to_string(player.player_id),
+                "Credit_Cap_Per_Planet", std::to_string(per_planet.raw()), std::to_string(cap.raw()));
+        }
         return core::Result<Fixed>::success(cap);
     };
     // Root retains home records; setup does not publish presentation/Lua pointers.
@@ -766,7 +780,7 @@ void install_live_conflict_services(CampaignSetupServices& services,
 void install_live_ability_services(CampaignSetupServices& services,
     const std::shared_ptr<const Prepared>& owned) {
     services.economy_corruption = [owned](const CampaignSetupPlan& input, const gc::GalacticSetup& setup) {
-        return prepare_corruption_economy(owned->constants, owned->market, owned->catalog, input, setup);
+        return prepare_corruption_economy(owned->constants, owned->market, owned->catalog, input, setup, &owned->load_buffer);
     };
     services.ability_host = [owned](const CampaignSetupPlan& input, const gc::GalacticSetup& setup) {
         gc::GalacticAbilitySetup result;
@@ -911,9 +925,17 @@ void install_live_ability_services(CampaignSetupServices& services,
                     if (std::find(result.activated_spy_abilities.begin(), result.activated_spy_abilities.end(), key(candidate.name))
                         != result.activated_spy_abilities.end()) { spy = &candidate; break; }
                 }
+            std::vector<gc::AutoSpyProfile> automatic; // WGUI-19/101: initially enabled Galactic_Automatic records, authored order
+            if (spy_metadata) for (std::size_t i = 0; i < spy_metadata->system_spies.size(); ++i) {
+                const auto& candidate = spy_metadata->system_spies[i];
+                if (key(candidate.activation_style) != "GALACTIC_AUTOMATIC" || !candidate.initially_enabled) continue;
+                const auto validated = gc::validated_spy({gc::SpyStyle::galactic_automatic, candidate.duration, candidate.mask});
+                automatic.push_back({spy_metadata->name, static_cast<std::uint64_t>(i) + 1, validated.duration,
+                    candidate.influence_range, validated.mask});
+            }
             // A neutralization victim needs its hero respawn facts even without any activated ability of its own.
             const bool victim = neutralization_types.contains(binding.id);
-            if (!market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !spy && !victim
+            if (!market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !spy && !victim && automatic.empty()
                 && !(original_metadata && original_metadata->named_hero.value_or(false))) continue;
             gc::GalacticAbilityProfile profile; profile.type = binding.id; profile.has_market = market;
             for (const auto& [ability, kind] : {
@@ -936,6 +958,7 @@ void install_live_ability_services(CampaignSetupServices& services,
                     (original_metadata && original_metadata->named_hero.value_or(false)) || key(spy_metadata->object_class) == "GENERICHEROUNIT"};
                 profile.ground_activated.push_back(gc::AbilityKind::system_spy);
             }
+            profile.auto_spies = std::move(automatic);
             profile.lifecycle_only = !market && !slicer && !corruptor && !hacker && !destroyer && !saboteur && !neutralizer && !spy;
             if (saboteur) {
                 profile.sabotage = gc::SabotageAbilityProfile{sabotage_name, true, Fixed::from_integer(2).value()}; // WGCH-28: stock factor two
@@ -1016,7 +1039,7 @@ void install_live_ability_services(CampaignSetupServices& services,
             }
             if (market) {
                 if (!market_enabled) return refuse<gc::GalacticAbilitySetup>("missing black-market enabled fact");
-                auto buyer = prepare_black_market_buyer(owned->catalog, binding.original_type, 0, 0, false);
+                auto buyer = prepare_black_market_buyer(owned->catalog, binding.original_type, 0, 0, false, &owned->load_buffer);
                 if (!buyer) return core::Result<gc::GalacticAbilitySetup>::failure(buyer.error());
                 profile.market = std::move(buyer).value(); profile.initially_enabled = *market_enabled;
             }
@@ -1057,11 +1080,16 @@ void install_live_ability_services(CampaignSetupServices& services,
                     }
                     return values.empty() || values.size() == 5;
                 };
-                if (!load_ranges("Min_Respawn_Time_Per_Tech_Level", theft.absence_min)
-                    || !load_ranges("Max_Respawn_Time_Per_Tech_Level", theft.absence_max)
-                    || theft.absence_min.size() != theft.absence_max.size()) return refuse<gc::GalacticAbilitySetup>("invalid theft absence arrays");
-                for (std::size_t i = 0; i < theft.absence_min.size(); ++i)
-                    if (theft.absence_min[i] < Fixed{} || theft.absence_min[i] > theft.absence_max[i]) return refuse<gc::GalacticAbilitySetup>("invalid theft absence range");
+                bool valid_ranges = load_ranges("Min_Respawn_Time_Per_Tech_Level", theft.absence_min);
+                valid_ranges = load_ranges("Max_Respawn_Time_Per_Tech_Level", theft.absence_max) && valid_ranges;
+                valid_ranges = valid_ranges && theft.absence_min.size() == theft.absence_max.size();
+                if (valid_ranges) for (std::size_t i = 0; i < theft.absence_min.size(); ++i)
+                    if (theft.absence_min[i] < Fixed{} || theft.absence_min[i] > theft.absence_max[i]) valid_ranges = false;
+                if (!valid_ranges) {
+                    campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1230", child("Min_Respawn_Time_Per_Tech_Level") ? child("Min_Respawn_Time_Per_Tech_Level") : slicer, binding.original_type,
+                        "Min_Respawn_Time_Per_Tech_Level/Max_Respawn_Time_Per_Tech_Level", "both arrays empty");
+                    theft.absence_min.clear(); theft.absence_max.clear();
+                }
             }
             const auto* type = input.original_type(binding.id);
             if (!type) return refuse<gc::GalacticAbilitySetup>("unbound ability original type");
@@ -1075,7 +1103,8 @@ void install_live_ability_services(CampaignSetupServices& services,
                 data::tag_trace::used(value); auto name = words(value->raw_text);
                 if (!name.empty() && !data::retail::is_placeholder(value->raw_text)) {
                     profile.respawn_structure = owned->identity(name.front());
-                    if (!profile.respawn_structure) return refuse<gc::GalacticAbilitySetup>("unbound hero respawn structure");
+                    if (!profile.respawn_structure) campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1231", value,
+                        binding.original_type, "Respawn_Tied_To_Structure", "no structure dependency");
                 }
             }
             result.profiles.push_back(std::move(profile));
@@ -1144,11 +1173,16 @@ void install_live_ability_services(CampaignSetupServices& services,
         for (const auto& planet : setup.planets) {
             const auto* source = planet_source(*owned, input, planet.id);
             if (!source || !source->planet_destroyed_credit_value) continue;
-            if (source->planet_destroyed_credit_value->raw() < 0) return refuse<gc::GalacticAbilitySetup>("invalid destroyed planet income");
+            if (source->planet_destroyed_credit_value->raw() < 0) {
+                const auto originals = layers(owned->catalog, source->name, data::Category::game_object);
+                campaign_load_note(&owned->load_buffer, "EAWR-LOAD-1232", data::retail::single(originals, "Planet_Destroyed_Credit_Value"),
+                    source->name, "Planet_Destroyed_Credit_Value", "ordinary income", "WGCH-176: invalid value unknown; retain ordinary income");
+                continue;
+            }
             result.ruined_income.push_back({planet.id, *source->planet_destroyed_credit_value});
         }
         auto corruption = prepare_corruption_host(owned->catalog, input, setup, result,
-            [owned](std::string_view name) { return owned->identity(name); });
+            [owned](std::string_view name) { return owned->identity(name); }, &owned->load_buffer);
         if (!corruption) return core::Result<gc::GalacticAbilitySetup>::failure(corruption.error());
         return core::Result<gc::GalacticAbilitySetup>::success(std::move(result));
     };
@@ -1319,6 +1353,10 @@ core::Result<CampaignSetupServices> prepare_live_campaign_services(const vfs::Vf
         return core::Result<CampaignSetupServices>::failure(starting.error());
     if (auto resources = prepare_live_resources(p, filesystem, catalog, plan, difficulty); !resources)
         return core::Result<CampaignSetupServices>::failure(resources.error());
+    for (const auto& location : plan.locations())
+        if (!catalog.find(location.original_type, data::Category::game_object))
+            p.note("campaign_unresolved_location", "Locations names unknown type " + location.original_type
+                + "; the entry creates nothing and its placement is skipped (RGC-80/81)");
     for (const auto& location : plan.locations()) if (location.planet) {
         const auto original = layers(catalog, location.original_type, data::Category::game_object);
         for (const auto* tag : {"Planet_Black_Market_Modifier", "Planet_Tech_Availability_Rating", "Planet_Slice_Difficulty_Rating"})
@@ -1329,6 +1367,42 @@ core::Result<CampaignSetupServices> prepare_live_campaign_services(const vfs::Vf
     const std::shared_ptr<const Prepared> owned = prepared;
     CampaignSetupServices services;
     services.load_diagnostics = owned->diagnostics;
+    services.annotate_load_notes = [owned, campaign = std::string(plan.campaign_name())](std::span<core::LoadNote> notes) {
+        for (auto& note : notes) if (note.code >= "EAWR-LOAD-1000" && note.code <= "EAWR-LOAD-1199") {
+            if (note.object == "GameConstants") {
+                const auto& root = owned->constants.root;
+                const auto found = std::find_if(root.children.begin(), root.children.end(), [&](const auto& node) {
+                    return core::iequals(node.name, note.tag);
+                });
+                const auto& source = found == root.children.end() ? root.source : found->source;
+                note.layer.mod_id = source.layer_id; note.file = source.logical_path; note.line = source.line;
+                if (found != root.children.end()) note.authored_value = found->raw_text;
+                continue;
+            }
+            auto originals = layers(owned->catalog, note.object, data::Category::game_object);
+            if (originals.empty()) originals = layers(owned->catalog, note.object, data::Category::faction);
+            if (originals.empty()) originals = layers(owned->catalog, campaign, data::Category::campaign);
+            if (const auto* node = data::retail::single(originals, note.tag)) {
+                note.layer.mod_id = node->source.layer_id;
+                note.file = node->source.logical_path; note.line = node->source.line;
+                note.authored_value = node->raw_text;
+            } else if (!originals.empty() && note.file.empty()) {
+                const auto& source = originals.front()->root.source;
+                note.layer.mod_id = source.layer_id; note.file = source.logical_path; note.line = source.line;
+            }
+        }
+    };
+    services.load_notes = [owned, annotate = services.annotate_load_notes] {
+        owned->load_collector.merge(owned->load_buffer);
+        auto notes = owned->load_collector.snapshot(); annotate(notes); return notes;
+    };
+    if (diagnostics::GcMemory::enabled()) services.memory_inventory = [weak = std::weak_ptr<const Prepared>(owned)](diagnostics::GcMemory& memory) {
+        if (const auto value = weak.lock()) {
+            memory.row("gc.providers.catalog", value->catalog.definitions());
+            memory.row("gc.providers.galactic_data", value->data);
+            memory.row("gc.providers.economics", value->economics.types);
+        }
+    };
     install_live_placement_services(services, owned, plan);
     install_live_conflict_services(services, owned);
     install_live_ability_services(services, owned);

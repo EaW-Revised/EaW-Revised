@@ -214,8 +214,8 @@ credential can be revoked on its own. The member uses the same credential for al
 
 Cloudflare's per-minute cap counts revokes as well as generates. A full room costs up to
 9 generates at attach, 9 revokes at its end, and one generate plus one revoke per kick,
-refused newcomer or Reattach: about 20 calls over its life. The default 30 calls per
-minute therefore serves roughly one to one and a half full rooms filling per minute;
+refused newcomer or Reattach: about 20 calls over its life. The default 120 calls per
+minute therefore serves roughly six full rooms filling per minute;
 operators running busy servers raise `cloudflare_turn_calls_per_minute`.
 
 **coturn has no revocation.** REST credentials are HMAC usernames with an embedded
@@ -623,10 +623,10 @@ qualification still needs the deployed-service cases in the test plan; loopback 
 | Item | Default proposal | Why |
 | --- | --- | --- |
 | Room capacity | 2..9 for signalling rooms | the transport bound, separate from the directory's listing cap of 64 |
-| Connections per member | 2 (directory + room member), or 1 if the slice moves room membership onto the directory connection | `max_connections` 128 holds 7 full rooms at two each; operators expecting more raise it (bound 4,096) |
+| Connections per member | 2 (directory + room member), or 1 if the slice moves room membership onto the directory connection | `max_connections` 1,024 holds 56 full rooms at two each; operators expecting more raise it (bound 4,096) |
 | Live connections per IP / IPv6 /64 | default `connections_per_ip` raised from 8 to **18** (2 x `max_match_seats`) | the live cap is enforced at accept; nine members behind one home NAT (three 3-human sides in one house, or the several-processes-per-machine test) need 18 live connections at two per member, and even 9 at one. The per-prefix operation, unpaired and guess budgets still bound abuse from that prefix |
 | Signals | provisional room budget: 480 operations and 2 MiB per member per minute, room = 9 x that; separate from the legacy 120 ops / 1 MiB session budget and from the per-prefix legacy budget (players can share a NAT) | GNS sends several blobs per connection while ICE settles and each member sets up 8 connections; the slice measures blobs and bytes per pair in the introduced-path test and sets the default to 4 x the measured maximum |
-| Memory per room | about 10 KiB of room/member records; queues are per connection (256 KiB / 64 frames each), so the worst case at two connections per member is 18 x 256 KiB = 4.5 MiB plus TLS state | total output queue memory stays bounded by `max_connections x queue_bytes` (32 MiB at defaults) |
+| Memory per room | about 10 KiB of room/member records; queues are per connection (256 KiB / 64 frames each), so the worst case at two connections per member is 18 x 256 KiB = 4.5 MiB plus TLS state | total output queue memory stays bounded by `max_connections x queue_bytes` (256 MiB at defaults) |
 | Reservations | 30 s attach deadline, then freed; at most 2 outstanding per room; counted toward `unpaired_sessions_per_ip`; an expired unattached reservation counts as a failed guess | stops a reserved-but-absent guest, or one client in rolling 30 s windows, holding a public room's seats |
 | Roster pushes | one snapshot per revision to each member, under 1 KiB | no deltas (lobby plan rule) |
 

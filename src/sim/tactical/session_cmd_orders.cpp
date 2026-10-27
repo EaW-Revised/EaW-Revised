@@ -186,8 +186,10 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
         else if (auto* guard = std::get_if<GuardPayload>(&squadron_payload)) guard->target = team_target(guard->target);
         // UFS-21: an accepted replacement ends the special approach, even when
         // the replacement is another move to the same point. Face preserves it.
-        if (live.abilities && !std::holds_alternative<FacePayload>(squadron_payload))
+        if (live.abilities && !std::holds_alternative<FacePayload>(squadron_payload)) {
             live.abilities->pending_buzz_position.reset();
+            live.abilities->pending_buzz_controller = {};
+        }
         apply_squadron_order(minds.at(mind->first), squadron_payload, live.state.position, squadron_table);
         if (mind->second.mode == SquadronMode::move && !std::holds_alternative<FacePayload>(command.payload)) {
             squadron_group.push_back(unit_id);

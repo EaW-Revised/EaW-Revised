@@ -38,6 +38,7 @@ core::Result<tactical::TacticalContent> conflict_entry_content(const tactical::T
     auto fog = skirmish::fog_rules(inputs);
     if (!fog) return core::Result<tactical::TacticalContent>::failure(fog.error());
     tactical::TacticalContent content;
+    content.load_notes = std::move(bound.value().load_notes);
     content.sensors = std::move(bound.value().sensors);
     content.durability = std::move(bound.value().durability);
     content.motion = std::move(bound.value().motion);

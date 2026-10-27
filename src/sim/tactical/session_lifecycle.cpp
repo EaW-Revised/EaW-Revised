@@ -348,7 +348,7 @@ TacticalSession::~TacticalSession() = default;
 core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
+    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box, core::LoadNoteBuffer* load_notes) {
     auto valid = validate_setup(setup);
     if (valid && setup.domain == BattleDomain::land) {
         return core::Result<TacticalSession>::failure(detail::diagnostic(
@@ -360,9 +360,10 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (valid) {
         valid = validate_sensors(sensors);
     }
-    if (valid) {
-        valid = validate_durability(durability);
-    }
+    if (!valid) return core::Result<TacticalSession>::failure(valid.error());
+    core::LoadNoteBuffer local_notes;
+    auto owned_durability = prepare_durability(durability, load_notes ? *load_notes : local_notes);
+    if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
     if (valid && !motion.profiles.empty()) {
         valid = validate_motion(motion);
     } else if (valid) {
@@ -386,7 +387,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     if (!valid) {
         return core::Result<TacticalSession>::failure(valid.error());
     }
-    auto impl = std::make_unique<Impl>(setup, sensors, durability, motion, fog, combat, victory, abilities, economy, map_box);
+    auto impl = std::make_unique<Impl>(setup, sensors, owned_durability.value(), motion, fog, combat, victory, abilities, economy, map_box);
     if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
     return core::Result<TacticalSession>::success(TacticalSession(std::move(impl)));
 }
@@ -394,7 +395,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
 core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
     const std::span<const SensorProfile> sensors, const DurabilityTable& durability, const MotionTable& motion,
     const std::optional<FogRules>& fog, const CombatTable& combat, const VictoryRules& victory,
-    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box) {
+    const AbilityTable& abilities, const EconomyRules& economy, const MapBox& map_box, core::LoadNoteBuffer* load_notes) {
     auto valid = validate_replay(replay);
     if (valid && replay.setup.domain == BattleDomain::land) {
         return core::Result<TacticalSession>::failure(detail::diagnostic(
@@ -410,9 +411,10 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     if (valid) {
         valid = validate_sensors(sensors);
     }
-    if (valid) {
-        valid = validate_durability(durability);
-    }
+    if (!valid) return core::Result<TacticalSession>::failure(valid.error());
+    core::LoadNoteBuffer local_notes;
+    auto owned_durability = prepare_durability(durability, load_notes ? *load_notes : local_notes);
+    if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
     if (valid && !motion.profiles.empty()) {
         valid = validate_motion(motion);
     } else if (valid) {
@@ -437,7 +439,7 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
         return core::Result<TacticalSession>::failure(valid.error());
     }
     auto session = TacticalSession(
-        std::make_unique<Impl>(replay.setup, sensors, durability, motion, fog, combat, victory, abilities,
+        std::make_unique<Impl>(replay.setup, sensors, owned_durability.value(), motion, fog, combat, victory, abilities,
             economy, map_box));
     if (session.impl_->initialization_error) return core::Result<TacticalSession>::failure(*session.impl_->initialization_error);
     for (const auto& command : replay.commands) {
@@ -453,7 +455,7 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
     return core::Result<TacticalSession>::success(std::move(session));
 }
 
-core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup, const TacticalContent& content) {
+core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup, const TacticalContent& content, core::LoadNoteBuffer* load_notes) {
     if (setup.domain != content.domain) {
         return core::Result<TacticalSession>::failure(detail::diagnostic(
             diagnostic_codes::invalid_setup, "tactical setup and content battle domains differ"));
@@ -466,9 +468,14 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
         if (setup.campaign || !setup.squadrons.empty() || !setup.free_garrisons.empty())
             return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "land movement host does not support campaign, space squadrons or free garrisons"));
-        // Land has its own movement-only host. Space content validation and phase order remain independent.
-        auto impl = std::make_unique<Impl>(resolved, std::span<const SensorProfile>{}, DurabilityTable{}, MotionTable{},
-            std::nullopt, CombatTable{}, VictoryRules{}, AbilityTable{}, EconomyRules{}, content.map_box);
+        core::LoadNoteBuffer local_notes;
+        auto owned_durability = prepare_durability(content.durability, load_notes ? *load_notes : local_notes);
+        if (!owned_durability) return core::Result<TacticalSession>::failure(owned_durability.error());
+        if (auto valid = validate_combat(content.combat); !valid)
+            return core::Result<TacticalSession>::failure(valid.error());
+        // Land owns locomotion; the same authored combat and durability rows bind its members.
+        auto impl = std::make_unique<Impl>(resolved, std::span<const SensorProfile>{}, owned_durability.value(), MotionTable{},
+            std::nullopt, content.combat, VictoryRules{}, AbilityTable{}, EconomyRules{}, content.map_box);
         if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
         if (auto initialized = impl->initialize_land(content); !initialized)
             return core::Result<TacticalSession>::failure(initialized.error());
@@ -476,7 +483,7 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     }
     if (content.retreat) resolve_cinematic_seats(resolved, content.economy.players);
     auto result = create(resolved, content.sensors, content.durability, content.motion, content.fog, content.combat,
-        content.victory, content.abilities, content.economy, content.map_box);
+        content.victory, content.abilities, content.economy, content.map_box, load_notes);
     if (result && content.retreat) {
         auto configured = result.value().configure_retreat(*content.retreat);
         if (!configured) return core::Result<TacticalSession>::failure(configured.error());
@@ -485,10 +492,10 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
 }
 
 core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
-    const TacticalContent& content) {
+    const TacticalContent& content, core::LoadNoteBuffer* load_notes) {
     if (replay.setup.domain == BattleDomain::land)
         if (auto valid = validate_replay(replay); !valid) return core::Result<TacticalSession>::failure(valid.error());
-    auto result = create(replay.setup, content);
+    auto result = create(replay.setup, content, load_notes);
     if (!result) return result;
     for (const auto& command : replay.commands)
         if (auto submitted = result.value().submit(command); !submitted) return core::Result<TacticalSession>::failure(submitted.error());
@@ -511,6 +518,9 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
         return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "stage_spawn during an object-turn provider call"));
     }
+    if (!impl_->setup.controllers && (unit.control != UnitControl::none || unit.controller_seat.value != 0))
+        return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "staged controller metadata requires the battle controller policy"));
     if (!impl_->teams.contains(unit.owner)) {
         return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
             "staged unit owner " + std::to_string(unit.owner) + " is not a declared player"));
@@ -526,6 +536,8 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
     auto state = unit;
     state.entity_id = impl_->next_id;
     state.order = Order{};
+    if (auto assigned = impl_->attribute_output(state, unit.controller_seat, state.entity_id); !assigned)
+        return core::Result<EntityId>::failure(assigned.error());
     auto live = impl_->sorted_live();
     live.push_back(impl_->new_unit(state, impl_->completed_tick));
     std::optional<Impl::CommandLedger> command_ledger;

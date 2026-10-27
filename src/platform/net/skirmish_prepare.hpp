@@ -33,7 +33,7 @@ struct PreparedSkirmish {
 };
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs&, const data::Catalog&,
     std::string& failure, const std::string& map, const std::set<std::string>& additional_types = {});
-[[nodiscard]] std::set<std::string> missing_start_types(const skirmish::Fixture&, const skirmish::StartInputs&, const units::UnitTables&);
+using skirmish::missing_start_types;
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, const vfs::Vfs&, const data::Catalog&);
 [[nodiscard]] core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture&, units::UnitTables, skirmish::StartInputs);
 [[nodiscard]] core::Result<skirmish::FixtureOptions> validated_lan_options(const skirmish::SetupSelection&, std::span<const skirmish::SetupMap>);

@@ -113,6 +113,8 @@ std::optional<core::Diagnostic> bind_projectile_flight(const Projectile& project
             flight.straight_distance = input(projectile.rocket_straight_distance, rocket_default_straight_distance,
                 "Projectile_Rocket_Straight_Distance");
         }
+        if (const auto reason = tactical::flight_profile_error(flight); !reason.empty())
+            return failure("projectile '" + projectile.id + "': " + std::string(reason));
         shot.flight = flight;
     }
     return std::nullopt;
@@ -665,7 +667,8 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
 } // namespace
 
 core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const ContentErrors policy,
-    std::vector<core::Diagnostic>* const skipped) {
+    std::vector<core::Diagnostic>* const skipped, core::LoadNoteBuffer* load_notes) {
+    (void)load_notes;
     using Result = core::Result<tactical::CombatTable>;
     const CategoryBits category_bits{tables};
 

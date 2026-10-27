@@ -32,6 +32,28 @@ int TacticalHud::options_presses() const noexcept {
 }
 EawrTacticalHud* TacticalHud::hud() const noexcept { return state_->hud; }
 
+void TacticalHud::prepare_command_bar_movie(const vfs::Vfs& filesystem, const std::string_view movie) {
+    if (state_->movie_bone && state_->hud) {
+        state_->hud->set_meta("eawr_movie_ready", false);
+        state_->command_bar_movie.prepare(filesystem, movie, *state_->movie_bone, *state_->hud);
+        state_->hud->set_movie_warmup([state = state_.get()] {
+            if (!state->command_bar_movie.warmup()) return false;
+            state->hud->set_meta("eawr_movie_ready", true);
+            return true;
+        });
+    }
+}
+bool TacticalHud::play_command_bar_movie(const std::string_view speech) {
+    return state_->hud && state_->command_bar_movie.start(*state_->hud, speech);
+}
+void TacticalHud::service_command_bar_movie(const bool speech_present, const bool paused) {
+    if (state_->hud) state_->command_bar_movie.service(speech_present, paused, state_->hud->placement());
+}
+bool TacticalHud::command_bar_movie_playing() const { return state_->command_bar_movie.playing(); }
+bool TacticalHud::command_bar_movie_active() const { return state_->command_bar_movie.active(); }
+std::string_view TacticalHud::command_bar_movie_speech() const { return state_->command_bar_movie.speech(); }
+void TacticalHud::write_command_bar_movie_report(std::ostream& output) const { state_->command_bar_movie.write_report(output); }
+
 std::string TacticalHud::localized_text(std::string_view key, std::string_view fallback) const {
     if (state_->text_database)
         if (const auto* entry = state_->text_database->find(key)) return data::ui::to_utf8(entry->value);
@@ -42,6 +64,125 @@ void TacticalHud::set_time_handlers(TimeHandlers handlers) { state_->time_handle
 void TacticalHud::set_movie_handler(std::function<void()> handler) { state_->movie_handler = std::move(handler); }
 void TacticalHud::set_options_handler(std::function<void()> handler) { state_->options_handler = std::move(handler); }
 void TacticalHud::set_beacon_handler(std::function<void()> handler) { state_->beacon_handler = std::move(handler); }
+void TacticalHud::set_gift_handler(std::function<void(sim::SeatId)> handler) { state_->gift_handler = std::move(handler); }
+
+void TacticalHud::set_gift(const bool policy, const bool enabled, const std::vector<model::ObserverOwner>& recipients) {
+    auto& state = *state_;
+    const bool changed = state.gift_recipients != recipients;
+    state.gift_enabled = policy && enabled && !recipients.empty();
+    if (state.gift_open && (recipients.size() != state.gift_recipients.size()
+        || !std::equal(recipients.begin(), recipients.end(), state.gift_recipients.begin(),
+            [](const auto& a, const auto& b) { return a.seat == b.seat; }))) state.gift_open = false;
+    if (changed) state.gift_recipients = recipients;
+    if (!state.gift_enabled) state.gift_open = false;
+    if (!policy || !state.hud || state.shell.order_buttons.empty()) {
+        if (state.gift_button) state.gift_button->hide();
+        if (state.gift_scroll) state.gift_scroll->hide();
+        for (auto& cell : state.gift_cells) cell.button->hide();
+        state.gift_viewport = Vector2(-1, -1);
+        return;
+    }
+    if (state.gift_button && !changed && state.gift_viewport == state.hud->get_size()
+        && state.gift_drawn_enabled == state.gift_enabled && state.gift_drawn_open == state.gift_open) return;
+    state.gift_viewport = state.hud->get_size();
+    state.gift_drawn_enabled = state.gift_enabled;
+    state.gift_drawn_open = state.gift_open;
+    // ADR-020 project placement: immediately above the authored command row.
+    // Reuse that row's blank/state art; the feature has no retail Gift icon.
+    const auto& look = state.shell.order_buttons.front();
+    const auto make_button = [&](Control* parent) {
+        auto* button = memnew(EawrHudButton);
+        button->setup_art({.normal = state.command_texture(look.blank, "gift command blank"),
+            .hover = state.command_texture(look.mouse_over, "gift command hover"),
+            .pressed = state.command_texture(look.pressed, "gift command pressed"),
+            .disabled = state.command_texture(look.blank, "gift command disabled")});
+        parent->add_child(button);
+        auto* label = memnew(Label);
+        label->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        label->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+        label->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+        label->set_vertical_alignment(VERTICAL_ALIGNMENT_CENTER);
+        label->set_clip_text(true);
+        label->add_theme_color_override("font_color", Color(1, 1, 1));
+        label->add_theme_color_override("font_outline_color", Color(0, 0, 0));
+        label->add_theme_constant_override("outline_size", 2);
+        if (state.fonts) label->add_theme_font_override("font", state.fonts->font(state.card_face));
+        button->add_child(label);
+        return State::GiftCell{button, label, {}};
+    };
+    if (!state.gift_button) {
+        auto cell = make_button(state.hud);
+        state.gift_button = cell.button;
+        state.gift_button->set_name("gift");
+        const data::ui::TextDatabase empty;
+        data::ui::TextLookup lookup(state.text_database ? *state.text_database : empty);
+        cell.label->set_text(text(data::ui::to_utf8(lookup.text("TEXT_EAWR_GIFT_UNITS"))));
+        state.gift_button->set_action([this] {
+            auto& current = *state_;
+            if (!current.gift_enabled) return;
+            ++current.gift_presses;
+            current.gift_open = !current.gift_open;
+            set_gift(true, current.gift_enabled, current.gift_recipients);
+        });
+        state.gift_scroll = memnew(ScrollContainer);
+        state.gift_scroll->set_horizontal_scroll_mode(ScrollContainer::SCROLL_MODE_DISABLED);
+        state.gift_scroll->set_z_index(1);
+        state.hud->add_child(state.gift_scroll);
+        state.gift_list = memnew(Control);
+        state.gift_list->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        state.gift_scroll->add_child(state.gift_list);
+    }
+    const float scale = static_cast<float>(state.hud->space().scale);
+    const Vector2 size(96.0F * scale, 30.0F * scale);
+    Vector2 position(12.0F * scale, state.hud->get_size().y - 220.0F * scale);
+    if (const auto anchor = state.order_buttons.find("attack"); anchor != state.order_buttons.end())
+        position = anchor->second->get_position() - Vector2(0, size.y + 4.0F * scale);
+    position.x = std::clamp(position.x, 0.0F, std::max(0.0F, state.hud->get_size().x - size.x));
+    position.y = std::clamp(position.y, 0.0F, std::max(0.0F, state.gift_viewport.y - size.y));
+    state.gift_button->set_position(position);
+    state.gift_button->set_size(size);
+    state.gift_button->set_hit_rect({{}, size});
+    state.gift_button->set_disabled(!state.gift_enabled);
+    state.gift_button->set_modulate(state.gift_enabled ? Color(1, 1, 1) : Color(0.5F, 0.5F, 0.5F));
+    state.gift_button->show();
+    const Vector2 recipient_size(180.0F * scale, size.y);
+    const float rows_height = static_cast<float>(state.gift_recipients.size()) * (size.y + 2.0F * scale);
+    const float available = std::max(size.y, position.y - 4.0F * scale);
+    const float list_height = std::min(rows_height, available);
+    state.gift_scroll->set_position({std::clamp(position.x, 0.0F,
+        std::max(0.0F, state.gift_viewport.x - recipient_size.x)), std::max(0.0F, position.y - list_height - 2.0F * scale)});
+    state.gift_scroll->set_size({recipient_size.x, list_height});
+    state.gift_list->set_custom_minimum_size({recipient_size.x, rows_height});
+    state.gift_scroll->set_visible(state.gift_open);
+    for (std::size_t i = 0; i < state.gift_recipients.size(); ++i) {
+        if (i == state.gift_cells.size()) {
+            auto cell = make_button(state.gift_list);
+            cell.button->set_action([this, i] {
+                auto& current = *state_;
+                if (!current.gift_open || !current.gift_enabled || i >= current.gift_recipients.size()) return;
+                const auto seat = current.gift_cells[i].seat;
+                if (current.gift_recipients[i].seat != seat) return;
+                current.gift_open = false;
+                ++current.gift_submissions;
+                current.gift_scroll->hide();
+                for (auto& row : current.gift_cells) row.button->hide();
+                if (current.gift_handler) current.gift_handler(seat);
+            });
+            state.gift_cells.push_back(cell);
+        }
+        auto& cell = state.gift_cells[i];
+        cell.seat = state.gift_recipients[i].seat;
+        const String name = text(state.gift_recipients[i].name);
+        if (cell.label->get_text() != name) cell.label->set_text(name);
+        cell.button->set_tooltip_text(name);
+        cell.button->set_name(String("gift_to_") + String::num_uint64(cell.seat.value));
+        cell.button->set_position({0, static_cast<float>(i) * (size.y + 2.0F * scale)});
+        cell.button->set_size(recipient_size);
+        cell.button->set_hit_rect({{}, recipient_size});
+        cell.button->set_visible(state.gift_open);
+    }
+    for (std::size_t i = state.gift_recipients.size(); i < state.gift_cells.size(); ++i) state.gift_cells[i].button->hide();
+}
 void TacticalHud::set_beacon(const bool enabled, const bool targeting) {
     if (auto* button = state_->beacon_button) {
         button->set_special_disabled(!enabled);
@@ -184,6 +325,9 @@ std::optional<std::array<float, 2>> TacticalHud::control_point(const std::string
         return centre(Rect2(button->get_global_position() + button->hit_rect().position, button->hit_rect().size));
     };
     if (name == "pause") return button_centre(state.pause_button);
+    if (name == "gift") return button_centre(state.gift_button);
+    for (const auto& cell : state.gift_cells)
+        if (name == "gift_to_" + std::to_string(cell.seat.value)) return button_centre(cell.button);
     if (name == "options" || name == "b_option_t") return button_centre(state.options_button);
     if (name == "movie_camera" || name == "b_camera_t") return button_centre(state.movie_button);
     if (name == "beacon" || name == "b_special_weapon2") return button_centre(state.beacon_button);
@@ -262,13 +406,7 @@ std::optional<std::array<float, 2>> TacticalHud::minimap_point(const double x, c
 
 void TacticalHud::set_unit_cards(const model::CardLayout& layout, const std::span<const model::CardUnit> units) {
     if (state_->cards == nullptr) return;
-    std::vector<EawrUnitCards::Card> cards;
-    cards.reserve(layout.cards.size());
-    for (const model::UnitCard& card : layout.cards) {
-        if (card.unit >= units.size()) continue;
-        cards.push_back({card.slot, units[card.unit].type, card.count, card.stacked, card.health_level, card.shield});
-    }
-    state_->cards->show(std::move(cards), layout.borders);
+    state_->cards->show_units(layout, units);
 }
 
 

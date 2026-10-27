@@ -4,6 +4,7 @@
 // test_battle_input.py).
 
 #include "eawr/presentation/ui/world_ui.hpp"
+#include "eawr/presentation/ui/settings.hpp"
 #include "ui_test_support.hpp"
 
 #include <array>
@@ -17,6 +18,68 @@ namespace ui = presentation::ui;
 using test::ui::expect;
 
 bool close_to(const float a, const float b) { return std::abs(a - b) <= 1.0e-3F; }
+
+void owner_names() {
+    sim::tactical::TacticalInstance instance;
+    const ui::Rgb same_colour{12, 34, 56};
+    const std::array<ui::ObserverOwner, 3> roster{{{1, "Alice", same_colour},
+        {2, "Bob", same_colour}, {3, "Computer (Hard)", {90, 80, 70}}}};
+    expect(ui::resolve_owner_name(1, roster, "Faction") == "Alice", "hover roster: unique human name");
+    expect(ui::resolve_owner_name(99, roster, "Faction").empty(), "hover roster: no invented player name");
+    const std::array<ui::ObserverOwner, 2> shared{{{1, "Alice", same_colour}, {1, "Bob", same_colour}}};
+    expect(ui::resolve_owner_name(1, shared, "Faction") == "Faction", "hover roster: shared owner keeps faction fallback");
+    expect(ui::resolve_owner_name(99, roster, "Faction", "Known scoreboard label") == "Known scoreboard label",
+        "hover roster: existing display fallback is preserved");
+    instance.owner = 1;
+    expect(ui::display_owner(instance, roster, true) == &roster[0], "hover: own human lobby name is borrowed");
+    instance.owner = 2;
+    expect(ui::display_owner(instance, roster, true) == &roster[1], "hover: enemy/ally identity differs with identical colours");
+    expect(ui::display_owner(instance, roster, true)->colour == same_colour, "hover: player colour is preserved");
+    expect(!ui::display_owner(instance, roster, false), "hover: fog hides even a known owner");
+    ui::GameplaySettings settings;
+    expect(ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, true)),
+        "hover: multiplayer default reaches resolver");
+    expect(!ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, false)),
+        "hover: single-player default reaches resolver");
+    settings.hover_owner_names = 0;
+    expect(!ui::display_owner(instance, roster, true, ui::hover_owner_names_enabled(settings, true)),
+        "hover: disabled real setting reaches resolver");
+    instance.owner = 3;
+    expect(ui::display_owner(instance, roster, true)->name == "Computer (Hard)", "hover: AI display name");
+    instance.owner = 99;
+    expect(!ui::display_owner(instance, roster, true), "hover: absent roster entry has no invented name");
+}
+
+void controller_owner_names() {
+    sim::tactical::BattleControllerPolicy policy;
+    policy.seats = {{{11}, 1, sim::SeatKind::human, true}, {{12}, 1, sim::SeatKind::human, true}};
+    policy.factions = {{1, sim::tactical::FactionController::humans}};
+    const auto fallback = ui::resolve_owner_name(1, {}, "Faction", {}, &policy);
+    expect(fallback == "Faction", "shared human lobby owner has a faction caption without a player-level name");
+    expect(ui::resolve_owner_name(1, {}, "Faction").empty(), "policy OFF preserves the previous unnamed lobby fallback");
+    sim::tactical::TacticalInstance instance;
+    instance.owner = 1; instance.control = sim::tactical::UnitControl::mobile; instance.controller_seat = {11};
+    const ui::Rgb colour{12, 34, 56};
+    const std::array<ui::ObserverOwner, 1> shared_roster{{{1, std::string(fallback), colour}}};
+    instance.control = sim::tactical::UnitControl::shared_structure; instance.controller_seat = {};
+    const auto* caption = ui::display_owner(instance, shared_roster, true, true, true);
+    expect(caption && caption->name == "Faction", "shared human-side structure displays the real adapter fallback caption");
+    instance.control = sim::tactical::UnitControl::mobile; instance.controller_seat = {11};
+    const std::array<ui::ObserverOwner, 4> roster{{{1, "Faction", colour},
+        {1, "Alice", colour, {}, {11}}, {1, "Bob", colour, {}, {12}}, {1, "Computer", colour, {}, {13}}}};
+    expect(ui::display_owner(instance, roster, true, true, true) == &roster[1], "controller hover resolves first human seat");
+    instance.controller_seat = {12};
+    expect(ui::display_owner(instance, roster, true, true, true) == &roster[2], "gift updates hover name directly from instance controller");
+    expect(ui::display_owner(instance, roster, true, true, true)->colour == colour, "gift retains faction/player colour");
+    instance.controller_seat = {13};
+    expect(ui::display_owner(instance, roster, true, true, true) == &roster[3], "AI controller uses its display name");
+    instance.control = sim::tactical::UnitControl::shared_structure; instance.controller_seat = {};
+    expect(ui::display_owner(instance, roster, true, true, true) == &roster[0], "shared structure keeps faction fallback");
+    expect(!ui::display_owner(instance, roster, false, true, true)
+        && !ui::display_owner(instance, roster, true, false, true), "controller names still obey fog and hover setting");
+    instance.control = sim::tactical::UnitControl::mobile; instance.controller_seat = {12};
+    expect(ui::display_owner(instance, roster, true, true, false) == &roster[0], "policy OFF preserves player-based hover resolver");
+}
 
 void waypoints() {
     using Fixed = sim::math::Fixed;
@@ -638,6 +701,8 @@ int main() {
     expect(ui::hero_world_identity(true, false), "WU-47: a named space hero needs no explicit head tag");
     expect(ui::hero_world_identity(false, true), "WU-47: an explicit head admits an unnamed hero");
     expect(!ui::hero_world_identity(false, false), "WU-47: ordinary ships and generic identity alone get no head");
+    owner_names();
+    controller_owner_names();
     waypoints();
     ability_overlays();
     group_numbers();

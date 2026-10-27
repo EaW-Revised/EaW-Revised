@@ -892,6 +892,32 @@ void foc_start(const std::filesystem::path& fixtures) {
         return;
     }
     const auto& start = built.value();
+    {
+        // A GC load freezes the effective closure once, while a skirmish start
+        // still reads it itself. Both routes must produce the same sealed start.
+        auto identity = skirmish::read_data_identity(filesystem.value());
+        expect(static_cast<bool>(identity), "load-local data identity reads");
+        if (identity) {
+            auto reused = skirmish::read_start_inputs(fixture, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value());
+            expect(static_cast<bool>(reused), "start inputs accept the same mounted identity");
+            if (reused) {
+                const auto reused_start = skirmish::build_start(fixture, reused.value());
+                expect(reused_start && reused_start.value().setup == start.setup,
+                    "load-local identity preserves the entire installed stock tactical setup");
+                expect(skirmish::match_identity(reused.value()) == skirmish::match_identity(inputs.value()),
+                    "load-local identity preserves every installed stock match domain");
+            }
+            auto missing = fixture;
+            missing.map = "data/art/maps/pf_identity_missing.ted";
+            const auto fresh_error = skirmish::read_start_inputs(missing, filesystem.value(), catalog.value().catalog, tables.value());
+            const auto reused_error = skirmish::read_start_inputs(missing, filesystem.value(), catalog.value().catalog,
+                tables.value(), identity.value());
+            expect(!fresh_error && !reused_error
+                && eawr::core::format_diagnostic(fresh_error.error()) == eawr::core::format_diagnostic(reused_error.error()),
+                "load-local identity preserves the first strict per-map refusal");
+        }
+    }
 
     // Retail skirmish players: the two slots, then Pirates, Neutral, Hostile, Sarlacc and Hutts,
     // the non-playable factions with Create_Player_In_Multiplayer_Games, in faction order.

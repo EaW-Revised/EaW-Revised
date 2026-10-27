@@ -63,6 +63,7 @@ struct ProfileResult {
 // Engine adapters share this pre-pass. root_flag is --eawr-mod-root (viewer) or --mod-root (sim).
 // Explicit roots win, even if the profile is unreadable; the report says so.
 struct ProfileArguments {
+    std::optional<Profile> profile;
     std::vector<std::string> arguments;
     std::optional<ProfileLaunch> launch;
     std::optional<Warning> error;

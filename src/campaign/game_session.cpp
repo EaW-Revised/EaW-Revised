@@ -204,11 +204,34 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
                 auto text = record.reward_type + " not applied: " + record.outcome.substr(std::string_view("refused: ").size());
                 if (story_reported.insert(text).second) story_notes.push_back(std::move(text));
             }
+            if (!record.dialog.empty()) apply_story_dialog(record); // WST-20 (6): the dialog follows the reward
             story_triggers.push_back(std::move(record));
         }
     }
     story_notes.push_back("reward chain exceeds " + std::to_string(max_rounds) + " rounds; the rest waits for the next step");
     return core::Result<void>::success();
+}
+
+namespace {
+class StoryPresentationQueue final : public galactic::story::PresentationSink {
+public:
+    explicit StoryPresentationQueue(std::vector<galactic::story::PresentationEvent>& events) : events_(events) {}
+    void receive(const galactic::story::PresentationEvent& event) override { events_.push_back(event); }
+private:
+    std::vector<galactic::story::PresentationEvent>& events_;
+};
+} // namespace
+
+// WST-58: a triggered event with a Story_Dialog adds a holocron goal for the plot's owner. Whether the summary is
+// already open is the local renderer's fact, so quiet requests defer refresh versus flash to that local state.
+// WST-70 quiet advisor/history and mission-sound providers/sinks are not wired: see goals_policy_seam.
+void GameSession::Impl::apply_story_dialog(const galactic::story::Triggered& record) {
+    namespace st = galactic::story;
+    auto at = story_goals.try_emplace(record.owner, record.owner).first;
+    StoryPresentationQueue queue(story_presentation);
+    st::LocalPresentation local; local.defer_summary_state = true;
+    static_cast<void>(at->second.dialog(st::Dialog{record.dialog, record.variable, record.tag, record.chapter, record.popup, record.sound,
+        record.remove_after_viewed}, local, queue));
 }
 
 core::Result<void> GameSession::Impl::forward_story_calls() {
@@ -362,6 +385,14 @@ std::string GameSession::Impl::Child::context_hash() const {
     put(bytes, killers.size(), 8);
     for (const auto& [id, killer] : killers) { put(bytes, id, 8); put(bytes, killer, 8); }
     if (owns_pause) put(bytes, 1, 1);
+    if (conflict.tactical.controllers) {
+        put(bytes, 0x4c525443U, 4); put(bytes, 4, 4); put(bytes, controller_inputs.size(), 8);
+        for (const auto& input : controller_inputs) {
+            put(bytes, input.outer.tick, 8); put(bytes, input.outer.seat.value, 4); put(bytes, input.outer.sequence, 8);
+            put(bytes, input.producer_sequence, 8); put(bytes, input.body.size(), 8);
+            bytes.insert(bytes.end(), input.body.begin(), input.body.end());
+        }
+    }
     return core::sha256_hex(bytes);
 }
 
@@ -464,7 +495,7 @@ tactical::CampaignReserveAdmission GameSession::Impl::reserve_admission(const ta
     return {true, owner, child->conflict.tactical.campaign->reserves, account->pool_tokens};
 }
 
-core::Result<void> GameSession::Impl::refresh_battle_seats() {
+core::Result<void> GameSession::Impl::refresh_battle_seats(const bool initial_policy) {
     if (!child || !world().seat_control()) return core::Result<void>::success();
     auto& record = child->conflict;
     record.seats.clear();
@@ -488,6 +519,45 @@ core::Result<void> GameSession::Impl::refresh_battle_seats() {
         }
         if (row.kind == galactic::SeatKind::script && player == 0) continue;
         record.seats.push_back({row.seat_id, player});
+    }
+    if (initial_policy && record.tactical.controllers && !restoring_child && !role_pending()
+        && child->session.completed_tick() == 0 && child->controller_inputs.empty()) {
+        auto policy = *record.tactical.controllers;
+        const auto previous = policy.seats;
+        policy.seats.clear();
+        // ADR-020: only the agreed effective battle mapping chooses controllers.
+        // Retain inactive bindings so a spectator cannot erase the opt-in roster.
+        for (const auto& source : world().seats()) {
+            const auto effective = std::find_if(record.seats.begin(), record.seats.end(),
+                [&](const auto& row) { return row.seat == source.seat_id; });
+            const auto old = std::find_if(previous.begin(), previous.end(), [&](const auto& row) { return row.seat == source.seat_id; });
+            const bool active = source.active && effective != record.seats.end() && effective->player != 0;
+            const auto owner = active ? effective->player : old != previous.end() ? old->player : source.player;
+            if ((source.kind == sim::SeatKind::human || source.kind == sim::SeatKind::ai)
+                && std::any_of(policy.factions.begin(), policy.factions.end(), [&](const auto& row) { return row.player == owner; }))
+                policy.seats.push_back({source.seat_id, owner, source.kind, active});
+        }
+        for (auto& faction : policy.factions) {
+            const bool human = std::any_of(policy.seats.begin(), policy.seats.end(), [&](const auto& row) {
+                return row.player == faction.player && row.active && row.kind == sim::SeatKind::human;
+            });
+            if (human) faction.mode = tactical::FactionController::humans;
+            else {
+                const auto fallback = std::find_if(state.control.controllers.begin(), state.control.controllers.end(),
+                    [&](const auto& row) { return row.player == faction.player; });
+                faction.mode = fallback != state.control.controllers.end() && fallback->dropout == galactic::FactionControl::passive
+                    ? tactical::FactionController::passive : tactical::FactionController::ai;
+            }
+            for (auto& binding : policy.seats) if (binding.player == faction.player && binding.kind == sim::SeatKind::ai) {
+                const auto* source = seat(binding.seat);
+                binding.active = !human && source && source->active;
+            }
+        }
+        if (policy != *record.tactical.controllers) {
+            if (auto installed = child->session.set_initial_controller_policy(std::move(policy)); !installed) return installed;
+            record.tactical = child->session.world().record().setup;
+            child->world_hash = sim::StateHash(child->session.world().state_sha256());
+        }
     }
     auto digest = conflict_hash(record);
     if (!digest) return core::Result<void>::failure(digest.error());
@@ -1200,6 +1270,10 @@ core::Result<void> GameSession::install_story(galactic::story::Config config, st
     for (const auto& [text, count] : refused) impl_->story_notes.push_back(std::to_string(count) + " not run, " + text);
     return core::Result<void>::success();
 }
+const galactic::story::GoalsState* GameSession::story_goals(const galactic::story::Player owner) const noexcept {
+    const auto at = impl_->story_goals.find(owner);
+    return at == impl_->story_goals.end() ? nullptr : &at->second.state();
+}
 const galactic::story::Engine* GameSession::story_engine() const noexcept {
     return impl_->story_engine ? &*impl_->story_engine : nullptr;
 }
@@ -1279,6 +1353,11 @@ core::Result<SeatBattleView> GameSession::battle_view(const sim::SeatId id) cons
 }
 galactic::FactionControl GameSession::battle_controller(const galactic::PlayerId player) const noexcept {
     if (!impl_->child) return galactic::FactionControl::passive;
+    if (const auto& policy = impl_->child->session.world().controller_policy(); policy) {
+        for (const auto& faction : policy->factions) if (faction.player == player)
+            return faction.mode == tactical::FactionController::humans ? galactic::FactionControl::human
+                : faction.mode == tactical::FactionController::ai ? galactic::FactionControl::ai : galactic::FactionControl::passive;
+    }
     for (const auto& binding : impl_->child->conflict.seats) {
         const auto* seat = impl_->seat(binding.seat);
         if (binding.player == player && seat && seat->active && seat->kind == galactic::SeatKind::human)

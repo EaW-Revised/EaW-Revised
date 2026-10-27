@@ -7,7 +7,7 @@ void nested_actor_facts_contracts();
 void actor_parent_depth_contracts();
 void sparse_actor_change_contracts();
 void free_fleet_signal_contracts();
-void real_factory_contracts(bool configured_cadence = false);
+void real_factory_contracts(bool configured_cadence = false, bool invalid_freestore = false);
 void prepared_restore_contracts();
 void authored_selection_contracts();
 void mp_ai_uses_authored_faction_basic_ai();

@@ -92,6 +92,7 @@ struct ScriptedTick {
 class ScriptEngine {
 public:
     virtual ~ScriptEngine() = default;
+    [[nodiscard]] virtual bool supports_battle_ai(sim::tactical::PlayerId) const noexcept { return false; }
     // Installed at the same boundary as the engine, including checkpoint rebuilds.
     // A failed step poisons the scripted session: callers discard both owners.
     [[nodiscard]] virtual core::Result<std::shared_ptr<sim::tactical::ObjectTurnService>> object_turn_service(
@@ -174,6 +175,7 @@ public:
     // Optional campaign controller gate over translated commands. Empty preserves standalone
     // tactical routing; the owning session reconstructs it from its hashed controller state.
     void set_order_admission(std::function<bool(const TacticalOrder&)> admission);
+    [[nodiscard]] bool supports_battle_ai(sim::tactical::PlayerId player) const noexcept;
     // #957: a monotonic clock in nanoseconds; with one, step() fills ScriptedTick::timing. The sim
     // never reads a clock itself: presentation and tools supply it.
     void set_step_clock(std::function<std::uint64_t()> clock);
@@ -192,6 +194,9 @@ public:
     // Diagnostic const query at a completed tick; caller excludes concurrent stepping.
     [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     [[nodiscard]] const sim::tactical::TacticalSession& world() const noexcept;
+    [[nodiscard]] core::Result<void> set_initial_controller_policy(sim::tactical::BattleControllerPolicy policy);
+    // Frozen content admission before the first step of a fresh or restored bridge.
+    [[nodiscard]] core::Result<void> omit_object_script_decisions(std::span<const sim::tactical::TypeId> types);
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     // Script state hash at the tick barrier (ScriptScheduler::state_hash).
     [[nodiscard]] core::Result<std::string> script_state_hash();

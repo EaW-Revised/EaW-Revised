@@ -98,6 +98,7 @@ bool parse_event(const data::XmlNode& node, story::EventDef& event, std::vector<
         else if (same(tag, "Story_Dialog_SFX")) event.sound = data::retail::boolean(text).value_or(true);
         // Reward_Position, Event_Filter and the speech-done timeout belong to later parts (WST-05).
     }
+    event.authored_tag_present = !event.tag.empty(); // WST-58: before the incoming override
     if (!incoming.empty()) event.tag = incoming; // WST-70: a nonempty Story_Incoming overrides Story_Tag
     // WST-18: Timeout is parsed and stored, never serviced.
     if (event.name.empty() || !story::known_event_type(event.type)) {

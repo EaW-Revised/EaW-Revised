@@ -2,7 +2,7 @@
 
 This note covers reading a caller-supplied compiled Direct3D 9 effect into metadata.
 It does not choose a technique, execute a state, evaluate an expression, translate a
-program, or activate a material. The input is binary effect data, never shader source.
+program, or activate a material. The input is binary effect or stage data, never shader source.
 
 ## Evidence and scope
 
@@ -27,6 +27,10 @@ Public interface references:
 | EFX-05 | Validate referenced graphs without recursive host-stack growth. Diagnose cycles, invalid references, unsupported forms and truncated records explicitly. Limits derive from the available bytes and representation; any extra safety budget has a named diagnostic and a documented resource reason. |
 | EFX-06 | Failure reports identify the category and byte location without echoing payload or shader text. The caller's supplied source provenance is retained by the standard asset diagnostic. No partial graph is exposed as a successful parse. |
 | EFX-07 | Tests build invented containers and mutate them deterministically. Truncation, overflowing offsets/counts, excessive counts, cycles, invalid references and unknown objects must terminate with a diagnostic. No installed-file literal or profile corpus is committed. |
+| EFX-08 | Frame typed vertex/pixel programs from their profile through a terminal END instruction. Skip comments and complete instruction operands, including END-shaped literal operands. Preserve declarations and unknown semantic usage identifiers. Framing is not executable shader validation or a promise of backend support. |
+| EFX-09 | Read public constant tables within their enclosing comment. Preserve ordered constants, register sets/ranges, type/member graphs, arrays and register defaults. Share repeated type descriptors and diagnose cycles without recursive host-stack growth. Link exact effect parameter names when present; retain unmatched compiler constants without guessing a binding. |
+| EFX-10 | Resolve named objects to terminal objects and share program descriptors across aliases. Inline shader initializers and separate program objects use the same descriptor. Empty or one-zero-word shader defaults are null only in typed shader contexts; numeric zero remains numeric data. Keep dynamic shader expressions distinct from fixed program assignments. |
+| EFX-11 | Preserve state-expression and preshader envelopes, their ordered tagged sections and constant inputs, without evaluating arithmetic. Validate enclosing version/comment/END framing; retain unknown section bodies. Diagnostics address the original byte span and retain logical provenance without printing shader bodies. |
 
 ## Independently observed layout
 
@@ -119,6 +123,73 @@ raw payload consistent with its metadata. A named reference links the target
 state's object slot to the referenced parameter's default object slot. Detect
 cycles in those structural edges; expression/program payloads remain opaque,
 and their arithmetic dependency analysis belongs to the next slice.
+
+## Program and expression descriptors
+
+`effect_descriptor_version` identifies the shared metadata contract for compiled
+effects and independently compiled source stages. A source-stage compiler calls
+`read_shader_program` and retains its source-line, entry/profile and compilation
+provenance in its outer activation record. The supplied `Source` identifies the
+diagnostic origin; program offsets address the compiled stage bytes. Within a
+compiled effect those offsets instead address the enclosing effect bytes.
+All byte and text views borrow immutable caller-owned storage, including constant
+names, defaults and nested expression sections. The activation/cache owner must
+retain that storage until all descriptors and consumers of their views are gone.
+
+The stage reader supports vertex profiles 1.1, 2.0 and 3.0 and pixel profiles
+1.1 through 1.4, 2.0 and 3.0 for metadata framing. The earlier profiles use
+documented opcode operand counts; later profiles carry the operand count in each
+instruction. Unsupported versions/opcodes receive located diagnostics. These
+rules follow Microsoft's [shader code format](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/shader-code-format),
+[instruction token](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/instruction-token)
+and [comment token](https://learn.microsoft.com/en-us/windows-hardware/drivers/display/comment-token)
+contracts. A successful metadata parse never substitutes for the backend's full
+shader validation.
+
+Constant-table offsets are relative to the table header following its `CTAB`
+tag. The [table header](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxshader-constanttable),
+[constant record](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxshader-constantinfo)
+and [type record](https://learn.microsoft.com/en-us/windows/win32/direct3d9/d3dxshader-typeinfo)
+are public interfaces. Numeric defaults in these records use register storage
+(four bytes per boolean register, sixteen per integer/float register); effect
+parameter defaults remain their separate packed typed values. Sampler records
+retain sampler register/type metadata; texture resources and sampler states
+remain linked through the ordered effect values and named references. Unknown
+semantic strings and declaration usage identifiers remain data for later binding
+compatibility decisions.
+
+Named sampler assignments retain their immediate `initializer.parameter` link
+and original typed default; consumers follow the link to the parameter's sampler
+states. Kind and array shape must agree. Default/member/sampler/reference edges
+are checked together for cycles using a bounded iterative traversal.
+
+The independently authored native reset pass establishes shader-state identifiers
+146 (vertex) and 147 (pixel). Its `NULL` assignments are serialized as integer
+zero, as is an ordinary numeric zero in a different state. `EffectState::shader`
+therefore exposes the assignment's stage and null/program/expression descriptor
+using the shader-state identifier as context. It retains the original typed value
+and any immediate named reference. Integer zero in other states remains numeric;
+an absent shader state does not acquire a synthesized null assignment.
+
+An optional Windows contract probe compiles an independently authored effect in
+memory using the system native compiler, with separate/inline programs, a named
+program reference, a null reset, sampler metadata, a state expression and a
+preshader. It loads only the system compiler and never compiles installed source.
+The expression envelopes use version words `0x46580200` and `0x46580201`, followed
+by length-delimited comment sections and END. `CTAB` describes inputs, `CLIT`
+retains literal data and `FXLC` retains expression code. A program's `PRES` comment
+contains a preshader envelope when it has a body. A tag-only `PRES` comment is an
+empty marker retained in comment order, with no expression descriptor; any
+nonempty body still requires its version, complete section framing and END.
+Bodies remain opaque in this reader: instruction
+evaluation, literal interpretation and arithmetic dependency analysis belong to
+the evaluator. Unknown sections remain visible rather than being discarded.
+
+The test executable's `--inventory data-root ...` mode reads a caller-supplied
+effective VFS chain and prints counts and located failures only. It uses the
+production manifest/loose-file mounting policy and writes no asset or generated
+shader files. It is a private acceptance tool, not a corpus-derived capability
+list or a runtime effect-name allowlist.
 
 Counts are bounded by the minimum serialized record sizes and bytes remaining.
 The parser also bounds its metadata visits and string work relative to the input

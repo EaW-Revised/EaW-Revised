@@ -58,14 +58,14 @@ std::string text(const data::XmlNode* node) {
 }
 core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const CampaignSetupPlan& plan,
     const gc::GalacticSetup& setup, gc::GalacticAbilitySetup& host,
-    const std::function<gc::TypeId(std::string_view)>& identity) {
+    const std::function<gc::TypeId(std::string_view)>& identity, core::LoadNoteBuffer* notes) {
     if (!setup.control || !setup.census || !setup.economy_corruption) return invalid("corruption authoring requires live control/census/economy");
     host.multiplayer = setup.economy_corruption->multiplayer;
     const auto campaign = layers(catalog, plan.campaign_name(), data::Category::campaign);
     if (const auto* tutorial = data::retail::single(campaign, "Tutorial")) {
         data::tag_trace::used(tutorial); const auto flag = data::retail::boolean(tutorial->raw_text);
-        if (!flag) return invalid("invalid corruption tutorial mode");
-        if (*flag) host.tutorial_corruption_allowed = false; // named scripted destination-admission seam
+        if (!flag) campaign_load_note(notes, "EAWR-LOAD-1220", tutorial, plan.campaign_name(), "Tutorial", "false");
+        if (flag && *flag) host.tutorial_corruption_allowed = false; // named scripted destination-admission seam
     }
     const auto ids = [&](const data::XmlNode* node, std::vector<gc::TypeId>& out) {
         if (!node || data::retail::is_placeholder(node->raw_text)) return true;
@@ -84,21 +84,46 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
             auto& c = p.slots[index]; const auto prefix = "Corruption_" + std::to_string(index + 1) + "_";
             const auto node = [&](std::string_view suffix) { return data::retail::single(original, prefix + std::string(suffix)); };
             const auto type = corruption_type(node("Type")), required = corruption_type(node("Required_Mission_Type"));
-            if (!type || !required || !number(node("Credit_Cost"), c.price) || c.price < Fixed{}
-                || !count(node("Required_Unit_Count"), c.unit_count) || !count(node("Required_Mission_Count"), c.mission_count)
-                || !number(node("Success_Credit_Bonus"), c.credit_reward) || !ids(node("Required_Unit_Type"), c.unit_types)
-                || !ids(node("Required_Planets"), c.planet_types)) return invalid("invalid corruption slot inputs");
+            const data::XmlNode* bad = nullptr;
+            std::string bad_tag;
+            const auto checked = [&](bool valid, std::string_view suffix) {
+                if (!valid) { bad = node(suffix); bad_tag = prefix + std::string(suffix); }
+                return valid;
+            };
+            if (!checked(type.has_value(), "Type") || !checked(required.has_value(), "Required_Mission_Type")
+                || !checked(number(node("Credit_Cost"), c.price) && c.price >= Fixed{}, "Credit_Cost")
+                || !checked(count(node("Required_Unit_Count"), c.unit_count), "Required_Unit_Count")
+                || !checked(count(node("Required_Mission_Count"), c.mission_count), "Required_Mission_Count")
+                || !checked(number(node("Success_Credit_Bonus"), c.credit_reward), "Success_Credit_Bonus")
+                || !checked(ids(node("Required_Unit_Type"), c.unit_types), "Required_Unit_Type")
+                || !checked(ids(node("Required_Planets"), c.planet_types), "Required_Planets")) {
+                campaign_load_note(notes, "EAWR-LOAD-1221", bad ? bad : (original.empty() ? nullptr : &original.front()->root),
+                    source->original_type, bad_tag, "skip slot", "WGCH-172/173: unknown invalid-data behavior",
+                    core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+                c = {}; continue;
+            }
             c.type = *type; c.required_mission_type = *required; c.briefing = text(node("Mission_Briefing"));
             c.map = text(node("Tactical_Map_Name")); c.script = text(node("Tactical_Script_Name"));
             const auto mode = key(text(node("Tactical_Game_Mode")));
-            if (!mode.empty() && mode != "LAND" && mode != "SPACE") return invalid("invalid corruption mission mode");
+            if (!mode.empty() && mode != "LAND" && mode != "SPACE") {
+                campaign_load_note(notes, "EAWR-LOAD-1221", node("Tactical_Game_Mode"), source->original_type,
+                    prefix + "Tactical_Game_Mode", "skip slot", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+                c = {}; continue;
+            }
             c.mode = mode == "LAND" ? 1 : mode == "SPACE" ? 2 : 0;
             const auto unlock = text(node("Success_Unlock_Unit_Type"));
             if (!unlock.empty()) {
-                c.build_unlock = identity(unlock); if (!c.build_unlock) return invalid("unbound corruption build unlock");
+                c.build_unlock = identity(unlock);
+                if (!c.build_unlock) {
+                    campaign_load_note(notes, "EAWR-LOAD-1221", node("Success_Unlock_Unit_Type"), source->original_type,
+                        prefix + "Success_Unlock_Unit_Type", "skip slot", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+                    c = {}; continue;
+                }
                 const auto unlocked = layers(catalog, unlock, data::Category::game_object);
                 const auto* cost = data::retail::single(unlocked, "Build_Cost_Credits");
-                if (!cost || !number(cost, c.unlock_build_cost)) return invalid("unbound corruption unlock build cost");
+                if (!cost || !number(cost, c.unlock_build_cost) || c.unlock_build_cost < Fixed{}) {
+                    campaign_load_note(notes, "EAWR-LOAD-1222", cost, unlock, "Build_Cost_Credits", "0"); c.unlock_build_cost = {};
+                }
             }
         }
         host.corruption_planets.push_back(std::move(p));
@@ -111,24 +136,27 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
             data::tag_trace::used(node); const auto names = words(node->raw_text);
             // Entries are positional by corruption type; a shorter authored list leaves the trailing types without
             // an upgrade, and only entries past the modelled corruption types have nothing to bind to.
-            if (names.size() > p.automatic_upgrades.size() - 1) return invalid("corruption automatic upgrade list names more types than the corruption model has");
-            for (std::size_t i = 0; i < names.size(); ++i) {
+            if (names.size() > p.automatic_upgrades.size() - 1)
+                campaign_load_note(notes, "EAWR-LOAD-1223", node, binding.faction, node->name, "truncate to corruption type count");
+            for (std::size_t i = 0; i < std::min(names.size(), p.automatic_upgrades.size() - 1); ++i) {
                 if (data::retail::is_placeholder(names[i])) continue;
                 p.automatic_upgrades[i + 1] = identity(names[i]);
-                if (!p.automatic_upgrades[i + 1]) return invalid("unbound corruption automatic upgrade");
+                if (!p.automatic_upgrades[i + 1]) campaign_load_note(notes, "EAWR-LOAD-1223", node, binding.faction, node->name, "unresolved entries remain empty");
             }
         }
         host.corruption_players.push_back(p);
     }
     for (const auto& binding : plan.type_bindings()) {
         if (std::none_of(setup.census->types.begin(), setup.census->types.end(), [&](const auto& t) { return t.type == binding.id; })) continue;
-        const auto* type = plan.original_type(binding.id); if (!type) return invalid("unbound corruption prerequisite original type");
+        const auto* type = plan.original_type(binding.id); if (!type) {
+            campaign_load_note(notes, "EAWR-LOAD-1224", nullptr, binding.original_type, "prerequisite", "skip unresolved prerequisite"); continue;
+        }
         const auto original = layers(catalog, binding.original_type, data::Category::game_object);
         bool consume = true; // WGCH-171: qualified original type byte-member default
         if (const auto* node = data::retail::single(original, "Destroy_When_Used_As_Corruption_Prereq")) {
             data::tag_trace::used(node); const auto value = data::retail::boolean(node->raw_text);
-            if (!value) return invalid("invalid corruption prerequisite destruction flag");
-            consume = *value;
+            if (!value) campaign_load_note(notes, "EAWR-LOAD-1224", node, binding.original_type, node->name, "true");
+            consume = value.value_or(true);
         }
         host.corruption_prerequisites.push_back({binding.id, consume, type->named_hero.value_or(false)});
     }
@@ -143,13 +171,13 @@ core::Result<void> prepare_corruption_host(const data::Catalog& catalog, const C
     }
     for (const auto* node : data::retail::list(campaign, "Corruption_Level_Override", data::retail::ListRule::replace_in_variant)) {
         data::tag_trace::used(node); const auto pair = words(node->raw_text);
-        if (pair.size() != 2) return invalid("invalid starting corruption override");
+        if (pair.size() != 2) { campaign_load_note(notes, "EAWR-LOAD-1225", node, plan.campaign_name(), node->name, "skip override"); continue; }
         const auto type = identity(pair[0]); const auto level = Fixed::from_decimal(pair[1]);
-        if (!type || !level) return invalid("unbound starting corruption override");
+        if (!type || !level) { campaign_load_note(notes, "EAWR-LOAD-1225", node, plan.campaign_name(), node->name, "skip override"); continue; }
         const auto found = std::find_if(host.corruption_planets.begin(), host.corruption_planets.end(), [&](const auto& p) { return p.type == type; });
         if (found == host.corruption_planets.end()) continue;
         if (std::count_if(host.corruption_planets.begin(), host.corruption_planets.end(), [&](const auto& p) { return p.type == type; }) > 1)
-            return invalid("starting corruption override has ambiguous active planet type");
+        { campaign_load_note(notes, "EAWR-LOAD-1225", node, plan.campaign_name(), node->name, "skip ambiguous override"); continue; }
         const auto planet = std::find_if(setup.planets.begin(), setup.planets.end(), [&](const auto& p) { return p.id == found->planet; });
         host.initial_corruption.push_back({found->planet, level.value() > Fixed{} ? gc::corruption_fixture::Type::racketeering : gc::corruption_fixture::Type::none, planet->owner});
     }

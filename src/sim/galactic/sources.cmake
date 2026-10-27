@@ -50,6 +50,7 @@ set(EAWR_SIM_GALACTIC_SOURCES
 # Fixture-level galactic hero actions, WGCH-20..115.
 list(APPEND EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/ability_theft.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ability_auto_spy.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ability_sabotage.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ability_neutralize.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/hero_actions.cpp"

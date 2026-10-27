@@ -4,9 +4,7 @@
 #include <locale>
 #include "eawr/core/load_profile.hpp"
 #include "eawr/scene/scene.hpp"
-#include "eawr/skirmish/roster_gate.hpp"
 #include <algorithm>
-#include <cctype>
 #include <charconv>
 #include <sstream>
 namespace eawr::presentation::godot_backend {
@@ -36,9 +34,6 @@ core::Result<std::vector<std::uint32_t>> skirmish_player_ids(std::string_view te
     return Result::success(std::move(ids));
 }
 
-namespace { std::string lower_path(std::string_view value) {
-    std::string result(value); for (auto& c : result) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return result;
-} }
 // The mounted FoC view's unit tables (the M2 types), or nothing with `failure` set.
 [[nodiscard]] std::optional<units::UnitTables> load_start_tables(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                                                            std::string& failure, const std::string& space_map,
@@ -62,37 +57,6 @@ namespace { std::string lower_path(std::string_view value) {
     }
     return std::move(tables).value();
 }
-
-[[nodiscard]] std::set<std::string> missing_start_types(const skirmish::Fixture& fixture,
-                                                       const skirmish::StartInputs& inputs,
-                                                       const units::UnitTables& tables) {
-    std::set<std::string> missing;
-    const auto need = [&](const std::string& type) {
-        // RG-04: skip gated starting types before their unsupported data is loaded.
-        if (!skirmish::roster_disabled_types().contains(skirmish::type_id(type)) && !tables.find(type)) missing.insert(type);
-    };
-    for (const auto& slot : fixture.slots) {
-        for (const auto& type : slot.fleet) need(type);
-        for (const auto& forces : inputs.faction_forces) {
-            if (lower_path(forces.faction) != lower_path(slot.faction)) continue;
-            for (const auto& type : forces.space_skirmish_default_forces) need(type);
-        }
-        const std::string station = "team_" + std::string(slot.team < 10 ? "0" : "")
-            + std::to_string(slot.team) + "_space_station";
-        for (const auto& placement : inputs.placements) {
-            if (!placement.marker || lower_path(placement.type) != station) continue;
-            for (const auto& candidate : placement.marker_for) {
-                std::string affiliations = candidate.affiliation;
-                std::replace(affiliations.begin(), affiliations.end(), ',', ' ');
-                std::istringstream names(affiliations);
-                std::string faction;
-                while (names >> faction) if (lower_path(faction) == lower_path(slot.faction)) need(candidate.type);
-            }
-        }
-    }
-    return missing;
-}
-
 
 core::Result<PreparedSkirmish> prepare_skirmish(const skirmish::Fixture& fixture,
     const vfs::Vfs& filesystem, const data::Catalog& catalog) {

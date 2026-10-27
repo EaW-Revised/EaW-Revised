@@ -3,6 +3,7 @@
 #include "checkpoint_archive_internal.hpp"
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
+#include "eawr/sim/galactic/story_goals.hpp"
 
 namespace eawr::sim::galactic::checkpoint_detail {
 
@@ -174,7 +175,18 @@ template <> struct Fields<::eawr::sim::galactic::ControlTransitionModifier> {
 
 template <> struct Fields<::eawr::sim::galactic::ControlType> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.type, v.political_control, v.stealth, v.ground_capable);
+        a(v.type);
+        // Binary rows retain their exact bytes; 255 escapes a previously invalid row.
+        auto& extended = v.signed_political_control;
+        auto& binary = v.political_control;
+        std::uint8_t compact = extended ? 255 : binary;
+        a(compact);
+        if (compact == 255) {
+            std::int64_t signed_value = extended.value_or(0);
+            a(signed_value);
+            if constexpr (A::reading) { extended = signed_value; binary = 0; }
+        } else if constexpr (A::reading) { binary = compact; extended.reset(); }
+        a(v.stealth, v.ground_capable);
     }
 };
 
@@ -771,6 +783,30 @@ template <> struct Fields<::eawr::sim::galactic::story::SubPlotState> {
 template <> struct Fields<::eawr::sim::galactic::story::State> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.started, v.now, v.sequence, v.subplots, v.flags);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::Objective> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.text_id, v.suggestion, v.number, v.status);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::Goal> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.dialog, v.variable, v.tag, v.chapter, v.completed, v.hidden, v.remove_after_viewed);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::GoalsState> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.objectives, v.goals, v.objectives_visible);
+    }
+};
+
+template <> struct Fields<::eawr::sim::galactic::story::OwnerGoals> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.owner, v.state);
     }
 };
 

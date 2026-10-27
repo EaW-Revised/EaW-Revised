@@ -61,17 +61,12 @@ std::optional<bool> Record::boolean(const std::string_view tag) const {
 }
 
 std::optional<Fixed> Record::parse_number(const XmlNode& at, const std::string_view raw, const std::string_view tag) const {
-    if (tag == "Hyperspace_Speed_Factor" || tag == "Corruption_Hyperspace_Bonus"
-        || tag == "Object_Max_Speed_Multiplier_Galactic" || tag == "MaximumFleetMovementDistance") {
-        const auto parsed = retail::float_value(raw);
-        return parsed ? std::optional(parsed->value) : std::nullopt;
-    }
-    const auto parsed = retail::leading_number(raw);
+    const auto parsed = retail::float_value(raw);
     if (!parsed) {
         issue(IssueKind::bad_value, &at, std::string(tag), trim(raw), "not a number in Q24 range");
         return std::nullopt;
     }
-    if (parsed->trailing_text) {
+    if (!parsed->exact) {
         issue(IssueKind::trailing_text, &at, std::string(tag), trim(raw), "read as its leading number (AU-82)");
     }
     return parsed->value;
@@ -85,13 +80,11 @@ std::optional<Fixed> Record::number(const std::string_view tag) const {
 std::optional<std::int64_t> Record::whole(const std::string_view tag) const {
     const auto* found = node(tag);
     if (found == nullptr) return std::nullopt;
-    const auto value = parse_number(*found, found->raw_text, tag);
+    const auto value = retail::integer_value(found->raw_text);
     if (!value) return std::nullopt;
-    if (value->raw() % Fixed::scale != 0) {
-        issue(IssueKind::bad_value, found, std::string(tag), trim(found->raw_text), "not a whole number");
-        return std::nullopt;
-    }
-    return value->raw() / Fixed::scale;
+    if (!value->exact) issue(IssueKind::trailing_text, found, std::string(tag), trim(found->raw_text),
+        "read as a saturated leading integer (LSA-P1)");
+    return value->value;
 }
 
 std::optional<Position> Record::position(const std::string_view tag) const {

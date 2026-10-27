@@ -102,6 +102,8 @@ struct GameplaySettings final {
     int scroll_stop{scroll_stop_default};
     bool absolute_scrolling{true};
     bool delay_tooltips{false};
+    bool reinforcement_areas_only_while_placing{true}; // PD-01: presentation only.
+    int hover_owner_names{-1}; // #5130: -1 follows mode (MP on, solo off), 0 off, 1 on.
     bool right_button_scroll{false};
     bool both_buttons_rotate{false};
     bool alternate_mouse{false};
@@ -113,6 +115,16 @@ struct GameplaySettings final {
 
     friend bool operator==(const GameplaySettings&, const GameplaySettings&) = default;
 };
+
+[[nodiscard]] constexpr bool hover_owner_names_enabled(const GameplaySettings& settings, const bool multiplayer) noexcept {
+    return settings.hover_owner_names < 0 ? multiplayer : settings.hover_owner_names != 0;
+}
+
+// PD-01: the saved preference can restrict the data rule, never relax it.
+[[nodiscard]] constexpr bool reinforcement_areas_visible(const GameplaySettings& settings,
+    const bool data_only_while_dragging, const bool pane_open, const bool placing) noexcept {
+    return placing || (pane_open && !settings.reinforcement_areas_only_while_placing && !data_only_while_dragging);
+}
 
 struct NetworkSettings final {
     int port{default_network_port};

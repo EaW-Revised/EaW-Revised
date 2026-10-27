@@ -39,10 +39,8 @@ core::Result<std::optional<gc::RaidSetup>> build_raid_inputs(const units::Galact
         return core::Result<Out>::success({});
     if (!faction || !free || !limited || !heroes || !count) return fail("incomplete raid policy");
     const auto cap = [](const auto* constant) -> std::optional<std::uint32_t> {
-        const auto value = constant->number;
-        if (!value || value->raw() < 0 || value->raw() % Fixed::scale != 0
-            || static_cast<std::uint64_t>(value->raw() / Fixed::scale) > std::numeric_limits<std::uint32_t>::max()) return {};
-        return static_cast<std::uint32_t>(value->raw() / Fixed::scale);
+        // LSA-36: signed atoi input; cap comparisons interpret these preserved encoding bits as signed.
+        return static_cast<std::uint32_t>(data::retail::integer_constant(constant->text));
     };
     const auto max_heroes = cap(heroes), max_limited = cap(count);
     if (!max_heroes || !max_limited) return fail("invalid raid caps");

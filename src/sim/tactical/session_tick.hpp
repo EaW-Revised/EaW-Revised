@@ -11,7 +11,10 @@ namespace eawr::sim::tactical {
 // their original declaration sites; journal lifetime extends through tick exit.
 namespace session_detail {
 
+class CombatPhases;
+
 class Tick final {
+    friend class CombatPhases;
     using Impl = TacticalSession::Impl;
 public:
     Tick(TacticalSession& session, Impl* impl, const PartitionExecutor& executor);
@@ -19,8 +22,14 @@ public:
     Tick(const Tick&) = delete;
     Tick& operator=(const Tick&) = delete;
     core::Result<TacticalTick> run();
+    core::Result<void> land_combat(std::vector<LiveUnit>& live,
+        const std::vector<std::pair<EntityId, math::Vec3>>& starts,
+        std::vector<Event>& events, std::vector<CombatEvent>& combat_events);
+
 
 private:
+    std::optional<BattleControllerPolicy> controller_rollback_;
+    bool controller_committed_{};
     void record_damage_change(const LiveUnit& target, math::Fixed before,
         EntityId source = invalid_entity_id, const UnitStage* staged = nullptr);
     std::vector<DamageChange> damage_changes_; // ordered commits only, not partition jobs

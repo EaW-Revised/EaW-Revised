@@ -3,6 +3,8 @@
 # ROOT_ONLY lists preserve the root build's existing additional units.
 
 set(EAWR_PRESENTATION_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/shader_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_bindings.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_pause.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/animation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/idle_playback.cpp"
@@ -19,6 +21,8 @@ set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/lighting/lighting.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lighting/scene_bloom.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lighting/wind.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_translation_cache.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_translation_report.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/godot/renderer_contract.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/particles/alo_particles.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/particles/map_effect_plan.cpp"

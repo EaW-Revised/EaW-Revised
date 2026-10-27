@@ -93,6 +93,7 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
         failure = "live session content: " + core::format_diagnostic(content.error());
         return false;
     }
+    if (!skipped.empty()) std::cerr << "EAWR live session content: " << skirmish::content_load_summary(skipped) << std::endl;
     // #4589: a skipped type that the start places fails the start; the skip set binds into the match identity.
     if (auto placed = skirmish::refuse_skipped_starts(start.value(), skipped); !placed) {
         failure = "live session start: " + core::format_diagnostic(placed.error());
@@ -134,6 +135,7 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
             failure = "live session AI scripts: " + core::format_diagnostic(ai.error());
             return false;
         }
+        for (const auto& note : ai.value().load_notes) std::cerr << core::format_diagnostic(note) << std::endl;
         ai_scripts_ = std::move(ai.value().scripts);
         ai_players_ = std::move(ai.value().players);
     }
@@ -163,12 +165,6 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
         skirmish::drop_skipped_menu_options(economy_, skipped_types, &dropped);
         for (const auto& line : dropped) std::cerr << "EAWR live session content: " << line << std::endl;
     }
-    auto preview_colours = ui::reinforcement_colours(filesystem);
-    if (!preview_colours) {
-        failure = "reinforcement preview colours: " + core::format_diagnostic(preview_colours.error());
-        return false;
-    }
-    preview_colours_ = preview_colours.value();
     tables_ = std::move(*tables);
 
     const auto human = std::find_if(start_->players.begin(), start_->players.end(),

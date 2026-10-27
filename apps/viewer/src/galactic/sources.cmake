@@ -7,6 +7,7 @@ set(EAWR_VIEWER_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/reference_pages.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/reference_publication.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/reference_pages_widget.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/story_summary_widget.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/battle_dialog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/campaign_score_dialog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_campaign_score.cpp"

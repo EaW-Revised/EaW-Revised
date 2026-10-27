@@ -9,9 +9,11 @@ struct RaidSlot {
     EawrHudButton* button{};
     godot::Label* text{};
     bool projected{};
+    std::optional<sim::galactic::AbilityKind> kind;
 };
 struct DestructionHudState {
-    std::map<sim::galactic::PlanetId, RaidSlot> raid_slots;
+    std::map<sim::galactic::PlanetId, RaidSlot> raid_slots, ability_slots;
+    std::vector<viewer::galactic::AbilityDrop> abilities;
     std::vector<viewer::galactic::DropIntent> raids;
     std::uint64_t raid_accepts{};
     EawrHudButton* slot{};

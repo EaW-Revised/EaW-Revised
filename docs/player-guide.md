@@ -32,7 +32,14 @@ the fonts it extracted, reports and logs (`logs\godot.log`).
 
 To reset EAWR, close it and delete that folder. Your game is untouched.
 
-## Render thread update
+## Options
+
+Reinforcement areas only while placing is enabled by default in **Options > Gameplay**.
+The red no-drop grid appears during placement and disappears when placement ends, even with the panel open.
+Turn it off to follow the retail/mod panel-or-drag rule. Accept saves the choice; Cancel discards edits; Defaults enables it.
+This changes presentation only and takes effect without restarting.
+
+### Render thread update
 
 Separate rendering is now the default. To switch back to Safe, start
 **`EAWR (Safe render thread).cmd`** or run `EAWR.exe --safe-render-thread`.

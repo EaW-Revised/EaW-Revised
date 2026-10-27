@@ -114,6 +114,8 @@ public:
     using ClonePoseAt = std::function<std::optional<ClonePose>(std::size_t ship, double presented_tick)>;
     // #456: the model transform of model projectile slot `ship` at a presented tick; nullopt
     // when its projectile was not in flight then.
+    using BirthAt = std::function<std::optional<double>(std::size_t ship)>;
+    using ProjectileBirthAt = std::function<std::optional<std::pair<double, std::uint64_t>>(std::size_t ship)>;
     using ProjectilePoseAt = std::function<std::optional<sim::math::Mat3x4>(std::size_t ship, double presented_tick)>;
     // #535: a unit's fog fade opacity (space-fog-presentation.md FW-16), 1 when it is not fading.
     using FadeOpacity = std::function<float(sim::EntityId entity)>;
@@ -136,7 +138,8 @@ public:
                              const ProjectilePoseAt& projectile_pose_at, const FixedCamera& camera,
                              double presented_tick, bool reveal = false, const FadeOpacity& fade_opacity = {},
                              std::span<const sim::EntityId> unfogged_props = {},
-                             const ProjectileOpacity& projectile_opacity = {});
+                             const ProjectileOpacity& projectile_opacity = {},
+                             const BirthAt& clone_birth_at = {}, const ProjectileBirthAt& projectile_birth_at = {});
     // #638: the pool the particle systems step on (null: the main thread alone); it must outlive
     // this object's frames.
     void set_workers(const particles::StepExecutor* workers) noexcept { registry_->set_executor(workers); }
@@ -174,6 +177,7 @@ public:
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
 
 private:
+    float sample_seconds_{};
     bool measure_owner_{};
     std::array<double, 9> owner_timings_{};
     bool measure_preparation_{};
@@ -218,6 +222,7 @@ private:
         bool gravity_well{};
         bool missile_shield{};
         bool blast_effect{};
+        float catchup_seconds{};
         bool elapsed_clock{}; // PS-42: projectile proxies share the drawn pose's elapsed clock.
     };
     // One started emitter: the unit, the proxy, the session tick whose state started it, the
@@ -263,6 +268,7 @@ private:
         // #421: a death clone's proxies, planned at its first shown sample.
         std::vector<CloneProxy> clone;
         sim::EntityId entity{};
+        std::uint64_t projectile_generation{};
         struct AttachedModel final {
             std::size_t hardpoint{};
             std::size_t proxy_base{};
@@ -370,6 +376,11 @@ private:
     std::uint64_t prepared_model_requests_{}, prepared_models_{}, prepared_system_requests_{}, prepared_systems_{};
     std::uint64_t prepared_source_bytes_{};
     double asset_prepare_ms_{};
+    std::uint64_t backend_warm_requested_{}, backend_warm_admitted_{}, backend_warm_refused_{};
+    std::size_t backend_warm_policies_{};
+    std::uint64_t backend_warm_texture_bytes_{};
+    double backend_warm_ms_{};
+    GodotParticleBackend::EmitterPrewarmWork backend_warm_work_;
     std::vector<Ship> ships_;
     std::vector<std::size_t> visit_, busy_;
     particles::CameraFrame camera_frame_{};

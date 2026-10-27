@@ -762,7 +762,11 @@ void GalacticMode::State::write_report_handoff(std::ostringstream& output) const
            << ",\"done\":" << (briefing_done ? "true" : "false")
            << ",\"accepted\":" << (briefing_accepted ? "true" : "false")
            << ",\"intro_requested\":" << (intro_requested ? "true" : "false")
-           << ",\"movie\":" << json(briefing_movie) << ",\"movie_playback\":false,\"intro_playback\":false}";
+           << ",\"movie\":" << json(briefing_movie) << ",\"movie_playback\":"
+           << (tactical && tactical->command_bar_movie_playing() ? "true" : "false")
+           << ",\"intro_playback\":false,\"movie_status\":";
+    if (tactical) tactical->write_command_bar_movie_report(output); else output << "null";
+    output << '}';
     output << ",\n  \"handoff\": {\"requested\": " << (options.synthetic_battle || handoff_requested ? "true" : "false")
            << ", \"conflict\": " << conflict << ", \"returned\": " << (returned ? "true" : "false")
            << ", \"child_ready_tick\": " << child_ready_tick << ", \"loading_frames\": " << loading_frames
@@ -859,6 +863,15 @@ bool GalacticMode::State::write_report() const {
     write_report_handoff(output);
     write_report_zoom_samples(output);
     write_report_models(output);
+    if (!memory_snapshots.empty()) {
+        output << ",\n  \"memory_census\":{\"units\":\"bytes\",\"scope\":\"listed_lower_bounds_and_overlapping_monitors_not_disjoint_process_ownership\",\"snapshots\":[";
+        for (std::size_t i = 0; i < memory_snapshots.size(); ++i) {
+            output << (i ? "," : "") << memory_snapshots[i].payload << ",\"attribution\":";
+            memory_snapshots[i].attribution.write(output);
+            output << '}';
+        }
+        output << "]}";
+    }
     output << "\n}\n";
     std::error_code error;
     if (!options.report_path.parent_path().empty()) std::filesystem::create_directories(options.report_path.parent_path(), error);

@@ -209,8 +209,8 @@ std::string details_entry(const std::string& id, const std::string& manifest, co
            + std::to_string(latest_time) + "\"\n\t\t}\n";
 }
 
-std::string workshop_acf(const std::string& installed, const std::string& details, bool needs_download = false) {
-    return "\"AppWorkshop\"\n{\n\t\"appid\"\t\t\"32470\"\n\t\"SizeOnDisk\"\t\t\"8192\"\n\t\"NeedsUpdate\"\t\t\"0\"\n\t\"NeedsDownload\"\t\t\""
+std::string workshop_acf(const std::string& installed, const std::string& details, bool needs_download = false, bool needs_update = false) {
+    return "\"AppWorkshop\"\n{\n\t\"appid\"\t\t\"32470\"\n\t\"SizeOnDisk\"\t\t\"8192\"\n\t\"NeedsUpdate\"\t\t\"" + std::string(needs_update ? "1" : "0") + "\"\n\t\"NeedsDownload\"\t\t\""
            + std::string(needs_download ? "1" : "0") + "\"\n\t\"WorkshopItemsInstalled\"\n\t{\n" + installed + "\t}\n\t\"WorkshopItemDetails\"\n\t{\n"
            + details + "\t}\n}\n";
 }
@@ -347,6 +347,88 @@ void test_workshop_states() {
           && too_big.records[0].has_warning(codes::folder_not_listed));
     CHECK(moved.records.size() == 1 && moved.records[0].state == ModState::installed
           && same_location(path_from_utf8(moved.records[0].root), workshop_content(later) / "42"));
+}
+
+void test_workshop_transitions_and_snapshot() {
+    Scratch scratch;
+    const auto library = scratch.path() / "library";
+    const auto item = workshop_content(library) / "77";
+    make_mod(item);
+    DiscoveryInput input;
+    input.steam_libraries = {library};
+    input.walk_trees = false;
+    auto write_acf = [&](const std::string& installed, const std::string& details, bool downloading, bool update) {
+        write_file(workshop_acf_path(library), workshop_acf(installed, details, downloading, update));
+    };
+    auto state = [&]() { const auto catalog = discover(input); CHECK(catalog.records.size() == 1); return catalog.records.at(0).state; };
+    write_acf(installed_entry("77", "old", 1000), details_entry("77", "old", "", 0), false, false);
+    CHECK(state() == ModState::installed);
+    auto baseline = workshop_snapshot(input);
+    CHECK(baseline.complete && baseline.revision.size() == 64);
+    CHECK(workshop_snapshot(input).revision == baseline.revision);
+    write_acf(installed_entry("77", "old", 1000), details_entry("77", "new", "", 0), false, true);
+    CHECK(parse_workshop_manifest(workshop_acf("", "", false, true))->needs_update);
+    CHECK(state() == ModState::needs_update);  // ordinary details manifest, no latest_* extension
+    CHECK(workshop_snapshot(input).revision != baseline.revision);
+    write_acf(installed_entry("77", "old", 1000), details_entry("77", "new", "", 0), true, true);
+    CHECK(state() == ModState::downloading);
+    write_acf(installed_entry("77", "new", 1000), details_entry("77", "new", "", 0), false, false);
+    CHECK(state() == ModState::installed);
+    // App-wide hints must not mark an unrelated up-to-date item as downloading or stale.
+    write_acf(installed_entry("77", "new", 1000), details_entry("77", "new", "", 0), true, true);
+    CHECK(state() == ModState::installed);
+    // Missing installed keys are not evidence of a newer item, even while the app downloads something.
+    for (const auto& partial : {std::string("\"77\" { \"timeupdated\" \"1000\" }"),
+                                std::string("\"77\" { \"manifest\" \"old\" }"),
+                                std::string("\"77\" { }")}) {
+        write_acf(partial, details_entry("77", "new", "new", 2000), true, true);
+        CHECK(state() == ModState::installed);
+    }
+    // Time-only updates and an item not yet installed are also service-owned states.
+    write_acf(installed_entry("77", "new", 500), details_entry("77", "new", "", 0), false, true);
+    CHECK(state() == ModState::needs_update);
+    write_acf("", details_entry("77", "new", "", 0), true, true);
+    CHECK(state() == ModState::downloading);
+    baseline = workshop_snapshot(input);
+    // Polling never sees asset content/recursive metadata changes.
+    const auto parent_time = fs::last_write_time(item);
+    write_file(item / "Data" / "XML" / "GameObjectFiles.xml", "<changed synthetic asset/>");
+    fs::last_write_time(item, parent_time);
+    CHECK(workshop_snapshot(input).revision == baseline.revision);
+    // An immediate item folder's mtime, a new item, and removal all invalidate the token.
+    fs::last_write_time(item, parent_time + std::chrono::seconds(2));
+    CHECK(workshop_snapshot(input).revision != baseline.revision);
+    baseline = workshop_snapshot(input);
+    fs::create_directory(workshop_content(library) / "78");
+    CHECK(workshop_snapshot(input).revision != baseline.revision);
+    baseline = workshop_snapshot(input);
+    fs::remove(workshop_content(library) / "78");
+    CHECK(workshop_snapshot(input).revision != baseline.revision);
+    baseline = workshop_snapshot(input);
+    const auto acf_time = fs::last_write_time(workshop_acf_path(library));
+    fs::last_write_time(workshop_acf_path(library), acf_time + std::chrono::seconds(2));
+    CHECK(workshop_snapshot(input).revision != baseline.revision);
+    // Steam may have no Workshop content yet. Offline/unreadable sources never publish an empty new state.
+    const auto empty_library = scratch.path() / "empty";
+    fs::create_directory(empty_library);
+    input.steam_libraries = {empty_library};
+    CHECK(workshop_snapshot(input).complete);
+    input.steam_libraries = {scratch.path() / "offline"};
+    CHECK(!workshop_snapshot(input).complete && workshop_snapshot(input).revision.empty());
+    input.steam_libraries = {library};
+    fs::remove(workshop_acf_path(library));
+    fs::create_directory(workshop_acf_path(library)); // wrong type, deterministic on Windows and Unix
+    CHECK(!workshop_snapshot(input).complete);
+    fs::remove(workshop_acf_path(library));
+    // Library maps are followed without descending into any mod tree.
+    const auto steam_root = scratch.path() / "steam";
+    write_file(steam_root / "steamapps" / "libraryfolders.vdf",
+               "\"libraryfolders\" { \"1\" { \"path\" \"" + vdf_escaped(library) + "\" } }");
+    input.steam_roots = {steam_root};
+    input.steam_libraries.clear();
+    CHECK(workshop_snapshot(input).complete);
+    write_file(steam_root / "steamapps" / "libraryfolders.vdf", "broken {");
+    CHECK(!workshop_snapshot(input).complete);
 }
 
 void test_mods_folder() {
@@ -567,6 +649,7 @@ void test_read_only() {
     set_read_only(fixture, true);
     const Snapshot before = snapshot(fixture);
     const Catalog catalog = discover(input);
+    CHECK(workshop_snapshot(input).complete);
     const Snapshot after = snapshot(fixture);
     set_read_only(fixture, false);
 
@@ -593,6 +676,7 @@ int main() {
     test_library_folders();
     test_workshop_manifest();
     test_workshop_states();
+    test_workshop_transitions_and_snapshot();
     test_mods_folder();
     test_manual_folders();
     test_fingerprints();

@@ -42,6 +42,7 @@ std::optional<WorkshopManifest> parse_workshop_manifest(std::string_view text) {
     const VdfNode* app = root ? root->child("AppWorkshop") : nullptr;
     if (app == nullptr || !app->is_object) return std::nullopt;
     WorkshopManifest manifest;
+    manifest.needs_update = number_of<std::int64_t>(*app, "NeedsUpdate") != 0;
     manifest.needs_download = number_of<std::int64_t>(*app, "NeedsDownload") != 0;
     if (const VdfNode* installed = app->child("WorkshopItemsInstalled"); installed != nullptr && installed->is_object) {
         for (const VdfNode& item : installed->children) {

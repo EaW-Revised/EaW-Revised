@@ -23,9 +23,13 @@
 #include "eawr/campaign/ai_selection_content.hpp"
 #include "eawr/campaign/ai_perception_content.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/diagnostics/gc_memory_watch.hpp"
+#include "eawr/diagnostics/gc_memory_boundary.hpp"
 
 #include <array>
 #include <charconv>
+#include <chrono>
+#include <iterator>
 #include <filesystem>
 #include <sstream>
 #include <stdexcept>
@@ -42,6 +46,45 @@ namespace cp = eawr::campaign;
 using galactic_test::expect;
 using eawr::sim::math::Fixed;
 using ai::real;
+
+void memory_boundary_contract() {
+    namespace diag = eawr::diagnostics;
+    struct TemporaryDirectory {
+        std::filesystem::path path = std::filesystem::temp_directory_path() /
+            ("eawr-memory-boundary-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ~TemporaryDirectory() { std::error_code error; std::filesystem::remove_all(path, error); }
+    } temporary;
+    const auto report = temporary.path / "capture.json";
+    unsigned captures{};
+    const auto capture = [&](bool enabled, bool interactive, const std::string& phase) {
+        diag::with_gc_memory_boundary(enabled, interactive, phase, [&] {
+            ++captures;
+            expect(diag::write_gc_memory_boundary(report, phase, "campaign", "profile",
+                "{\"phase\":\"" + phase + "\",\"tick\":0", [](std::ostream& out) { out << "{}"; }),
+                "memory boundary writes its actual sidecar");
+        });
+    };
+    capture(false, false, "post_load");
+    capture(false, false, "steady");
+    capture(true, true, "post_load");
+    capture(true, false, "other");
+    expect(captures == 0 && !std::filesystem::exists(temporary.path)
+        && !diag::gc_memory_boundary_enabled(false, false), "default-off/interactive gate performs no census or sidecar IO");
+    for (const std::string phase : {"post_load", "steady"}) {
+        capture(true, false, phase);
+        auto sidecar = report;
+        sidecar.replace_extension("." + phase + ".memory.json");
+        std::ifstream input(sidecar, std::ios::binary);
+        const std::string text{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+        expect(text == "{\"status\":\"partial_memory_boundary\",\"campaign\":\"campaign\",\"profile\":\"profile\","
+            "\"memory_census\":{\"units\":\"bytes\",\"scope\":\"listed_lower_bounds_and_overlapping_monitors_not_disjoint_process_ownership\","
+            "\"snapshots\":[{\"phase\":\"" + phase + "\",\"tick\":0,\"attribution\":{}}]}}\n",
+            "post_load/steady .memory.json preserve the complete boundary key shape");
+    }
+    expect(captures == 2 && std::filesystem::exists(temporary.path / "capture.post_load.memory.json")
+        && std::filesystem::exists(temporary.path / "capture.steady.memory.json"), "steady does not overwrite post_load");
+}
+
 Fixed whole(std::int64_t value) { return Fixed::from_integer(value).value(); }
 
 ai::AiData equations(const std::vector<std::pair<std::string, std::string>>& files,
@@ -1575,6 +1618,38 @@ end
 
 int case_galactic_ai_perception_stock_tests(int argc, char**) {
     try {
+        memory_boundary_contract();
+        {
+            using eawr::diagnostics::GcMemory;
+            using eawr::diagnostics::GcMemoryWatch;
+            const auto previous = GcMemory::census_enabled.exchange(true);
+            GcMemoryWatch watch;
+            auto input = std::make_shared<std::vector<int>>(128, 4);
+            const std::weak_ptr<std::vector<int>> weak = input;
+            auto alias = watch.watch("first", input);
+            static_cast<void>(watch.watch("alias", input));
+            GcMemory memory;
+            watch.read(memory);
+            expect(memory.rows["first"] == sizeof(*input) + input->capacity() * sizeof(int)
+                && memory.rows["alias"] == 0, "diagnostic service aliases count shared backing once");
+            alias.reset(); input.reset();
+            expect(weak.expired(), "diagnostic service watches never retain ownership");
+            GcMemory expired;
+            watch.read(expired);
+            expect(expired.rows.empty(), "expired diagnostic service inputs are absent");
+            const std::optional<std::string> text(std::string(100, 'x'));
+            GcMemory nested;
+            expect(nested.bytes(text) == text->capacity() + 1, "optional XML payload retains its heap bytes");
+            GcMemory::census_enabled.store(false);
+            if (GcMemory::directory().empty()) {
+                GcMemoryWatch off;
+                static_cast<void>(off.watch("disabled", std::make_shared<std::vector<int>>(128, 4)));
+                GcMemory empty;
+                off.read(empty);
+                expect(empty.rows.empty(), "disabled diagnostic watches record no readers");
+            }
+            GcMemory::census_enabled.store(previous);
+        }
         if (argc > 1) installed();
         else {
             std::string reference;

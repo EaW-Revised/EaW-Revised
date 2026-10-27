@@ -6,6 +6,20 @@
 #include <map>
 
 namespace eawr::campaign {
+namespace {
+void political_note(core::LoadNoteBuffer* notes, std::string_view code, std::string_view object,
+    std::string_view file, std::string_view tag, std::string authored, std::string effective,
+    std::string message, core::LoadCategory category = core::LoadCategory::unknown_degrade,
+    core::LoadAction action = core::LoadAction::default_used) {
+    if (!notes) return;
+    core::LoadNote note; note.code = code; note.object = object; note.file = file; note.tag = tag;
+    note.authored_value = std::move(authored); note.effective_value = std::move(effective);
+    note.classification = category; note.action = action;
+    note.diagnostic_code = sim::galactic::diagnostic_codes::invalid_setup; note.message = std::move(message);
+    if (category == core::LoadCategory::retail_accepts) note.retail = "LSA-19: signed integer sum, then planet clamp -1..1";
+    notes->append(std::move(note));
+}
+} // namespace
 core::Result<sim::math::Fixed> prepare_control_alignment_multiplier(
     sim::math::Fixed strength, bool like, sim::math::Fixed maximum) {
     const auto one = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
@@ -34,7 +48,7 @@ core::Result<std::vector<sim::galactic::GroundCapabilityType>> prepare_ground_ca
     return core::Result<Out>::success(std::move(result));
 }
 core::Result<sim::galactic::PoliticalControlSetup> prepare_initial_control(
-    const sim::galactic::GalacticSetup& galaxy, sim::galactic::PoliticalControlSetup presence) {
+    const sim::galactic::GalacticSetup& galaxy, sim::galactic::PoliticalControlSetup presence, core::LoadNoteBuffer* notes) {
     namespace gc = sim::galactic;
     using Out = gc::PoliticalControlSetup;
     // A root start cannot reuse a prior allegiance/capture/death journal.
@@ -66,6 +80,10 @@ core::Result<sim::galactic::PoliticalControlSetup> prepare_initial_control(
         auto calculated = gc::calculate_planet_control(inputs, inputs.planets[i], inputs.state[i], orbit_by_planet[inputs.planets[i].planet],
             galaxy.movement ? &*galaxy.movement : nullptr, {}, 0);
         if (!calculated) return core::Result<Out>::failure(calculated.error());
+        if (notes) {
+            core::LoadNoteCollector collector; collector.merge(calculated.value().notes);
+            for (auto note : collector.snapshot()) { note.phase = core::LoadPhase::load; notes->append(std::move(note)); }
+        }
         presence.state[i] = calculated.value().state;
         candidate.planets[i].owner = presence.state[i].current_player;
     }
@@ -77,7 +95,8 @@ core::Result<sim::galactic::PoliticalControlSetup> prepare_initial_control(
 core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
     const data::galactic::GalacticData& data, const units::GalacticTypeTable& types,
     sim::galactic::PoliticalControlSetup presence, const std::span<const ControlTypeBinding> objects,
-    const std::span<const ControlObjectBinding> planets, const std::span<const ControlObjectBinding> routes) {
+    const std::span<const ControlObjectBinding> planets, const std::span<const ControlObjectBinding> routes,
+    core::LoadNoteBuffer* notes) {
     using Out = sim::galactic::PoliticalControlSetup;
     const auto fail = [](const std::string& message, const std::string& path = {}) {
         core::Diagnostic error; error.code = std::string(sim::galactic::diagnostic_codes::invalid_setup);
@@ -86,13 +105,31 @@ core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
     };
     const auto* duration = data.constant("Political_Control_Change_Time_Seconds");
     const auto* limit = data.constant("Max_Ground_Forces_On_Planet");
-    if (!duration || !duration->number || duration->number->raw() <= 0
-        || !limit || !limit->number || limit->number->raw() <= 0
-        || limit->number->raw() % sim::math::Fixed::scale != 0
-        || limit->number->trunc_to_integer() > static_cast<std::int64_t>(sim::galactic::galactic_max_objects))
-        return fail("missing or invalid authored political transition duration or surface limit");
-    presence.change_seconds = *duration->number;
-    presence.max_ground_forces = static_cast<std::uint32_t>(limit->number->trunc_to_integer());
+    // Unknown consumers: a one-second transition and one surface slot are the
+    // documented inert minimums, not retail defaults (LSA-20/21).
+    const auto one = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
+    presence.change_seconds = duration && duration->number ? *duration->number : one;
+    sim::math::Fixed denominator{}, delta{};
+    if (presence.change_seconds.raw() <= 0
+        || !sim::math::try_multiply(presence.change_seconds, sim::math::Fixed::from_raw(30 * sim::math::Fixed::scale), denominator)
+        || !sim::math::try_divide(one, denominator, delta) || delta.raw() <= 0) {
+        political_note(notes, "EAWR-LOAD-1101", "GameConstants", {}, "Political_Control_Change_Time_Seconds",
+            duration ? duration->text : "omitted", "1", "missing or invalid authored political transition duration or surface limit");
+        presence.change_seconds = one;
+    } else if (!duration || !duration->number) {
+        political_note(notes, "EAWR-LOAD-1101", "GameConstants", {}, "Political_Control_Change_Time_Seconds",
+            duration ? duration->text : "omitted", "1", "missing or invalid authored political transition duration or surface limit");
+    }
+    const auto authored_limit = limit && limit->number ? limit->number->trunc_to_integer() : 1;
+    std::size_t placed = 1;
+    for (const auto& planet : presence.planets) placed = std::max(placed, planet.landed.size());
+    presence.max_ground_forces = static_cast<std::uint32_t>(std::clamp(authored_limit,
+        static_cast<std::int64_t>(std::min(placed, sim::galactic::galactic_max_objects)),
+        static_cast<std::int64_t>(sim::galactic::galactic_max_objects)));
+    if (!limit || !limit->number || limit->number->raw() % sim::math::Fixed::scale != 0
+        || authored_limit != presence.max_ground_forces)
+        political_note(notes, "EAWR-LOAD-1102", "GameConstants", {}, "Max_Ground_Forces_On_Planet", limit ? limit->text : "omitted",
+            std::to_string(presence.max_ground_forces), "missing or invalid authored political transition duration or surface limit");
     presence.types.clear();
     presence.ability_types.clear(); presence.ability_sources.clear();
     sim::galactic::TypeId previous{};
@@ -100,21 +137,35 @@ core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
         const auto resolved = units::resolve_initial_galactic_type(types, binding.original_type);
         if (!resolved) return core::Result<Out>::failure(resolved.error());
         const auto* type = &resolved.value();
-        if (binding.id <= previous || !type || !type->political_control
-            || (type->political_control->raw() != 0 && type->political_control->raw() != sim::math::Fixed::scale))
-            return fail(binding.original_type + ": missing or invalid orbital Political_Control", type ? type->file : std::string{});
+        if (binding.id <= previous) return fail("control type bindings require ordered nonzero identities");
         previous = binding.id;
-        presence.types.push_back({binding.id, static_cast<std::uint8_t>(type->political_control->trunc_to_integer()), binding.skips_combat, binding.ground_capable});
+        const auto value = type->political_control.value_or(sim::math::Fixed{}).trunc_to_integer();
+        sim::galactic::ControlType control_type{binding.id, static_cast<std::uint8_t>(value == 1), binding.skips_combat, binding.ground_capable};
+        if (value != 0 && value != 1) control_type.signed_political_control = value;
+        if (!type->political_control || *type->political_control != sim::math::Fixed::from_raw(control_type.political_control * sim::math::Fixed::scale))
+            political_note(notes, "EAWR-LOAD-1100", type->name, type->file, "Political_Control",
+                type->political_control ? std::to_string(type->political_control->raw()) : "omitted", std::to_string(value),
+                binding.original_type + ": missing or invalid orbital Political_Control",
+                type->political_control ? core::LoadCategory::retail_accepts : core::LoadCategory::unknown_degrade,
+                type->political_control ? core::LoadAction::accepted : core::LoadAction::default_used);
+        presence.types.push_back(control_type);
         sim::galactic::ControlAbilityType abilities; abilities.type = binding.id;
         for (const auto& ability : type->control_abilities) {
-            if (!ability.initially_enabled || !core::iequals(ability.activation_style, "Galactic_Automatic"))
-                return fail(binding.original_type + ": automatic_control_activation_unqualified", type->file);
+            if (!ability.initially_enabled || !core::iequals(ability.activation_style, "Galactic_Automatic")) {
+                political_note(notes, "EAWR-LOAD-1103", type->name, type->file, "Political_Ability", "unqualified activation", "skip ability",
+                    binding.original_type + ": automatic_control_activation_unqualified", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+                continue;
+            }
             sim::galactic::ControlAbility row;
             row.protection = ability.protection; row.enabled = *ability.initially_enabled;
             if (!row.protection) {
                 if (!ability.multiplier || !ability.category || *ability.category < std::numeric_limits<std::int32_t>::min()
                     || *ability.category > std::numeric_limits<std::int32_t>::max())
-                    return fail(binding.original_type + ": missing or invalid political transition ability quantity", type->file);
+                {
+                    political_note(notes, "EAWR-LOAD-1103", type->name, type->file, "Political_Ability", "invalid quantity", "skip ability",
+                        binding.original_type + ": missing or invalid political transition ability quantity", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+                    continue;
+                }
                 // WGM-197: this tag is a direct time multiplier; invalid ranges become zero.
                 row.multiplier = *ability.multiplier >= sim::math::Fixed{} && *ability.multiplier < sim::math::Fixed::from_raw(sim::math::Fixed::scale)
                     ? *ability.multiplier : sim::math::Fixed{};

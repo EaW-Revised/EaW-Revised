@@ -26,6 +26,15 @@ POLICY = {"vs": {"inputs": {"position": "vec4(VERTEX,1.0)"}},
 
 
 class BridgeContracts(unittest.TestCase):
+    def test_explicit_sampler_controls_reject_unknown_states(self):
+        for state, hints in (("nearest_clamp", "filter_nearest, repeat_disable"),
+                             ("linear_repeat", "filter_linear, repeat_enable")):
+            policy = {**POLICY, "ps": {**POLICY["ps"], "sampler_states": {"colour": state}}}
+            self.assertIn(f"BaseTexture : {hints};", bridge(VS, PS, VR, PR, policy))
+        with self.assertRaises(Unsupported):
+            bridge(VS, PS, VR, PR, {**POLICY, "ps": {**POLICY["ps"],
+                   "sampler_states": {"colour": "unknown"}}})
+
     def test_links_by_location_and_pads_missing_channels(self):
         text = bridge(VS, PS, VR, PR, POLICY)
         self.assertIn("texcoord = vec4(gate_link_2, 0.0, 1.0);", text)

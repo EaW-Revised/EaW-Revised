@@ -161,6 +161,10 @@ std::uint64_t CommandScheduler::reservation_revision() const {
 core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& intent) {
     using Payload = core::Result<tactical::CommandPayload>;
     switch (intent.verb) {
+    case TacticalVerb::gift:
+        if (intent.gift_recipient.value == 0)
+            return Payload::failure(failure(diagnostic_codes::invalid_intent, "gift needs a recipient seat"));
+        return Payload::success(tactical::GiftPayload{intent.gift_recipient});
     case TacticalVerb::stop: return Payload::success(tactical::StopPayload{});
     case TacticalVerb::beacon: return Payload::success(tactical::BeaconPayload{intent.destination});
     case TacticalVerb::move: return Payload::success(tactical::MovePayload{intent.destination, intent.through_hazards, intent.append});
@@ -230,8 +234,8 @@ core::Result<tactical::CommandPayload> command_payload(const TacticalIntent& int
 
 CommandScheduler::CommandScheduler(
     const tactical::PlayerId player, const std::uint64_t first_sequence, const std::uint64_t first_tick,
-    std::function<std::uint64_t()> intent_epoch)
-    : player_(player), next_sequence_(first_sequence), open_tick_(first_tick), intent_epoch_(std::move(intent_epoch)),
+    std::function<std::uint64_t()> intent_epoch, const sim::SeatId controller_seat)
+    : player_(player), controller_seat_(controller_seat), next_sequence_(first_sequence), open_tick_(first_tick), intent_epoch_(std::move(intent_epoch)),
       epoch_state_(intent_epoch_ ? std::make_shared<EpochState>() : nullptr) {}
 
 CommandScheduler::IntentEpochScope::IntentEpochScope(IntentEpochScope&& other) noexcept
@@ -304,6 +308,10 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
     if (intent_epoch_) open_tick_ = std::max(open_tick_, producer_epoch());
     queue_.push_back(tactical::PlayerCommand{
         sim::CommandKey{open_tick_, player_, next_sequence_++}, std::move(units), std::move(payload).value()});
+    if (controller_seat_.value != 0) {
+        queue_.back().origin = tactical::CommandOrigin::seat;
+        queue_.back().issuing_seat = controller_seat_;
+    }
     const bool reserves = economy || quitting || intent.verb == TacticalVerb::ability
         || intent.verb == TacticalVerb::repair_hardpoint || intent.verb == TacticalVerb::special_fire;
     if (reservations_enabled_ && reserves) {
@@ -312,6 +320,21 @@ core::Result<void> CommandScheduler::issue(const TacticalIntent& intent) {
     }
     if (issue_observer_) issue_observer_(queue_.back().key.sequence, open_tick_);
     return core::Result<void>::success();
+}
+
+void CommandScheduler::discard_unit_orders(const sim::EntityId entity) {
+    const std::lock_guard lock(mutex_);
+    std::erase_if(queue_, [entity](const auto& command) {
+        return command.units.size() == 1 && command.units.front() == entity;
+    });
+    for (auto& command : queue_) std::erase(command.units, entity);
+    for (auto& reservation : reservations_)
+        if (!reservation.handed_off) std::erase(reservation.intent.units, entity);
+    std::erase_if(reservations_, [&](const auto& row) {
+        return !row.handed_off && std::none_of(queue_.begin(), queue_.end(),
+            [&](const auto& command) { return command.key.sequence == row.sequence; });
+    });
+    ++reservation_revision_;
 }
 
 std::vector<tactical::PlayerCommand> CommandScheduler::take(const std::uint64_t next_tick) {

@@ -568,6 +568,7 @@ enum class ProjectileExpiryReason : std::uint32_t {
     target_radius = 3,
     rocket_path_exhausted = 4,
     explicit_request = 5,
+    ground_contact = 6, // coordinator-reserved: LR2-12, terminal once at terrain/water contact
 };
 
 // weapon is the slot's HardPoints index (object_weapon for the unit's own weapon); a shot's

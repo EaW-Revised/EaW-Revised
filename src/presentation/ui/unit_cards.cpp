@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace eawr::presentation::ui {
 namespace {
@@ -49,6 +50,24 @@ std::uint32_t ability_index(const std::string_view name) noexcept {
 
 std::string_view ability_name(const std::uint32_t ability) noexcept {
     return ability < ability_names.size() ? ability_names[ability] : std::string_view{};
+}
+
+SquadronOf make_squadron(const sim::EntityId container, std::string type, const std::uint32_t ability,
+                         const std::uint32_t second_ability, const bool homogeneous,
+                         const std::span<const TeamMember> members) {
+    SquadronOf team;
+    team.container = container;
+    team.type = std::move(type);
+    team.ability = ability;
+    team.second_ability = second_ability;
+    team.homogeneous = homogeneous;
+    double sum = 0.0;
+    for (const TeamMember& member : members) {
+        team.members.push_back(member.entity);
+        sum += member.health;
+    }
+    team.health = team.members.empty() ? 0.0 : sum / static_cast<double>(team.members.size());
+    return team;
 }
 
 std::vector<CardUnit> card_units(const std::span<const SelectedUnit> selection) {

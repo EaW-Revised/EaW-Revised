@@ -176,6 +176,8 @@ public:
     void setup(Setup setup);
     // The cards to draw; redraws only when they change.
     void show(std::vector<Card> cards, std::vector<presentation::ui::CardBorder> borders);
+    // Compare against retained display values before allocating card strings or vectors.
+    void show_units(const presentation::ui::CardLayout& layout, std::span<const presentation::ui::CardUnit> units);
     // A retained menu can change price/tint/dial without reconstructing card names.
     bool update_build_states(std::span<const presentation::ui::BuildButton> buttons);
     void set_click(std::function<void(std::size_t slot, bool shift)> click) { click_ = std::move(click); }
@@ -214,6 +216,8 @@ private:
     Setup setup_;
     std::vector<Card> cards_;
     std::uint64_t build_card_batches_{};
+    std::uint64_t unit_card_syncs_{};
+    std::uint64_t unit_card_batches_{};
     std::uint64_t build_state_updates_{};
     std::vector<presentation::ui::CardBorder> borders_;
     std::vector<std::unique_ptr<PortraitCellRenderer>> cells_;

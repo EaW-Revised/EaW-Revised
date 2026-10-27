@@ -2,6 +2,7 @@
 #include "xml_internal.hpp"
 #include "eawr/diagnostics/owner_census.hpp"
 #include <atomic>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -206,6 +207,7 @@ core::Result<LoadResult> load_catalog(
     impl->profile = profile;
     impl->generation = next_generation.fetch_add(1, std::memory_order_relaxed);
     std::vector<core::Diagnostic> diagnostics;
+    core::LoadNoteCollector notes;
     LoadHealth health;
     const auto fail_load = [&health](const core::Diagnostic& diagnostic) {
         if (!health.fatal) health.fatal = diagnostic;
@@ -228,6 +230,8 @@ core::Result<LoadResult> load_catalog(
 
     std::unordered_set<std::string> active_records;
     std::size_t global_registry_order = 0;
+    std::optional<core::load_profile::Scope> registry_scope;
+    registry_scope.emplace(core::load_profile::Phase::catalog_registry);
     for (const auto& registry : registries) {
         impl->registry_roots.push_back(RegistryRoot{
             .category = registry.category,
@@ -312,12 +316,32 @@ core::Result<LoadResult> load_catalog(
                     }
                 } else {
                     ++health.include_missing;
+                    // XML R-10: an initially missing include is omitted, as before.
+                    const auto [line, column] = parsed.value().offsets.line_column(file.offset_debug());
+                    (void)column;
+                    core::LoadNote note;
+                    note.code = core::load_note_codes::missing_include;
+                    note.classification = core::LoadCategory::retail_accepts;
+                    note.layer.mod_id = record.value().layer_id;
+                    note.file = record.value().canonical_path;
+                    note.line = line;
+                    note.object = path;
+                    note.tag = file.name();
+                    note.authored_value = file.child_value();
+                    note.action = core::LoadAction::accepted;
+                    note.effective_value = "omitted";
+                    note.retail = "XML R-10: initial missing includes are omitted";
+                    note.diagnostic_code = diagnostics.back().code;
+                    note.message = diagnostics.back().message;
+                    notes.append(std::move(note));
                 }
                 impl->registry_files.push_back(std::move(registry_file));
                 ++global_registry_order;
                 continue;
             }
             active_records.insert(record_identity(included_record.value()));
+            const core::load_profile::LayerScope layer_timer(included_record.value().layer_id,
+                core::load_profile::LayerKind::registry, included_bytes.value().size());
             registry_file.source = SourceLocation{included_record.value().canonical_path,
                 included_record.value().source_id, included_record.value().layer_id, 1, 1};
             registry_file.input_sha256 = input_hash(included_bytes.value());
@@ -364,19 +388,29 @@ core::Result<LoadResult> load_catalog(
         }
     }
 
+    registry_scope.reset();
+    std::optional<core::load_profile::Scope> inventory_scope;
+    inventory_scope.emplace(core::load_profile::Phase::catalog_inventory);
     auto effective = vfs.enumerate({}, ".xml");
     if (!effective) return core::Result<LoadResult>::failure(effective.error());
     std::unordered_map<std::string, std::string> effective_sources;
     for (const auto& record : effective.value()) {
         effective_sources.insert_or_assign(record.canonical_path, record.source_id);
         if (parse_outcomes.contains(record.canonical_path)) continue;
+        if (!options.parse_unregistered_xml) {
+            parse_outcomes[record.canonical_path] = {false, "not parsed: the inventory pass was not requested"};
+            continue;
+        }
+        core::load_profile::LayerScope layer_timer(record.layer_id, core::load_profile::LayerKind::inventory);
         auto bytes = vfs.open(record.canonical_path);
         if (!bytes) {
+            layer_timer.discard();
             parse_outcomes[record.canonical_path] = {false, bytes.error().message};
             diagnostics.push_back(bytes.error());
             continue;
         }
         auto parsed = parse_document(bytes.value(), record);
+        layer_timer.add_bytes(bytes.value().size());
         if (!parsed) {
             parse_outcomes[record.canonical_path] = {false, parsed.error().message};
             diagnostics.push_back(parsed.error());
@@ -384,6 +418,8 @@ core::Result<LoadResult> load_catalog(
             parse_outcomes[record.canonical_path] = {true, "parsed effective physical XML"};
         }
     }
+    inventory_scope.reset();
+    core::load_profile::Scope index_scope(core::load_profile::Phase::catalog_index);
     for (auto& file : impl->physical_inventory) {
         // Raw records share a canonical path; only the effective source has readable bytes.
         file.active_registry_file = active_records.contains(record_identity(file.record));
@@ -403,7 +439,7 @@ core::Result<LoadResult> load_catalog(
     member_definitions.reserve(impl->definitions.size());
     for (const auto& definition : impl->definitions) member_definitions.push_back(&definition);
     derive_member_flags(member_definitions, impl->member_flags, impl->member_flags_issue, impl->member_roster_notes);
-    return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics), std::move(health)});
+    return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics), std::move(health), notes.snapshot()});
 }
 
 core::Result<LoadResult> load_catalog_strict(const vfs::Vfs& vfs, const Profile profile) {

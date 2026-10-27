@@ -22,6 +22,8 @@
 #include <string>
 #include <vector>
 
+namespace eawr::diagnostics { class GcMemory; }
+
 namespace eawr::presentation::godot_backend {
 
 // The same engine-free audio loaders/voice queue/fades as tactical audio.
@@ -58,6 +60,7 @@ public:
         std::string_view winner_faction, std::string_view loser_faction);
     void service(double delta, const FixedCamera& camera, bool paused);
     void write_report(std::ostream& output) const;
+    void memory_inventory(diagnostics::GcMemory& memory) const;
 private:
     const audio::MusicEvent* music(std::string_view name) const;
     void play(const std::optional<audio::GalacticMusicDirector::Cue>& cue);
@@ -65,6 +68,8 @@ private:
     void play_event(std::string_view name);
     const std::vector<audio::Field>& type_fields(std::string_view type);
     void update_speech(bool paused);
+    void record_start(std::string_view kind, std::string_view event,
+        const godot::StringName& bus_name, float stream_db, double gain);
     const vfs::Vfs& filesystem_;
     const data::Catalog& catalog_;
     // SND-44/48: the speech registry, FIFO and its one stream, as in tactical audio.
@@ -125,6 +130,18 @@ private:
     std::uint64_t summary_conflict_{};
     std::map<std::string, godot::Ref<godot::AudioStream>> streams_;
     std::vector<std::string> problems_, music_log_;
+    struct MusicStart {
+        std::string bus, send;
+        float stream_db{}, music_db{}, master_db{};
+        double event_volume{}, fade{};
+    };
+    std::vector<MusicStart> music_starts_;
+    struct SampleStart {
+        std::string kind, event, bus, category, send;
+        float stream_db{}, category_db{}, master_db{};
+        double gain{};
+    };
+    std::vector<SampleStart> sample_starts_;
     std::map<std::string, std::uint64_t> sounds_;
     std::map<std::string, std::uint64_t> played_sounds_;
     std::map<std::string, std::uint64_t> playback_failures_;

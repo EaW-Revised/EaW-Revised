@@ -1,6 +1,9 @@
 #include "galactic_audio.hpp"
+#include "eawr/diagnostics/gc_memory.hpp"
 #include "eawr/core/text.hpp"
 #include "audio_output.hpp"
+#include "audio_buses.hpp"
+#include "settings_store.hpp"
 #include "galactic_mode_internal.hpp"
 
 #include "eawr/data/tag_trace.hpp"
@@ -17,6 +20,17 @@
 #include <cstring>
 
 namespace eawr::presentation::godot_backend {
+void GalacticAudio::memory_inventory(diagnostics::GcMemory& memory) const {
+    memory.row("viewer.audio.metadata", type_fields_, faction_fields_, audio_fields_, category_masks_, rankings_);
+    for (const auto& [name, stream] : streams_) {
+        memory.rows["viewer.audio.stream_names"] += memory.bytes(name);
+        godot::PackedByteArray data;
+        if (const auto* wav = godot::Object::cast_to<godot::AudioStreamWAV>(stream.ptr())) data = wav->get_data();
+        else if (const auto* mp3 = godot::Object::cast_to<godot::AudioStreamMP3>(stream.ptr())) data = mp3->get_data();
+        if (!data.is_empty() && memory.seen.insert(data.ptr()).second)
+            memory.rows["viewer.audio.stream_payload"] += static_cast<std::uint64_t>(data.size());
+    }
+}
 namespace {
 std::string trim(std::string_view value) {
     return core::trim(value, core::xml_whitespace);
@@ -44,6 +58,10 @@ godot::Vector3 render(const audio::Vec3& source) {
 GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
     const data::Catalog& catalog, const std::string_view local_faction, const bool muted)
     : filesystem_(filesystem), catalog_(catalog), muted_(muted || audio_output_muted()) {
+    // Direct GC launches and menu transitions share the Options mixer. Apply
+    // the active record before any opening cue can start.
+    const auto* saved = ActiveSettings::get();
+    audio_buses::ensure(saved ? mix_levels(saved->audio) : audio::MixLevels{});
     // BA-01: presets and overrides in effective registry/file order.
     std::vector<const data::Definition*> definitions;
     for (const auto& definition : catalog.definitions())
@@ -127,7 +145,7 @@ GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
         const auto bus_name = godot::String("EAWR_GC_Pan_") + godot::String::num_int64(static_cast<std::int64_t>(index));
         auto bus = server->get_bus_index(bus_name);
         if (bus < 0) { bus = server->get_bus_count(); server->add_bus(); server->set_bus_name(bus, bus_name); }
-        server->set_bus_send(bus, "Master");
+        server->set_bus_send(bus, audio_buses::names[audio_buses::sfx]);
         while (server->get_bus_effect_count(bus) > 0) server->remove_bus_effect(bus, 0);
         panners_[index].instantiate(); server->add_bus_effect(bus, panners_[index]);
         voice.player->set_bus(bus_name);
@@ -135,9 +153,11 @@ GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
     }
     for (auto& track : tracks_) {
         track.player = memnew(godot::AudioStreamPlayer);
+        track.player->set_bus(audio_buses::names[audio_buses::music]);
         host.add_child(track.player);
     }
     speech_player_ = memnew(godot::AudioStreamPlayer);
+    speech_player_->set_bus(audio_buses::names[audio_buses::voice]);
     host.add_child(speech_player_);
     // The renderer owns a bare camera; use the established tactical listener
     // viewport adapter to give Godot a listener in the galaxy's world.
@@ -151,6 +171,7 @@ GalacticAudio::GalacticAudio(godot::Node3D& host, const vfs::Vfs& filesystem,
     host.add_child(listener_viewport_);
     for (auto& voice : spatial_players_) {
         voice.player = memnew(godot::AudioStreamPlayer3D);
+        voice.player->set_bus(audio_buses::names[audio_buses::sfx]);
         voice.player->set_attenuation_model(godot::AudioStreamPlayer3D::ATTENUATION_DISABLED);
         voice.player->set_max_distance(0.0F);
         voice.player->set_attenuation_filter_cutoff_hz(20500.0F);
@@ -371,7 +392,9 @@ void GalacticAudio::update_speech(const bool paused) {
     }
     if (loaded.is_null()) { speech_queue_.pop(); return; }
     speech_player_->stop(); speech_player_->set_stream(loaded);
-    speech_player_->set_volume_db(db(muted_ ? 0 : speech.volume)); speech_player_->play();
+    speech_player_->set_volume_db(db(muted_ ? 0 : speech.volume));
+    record_start("speech", speech.name, speech_player_->get_bus(), speech_player_->get_volume_db(), speech.volume);
+    speech_player_->play();
     speech_stream_.opened();
     speech_handle_ = speech_stream_.handle(); speech_started_ = true; speech_started_at_ = clock_;
     if (speech_log_.size() < 256) speech_log_.push_back(speech.name + " " + file);
@@ -420,7 +443,16 @@ void GalacticAudio::play(const std::optional<audio::GalacticMusicDirector::Cue>&
     }
     next.player->set_stream(loaded); next.volume = cue->event->volume;
     next.fade.begin(cue->event->fade_in_seconds); next.active = true;
-    next.player->set_volume_db(db(muted_ ? 0 : next.volume * next.fade.level * audio::default_volume_slider * audio::default_volume_slider));
+    next.player->set_volume_db(db(muted_ ? 0 : next.volume * next.fade.level));
+    if (music_starts_.size() < 256) {
+        const auto* server = godot::AudioServer::get_singleton();
+        const auto bus = server->get_bus_index(next.player->get_bus());
+        const auto mix = server->get_bus_index(audio_buses::names[audio_buses::mix]);
+        music_starts_.push_back({galactic_detail::utf8(godot::String(next.player->get_bus())),
+            galactic_detail::utf8(godot::String(server->get_bus_send(bus))),
+            next.player->get_volume_db(), server->get_bus_volume_db(bus), server->get_bus_volume_db(mix),
+            next.volume, next.fade.level});
+    }
     next.player->play();
 }
 
@@ -473,22 +505,32 @@ void GalacticAudio::service(const double delta, const FixedCamera& camera, const
             if (audio::Voices::is_3d_voice(start.voice)) {
                 auto& voice = spatial_players_.at(start.voice);
                 voice.player->stop(); voice.player->set_stream(loaded);
-                voice.gain = start.volume * audio::category_gain(*request.event, {});
+                // SND-60: Localize chooses the category; its bus supplies the
+                // slider and Mix supplies master, leaving authored gain here.
+                voice.player->set_bus(audio_buses::names[request.event->localized ? audio_buses::voice : audio_buses::sfx]);
+                voice.gain = start.volume;
                 voice.handle = sample.handle; voice.started_at = clock_; voice.position = *request.position;
                 voice.saturation = request.event->saturation_distance;
                 voice.player->set_position(render(voice.position));
                 voice.player->set_pitch_scale(static_cast<float>(start.pitch));
-                voice.player->set_volume_db(-80.0F); voice.player->play();
+                voice.player->set_volume_db(-80.0F);
+                record_start("spatial", request.event->name, voice.player->get_bus(), voice.player->get_volume_db(), voice.gain);
+                voice.player->play();
                 return start;
             }
             auto& voice = players_.at(start.voice - audio::Voices::voices_3d);
             voice.player->stop(); voice.player->set_stream(loaded);
             // SND-61: an active speech stream caps ordinary SFX gain.
-            voice.gain = audio::speech_sfx_gain(start.volume, speech_stream_.active(), false) * audio::category_gain(*request.event, {});
+            voice.gain = audio::speech_sfx_gain(start.volume, speech_stream_.active(), false);
             voice.handle = sample.handle; voice.started_at = clock_;
             panners_[start.voice - audio::Voices::voices_3d]->set_pan(static_cast<float>(start.pan * 2 - 1));
+            auto* server = godot::AudioServer::get_singleton();
+            server->set_bus_send(server->get_bus_index(voice.player->get_bus()),
+                audio_buses::names[request.event->localized ? audio_buses::voice : audio_buses::sfx]);
             voice.player->set_pitch_scale(static_cast<float>(start.pitch));
-            voice.player->set_volume_db(db(muted_ ? 0 : voice.gain)); voice.player->play();
+            voice.player->set_volume_db(db(muted_ ? 0 : voice.gain));
+            record_start("pooled_2d", request.event->name, voice.player->get_bus(), voice.player->get_volume_db(), voice.gain);
+            voice.player->play();
             return start;
         },
         [this](std::size_t index) {
@@ -518,10 +560,24 @@ void GalacticAudio::service(const double delta, const FixedCamera& camera, const
         auto& track = tracks_[index];
         if (!track.active) continue;
         track.fade.advance(std::max(0.0, delta));
-        track.player->set_volume_db(db(muted_ ? 0 : track.volume * track.fade.level * audio::default_volume_slider * audio::default_volume_slider));
+        track.player->set_volume_db(db(muted_ ? 0 : track.volume * track.fade.level));
         if (index == current_ && !track.fade.ending && !track.player->is_playing()) { track.active = false; ended = true; }
     }
     if (ended) play(director_.track_ended());
+}
+
+void GalacticAudio::record_start(const std::string_view kind, const std::string_view event,
+    const godot::StringName& bus_name, const float stream_db, const double gain) {
+    if (sample_starts_.size() >= 256) return;
+    const auto* server = godot::AudioServer::get_singleton();
+    const auto bus = server->get_bus_index(bus_name);
+    const auto category_name = kind == "pooled_2d" ? server->get_bus_send(bus) : bus_name;
+    const auto category = server->get_bus_index(category_name);
+    const auto mix = server->get_bus_index(audio_buses::names[audio_buses::mix]);
+    sample_starts_.push_back({std::string(kind), std::string(event),
+        galactic_detail::utf8(godot::String(bus_name)), galactic_detail::utf8(godot::String(category_name)),
+        galactic_detail::utf8(godot::String(server->get_bus_send(category))),
+        stream_db, server->get_bus_volume_db(category), server->get_bus_volume_db(mix), gain});
 }
 
 void GalacticAudio::write_report(std::ostream& output) const {
@@ -537,6 +593,26 @@ void GalacticAudio::write_report(std::ostream& output) const {
         << ",\"muted\":" << (muted_ ? "true" : "false") << ",\"music\":[";
     for (std::size_t index = 0; index < music_log_.size(); ++index)
         output << (index ? "," : "") << galactic_detail::json(music_log_[index]);
+    output << "],\"music_starts\":[";
+    for (std::size_t index = 0; index < music_starts_.size(); ++index) {
+        const auto& start = music_starts_[index];
+        output << (index ? "," : "") << "{\"bus\":" << galactic_detail::json(start.bus)
+            << ",\"send\":" << galactic_detail::json(start.send)
+            << ",\"stream_db\":" << start.stream_db << ",\"music_db\":" << start.music_db
+            << ",\"master_db\":" << start.master_db << ",\"event_volume\":" << start.event_volume
+            << ",\"fade\":" << start.fade << '}';
+    }
+    output << "],\"sample_starts\":[";
+    for (std::size_t index = 0; index < sample_starts_.size(); ++index) {
+        const auto& start = sample_starts_[index];
+        output << (index ? "," : "") << "{\"kind\":" << galactic_detail::json(start.kind)
+            << ",\"event\":" << galactic_detail::json(start.event)
+            << ",\"bus\":" << galactic_detail::json(start.bus)
+            << ",\"category\":" << galactic_detail::json(start.category)
+            << ",\"send\":" << galactic_detail::json(start.send)
+            << ",\"stream_db\":" << start.stream_db << ",\"category_db\":" << start.category_db
+            << ",\"master_db\":" << start.master_db << ",\"gain\":" << start.gain << '}';
+    }
     output << "],\"speech\":[";
     for (std::size_t index = 0; index < speech_log_.size(); ++index)
         output << (index ? "," : "") << galactic_detail::json(speech_log_[index]);

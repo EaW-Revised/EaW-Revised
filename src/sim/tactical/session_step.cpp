@@ -74,7 +74,7 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
         return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::resource_limit,
             "tick " + std::to_string(tick) + " reached the tactical tick limit"));
     }
-    if (impl_->land) return impl_->step_land(executor);
+    if (impl_->land) return impl_->step_land(*this, executor);
     auto context = [&] {
         core::tick_profile::Scope scope("serial.tactical.setup");
         return session_detail::Tick(*this, impl_.get(), executor);
@@ -84,6 +84,8 @@ core::Result<TacticalTick> TacticalSession::step(const PartitionExecutor& execut
 
 // The gather buffers return with their capacity; only units are cleared. The next tick refills them.
 session_detail::Tick::~Tick() {
+    if (controller_rollback_ && !controller_committed_)
+        impl_->setup.controllers = std::move(controller_rollback_);
     auto& scratch = impl_->gather_scratch;
     if (gather_) {
         if (gather_->starts) scratch.starts = std::move(*gather_->starts);

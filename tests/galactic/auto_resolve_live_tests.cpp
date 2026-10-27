@@ -19,6 +19,11 @@
 #include "eawr/checkpoint/game.hpp"
 #include "../../src/campaign/checkpoint_fields_internal.hpp"
 #include <filesystem>
+#include <chrono>
+#include <fstream>
+#include <set>
+#include <regex>
+#include "../support/temp_dir.hpp"
 #include <stdexcept>
 #include <utility>
 using eawr::testing::take;
@@ -476,11 +481,40 @@ void installed() {
         expect(requested, "later enemy arrival requests a conflict using refreshed live presence");
         if (!arrival_hash) arrival_hash = galaxy.state_sha256(); else expect(*arrival_hash == galaxy.state_sha256(), "live access and arrival hashes agree on 1/2/4/8");
     }
+    // WGS-94: omit the flag in XML, so both the catalog and faction table see the omission.
+    const auto omission_directory = std::filesystem::current_path() / ("auto-resolve-omitted-benefits-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{omission_directory};
+    std::set<std::string> faction_files;
+    for (const auto& definition : catalog.catalog.definitions()) if (definition.active && definition.category == eawr::data::Category::faction)
+        faction_files.insert(definition.root.source.logical_path);
+    for (const auto& logical : faction_files) {
+        if (!logical.starts_with("data/")) throw std::runtime_error("faction overlay requires a canonical data path");
+        const auto bytes = take(filesystem.open(logical));
+        const std::string xml(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        const auto path = omission_directory / std::filesystem::path(logical.substr(5));
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path);
+        out << std::regex_replace(xml,
+            std::regex("<Benefits_From_Corruption\\b[^>]*>[^<]*</Benefits_From_Corruption\\s*>", std::regex::icase), "");
+        if (!out) throw std::runtime_error("faction omission overlay write failed");
+    }
+    auto omission_mounts = mounts;
+    omission_mounts.insert(omission_mounts.begin(), {"omitted-benefits", omission_directory, "data", {}});
+    const auto omission_fs = take(eawr::vfs::Vfs::mount(omission_mounts));
+    const auto omission_catalog = take(eawr::data::load_catalog(omission_fs, eawr::data::Profile::foc));
+    auto omission_data = take(dg::load_galactic_data(omission_fs, omission_catalog.catalog));
+    omission_data.campaigns.push_back(authored);
+    for (const auto name : {"Rebel", "Empire"}) {
+        const auto* faction = omission_data.faction(name);
+        expect(faction && faction->is_playable.value_or(false) && !faction->benefits_from_corruption.has_value(),
+            "WGS-94 real XML omits the playable battle factions' benefit flags");
+    }
     for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U}) {
         const bool land = scenario != 0, conquest = scenario >= 2, commissioned = scenario == 3;
-        auto resolver_data = data;
-        if (scenario == 4) for (auto& faction : resolver_data.factions)
-            if (faction.name == "Rebel" || faction.name == "Empire") faction.benefits_from_corruption.reset();
+        const auto& resolver_data = scenario == 4 ? omission_data : data;
+        const auto& resolver_catalog = scenario == 4 ? omission_catalog.catalog : catalog.catalog;
+        const auto& resolver_fs = scenario == 4 ? omission_fs : filesystem;
         auto fixture = battle_fixture(plan, types, land, conquest);
         const auto type_id = [&](std::string_view name) {
             const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& row) { return row.original_type == name; });
@@ -566,7 +600,7 @@ void installed() {
         std::optional<cp::AutoResolveOutcomeApplication> reference; std::optional<std::string> hash;
         for (const std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count); auto game = take(cp::GameSession::create(fixture.setup));
-            auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, resolver_data, types, plan, fixture.originals));
+            auto adapters = take(cp::make_stock_auto_resolver(resolver_fs, resolver_catalog, resolver_data, types, plan, fixture.originals));
             game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
             game.set_movement_access_provider(std::move(adapters.access));
             game.set_auto_resolver(std::move(adapters.resolve)); game.set_auto_resolve_progress_reader(std::move(adapters.progress)); game.set_auto_resolve_outcome_services(std::move(adapters.outcomes));

@@ -117,6 +117,13 @@ void WorldUiView::write_report(std::ostream& output) const {
                << ", \"health\": " << tooltip_health_ << ", \"rect\": [" << tooltip_rect_[0] << ", "
                << tooltip_rect_[1] << ", " << tooltip_rect_[2] << ", " << tooltip_rect_[3] << "]}";
     } else output << "null";
+    output << ", \"hover_owner\": ";
+    if (owner_shown_) {
+        output << "{\"entity\": " << owner_entity_ << ", \"name\": "
+            << eawr::viewer::camera_input::json_string_literal(owner_shown_->name)
+            << ", \"colour\": [" << static_cast<int>(owner_shown_->colour[0]) << ','
+            << static_cast<int>(owner_shown_->colour[1]) << ',' << static_cast<int>(owner_shown_->colour[2]) << "]}";
+    } else output << "null";
     output
            << ", \"icons\": " << icons_.size() << ", \"grid_icons\": " << grid_icons_
            << ", \"max_grid_icons\": " << max_grid_icons_ << ", \"combat_cells\": " << grid_.cells().size()

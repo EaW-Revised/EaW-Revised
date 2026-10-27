@@ -73,11 +73,18 @@ bool Goals::apply(const GoalCommand& command, PresentationSink& sink) {
 }
 bool Goals::dialog(const Dialog& d, const LocalPresentation& local, PresentationSink& sink) {
     if (d.file.empty()) return false;
+    const auto present = [&](auto payload) {
+        // Initialize storage before selecting the active presentation alternative.
+        PresentationEvent event{};
+        event.owner = owner_;
+        event.payload.emplace<std::decay_t<decltype(payload)>>(std::move(payload));
+        sink.receive(event);
+    };
     // WST-58 default tag; chapter value is supplied by caller, default is a named seam.
     const auto tag = d.tag.empty() ? d.file + "_" + std::to_string(d.chapter) : d.tag;
-    Goal goal{d.file, d.variable, tag, d.chapter, false, false};
+    Goal goal{d.file, d.variable, tag, d.chapter, false, false, d.remove_after_viewed.value_or(d.tag.empty())}; // WST-58: test the authored tag
     auto row = std::find_if(state_.goals.begin(), state_.goals.end(), [&](const auto& g) { return g.tag == tag; });
-    if (row == state_.goals.end()) state_.goals.push_back(goal);
+    if (row == state_.goals.end()) state_.goals.insert(state_.goals.begin(), goal); // WST-58: newest first
     else {
         // WST-58: repeated-dialog update policy preserves completion and visibility.
         // Original duplicate-tag behaviour remains goals_policy_seam.
@@ -85,12 +92,15 @@ bool Goals::dialog(const Dialog& d, const LocalPresentation& local, Presentation
         goal.hidden = row->hidden;
         *row = goal;
     }
-    sink.receive({owner_, GoalChanged{tag, goal}});
-    if (local.summary_open) sink.receive({owner_, SummaryRequest{SummaryAction::refresh, tag, d.chapter}});
-    else if (d.popup) sink.receive({owner_, SummaryRequest{SummaryAction::open, tag, d.chapter}});
-    else {
-        sink.receive({owner_, SummaryRequest{SummaryAction::flash_button, tag, d.chapter}});
-        sink.receive({owner_, AdvisorRequest{local.transmission_text}});
+    present(GoalChanged{tag, goal});
+    if (local.summary_open) present(SummaryRequest{SummaryAction::refresh, tag, d.chapter});
+    else if (d.popup) present(SummaryRequest{SummaryAction::open, tag, d.chapter});
+    else if (local.defer_summary_state) {
+        present(SummaryRequest{SummaryAction::refresh_or_flash, tag, d.chapter,
+            local.transmission_text, d.sound ? local.mission_added_sound : std::string{}});
+    } else {
+        present(SummaryRequest{SummaryAction::flash_button, tag, d.chapter});
+        present(AdvisorRequest{local.transmission_text});
         if (d.sound) {
             PresentationEvent event{};
             event.owner = owner_;

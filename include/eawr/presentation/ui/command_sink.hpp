@@ -42,6 +42,7 @@ enum class TacticalVerb : std::uint8_t {
     repair_hardpoint = 13, // WSL-40: station in units, hardpoint index, local payer
     special_fire = 14, // WSW-31: one source and a player-admitted object target
     beacon = 15, // HCB-12: player-owned point placement, no selection.
+    gift = 16, // ADR-020: selected mobile controller transfer.
 };
 
 // Where an intent came from. Presentation-only: it never enters a command, so a HUD button and
@@ -78,6 +79,7 @@ struct TacticalIntent {
     std::optional<sim::math::Fixed> reinforcement_facing{}; // WR-X01: local battle deployment choice
     std::uint64_t reinforcement_token{}; // WGM-48: published persistent reserve identity
     bool append{}; // HCB-57: queued point movement.
+    sim::SeatId gift_recipient{};
     friend bool operator==(const TacticalIntent&, const TacticalIntent&) = default;
 };
 
@@ -165,7 +167,7 @@ public:
     // called by issue/open_tick and capture_intent_epoch under the epoch mutex;
     // it must be thread-safe and must not call back into this scheduler.
     explicit CommandScheduler(sim::tactical::PlayerId player, std::uint64_t first_sequence = 0,
-        std::uint64_t first_tick = 0, std::function<std::uint64_t()> intent_epoch = {});
+        std::uint64_t first_tick = 0, std::function<std::uint64_t()> intent_epoch = {}, sim::SeatId controller_seat = {});
 
     // Sample and reserve under the same lock observed by LAN sealing. Decoding
     // callbacks must not block: a held epoch can prevent simulation progress.
@@ -195,6 +197,8 @@ public:
     // and preserves their producer epochs for LAN admission. Thread-safe.
     [[nodiscard]] std::vector<sim::tactical::PlayerCommand> take(std::uint64_t next_tick);
 
+    // Revoke only locally queued unit gestures; handed-off commands remain authoritative.
+    void discard_unit_orders(sim::EntityId entity);
     [[nodiscard]] std::size_t pending() const;
     [[nodiscard]] sim::tactical::PlayerId player() const noexcept { return player_; }
     [[nodiscard]] std::uint64_t next_sequence() const;
@@ -207,6 +211,7 @@ public:
 
 private:
     const sim::tactical::PlayerId player_;
+    const sim::SeatId controller_seat_;
     mutable std::mutex mutex_;
     std::uint64_t next_sequence_;
     std::uint64_t open_tick_;

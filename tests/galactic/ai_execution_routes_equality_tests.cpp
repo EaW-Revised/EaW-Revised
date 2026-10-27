@@ -142,7 +142,8 @@ core::Result<ExecutionRouteBuild> reference_build_execution_routes(const Executi
     auto paths = std::make_shared<ExecutionPathMatrix>(); paths->player = input.player;
     for (const auto& planet : input.planets) paths->nodes.push_back(planet.planet);
     for (const auto cost : costs) paths->costs.push_back(cost == missing_cost ? std::numeric_limits<std::uint64_t>::max()
-        : (static_cast<std::uint64_t>(cost >> 16U) << 32U) | (cost & 65535U)); paths->previous = std::move(previous); out.paths = std::move(paths);
+        : (static_cast<std::uint64_t>(cost >> 16U) << 32U) | (cost & 65535U));
+    paths->previous = std::move(previous); out.paths = std::move(paths);
     return Result::success(std::move(out));
 }
 } // namespace eawr::script::foc::galactic_ai::reference

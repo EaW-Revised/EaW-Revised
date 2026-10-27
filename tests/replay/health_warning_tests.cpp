@@ -45,7 +45,7 @@ Trace run(std::size_t workers, bool notifications) {
     auto session = std::move(created).value();
     session.set_damage_notifications(notifications);
     // Three ordered hits in one tick must retain every intermediate hull value.
-    for (const auto [sequence, amount] : {std::pair{0U, 35}, {1U, 35}, {2U, 25}}) {
+    for (const auto& [sequence, amount] : {std::pair{0U, 35}, {1U, 35}, {2U, 25}}) {
         const auto submitted = session.submit({{0, 1, sequence}, {1}, tactical::DamagePayload{units(amount), tactical::hull_target}});
         expect(static_cast<bool>(submitted), "scripted hit submits");
     }

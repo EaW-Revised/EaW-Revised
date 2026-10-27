@@ -1,5 +1,7 @@
 #include "battle_input.hpp"
 
+#include "camera_input.hpp"
+
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
@@ -76,7 +78,9 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
     frame_ = space.live_camera_frame();
     if (Viewport* viewport = host_ != nullptr ? host_->get_viewport() : nullptr) {
         const Vector2 size = viewport->get_visible_rect().size;
-        viewport_ = {static_cast<float>(size.x), static_cast<float>(size.y)};
+        // The same whole-pixel rect the camera frame was built for (camera_input.hpp).
+        viewport_ = {viewer::camera_input::whole_viewport_extent(static_cast<float>(size.x)),
+                     viewer::camera_input::whole_viewport_extent(static_cast<float>(size.y))};
     }
     live_ = &live;
     scene_ = &population;
@@ -125,6 +129,17 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
             if (event.kind == sim::tactical::EventKind::pad_captured) {
                 selection_.owner_changed(event.unit, static_cast<sim::tactical::PlayerId>(event.sequence),
                     event.player, live.local_player());
+            }
+            if (event.kind == sim::tactical::EventKind::controller_changed && live.controller_policy_enabled()
+                && live.local_controller_seat().value != 0) {
+                selection_.controller_changed(event.unit, event.previous_controller, event.controller, live.local_controller_seat());
+                if (event.previous_controller == live.local_controller_seat() && event.controller != event.previous_controller) {
+                    live.discard_unit_orders(event.unit);
+                    cancel();
+                    if (auto* input = live.order_input()) input->cancel_mode();
+                    cancel_ability_target("controller changed");
+                    cancel_special_target("controller changed");
+                }
             }
             if (event.kind == sim::tactical::EventKind::station_replaced)
                 selection_.replace_entity(event.unit, event.sequence);
@@ -175,9 +190,10 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
                 && live.is_ally_of_local(visible.owner)) {
             unit.own = true; // WBP-08/09: allied pads enter the build UI before ordinary selection.
         }
+        unit.controlled = live.can_control(unit.entity);
         // #4919: ownership/alliance only, never a type name; ships and decorations are not inspected.
         unit.allied_inspectable = ui::allied_inspectable(unit, live.is_ally_of_local(visible.owner));
-        if (unit.own && selection_.contains(unit.entity)) {
+        if (unit.own && unit.controlled && selection_.contains(unit.entity)) {
             own_selection_ = true;
             const auto shape = pick_shapes_.find(visible.type);
             movable_selection_ = movable_selection_ || (shape != pick_shapes_.end() && shape->second.movable);
@@ -204,6 +220,52 @@ void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, 
         selection_.replace(selected);
     }
     selection_.retain_sorted(live.alive_units());
+    // Also recover from missed event history; only stored memberships need probing.
+    const auto& snapshot = live.battle_frame().latest;
+    if (live.controller_policy_enabled() && snapshot
+        && controller_tick_ != std::optional(snapshot->completed_tick())) {
+        controller_tick_ = snapshot->completed_tick();
+        for (std::size_t group = 0; group < ui::control_group_count; ++group) {
+            const auto members = selection_.group(group);
+            for (const auto entity : members) if (!live.can_control(entity))
+                selection_.controller_changed(entity, live.local_controller_seat(), {}, live.local_controller_seat());
+        }
+        const auto selected = selection_.units();
+        for (const auto entity : selected) if (!live.can_control(entity))
+            selection_.controller_changed(entity, live.local_controller_seat(), {}, live.local_controller_seat());
+    }
+}
+
+bool BattleInput::gift_enabled(const LiveSessionView& live) const {
+    const auto& snapshot = live.battle_frame().latest;
+    if (!snapshot || !live.controller_policy_enabled() || live.phase() != LiveSessionView::Phase::running) return false;
+    return std::any_of(selection_.units().begin(), selection_.units().end(), [&](const auto id) {
+        const auto* instance = live.snapshot_index().instance(id);
+        return instance && instance->control == sim::tactical::UnitControl::mobile && live.can_control(*instance)
+            && (!instance->durability || instance->durability->hull.raw() > 0);
+    });
+}
+
+bool BattleInput::gift_click(const sim::SeatId recipient, LiveSessionView& live) {
+    const auto epoch = live.input_epoch();
+    const auto& snapshot = live.battle_frame().latest;
+    if (!snapshot || live.phase() != LiveSessionView::Phase::running || !live.command_sink()) return false;
+    const auto eligible = ui::gift_recipients(live.local_controller_seat(), snapshot->controller_policy());
+    if (!std::binary_search(eligible.begin(), eligible.end(), recipient)) return false;
+    const auto chunks = ui::gift_chunks(live.local_controller_seat(), selection_.units(), snapshot->instances(), snapshot->controller_policy());
+    bool issued = false;
+    for (const auto& units : chunks) {
+        ui::TacticalIntent intent;
+        intent.verb = ui::TacticalVerb::gift;
+        intent.origin = ui::CommandOrigin::hud_button;
+        intent.units = units;
+        intent.gift_recipient = recipient;
+        if (!live.command_sink()->issue(intent)) { ++refused_; break; }
+        ++orders_;
+        issued = true;
+    }
+    if (issued) note("gift recipient " + std::to_string(recipient.value));
+    return issued;
 }
 
 bool BattleInput::beacon_click(LiveSessionView& live) {

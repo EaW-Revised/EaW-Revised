@@ -12,6 +12,24 @@
 #include <limits>
 #include <vector>
 
+namespace eawr::sim::tactical {
+std::string_view flight_profile_error(const FlightProfile& profile) noexcept {
+    // RFL-16: retain the authored scalar; RFL-09 checks actual evaluated geometry.
+    if (profile.authored_distance.raw() < 0) return "Projectile_Max_Flight_Distance must be nonnegative";
+    const auto bounded = [](const math::Fixed value) {
+        return value.raw() >= 0 && value.raw() <= max_motion_coordinate * math::Fixed::scale;
+    };
+    if (!bounded(profile.curve_distance)) return "Projectile_Rocket_Curve_Distance outside supported geometry domain";
+    if (!bounded(profile.straight_distance)) return "Projectile_Rocket_Straight_Distance outside supported geometry domain";
+    if (!bounded(profile.curve_offset)) return "Projectile_Rocket_Curve_Offset outside supported geometry domain";
+    if (profile.lifetime && (profile.lifetime->raw() < 0 || profile.lifetime->raw() > 3600 * math::Fixed::scale))
+        return "Projectile_Max_Lifetime outside supported [0, 3600] seconds";
+    if (profile.kind == FlightKind::rocket && profile.curve_distance.raw() == 0)
+        return "Projectile_Rocket_Curve_Distance must be positive for ROCKET subdivision (RFL-09)";
+    return {};
+}
+} // namespace eawr::sim::tactical
+
 namespace eawr::sim::tactical::detail {
 namespace {
 using math::Fixed;
@@ -298,14 +316,7 @@ core::Result<Fixed> rocket_arc_length(const RocketSegment& segment, const Fixed 
 }
 
 bool valid_flight(const FlightProfile& profile) noexcept {
-    const auto bounded = [](const Fixed value) {
-        return value.raw() >= 0 && value.raw() <= max_motion_coordinate * Fixed::scale;
-    };
-    if (!bounded(profile.authored_distance) || !bounded(profile.curve_distance)
-        || !bounded(profile.straight_distance) || !bounded(profile.curve_offset)
-        || (profile.lifetime && (profile.lifetime->raw() < 0 || profile.lifetime->raw() > 3600 * Fixed::scale))) return false;
-    if (profile.kind != FlightKind::rocket) return true;
-    return profile.curve_distance.raw() > 0;
+    return flight_profile_error(profile).empty();
 }
 
 core::Result<void> prepare_rocket_path(Projectile& projectile, CombatRandom* random, RocketPathWork* diagnostics, const RocketPathPolicy& policy) {

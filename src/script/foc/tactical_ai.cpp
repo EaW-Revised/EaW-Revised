@@ -55,6 +55,11 @@ public:
         std::vector<std::string> notes)
         : host_(std::move(host)), goals_(std::move(goals)), closure_(std::move(closure)), startup_notes_(std::move(notes)) {}
 
+    bool supports_battle_ai(const tactical::PlayerId player) const noexcept override {
+        const auto found = host_->players.find(player);
+        return goals_ && found != host_->players.end() && found->second->ai && !found->second->player_type.empty();
+    }
+
     core::Result<std::shared_ptr<tactical::ObjectTurnService>> object_turn_service(
         const tactical::TacticalSession& world, ScriptScheduler& scripts) override {
         scripts_ = &scripts;
@@ -168,7 +173,10 @@ public:
             [](const auto& entry) { return entry.second != 0; });
         // GFS-A24: a standalone goals owner also retains its streams and decisions across saves.
         // Admission fixtures also retain freestore-only continuation before/after their boundary.
-        if (!host_->setup.scoring && !host_->suspension_used && !delayed && !goals_) return Result::success(std::nullopt);
+        // SOS-46: even an otherwise stateless owner retains a nonempty omission
+        // closure, so hashing and checkpoint admission distinguish its policy.
+        if (!host_->setup.scoring && !host_->suspension_used && !delayed && !goals_
+            && host_->omitted_object_scripts.empty()) return Result::success(std::nullopt);
         static_cast<void>(world);
         const auto& content = closure_;
         std::string scoring, native;
@@ -303,6 +311,8 @@ public:
         }
         std::set<tactical::PlayerId> tested; // freestores already tested this frame
         for (const AiPlayer& player : host_->setup.players) {
+            // Prepare dormant freestores at the first barrier. Their threads
+            // remain host paced; freestore_tests gates every gameplay pump.
             if (!player.ai) continue;
             const std::uint64_t instance = freestore_instance(player.player);
             if (!std::binary_search(instances.begin(), instances.end(), instance)) continue;
@@ -550,8 +560,10 @@ core::Result<void> tactical_ai_detail::service_objects(const sim::PartitionExecu
                 }
                 // Tactical identities are monotonically allocated and never reused.
                 // Their allocation identity is also their generation (SOS-44).
+                auto module = "Data/Scripts/GameObject/" + name + ".lua";
+                if (host_->omitted_object_scripts.contains(module)) continue;
                 proposed[index] = authoritative::ObjectScript{{handle_game_object, unit.id}, unit.id,
-                    first_object_instance + unit.id, "Data/Scripts/GameObject/" + name + ".lua"};
+                    first_object_instance + unit.id, std::move(module)};
             }
         });
     if (!prepared) return prepared;
@@ -635,6 +647,8 @@ core::Result<PreparedAiSession> prepare_session(
     using SessionResult = core::Result<PreparedAiSession>;
     auto host = std::make_shared<Host>();
     host->setup = setup;
+    auto load_notes = object_script_load_notes(setup, modules);
+    for (const auto& note : load_notes) host->omitted_object_scripts.insert(*note.logical_path);
     host->ai_world = std::make_shared<ai::TacticalWorld>(*host);
     for (const AiType& type : host->setup.content.types) {
         host->types.emplace(type.type_id, &type);
@@ -644,6 +658,7 @@ core::Result<PreparedAiSession> prepare_session(
     if (auto loaded = load_contrast(*host, modules); !loaded) return SessionResult::failure(loaded.error());
     std::shared_ptr<ai::Engine> goals;
     std::vector<std::string> notes;
+    for (const auto& note : load_notes) notes.push_back(core::format_diagnostic(note));
     std::set<std::string> selected_goals;
     if (setup.bounds && !setup.xml.empty()) {
         auto data = ai::load_ai_data(setup.xml, converters(host));
@@ -724,8 +739,29 @@ core::Result<PreparedAiSession> prepare_session(
     for (const auto& [path, bytes] : modules) { append(path); append(bytes); }
     append("xml");
     for (const auto& [path, bytes] : setup.xml) { append(path); append(bytes); }
+    // SOS-46 / #4589: bind the deterministic omission set only when nonempty,
+    // preserving stock closure bytes and separating sessions with different skips.
+    if (!load_notes.empty()) {
+        append("omitted-object-scripts-v1");
+        const auto roots = object_script_modules(setup);
+        for (const auto& note : load_notes) {
+            append(*note.logical_path);
+            const auto& types = roots.at(*note.logical_path);
+            append(std::to_string(types.size()));
+            for (const auto& type : types) append(type);
+        }
+    }
     const auto closure = core::sha256_hex(closure_bytes);
     auto bind = [host, goals, closure, notes = std::move(notes)](authoritative::ScriptedTacticalSession& session) -> core::Result<void> {
+        // SOS-46: native stand-ins are implementations of the omitted attachment,
+        // not independent abilities. Reapply admission when rebuilding a checkpoint.
+        if (!host->omitted_object_scripts.empty()) {
+            std::vector<tactical::TypeId> omitted_types;
+            for (const auto& type : host->setup.content.types)
+                if (host->object_script_omitted(type)) omitted_types.push_back(type.type_id);
+            std::sort(omitted_types.begin(), omitted_types.end());
+            if (auto admitted = session.omit_object_script_decisions(omitted_types); !admitted) return admitted;
+        }
         for (const std::string_view verb : {verb_move, verb_attack, verb_attack_move, verb_guard, verb_ability, verb_special_fire, verb_buy, verb_pad_build, verb_reinforce, verb_credit_grant, verb_reservation_debit, verb_reveal_all}) {
             if (auto added = session.register_verb(verb, translate_order); !added) return added;
         }
@@ -748,7 +784,7 @@ core::Result<PreparedAiSession> prepare_session(
         const auto identity = core::sha256_hex(std::span(reinterpret_cast<const std::uint8_t*>(combined.data()), combined.size()));
         return session.set_engine(std::make_shared<FreestoreEngine>(host, goals, identity, notes));
     };
-    return SessionResult::success({std::move(scripts).value(), std::move(bind)});
+    return SessionResult::success({std::move(scripts).value(), std::move(bind), std::move(load_notes)});
 }
 
 core::Result<authoritative::ScriptedTacticalSession> create_session(

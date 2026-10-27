@@ -3,6 +3,7 @@
 #include "attract_runner.hpp"
 
 #include "viewer_path.hpp"
+#include "viewer_load_notes.hpp"
 
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/xml.hpp"
@@ -108,7 +109,10 @@ constexpr std::uint32_t baseline_frame = 31;
     content->profile = profile;
     const data::Profile data_profile = profile == "remake" ? data::Profile::remake
         : profile == "foc" ? data::Profile::foc : data::Profile::eaw;
-    auto loaded = data::load_catalog(*content->filesystem, data_profile);
+    data::LoadOptions load_options;
+    load_options.parse_unregistered_xml = false;
+    auto loaded = data::load_catalog(*content->filesystem, data_profile, load_options);
+    if (loaded) publish_viewer_load_notes(std::move(loaded.value().notes), content->layers);
     if (!loaded) { failure = core::format_diagnostic(loaded.error()); return nullptr; }
     content->catalog = std::make_shared<const data::Catalog>(std::move(loaded.value().catalog));
     return content;

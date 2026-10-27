@@ -28,11 +28,18 @@ void* operator new(const std::size_t size) {
     throw std::bad_alloc();
 }
 void* operator new[](const std::size_t size) { return ::operator new(size); }
+// Keep the allocation guard's malloc/free pairing behind the matching delete operators.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete(void* pointer) noexcept { std::free(pointer); }
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 #if defined(__cpp_sized_deallocation)
-void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
-void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete[](pointer); }
 #endif
 
 namespace {

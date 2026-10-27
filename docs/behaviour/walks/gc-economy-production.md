@@ -1053,3 +1053,73 @@ upgrade references, localization and assets data-driven. Technology and land
 ability-specific lifecycle rules outside WGEP-166..170 still need bounded debug-build qualification.
 No new retail behavior is inferred, and no tag status is promoted merely because
 existing paths were inspected.
+
+
+### GC authored-data degradation at startup
+
+The owner policy is to refuse authored data only with a sourced retail refusal.
+The GC setup owns one load-note buffer and collector; its synchronous provider
+callbacks append in setup order, and the root captures the collector snapshot
+once after startup. Session start hands the snapshot to the existing load-note
+publisher, which appends it after catalog notes in the canonical profile file.
+Notes remain outside simulation identity, replays and checkpoints. A future
+partitioned producer must merge private buffers after joining its phase.
+
+| Family | Class and effective behavior | Evidence or project choice |
+| --- | --- | --- |
+| Ordinary market item omissions | B: tech/cost/uncommon multiplier use 1/0/0 | WGEP-105 |
+| Noncanonical numeric text | B: use the shared signed integer/float parse | LSA-P1/P3/P5 |
+| Buyer respawn lists | B: invalid lists clear both arrays | WGEP-107 |
+| Missing income factors or production multiplier pairs | C: neutral factors of one; invalid market factor range uses 1/1 | Unknown retail behavior; project default |
+| Missing planet market modifier or eligibility | C: zero modifier or false eligibility; an unbound item is skipped | Unknown invalid-data behavior; WGS-94 supplies omitted corruption eligibility false |
+| Fixed-point magnitude beyond existing economy arithmetic support | C: clamp the consumed value to that support range; nonnegative item/buyer multiplier stays nonnegative | Project safety bound, not a retail limit |
+| Invalid corruption slot/reference/mission mode | C: clear only that slot; unresolved automatic upgrades stay empty | WGCH-172/173 establish ordinary empty/zero fields; malformed-data behavior is unknown |
+| Theft absence arrays | C: clear both when malformed, mismatched or reversed | Unknown retail behavior; empty arrays are the project default |
+| Unresolved hero respawn structure | C: clear the dependency | Unknown retail behavior |
+| Invalid destroyed planet income | C: retain ordinary income | WGCH-176; invalid-data behavior unknown |
+
+Codes EAWR-LOAD-1200..1209 cover market/economy observations, 1220..1225
+corruption setup, and 1230..1232 hero observations. No class A refusal was found
+in these families. The tutorial-item omission refusal (WGEP-104) is deferred by
+owner direction and remains unchanged in this round. The loadcheck command
+currently loads tactical content only; its GC setup hook is a separate infra
+follow-up, using this same snapshot and writer.
+
+
+## Production and aggregate load recovery (G1)
+
+The campaign owner normalizes its private authoring copy before the strict
+simulation validators. The snapshot joins the same root-owned LoadNote collector
+as economy/corruption notes; it never enters simulation identity or save bytes.
+The ordinary production price rounding and signed negative-limit sentinel rules
+(LSA-06/15/16, WGEP-30) remain in force.
+
+| Family | Class and effective behavior | Basis |
+| --- | --- | --- |
+| Negative tech and unusual required/base levels | B: retain signed int32 values; availability decides whether the offer can be bought | LSA-09 |
+| Negative technology target passed through the typed adapter | B: use the unsigned source parser bits | LSA-08, WGEP-42 |
+| Population magnitude or capacity outside arithmetic support | C: clamp the consumed value; retain ordinary signed int32 additional capacity | Project representation, not a retail restriction |
+| Fiscal sum, cap or difficulty product overflow | C: saturate the overflowing contribution, bound per-planet cap by planet count, and retain the greatest representable nonnegative difficulty factor | Project representation; signed basic income remains CGS-19 |
+| Malformed selected difficulty multiplier | C: neutral factor one | Retail malformed-data behavior unknown |
+| Graph resource limits | C: retain the first 4096 planet locations and 500000 distinct live route links before graph construction; omitted locations create no forces | Current PlanetGraph work bound |
+| Over-budget offers | C: retain the ordered prefix across planets | Project work bound |
+| Unbound, cyclic or over-budget composite membership | C: retain safe census links; omit the affected creation template and its dependent templates | Project recovery; no invented transport binding |
+| Unsupported initial starbase level | C: omit that placement; its numeric offer still loads unchanged | Initial control representation currently supports 1..5 |
+| Over-budget starting forces | C: retain complete requests in order; omit the first over-budget placement and all later ones before commit | Project object bound; authored allegiance targets and all factions remain |
+
+EAWR-LOAD-1000/1001 identify B observations; 1010..1012 cover census data,
+1020..1022 fiscal data, and 1030..1036 resource/template omissions. The load
+owner may request a smaller object budget, but cannot enlarge the simulation's
+hard bound. Skipped placements consume no persistent IDs. Safe normalization is
+deterministic and idempotent; malformed identity/order/provider contracts and
+untrusted save/replay input still receive strict validation.
+
+Player count is an explicit exception authorized for this sweep: more than 64
+players still refuses startup with the supported limit and follow-up (legacy EAWR-4286) in
+the message. This is an implementation limitation, not a retail class A refusal;
+no player or faction is dropped to fit it. Seat/controller protocol limits and
+journal/payload integrity are also unchanged.
+
+The synthetic contracts exercise effective values and emitted notes, actual
+session creation/stepping, and 1/2/4/8 equality after an entire force pass is
+omitted. Stock acceptance additionally requires replay76 and the stock GC pair.

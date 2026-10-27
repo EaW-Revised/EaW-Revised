@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -16,6 +17,96 @@
 
 namespace unit_tables_test_support {
 void synthetic_tables() {
+    // HD-06: both omitted and explicit zero Health retain every authored hardpoint.
+    for (const std::string_view value : {"", "<Health>0</Health>", "<Health>-1</Health>", "<Health>1e99</Health>"}) {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        auto points = std::string(hardpoints_xml);
+        const std::string_view laser_health = "<Health>260.0</Health>";
+        const std::string_view engine_health = "<Health>170.0</Health>";
+        points.replace(points.find(laser_health), laser_health.size(), value);
+        points.replace(points.find(engine_health), engine_health.size(), value);
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "HD-06: hardpoint Health fixture loads");
+        if (!loaded.tables) continue;
+        if (value.empty()) {
+            auto missing = *loaded.tables;
+            auto& scalars = missing.constants.scalars;
+            scalars.erase(std::remove_if(scalars.begin(), scalars.end(), [](const auto& scalar) {
+                return scalar.tag == "ShieldRechargeIntervalInSecs";
+            }), scalars.end());
+            eawr::core::LoadNoteBuffer load_notes;
+            auto recovered = eawr::units::durability_table(missing, nullptr, &load_notes);
+            eawr::core::LoadNoteCollector collector; collector.merge(load_notes);
+            const auto captured = collector.snapshot();
+            expect(recovered && recovered.value().damage && recovered.value().damage->shield_recharge_frames == 90,
+                "missing shield recharge interval uses stock three seconds");
+            expect(std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-0120" && note.tag == "ShieldRechargeIntervalInSecs"
+                    && note.action == eawr::core::LoadAction::default_used
+                    && note.classification == eawr::core::LoadCategory::retail_accepts && note.retail == "LSA-P5";
+            }), "missing shield recharge interval records a default note");
+            if (recovered) {
+                eawr::sim::tactical::TacticalSetup setup;
+                setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable},
+                    {2, 2, 2, eawr::sim::tactical::player_flag_commandable}};
+                auto session = eawr::sim::tactical::TacticalSession::create(setup, {}, recovered.value());
+                expect(static_cast<bool>(session), "stock fallback session creates");
+                if (session) {
+                    const eawr::sim::InlineExecutor executor;
+                    expect(static_cast<bool>(session.value().step(executor)), "stock fallback session steps");
+                }
+            }
+            auto extreme = *loaded.tables;
+            for (auto& unit : extreme.units) {
+                if (unit.hull && unit.hull->raw() > 0) {
+                    unit.hull = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+                    break;
+                }
+            }
+            for (auto& constant : extreme.constants.scalars) {
+                if (constant.tag == "ShieldRechargeIntervalInSecs") {
+                    constant.value = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+                    constant.text = "549755813887";
+                }
+            }
+            eawr::core::LoadNoteBuffer extreme_notes;
+            const auto bounded = eawr::units::durability_table(extreme, nullptr, &extreme_notes);
+            eawr::core::LoadNoteCollector extreme_collector;
+            extreme_collector.merge(extreme_notes);
+            const auto extreme_captured = extreme_collector.snapshot();
+            expect(static_cast<bool>(bounded), "extreme health and recharge load");
+            expect(std::any_of(extreme_captured.begin(), extreme_captured.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-0121" && note.tag == "Tactical_Health";
+            }), "health multiplication saturation records its tag");
+            expect(std::any_of(extreme_captured.begin(), extreme_captured.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-0122" && note.authored_value == "549755813887";
+            }), "service interval saturation records authored text");
+
+        }
+        std::vector<eawr::core::Diagnostic> notes;
+        const auto health = eawr::units::durability_table(*loaded.tables, &notes);
+        if (value == "<Health>1e99</Health>") {
+            expect(!health && health.error().code == "EAWR-UNITS-0003",
+                "negative and out-of-range hardpoint Health retain their error diagnostic");
+            continue;
+        }
+        expect(static_cast<bool>(health), "HD-06: omitted, zero and negative Health bind durability");
+        if (!health) continue;
+        const auto* ship = health.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+        expect(ship && ship->hardpoints.size() == 3 && ship->hardpoints[0].destroyable
+            && ship->hardpoints[0].role == eawr::sim::tactical::HardpointRole::weapon
+            && ship->hardpoints[1].destroyable
+            && ship->hardpoints[1].role == eawr::sim::tactical::HardpointRole::engine
+            && ship->hardpoints[0].max_health.raw() == 0 && ship->hardpoints[1].max_health.raw() == 0,
+            "HD-06: zero-health rows retain their flags, roles and authored order");
+        if (value == "<Health>-1</Health>") continue;
+        expect(notes.size() == 1 && notes[0].code == "EAWR-UNITS-0003"
+            && notes[0].severity == eawr::core::Severity::warning
+            && notes[0].message.find("Test_Frigate") != std::string::npos,
+            "HD-06: two zero-health hardpoints produce one load note for their type");
+    }
     {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
@@ -460,9 +551,11 @@ void synthetic_tables() {
     expect(station.kind == UnitKind::station && station.xml_type == "StarBase", "StarBase is a station");
     expect(station.station_community_property && !station.community_property && !station.capture_point,
         "WSU-16: an authored community station is shared without capture-point behaviour");
+    expect(station.ai_community_property, "PE-34: AI community metadata is read for non-capture originals");
     auto capture_tables = tables;
     capture_tables.units[1].capture_point = true;
     auto selection_only = capture_tables;
+    selection_only.units[0].ai_community_property = false;
     selection_only.units[0].station_community_property = false;
     expect(eawr::units::content_identity(selection_only) == eawr::units::content_identity(capture_tables),
         "WSU-16: station selection metadata leaves simulation identity unchanged");

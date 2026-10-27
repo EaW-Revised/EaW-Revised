@@ -2,7 +2,8 @@
 
 Adapted from the child-state field inventory generator. The inventory follows nested
 member types as well as the registered roots, so adding a member or a nested state
-struct requires either serialization or a documented derived-state exclusion.
+struct requires serialization, an explicit alternate codec, or a documented
+derived-state exclusion.
 """
 import argparse
 from pathlib import Path
@@ -14,6 +15,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/rende
 from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 
 EXCLUDED = {
+    "eawr::sim::tactical::QueueEntry": {
+        "controller_seat": "serialized and identity-validated by the v4 co-op controller tail in session_state.cpp; disabled policy requires the default value",
+    },
+    "eawr::sim::tactical::PlayerEconomy": {
+        "pool_controllers": "serialized and token/owner-validated by the v4 co-op controller tail in session_state.cpp; disabled policy requires an empty map",
+    },
+    "eawr::sim::tactical::RespawnState": {
+        "controller_seat": "serialized and owner-validated by the v4 co-op controller tail in session_state.cpp; disabled policy requires the default value",
+    },
+    "eawr::sim::tactical::SpawnerState": {
+        "controller_output_ordinal": "serialized by spawner identity in the v4 co-op controller tail in session_state.cpp; disabled policy requires zero",
+    },
+    "eawr::sim::tactical::AbilityState": {
+        "pending_buzz_controller": "serialized with live identity and validated against its pending request in the v4 co-op controller tail in session_state.cpp; disabled policy requires the default value",
+    },
+    "eawr::sim::tactical::UnitState": {
+        "control": "serialized and validated by the tagged controller tail in session_state.cpp save_checkpoint_state/load_checkpoint_state; disabled policy requires the default value",
+        "controller_seat": "serialized and validated by the tagged controller tail in session_state.cpp save_checkpoint_state/load_checkpoint_state; disabled policy requires the default value",
+    },
     "eawr::units::LandCompanyMember": {
         "stay_in_transport": "immutable unit-table creation admission; transport members are refused before runtime land state exists",
     },
@@ -38,6 +58,7 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller": "ability_consumption_handler ground_ability_story_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
         "synchronous consumption guard, zero at every checkpoint barrier": "consuming_spy",
         "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
+        "match-local diagnostic collector; never authoritative, hashed or checkpointed": "load_note_collector load_note_count",
         "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_offer_rebuilds production_producers verify_cached_hash",
         "local per-player publication caches rebuilt on demand, never serialized": "view_publications",
         "immutable snapshot section copies and revision counters rebuilt on load": "published_sections section_generation",
@@ -52,10 +73,10 @@ OWNER_EXCLUSIONS = {
         "prebattle autosave admission window derived by the conflict owner each step, never saved (#2524)": "prebattle_autosave_window",
     },
     "eawr::campaign::GameSession::Impl": {
-        "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine",
+        "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine story_goals",
         "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards technology_handler vote_progress",
         "immutable content lookup tables rebound on load": "story_factions story_planets story_scripts",
-        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_triggers",
+        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_triggers story_presentation",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
         "history rebase scheduled by a save or load and applied at the next step; a recapture before it sees the saved window (#4058)": "scheduled_base",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
@@ -278,7 +299,16 @@ def check(overrides=None):
             name = resolve(qualified, scope, types, aliases) or qualified.lstrip(":")
             if name in CUSTOM_CODECS:
                 continue
-            fields = re.findall(r"\bv\.(\w+)", body)
+            # An array written slot by slot (LiveUnit::upgrade_bonuses keeps its
+            # version-gated seventh slot) is one field; writing the same subscript
+            # twice, or a plain field twice, is still a duplicate.
+            fields, subscripts = [], set()
+            for field, subscript in re.findall(r"\bv\.(\w+)(\[[^\]]*\])?", body):
+                key = (field, re.sub(r"\s", "", subscript))
+                if not subscript or key in subscripts or field not in {name for name, _ in subscripts}:
+                    fields.append(field)
+                if subscript:
+                    subscripts.add(key)
             # Command keys expose nested members and the payload is referenced in
             # both read/write branches of its existing payload codec.
             registered[name] = list(dict.fromkeys(fields)) if name == "eawr::sim::galactic::GameCommand" else fields

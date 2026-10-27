@@ -1168,8 +1168,8 @@ void test_human_seat_admission() {
             std::variant_alternative_t<Index, tactical::CommandPayload>{}}) == tactical::PayloadAuthority::engine_only), ...);
         return engine_count;
     };
-    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 5U,
-        "CP-1: every payload is classified; damage, credits, reveal, reservation debit and campaign releases are engine-only");
+    expect(classify(std::make_index_sequence<std::variant_size_v<tactical::CommandPayload>>{}) == 6U,
+        "CP-1: every payload is classified; damage, credits, reveal, reservation debit, campaign releases and battle control are engine-only");
     tactical::SeatBinding binding{{1}, 2};
     tactical::SeatCommand intent{{0, {1}, 0}, 2, {10}, tactical::StopPayload{}};
     tactical::SeatAdmission admission;
@@ -1323,6 +1323,705 @@ void test_beacons() {
         expect(other.snapshot()->visible_beacons(3).empty(), "rejected beacons create no presentation record");
     }
 }
+void test_controller_split_and_gates() {
+    const auto population_rules = [] {
+        tactical::EconomyRules rules;
+        rules.campaign = true;
+        rules.campaign_population = {{11, 8}, {12, 8}, {13, 2}, {14, 0}, {15, 0}, {16, 1}, {17, 3},
+            {18, 100}, {19, 100}, {20, 0}, {99, 9}};
+        return rules;
+    };
+    for (const auto humans : {2U, 3U, 4U}) {
+        tactical::TacticalSetup setup;
+        setup.players = {{1, 1, 1, 1}, {2, 2, 2, 1}, {3, 3, 3, 0}};
+        setup.first_free_entity_id = 50;
+        setup.campaign.emplace();
+        setup.controllers.emplace();
+        for (const auto player : {1U, 2U}) {
+            tactical::EconomyPlayer account; account.player = player; account.credit_cap = eawr::sim::math::Fixed{};
+            setup.campaign->players.push_back(account);
+            setup.controllers->factions.push_back({player, tactical::FactionController::humans});
+            for (std::uint32_t seat = 1; seat <= humans; ++seat)
+                setup.controllers->seats.push_back({{(player - 1) * humans + seat}, player, eawr::sim::SeatKind::human, true});
+            for (std::uint64_t id = 1; id <= 10; ++id)
+                setup.units.push_back({id + (player - 1) * 20, 10 + id, player});
+            setup.units.back().control = tactical::UnitControl::shared_structure;
+            setup.units[setup.units.size() - 5].purchase_type = 99; // transformed hero sorts by loaded purchase population
+            setup.squadrons.push_back({7 + (player - 1) * 20, {8 + (player - 1) * 20, 9 + (player - 1) * 20}});
+        }
+        setup.units.push_back({45, 11, 3}); // scenery is not a commandable side
+        auto rules = population_rules(); rules.players = setup.campaign->players;
+        const auto initial = setup;
+        expect(static_cast<bool>(tactical::split_initial_controllers(setup, rules)), "initial split succeeds for 2/3/4 humans on each side");
+        const std::array<std::uint64_t, 7> rank{6, 1, 2, 7, 3, 4, 5};
+        for (const auto player : {1U, 2U}) {
+            for (std::size_t i = 0; i < rank.size(); ++i) {
+                const auto id = rank[i] + (player - 1) * 20;
+                const auto unit = std::find_if(setup.units.begin(), setup.units.end(), [id](const auto& row) { return row.entity_id == id; });
+                expect(unit->controller_seat.value == (player - 1) * humans + 1 + i % humans,
+                    "population descending, stable-ID ties and zero-population tail are dealt round-robin");
+            }
+            const auto offset = (player - 1) * 10;
+            expect(setup.units[offset + 6].controller_seat == setup.units[offset + 7].controller_seat
+                && setup.units[offset + 6].controller_seat == setup.units[offset + 8].controller_seat,
+                "authored root and attached craft are indivisible despite member populations");
+            expect(setup.units[offset + 9].control == tactical::UnitControl::shared_structure
+                && setup.units[offset + 9].controller_seat.value == 0, "structures do not consume a deal slot");
+        }
+        expect(setup.units.back().control == tactical::UnitControl::none, "neutral scenery is excluded");
+        auto scrambled = initial; std::reverse(scrambled.units.begin(), scrambled.units.end());
+        expect(tactical::split_initial_controllers(scrambled, rules) && scrambled == setup,
+            "initial storage order does not affect final controller setup");
+        auto disabled = initial; disabled.controllers.reset();
+        for (auto& unit : disabled.units) { unit.control = tactical::UnitControl::none; unit.controller_seat = {}; }
+        const auto before = tactical::write_replay({disabled, 0, {}});
+        expect(tactical::split_initial_controllers(disabled, rules)
+            && tactical::write_replay({disabled, 0, {}}).value() == before.value(),
+            "disabled policy keeps setup and replay bytes unchanged");
+    }
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+    setup.units = {{1, 11, 1}, {2, 11, 1}, {3, 11, 2}, {4, 12, 1}};
+    setup.first_free_entity_id = 5; setup.campaign.emplace();
+    for (const auto player : {1U, 2U}) { tactical::EconomyPlayer account; account.player = player; account.credit_cap = eawr::sim::math::Fixed{}; setup.campaign->players.push_back(account); }
+    setup.controllers = tactical::BattleControllerPolicy{
+        {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
+            {{3}, 2, eawr::sim::SeatKind::ai, true}},
+        {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+    for (std::size_t i = 0; i < 3; ++i) { setup.units[i].control = tactical::UnitControl::mobile; setup.units[i].controller_seat = {static_cast<std::uint32_t>(i + 1)}; }
+    setup.units.back().control = tactical::UnitControl::shared_structure;
+    auto economy = population_rules(); economy.players = setup.campaign->players;
+    auto passive = setup;
+    passive.controllers->seats.pop_back();
+    passive.controllers->factions.back().mode = tactical::FactionController::passive;
+    passive.units[2].control = tactical::UnitControl::shared_structure; passive.units[2].controller_seat = {};
+    expect(static_cast<bool>(tactical::split_initial_controllers(passive, economy)),
+        "a passive side containing only shared structures needs no mobile controller seat");
+    passive.units[2].control = tactical::UnitControl::mobile;
+    expect(!tactical::split_initial_controllers(passive, economy),
+        "a passive side with a mobile root refuses a missing configured controller");
+    auto installed = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+    expect(static_cast<bool>(installed), "initial role installation fixture creates");
+    if (installed) {
+        auto policy = *setup.controllers; policy.seats[1].active = false;
+        expect(static_cast<bool>(installed.value().set_initial_controller_policy(policy)), "held tick-zero role installs its effective roster");
+        auto replayed = tactical::TacticalSession::from_replay(installed.value().record(), {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(replayed && replayed.value().state_sha256() == installed.value().state_sha256(),
+            "role installation refreshes the campaign setup binding used by standalone replay");
+        const auto saved = installed.value().save_checkpoint_state();
+        expect(saved && replayed && replayed.value().load_checkpoint_state(saved.value())
+            && replayed.value().state_sha256() == installed.value().state_sha256()
+            && replayed.value().snapshot()->canonical_bytes() == installed.value().snapshot()->canonical_bytes(),
+            "role installation and checkpoint reconstruction agree at tick zero without a second split");
+    }
+    const std::vector<tactical::CommandPayload> families{
+        tactical::StopPayload{}, tactical::MovePayload{}, tactical::FacePayload{}, tactical::AttackPayload{3},
+        tactical::AttackMovePayload{{}, 3}, tactical::GuardPayload{{}, 2},
+        tactical::AbilityPayload{tactical::AbilityKind::defend},
+        tactical::AreaAbilityPayload{tactical::AbilityKind::barrage}, tactical::ManualTargetPayload{3, 0},
+        tactical::SpecialFirePayload{3}, tactical::BuyPayload{11}, tactical::PadBuildPayload{11}, tactical::PadSellPayload{}};
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool scramble : {false, true}) {
+        std::string hashes;
+        for (std::size_t family = 0; family < families.size(); ++family) {
+            auto made = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+            expect(static_cast<bool>(made), "controller gate fixture creates");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            if (scramble) world.scramble_storage_for_testing();
+            tactical::PlayerCommand forged{{0, 1, 1}, {2}, families[family]};
+            forged.origin = tactical::CommandOrigin::seat; forged.issuing_seat = {1};
+            auto own = forged; own.key.sequence = 2; own.units.front() = 1;
+            expect(world.submit(forged) && world.submit(own), "well-shaped same-faction orders reach execution authority");
+            const auto tick = world.step(ReverseInline(workers));
+            expect(static_cast<bool>(tick), "controller gate family advances");
+            if (!tick) continue;
+            const auto& events = tick.value().snapshot->events();
+            const auto rejected = std::find_if(events.begin(), events.end(), [](const auto& row) { return row.sequence == 1 && row.kind == tactical::EventKind::order_rejected; });
+            expect(rejected != events.end() && rejected->reason == tactical::RejectReason::unit_not_controlled,
+                "every mobile opcode family rejects a forged teammate source");
+            const auto accepted = std::find_if(events.begin(), events.end(), [](const auto& row) {
+                return row.sequence == 2 && (row.kind == tactical::EventKind::order_accepted || row.kind == tactical::EventKind::order_rejected);
+            });
+            expect(accepted != events.end() && accepted->reason != tactical::RejectReason::unit_not_controlled,
+                "own source keeps the opcode's existing admission");
+            if (family < 6) expect(accepted != events.end() && accepted->kind == tactical::EventKind::order_accepted,
+                "own movement, attack and allied guard orders are accepted");
+            hashes += tick.value().state_hash.get() + tick.value().snapshot->sha256();
+        }
+        auto world = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        if (!world) continue;
+        tactical::PlayerCommand engine_forgery{{0, 1, 1}, {2}, tactical::DamagePayload{eawr::sim::math::Fixed::from_integer(1).value()}};
+        engine_forgery.origin = tactical::CommandOrigin::seat; engine_forgery.issuing_seat = {1};
+        expect(!world.value().submit(engine_forgery), "human provenance cannot turn an engine opcode into a controller bypass");
+        std::uint64_t sequence{};
+        for (const auto seat : {1U, 2U}) {
+            tactical::PlayerCommand command{{0, 1, ++sequence}, {4}, tactical::StopPayload{}};
+            command.origin = tactical::CommandOrigin::seat; command.issuing_seat = {seat};
+            expect(static_cast<bool>(world.value().submit(command)), "every teammate may order the shared structure");
+        }
+        tactical::PlayerCommand mixed{{0, 1, ++sequence}, {1, 2}, tactical::StopPayload{}};
+        mixed.origin = tactical::CommandOrigin::seat; mixed.issuing_seat = {1};
+        expect(static_cast<bool>(world.value().submit(mixed)), "mixed own/teammate selection admits per-unit execution");
+        const auto tick = world.value().step(ReverseInline(workers));
+        expect(tick && std::count_if(tick.value().snapshot->events().begin(), tick.value().snapshot->events().end(), [](const auto& row) {
+            return row.kind == tactical::EventKind::order_accepted;
+        }) == 3, "both shared orders and own mixed member execute");
+        expect(tick && std::count_if(tick.value().snapshot->events().begin(), tick.value().snapshot->events().end(), [](const auto& row) {
+            return row.reason == tactical::RejectReason::unit_not_controlled;
+        }) == 1, "only the teammate member of a mixed selection is refused");
+        auto policy = *setup.controllers;
+        expect(!world.value().set_initial_controller_policy(policy), "a running child can never re-split");
+        hashes += world.value().state_sha256();
+        if (reference.empty()) reference = hashes;
+        expect(hashes == reference, "all command gate hashes and snapshots match at 1/2/4/8 workers and scrambled storage");
+    }
+}
+
+void test_controller_shared_special_fire() {
+    const auto whole = [](const std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    tactical::TacticalSetup setup;
+    setup.players = {{1, 1, 1, 1}, {2, 2, 2, 1}, {3, 1, 3, 0}};
+    setup.units = {{1, 11, 1}, {2, 11, 2, {whole(100), {}, {}}}, {3, 12, 1}, {4, 12, 3}};
+    setup.first_free_entity_id = 5; setup.campaign.emplace();
+    setup.controllers = tactical::BattleControllerPolicy{
+        {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
+            {{3}, 2, eawr::sim::SeatKind::ai, true}},
+        {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+    setup.units[0].control = tactical::UnitControl::mobile; setup.units[0].controller_seat = {1};
+    setup.units[1].control = tactical::UnitControl::mobile; setup.units[1].controller_seat = {3};
+    setup.units[2].control = tactical::UnitControl::shared_structure;
+    for (const auto player : {1U, 2U}) {
+        tactical::EconomyPlayer account; account.player = player; account.credit_cap = whole(0);
+        setup.campaign->players.push_back(account);
+    }
+    setup.campaign->upgrades = {{90, 3, 1}};
+    tactical::EconomyRules economy; economy.campaign = true; economy.players = setup.campaign->players;
+    tactical::UpgradeProfile unlock; unlock.type = 90;
+    tactical::UpgradeProfile::SpecialUnlock enabled; enabled.all_allies = true;
+    unlock.special_unlocks.push_back(enabled);
+    economy.upgrades.push_back(unlock);
+    tactical::CombatTable combat;
+    tactical::CombatProfile target; target.type_id = 11; target.category_bits = 1;
+    tactical::CombatProfile station; station.type_id = 12; station.star_base = true;
+    tactical::WeaponProfile gun; gun.hardpoint = 0; gun.range = whole(1000);
+    gun.cone_width = whole(360); gun.cone_height = whole(180); gun.requires_manual_target = gun.special = true;
+    gun.shot.emplace(); gun.shot->speed = whole(1); gun.shot->max_travel = whole(1000);
+    station.weapons.push_back(gun); combat.profiles = {target, station};
+    const std::vector<tactical::SensorProfile> sensors{{12, whole(1000)}};
+    for (const bool controllers : {false, true}) {
+        for (const bool permission : {false, true}) {
+            auto fixture = setup;
+            if (!controllers) {
+                fixture.controllers.reset();
+                for (auto& unit : fixture.units) { unit.control = tactical::UnitControl::none; unit.controller_seat = {}; }
+            }
+            auto rules = economy;
+            rules.upgrades.front().special_unlocks.front().reverse = !permission;
+            std::string reference;
+            for (const auto workers : {1U, 2U, 4U, 8U}) {
+                std::string hashes;
+                for (const auto seat : {1U, 2U}) {
+                    auto made = tactical::TacticalSession::create(fixture, sensors, {}, {}, std::nullopt, combat, {}, {}, rules);
+                    expect(static_cast<bool>(made), "shared special-fire fixture creates");
+                    if (!made) continue;
+                    auto world = std::move(made).value();
+                    expect(world.snapshot()->economy().front().special_weapons_enabled == permission,
+                    "only a non-reversed held unlock enables shared special fire with controllers on and off");
+                    std::uint64_t sequence{};
+                    for (const auto source : {3ULL, 4ULL}) {
+                        tactical::PlayerCommand command{{0, 1, ++sequence}, {source}, tactical::SpecialFirePayload{2}};
+                        if (controllers) { command.origin = tactical::CommandOrigin::seat; command.issuing_seat = {seat}; }
+                        expect(static_cast<bool>(world.submit(command)), "both teammates submit own and allied shared-structure special fire");
+                    }
+                    const auto tick = world.step(ReverseInline(workers));
+                    expect(tick && std::count_if(tick.value().snapshot->events().begin(), tick.value().snapshot->events().end(), [](const auto& event) {
+                        return event.order == tactical::OrderKind::special_fire && event.kind == tactical::EventKind::order_accepted;
+                    }) == (permission ? 2 : 0), "only an enabled unlock accepts own and allied shared-structure special fire with controllers on and off");
+                    expect(tick && std::count_if(tick.value().snapshot->events().begin(), tick.value().snapshot->events().end(), [](const auto& event) {
+                        return event.order == tactical::OrderKind::special_fire && event.kind == tactical::EventKind::order_rejected
+                        && event.reason == tactical::RejectReason::ability_unavailable;
+                    }) == (permission ? 0 : 2), "a reversed unlock refuses own and allied shared-structure special fire with controllers on and off");
+                    hashes += world.state_sha256();
+                }
+                if (reference.empty()) reference = hashes;
+                expect(hashes == reference, "shared and allied special-fire controllers agree on 1/2/4/8 workers");
+            }
+        }
+    }
+}
+
+void test_controller_gifts() {
+    using eawr::sim::SeatId;
+    using eawr::sim::SeatKind;
+    for (const auto humans : {2U, 3U, 4U}) {
+        tactical::TacticalSetup setup;
+        setup.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+        setup.units = {{1, 11, 1}, {2, 12, 1}, {3, 13, 1}, {4, 14, 1}, {5, 11, 2}, {6, 11, 1}};
+        setup.first_free_entity_id = 7;
+        setup.squadrons = {{1, {2, 3}}};
+        setup.campaign.emplace(); setup.controllers.emplace();
+        for (const auto owner : {1U, 2U}) {
+            tactical::EconomyPlayer account; account.player = owner;
+            account.credit_cap = eawr::sim::math::Fixed{}; account.population_cap = 20;
+            setup.campaign->players.push_back(account);
+        }
+        for (std::uint32_t seat = 1; seat <= humans; ++seat)
+            setup.controllers->seats.push_back({{seat}, 1, SeatKind::human, true});
+        setup.controllers->seats.push_back({{humans + 1}, 2, SeatKind::human, true});
+        setup.controllers->seats.push_back({{humans + 2}, 1, SeatKind::human, false});
+        setup.controllers->seats.push_back({{humans + 3}, 1, SeatKind::ai, true});
+        setup.controllers->factions = {{1, tactical::FactionController::humans}, {2, tactical::FactionController::humans}};
+        for (auto& unit : setup.units) { unit.control = tactical::UnitControl::mobile; unit.controller_seat = {1}; }
+        setup.units[3].control = tactical::UnitControl::shared_structure; setup.units[3].controller_seat = {};
+        setup.units[4].controller_seat = {humans + 1};
+        setup.units[5].controller_seat = {2};
+        tactical::EconomyRules economy; economy.campaign = true; economy.players = setup.campaign->players;
+        const auto command = [](const std::uint64_t tick, const std::uint64_t sequence, const std::uint32_t sender,
+                                std::vector<eawr::sim::EntityId> units, tactical::CommandPayload payload) {
+            tactical::PlayerCommand result{{tick, 1, sequence}, std::move(units), std::move(payload)};
+            result.origin = tactical::CommandOrigin::seat; result.issuing_seat = {sender};
+            return result;
+        };
+        const auto gift = command(0, 2, 1, {1, 2, 3}, tactical::GiftPayload{{2}});
+        const auto encoded = tactical::encode_command_body(gift, setup);
+        expect(encoded && encoded.value().size() == 80 && encoded.value()[20] == 32,
+            "gift body retains common header and uses opcode 32 with recipient, list and provenance");
+        const auto decoded = encoded ? tactical::decode_command_body(encoded.value(), setup)
+            : eawr::core::Result<tactical::PlayerCommand>::failure(encoded.error());
+        expect(decoded && decoded.value() == gift, "gift body round-trips without losing authenticated sender");
+        if (encoded) {
+            for (std::size_t length = 0; length < encoded.value().size(); ++length)
+                expect(!tactical::decode_command_body(std::span(encoded.value()).first(length), setup),
+                    "every truncated gift body fails, including truncated provenance");
+            auto corrupt = encoded.value(); corrupt[28] = 1;
+            expect(!tactical::decode_command_body(corrupt, setup), "gift reserved word is validated");
+            corrupt = encoded.value(); corrupt[24] = 0;
+            expect(!tactical::decode_command_body(corrupt, setup), "gift zero recipient is invalid");
+            corrupt = encoded.value(); corrupt[32] = 1; corrupt[33] = 4;
+            expect(!tactical::decode_command_body(corrupt, setup), "gift excessive unit count is bounded before allocation");
+        }
+        auto invalid_shape = gift; invalid_shape.units.clear();
+        expect(!tactical::encode_command_body(invalid_shape, setup), "gift empty selection is refused");
+        invalid_shape = gift; invalid_shape.units = {1, 1};
+        expect(!tactical::encode_command_body(invalid_shape, setup), "gift duplicate roots are noncanonical");
+        invalid_shape = gift; invalid_shape.units = {3, 1};
+        expect(!tactical::encode_command_body(invalid_shape, setup), "gift unsorted list is noncanonical");
+        auto engine = gift; engine.origin = tactical::CommandOrigin::engine; engine.issuing_seat = {};
+        expect(!tactical::encode_command_body(engine, setup), "engine authority cannot invent human gifts");
+        auto disabled = setup; disabled.controllers.reset();
+        for (auto& unit : disabled.units) { unit.control = tactical::UnitControl::none; unit.controller_seat = {}; }
+        auto ordinary = gift; ordinary.origin = tactical::CommandOrigin::ordinary; ordinary.issuing_seat = {};
+        expect(!tactical::encode_command_body(ordinary, disabled), "gift requires explicitly enabled policy");
+        if (encoded) expect(!tactical::decode_command_body(encoded.value(), disabled), "disabled child rejects gift bytes");
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) for (const bool scramble : {false, true}) {
+            auto made = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+            expect(static_cast<bool>(made), "gift fixture enables campaign controller policy");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            const auto accounts = world.ledgers();
+            const auto before_economy = std::vector<tactical::PlayerEconomy>(accounts.begin(), accounts.end());
+            const auto before_instances = world.snapshot()->instances();
+            std::vector<std::uint64_t> visibility;
+            for (const auto& instance : before_instances) visibility.push_back(instance.visible_to);
+            expect(static_cast<bool>(world.submit(command(0, 1, 1, {1}, tactical::StopPayload{}))), "order before gift submits");
+            auto selected_gift = gift;
+            if (scramble) selected_gift.units = {2};
+            expect(static_cast<bool>(world.submit(selected_gift)), "root selections and member-only selections submit");
+            expect(static_cast<bool>(world.submit(command(0, 3, 1, {1}, tactical::MovePayload{}))), "former owner order queues for execution check");
+            const auto final_seat = humans >= 3 ? 3U : 1U;
+            expect(static_cast<bool>(world.submit(command(1, 4, 2, {1}, tactical::StopPayload{}))), "recipient orders before gifting onward");
+            expect(static_cast<bool>(world.submit(command(1, 5, 2, {1}, tactical::GiftPayload{{final_seat}}))), "recipient can gift onward without history");
+            if (humans >= 3) expect(static_cast<bool>(world.submit(command(2, 6, 3, {1}, tactical::GiftPayload{{1}}))), "third recipient can gift to original sender");
+            expect(static_cast<bool>(world.submit(command(3, 7, 1, {1}, tactical::StopPayload{}))), "original sender can command returned gift without cooldown");
+            const ReverseInline executor(workers);
+            if (scramble) world.scramble_storage_for_testing();
+            auto tick = world.step(executor);
+            expect(static_cast<bool>(tick), "ordered gift tick advances");
+            if (!tick) { std::cerr << tick.error().message << '\n'; continue; }
+            const auto instances = world.snapshot()->instances();
+            expect(instances.size() == setup.units.size() && instances[0].controller_seat == SeatId{2}
+                && instances[1].controller_seat == SeatId{2} && instances[2].controller_seat == SeatId{2},
+                "immutable snapshot switches complete root/member closure once");
+            const auto after_economy = world.ledgers();
+            expect(std::equal(before_economy.begin(), before_economy.end(), after_economy.begin(), after_economy.end()),
+                "gift preserves shared faction credits, queues, reserves and population accounts");
+            for (std::size_t i = 0; i < instances.size() && i < visibility.size() && i < setup.units.size(); ++i)
+                expect(instances[i].visible_to == visibility[i] && instances[i].owner == setup.units[i].owner,
+                    "gift leaves faction ownership and faction visibility unchanged");
+            const auto live = world.units();
+            expect(!live.empty() && live.front().order.kind == tactical::OrderKind::stop && live.front().order.issued_tick == 0,
+                "gift preserves the accepted current order and refuses the former controller's later move");
+            const auto events = world.snapshot()->events();
+            expect(std::count_if(events.begin(), events.end(), [](const auto& event) {
+                return event.kind == tactical::EventKind::controller_changed && event.previous_controller == SeatId{1}
+                    && event.controller == SeatId{2};
+            }) == 3, "controller events include previous and current seats for each transferred live identity");
+            expect(std::count_if(events.begin(), events.end(), [](const auto& event) {
+                return event.kind == tactical::EventKind::order_rejected && event.reason == tactical::RejectReason::unit_not_controlled;
+            }) == 1, "same-tick gift revokes former controller immediately");
+            const auto changed = std::find_if(events.begin(), events.end(), [](const auto& row) { return row.kind == tactical::EventKind::controller_changed; });
+            if (changed != events.end()) {
+                auto event = *changed; event.controller = {1};
+                expect(event != *changed, "controller event equality includes the recipient seat");
+            }
+            const auto saved = world.save_checkpoint_state();
+            auto log = world.record(); const auto pending = world.pending_commands();
+            log.commands.insert(log.commands.end(), pending.begin(), pending.end()); log.final_tick_count = 4;
+            const auto bytes = tactical::write_replay(log);
+            const auto parsed = bytes ? tactical::parse_replay(bytes.value())
+                : eawr::core::Result<tactical::TacticalReplay>::failure(bytes.error());
+            expect(parsed && parsed.value() == log, "standalone child log retains executed and pending gifts");
+            if (!saved || !parsed) continue;
+            auto fresh = tactical::TacticalSession::from_replay(parsed.value(), {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+            expect(static_cast<bool>(fresh), "gift checkpoint factory accepts the sealed child log");
+            if (!fresh) continue;
+            const auto loaded = fresh.value().load_checkpoint_state(saved.value());
+            expect(static_cast<bool>(loaded), "gift checkpoint restores current controller and pending onward gifts");
+            if (!loaded) continue;
+            expect(fresh.value().state_sha256() == world.state_sha256(), "restored gift state is immediately equal");
+            std::vector<std::string> hashes{world.state_sha256() + world.snapshot()->sha256()};
+            for (unsigned frame = 1; frame < 4; ++frame) {
+                if (scramble) world.scramble_storage_for_testing();
+                const auto advanced = world.step(executor); const auto restored = fresh.value().step(executor);
+                expect(advanced && restored && advanced.value().state_sha256 == restored.value().state_sha256
+                    && advanced.value().snapshot->canonical_bytes() == restored.value().snapshot->canonical_bytes(),
+                    "gift continuation equals live, including all events, after checkpoint restore");
+                if (!advanced || !restored) break;
+                hashes.push_back(world.state_sha256() + world.snapshot()->sha256());
+            }
+            const auto final_units = world.units();
+            expect(!final_units.empty() && final_units.front().controller_seat == SeatId{1}, "A to B to C to A needs no reclaim or transfer history");
+            auto child = tactical::TacticalSession::from_replay(world.record(), {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+            expect(static_cast<bool>(child), "completed gift child replay creates");
+            if (child && hashes.size() == 4) {
+                for (unsigned frame = 0; frame < 4; ++frame) {
+                    const auto advanced = child.value().step(executor);
+                    expect(advanced && child.value().state_sha256() + child.value().snapshot()->sha256() == hashes[frame],
+                        "standalone child replay equals live gift state and snapshot at every tick");
+                    if (!advanced) break;
+                }
+            }
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "2/3/4-human gifts match at 1/2/4/8 workers with scrambled storage");
+            // Invalid recipients and mixed source lists never transfer a valid subset.
+            const std::vector<tactical::PlayerCommand> refused{
+                command(0, 1, 1, {1}, tactical::GiftPayload{{1}}),
+                command(0, 1, 1, {1}, tactical::GiftPayload{{humans + 1}}),
+                command(0, 1, 1, {1}, tactical::GiftPayload{{humans + 2}}),
+                command(0, 1, 1, {1}, tactical::GiftPayload{{humans + 3}}),
+                command(0, 1, 1, {1}, tactical::GiftPayload{{humans + 4}}),
+                command(0, 1, 1, {1, 4}, tactical::GiftPayload{{2}}),
+                command(0, 1, 1, {1, 5}, tactical::GiftPayload{{2}}),
+                command(0, 1, 1, {1, 6}, tactical::GiftPayload{{2}}),
+                command(0, 1, 1, {1, 7}, tactical::GiftPayload{{2}})};
+            for (const auto& request : refused) {
+                auto rejected = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+                expect(static_cast<bool>(rejected), "invalid gift fixture creates with enabled controller policy");
+                if (!rejected) continue;
+                expect(static_cast<bool>(rejected.value().submit(request)), "dynamic gift eligibility is evaluated in command order");
+                const auto denied = rejected.value().step(executor);
+                expect(denied && denied.value().snapshot->events().size() == 1
+                    && denied.value().snapshot->events().front().kind == tactical::EventKind::order_rejected,
+                    "self, enemy, inactive, AI, absent spectator, structure, foreign, teammate and stale source gifts reject atomically");
+                const auto units = rejected.value().units();
+                expect(units.size() == setup.units.size() && std::equal(units.begin(), units.end(), setup.units.begin(),
+                    [](const auto& a, const auto& b) { return a.owner == b.owner && a.controller_seat == b.controller_seat
+                        && a.control == b.control && a.order == b.order; }), "invalid gift leaves every source and its orders unchanged");
+            }
+        }
+    }
+}
+
+
+void test_controller_departures() {
+    tactical::TacticalReplay log;
+    log.final_tick_count = 4;
+    auto& setup = log.setup;
+    setup.first_free_entity_id = 8;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    setup.campaign.emplace();
+    for (const auto player : {1U, 2U}) {
+        tactical::EconomyPlayer account; account.player = player;
+        account.credit_cap = eawr::sim::math::Fixed{};
+        setup.campaign->players.push_back(account);
+    }
+    setup.controllers = tactical::BattleControllerPolicy{
+        {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
+         {{3}, 1, eawr::sim::SeatKind::human, true}, {{10}, 1, eawr::sim::SeatKind::ai, false},
+         {{20}, 2, eawr::sim::SeatKind::ai, true}},
+        {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+    for (std::uint32_t id = 1; id <= 7; ++id) {
+        tactical::UnitState unit{id, 11, 1};
+        unit.control = id == 7 ? tactical::UnitControl::shared_structure : tactical::UnitControl::mobile;
+        unit.controller_seat = {id <= 3 ? 1U : id == 4 ? 2U : id <= 6 ? 3U : 0U};
+        setup.units.push_back(unit);
+    }
+    const auto seat_order = [](std::uint64_t tick, std::uint64_t seq, std::uint32_t seat,
+        std::vector<eawr::sim::EntityId> units, tactical::CommandPayload payload) {
+        tactical::PlayerCommand command{{tick, 1, seq}, std::move(units), std::move(payload)};
+        command.origin = tactical::CommandOrigin::seat; command.issuing_seat = {seat}; return command;
+    };
+    auto roster = *setup.controllers;
+    const auto leave = [&](std::uint64_t tick, std::uint64_t seq, std::uint32_t seat, bool last) {
+        tactical::BattleControlPayload change; change.departed = {seat};
+        for (auto& row : roster.seats) if (row.player == 1) {
+            if (row.seat.value == seat) row.active = false;
+            if (row.kind == eawr::sim::SeatKind::ai) row.active = last;
+            change.policy.seats.push_back(row);
+        }
+        change.policy.factions.push_back({1, last ? tactical::FactionController::passive : tactical::FactionController::humans});
+        tactical::PlayerCommand command{{tick, 1, seq}, {}, std::move(change)};
+        command.origin = tactical::CommandOrigin::engine; return command;
+    };
+    log.commands.push_back(seat_order(0, 1, 1, {1}, tactical::StopPayload{}));
+    log.commands.push_back(seat_order(0, 2, 1, {2}, tactical::GiftPayload{{2}}));
+    log.commands.push_back(leave(0, 3, 1, false));
+    log.commands.push_back(seat_order(0, 4, 1, {3}, tactical::StopPayload{}));
+    log.commands.push_back(seat_order(0, 5, 3, {3}, tactical::StopPayload{}));
+    log.commands.push_back(leave(1, 6, 2, false));
+    log.commands.push_back(leave(2, 7, 3, true));
+    auto bytes = tactical::write_replay(log);
+    expect(bytes && tactical::parse_replay(bytes.value()).value() == log, "departure codec preserves effective side roster");
+    auto forged = log; forged.commands[2].origin = tactical::CommandOrigin::seat; forged.commands[2].issuing_seat = {1};
+    expect(!tactical::validate_replay(forged), "human provenance cannot forge an engine departure");
+    auto duplicate = log; duplicate.commands[5] = log.commands[2]; duplicate.commands[5].key = {1, 1, 6};
+    expect(!tactical::validate_replay(duplicate), "repeated departure cannot reactivate or reclaim a seat");
+    const auto body = tactical::encode_command_body(log.commands[2], setup);
+    expect(static_cast<bool>(body), "bounded departure body encodes");
+    if (body) {
+        auto truncated = body.value(); truncated.pop_back();
+        expect(!tactical::decode_command_body(truncated, setup), "truncated departure roster/provenance rejects");
+        auto excessive = body.value(); excessive[32] = 255; excessive[33] = 255;
+        expect(!tactical::decode_command_body(excessive, setup), "oversized departure roster rejects before allocation");
+    }
+    tactical::EconomyRules economy; economy.campaign = true; economy.players = setup.campaign->players;
+    std::string expected;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = tactical::TacticalSession::from_replay(log, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(session), "departure world creates"); if (!session) continue;
+        const auto first = session.value().step(ReverseInline(workers));
+        expect(static_cast<bool>(first), "ordered departure tick executes"); if (!first) continue;
+        const auto units = session.value().units();
+        expect(units[0].controller_seat.value == 2 && units[1].controller_seat.value == 2
+            && units[2].controller_seat.value == 3, "gift then departure counts current roots and seat-ID ties");
+        expect(units[6].control == tactical::UnitControl::shared_structure && units[6].controller_seat.value == 0,
+            "departure preserves shared structures");
+        const auto& events = first.value().snapshot->events();
+        expect(std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.sequence == 1 && event.kind == tactical::EventKind::order_accepted;
+        }) && std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.sequence == 4 && event.kind == tactical::EventKind::order_rejected;
+        }), "leave preserves earlier orders and rejects later stale authority");
+        auto saved = session.value().save_checkpoint_state();
+        auto restored = tactical::TacticalSession::from_replay(log, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(saved && restored && restored.value().load_checkpoint_state(saved.value()), "departure checkpoint restores effective policy");
+        if (!saved || !restored) continue;
+        expect(restored.value().state_sha256() == session.value().state_sha256(), "restore never re-splits departed units");
+        for (int tick = 1; tick < 4; ++tick) {
+            auto live = session.value().step(ReverseInline(workers));
+            auto resumed = restored.value().step(ReverseInline(workers));
+            expect(live && resumed && live.value().state_hash.get() == resumed.value().state_hash.get(),
+                "departure checkpoint continuation equals replay");
+        }
+        expect(session.value().controller_policy()->factions.front().mode == tactical::FactionController::passive
+            && session.value().units().front().controller_seat.value == 10,
+            "last human transfers to configured passive AI seat without faction quit");
+        expect(session.value().record().setup == setup, "departures never rewrite sealed entry roster");
+        const auto hash = session.value().state_sha256();
+        if (expected.empty()) expected = hash; else expect(expected == hash, "departures equal on 1/2/4/8 workers");
+    }
+}
+
+void test_controller_foundation() {
+    tactical::TacticalReplay replay;
+    replay.final_tick_count = 4;
+    auto& setup = replay.setup;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 2, 2, tactical::player_flag_commandable}};
+    setup.units = {{1, 11, 1}, {2, 12, 1}, {3, 13, 2}};
+    setup.first_free_entity_id = 4;
+    setup.campaign.emplace();
+    for (const auto id : {1U, 2U}) {
+        tactical::EconomyPlayer account;
+        account.player = id;
+        account.credit_cap = eawr::sim::math::Fixed{};
+        setup.campaign->players.push_back(account);
+    }
+    setup.controllers = tactical::BattleControllerPolicy{
+        {{{1}, 1, eawr::sim::SeatKind::human, true}, {{2}, 1, eawr::sim::SeatKind::human, true},
+            {{3}, 2, eawr::sim::SeatKind::ai, true}, {{4}, 1, eawr::sim::SeatKind::human, true}},
+        {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}}};
+    for (std::size_t i = 0; i < setup.units.size(); ++i) {
+        setup.units[i].control = tactical::UnitControl::mobile;
+        setup.units[i].controller_seat.value = static_cast<std::uint32_t>(i + 1);
+    }
+    tactical::PlayerCommand command{{0, 1, 1}, {1}, tactical::MovePayload{}};
+    command.origin = tactical::CommandOrigin::seat;
+    command.issuing_seat = {1};
+    replay.commands = {command};
+    auto queued = command; queued.key = {2, 1, 2}; queued.issuing_seat = {2};
+    replay.commands.push_back(queued);
+    expect(static_cast<bool>(tactical::validate_replay(replay)), "controller fixture is valid");
+    const auto encoded = tactical::write_replay(replay);
+    expect(static_cast<bool>(encoded), "controller setup encodes");
+    if (!encoded) return;
+    const auto decoded = tactical::parse_replay(encoded.value());
+    expect(decoded && decoded.value() == replay, "controller roster, unit state and provenance round trip");
+    const auto header_end = static_cast<std::size_t>(encoded.value()[10])
+        | (static_cast<std::size_t>(encoded.value()[11]) << 8U);
+    const auto controller_bytes = 16U + 16U * setup.controllers->seats.size()
+        + 8U * setup.controllers->factions.size() + 16U * setup.units.size();
+    auto malformed = encoded.value(); malformed[header_end - controller_bytes] = 2;
+    expect(!tactical::parse_replay(malformed), "unsupported controller extension version fails");
+    malformed = encoded.value(); malformed[header_end - controller_bytes - 2] ^= 1;
+    expect(!tactical::parse_replay(malformed), "incorrect controller extension length fails");
+    const auto body = tactical::encode_command_body(command, setup);
+    expect(static_cast<bool>(body), "checked command body encodes");
+    if (body) {
+        auto parsed = tactical::decode_command_body(body.value(), setup);
+        expect(parsed && parsed.value() == command, "body codec preserves authenticated seat and producer key");
+        auto bad = body.value(); bad.pop_back();
+        expect(!tactical::decode_command_body(bad, setup), "truncated provenance fails");
+        bad = body.value(); bad[bad.size() - 12] = 2;
+        expect(!tactical::decode_command_body(bad, setup), "unsupported provenance version fails");
+        bad = body.value(); bad.back() = 1;
+        expect(!tactical::decode_command_body(bad, setup), "malformed origin fails");
+        bad = body.value(); bad[bad.size() - 8] = 0;
+        expect(!tactical::decode_command_body(bad, setup), "seat origin with zero seat fails");
+    }
+    auto oversized = command; oversized.units.resize(tactical::max_units_per_command + 1U);
+    expect(!tactical::encode_command_body(oversized, setup), "oversized controller command fails before encoding");
+    auto unstamped = command; unstamped.issuing_seat = {}; unstamped.origin = tactical::CommandOrigin::ordinary;
+    expect(!tactical::encode_command_body(unstamped, setup), "enabled policy requires explicit provenance");
+    auto waypoint = command; std::get<tactical::MovePayload>(waypoint.payload).append = true;
+    const auto waypoint_body = tactical::encode_command_body(waypoint, setup);
+    expect(waypoint_body && tactical::decode_command_body(waypoint_body.value(), setup)
+        && tactical::decode_command_body(waypoint_body.value(), setup).value() == waypoint,
+        "waypoint and provenance tails coexist canonically");
+    auto invalid = setup;
+    invalid.units.front().controller_seat = {3};
+    expect(!tactical::validate_setup(invalid), "other faction controller fails");
+    invalid = setup; invalid.controllers->seats.front().active = false;
+    expect(!tactical::validate_setup(invalid), "inactive mobile controller fails");
+    invalid = setup; invalid.controllers.reset();
+    expect(!tactical::validate_setup(invalid), "orphan controller data fails");
+    invalid = setup; invalid.units.front().controller_seat = {};
+    expect(!tactical::validate_setup(invalid), "zero cannot grant shared mobile control");
+    invalid = setup; invalid.controllers->seats[1].seat = {1};
+    expect(!tactical::validate_setup(invalid), "duplicate roster seat fails");
+    invalid = setup; invalid.squadrons = {{1, {2}}};
+    expect(!tactical::validate_setup(invalid), "attached squadron members retain root control");
+    auto native = replay;
+    native.setup.skirmish.emplace();
+    native.setup.skirmish->map = "data/art/maps/controller_fixture.ted";
+    native.setup.skirmish->map_sha256 = std::string(64, '0');
+    native.setup.skirmish->victory_condition = 1;
+    native.setup.skirmish->slots = {{1, true, {}, {}, {}}, {2, false, {}, {}, {}}};
+    native.setup.native_scene = tactical::ReplayNativeScene{true, {"fixture"}, {}, {"fixture"}};
+    const auto native_bytes = tactical::write_replay(native);
+    expect(native_bytes && tactical::parse_replay(native_bytes.value())
+        && tactical::parse_replay(native_bytes.value()).value() == native,
+        "native campaign SKSU loader metadata supports controller policy");
+    auto large_roster = replay;
+    large_roster.setup.controllers->seats.clear();
+    for (std::uint32_t seat = 1; seat <= 65; ++seat)
+        large_roster.setup.controllers->seats.push_back({{seat}, 1, eawr::sim::SeatKind::human, true});
+    large_roster.setup.controllers->seats.push_back({{66}, 2, eawr::sim::SeatKind::ai, true});
+    large_roster.setup.units[2].controller_seat = {66};
+    const auto roster_bytes = tactical::write_replay(large_roster);
+    expect(roster_bytes && tactical::parse_replay(roster_bytes.value())
+        && tactical::parse_replay(roster_bytes.value()).value() == large_roster,
+        "controller roster bound is independent of tactical faction count");
+    auto shared = setup;
+    shared.units[1].control = tactical::UnitControl::shared_structure;
+    shared.units[1].controller_seat = {};
+    expect(static_cast<bool>(tactical::validate_setup(shared)), "explicit shared structure uses zero controller");
+    shared.units[1].controller_seat = {2};
+    expect(!tactical::validate_setup(shared), "shared structure cannot carry a private controller");
+    auto foreign = command; foreign.issuing_seat = {3};
+    expect(!tactical::validate_command_provenance(foreign, setup), "mismatched command seat fails");
+    tactical::EconomyRules economy;
+    economy.campaign = true; economy.players = setup.campaign->players;
+    std::string reference_hash, reference_snapshot;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+      for (const bool scramble : {false, true}) {
+        auto created = tactical::TacticalSession::from_replay(replay, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(created), "controller session creates");
+        if (!created) continue;
+        auto session = std::move(created).value();
+        expect(session.snapshot()->instances().front().controller_seat.value == 1, "immutable instance publishes controller");
+        const auto start_hash = session.state_sha256();
+        const auto start_snapshot = session.snapshot()->sha256();
+        if (scramble) session.scramble_storage_for_testing();
+        expect(session.state_sha256() == start_hash, "ECS rebuild preserves controller identity");
+        auto changed = setup;
+        changed.units.front().controller_seat = {2};
+        const auto other = tactical::TacticalSession::create(changed, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(other && other.value().state_sha256() != start_hash, "state hash includes mobile controller");
+        expect(other && other.value().snapshot()->sha256() != start_snapshot, "snapshot hash includes mobile controller");
+        changed = setup; changed.controllers->seats[3].active = false;
+        const auto roster = tactical::TacticalSession::create(changed, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(roster && roster.value().snapshot()->sha256() != start_snapshot, "snapshot hash includes effective roster");
+        const auto advanced = session.step(ReverseInline(workers));
+        expect(static_cast<bool>(advanced), "controller command advances");
+        expect(advanced && advanced.value().state_hash.get() == session.state_sha256(),
+            "partitioned controller encoding equals the serial canonical encoder");
+        const auto saved = session.save_checkpoint_state();
+        expect(static_cast<bool>(saved), "controller checkpoint saves");
+        auto log = session.record();
+        const auto pending = session.pending_commands();
+        log.commands.insert(log.commands.end(), pending.begin(), pending.end());
+        if (!pending.empty()) log.final_tick_count = pending.back().key.tick + 1;
+        auto restored = tactical::TacticalSession::from_replay(log, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        expect(static_cast<bool>(restored), "sealed controller log restores");
+        if (!saved || !restored) continue;
+        const auto loaded = restored.value().load_checkpoint_state(saved.value());
+        expect(static_cast<bool>(loaded), "controller checkpoint loads");
+        if (!loaded) { std::cerr << loaded.error().message << '\n'; continue; }
+        expect(restored.value().state_sha256() == session.state_sha256(), "checkpoint restores controller state hash");
+        expect(restored.value().pending_commands() == pending, "checkpoint retains pending caller provenance");
+        expect(restored.value().record().commands == session.record().commands, "checkpoint restores executed caller provenance");
+        expect(restored.value().snapshot()->controller_policy() == session.snapshot()->controller_policy()
+            && std::equal(restored.value().snapshot()->instances().begin(), restored.value().snapshot()->instances().end(),
+                session.snapshot()->instances().begin(), session.snapshot()->instances().end()),
+            "checkpoint immediately restores controller policy and complete instances");
+        // Restore publishes empty tick-event lists (session_state.cpp), so the immediate snapshot
+        // cannot match a live snapshot containing its previous tick's events. Like the existing
+        // native-checkpoint test, compare immediate state and then continuation; compare full
+        // snapshots, including events, after every resumed step through pending execution.
+        const std::array<std::uint8_t, 8> controller_tag{'C', 'T', 'R', 'L', 4, 0, 0, 0};
+        const auto tail = std::find_end(saved.value().begin(), saved.value().end(),
+            controller_tag.begin(), controller_tag.end());
+        expect(tail != saved.value().end(), "controller continuation uses the required version-4 domain");
+        if (tail == saved.value().end()) continue;
+        const auto offset = static_cast<std::size_t>(tail - saved.value().begin());
+        const auto policy_archive_bytes = 16U + 10U * setup.controllers->seats.size() + 8U * setup.controllers->factions.size();
+        auto corrupt = saved.value(); corrupt[offset + policy_archive_bytes + 24] = 3;
+        expect(!restored.value().load_checkpoint_state(corrupt), "checkpoint rejects foreign controller seat");
+        corrupt = saved.value(); corrupt[offset + 4] = 2;
+        expect(!restored.value().load_checkpoint_state(corrupt), "checkpoint rejects the replaced version-2 controller tail");
+        corrupt = saved.value(); corrupt[offset + policy_archive_bytes + 32] = 1;
+        expect(!restored.value().load_checkpoint_state(corrupt), "checkpoint rejects a pending caller without a pending ability request");
+        auto fresh = tactical::TacticalSession::from_replay(log, {}, {}, {}, std::nullopt, {}, {}, {}, economy);
+        if (!fresh || !fresh.value().load_checkpoint_state(saved.value())) continue;
+        while (session.completed_tick() < log.final_tick_count) {
+            const auto resumed_tick = fresh.value().step(ReverseInline(workers));
+            const auto live_tick = session.step(ReverseInline(workers));
+            expect(resumed_tick && live_tick && resumed_tick.value().state_hash.get() == live_tick.value().state_hash.get(),
+                "checkpoint continuation equals live through pending command execution");
+            if (!resumed_tick || !live_tick) break;
+            expect(fresh.value().snapshot()->canonical_bytes() == session.snapshot()->canonical_bytes(),
+                "checkpoint full snapshot equals live after each continuation step");
+        }
+        expect(fresh.value().record().commands == log.commands, "restored pending seat provenance reaches executed recording");
+        expect(fresh.value().state_sha256() == session.state_sha256(), "checkpoint continuation equals live");
+        if (workers == 1 && !scramble) { reference_hash = session.state_sha256(); reference_snapshot = session.snapshot()->sha256(); }
+        expect(reference_hash == session.state_sha256() && reference_snapshot == session.snapshot()->sha256(),
+            "controller state and snapshot equal on 1/2/4/8 workers");
+      }
+    }
+}
 #include "canonical_encoder_oracle.hpp"
 }
 
@@ -1349,6 +2048,11 @@ int main(const int argc, const char* const argv[]) {
         std::cerr << "tactical fixtures are missing from " << fixtures << '\n';
         return 1;
     }
+    test_controller_shared_special_fire();
+    test_controller_gifts();
+    test_controller_split_and_gates();
+    test_controller_foundation();
+    test_controller_departures();
     test_format(fixtures);
     test_human_seat_admission();
     test_special_fire_format(fixtures);

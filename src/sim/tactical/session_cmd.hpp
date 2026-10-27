@@ -2,6 +2,7 @@
 
 #include "session_tick.hpp"
 
+#include <algorithm>
 #include <array>
 #include <set>
 #include <cstddef>
@@ -13,6 +14,26 @@
 #include <vector>
 
 namespace eawr::sim::tactical::session_detail {
+
+// ADR-020: additional source authority, independent of each opcode's owner/target
+// rules. In particular, an allied shared station and a repair payer retain their
+// existing admission. Zero never gives a mobile source shared control.
+[[nodiscard]] inline RejectReason controller_admission(const TacticalSetup& setup,
+    const PlayerCommand& command, const UnitState& source, const bool shared_exception = false) {
+    if (!setup.controllers || command.origin == CommandOrigin::engine) return RejectReason::none;
+    const auto& seats = setup.controllers->seats;
+    const auto seat = std::lower_bound(seats.begin(), seats.end(), command.issuing_seat,
+        [](const auto& row, const auto id) { return row.seat < id; });
+    if (command.origin != CommandOrigin::seat || seat == seats.end() || seat->seat != command.issuing_seat
+        || !seat->active || seat->player != command.key.player_id)
+        return RejectReason::unit_not_controlled;
+    if (source.control == UnitControl::shared_structure) return RejectReason::none;
+    if (source.control == UnitControl::none && shared_exception
+        && std::none_of(setup.controllers->factions.begin(), setup.controllers->factions.end(),
+            [&](const auto& faction) { return faction.player == source.owner; })) return RejectReason::none;
+    return source.control == UnitControl::mobile && source.owner == command.key.player_id
+        && source.controller_seat == command.issuing_seat ? RejectReason::none : RejectReason::unit_not_controlled;
+}
 
 // Private handler for admitted orders, called only by commands() in its existing
 // serial unit loop. Reference wrappers borrow callbacks without allocating or
@@ -46,7 +67,7 @@ struct Tick::CommandHandlers final {
     CommandKey& concentrate_command_key;
 
     std::vector<LiveUnit*> ordinary_ability_holders(EntityId unit_id, AbilityKind kind) const;
-    core::Result<RejectReason> apply_ability(EntityId unit_id, const AbilityPayload& payload) const;
+    core::Result<RejectReason> apply_ability(EntityId unit_id, const AbilityPayload& payload, SeatId caller = {}) const;
 private:
     core::Result<RejectReason> switch_ordinary_ability(const AbilityPayload& payload,
         const std::vector<LiveUnit*>& holders, auto& slot_of, auto& profile_of, const std::uint64_t& command_tick,
@@ -75,7 +96,7 @@ private:
     core::Result<RejectReason> apply_buzz_droids(EntityId unit_id, const AbilityPayload& payload,
         const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, EntityId& next_id,
         const std::uint64_t& frame, UnitStage& staged, const SquadronTable& squadron_table,
-        const MotionTable& table) const;
+        const MotionTable& table, SeatId caller) const;
     core::Result<RejectReason> apply_ion_cannon_shot(EntityId unit_id, const AbilityPayload& payload,
         const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds, UnitStage& staged,
         const SquadronTable& squadron_table) const;

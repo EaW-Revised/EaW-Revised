@@ -205,7 +205,7 @@ Open observations (fidelity list until observed):
 - How retail recovers from a malformed `.rc` dialog (mods ship an empty field, a missing comma and a trailing `|`). Until observed, EAWR rejects only that dialog with one EAWR-UI-0201 error (the defect's line and the reason) and resumes after its `END`, or at the next `DIALOGEX` when the `END` is missing. `BEGIN`, `END` and statement keywords are never values, so a trailing `|` or `,` stops at the next statement.
 - The `Anim_Frame_Delay` unit.
 - Edge scrolling while the pointer is over the HUD.
-- Whether the mouse wheel over the command bar zooms the camera. UI-07 stops it there, per UI-I2.
+- Whether the mouse wheel over the tactical command bar zooms the camera. UI-07 stops it there, per UI-I2.
 - Whether a HUD attack mode stays armed after a click on ground or a friendly unit. UI-07 keeps it
   armed; retail issues no action there.
 - Whether retail hotkeys are suppressed while an edit box has focus (UI-I3 is a design rule; the
@@ -289,9 +289,16 @@ As built (UI-07 input routing and command sink):
 - The world layer runs before the camera. The selection and order handlers plug into
   `ViewerHost::route_world_input` ahead of the camera path.
 - `EawrUiHitMask` is the HUD root. Its `_has_point` is `HudViewModel::hit_test_screen`.
-  `EawrUiModalLayer` is a modal backdrop; a visible one sets the policy's `modal_open`. Both turn
-  off Godot's `force_pass_scroll_events`. By default Godot passes wheel events on through STOP
-  controls, and the camera would then zoom under the HUD.
+  `EawrUiModalLayer` is a modal backdrop; a visible one sets the policy's `modal_open`. Both default
+  to turning off Godot's `force_pass_scroll_events`, so unused wheel events stop at the HUD.
+  The galactic command-bar, organization-shell and advanced-map masks explicitly enable wheel propagation:
+  unused wheel events over their icons, pads and backgrounds reach the existing map zoom handler.
+  GUI scroll consumers and modal backdrops retain the wheel; fleet drags and ground selection
+  gestures also block map zoom, including wheel input away from the source control. Wheel-in can
+  pick a planet through a non-consuming HUD panel; ordinary clicks retain panel exclusion.
+  Evidence for this galactic policy is the owner's 2026-10-26 playtest report (legacy EAWR-5085);
+  an independent retail capture remains pending. The tactical command-bar policy remains an open
+  observation above.
 - HUD buttons never take keyboard focus (`FOCUS_NONE`, as in the kit), so arrow keys stay with
   the camera after a click. When a text control takes focus, held camera input is cancelled.
 - A modal dialog opening or closing ends every world hold (`ModalHoldGuard`). The host checks

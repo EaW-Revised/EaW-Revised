@@ -397,6 +397,22 @@ void EawrOptionsScreen::rebuild_page() {
             service.controls.insert(back, std::move(performance));
         }
     }
+    if (page_ == Page::gameplay) {
+        const int top = service.rect.height;
+        service.rect.height += 60;
+        data::DialogControl control;
+        control.statement = "CONTROL";
+        control.id_name = "IDC_HOVER_OWNER_NAMES";
+        control.text = "Show player names when hovering units";
+        control.class_name = "Button";
+        control.style = {"WS_VISIBLE", "WS_TABSTOP", "BS_AUTOCHECKBOX"};
+        control.rect = {12, top + 4, service.rect.width - 24, 22};
+        service.controls.push_back(control);
+        control.id_name = "IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING";
+        control.text = "Reinforcement areas only while placing";
+        control.rect.y += 30;
+        service.controls.push_back(control);
+    }
     if (page_ == Page::keyboard) {
         // ST-K3: append the owner-requested preset to the loaded keyboard page.
         const int top = service.rect.height;
@@ -821,7 +837,7 @@ void EawrOptionsScreen::wire_page() {
                 control->set_value_no_signal(value);
             }
         }
-        const std::array<std::pair<const char*, bool>, 8> checks{{
+        const std::array<std::pair<const char*, bool>, 10> checks{{
             {"IDC_ABSOLUTE_SCROLLING", play.absolute_scrolling},
             {"IDC_DELAY_TOOLTIPS", play.delay_tooltips},
             {"IDC_RIGHT_BUTTON_SCROLL", play.right_button_scroll},
@@ -830,6 +846,8 @@ void EawrOptionsScreen::wire_page() {
             {"IDC_SIMPLIFIED_FACTION_COLORS", play.simplified_faction_colours},
             {"IDC_ABILITIES_DEFAULT_TO_AUTOFIRE", play.abilities_autofire},
             {"IDC_AUTORESOLVE", play.ask_auto_resolve},
+            {"IDC_HOVER_OWNER_NAMES", model::hover_owner_names_enabled(play, options_.multiplayer)},
+            {"IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING", play.reinforcement_areas_only_while_placing},
         }};
         for (const auto& [id, value] : checks) {
             if (has(id)) check(id)->set_pressed_no_signal(value);
@@ -1099,6 +1117,10 @@ void EawrOptionsScreen::sync_draft_from_controls() {
         break;
     }
     case Page::gameplay:
+        if (const auto v = value("IDC_REINFORCEMENT_AREAS_ONLY_WHILE_PLACING"))
+            draft_.gameplay.reinforcement_areas_only_while_placing = *v > 0.5;
+        if (const auto v = value("IDC_HOVER_OWNER_NAMES"); v && (*v > 0.5) != model::hover_owner_names_enabled(draft_.gameplay, options_.multiplayer))
+            draft_.gameplay.hover_owner_names = *v > 0.5;
         if (const auto v = value("IDC_GAME_SPEED_SLIDER")) draft_.gameplay.tactical_speed = static_cast<int>(*v + 0.5);
         break;
     case Page::network: {
@@ -1182,6 +1204,8 @@ void EawrOptionsScreen::defaults_page() {
     case Page::gameplay:
         // The honoured option only: the others are not editable here, so Defaults leaves them.
         draft_.gameplay.tactical_speed = defaults.gameplay.tactical_speed;
+        draft_.gameplay.hover_owner_names = defaults.gameplay.hover_owner_names;
+        draft_.gameplay.reinforcement_areas_only_while_placing = defaults.gameplay.reinforcement_areas_only_while_placing;
         break;
     case Page::keyboard: draft_.camera_wasd = defaults.camera_wasd; break;
     case Page::network:

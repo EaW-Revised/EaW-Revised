@@ -82,6 +82,30 @@ template<class T, class Key> bool ordered(const std::vector<T>& rows, Key get) {
 }
 } // namespace
 
+core::Result<PlayerId> orbital_occupation(const PoliticalControlSetup* control, const PlanetId planet,
+    const std::span<const Fleet> fleets, const MovementSetup* movement, const std::span<const CensusObject> actors) {
+    if (control) if (const auto* row = find_row(control->planets, planet, [](const auto& p) { return p.planet; }))
+        if (row->starbase.owner) return core::Result<PlayerId>::success(row->starbase.owner);
+    const Fleet* ordinary = nullptr;
+    const Fleet* stealth = nullptr;
+    for (const auto& fleet : fleets) {
+        if (fleet.orbit != planet || fleet.motion.transit || fleet.orbit_slot > 2) continue;
+        const auto members = control ? live_breakdown(*control, fleet.members, movement) : flattened(fleet.members, movement);
+        if (members.empty()) continue;
+        const auto skip = !actors.empty() ? fleet_combat_skip(fleet, actors, movement)
+            : core::Result<bool>::success(control ? skips(*control, members)
+                : movement && std::all_of(members.begin(), members.end(), [&](const auto& member) {
+                    const auto* profile = find_row(movement->types, member.type, [](const auto& t) { return t.type; });
+                    return profile && profile->skips_combat;
+                }));
+        if (!skip) return core::Result<PlayerId>::failure(skip.error());
+        auto& first = skip.value() ? stealth : ordinary;
+        if (!first || fleet.motion.orbit_entry < first->motion.orbit_entry) first = &fleet;
+    }
+    const auto* occupied = ordinary ? ordinary : stealth;
+    return core::Result<PlayerId>::success(occupied ? occupied->owner : 0);
+}
+
 bool erase_control_actor(PoliticalControlSetup& inputs, EntityId actor) {
     return std::erase_if(inputs.ability_sources, [actor](const auto& row) { return row.actor == actor; }) != 0;
 }
@@ -198,7 +222,9 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
         return invalid<void>("control requires one neutral player and complete relation inputs");
     for (const auto& r : s.relations) if (!known(r.player) || !known(r.other) || (r.player == r.other && !r.allied))
         return invalid<void>("invalid political relation");
-    for (const auto& t : s.types) if (t.type == 0 || t.political_control > 1)
+    for (const auto& t : s.types) if (t.type == 0 || t.political_control > 1
+        || (t.signed_political_control && (*t.signed_political_control < std::numeric_limits<std::int64_t>::min() / Fixed::scale
+            || *t.signed_political_control > std::numeric_limits<std::int64_t>::max() / Fixed::scale)))
         return invalid<void>("orbital political control must be zero or one");
     if (!s.ground_capability_types.empty()) {
         if (s.ground_capability_types.size() != s.types.size()) return invalid<void>("ground capability facts must cover every control type");
@@ -286,6 +312,22 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     const std::span<const Route> routes, const std::uint64_t frame, const std::span<const CensusObject> actors,
     const std::map<FleetId, core::Result<bool>>* cached_skip) {
     ControlStep out; out.state = previous;
+    const auto degrade = [&](std::string_view code, std::string_view message, std::string effective) {
+        core::LoadNote note; note.code = code; note.object = std::to_string(p.planet);
+        note.tag = "Political_Control"; note.phase = core::LoadPhase::runtime;
+        note.action = core::LoadAction::runtime_degraded; note.effective_value = std::move(effective);
+        note.diagnostic_code = diagnostic_codes::invalid_setup; note.message = message;
+        out.degraded = true;
+        out.notes.runtime(std::move(note));
+    };
+    const auto add = [&](Fixed a, Fixed b, std::string_view message) {
+        Fixed value{};
+        if (!math::try_add(a, b, value)) {
+            value = Fixed::from_raw(b.raw() < 0 ? std::numeric_limits<std::int64_t>::min() : std::numeric_limits<std::int64_t>::max());
+            degrade("EAWR-LOAD-1114", message, std::to_string(value.raw()));
+        }
+        return value;
+    };
     auto& state = out.state;
     PlayerId controller = p.ground_base.level ? p.ground_base.owner : 0;
     Fixed military = Fixed::from_raw(static_cast<std::int64_t>(p.ground_base.level) * Fixed::scale);
@@ -312,8 +354,8 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
             : invalid<bool>("political_live_fleet_skip_unqualified"))
             : actors.empty() ? core::Result<bool>::success(skips(s, members))
             : fleet_combat_skip(fleet, actors, movement);
-        if (!live_skip) return core::Result<ControlStep>::failure(live_skip.error());
-        const bool stealth = live_skip.value();
+        if (!live_skip) degrade("EAWR-LOAD-1112", live_skip.error().message, "bound type stealth predicate");
+        const bool stealth = live_skip ? live_skip.value() : skips(s, members);
         if (!orbital) {
             if (!stealth) orbital = fleet.owner;
             else if (!stealth_fallback) stealth_fallback = fleet.owner;
@@ -323,8 +365,11 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
         for (const auto& member : members) {
             ++out.member_visits;
             const auto* t = type(s, member.type);
-            if (!t) return invalid<ControlStep>("missing live political type at control service");
-            fleet_control += fleet.owner == controller ? t->political_control : -static_cast<std::int64_t>(t->political_control);
+            if (!t) { degrade("EAWR-LOAD-1112", "missing live political type at control service", "skip contribution"); continue; }
+            const auto authored = t->signed_political_control.value_or(t->political_control);
+            // The typed loader bounds each signed quantity to Fixed integer range;
+            // the object budget keeps their sum representable.
+            fleet_control += fleet.owner == controller ? authored : -authored;
         }
     }
     if (!orbital) orbital = stealth_fallback;
@@ -338,15 +383,14 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     else if (controller && leaning.raw() > 0) {
         const auto* controlling = find_row(s.players, controller, [](const auto& row) { return row.player; });
         const auto* leaning_owner = find_row(s.players, p.leaning_player, [](const auto& row) { return row.player; });
-        if (!controlling || !leaning_owner) return invalid<ControlStep>("missing faction identity for planet leaning");
-        if (controlling->faction != leaning_owner->faction) leaning = Fixed::from_raw(-leaning.raw());
+        if (!controlling || !leaning_owner) {
+            degrade("EAWR-LOAD-1112", "missing faction identity for planet leaning", "zero leaning"); leaning = Fixed{};
+        } else if (controlling->faction != leaning_owner->faction) leaning = Fixed::from_raw(-leaning.raw());
     }
     if (!controller) for (const auto& player : s.players) if (player.neutral) { controller = player.player; break; }
-    Fixed target{};
-    if (!math::try_add(military, Fixed::from_raw(std::min(fleet_control, std::int64_t{0}) * Fixed::scale), target)
-        || !math::try_add(target, leaning, target)) return invalid<ControlStep>("political category sum overflow");
-    for (const auto value : p.special_control) if (!math::try_add(target, value, target))
-        return invalid<ControlStep>("special political category overflow");
+    Fixed target = add(military, Fixed::from_raw(std::min(fleet_control, std::int64_t{0}) * Fixed::scale), "political category sum overflow");
+    target = add(target, leaning, "political category sum overflow");
+    for (const auto value : p.special_control) target = add(target, value, "special political category overflow");
     Fixed trade{};
     for (const auto& route : routes) {
         ++out.route_visits;
@@ -355,10 +399,10 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
         const auto* other_state = find_row(s.state, other, [](const auto& row) { return row.planet; });
         const auto* input = find_row(s.routes, route.id, [](const auto& row) { return row.route; });
         if (other_state && input && previous.current >= one && other_state->current >= one
-            && allied(s, other_state->current_player, controller)
-            && !math::try_add(trade, input->political_gain, trade)) return invalid<ControlStep>("route political gain overflow");
+            && allied(s, other_state->current_player, controller))
+            trade = add(trade, input->political_gain, "route political gain overflow");
     }
-    if (!math::try_add(target, trade, target)) return invalid<ControlStep>("political total overflow");
+    target = add(target, trade, "political total overflow");
     Fixed maximum = five;
     if (cap_controller) if (const auto* cap = find_row(p.caps, cap_controller, [](const auto& row) { return row.player; }))
         maximum = cap->maximum == 0 ? five : Fixed::from_raw(static_cast<std::int64_t>(cap->maximum) * Fixed::scale);
@@ -395,7 +439,9 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
             // GPC-01: target allegiance owns appropriateness, never previous current control.
             if (it->owner != state.target_player) continue;
             const auto* profile = find_row(s.ability_types, it->type, [](const auto& row) { return row.type; });
-            if (!profile || it->ability >= profile->abilities.size()) return invalid<ControlStep>("unbound political ability source");
+            if (!profile || it->ability >= profile->abilities.size()) {
+                degrade("EAWR-LOAD-1113", "unbound political ability source", "skip ability source"); continue;
+            }
             const auto& ability = profile->abilities[it->ability];
             if (ability.enabled) automatic.push_back(&ability);
         }
@@ -420,30 +466,48 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
         Fixed multiplier = one, denominator{}, delta{};
         for (const auto& [category, value] : modifiers) {
             (void)category;
-            if (!math::try_multiply(multiplier, value, multiplier)) return invalid<ControlStep>("transition multiplier overflow");
+            Fixed product{};
+            if (!math::try_multiply(multiplier, value, product)) {
+                product = Fixed::from_raw((multiplier.raw() < 0) != (value.raw() < 0)
+                    ? std::numeric_limits<std::int64_t>::min() : std::numeric_limits<std::int64_t>::max());
+                degrade("EAWR-LOAD-1114", "transition multiplier overflow", std::to_string(product.raw()));
+            }
+            multiplier = product;
         }
         // CGS-17: real planet instances enable this hard-coded aggregate floor after category combination.
         multiplier = std::max(multiplier, minimum_transition_multiplier);
         if (!math::try_multiply(s.change_seconds, multiplier, denominator)
             || !math::try_multiply(denominator, Fixed::from_raw(30 * Fixed::scale), denominator)
             || !math::try_divide(one, denominator, delta) || delta.raw() <= 0)
-            return invalid<ControlStep>("invalid political transition service rate");
+        {
+            delta = one;
+            degrade("EAWR-LOAD-1115", "invalid political transition service rate", "one level per admitted frame");
+        }
         Fixed distance{}, amount{};
         if (state.current_player == state.target_player) {
             if (state.current < target) {
                 if (!math::try_subtract(target, state.current, distance)
                     || !math::try_add(state.current, std::min(delta, distance), amount))
-                    return invalid<ControlStep>("political transition amount overflow");
+                {
+                    amount = target;
+                    degrade("EAWR-LOAD-1114", "political transition amount overflow", std::to_string(amount.raw()));
+                }
                 state.current = amount;
             } else if (state.current > target) {
                 if (!math::try_subtract(state.current, target, distance)
                     || !math::try_subtract(state.current, std::min(delta, distance), amount))
-                    return invalid<ControlStep>("political transition amount overflow");
+                {
+                    amount = target;
+                    degrade("EAWR-LOAD-1114", "political transition amount overflow", std::to_string(amount.raw()));
+                }
                 state.current = amount;
             }
         } else {
             if (!math::try_subtract(state.current, std::min(delta, state.current), amount))
-                return invalid<ControlStep>("political transition amount overflow");
+            {
+                amount = Fixed{};
+                degrade("EAWR-LOAD-1114", "political transition amount overflow", "0");
+            }
             state.current = amount;
             if (state.current == Fixed{}) state.current_player = state.target_player;
         }
@@ -626,7 +690,8 @@ core::Result<void> GalacticSession::Impl::service_control(const PartitionExecuto
     if (!phase) return core::Result<void>::failure(phase.error());
     for (const auto& row : staged) if (!*row) return core::Result<void>::failure(row->error());
     for (std::size_t i = 0; i < staged.size(); ++i) {
-        const auto& value = staged[i]->value();
+        auto& value = staged[i]->value();
+        if (value.degraded) merge_load_notes(value.notes);
         ++work.control_planets; work.control_route_visits += value.route_visits; work.control_member_visits += value.member_visits;
         const auto& before = control->state[i];
         const auto& p = control->planets[i];
@@ -689,6 +754,7 @@ core::Result<void> GalacticSession::Impl::initialize_control() {
         auto calculated = calculate_planet_control(inputs, inputs.planets[i], inputs.state[i], orbit,
             setup.movement ? &*setup.movement : nullptr, {}, 0, actor_inputs());
         if (!calculated) return core::Result<void>::failure(calculated.error());
+        if (calculated.value().degraded) merge_load_notes(calculated.value().notes);
         control->state[i] = calculated.value().state;
         registry.get<session_detail::PlanetData>(planets.at(inputs.planets[i].planet)).owner = calculated.value().state.current_player;
         relocate_actor(inputs.planets[i].planet, calculated.value().state.current_player, inputs.planets[i].planet, 0);
@@ -1423,7 +1489,11 @@ void encode_control(std::vector<std::uint8_t>& bytes, const PoliticalControlSetu
     count(s.relations.size());
     for (const auto& r : s.relations) { put_u32(bytes, r.player); put_u32(bytes, r.other); flag(r.allied); }
     count(s.types.size());
-    for (const auto& r : s.types) { put_u64(bytes, r.type); put_u8(bytes, r.political_control); flag(r.stealth); flag(r.ground_capable); }
+    for (const auto& r : s.types) {
+        put_u64(bytes, r.type); put_u8(bytes, r.signed_political_control ? 255 : r.political_control);
+        if (r.signed_political_control) put_i64(bytes, *r.signed_political_control);
+        flag(r.stealth); flag(r.ground_capable);
+    }
     count(s.planets.size());
     for (const auto& p : s.planets) {
         put_u64(bytes, p.planet); put_u64(bytes, p.type);
@@ -1506,7 +1576,14 @@ core::Result<PoliticalControlSetup> decode_control(const std::span<const std::ui
     }
     if (!count(n, 11)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) {
-        ControlType r; if (!in.read_u64(r.type) || !in.read_u8(r.political_control) || !flag(r.stealth) || !flag(r.ground_capable)) return fail(); s.types.push_back(r);
+        ControlType r;
+        if (!in.read_u64(r.type) || !in.read_u8(r.political_control)) return fail();
+        if (r.political_control == 255) {
+            std::int64_t value{}; if (!in.read_i64(value)) return fail();
+            r.political_control = 0; r.signed_political_control = value;
+        }
+        if (!flag(r.stealth) || !flag(r.ground_capable)) return fail();
+        s.types.push_back(r);
     }
     if (!count(n, 80)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) {

@@ -28,7 +28,9 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
         }
         hardpoint.targetable = flag(*object, "Is_Targetable", true).value_or(false);
         hardpoint.destroyable = flag(*object, "Is_Destroyable", true).value_or(false);
-        hardpoint.health = object->fixed("Health", report_, hardpoint.targetable || hardpoint.destroyable);
+        hardpoint.health = object->fixed("Health", report_, hardpoint.targetable && !hardpoint.destroyable);
+        // HD-06: omission keeps the retail zero default; invalid authored values stay unresolved.
+        if (hardpoint.destroyable && object->single("Health") == nullptr) hardpoint.health = Fixed{};
         hardpoint.repair_amount_per_frame = object->fixed("Repair_Amount_Per_Frame", report_, false);
         hardpoint.repair_cost_per_frame = object->fixed("Repair_Cost_Per_Frame", report_, false);
         hardpoint.model_to_attach = object->text("Model_To_Attach");

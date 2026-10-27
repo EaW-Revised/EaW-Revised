@@ -1,6 +1,7 @@
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/campaign/space_briefing.hpp"
+#include "eawr/campaign/space_entry.hpp"
 
 #include <algorithm>
 #include <tuple>
@@ -209,6 +210,30 @@ core::Result<void> apply_space_rules(ConflictEntry& entry, const skirmish::Start
     }
     auto decorated = entry.content;
     if (auto bound = bind_space_rules(setup, content, decorated); !bound) return bound;
+    if (entry.controller_policy) {
+        setup.controllers = entry.controller_policy;
+        for (auto& unit : setup.units) {
+            const auto* type = type_of(tables, unit.type_id);
+            const auto force = std::lower_bound(entry.conflict.forces.begin(), entry.conflict.forces.end(), unit.entity_id,
+                [](const auto& row, const auto id) { return row.id < id; });
+            const bool orbital = force != entry.conflict.forces.end() && force->id == unit.entity_id
+                && force->role == ForceRole::orbital;
+            const bool structure = type && (type->kind == units::UnitKind::station || type->build_pad
+                || type->under_construction || type->star_base || type->planetary_weapon);
+            if ((structure || orbital) && std::any_of(setup.controllers->factions.begin(), setup.controllers->factions.end(),
+                    [&](const auto& faction) { return faction.player == unit.owner; }))
+                unit.control = tactical::UnitControl::shared_structure;
+        }
+        if (auto split = prepare_battle_controllers(setup, decorated); !split) return split;
+        for (auto& unit : entry.start.units) {
+            const auto state = std::lower_bound(setup.units.begin(), setup.units.end(), unit.state.entity_id,
+                [](const auto& row, const auto id) { return row.entity_id < id; });
+            if (state == setup.units.end() || state->entity_id != unit.state.entity_id)
+                return fail<void>("controller split lost a start unit");
+            unit.state.control = state->control;
+            unit.state.controller_seat = state->controller_seat;
+        }
+    }
     entry.conflict.tactical = setup;
     entry.start.setup = std::move(setup);
     entry.content = std::move(decorated);

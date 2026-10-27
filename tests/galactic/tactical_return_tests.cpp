@@ -9,6 +9,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 #include "eawr/sim/galactic/victory.hpp"
+#include "eawr/sim/galactic/control.hpp"
 #include "../../src/campaign/battle_return_internal.hpp"
 
 #include <algorithm>
@@ -205,6 +206,179 @@ void retreat_destination_ties() {
     expect(eawr::sim::math::compare_squared_lengths({low, low, low}, {high, high, high}) > 0,
         "squared distance comparison retains full signed-raw range without overflow");
 }
+void retreat_orbital_occupation() {
+    // WGM-27/63: a retained departure planet is not current orbital occupation.
+    for (const bool surface : {false, true}) for (unsigned presence = 0; presence < 10; ++presence) {
+        std::optional<std::string> reference;
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            auto setup = galaxy();
+            setup.players.push_back({3, 3, 0});
+            setup.movement->players.push_back({3, f(1), f(3), false});
+            setup.planets.push_back({3, {f(12), f(6), {}}, 2});
+            setup.movement->planets.push_back({3, f(1), false});
+            for (const auto& player : setup.players) for (const auto& planet : setup.planets)
+                if (player.player_id == 3 || planet.id == 3)
+                    setup.movement->access.push_back({player.player_id, planet.id, true, false});
+            std::sort(setup.movement->access.begin(), setup.movement->access.end(), [](const auto& a, const auto& b) {
+                return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+            });
+            // Planet 2 is the closer fallback; only genuine own occupation at 3 outranks it.
+            setup.fleets[1].orbit = 3;
+            if (presence == 2) setup.fleets[1].owner = 2;
+            if (presence == 4 || presence == 7 || presence == 8 || presence == 9) {
+                setup.fleets.push_back({13, 2, 3, {{31, 3}}});
+                // Tick-zero insertion assigns orbit order; reverse the owners to
+                // exercise an earlier ordinary enemy without injecting runtime state.
+                if (presence == 8) {
+                    setup.fleets[1].owner = 2;
+                    setup.fleets.back().owner = 1;
+                }
+            }
+            if (presence == 6) std::erase_if(setup.fleets, [](const auto& row) { return row.id == 11; });
+            setup.control.emplace(); auto& control = *setup.control;
+            control.change_seconds = f(1); control.max_ground_forces = 10;
+            control.routes = {{4, f(1)}};
+            control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+            for (const auto& a : control.players) for (const auto& b : control.players)
+                control.relations.push_back({a.player, b.player, a.player == b.player});
+            control.types = {{1, 0, false, false}, {2, 0, false, true}, {3, 0, false, false}};
+            if (presence >= 3 && presence <= 5) control.types[0].stealth = true;
+            if (presence == 7) control.types[2].stealth = true;
+            for (const auto& planet : setup.planets) {
+                gc::ControlPlanet row; row.planet = planet.id; row.type = 100 + planet.id; row.surface_accessible = true;
+                row.ground_base = {2, 1};
+                if (!surface && planet.id == 2 && presence != 6) row.ground_base = {1, 1};
+                // Owner-save shape: a friendly spy does not override a hostile starbase.
+                if (planet.id == 3 && (presence == 3 || presence == 6)) row.starbase = {presence == 3 ? 2U : 1U, 1};
+                control.planets.push_back(row);
+            }
+            auto world = checked(gc::GalacticSession::create(setup));
+            if (presence == 1) {
+                const auto moved = checked(world.admit_native_fleet(1, gc::MoveFleet{11, {3, 2}, {}}));
+                expect(moved.admitted, "own fleet departs the enemy-held candidate planet");
+                const auto fleets = world.snapshot()->fleets();
+                const auto departed = std::find_if(fleets.begin(), fleets.end(), [](const auto& row) { return row.id == 11; });
+                expect(departed != fleets.end() && departed->orbit == 0 && departed->motion.transit,
+                    "WGM-27 native departure unlinks the source orbit");
+                auto retained = std::vector<gc::Fleet>(fleets.begin(), fleets.end());
+                const auto stale = std::find_if(retained.begin(), retained.end(), [](const auto& row) { return row.id == 11; });
+                expect(stale != retained.end(), "departing fleet remains available for the stale-source query");
+                if (stale != retained.end()) stale->orbit = 3;
+                expect(checked(gc::orbital_occupation(&control, 3, retained, &*setup.movement)) == 0,
+                    "a synthetic retained source cannot make an in-transit fleet occupy orbit");
+            }
+            const gc::PlanetId expected = presence == 0 || presence == 5 || presence == 6 || presence == 7 || presence == 9 ? 3 : 2;
+            world.scramble_storage_for_testing();
+            for (unsigned restore = 0; restore < 3; ++restore) {
+                expect(checked(campaign::retreat_destination(*world.snapshot(), 1, 1, surface)) == expected,
+                    "WGM-C01 retreat occupation respects starbase, ordinary fleet order and stealth fallback, excluding transit");
+                const auto saved = checked(world.save_checkpoint_state());
+                auto restored = checked(gc::GalacticSession::from_replay(world.record()));
+                okay(restored.load_checkpoint_state(saved));
+                world = std::move(restored);
+            }
+            if (!surface) {
+                eawr::platform::ThreadWorkerAdapter executor(workers);
+                campaign::ConflictRecord c; c.planet = 1;
+                campaign::TacticalReturnPlan plan; plan.result.retreat_player = 1; plan.retreat_fleets = {10};
+                campaign::TacticalReturnState state;
+                okay(campaign::apply_tactical_return(world, c, plan, state, executor));
+                const auto fleets = world.snapshot()->fleets();
+                const auto returned = std::find_if(fleets.begin(), fleets.end(), [](const auto& row) { return row.id == 10; });
+                expect(returned != fleets.end() && returned->motion.transit && returned->motion.transit->path.back() == expected,
+                    "tactical retreat departs to the eligible candidate rather than the stale transit source");
+            }
+            if (reference) expect(*reference == world.state_sha256(), "retreat occupation matches on 1/2/4/8 workers");
+            else reference = world.state_sha256();
+        }
+    }
+    // Runtime combat skipping can differ from the static type's stealth flag.
+    gc::PoliticalControlSetup control; control.types = {{1, 0, false, false}};
+    std::vector<gc::Fleet> fleets = {{11, 1, 3, {{30, 1}}}, {13, 2, 3, {{31, 1}}}};
+    fleets[0].motion.orbit_entry = 10; fleets[1].motion.orbit_entry = 20;
+    std::vector<gc::CensusObject> actors;
+    for (const auto& fleet : fleets) {
+        gc::CensusObject actor; actor.id = fleet.members.front().id; actor.owner = fleet.owner;
+        actor.original_type = actor.current_type = 1; actor.combat_role = gc::ActorCombatRole::ordinary;
+        actor.abilities.present = true; actor.abilities.combat_skip = fleet.owner == 1;
+        actors.push_back(actor);
+    }
+    expect(checked(gc::orbital_occupation(&control, 3, fleets, nullptr, actors)) == 2,
+        "WGM-C03 live combat skip lets the ordinary enemy fleet take precedence over an earlier friendly spy");
+    actors.front().abilities.combat_skip = false;
+    expect(checked(gc::orbital_occupation(&control, 3, fleets, nullptr, actors)) == 1,
+        "disabling live combat skip restores the first ordinary fleet as orbital occupant");
+}
+void gift_keeps_campaign_return() {
+    for (const auto humans : {2U, 3U, 4U}) {
+        std::optional<campaign::BattleResult> reference_result;
+        std::string reference_galaxy;
+        for (const auto workers : eawr::platform::determinism_worker_counts()) for (const bool gifting : {false, true}) {
+            auto setup = galaxy();
+            setup.player_economy = gc::PlayerEconomySetup{{{1, f(100), f(1000), 0, 0}, {2, f(100), f(1000), 0, 0}}};
+            for (std::uint32_t seat = 3; seat <= humans + 1; ++seat)
+                setup.seats.push_back({{seat}, 1, gc::SeatKind::human, 0, true, 1});
+            setup.seat_control.emplace(); setup.seat_control->teams = {{1, {1}, false}};
+            setup.seat_control->controllers = {{1, gc::FactionControl::human, gc::FactionControl::ai, {}, {}},
+                {2, gc::FactionControl::ai, gc::FactionControl::ai, {}, {}}};
+            auto c = conflict(setup);
+            for (std::uint32_t seat = 3; seat <= humans + 1; ++seat) c.seats.push_back({{seat}, 1});
+            c.tactical.campaign.emplace(); c.tactical.controllers.emplace();
+            for (const auto owner : {1U, 2U}) {
+                tactical::EconomyPlayer account; account.player = owner; account.credit_cap = f(1000);
+                account.credits = f(100); account.population_cap = 20;
+                c.tactical.campaign->players.push_back(account);
+            }
+            for (const auto& seat : setup.seats)
+                c.tactical.controllers->seats.push_back({seat.seat_id, seat.player, seat.kind, seat.active});
+            c.tactical.controllers->factions = {{1, tactical::FactionController::humans}, {2, tactical::FactionController::ai}};
+            auto binding = content(c); binding.economy.campaign = true;
+            binding.economy.players = c.tactical.campaign->players;
+            binding.economy.campaign_population = {{1, 1}, {3, 0}};
+            binding.retreat->prevention.clear(); binding.retreat->attrition_factor = {};
+            auto game = checked(campaign::GameSession::create(setup));
+            okay(game.stage_battle(c, binding, campaign::ScriptRequirement::none));
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            (void)checked(game.step(executor));
+            expect(game.battle() && game.battle()->controller_policy(), "GC return fixture explicitly enables co-op policy");
+            if (!game.battle() || !game.battle()->controller_policy()) continue;
+            const auto before = game.battle()->units();
+            const auto source = std::find_if(before.begin(), before.end(), [](const auto& row) {
+                return row.owner == 1 && row.control == tactical::UnitControl::mobile;
+            });
+            expect(source != before.end(), "GC return fixture supplies a giftable persistent root");
+            if (source == before.end()) continue;
+            const auto recipient = source->controller_seat.value == 1 ? 3U : 1U;
+            const auto issue = [&](const eawr::sim::SeatId sender, const std::uint64_t sequence,
+                                   std::vector<eawr::sim::EntityId> units, tactical::CommandPayload payload) {
+                tactical::PlayerCommand command{{0, 1, sequence}, std::move(units), std::move(payload), sender, tactical::CommandOrigin::seat};
+                const auto body = checked(tactical::encode_command_body(command, game.battle()->initial_setup()));
+                okay(game.submit({{game.completed_tick(), sender, sequence},
+                    gc::TacticalLayerCommand{c.id, tactical::command_body_opcode(command), body}}));
+            };
+            if (gifting) issue(source->controller_seat, 1, {source->entity_id}, tactical::GiftPayload{{recipient}});
+            (void)checked(game.step(executor));
+            if (gifting) {
+                const auto after = game.battle()->units();
+                const auto gifted = std::find_if(after.begin(), after.end(), [&](const auto& row) { return row.entity_id == source->entity_id; });
+                expect(gifted != after.end() && gifted->owner == source->owner && gifted->controller_seat.value == recipient,
+                    "gift changes temporary control while retaining the campaign faction owner");
+            }
+            issue({1}, 2, {}, tactical::RetreatPayload{tactical::RetreatAction::start});
+            std::optional<campaign::BattleResult> result;
+            for (unsigned frame = 0; frame < 600 && game.battle(); ++frame) {
+                const auto tick = checked(game.step(executor));
+                if (tick.result) result = tick.result;
+            }
+            expect(result && !game.battle(), "gifted persistent units return through the ordinary campaign retreat path");
+            if (!result) continue;
+            if (!reference_result) { reference_result = result; reference_galaxy = game.galaxy().state_sha256(); }
+            expect(result == reference_result && game.galaxy().state_sha256() == reference_galaxy,
+                "gifting leaves faction battle result, credits, population, losses and returned fleets unchanged on 1/2/4/8 workers");
+        }
+    }
+}
+
 void pure_policy() {
     tactical::RetreatRules rules; rules.campaign = true; rules.players = {{1, 2, true}, {2, 2, true}};
     tactical::RetreatState state;
@@ -1084,7 +1258,29 @@ void stock_interdiction() {
     options.players = {{{1, 1, 0}, "First", true}, {{2, 2, 0}, "Second", true}, {{3, 3, 0}, "Neutral", true}};
     options.types = {{1, "RenamedWell"}, {3, "RenamedOther"}};
     const auto plan = checked(campaign::plan_campaign_setup(data, types, authored.name, options));
-    const auto services = checked(campaign::prepare_stock_tactical_return(files, catalog.catalog, plan));
+    for (const auto& [seconds, expected] : std::array<std::pair<std::string_view, std::uint32_t>, 4>{{
+            {"-2.5", 0}, {"text", 0}, {"2.5", 75}, {"999999999999999999999", UINT32_MAX}}}) {
+        for (const auto factor : {"-2", "3"}) {
+            write("GameConstants.xml", "<GameConstants><Default_Hero_Respawn_Time>1</Default_Hero_Respawn_Time>"
+                "<Space_Retreat_Attrition_Factor>" + std::string(factor) + "</Space_Retreat_Attrition_Factor>"
+                "<Space_Retreat_Allowed_Countdown_Seconds>" + std::string(seconds)
+                + "</Space_Retreat_Allowed_Countdown_Seconds></GameConstants>");
+            // The VFS indexes loose-file sizes at mount time; refresh after rewriting the fixture.
+            const auto numeric_files = checked(eawr::vfs::Vfs::mount(mounts));
+            const auto parsed = checked(campaign::prepare_stock_tactical_return(numeric_files, catalog.catalog, plan));
+            auto probe = conflict(galaxy()); auto bound = content(probe);
+            okay(parsed.bind(probe, bound));
+            expect(bound.retreat && bound.retreat->rules.lockout_frames == expected,
+                "LSA-37 countdown accepts negative/text/fraction/overflow with bounded frame conversion");
+            expect(bound.retreat && bound.retreat->attrition_factor == (std::string_view(factor) == "-2" ? f(0) : f(1)),
+                "LSA-39 unit float clamps to zero or one");
+        }
+    }
+    write("GameConstants.xml", "<GameConstants><Default_Hero_Respawn_Time>1</Default_Hero_Respawn_Time>"
+        "<Space_Retreat_Attrition_Factor>0</Space_Retreat_Attrition_Factor>"
+        "<Space_Retreat_Allowed_Countdown_Seconds>0</Space_Retreat_Allowed_Countdown_Seconds></GameConstants>");
+    const auto reset_files = checked(eawr::vfs::Vfs::mount(mounts));
+    const auto services = checked(campaign::prepare_stock_tactical_return(reset_files, catalog.catalog, plan));
     auto c = conflict(galaxy());
     c.tactical.first_free_entity_id = 100;
     c.tactical.players.push_back({3, 2, 3, 1}); // allied observer must not receive prevention
@@ -1210,7 +1406,7 @@ void installed() {
 }
 }
 int case_galactic_tactical_return_tests(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { retreat_destination_ties(); pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_faction_retreat(); stock_interdiction(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { retreat_destination_ties(); retreat_orbital_occupation(); gift_keeps_campaign_return(); pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_faction_retreat(); stock_interdiction(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

@@ -40,6 +40,184 @@ def faction_colours():
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class CampaignSpaceCycle(unittest.TestCase):
+    def test_campaign_reserve_drag_ghost_and_wheel(self):
+        # Ordinary campaign Move/Merge/Fight admission; all deployment gestures use Godot input.
+        directory = Path(tempfile.mkdtemp(prefix="eawr-gc-reserve-preview-"))
+        # A normal fleet pathfinder gesture below admits one ship and leaves room
+        # for identity reserves, without a debug spawn or tactical purchase menu.
+        import copy
+        corpus = Corpus(support.GAME_ROOT)
+        campaigns = ET.fromstring(corpus.read_effective("foc", "data/xml/campaigns_underworld_gc.xml").data)
+        campaign = copy.deepcopy(next(row for row in campaigns if row.attrib.get("Name") == "Sandbox_Gateways_Rebel"))
+        campaign.set("Name", "EAWR_Reserve_Preview_Proof")
+        for row in list(campaign):
+            if row.tag in {"Starting_Forces", "AI_Player_Control", "Special_Case_Production", "Campaign_Set"} or row.tag.endswith("_Story_Name"):
+                campaign.remove(row)
+        for faction in ("Rebel", "Empire", "Underworld"):
+            ET.SubElement(campaign, "AI_Player_Control").text = faction + ", None"
+        forces = [("Rebel", "Bespin", "Rebel_Star_Base_1"), ("Empire", "Byss", "Empire_Star_Base_1"),
+                  ("Empire", "Byss", "Tartan_Patrol_Cruiser")] + [("Rebel", "Bespin", "Corellian_Corvette")] * 3
+        for faction, planet, unit in forces:
+            ET.SubElement(campaign, "Starting_Forces").text = f"{faction}, {planet}, {unit}"
+        campaigns.append(campaign)
+        mod = directory / "campaign"
+        xml = mod / "Data/XML"
+        xml.mkdir(parents=True)
+        (xml.parent / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+        ET.ElementTree(campaigns).write(xml / "Campaigns_Underworld_GC.xml", encoding="utf-8")
+        arguments = qualified_campaign_arguments("win")
+        arguments[1] = "EAWR_Reserve_Preview_Proof"
+        arguments += ["--eawr-mod-root", str(mod), "--eawr-galactic-focus", "4", "--eawr-galactic-flight-ms", "0"]
+        def run(label, reinforce=None, reserve=None):
+            target = directory / label
+            target.mkdir()
+            driver = target / "input.gd"
+            actions = []
+            if reinforce is not None:
+                def centre(rect):
+                    x, y, w, h = rect
+                    return [x + w / 2, y + h / 2]
+                actions = [[0.5, "click", centre(reinforce)]]
+            if reserve is not None:
+                actions += [[1.0, "press", centre(reserve)],
+                           [1.25, "motion", [640, 250]], [1.8, "capture", "before"],
+                           [2.0, "wheel", [640, 250]], [2.5, "capture", "rotated"],
+                           [2.7, "cancel", [640, 250]], [3.2, "capture", "cancelled"]]
+            driver.write_text('''extends SceneTree
+var age = 0.0
+var index = 0
+var actions = %s
+var fleet_stage = 0
+var source = Vector2.ZERO
+var target = Vector2.ZERO
+var pathfinder_seen = false
+var ready_msec = 0
+var viewport: SubViewport
+func _initialize():
+    # Leave wall-clock time for native discovery/focus and fleet input before frame-20 Move.
+    Engine.max_fps = 1
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280, 720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(instance)
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+    ready_msec = Time.get_ticks_msec()
+func pointer(point, down, moving):
+    var event
+    if moving:
+        event = InputEventMouseMotion.new()
+        event.relative = Vector2(24, 0)
+        event.button_mask = MOUSE_BUTTON_MASK_LEFT if down else 0
+    else:
+        event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+        event.double_click = fleet_stage == 0
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event, true)
+func _process(delta):
+    var slot = root.find_child("q1_0000", true, false)
+    var ship = root.find_child("q1_0001", true, false)
+    # Discovery can invalidate the command-line focus on the first publication.
+    # Re-select the drawn planet through native world input before organizing its fleet.
+    if fleet_stage == 0 and (slot == null or not slot.is_visible_in_tree()):
+        var planet = root.find_child("planet_name_4", true, false)
+        if planet != null and planet.is_visible_in_tree():
+            var label = planet.get_global_rect()
+            var point = Vector2(label.position.x - 28, label.get_center().y)
+            pointer(point, true, false)
+            pointer(point, false, false)
+    if slot != null and slot.is_visible_in_tree() and ship != null and ship.is_visible_in_tree() and Time.get_ticks_msec() - ready_msec > 2000:
+        pathfinder_seen = pathfinder_seen or slot.get_meta("pathfinder_member", 0) > 0
+        fleet_stage += 1
+        if fleet_stage == 1:
+            source = ship.get_global_rect().get_center()
+            target = slot.get_global_rect().get_center()
+            pointer(source, false, true)
+        if fleet_stage == 3: pointer(source, true, false)
+        if fleet_stage == 5: pointer(source + Vector2(24, 0), true, true)
+        if fleet_stage == 7: pointer(target, true, true)
+        if fleet_stage == 9: pointer(target, false, false)
+    if root.find_child("CampaignSpaceBattleReady", true, false) == null:
+        return false
+    Engine.max_fps = 60
+    age += min(delta, 0.1)
+    if index < actions.size() and age > actions[index][0]:
+        var action = actions[index]
+        index += 1
+        if action[1] == "capture":
+            viewport.get_texture().get_image().save_png(%s + "/" + action[2] + ".png")
+        elif action[1] == "motion":
+            var event = InputEventMouseMotion.new()
+            event.position = Vector2(action[2][0], action[2][1])
+            event.global_position = event.position
+            event.relative = Vector2(25, 0)
+            event.button_mask = MOUSE_BUTTON_MASK_LEFT
+            viewport.push_input(event, true)
+        else:
+            var buttons = [true, false] if action[1] != "press" else [true]
+            for down in buttons:
+                var event = InputEventMouseButton.new()
+                event.position = Vector2(action[2][0], action[2][1])
+                event.global_position = event.position
+                event.button_index = MOUSE_BUTTON_WHEEL_UP if action[1] == "wheel" else (MOUSE_BUTTON_RIGHT if action[1] == "cancel" else MOUSE_BUTTON_LEFT)
+                event.pressed = down
+                viewport.push_input(event, true)
+    if age > (0.8 if actions.is_empty() else (1.2 if actions.size() == 1 else 3.5)):
+        var file = FileAccess.open(%s + "/staging.json", FileAccess.WRITE)
+        file.store_string(JSON.stringify({"pathfinder": pathfinder_seen, "fleet_stage": fleet_stage, "source": [source.x, source.y], "target": [target.x, target.y]}))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(actions), json.dumps(target.as_posix()), json.dumps(target.as_posix())), encoding="utf-8")
+            result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+                *arguments, "--eawr-game-root", support.GAME_ROOT,
+                "--eawr-lighting", "sh", "--eawr-shadows", "on", "--eawr-environment", "map",
+                "--eawr-report", str(target / "report.json")], cwd=support.ROOT,
+                capture_output=True, text=True, timeout=1200, check=False)
+            (target / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((target / "tactical.json").is_file(), result.stdout + result.stderr)
+            self.assertTrue(json.loads((target / "staging.json").read_text())["pathfinder"], "native fleet drag did not publish a pathfinder")
+            return json.loads((target / "tactical.json").read_text(encoding="utf-8"))
+        initial = run("geometry")
+        panel = initial["hud"]["production"]
+        opened = run("pane", panel["reinforce_rect"])["hud"]["production"]
+        slots = [slot for slot in opened["pool"] if slot["enabled"]]
+        self.assertTrue(slots, opened)
+        self.assertTrue(opened["pane_open"], opened)
+        result = run("drag", panel["reinforce_rect"], slots[0]["rect"])
+        preview = result["live_session"]["placement_preview"]
+        samples = [row for row in preview["samples"] if row["clones"]]
+        self.assertTrue(samples, preview)
+        yaws = list(dict.fromkeys(row["facing_yaw"] for row in samples))
+        self.assertEqual(len(yaws), 2, samples)
+        self.assertAlmostEqual((yaws[1] - yaws[0]) % 360, 15, delta=0.01)
+        self.assertIsNone(result["battle_input"]["production"]["placing"])
+        # Check actual drawn tint, independently of the preview pose report.
+        from PIL import Image
+        before = Image.open(directory / "drag/before.png").convert("RGB")
+        cancelled = Image.open(directory / "drag/cancelled.png").convert("RGB")
+        constants = ET.fromstring(corpus.read_effective("foc", "data/xml/gameconstants.xml").data)
+        bad = [int(value) for value in constants.findtext("ReinforcementOverlayBadColor").replace(",", " ").split()[:3]]
+        dominant = max(range(3), key=lambda index: bad[index])
+        coloured = 0
+        # Keep the moving live flagship outside the crop; only the cursor clone can satisfy it.
+        for y in range(170, 310):
+            for x in range(560, 720):
+                a, b = before.getpixel((x, y)), cancelled.getpixel((x, y))
+                if a[dominant] > 40 and all(a[dominant] > a[i] * 1.5 for i in range(3) if i != dominant) and max(abs(a[i] - b[i]) for i in range(3)) > 25:
+                    coloured += 1
+        self.assertGreater(coloured, 30, "no coloured preview model near the drag cursor")
+        print("campaign reserve ghost/wheel evidence:", directory)
+
     def test_company_created_commanders_show_on_flagship(self):
         try:
             from .campaign_space_cases import commander_campaign_arguments

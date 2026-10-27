@@ -2,6 +2,7 @@
 // the saved choice, the Godot command line and the whole flow against a
 // fake UI and a fake process runner. No game, no Godot, no retail bytes: fixtures are empty folders
 // and a few made-up bytes.
+#include "mods_start.hpp"
 #include "install_discovery.hpp"
 #include "launch_plan.hpp"
 #include "launcher_flow.hpp"
@@ -12,6 +13,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <fstream>
 #include <functional>
@@ -1078,6 +1080,16 @@ void test_project_name_matches_godot_project(const fs::path& project_godot) {
 } // namespace
 
 int main(int argc, char** argv) {
+    CHECK(mods_start_mode({}) == ModsStartMode::launch);
+    const std::array<std::wstring_view, 1> shortcut{L"--create-shortcut"};
+    const std::array<std::wstring_view, 1> bad{L"--mods"};
+    const std::array<std::wstring_view, 2> extra{L"--create-shortcut", L"extra"};
+    CHECK(mods_start_mode(shortcut) == ModsStartMode::create_shortcut);
+    CHECK(mods_start_mode(bad) == ModsStartMode::invalid);
+    CHECK(mods_start_mode(extra) == ModsStartMode::invalid);
+    CHECK(mods_launcher_path(L"X:/portable kit/EAWR Mods.exe") == fs::path(L"X:/portable kit/EAWR.exe"));
+    CHECK(mods_launcher_path(L"Y:/moved kit/EAWR Mods.exe") == fs::path(L"Y:/moved kit/EAWR.exe"));
+
     test_validation();
     test_steam_modern_and_legacy();
     test_steam_manifest_name_must_be_one_folder();

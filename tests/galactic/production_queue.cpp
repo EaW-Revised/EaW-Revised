@@ -11,8 +11,10 @@
 #include "galactic_support.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/production.hpp"
+#include "eawr/sim/galactic/replay.hpp"
 #include "eawr/sim/galactic/observer.hpp"
 #include "eawr/sim/galactic/fleet_intelligence.hpp"
+#include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -100,6 +102,31 @@ void admission() {
     expect(game.snapshot()->player_economy()->players[0].credits == f(50), "two planets atomically share the account");
     expect(game.snapshot()->production()->planets[2].queues[0].empty(), "third buy cannot overspend");
     expect(tick.snapshot->events().back().reason == galactic::GalacticRejectReason::production_admission, "typed admission rejection");
+    // LSA-04/06: signed integer limits below -1 remain valid at session creation.
+    for (const auto limit : {-2LL, -2147483648LL}) {
+        auto input = setup();
+        auto& offer = input.production->planets[0].offers[1];
+        offer.planet_limit = offer.current_limit = offer.lifetime_limit = limit;
+        const auto created = galactic::GalacticSession::create(input);
+        expect(static_cast<bool>(created), "signed negative limits survive production validation");
+        if (created) {
+            const auto& producer = input.production->planets[0];
+            const auto admitted = galactic::production_admission({*input.production, producer,
+                input.production->players[0], input.player_economy->players[0], input.fleets,
+                input.planets[0].owner, nullptr, 10000, 1}, &offer, galactic::ProductionDomain::ground);
+            expect(admitted == galactic::ProductionAdmission::allowed, "every negative signed limit disables its cap");
+        }
+    }
+    {
+        auto input = setup(); auto& offer = input.production->planets[0].offers[0];
+        offer.kind = galactic::ProductionKind::technology; offer.target_tech = 4294967295LL;
+        expect(static_cast<bool>(galactic::GalacticSession::create(input)), "LSA-08 uint32 technology target survives session creation");
+        const auto& producer = input.production->planets[0];
+        const auto admitted = galactic::production_admission({*input.production, producer,
+            input.production->players[0], input.player_economy->players[0], input.fleets,
+            input.planets[0].owner, nullptr, 10000, 1}, &offer, galactic::ProductionDomain::ground);
+        expect(admitted == galactic::ProductionAdmission::tech, "wrapped technology target is unavailable above the account maximum");
+    }
     const auto check = [&](auto mutate, galactic::ProductionAdmission why, galactic::TypeId type = 1000) {
         auto input = setup(); mutate(input); auto session = take(galactic::GalacticSession::create(input));
         const auto& producer = input.production->planets[0];
@@ -121,6 +148,95 @@ void admission() {
     check([](auto& s) { s.production->planets[0].offers[0].current_limit = 0; }, galactic::ProductionAdmission::current_limit);
     check([](auto& s) { s.production->planets[0].offers[0].lifetime_limit = 0; }, galactic::ProductionAdmission::lifetime_limit);
     check([](auto& s) { s.production->planets[0].offers[0].required_structures = {{1001}}; }, galactic::ProductionAdmission::prerequisites);
+    // LSA-09: requirements are source integers, not a campaign-load level bound.
+    for (const auto level : {0LL, 5LL, 6LL, 99LL, -1LL, -2147483648LL, 2147483647LL}) {
+        for (const bool ground : {true, false}) {
+            auto input = setup(); auto& planet = input.production->planets[0];
+            planet.ground_level = planet.space_level = 2;
+            auto& offer = planet.offers[0];
+            offer.domain = ground ? galactic::ProductionDomain::ground : galactic::ProductionDomain::space;
+            (ground ? offer.required_ground_level : offer.required_space_level) = level;
+            galactic::GalacticReplay replay; replay.setup = input;
+            expect(take(galactic::parse_replay(take(galactic::write_replay(replay)))) == replay,
+                "signed and oversized requirements survive replay encoding");
+            std::string baseline;
+            for (const auto workers : eawr::platform::determinism_worker_counts()) {
+                eawr::platform::ThreadWorkerAdapter pool(workers);
+                auto session = take(galactic::GalacticSession::create(input));
+                const auto saved = take(session.save_checkpoint_state());
+                auto restored = take(galactic::GalacticSession::create(input));
+                (void)take(restored.load_checkpoint_state(saved));
+                expect(take(restored.save_checkpoint_state()) == saved, "requirement checkpoint is canonical");
+                const auto order = buy(0, 1, 1, 1000, offer.domain);
+                submit(session, order); submit(restored, order);
+                const auto result = take(session.step(pool));
+                expect(take(restored.step(pool)).state_hash.get() == result.state_hash.get(),
+                    "requirement checkpoint continuation matches");
+                if (baseline.empty()) baseline = result.state_hash.get();
+                expect(result.state_hash.get() == baseline, "requirement admission agrees on 1/2/4/8 workers");
+                const bool blocked = level != 0;
+                const auto channel = ground ? 0U : 1U;
+                expect(result.snapshot->production()->planets[0].queues[channel].empty() == blocked,
+                    "unsigned requirement gates enqueue against the actual base");
+                expect(result.snapshot->player_economy()->players[0].credits == f(blocked ? 250 : 150),
+                    "unreachable requirement never debits credits");
+                if (blocked) expect(result.snapshot->events().back().value
+                    == static_cast<std::uint64_t>(galactic::ProductionAdmission::prerequisites),
+                    "unreachable requirement reports prerequisites rather than aborting load");
+            }
+        }
+    }
+    for (const auto level : {-2147483649LL, 2147483648LL}) {
+        for (const bool ground : {true, false}) {
+            auto input = setup(); auto& offer = input.production->planets[0].offers[0];
+            (ground ? offer.required_ground_level : offer.required_space_level) = level;
+            expect(!galactic::GalacticSession::create(input), "requirements outside source int32 remain invalid");
+        }
+    }
+    for (const bool ground : {true, false}) {
+        for (const auto level : {1LL, 99LL, -1LL, -2147483648LL}) {
+            std::string baseline;
+            for (const auto workers : eawr::platform::determinism_worker_counts()) {
+                eawr::platform::ThreadWorkerAdapter pool(workers);
+                auto input = setup(); auto& planet = input.production->planets[0];
+                planet.ground_level = planet.space_level = 2;
+                auto& offer = planet.offers[0]; offer.seconds = f(100);
+                offer.domain = ground ? galactic::ProductionDomain::ground : galactic::ProductionDomain::space;
+                (ground ? offer.required_ground_level : offer.required_space_level) = 1;
+                auto session = take(galactic::GalacticSession::create(input));
+                submit(session, buy(0, 1, 1, 1000, offer.domain));
+                (void)take(session.step(pool));
+                auto original = session.snapshot()->production()->planets[0];
+                const auto channel = ground ? 0U : 1U;
+                expect(original.queues[channel].size() == 1, "service fixture starts with admitted work");
+                auto changed = original;
+                (ground ? changed.ground_level : changed.space_level) = 0;
+                (ground ? changed.offers[0].required_ground_level : changed.offers[0].required_space_level) = level;
+                // Restore a synthetic queued owner after losing its prerequisite.
+                // Signed/unreachable requirements cannot normally enter via purchase.
+                galactic::checkpoint_detail::Writer before, after;
+                before(original); after(changed);
+                auto saved = take(session.save_checkpoint_state());
+                const auto at = std::search(saved.begin(), saved.end(), before.bytes.begin(), before.bytes.end());
+                if (at == saved.end() || before.bytes.size() != after.bytes.size())
+                    throw std::runtime_error("queued producer checkpoint fixture not found");
+                std::copy(after.bytes.begin(), after.bytes.end(), at);
+                auto restored = take(galactic::GalacticSession::create(input));
+                (void)take(restored.load_checkpoint_state(saved));
+                const auto balance = restored.snapshot()->player_economy()->players[0].credits;
+                const auto result = take(restored.step(pool));
+                expect(result.snapshot->production()->planets[0].queues[channel].empty(),
+                    "queue service cancels work with an unreachable unsigned prerequisite");
+                expect(result.snapshot->player_economy()->players[0].credits == balance,
+                    "lost prerequisite neither bills nor directly refunds queued work");
+                expect(std::ranges::any_of(result.snapshot->events(), [](const auto& event) {
+                    return event.kind == galactic::GalacticEventKind::production_cancelled;
+                }), "lost prerequisite emits queue cancellation");
+                if (baseline.empty()) baseline = result.state_hash.get();
+                expect(result.state_hash.get() == baseline, "prerequisite servicing agrees on 1/2/4/8 workers");
+            }
+        }
+    }
     auto zero_pop = setup(); zero_pop.production->players[0].population_used = f(60);
     auto structures = take(galactic::GalacticSession::create(zero_pop)); submit(structures, buy(0, 1, 1, 1001));
     (void)take(structures.step(serial)); expect(structures.snapshot()->production()->planets[0].queues[0].size() == 1, "zero-pop structure over cap allowed");

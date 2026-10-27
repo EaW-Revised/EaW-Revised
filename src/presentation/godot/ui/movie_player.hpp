@@ -14,11 +14,16 @@
 
 #include "eawr/core/result.hpp"
 #include "eawr/data/ui/movie.hpp"
+#include "eawr/presentation/ui/layout.hpp"
 
 #include <godot_cpp/classes/control.hpp>
 #include <godot_cpp/classes/video_stream_player.hpp>
 #include <godot_cpp/variant/rect2.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <optional>
+#include <ostream>
+#include <cstdint>
+#include <chrono>
 
 namespace eawr::presentation::godot_backend {
 
@@ -34,5 +39,40 @@ namespace eawr::presentation::godot_backend {
 // player has had a few frames; a stream Godot cannot decode never gets one.
 [[nodiscard]] core::Result<void> validate_hud_movie(const godot::VideoStreamPlayer& player,
     const data::ui::HudMovie& movie);
+
+// SND-69/G12: reusable command-bar consumer. The caller supplies an authored
+// request, shell bone and speech-presence/pause facts, never a live session.
+class CommandBarMovie final {
+public:
+    CommandBarMovie() = default;
+    ~CommandBarMovie();
+    CommandBarMovie(const CommandBarMovie&) = delete;
+    CommandBarMovie& operator=(const CommandBarMovie&) = delete;
+    void prepare(const vfs::Vfs&, std::string_view movie, presentation::ui::ReferencePoint bone, godot::Control& parent);
+    // Loading-only callback; true once two decoded frames have actually drawn.
+    [[nodiscard]] bool warmup();
+    [[nodiscard]] bool start(godot::Control& parent, std::string_view speech);
+    void service(bool speech_present, bool paused, const presentation::ui::ShellPlacement& placement);
+    void stop();
+    [[nodiscard]] bool active() const { return player() != nullptr; }
+    [[nodiscard]] bool playing() const;
+    [[nodiscard]] const std::string& speech() const { return speech_; }
+    void write_report(std::ostream&) const;
+private:
+    [[nodiscard]] godot::VideoStreamPlayer* player() const;
+    void release_prepared();
+    std::optional<data::ui::HudMovie> movie_;
+    data::ui::CommandBarMovieStyle style_;
+    presentation::ui::ReferencePoint bone_;
+    std::int64_t player_id_{};
+    std::int64_t prepared_player_id_{};
+    std::chrono::steady_clock::time_point serviced_at_;
+    double decode_seconds_{};
+    bool decoded_{};
+    std::uint64_t warmup_first_draw_{};
+    bool warming_{};
+    godot::String cache_;
+    std::string speech_, problem_, requested_movie_, requested_speech_;
+};
 
 } // namespace eawr::presentation::godot_backend

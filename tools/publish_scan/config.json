@@ -1035,6 +1035,14 @@
           "lan-host"
         ],
         "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_economy.cpp",
+        "sha256": "44ab01971678f1cfcd3493e0a6576961a8a229e25bbccbe6526b3e944dc993cd",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member named lan (LAN session option), not a LAN host name (#5343)"
       }
     ]
   },
@@ -1044,6 +1052,9 @@
     ]
   },
   "assets": {
+    "external_package_manifests": {
+      "third_party/shader_runtime/lock.json": "816fedd1459ea0f0a2f9cad0a05ba38673c230f29f26fea8c543e74a2982dfbc"
+    },
     "retail_suffixes": [
       ".alo",
       ".ala",

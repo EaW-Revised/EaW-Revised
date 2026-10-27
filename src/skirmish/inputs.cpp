@@ -1,6 +1,7 @@
 #include "eawr/skirmish/start.hpp"
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/setup.hpp"
+#include "eawr/skirmish/roster_gate.hpp"
 
 #include "eawr/assets/map.hpp"
 #include "eawr/core/sha256.hpp"
@@ -694,15 +695,24 @@ core::Result<StartInputs> read_start_inputs(
     const vfs::Vfs& filesystem,
     const data::Catalog& catalog,
     const units::UnitTables& tables) {
+    auto identity = read_data_identity(filesystem);
+    if (!identity) return core::Result<StartInputs>::failure(identity.error());
+    return read_start_inputs(fixture, filesystem, catalog, tables, identity.value());
+}
+
+core::Result<StartInputs> read_start_inputs(
+    const Fixture& fixture,
+    const vfs::Vfs& filesystem,
+    const data::Catalog& catalog,
+    const units::UnitTables& tables,
+    const DataIdentity& identity) {
     using Result = core::Result<StartInputs>;
     StartInputs inputs;
     inputs.map = fixture.map;
     inputs.tables = &tables;
 
-    auto identity = read_data_identity(filesystem);
-    if (!identity) return Result::failure(identity.error());
-    inputs.script_manifest_digest = identity.value().script_manifest_digest;
-    inputs.ai_data_digest = identity.value().ai_data_digest;
+    inputs.script_manifest_digest = identity.script_manifest_digest;
+    inputs.ai_data_digest = identity.ai_data_digest;
     inputs.difficulty = load_difficulty_table(filesystem);
 
     auto record = filesystem.stat(fixture.map);
@@ -735,6 +745,33 @@ core::Result<StartInputs> read_start_inputs(
     if (auto rules = read_start_rules(inputs, fixture.slots, filesystem, catalog); !rules)
         return Result::failure(rules.error());
     return Result::success(std::move(inputs));
+}
+
+std::set<std::string> missing_start_types(const Fixture& fixture, const StartInputs& inputs,
+                                        const units::UnitTables& tables) {
+    std::set<std::string> missing;
+    const auto need = [&](const std::string& type) {
+        // RG-04: skip gated starting types before their unsupported data is loaded.
+        if (!roster_disabled_types().contains(type_id(type)) && !tables.find(type)) missing.insert(type);
+    };
+    for (const auto& slot : fixture.slots) {
+        for (const auto& type : slot.fleet) need(type);
+        for (const auto& forces : inputs.faction_forces) {
+            if (!detail::iequals(forces.faction, slot.faction)) continue;
+            for (const auto& type : forces.space_skirmish_default_forces) need(type);
+        }
+        const std::string station = "team_" + std::string(slot.team < 10 ? "0" : "")
+            + std::to_string(slot.team) + "_space_station";
+        for (const auto& placement : inputs.placements) {
+            if (!placement.marker || !detail::iequals(placement.type, station)) continue;
+            for (const auto& candidate : placement.marker_for) {
+                for (const auto& faction : detail::tokens(candidate.affiliation)) {
+                    if (detail::iequals(faction, slot.faction)) need(candidate.type);
+                }
+            }
+        }
+    }
+    return missing;
 }
 
 } // namespace eawr::skirmish

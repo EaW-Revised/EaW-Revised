@@ -375,6 +375,26 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
         auto planned = cp::plan_live_campaign_setup(filesystem, data, types, name, options, "Normal_Default");
         if (!planned) throw std::runtime_error(eawr::core::format_diagnostic(planned.error()));
         if (source->name == "Sandbox_Equal_Footing_Underworld") {
+            auto omitted = data;
+            for (auto& faction : omitted.factions) if (faction.name == source->starting_active_player)
+                faction.benefits_from_corruption.reset();
+            const auto omission_plan = cp::plan_live_campaign_setup(filesystem, omitted, types, name, options, "Normal_Default");
+            if (!omission_plan) throw std::runtime_error(eawr::core::format_diagnostic(omission_plan.error()));
+            const auto omission_services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, omitted, types,
+                omission_plan.value(), "Normal_Default");
+            if (!omission_services) throw std::runtime_error(eawr::core::format_diagnostic(omission_services.error()));
+            expect(std::count_if(omission_services.value().load_diagnostics.begin(), omission_services.value().load_diagnostics.end(),
+                [&](const auto& note) {
+                    return note.code == "campaign_omitted_faction_tag" && note.severity == eawr::core::Severity::warning
+                        && note.message.find(source->starting_active_player + ": Benefits_From_Corruption") != std::string::npos
+                        && note.message.find("false constructor default (WGS-94)") != std::string::npos;
+                }) == 1, "WGS-94 omitted faction benefit emits one load note naming the default");
+            auto omission_root = cp::CampaignRoot::create(omission_plan.value(), omission_services.value());
+            if (!omission_root) throw std::runtime_error(eawr::core::format_diagnostic(omission_root.error()));
+            const auto& movement_players = omission_root.value().game()->galaxy().setup().movement->players;
+            expect(std::any_of(movement_players.begin(), movement_players.end(), [&](const auto& player) {
+                return player.player == *options.solo_reference_human && !player.benefits_from_corruption;
+            }), "WGS-94 the live campaign uses false for an omitted faction benefit");
             auto malformed = data;
             malformed.issues.push_back({eawr::data::galactic::IssueKind::bad_value, {}, 0,
                 source->starting_active_player, "Benefits_From_Corruption", "unknown", "invalid Boolean"});
@@ -1709,6 +1729,188 @@ void installed_unscouted_intel() {
         }
     }
 }
+// G3: malformed hero data and invalid ruined income degrade through the actual startup callbacks.
+void installed_guard_load_notes(bool production_guard = false) {
+    using Fixed = eawr::sim::math::Fixed;
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: GC load-note startup requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto base = eawr::vfs::Vfs::mount(mounts).value();
+    const auto directory = std::filesystem::temp_directory_path() / ("gc-hero-load-notes-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+    const auto original = base.open("data/xml/namedherounits.xml").value();
+    std::string text(reinterpret_cast<const char*>(original.data()), original.size());
+    text = std::regex_replace(text, std::regex("<Min_Respawn_Time_Per_Tech_Level>[^<]*</Min_Respawn_Time_Per_Tech_Level>", std::regex::icase),
+        "<Min_Respawn_Time_Per_Tech_Level>broken</Min_Respawn_Time_Per_Tech_Level>");
+    text = std::regex_replace(text, std::regex("</HeroUnit>", std::regex::icase),
+        "<Respawn_Tied_To_Structure>Missing_Guard_Structure</Respawn_Tied_To_Structure></HeroUnit>");
+    std::filesystem::create_directories(directory / "xml");
+    { std::ofstream out(directory / "xml/namedherounits.xml"); out << text; }
+    std::string guarded_initial_base;
+    if (production_guard) {
+        const auto originals = eawr::data::load_catalog(base, eawr::data::Profile::foc).value();
+        const auto stock_types = eawr::units::galactic_type_table(originals.catalog);
+        const auto selected = std::find_if(stock_types.types.begin(), stock_types.types.end(), [](const auto& type) {
+            return type.object_class == "SpaceUnit" && type.file != "data/xml/namedherounits.xml"
+                && type.required_star_base_level.value_or(0) > 0
+                && type.build_cost_credits.value_or(Fixed{}).raw() > 0
+                && std::find(type.behavior.begin(), type.behavior.end(), "DUMMY_STARSHIP") != type.behavior.end();
+        });
+        if (selected == stock_types.types.end()) throw std::runtime_error("production guard fixture has no authored starship");
+        const auto stock_data = eawr::data::galactic::load_galactic_data(base, originals.catalog).value();
+        const auto* definition = stock_data.campaign("Sandbox_Equal_Footing_Rebel");
+        if (!definition) throw std::runtime_error("production guard campaign is missing");
+        const eawr::units::GalacticType* starting_base{};
+        for (const auto& force : definition->starting_forces) {
+            const auto* type = stock_types.find(force.type);
+            if (type && type->object_class == "StarBase" && type->file != "data/xml/namedherounits.xml"
+                && type->required_planets.empty()
+                && type->build_advances_tech_level.value_or(0) == 0
+                && std::find(type->behavior.begin(), type->behavior.end(), "DUMMY_STAR_BASE") != type->behavior.end()) {
+                starting_base = type; break;
+            }
+        }
+        if (!starting_base) throw std::runtime_error("production guard fixture has no authored starting base");
+        guarded_initial_base = starting_base->name;
+        // A logical file can contribute definitions from several mounted layers. Copy the
+        // catalog winners, rather than VFS::open's single file, to retain every identity.
+        const auto escape = [](std::string_view value) {
+            std::string result;
+            for (const char ch : value) switch (ch) {
+            case '&': result += "&amp;"; break;
+            case '<': result += "&lt;"; break;
+            case '>': result += "&gt;"; break;
+            case '"': result += "&quot;"; break;
+            default: result += ch; break;
+            }
+            return result;
+        };
+        const auto emit = [&](auto&& self, std::ostream& out, const eawr::data::XmlNode& node,
+                              std::string_view extra = {}) -> void {
+            out << '<' << node.name;
+            for (const auto& attribute : node.attributes)
+                out << ' ' << attribute.name << "=\"" << escape(attribute.value) << '\"';
+            out << '>' << escape(node.raw_text);
+            for (const auto& child : node.children) self(self, out, child, {});
+            out << extra << "</" << node.name << ">\n";
+        };
+        for (const auto& file : std::set<std::string>{selected->file, starting_base->file}) {
+            if (!file.starts_with("data/")) throw std::runtime_error("production fixture source is outside data");
+            const auto path = directory / std::filesystem::path(file.substr(5));
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path);
+            out << "<Types>\n";
+            for (const auto& entry : originals.catalog.definitions()) {
+                if (!entry.active || !entry.namespace_winner || entry.category != eawr::data::Category::game_object
+                    || entry.root.source.logical_path != file) continue;
+                std::string_view extra;
+                if (entry.id == selected->name) extra =
+                    "<Tech_Level>-2</Tech_Level><Required_Star_Base_Level>99</Required_Star_Base_Level>"
+                    "<Base_Level>99</Base_Level><Build_Advances_Tech_Level>-1</Build_Advances_Tech_Level>";
+                if (entry.id == starting_base->name) extra =
+                    "<Base_Level>99</Base_Level><Required_Star_Base_Level>1</Required_Star_Base_Level>"
+                    "<Build_Cost_Credits>100</Build_Cost_Credits>";
+                emit(emit, out, entry.root, extra);
+            }
+            out << "</Types>\n";
+            if (!out) throw std::runtime_error("production guard overlay write failed");
+        }
+    }
+    mounts.insert(mounts.begin(), {"hero-guard-fixture", directory, "data", {}});
+    const auto files = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(files, eawr::data::Profile::foc).value();
+    auto data = eawr::data::galactic::load_galactic_data(files, catalog.catalog).value();
+    for (auto& planet : data.planets) planet.planet_destroyed_credit_value = Fixed::from_integer(-1).value();
+    const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    if (production_guard) {
+        const auto* guarded = types.find(guarded_initial_base);
+        if (!guarded || guarded->base_level != 99 || guarded->required_star_base_level != 1
+            || guarded->build_cost_credits != Fixed::from_integer(100).value())
+            throw std::runtime_error("starting base overlay did not retain its identity and authored values");
+    }
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool human = faction.name == "Rebel";
+        if (human) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+            human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+    }
+    for (const auto& type : types.types) options.types.push_back({options.types.size() + 1, type.name});
+    const auto plan = cp::plan_live_campaign_setup(files, data, types, "Sandbox_Equal_Footing_Rebel", options, "Normal_Default").value();
+    const auto services = cp::prepare_live_campaign_services(files, catalog.catalog, data, types, plan, "Normal_Default").value();
+    auto created = cp::CampaignRoot::create(plan, services);
+    if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
+    auto campaign = std::move(created).value();
+    const auto notes = campaign.load_notes();
+    if (production_guard) {
+        for (const auto tag : {"Tech_Level", "Required_Star_Base_Level", "Base_Level"})
+            expect(std::any_of(notes.begin(), notes.end(), [&](const auto& note) {
+                return note.code == "EAWR-LOAD-1001" && note.tag == tag
+                    && note.classification == eawr::core::LoadCategory::retail_accepts
+                    && note.layer.mod_id == "hero-guard-fixture" && note.line.has_value()
+                    && !note.file.empty() && !note.authored_value.empty();
+            }), "G1 unusual XML levels load with B notes carrying the winning mod source");
+        expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1001" && note.tag == "Required_Star_Base_Level"
+                && note.authored_value == "99" && note.effective_value == "99";
+        }), "G1 requirement level 99 is retained through live preparation");
+        expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1035" && note.action == eawr::core::LoadAction::skipped_placement;
+        }), "unsupported starting base emits C only when its placement is actually skipped");
+        for (const auto& note : notes) if (note.code == "EAWR-LOAD-1035")
+            expect(std::any_of(plan.forces().begin(), plan.forces().end(), [&](const auto& force) {
+                const auto* original_type = plan.original_type(force.type);
+                return original_type && original_type->name == note.object;
+            }), "unused registered base prototypes do not emit a skipped-placement note");
+        std::size_t intact_bases{};
+        const auto base_binding = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(),
+            [&](const auto& binding) { return binding.original_type == guarded_initial_base; });
+        if (base_binding == plan.type_bindings().end()) throw std::runtime_error("guarded initial base identity is missing");
+        for (const auto& producer : campaign.game()->galaxy().setup().production->planets)
+            for (const auto& offer : producer.offers) if (offer.type == base_binding->id) {
+                ++intact_bases;
+                expect(offer.kind == gc::ProductionKind::starbase && offer.base_level == 99
+                    && offer.required_space_level == 1 && offer.price == Fixed::from_integer(100).value()
+                    && offer.direct_build_allowed, "skipping an initial base leaves its authored production offer intact");
+            }
+        expect(intact_bases > 0, "starting-base fixture exercises actual retained production offers");
+    }
+    for (const auto code : {"EAWR-LOAD-1230", "EAWR-LOAD-1231", "EAWR-LOAD-1232"})
+        expect(std::any_of(notes.begin(), notes.end(), [&](const auto& note) {
+            return note.code == code && note.classification == eawr::core::LoadCategory::unknown_degrade;
+        }), "GC root snapshot includes every hero guard family");
+    const auto& abilities = *campaign.game()->galaxy().setup().ability_host;
+    expect(abilities.ruined_income.empty(), "invalid ruined income retains ordinary income");
+    bool theft_seen{};
+    for (const auto& profile : abilities.profiles) {
+        expect(profile.respawn_structure == 0, "unresolved hero structure dependency cleared");
+        if (profile.theft) { theft_seen = true; expect(profile.theft->absence_min.empty() && profile.theft->absence_max.empty(), "malformed theft arrays clear both"); }
+    }
+    expect(theft_seen, "installed hero fixture exercised theft parsing");
+    const auto snapshot_again = services.load_notes();
+    const auto expected_snapshot = eawr::core::load_notes_json(notes);
+    const auto expected_provider = production_guard ? eawr::core::load_notes_json(services.load_notes()) : expected_snapshot;
+    expect(eawr::core::load_notes_json(snapshot_again) == expected_provider,
+        "GC provider snapshot merge is deterministic and idempotent");
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto session = gc::GalacticSession::create(campaign.game()->galaxy().setup()).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers); std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 3; ++tick) hashes.push_back(session.step(executor).value().state_hash.get());
+        if (workers == 1) baseline = hashes; else expect(hashes == baseline, "degraded hero campaign continues deterministically");
+    }
+    std::vector<eawr::core::LoadNote> published;
+    eawr::platform::LiveGameSession::Options live;
+    live.load_note_sink = [&](std::span<const eawr::core::LoadNote> rows) { published.assign(rows.begin(), rows.end()); };
+    const auto started = eawr::platform::LiveGameSession::start(std::move(campaign), std::move(live));
+    expect(static_cast<bool>(started) && eawr::core::load_notes_json(published) == expected_snapshot,
+        "session start hands GC snapshot to the shared load-note sink");
+}
 // LSA-17/18: temporary XML overlays exercise the live readers and full campaign root.
 void installed_retail_production_numbers() {
     using Fixed = eawr::sim::math::Fixed;
@@ -1744,7 +1946,7 @@ void installed_retail_production_numbers() {
         const std::regex pattern("<" + tag + "\\b[^>]*>[^<]*</" + tag + "\\s*>", std::regex::icase);
         return std::regex_replace(xml, pattern, "<" + tag + ">" + value + "</" + tag + ">");
     };
-    const auto load = [&](unsigned family, const std::string& value) {
+    const auto load = [&](unsigned family, const std::string& value, bool omit_benefits = false) {
         auto changed = replace(constants, "Production_Speed_Factor", family == 0 ? value : "1");
         for (unsigned i = 0; i < 5; ++i)
             changed = replace(std::move(changed), "Production_Speed_Mod_Base_Vs_Tech_" + std::to_string(i), family == 1 ? value : "1");
@@ -1753,6 +1955,8 @@ void installed_retail_production_numbers() {
         for (const auto& [path, original] : faction_files) {
             auto faction = replace(original, "Corruption_Galactic_Production_Price_Multipliers", (family == 3 ? value : "1") + " 0.5");
             faction = replace(std::move(faction), "Corruption_Galactic_Production_Time_Multipliers", (family == 3 ? value : "1") + " 0.5");
+            if (omit_benefits) faction = std::regex_replace(faction,
+                std::regex("<Benefits_From_Corruption\\b[^>]*>[^<]*</Benefits_From_Corruption\\s*>", std::regex::icase), "");
             write(path, faction);
         }
         auto layered = mounts;
@@ -1779,10 +1983,34 @@ void installed_retail_production_numbers() {
         if (!services) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + services.error().message);
         auto campaign = cp::CampaignRoot::create(plan, services.value());
         if (!campaign) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + campaign.error().message);
+        if (omit_benefits) {
+            for (const auto& binding : plan.player_bindings()) {
+                const auto* faction = data.faction(binding.faction);
+                expect(faction && !faction->benefits_from_corruption.has_value(), "WGS-94 omission reaches the real XML loader");
+                const auto prefix = binding.faction + ": Benefits_From_Corruption";
+                expect(std::count_if(services.value().load_diagnostics.begin(), services.value().load_diagnostics.end(), [&](const auto& note) {
+                    return note.code == "campaign_omitted_faction_tag" && note.severity == eawr::core::Severity::warning
+                        && note.message.starts_with(prefix) && note.message.find("false constructor default (WGS-94)") != std::string::npos;
+                }) == 1, "WGS-94 real XML omission emits exactly one existing load note per bound faction");
+            }
+        }
         return std::pair{campaign.value().game()->galaxy().setup(), plan};
     };
     const auto baseline = load(4, "1");
     expect(baseline.first.production.has_value() && baseline.first.economy_corruption.has_value(), "numeric fixture baseline reaches full production and corruption campaign setup");
+    const auto omitted = load(4, "1", true);
+    expect(omitted.first.economy_corruption && std::all_of(omitted.first.economy_corruption->players.begin(), omitted.first.economy_corruption->players.end(),
+        [](const auto& player) { return !player.benefits; }), "WGS-94 real XML omission defaults the raw economy catalog flag false for playable factions too");
+    expect(omitted.first.movement && std::all_of(omitted.first.movement->players.begin(), omitted.first.movement->players.end(),
+        [](const auto& player) { return !player.benefits_from_corruption; }), "WGS-94 real XML omission defaults movement eligibility false");
+    const auto missing = cp::prepare_corruption_economy(base, eawr::data::Catalog{}, baseline.second, baseline.first);
+    expect(missing && missing.value().players.size() == baseline.first.players.size(),
+        "G3 a missing catalog faction retains an inert economy player");
+    auto missing_data = eawr::data::galactic::load_galactic_data(base, catalog.catalog).value();
+    std::erase_if(missing_data.factions, [](const auto& faction) { return faction.name == "Rebel"; });
+    const auto missing_services = cp::prepare_live_campaign_services(base, catalog.catalog, missing_data,
+        eawr::units::galactic_type_table(catalog.catalog), baseline.second, "Normal_Default");
+    expect(!missing_services, "WGS-94 a missing faction record still refuses full live setup");
     for (unsigned family = 0; family < 4; ++family) for (const auto value : {"-1.5", "0", "text", "2.7"}) {
         const auto parsed = std::string_view(value) == "text" ? Fixed{} : Fixed::from_decimal(value).value();
         const auto [setup, plan] = load(family, value);
@@ -1845,6 +2073,126 @@ void installed_retail_production_numbers() {
         ++adjustments;
     }
     expect(adjustments > 0, "fractional faction-adjustment fixture checks at least one authored real-loader row");
+    // AU-80/81 ignore placeholders, retaining the same fresh false default as an omitted tag.
+    for (const auto& [path, original] : faction_files)
+        write(path, replace(original, "Benefits_From_Corruption", "TBD"));
+    const auto placeholder_fs = eawr::vfs::Vfs::mount(layered).value();
+    const auto placeholder_catalog = eawr::data::load_catalog(placeholder_fs, eawr::data::Profile::foc).value();
+    const auto placeholder_economy = cp::prepare_corruption_economy(placeholder_fs, placeholder_catalog.catalog, baseline.second, baseline.first);
+    expect(placeholder_economy && std::all_of(placeholder_economy.value().players.begin(), placeholder_economy.value().players.end(),
+        [](const auto& player) { return !player.benefits; }), "AU-80/81 a placeholder retains the same false omission default");
+}
+// RGC-80/81: synthetic authored list using installed constructor inputs, without changing game files.
+void unresolved_location() {
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: unresolved location requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto files = eawr::vfs::Vfs::mount(mounts).value();
+    const auto loaded = eawr::data::load_catalog(files, eawr::data::Profile::foc).value();
+    auto data = eawr::data::galactic::load_galactic_data(files, loaded.catalog).value();
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    auto source = *data.campaign("Sandbox_Equal_Footing_Rebel");
+    const auto ship = std::find_if(source.starting_forces.begin(), source.starting_forces.end(), [&](const auto& record) {
+        const auto* type = types.find(record.type);
+        return record.faction == source.starting_active_player && type
+            && std::find(type->behavior.begin(), type->behavior.end(), "DUMMY_STARSHIP") != type->behavior.end();
+    });
+    if (source.planets.size() < 2 || ship == source.starting_forces.end()) throw std::runtime_error("location fixture needs two planets and a ship");
+    const auto force = *ship;
+    const auto a = source.planets.front(), b = source.planets.back();
+    const std::string missing = "Undefined_Campaign_Location";
+    expect(!loaded.catalog.find(missing, eawr::data::Category::game_object), "fixture location is undefined");
+    source.planets = {a, b}; source.locations = {a, missing, b}; source.trade_routes.clear();
+    source.starting_forces = {{force.faction, a, force.type}, {force.faction, missing, force.type}, {force.faction, b, force.type}};
+    source.special_case_production = {{force.faction, missing, "Undefined_Force_Type"}};
+    source.home_locations = {{force.faction, a}};
+    data.campaigns = {source};
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool human = faction.name == source.starting_active_player;
+        if (human) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+            human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    std::vector<std::string> baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto plan = cp::plan_live_campaign_setup(files, data, types, source.name, options, "Normal_Default").value();
+        expect(plan.locations().size() == 3 && plan.locations()[0].planet && !plan.locations()[1].planet
+            && plan.locations()[2].planet && plan.galaxy().planets.size() == 2, "missing location retains its slot without a planet");
+        expect(plan.forces().size() == 2 && plan.initial_placements().empty(), "missing location receives neither forces nor special placement");
+        const auto services = cp::prepare_live_campaign_services(files, loaded.catalog, data, types, plan, "Normal_Default").value();
+        const auto count = std::count_if(services.load_diagnostics.begin(), services.load_diagnostics.end(), [&](const auto& note) {
+            return note.code == "campaign_unresolved_location" && note.severity == eawr::core::Severity::warning
+                && note.message.find(missing) != std::string::npos;
+        });
+        expect(count == 1, "undefined location emits one load note naming the skipped entry");
+        auto created = cp::CampaignRoot::create(plan, services);
+        if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
+        auto campaign = std::move(created).value();
+        const auto setup = campaign.game()->galaxy().setup();
+        expect(setup.planets.size() == 2 && setup.fleets.size() == 2, "both valid locations survive with their starting fleets");
+        for (const auto& location : plan.locations()) if (location.planet)
+            expect(std::count_if(setup.fleets.begin(), setup.fleets.end(), [&](const auto& fleet) {
+                return fleet.orbit == location.planet->id && fleet.members.size() == 1;
+            }) == 1, "one authored ship placed at each valid location before and after the missing entry");
+        auto session = gc::GalacticSession::create(setup).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 3; ++tick) hashes.push_back(session.step(executor).value().state_hash.get());
+        if (workers == 1) baseline = hashes;
+        else expect(hashes == baseline, "unresolved-location campaign is deterministic on 1/2/4/8 workers");
+    }
+}
+// An omitted route control value uses the retail constructor default.
+void omitted_route_control() {
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: route control requires EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto files = eawr::vfs::Vfs::mount(mounts).value();
+    const auto loaded = eawr::data::load_catalog(files, eawr::data::Profile::foc).value();
+    auto data = eawr::data::galactic::load_galactic_data(files, loaded.catalog).value();
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    const auto source = *data.campaign("Sandbox_Equal_Footing_Rebel");
+    if (source.trade_routes.empty()) throw std::runtime_error("route control fixture requires a route");
+    const auto route_name = source.trade_routes.front();
+    const auto route = std::find_if(data.trade_routes.begin(), data.trade_routes.end(), [&](const auto& row) { return row.name == route_name; });
+    if (route == data.trade_routes.end()) throw std::runtime_error("route control fixture route unavailable");
+    route->political_control_gain.reset();
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        const bool human = faction.name == source.starting_active_player;
+        if (human) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+            human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    const auto plan = cp::plan_live_campaign_setup(files, data, types, source.name, options, "Normal_Default").value();
+    const auto services = cp::prepare_live_campaign_services(files, loaded.catalog, data, types, plan, "Normal_Default").value();
+    expect(std::any_of(services.load_diagnostics.begin(), services.load_diagnostics.end(), [&](const auto& note) {
+        return note.code == "campaign_route_control_default" && note.message.find(route_name) != std::string::npos;
+    }), "omitted route gain emits a warning");
+    const auto campaign = cp::CampaignRoot::create(plan, services).value();
+    const auto& routes = campaign.game()->galaxy().setup().control->routes;
+    const auto index = std::find(plan.route_names().begin(), plan.route_names().end(), route_name) - plan.route_names().begin();
+    expect(index < static_cast<std::ptrdiff_t>(plan.galaxy().routes.size())
+        && std::any_of(routes.begin(), routes.end(), [&](const auto& item) {
+            return item.route == plan.galaxy().routes[static_cast<std::size_t>(index)].id && item.political_gain == eawr::sim::math::Fixed{};
+        }), "omitted route gain loads as zero");
 }
 } // namespace
 int main(int argc, const char* const argv[]) {
@@ -1859,6 +2207,9 @@ int main(int argc, const char* const argv[]) {
                 || std::string_view(argv[1]) == "--authored-protection-source"
                 || std::string_view(argv[1]) == "--solo-protection-sources"
                 || std::string_view(argv[1]) == "--all-mp-protection-sources")) installed(false, false, argv[1]);
+        else if (argc == 2 && std::string_view(argv[1]) == "--guard-load-notes") installed_guard_load_notes();
+        else if (argc == 2 && std::string_view(argv[1]) == "--production-load-notes") installed_guard_load_notes(true);
+        else if (argc == 2 && std::string_view(argv[1]) == "--unresolved-location") { unresolved_location(); omitted_route_control(); }
         else if (argc == 2 && std::string_view(argv[1]) == "--retail-production-numbers") installed_retail_production_numbers();
         else if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();

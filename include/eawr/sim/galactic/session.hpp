@@ -3,6 +3,7 @@
 #include "eawr/sim/galactic/history.hpp"
 
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/events.hpp"
@@ -105,6 +106,9 @@ struct GalacticTick {
 // hashes. One tick is one FoC logical frame, 1/30 s of galactic time (ADR-013).
 class GalacticSession final {
 public:
+    [[nodiscard]] std::vector<core::LoadNote> load_notes() const;
+    [[nodiscard]] std::size_t load_note_count() const noexcept;
+
     using NativeInvasion = sim::galactic::NativeInvasion;
     struct NativeInvasionReceipt {
         bool admitted{};

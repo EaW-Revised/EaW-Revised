@@ -499,6 +499,101 @@ void test_battle(const std::filesystem::path& fixtures, const bool update) {
     }
 }
 
+void test_degraded_ion_storm() {
+    auto table = durability();
+    table.damage->ion_storm_disable_seconds = units(4000);
+    eawr::core::LoadNoteBuffer buffer;
+    const auto normalized = tactical::prepare_durability(table, buffer);
+    eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+    const auto notes = collector.snapshot();
+    expect(normalized && normalized.value().damage->ion_storm_disable_seconds == units(3600), "ion-storm window clamps to one hour");
+    expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0110" && note.tag == "Ion_Storm_Shield_Disable_Time"
+            && note.classification == eawr::core::LoadCategory::unknown_degrade
+            && note.authored_value == "4000" && note.effective_value == "3600";
+    }), "ion-storm clamp records a class C note");
+    eawr::core::LoadNoteBuffer session_notes;
+    auto created = tactical::TacticalSession::create(setup({}), sensors(), table, {}, std::nullopt, combat(1), {}, {}, {}, {}, &session_notes);
+    eawr::core::LoadNoteCollector session_collector; session_collector.merge(session_notes);
+    const auto captured = session_collector.snapshot();
+    expect(std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0110" && note.diagnostic_code == "EAWR-SIM-0305";
+    }), "session creation publishes the original diagnostic in its note");
+    expect(static_cast<bool>(created), "normalized damage session creates");
+    if (created) {
+        const eawr::sim::InlineExecutor executor;
+        expect(static_cast<bool>(created.value().step(executor)), "normalized damage session steps");
+    }
+}
+
+void test_degraded_damage_shapes() {
+    auto table = durability();
+    auto& damage = *table.damage;
+    damage.diminishing = {{units(2), units(1)}, {units(1), units(0)}, {units(1), units(2)}};
+    damage.armor_types = tactical::max_damage_types + 1;
+    eawr::core::LoadNoteBuffer buffer;
+    tactical::normalize_durability(table, buffer);
+    eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+    const auto notes = collector.snapshot();
+    expect(damage.diminishing.size() == 2 && damage.diminishing[0].x == units(1)
+        && damage.diminishing[0].y == units(2), "curve sorts and retains the last duplicate");
+    expect(damage.armor_types == tactical::max_damage_types && damage.armor_mods.size()
+        == static_cast<std::size_t>(damage.damage_types) * damage.armor_types, "armor dimensions are bounded and complete");
+    expect(std::any_of(notes.begin(), notes.end(), [](const auto& n) { return n.code == "EAWR-LOAD-0112"; })
+        && std::any_of(notes.begin(), notes.end(), [](const auto& n) { return n.code == "EAWR-LOAD-0113"; }),
+        "curve and armor normalization record notes");
+    expect(static_cast<bool>(tactical::validate_durability(table)), "normalized curve and armor validate");
+    auto session = tactical::TacticalSession::create(setup({}), sensors(), table, {}, std::nullopt, combat(1));
+    expect(static_cast<bool>(session), "normalized curve and armor session creates");
+    if (session) {
+        const eawr::sim::InlineExecutor executor;
+        expect(static_cast<bool>(session.value().step(executor)), "normalized curve and armor session steps");
+    }
+}
+
+void test_duplicate_durability_ids() {
+    auto table = durability();
+    table.profiles.push_back(table.profiles.front());
+    table.difficulty = {{2, units(1), units(1), units(1)}, {1, units(1), units(1), units(1)},
+        {1, units(2), units(1), units(1)}};
+    eawr::core::LoadNoteBuffer notes;
+    tactical::normalize_durability(table, notes);
+    eawr::core::LoadNoteCollector collector;
+    collector.merge(notes);
+    const auto captured = collector.snapshot();
+    expect(table.profiles.size() == 4 && table.difficulty.size() == 2
+        && table.difficulty.front().health == units(1), "duplicate IDs retain the first row");
+    expect(std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0104";
+    }) && std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0105";
+    }), "duplicate ID normalization records notes");
+    expect(static_cast<bool>(tactical::validate_durability(table)), "deduplicated table validates");
+}
+
+void test_spline_overflow_degrades() {
+    auto table = durability();
+    table.damage->diminishing = {{Fixed::from_raw(0), units(0)}, {Fixed::from_raw(17), units(256)},
+        {Fixed::from_raw(34), units(0)}};
+    eawr::core::LoadNoteBuffer notes;
+    tactical::normalize_durability(table, notes);
+    eawr::core::LoadNoteCollector collector;
+    collector.merge(notes);
+    const auto captured = collector.snapshot();
+    expect(table.damage->diminishing_linear_fallback, "unsafe spline uses linear fallback");
+    expect(std::any_of(captured.begin(), captured.end(), [](const auto& note) {
+        return note.code == "EAWR-LOAD-0116";
+    }), "unsafe spline records its fallback");
+    expect(static_cast<bool>(tactical::validate_durability(table)), "fallback curve validates");
+    const auto factor = tactical::diminishing_factor(*table.damage, 0);
+    expect(factor && factor.value() >= units(0) && factor.value() <= units(256), "fallback factor is bounded");
+    eawr::core::LoadNoteBuffer repeat;
+    tactical::normalize_durability(table, repeat);
+    eawr::core::LoadNoteCollector repeated;
+    repeated.merge(repeat);
+    expect(repeated.snapshot().empty(), "normalizing fallback twice emits no second note");
+}
+
 void test_validation() {
     auto table = durability();
     expect(static_cast<bool>(tactical::validate_durability(table)), "the test durability table is valid");
@@ -627,6 +722,10 @@ int main(int argc, char** argv) {
     }
     const bool update = argc > 2 && std::string_view(argv[2]) == "--update";
     test_validation();
+    test_degraded_ion_storm();
+    test_degraded_damage_shapes();
+    test_spline_overflow_degrades();
+    test_duplicate_durability_ids();
     test_large_range_roundtrip();
     test_zero_direct_blast();
     test_curve();

@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/movie_player.hpp"
 #include "tactical_hud.hpp"
 
 #include "perf_overlay_view.hpp"
@@ -19,6 +20,7 @@
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/texture_rect.hpp>
 #include <godot_cpp/classes/label.hpp>
+#include <godot_cpp/classes/scroll_container.hpp>
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/input_event_mouse_button.hpp>
@@ -377,6 +379,8 @@ struct TacticalHud::State final {
     std::string shell_model;
     std::string atlas_path;
     model::HudShell shell;
+    std::optional<model::ReferencePoint> movie_bone;
+    CommandBarMovie command_bar_movie;
     model::PlanetName planet;
     std::shared_ptr<FontProvider> fonts;
     std::array<Ref<Font>, 2> world_group_fonts;
@@ -421,6 +425,18 @@ struct TacticalHud::State final {
     std::vector<TeamDockCell> team_dock_cells;
     EawrHudButton* options_button{};
     EawrHudButton* movie_button{};
+    EawrHudButton* gift_button{};
+    ScrollContainer* gift_scroll{};
+    Control* gift_list{};
+    Vector2 gift_viewport{-1, -1};
+    bool gift_drawn_enabled{}, gift_drawn_open{};
+    struct GiftCell { EawrHudButton* button{}; Label* label{}; sim::SeatId seat{}; };
+    std::vector<GiftCell> gift_cells;
+    std::vector<model::ObserverOwner> gift_recipients;
+    std::function<void(sim::SeatId)> gift_handler;
+    bool gift_open{};
+    bool gift_enabled{};
+    std::uint64_t gift_presses{}, gift_submissions{};
     EawrHudButton* beacon_button{};
     std::function<void()> beacon_handler;
     Control* movie_bands{};

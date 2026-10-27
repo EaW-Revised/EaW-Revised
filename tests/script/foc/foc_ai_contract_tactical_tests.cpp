@@ -1325,7 +1325,7 @@ void point_defence_stand_in() {
     missile_ship.type_id = 101;
     laser_ship.type_id = 102;
     combat.profiles = {crusader, missile_ship, laser_ship};
-    for (const bool owned_by_ai : {true, false}) {
+    for (const bool omitted : {false, true}) for (const bool owned_by_ai : {true, false}) {
         auto created = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, combat, {}, table);
         expect(created.has_value(), "WLD-10: point defence world starts");
         if (!created) return;
@@ -1333,6 +1333,7 @@ void point_defence_stand_in() {
         auto host = ai::make_tactical_host();
         foc::AiType shooter, lasers, defender;
         defender.type_id = 100; defender.locomotor = true; defender.point_defence_script = true;
+        defender.lua_script = "ObjectScript_PointDefense";
         shooter.type_id = 101; shooter.locomotor = true; shooter.hardpoint_projectiles = {0, 300};
         lasers.type_id = 102; lasers.locomotor = true; lasers.hardpoint_projectiles = {301};
         host->setup.content.types = {defender, shooter, lasers};
@@ -1340,6 +1341,11 @@ void point_defence_stand_in() {
         host->types.emplace(101, &host->setup.content.types[1]);
         host->types.emplace(102, &host->setup.content.types[2]);
         host->setup.content.projectile_categories.emplace(300, foc::ai_projectile_missile);
+        const std::string root = "Data/Scripts/GameObject/OBJECTSCRIPT_POINTDEFENSE.lua";
+        const auto notes = foc::object_script_load_notes(host->setup, omitted
+            ? std::map<std::string, std::string>{} : std::map<std::string, std::string>{{root, "function main() end"}});
+        expect(notes.size() == (omitted ? 1U : 0U), "SOS-46: point defence root availability is classified");
+        for (const auto& note : notes) host->omitted_object_scripts.insert(*note.logical_path);
         host->view = foc::detail::build_view(world, *world.snapshot());
         ai::Engine engine(host, {}, {});
         if (owned_by_ai) ai::EngineContractAccess::collect_fixture(engine);
@@ -1353,8 +1359,17 @@ void point_defence_stand_in() {
         ai::EngineContractAccess::threat(engine, 1, 2, 9);
         expect(count(2) == 0, "WLD-10: the object's phase in the second decides when it looks");
         const auto issued = count(1);
-        if (!owned_by_ai) {
-            expect(issued == 0, "WLD-10: a player without an AI never uses the stand-in");
+        if (!owned_by_ai || omitted) {
+            expect(issued == 0, "SOS-46: absent point defence Lua never makes native decisions");
+            if (omitted) {
+                expect(world.submit({{0, 2, 0}, {1}, tactical::AbilityPayload{
+                    tactical::AbilityKind::laser_defense, tactical::AbilityAction::activate}}).has_value(),
+                    "SOS-46: missing script preserves manual point defence input");
+                expect(world.step(sim::InlineExecutor{}).has_value(), "SOS-46: manual point defence steps");
+                host->view = foc::detail::build_view(world, *world.snapshot());
+                expect(foc::detail::ability_view(*host, *host->view->find(1), tactical::AbilityKind::laser_defense).active,
+                    "SOS-46: missing script preserves manual point defence activation");
+            }
             continue;
         }
         expect(issued == 1, "WLD-10: a deadly enemy with a missile switches laser defence on");
@@ -1387,15 +1402,21 @@ void point_defence_stand_in() {
 void corrupt_systems_stand_in() {
     namespace math = eawr::sim::math;
     const auto fixed = [](std::int64_t value) { return math::Fixed::from_integer(value).value(); };
-    for (const bool human : {false, true}) {
+    for (const bool omitted : {false, true}) for (const bool human : {false, true}) {
         auto host = ai::make_tactical_host();
         host->setup.players = {{1, "REBEL", false, false, ""}, {2, "UNDERWORLD", false, !human, ""},
             {3, "NEUTRAL", true, false, ""}};
         for (const auto& player : host->setup.players) host->players.emplace(player.player, &player);
         foc::AiType hero, enemy_type;
         hero.type_id = 100; hero.corrupt_systems_script = true;
+        hero.lua_script = "ObjectScript_IG2000";
         enemy_type.type_id = 101; enemy_type.combat_power = Real(1000);
         host->setup.content.types = {hero, enemy_type};
+        const std::string root = "Data/Scripts/GameObject/OBJECTSCRIPT_IG2000.lua";
+        const auto notes = foc::object_script_load_notes(host->setup, omitted
+            ? std::map<std::string, std::string>{} : std::map<std::string, std::string>{{root, "function main() end"}});
+        expect(notes.size() == (omitted ? 1U : 0U), "SOS-46: corrupt systems root availability is classified");
+        for (const auto& note : notes) host->omitted_object_scripts.insert(*note.logical_path);
         host->types.emplace(100, &host->setup.content.types[0]);
         host->types.emplace(101, &host->setup.content.types[1]);
         auto view = std::make_shared<foc::detail::WorldView>();
@@ -1422,8 +1443,8 @@ void corrupt_systems_stand_in() {
         enemy.id = 3; enemy.position.x = fixed(300);
         view->units.push_back(enemy);
         expect(service(2) == 0, "WHE-67: service waits for the object's one-second phase");
-        expect(service(1) == (human ? 0U : 1U), "WHE-67: only the AI casts above the threshold");
-        if (human) continue;
+        expect(service(1) == (human || omitted ? 0U : 1U), "SOS-46: only an AI with a present script casts above the threshold");
+        if (human || omitted) continue;
         const auto* command = ai::EngineContractAccess::last_order(engine);
         expect(command && command->arguments.size() == 7
             && std::get<Real>(command->arguments[4].data) == Real(250),

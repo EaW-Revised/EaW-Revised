@@ -25,6 +25,7 @@ using namespace render_detail;
 namespace {
 using TimingClock = std::chrono::steady_clock;
 std::atomic<bool> default_stream_bucketing{true};
+std::atomic<bool> default_catchup_folding{true};
 struct Measure final {
     explicit Measure(double* destination):destination_(destination),start_(destination?TimingClock::now():TimingClock::time_point{}){}
     ~Measure(){if(destination_)*destination_+=std::chrono::duration<double,std::milli>(TimingClock::now()-start_).count();}
@@ -83,6 +84,7 @@ struct EffectRegistry::Instance final {
     float brightness{1.0F};
     bool visible{true};
     bool prepared{true};
+    bool pending_upload{};
     bool stepped{};
     bool deferred{};
     bool updated{};
@@ -97,6 +99,28 @@ struct EffectRegistry::Instance final {
 };
 
 EffectRegistry::EffectRegistry(RenderBackend& backend) : backend_(&backend) {}
+
+EffectRegistry::FrameUploads::FrameUploads(EffectRegistry& registry, const bool enabled) noexcept
+    : registry_(registry), enabled_(enabled) {
+    if (enabled_) ++registry_.upload_scopes_;
+}
+
+EffectRegistry::FrameUploads::~FrameUploads() {
+    if (!enabled_ || --registry_.upload_scopes_ != 0) return;
+    for (const auto& instance : registry_.instances_) {
+        if (!instance->pending_upload) continue;
+        instance->pending_upload = false;
+        registry_.commit_upload(*instance);
+    }
+}
+
+void EffectRegistry::set_catchup_folding_default(const bool on) noexcept {
+    default_catchup_folding.store(on, std::memory_order_relaxed);
+}
+
+bool EffectRegistry::catchup_folding_default() noexcept {
+    return default_catchup_folding.load(std::memory_order_relaxed);
+}
 
 void EffectRegistry::set_stream_bucketing_default(const bool on) noexcept {
     default_stream_bucketing.store(on, std::memory_order_relaxed);
@@ -253,7 +277,7 @@ EffectRegistry::Admission EffectRegistry::spawn_authored(
             instance->cpu.reset(seed);
             instance->handle = next_handle_++;
             instance->brightness = 1; instance->visible = instance->prepared = instance->backend_visible = true;
-            instance->stepped = instance->deferred = instance->updated = instance->was_rendered = instance->exhausted = false;
+            instance->pending_upload = instance->stepped = instance->deferred = instance->updated = instance->was_rendered = instance->exhausted = false;
             instance->accumulated = 0; instance->render_active.clear();
             std::fill(instance->backend_empty.begin(), instance->backend_empty.end(), false);
             std::fill(instance->backend_terminal.begin(), instance->backend_terminal.end(), false);
@@ -892,6 +916,23 @@ void EffectRegistry::upload(Instance& instance, const bool stepped, const bool h
     if (stepped && instance.deferred) ++work_.updates_deferred;
     if (stepped) { if (instance.stepped) ++work_.steps; }
     else ++work_.presents;
+    if (instance.prepared) {
+        work_.streams_built += instance.plans.size();
+        if (hashed) work_.streams_hashed += instance.plans.size();
+    }
+    // Preserve the logical render-admission feedback between catch-up samples.
+    // Delaying the backend submission must not change PS-38 CPU update admission.
+    if (instance.prepared) for (const auto index : instance.render_active) {
+        if (!instance.streams[index].indices.empty()) instance.was_rendered = true;
+    }
+    if (upload_scopes_ != 0) {
+        instance.pending_upload = true;
+        return;
+    }
+    commit_upload(instance);
+}
+
+void EffectRegistry::commit_upload(Instance& instance) {
     // Workers establish empty streams; only this ordered main-thread commit
     // changes residency. Notify once per empty span and once on a later
     // terminal upgrade, including groups outside render preparation.
@@ -923,8 +964,6 @@ void EffectRegistry::upload(Instance& instance, const bool stepped, const bool h
         ++work_.uploads;
     }
     instance.backend_visible = true;
-    work_.streams_built += instance.plans.size();
-    if (hashed) work_.streams_hashed += instance.plans.size();
 }
 
 core::Result<void> EffectRegistry::release(const EffectHandle handle) {

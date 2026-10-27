@@ -4,6 +4,7 @@
 #include "eawr/script/authoritative/clock_rng.hpp"
 #include "eawr/sim/math/trig.hpp"
 #include "eawr/sim/tactical/motion.hpp"
+#include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -1122,8 +1123,28 @@ core::Result<ConflictEntry> build_space_entry(const ConflictRecord& record, cons
     auto content = space_entry_content(entry.conflict.tactical, plan.map);
     if (!content) return core::Result<ConflictEntry>::failure(content.error());
     entry.content = std::move(content).value();
+    entry.controller_policy = record.tactical.controllers;
     entry.start.arrivals = battle::plan_start_arrivals(entry.start, *input.map.tables, &entry.content.economy);
     return built;
+}
+
+core::Result<void> prepare_battle_controllers(tt::TacticalSetup& setup, const tt::TacticalContent& content) {
+    if (!setup.controllers) return core::Result<void>::success();
+    for (auto& unit : setup.units) {
+        if (unit.control != tt::UnitControl::none) continue;
+        const auto* combat = content.combat.find(unit.type_id);
+        const auto* footprint = content.motion.footprint(unit.type_id);
+        const bool mobile = content.motion.find(unit.type_id) || (footprint && footprint->locomotor)
+            || content.motion.squadrons.find_squadron(unit.type_id) || content.motion.squadrons.find_craft(unit.type_id);
+        const bool structure = (combat && (combat->star_base || combat->planetary_weapon))
+            || (!mobile && std::any_of(content.economy.menus.begin(), content.economy.menus.end(),
+                [&](const auto& menu) { return menu.station == unit.type_id; }))
+            || (footprint && footprint->layer == tt::SpaceLayer::static_object && !footprint->locomotor);
+        if (structure && std::any_of(setup.controllers->factions.begin(), setup.controllers->factions.end(),
+            [&](const auto& faction) { return faction.player == unit.owner; }))
+            unit.control = tt::UnitControl::shared_structure;
+    }
+    return tt::split_initial_controllers(setup, content.economy);
 }
 
 core::Result<tt::TacticalContent> space_entry_content(const tt::TacticalSetup& setup, const skirmish::StartInputs& inputs) {

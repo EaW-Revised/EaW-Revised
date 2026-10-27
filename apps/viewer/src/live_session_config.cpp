@@ -310,7 +310,10 @@ namespace {
         // buttons and the quit confirmation's Yes and No).
         const bool menu = hud == "options" || hud == "b_option_t" || hud == "menu_options" || hud == "menu_back"
             || hud == "menu_quit" || hud == "menu_resume" || hud == "menu_yes" || hud == "menu_no";
-        if (!time && !production && !order && !special && !menu) return std::nullopt;
+        const auto gift_seat = hud.starts_with("gift_to_") ? parse_u64(hud.substr(8)) : std::nullopt;
+        const bool gift = hud == "gift" || (gift_seat && *gift_seat != 0
+            && *gift_seat <= std::numeric_limits<std::uint32_t>::max());
+        if (!time && !production && !order && !special && !menu && !gift) return std::nullopt;
         if (input.shift || input.ctrl || input.alt) return std::nullopt;
         return input;
     }
@@ -382,7 +385,8 @@ namespace {
 bool LiveSessionView::parse_argument(const std::string_view name, const std::optional<std::string>& value,
                                      Options& options, bool& value_used, std::string& error) {
     value_used = false;
-    if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-") && name != "--eawr-land-bindings") return false;
+    if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-")
+        && name != "--eawr-land-bindings" && name != "--eawr-audio-preload") return false;
     if (!value) {
         error = "missing value for " + std::string(name);
         return true;
@@ -464,6 +468,23 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                 }
             }
         }
+    } else if (name == "--eawr-live-controller-seat") {
+        const auto seat = parse_u64(text);
+        if (!seat || *seat == 0 || *seat > std::numeric_limits<std::uint32_t>::max())
+            error = "--eawr-live-controller-seat expects a nonzero seat ID";
+        else options.controller_seat = sim::SeatId{static_cast<std::uint32_t>(*seat)};
+    } else if (name == "--eawr-live-controller-name") {
+        const auto colon = text.find(':');
+        const auto seat = parse_u64(text.substr(0, colon));
+        if (colon == std::string::npos || !seat || *seat == 0 || *seat > std::numeric_limits<std::uint32_t>::max()
+            || colon + 1 == text.size()) error = "--eawr-live-controller-name expects <seat>:<display name>";
+        else options.controller_names.emplace_back(sim::SeatId{static_cast<std::uint32_t>(*seat)}, text.substr(colon + 1));
+    } else if (name == "--eawr-live-owner-name") {
+        const auto colon = text.find(':');
+        const auto player = parse_u64(text.substr(0, colon));
+        if (colon == std::string::npos || !player || *player == 0 || *player > std::numeric_limits<tactical::PlayerId>::max()
+            || colon + 1 == text.size()) error = "--eawr-live-owner-name expects <player>:<display name>";
+        else options.observer_names.emplace_back(static_cast<tactical::PlayerId>(*player), text.substr(colon + 1));
     } else if (name == "--eawr-live-replay") {
         options.replay_input = ViewerPath{text}.native();
     } else if (name == "--eawr-live-melee") {
@@ -536,7 +557,7 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
                     "<tick>:key:<name>, each with optional +shift, +ctrl or +alt, "
                     "<tick>:mdrag:<dx>,<dy> or <tick>:mclick:centre, each with optional +ctrl, "
                     "or <tick>:wheel:<in|out>, or <tick>:<click|rclick|hover|press|release>:hud=<pause|fast_forward|resume|quit|"
-                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no>; "
+                    "b_reinforcement|r_close|r_RRCC|tqueueNN|attack|attack_move|move|waypoint|stop|guard|gift|gift_to_N|special_weapon|retreat|options|menu_options|menu_back|menu_quit|menu_resume|menu_yes|menu_no>; "
                     "f<frame> in place of <tick> fires on that frame after the warm-up";
         } else {
             options.inputs.push_back(std::move(*input));
@@ -665,6 +686,9 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         } else {
             options.death_persistence = *seconds;
         }
+    } else if (name == "--eawr-audio-preload") {
+        if (text != "on" && text != "off") error = "--eawr-audio-preload expects on or off";
+        else options.audio_preload = text == "on";
     } else if (name == "--eawr-live-audio-pace") {
         if (text != "on" && text != "off") error = "--eawr-live-audio-pace expects on or off";
         options.audio_pace = text == "on";

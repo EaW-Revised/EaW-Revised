@@ -60,6 +60,30 @@ core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state()
             out(id, SpacePathService::checkpoint(search.search), search.frame, search.target, search.max_speed, search.inputs, search.plan);
         }
         out(encode_retreat_state(impl_->retreat_state), impl_->midbattle_solve);
+        if (impl_->setup.controllers) {
+            out(std::uint32_t{0x4c525443U}, std::uint32_t{4}, *impl_->setup.controllers,
+                static_cast<std::uint64_t>(live.size()));
+            for (const auto& unit : live)
+                out(unit.state.entity_id, unit.state.controller_seat.value, unit.state.control,
+                    unit.abilities ? unit.abilities->pending_buzz_controller.value : 0U);
+            out(static_cast<std::uint64_t>(impl_->ledgers.size()));
+            for (const auto& ledger : impl_->ledgers) {
+                out(ledger.player);
+                for (const auto& queue : ledger.queues) {
+                    out(static_cast<std::uint64_t>(queue.size()));
+                    for (const auto& entry : queue) out(entry.entry_id, entry.controller_seat.value);
+                }
+                out(static_cast<std::uint64_t>(ledger.pool_controllers.size()));
+                for (const auto& [token, seat] : ledger.pool_controllers) out(token, seat.value);
+            }
+            out(static_cast<std::uint64_t>(impl_->respawns.size()));
+            for (const auto& [due, batch] : impl_->respawns) {
+                out(due, static_cast<std::uint64_t>(batch.objects.size()));
+                for (const auto& request : batch.objects) out(request.controller_seat.value);
+            }
+            out(static_cast<std::uint64_t>(impl_->spawners.size()));
+            for (const auto& [id, spawner] : impl_->spawners) out(id, spawner.controller_output_ordinal);
+        }
         return core::Result<std::vector<std::uint8_t>>::success(std::move(out.bytes));
     } catch (const checkpoint_detail::Invalid& error) {
         return core::Result<std::vector<std::uint8_t>>::failure(detail::diagnostic(diagnostic_codes::resource_limit, error.what()));
@@ -159,6 +183,108 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
             throw checkpoint_detail::Invalid("invalid campaign retreat state");
         impl_->retreat_state = std::move(retreat_saved).value();
         for (auto& unit : live) impl_->refresh_damage_modes(unit);
+        if (impl_->setup.controllers) {
+            std::uint32_t tag{}, extension_version{};
+            std::uint64_t count{};
+            in(tag, extension_version);
+            if (tag != 0x4c525443U || extension_version != 4)
+                throw checkpoint_detail::Invalid("invalid checkpoint controller section");
+            BattleControllerPolicy effective;
+            in(effective, count);
+            if (count != live.size()) throw checkpoint_detail::Invalid("invalid checkpoint controller count");
+            auto recorded = initial_setup();
+            for (const auto& [key, command] : impl_->pending) {
+                if (key.tick >= impl_->completed_tick) break;
+                if (std::holds_alternative<BattleControlPayload>(command.payload))
+                    if (auto applied = detail::apply_battle_control_policy(recorded, command); !applied)
+                        throw checkpoint_detail::Invalid(applied.error().message);
+            }
+            if (*recorded.controllers != effective)
+                throw checkpoint_detail::Invalid("effective controller roster differs from sealed transitions");
+            impl_->setup.controllers = std::move(effective);
+            const auto binding_valid = [&](const PlayerId owner, const SeatId seat, const bool zero_allowed) {
+                if (seat.value == 0) return zero_allowed;
+                return std::any_of(impl_->setup.controllers->seats.begin(), impl_->setup.controllers->seats.end(),
+                    [&](const auto& row) { return row.player == owner && row.seat == seat; });
+            };
+            const auto no_controller = [&](const PlayerId owner) {
+                return impl_->output_controller(owner, {}, 0).value == 0;
+            };
+            TacticalSetup controller_setup = impl_->setup;
+            controller_setup.units.clear();
+            for (auto& unit : live) {
+                EntityId id{};
+                SeatId pending;
+                in(id, unit.state.controller_seat.value, unit.state.control, pending.value);
+                if (id != unit.state.entity_id) throw checkpoint_detail::Invalid("checkpoint controller identity mismatch");
+                const bool has_request = unit.abilities && unit.abilities->pending_buzz_position;
+                if (!has_request && pending.value != 0)
+                    throw checkpoint_detail::Invalid("controller has no pending ability request");
+                if (has_request) {
+                    const auto* profile = impl_->buzz_profile(unit.state.type_id);
+                    if (profile == nullptr || !binding_valid(unit.state.owner, pending,
+                            no_controller(unit.state.owner) || impl_->shared_controller_type(profile->droid_type)))
+                        throw checkpoint_detail::Invalid("invalid pending ability controller");
+                }
+                if (unit.abilities) unit.abilities->pending_buzz_controller = pending;
+                controller_setup.units.push_back(unit.state);
+            }
+            in(count);
+            if (count != impl_->ledgers.size()) throw checkpoint_detail::Invalid("controller ledger count mismatch");
+            for (auto& ledger : impl_->ledgers) {
+                PlayerId player{};
+                in(player);
+                if (player != ledger.player) throw checkpoint_detail::Invalid("controller ledger identity mismatch");
+                for (auto& queue : ledger.queues) {
+                    in(count);
+                    if (count != queue.size()) throw checkpoint_detail::Invalid("controller queue count mismatch");
+                    for (auto& entry : queue) {
+                        std::uint64_t entry_id{};
+                        in(entry_id, entry.controller_seat.value);
+                        if (entry_id != entry.entry_id || !binding_valid(ledger.player, entry.controller_seat, no_controller(ledger.player)))
+                            throw checkpoint_detail::Invalid("invalid queued output controller");
+                    }
+                }
+                in(count);
+                if (count > ledger.pool_tokens.size()) throw checkpoint_detail::Invalid("excess pooled output controllers");
+                ledger.pool_controllers.clear();
+                const std::set<std::uint64_t> pool_tokens(ledger.pool_tokens.begin(), ledger.pool_tokens.end());
+                std::uint64_t previous_token{};
+                for (std::uint64_t index = 0; index < count; ++index) {
+                    std::uint64_t token{};
+                    SeatId seat;
+                    in(token, seat.value);
+                    if (token <= previous_token || !binding_valid(ledger.player, seat, false)
+                        || !pool_tokens.contains(token))
+                        throw checkpoint_detail::Invalid("invalid pooled output controller");
+                    ledger.pool_controllers.emplace(token, seat);
+                    previous_token = token;
+                }
+            }
+            in(count);
+            if (count != impl_->respawns.size()) throw checkpoint_detail::Invalid("controller respawn count mismatch");
+            for (auto& [due, batch] : impl_->respawns) {
+                std::uint64_t frame{}, objects{};
+                in(frame, objects);
+                if (frame != due || objects != batch.objects.size()) throw checkpoint_detail::Invalid("controller respawn identity mismatch");
+                for (auto& request : batch.objects) {
+                    in(request.controller_seat.value);
+                    if (!binding_valid(request.owner, request.controller_seat,
+                            no_controller(request.owner) || impl_->shared_controller_type(request.type)))
+                        throw checkpoint_detail::Invalid("invalid respawn controller");
+                }
+            }
+            in(count);
+            if (count != impl_->spawners.size()) throw checkpoint_detail::Invalid("controller spawner count mismatch");
+            for (auto& [id, spawner] : impl_->spawners) {
+                EntityId saved_id{};
+                in(saved_id, spawner.controller_output_ordinal);
+                if (saved_id != id) throw checkpoint_detail::Invalid("controller spawner identity mismatch");
+            }
+            controller_setup.squadrons = impl_->squadrons;
+            if (auto valid = validate_controllers(controller_setup); !valid)
+                throw checkpoint_detail::Invalid(valid.error().message);
+        }
         if (in.remaining() != 0) throw checkpoint_detail::Invalid("trailing child-state bytes");
         // The factory submitted the sealed log. Move its past commands into the immutable record.
         impl_->executed.clear();
@@ -251,7 +377,7 @@ void TacticalSession::Impl::publish_staged(const std::vector<LiveUnit>& live, st
         current_snapshot = std::make_shared<const TacticalSnapshot>(completed_tick, snapshot_players,
             std::move(instances), std::move(events), std::move(combat_events), projectiles, outcome,
             std::vector<SpinningCraft>{}, std::vector<SquadronTarget>{}, squadrons, economy_views(ledgers, shares), pad_views(), quits,
-            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons);
+            losses, productions, manual_clock_views(), economy_cues, ability_spawns, retreat_views(), garrison_timer_views(), beacons, setup.controllers);
     }
 
 std::vector<GarrisonTimerView> TacticalSession::Impl::garrison_timer_views() const {
@@ -332,6 +458,8 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         TacticalInstance instance{unit.state.entity_id, unit.state.type_id, unit.state.owner,
             teams.at(unit.state.owner), transform, 0, {}, {}, {}};
         instance.contained = unit.state.contained;
+        instance.controller_seat = unit.state.controller_seat;
+        instance.control = unit.state.control;
         if (unit.durability) {
             instance.durability = durability_status(*health_profile(unit), durability, *unit.durability);
         }
@@ -418,6 +546,12 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
 void TacticalSession::Impl::append_canonical_unit(std::vector<std::uint8_t>& bytes, const LiveUnit& unit) const {
     detail::append_unit_record(bytes, unit.state);
     detail::append_order(bytes, unit.state.order);
+    // Controller bytes share the existing partitioned per-unit encoder.
+    if (setup.controllers) {
+        sim::detail::append_u32(bytes, unit.state.controller_seat.value);
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(unit.state.control));
+        sim::detail::append_u32(bytes, unit.abilities ? unit.abilities->pending_buzz_controller.value : 0U);
+    }
     if (unit.state.barrage_source != invalid_entity_id) {
         bytes.insert(bytes.end(), {'B', 'P', 'R', 'X'});
         sim::detail::append_u64(bytes, unit.state.barrage_source);
@@ -652,6 +786,37 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         if (land) {
             const auto state = land_bytes(encoding != nullptr);
             bytes.insert(bytes.end(), state.begin(), state.end());
+        }
+        if (setup.controllers) {
+            sim::detail::append_u32(bytes, 0x4c525443U); // CTRL optional state domain
+            detail::append_controller_policy(bytes, *setup.controllers, 4);
+            sim::detail::append_u64(bytes, ledgers.size());
+            for (const auto& ledger : ledgers) {
+                sim::detail::append_u32(bytes, ledger.player);
+                for (const auto& queue : ledger.queues) {
+                    sim::detail::append_u64(bytes, queue.size());
+                    for (const auto& entry : queue) {
+                        sim::detail::append_u64(bytes, entry.entry_id);
+                        sim::detail::append_u32(bytes, entry.controller_seat.value);
+                    }
+                }
+                sim::detail::append_u64(bytes, ledger.pool_controllers.size());
+                for (const auto& [token, seat] : ledger.pool_controllers) {
+                    sim::detail::append_u64(bytes, token);
+                    sim::detail::append_u32(bytes, seat.value);
+                }
+            }
+            sim::detail::append_u64(bytes, respawns.size());
+            for (const auto& [due, batch] : respawns) {
+                sim::detail::append_u64(bytes, due);
+                sim::detail::append_u64(bytes, batch.objects.size());
+                for (const auto& request : batch.objects) sim::detail::append_u32(bytes, request.controller_seat.value);
+            }
+            sim::detail::append_u64(bytes, spawners.size());
+            for (const auto& [id, spawner] : spawners) {
+                sim::detail::append_u64(bytes, id);
+                sim::detail::append_u64(bytes, spawner.controller_output_ordinal);
+            }
         }
         return bytes;
     }

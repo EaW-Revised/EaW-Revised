@@ -195,11 +195,13 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
     std::vector<TacticalInstance>& instances, std::vector<Squadron>& squadron_list,
     detail::MapStage<CraftState>& flights, detail::MapStage<SquadronState>& orders,
     const TypeId free_type, const PlayerId free_owner, std::vector<EntityId>* registered,
-    std::map<EntityId, ArrivalState>* lane_arrivals) const {
+    std::map<EntityId, ArrivalState>* lane_arrivals, const SeatId controller) const {
         using Void = core::Result<void>;
         const auto& table = motion.squadrons;
         const auto company_type = free_type != 0 ? free_type : profile.entries[decision.entry].squadron;
         const auto owner = free_type != 0 ? free_owner : spawner.state.owner;
+        UnitState attribution{0, company_type, owner};
+        if (auto assigned = attribute_output(attribution, controller); !assigned) return assigned;
         const auto* squadron = table.find_squadron(company_type);
         const auto& bay = profile.bays[decision.bay];
         const auto context = "tick " + std::to_string(frame) + " spawner " + std::to_string(spawner.state.entity_id) + ": ";
@@ -216,7 +218,10 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
         const auto add = [&](const UnitState& state) -> Void {
             const auto placed = math::to_matrix(state.rotation, state.position);
             if (!placed) return Void::failure(placed.error());
-            auto unit = new_unit(state, frame);
+            auto attributed = state;
+            attributed.control = attribution.control;
+            attributed.controller_seat = attribution.controller_seat;
+            auto unit = new_unit(attributed, frame);
             // WU-37/FL-06: the bay marks craft and direct ships. Team creation starts
             // unmarked; the bay marks only its first returned team below.
             unit.garrison_unit = true;

@@ -174,6 +174,15 @@ class RemakeBenchTests(unittest.TestCase):
             (root / "exit-codes.txt").write_text("stock-bespin 1\n")
             self.assertIn("measurement_error", bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"]))
 
+    def test_floor_stop_is_reported_as_a_memory_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "remake-dev4.floor.json").write_text(json.dumps({"result": "floor-stop",
+                "free_bytes": 4000000000, "private_bytes": 9000000000, "floor_bytes": 4294967296}))
+            row = bench.analyse_scene(root, "remake-dev4", bench.SCENES["remake-dev4"])
+            self.assertIn("4 GiB", row["measurement_error"])
+            self.assertEqual(row["floor_stop"]["private_bytes"], 9000000000)
+
     def test_missing_requested_scene_is_reported(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -239,6 +248,65 @@ class RemakeBenchTests(unittest.TestCase):
             receipt.write_text('{"machine":"fixture", "privateDesktop":true, "timedOut":false}')
             self.assertTrue(bench.analyse(root, {}))
 
+    def test_owner_dev4_and_render_thread_protocol(self):
+        def without_empire_fleet(args):
+            result = list(args)
+            index = next(i for i in range(len(result) - 1)
+                         if result[i] == "--eawr-skirmish-fleet" and result[i + 1].startswith("2:"))
+            del result[index:index + 2]
+            return result
+        common = without_empire_fleet(bench.SCENES["remake-dev4"]["args"])
+        for count in (1, 2, 4):
+            self.assertEqual(without_empire_fleet(bench.SCENES[f"remake-dev{count}"]["args"]), common)
+            self.assertEqual(bench.SCENES[f"remake-dev{count}"]["ticks"], 1500)
+            self.assertEqual(bench.SCENES[f"remake-dev{count}"]["window"], (600, 1400))
+            self.assertTrue(bench.SCENES[f"remake-dev{count}"]["fixed_window"])
+        scene = bench.SCENES["remake-dev4"]
+        self.assertEqual(scene["ticks"], 1500)
+        self.assertEqual(scene["args"][scene["args"].index("--eawr-profile") + 1], "remake")
+        self.assertEqual(scene["args"][scene["args"].index("--eawr-live-ticks") + 1], "1500")
+        self.assertEqual(scene["args"][scene["args"].index("--eawr-live-capture-ticks") + 1], "0")
+        self.assertEqual(scene["fleets"][1], bench.TARGETS)
+        self.assertEqual(scene["fleets"][2], bench.FIGHT * 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "spec.json"
+            bench.write_spec(path, ["remake-dev4"], "free", mod_root="fixture", prepare=True)
+            run = json.loads(path.read_text())["runs"][0]
+            self.assertEqual(run["engineArgs"][-2:], ["--render-thread", "separate"])
+            self.assertEqual(run["benchmark"]["render_thread"], "separate")
+            with self.assertRaisesRegex(ValueError, "owner census engagement"):
+                bench.write_spec(path, ["remake-dev4"], "free", mod_root="fixture",
+                                 preparations={"remake-dev4": self.native_start()})
+            native = self.native_start()
+            live = native["live_session"]
+            live["start_map"] = "data/art/maps/korriban.ted"
+            live["start_markers"] = [dict(player=p, use="spawn", position=[103.177246, -720.166992, 0])
+                                     for p in (1, 2)]
+            live["start_fleet"] = [dict(entity=e, player=1 if e <= 9 else 2, type="fixture",
+                                        position=[103.177246, -720.166992, 0])
+                                   for e in list(range(2, 10)) + list(range(11, 18))]
+            bench.write_spec(path, ["remake-dev4"], "free", mod_root="fixture",
+                             preparations={"remake-dev4": native})
+            run = json.loads(path.read_text())["runs"][0]
+            self.assertEqual(run["driverArgs"]["freeFloorGiB"], 4)
+            orders = [run["args"][i + 1] for i, value in enumerate(run["args"]) if value == "--eawr-live-order"]
+            self.assertEqual(orders, ["1:attack_move:2+3+4+5+6+7+8+9@103.177246,-720.166992,0",
+                                      "1:attack_move:11+12+13+14+15+16+17@103.177246,-720.166992,0"])
+            camera = bench.ET.parse(Path(tmp) / "engagement/remake-dev4.xml").getroot()
+            self.assertAlmostEqual(float(camera.find("initial").attrib["target_x"]), 103.177246)
+            self.assertAlmostEqual(float(camera.find("initial").attrib["target_y"]), -720.166992)
+
+    def test_separate_mode_requires_engine_log_proof(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "_spec.json").write_text(json.dumps({"runs": [{"name": "stock-bespin",
+                "benchmark": {"render_thread": "separate"}}]}))
+            row = bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])
+            self.assertFalse(row["render_thread_observed"])
+            (root / "stock-bespin.log").write_text("WARNING: The separate rendering thread feature is experimental")
+            row = bench.analyse_scene(root, "stock-bespin", bench.SCENES["stock-bespin"])
+            self.assertTrue(row["render_thread_observed"])
+
     def test_engagement_commands_both_owners_and_fixes_camera_at_native_midpoint(self):
         native = self.native_start()
         recipe = bench.engagement_recipe(native)
@@ -253,7 +321,7 @@ class RemakeBenchTests(unittest.TestCase):
             self.assertEqual(args[args.index("--eawr-diagnostic-vsync") + 1], "0")
             self.assertEqual(args[args.index("--eawr-diagnostic-max-fps") + 1], "0")
             self.assertNotIn("--eawr-live-audio-pace", args)
-            self.assertEqual(run["engineArgs"], ["--max-fps", "0", "--script", "{in}/observer/menu-observer.gd"])
+            self.assertEqual(run["engineArgs"], ["--max-fps", "0", "--render-thread", "separate", "--script", "{in}/observer/menu-observer.gd"])
             self.assertEqual(run["benchmark"]["observer"], "buffered-post-draw-v2")
             observer = (Path(tmp) / "observer/menu-observer.gd").read_text()
             self.assertNotIn(".flush()", observer)

@@ -60,6 +60,7 @@ def prepare(service: Path | None, launcher: Path | None, artifact: Path | None,
             raise FileNotFoundError(f"{name} missing: {path}")
     if not (service.parent / "eawr_loadcheck.exe").is_file():
         raise FileNotFoundError("load check helper missing beside mods service")
+    require_start_stub(launcher.parent)
     return obtain(artifact, read_pin(pin_path), cache)
 
 
@@ -84,6 +85,13 @@ def install(destination: Path, artifact: Path | None = None, pin_path: Path = DE
     return pin
 
 
+def require_start_stub(directory: Path) -> Path:
+    stub = directory / "EAWR Mods.exe"
+    if not stub.is_file():
+        raise FileNotFoundError(f"native mods start stub missing: {stub}")
+    return stub
+
+
 def install_manager(kit: Path, service: Path, artifact: Path | None = None,
                     pin_path: Path = DEFAULT_PIN) -> dict:
     if not service.is_file():
@@ -93,35 +101,9 @@ def install_manager(kit: Path, service: Path, artifact: Path | None = None,
         raise FileNotFoundError(f"load check helper missing: {helper}")
     if not (kit / "EAWR.exe").is_file():
         raise FileNotFoundError(f"EAWR.exe missing from kit: {kit}")
+    require_start_stub(kit)
     pin = install(kit / "launcher", artifact, pin_path)
     shutil.copyfile(service, kit / "eawr_mods_service.exe")
     shutil.copyfile(helper, kit / "eawr_loadcheck.exe")
-    # WSH starts the native GUI entry point without even a transient cmd.exe console.
-    (kit / "EAWR Mods.vbs").write_text(
-        'Set shell = CreateObject("WScript.Shell")\n'
-        'Set fso = CreateObject("Scripting.FileSystemObject")\n'
-        'exe = fso.BuildPath(fso.GetParentFolderName(WScript.ScriptFullName), "EAWR.exe")\n'
-        'shell.Run Chr(34) & exe & Chr(34) & " --mods", 1, False\n', encoding="ascii")
-    # Optional desktop shortcut installer; generated only for manager-equipped kits.
-    (kit / "Create EAWR Mods desktop shortcut.vbs").write_text(
-        'Set shell = CreateObject("WScript.Shell")\n'
-        'Set fso = CreateObject("Scripting.FileSystemObject")\n'
-        'kit = fso.GetParentFolderName(WScript.ScriptFullName)\n'
-        'exe = fso.BuildPath(kit, "EAWR.exe")\n'
-        'If Not fso.FileExists(exe) Or Not fso.FileExists(fso.BuildPath(kit, "launcher\\project.godot")) Or Not fso.FileExists(fso.BuildPath(kit, "eawr_mods_service.exe")) Then\n'
-        '  MsgBox "EAWR Mods is missing or incomplete. Extract the whole EAWR download and try again.", vbOKOnly + vbCritical, "EAWR Mods"\n'
-        '  WScript.Quit 2\n'
-        'End If\n'
-        'shortcut = fso.BuildPath(shell.SpecialFolders("Desktop"), "EAWR Mods.lnk")\n'
-        'If fso.FileExists(shortcut) Then\n'
-        '  If MsgBox("An EAWR Mods desktop shortcut already exists. Replace it?", vbYesNo + vbQuestion + vbDefaultButton2, "EAWR Mods") <> vbYes Then WScript.Quit 0\n'
-        'End If\n'
-        'Set link = shell.CreateShortcut(shortcut)\n'
-        'link.TargetPath = exe\n'
-        'link.Arguments = "--mods"\n'
-        'link.WorkingDirectory = kit\n'
-        'link.Description = "Choose mods and play Empire at War Revised"\n'
-        'link.IconLocation = exe & ",0"\n'
-        'link.Save\n', encoding="ascii")
     (kit / "launcher-pin.json").write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
     return pin

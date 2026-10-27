@@ -11,6 +11,11 @@ tests/fog/fixtures/fog-stub-v1.evidence.csv text eol=lf
 # Preserve the documented bytes of vendored upstream files.
 third_party/entt/single_include/entt/entt.hpp text eol=lf
 third_party/entt/LICENSE text eol=lf
+# Shader dependency manifests, generated identities and notice byte pins.
+third_party/shader_runtime/*.json text eol=lf
+third_party/shader_runtime/*.hpp text eol=lf
+third_party/shader_runtime/*.md text eol=lf
+third_party/shader_runtime/licenses/* text eol=lf whitespace=-blank-at-eol,-space-before-tab
 # The publish scan reviews the Lua XPM by its committed SHA-256 on every platform.
 third_party/lua/etc/lua.xpm text eol=lf
 # The P1-12 readiness report records the SHA-256 of the committed plan bytes.

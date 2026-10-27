@@ -11,6 +11,7 @@
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
 
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/os.hpp>
 
 #include <cctype>
 #include <cmath>
@@ -22,6 +23,8 @@ namespace eawr::presentation::godot_backend {
 
 bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& map, std::optional<eawr::viewer::MapCameraSource>& space_camera_source, std::vector<std::uint32_t>& session_records) {
     State& state = *this;
+    particles::EffectRegistry::set_catchup_folding_default(
+        OS::get_singleton()->get_environment("EAWR_PRESENTATION_CATCHUP") != String("off"));
     // #80: the session's units are drawn from its snapshots, through
     // the placed-ship upload path.
     if (state.space_place_object || !state.space_place_at.empty()) {
@@ -127,6 +130,7 @@ bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& ma
     // #2927: the saved volumes, when a player's view has them; FoC's 0.75 otherwise.
     BattleAudio::Options audio_options{.muted = !audible && !state.options.attract.has_value(),
                                        .attract_silent = state.options.attract.has_value()};
+    audio_options.preload = state.live_options.audio_preload;
     if (const auto* saved = ActiveSettings::get()) {
         const presentation::ui::SessionValues values = presentation::ui::session_values(*saved);
         audio_options.levels.master = values.master_gain;
@@ -345,6 +349,12 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                             live_session->unfogged_map_props(),
                             [effects](const std::size_t ship) {
                                 return effects ? effects->projectile_model_opacity(ship) : 0.0F;
+                            },
+                            [live_session](const std::size_t ship) { return live_session->clone_birth_tick(ship); },
+                            [live_session, effects, &battle](const std::size_t ship) -> std::optional<std::pair<double, std::uint64_t>> {
+                                return effects ? effects->projectile_model_birth(ship, *battle.latest,
+                                    [live_session](const std::uint64_t tick) { return live_session->snapshot_at(tick); })
+                                    : std::nullopt;
                             })) {
                         return core::Result<SpaceLiveUpdate>::failure(
                             {.code = "EAWR-VIEWER-UNIT-EMITTERS", .message = emitters->failure()});

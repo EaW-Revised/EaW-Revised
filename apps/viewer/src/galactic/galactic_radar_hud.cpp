@@ -20,6 +20,9 @@ bool GalacticMode::State::build_radar_hud() {
         if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
         advanced_map_anchors = std::move(loaded).value().shell;
         auto* mask = memnew(EawrUiHitMask); hud->add_child(mask);
+        // Like the command/organization shells, this faceplate has no wheel action.
+        // Its radar consumes wheel input itself; bonus/zoom icons and empty art pass it.
+        mask->set_force_pass_scroll_events(true);
         mask->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
         advanced_map_shell = memnew(EawrTacticalHud); mask->add_child(advanced_map_shell);
         EawrTacticalHud::Setup setup;

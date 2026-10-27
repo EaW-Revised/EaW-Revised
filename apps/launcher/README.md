@@ -103,7 +103,9 @@ The engine remains responsible for loading and validating the full profile.
 starts the profile service with its default user-data folder. Use the default
 folder for manager launches until the manager forwards this option to the service.
 
-Manager-equipped kits also include `Create EAWR Mods desktop shortcut.vbs`.
-Double-click it to create an **EAWR Mods** desktop shortcut pointing directly at
-`EAWR.exe --mods`. The installer explains an incomplete kit in a message box and asks before
-replacing an existing desktop shortcut. Neither installation nor startup opens a console.
+Manager-equipped kits include `EAWR Mods.exe`, a native GUI program with a static C runtime.
+Double-click it to start `EAWR.exe --mods` from the stub's own folder without a console.
+Run `"EAWR Mods.exe" --create-shortcut` to create an **EAWR Mods** desktop shortcut pointing
+at the stub. It checks for an incomplete kit and asks before replacing an existing shortcut,
+with **No** selected by default. The start executable keeps working when the kit moves;
+recreate the desktop shortcut after moving the kit. No script host is required.

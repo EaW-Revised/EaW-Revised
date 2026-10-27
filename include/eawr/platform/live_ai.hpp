@@ -21,6 +21,7 @@ class BattleScoring;
 struct LiveAi {
     std::shared_ptr<const LiveScripts> scripts;
     std::vector<sim::tactical::PlayerId> players; // the players the AI commands
+    std::vector<core::Diagnostic> load_notes; // SOS-46: frozen optional object-root warnings
 };
 
 // The retail freestore of each non-human lobby player (skirmish::ai_setup), its Lua files read

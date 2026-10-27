@@ -334,6 +334,30 @@ void synthetic() {
     const auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
     expect(static_cast<bool>(catalog), "load synthetic GC catalog");
     if (!catalog) return;
+    for (const auto& [text, expected] : std::array<std::pair<std::string_view, std::int32_t>, 6>{{
+            {"2.9", 2}, {"-2.9", -2}, {"text", 0}, {"1e3", 1},
+            {"9999999999999999999999", 2147483647}, {"-9999999999999999999999", -2147483647 - 1}}}) {
+        const std::array overrides{
+            eawr::data::ValueOverride{"Carrier", "Tech_Level", {std::string(text)}},
+            eawr::data::ValueOverride{"Carrier", "Additional_Population_Capacity", {std::string(text)}},
+            eawr::data::ValueOverride{"Carrier", "Squadron_Capacity", {std::string(text)}},
+            eawr::data::ValueOverride{"Carrier", "Build_Advances_Tech_Level", {std::string(text)}},
+            eawr::data::ValueOverride{"Carrier", "Starting_Spawned_Units_Tech_0", {"Variant, " + std::string(text == "text" ? "TBD" : text)}}};
+        const auto changed = eawr::data::with_overrides(catalog.value().catalog, overrides);
+        expect(static_cast<bool>(changed), "numeric object overlay loads");
+        if (!changed) continue;
+        const auto parsed = eawr::units::galactic_type_table(changed.value());
+        const auto* numeric = parsed.find("Carrier");
+        expect(numeric && numeric->tech_level == expected && numeric->additional_population_capacity == expected,
+            "LSA-04 signed counts truncate, saturate and accept text");
+        expect(numeric && numeric->squadron_capacity == static_cast<std::uint32_t>(expected)
+            && numeric->build_advances_tech_level == static_cast<std::uint32_t>(expected),
+            "LSA-07/08 atoi result is reinterpreted as uint32");
+        expect(numeric && numeric->starting_spawned_units[0].size() == 1
+            && numeric->starting_spawned_units[0][0].count == expected, "LSA-05 spawned pair uses atoi");
+        expect(static_cast<bool>(eawr::units::resolve_initial_galactic_type(parsed, "Carrier")),
+            "numeric authoring survives original-type resolution");
+    }
     const auto table = eawr::units::galactic_type_table(catalog.value().catalog);
     expect(table.types.size() == 18 && !table.find("Planet") && !table.find("Shot"), "GC types exclude planets and unrelated projectiles");
     for (const auto name : {"Company", "Renamed_Orbital_Team"}) {
@@ -345,10 +369,15 @@ void synthetic() {
         expect(technology && technology->build_advances_tech_level == target,
             "WGEP-42 technology target 2-5 is numeric rather than Boolean");
     }
-    expect(!eawr::units::resolve_initial_galactic_type(table, "BadTech")
-        && !eawr::units::resolve_initial_galactic_type(table, "NegativeTech"), "invalid authored technology targets refuse");
+    expect(eawr::units::resolve_initial_galactic_type(table, "BadTech")
+        && eawr::units::resolve_initial_galactic_type(table, "NegativeTech")
+        && table.find("BadTech")->build_advances_tech_level == 0
+        && table.find("NegativeTech")->build_advances_tech_level == 4294967295LL,
+        "LSA-08 text becomes zero and negative technology targets retain unsigned bits");
     expect(eawr::units::resolve_initial_galactic_type(table, "MaxTech")
-        && !eawr::units::resolve_initial_galactic_type(table, "OverflowTech"), "technology resolver agrees with the simulation signed-32 target bound");
+        && eawr::units::resolve_initial_galactic_type(table, "OverflowTech")
+        && table.find("OverflowTech")->build_advances_tech_level == 2147483647,
+        "LSA-P1 overflow saturates before unsigned interpretation");
     const auto* carrier = table.find("carrier");
     const auto* variant = table.find("Variant");
     expect(carrier && variant && carrier->control_abilities.size() == 2 && variant->control_abilities.size() == 2
@@ -410,14 +439,14 @@ void synthetic() {
     expect(defaults && !defaults.value().build_cost_credits && !defaults.value().build_time_seconds
         && !defaults.value().can_hyperspace_without_ability,
         "content-bearing originals retain omissions for consumer defaults");
-    expect(!eawr::units::resolve_initial_galactic_type(table, "Bad"), "invalid capacity cannot become an omission default");
+    expect(static_cast<bool>(eawr::units::resolve_initial_galactic_type(table, "Bad")), "LSA-04 fractional capacity resolves as its leading integer");
     expect(carrier && variant && carrier->stealth_company == true && variant->stealth_company == true,
         "stealth company metadata retains inherited authoring without fabricating live action traits");
     expect(flight && flight->squadron_units == std::vector<std::string>{"Carrier"},
         "WAR-84 first nonempty variant squadron occurrence replaces inherited membership");
     expect(flight && flight->company_transport == "Variant", "WGEP-78 original company transport loads and inherits");
     const auto* bad = table.find("Bad");
-    expect(bad && bad->build_cost_credits == Fixed{} && !bad->squadron_capacity, "text cost follows integer zero while invalid capacity stays absent");
+    expect(bad && bad->build_cost_credits == Fixed{} && bad->squadron_capacity == 2, "LSA-42 text becomes zero and LSA-04 fractions truncate");
     expect(carrier && carrier->required_special_structures == "Factory | Research", "preserve production prerequisite group grammar");
     bool trailing = false, unknown = false, dangling = false;
     for (const auto& row : table.issues) {
@@ -629,7 +658,7 @@ void technology_price_authoring() {
     const auto& defaults = row("Defaults").technology_prices[0];
     expect(defaults.initially_enabled == true && defaults.activation_style == "Galactic_Automatic"
         && defaults.reduction == Fixed{}, "specific technology-price constructor defaults are sourced");
-    expect(!row("Malformed").technology_prices[0].reduction, "malformed present percentage does not use the omission default");
+    expect(row("Malformed").technology_prices[0].reduction == Fixed{}, "LSA-42 text percentage converts to zero through the retail float reader");
     expect(row("Duplicate").technology_prices.size() == 2
         && row("Duplicate").technology_prices[0].reduction == Fixed::from_decimal("0.2").value(), "same authored source replaces; distinct names remain independent");
 }

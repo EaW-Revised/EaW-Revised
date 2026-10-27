@@ -24,4 +24,9 @@ set_tests_properties(launcher_smoke PROPERTIES TIMEOUT 300)
 
 
 
+add_test(NAME mods_start_smoke
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/mods_start_smoke.py"
+            "$<TARGET_FILE:eawr_mods_start>" "$<TARGET_FILE:launcher_fake_godot>")
+set_tests_properties(mods_start_smoke PROPERTIES TIMEOUT 120)
+
 eawr_label_tests()

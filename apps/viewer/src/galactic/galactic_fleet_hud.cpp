@@ -70,6 +70,7 @@ bool GalacticMode::State::build_fleet_hud() {
     if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
     fleet_anchors = std::move(loaded).value().shell;
     auto* mask = memnew(EawrUiHitMask);
+    mask->set_force_pass_scroll_events(true); // #5085: the organize shell has no wheel action.
     hud->add_child(mask); mask->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
     fleet_organize = memnew(EawrTacticalHud); mask->add_child(fleet_organize);
     EawrTacticalHud::Setup setup;
@@ -413,7 +414,10 @@ void GalacticMode::State::rebuild_ground_badges() {
                 look.named_hero, look.generic_hero, !look.icon.empty(), look.hero_rank};
         });
     for (const auto& planet : galaxy->planets) {
-        const auto icon = galactic_view::ground_stack(*displayed_snapshot, galaxy->local.player, planet.id, stacks.size());
+        const bool surface_held = !dragged_ground_units.empty()
+            || (ground_hud.pressed_object && map_input.box_end);
+        const auto icon = galactic_view::ground_drop_stack(*displayed_snapshot, galaxy->local.player,
+            planet.id, stacks.size(), dragged_fleet, dragged_stack, surface_held, dragged_members);
         if (!icon || stacks.empty()) continue;
         const auto key = std::pair{planet.id, std::uint8_t{3}};
         auto [entry, inserted] = fleet_badges.try_emplace(key);
@@ -867,9 +871,15 @@ void GalacticMode::State::update_fleet_captions(const presentation::ui::ShellPla
 void GalacticMode::State::update_fleet_hud() {
     if (!fleet_organize || !displayed_snapshot || !galaxy) return;
     const bool publication_changed = fleet_publication != displayed_snapshot;
-    bool changed = publication_changed || fleet_layout_dirty || fleet_view_planet != selected_planet
+    // GGS-05: held targets must refresh even while paused, without rebuilding
+    // the projection on every pointer motion. This also covers ground-pad drags.
+    const bool ground_targets_held = dragged_fleet || !dragged_ground_units.empty()
+        || (ground_hud.pressed_object && map_input.box_end);
+    const bool held_changed = ground_targets_held != fleet_ground_drop_targets_held;
+    fleet_ground_drop_targets_held = ground_targets_held;
+    bool changed = publication_changed || fleet_layout_dirty || held_changed || fleet_view_planet != selected_planet
         || fleet_view_selection != selected_fleet || fleet_view_member != selected_fleet_member;
-    if (publication_changed || fleet_layout_dirty) {
+    if (publication_changed || fleet_layout_dirty || held_changed) {
         rebuild_fleet_projection(publication_changed);
     }
     if (changed) {

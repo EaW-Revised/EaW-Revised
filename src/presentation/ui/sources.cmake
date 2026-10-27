@@ -21,6 +21,7 @@ set(EAWR_UI_MODEL_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/campaign_setup.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/command_sink.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/credits.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/story_summary.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/input_routing.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/lan_lobby.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/load_game.cpp"

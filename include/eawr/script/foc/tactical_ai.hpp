@@ -120,6 +120,8 @@ struct AiType {
     bool craft{};                             // a squadron member type
     std::uint32_t squadron_units{};           // its Squadron_Units count
     sim::tactical::TypeId squadron_unit{};    // its first craft type
+    bool community_property{};              // PE-34: allied ownership counts
+    sim::tactical::TypeId constructed_type{}; // PE-34: unfinished representation's completed type
     bool capture_point{};                    // CAPTURE_POINT ownership behavior
     bool build_pad{};                        // GS-11: type identity, independent of enabled economy
     bool initial_state_visible_under_fow{};  // WNO-13: authored object-goal fog exception
@@ -351,7 +353,13 @@ struct AiSetup {
 
 // The Lua files the host loads, as logical paths: the freestore and its
 // library chain, and the plan library that holds the contrast weights.
-[[nodiscard]] std::vector<std::string> required_modules(const AiSetup& setup);
+[[nodiscard]] std::vector<std::string> required_modules(const AiSetup& setup, bool include_object_roots = true);
+
+// SOS-46: authored object roots are optional attachments, grouped by logical path
+// with deterministic referencing type names. Other required roots remain strict.
+[[nodiscard]] std::map<std::string, std::vector<std::string>> object_script_modules(const AiSetup& setup);
+[[nodiscard]] std::vector<core::Diagnostic> object_script_load_notes(
+    const AiSetup& setup, const std::map<std::string, std::string>& modules);
 
 // AI-16: the selected controller's authored space freestore; the setup default
 // remains available to hosts that deliberately run without goal XML.
@@ -372,6 +380,7 @@ struct AiSetup {
 struct PreparedAiSession {
     authoritative::ScriptScheduler scripts;
     std::function<core::Result<void>(authoritative::ScriptedTacticalSession&)> bind;
+    std::vector<core::Diagnostic> load_notes; // SOS-46: one warning per absent object root
 };
 [[nodiscard]] core::Result<PreparedAiSession> prepare_session(
     const AiSetup& setup, const std::map<std::string, std::string>& modules);

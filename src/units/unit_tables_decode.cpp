@@ -282,6 +282,7 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         unit.influences_capture = flag(*object, "Influences_Capture_Point", false).value_or(true);
         unit.construction_blocker = !has_behavior(*object, "BASE_SHIELD")
             && !has_behavior(*object, "DUMMY_GROUND_STRUCTURE");
+        unit.ai_community_property = flag(*object, "Is_Community_Property", false).value_or(false);
         if (unit.capture_point) {
             unit.capture_radius = object->fixed("Capture_Point_Radius", report_, true);
             unit.capture_seconds = object->fixed("Capture_Point_Transition_Time_Seconds", report_, true);

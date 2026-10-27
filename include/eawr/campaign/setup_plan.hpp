@@ -2,6 +2,7 @@
 
 #include "eawr/campaign/fleets.hpp"
 #include "eawr/campaign/galaxy.hpp"
+#include "eawr/core/load_note.hpp"
 
 #include <functional>
 #include <optional>
@@ -101,6 +102,7 @@ public:
     [[nodiscard]] std::span<const InitialPlacement> initial_placements() const noexcept { return initial_placements_; }
     [[nodiscard]] std::span<const CampaignHome> homes() const noexcept { return homes_; }
     [[nodiscard]] std::span<const core::Diagnostic> diagnostics() const noexcept { return diagnostics_; }
+    [[nodiscard]] std::span<const core::LoadNote> load_notes() const noexcept { return load_notes_; }
     [[nodiscard]] core::Result<sim::galactic::FleetTypeTraits> resolve_fleet_type(sim::galactic::TypeId type) const;
     [[nodiscard]] const units::GalacticType* original_type(sim::galactic::TypeId) const noexcept;
     [[nodiscard]] std::span<const FleetTypeBinding> type_bindings() const noexcept { return type_bindings_; }
@@ -135,6 +137,7 @@ private:
     std::vector<InitialPlacement> initial_placements_;
     std::vector<CampaignHome> homes_;
     std::vector<core::Diagnostic> diagnostics_;
+    std::vector<core::LoadNote> load_notes_;
     units::GalacticTypeTable bound_types_;
     std::vector<FleetTypeBinding> type_bindings_;
     std::optional<sim::galactic::FiscalSetup> fiscal_;

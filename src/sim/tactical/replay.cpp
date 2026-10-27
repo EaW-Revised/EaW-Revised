@@ -71,6 +71,160 @@ void resolve_cinematic_seats(TacticalSetup& setup, const std::span<const Economy
     }
 }
 
+core::Result<void> validate_controllers(const TacticalSetup& setup) {
+    const auto invalid = [](const char* message) {
+        return fail<void>(diagnostic_codes::invalid_setup, message, {});
+    };
+    if (!setup.controllers) {
+        for (const auto& unit : setup.units)
+            if (unit.controller_seat.value != 0 || unit.control != UnitControl::none)
+                return invalid("controller fields require a battle controller policy");
+        return core::Result<void>::success();
+    }
+    const auto& policy = *setup.controllers;
+    if (!setup.campaign || policy.seats.empty() || policy.seats.size() > max_controller_seats
+        || policy.factions.empty() || policy.factions.size() > setup.players.size())
+        return invalid("controller policy requires a campaign battle and bounded nonempty roster");
+    PlayerId previous_player{};
+    bool cooperative{};
+    for (const auto& faction : policy.factions) {
+        if (faction.player <= previous_player || static_cast<unsigned>(faction.mode) < 1
+            || static_cast<unsigned>(faction.mode) > 3
+            || std::none_of(setup.players.begin(), setup.players.end(), [&](const auto& p) {
+                return p.player_id == faction.player && p.commandable();
+            })) return invalid("invalid controller faction order, mode or player");
+        previous_player = faction.player;
+        const auto humans = std::count_if(policy.seats.begin(), policy.seats.end(), [&](const auto& seat) {
+            return seat.player == faction.player && seat.active && seat.kind == SeatKind::human;
+        });
+        cooperative = cooperative || std::count_if(policy.seats.begin(), policy.seats.end(), [&](const auto& seat) {
+            return seat.player == faction.player && seat.kind == SeatKind::human;
+        }) > 1;
+        const auto ais = std::count_if(policy.seats.begin(), policy.seats.end(), [&](const auto& seat) {
+            return seat.player == faction.player && seat.active && seat.kind == SeatKind::ai;
+        });
+        if ((faction.mode == FactionController::humans && humans == 0)
+            || (faction.mode != FactionController::humans && humans != 0)
+            || (faction.mode == FactionController::ai && ais != 1))
+            return invalid("controller faction mode disagrees with effective roster");
+    }
+    if (!cooperative) return invalid("controller policy is disabled for solo battles");
+    SeatId previous_seat{};
+    for (const auto& seat : policy.seats) {
+        if (seat.seat <= previous_seat || (seat.kind != SeatKind::human && seat.kind != SeatKind::ai)
+            || std::none_of(policy.factions.begin(), policy.factions.end(), [&](const auto& f) { return f.player == seat.player; }))
+            return invalid("invalid controller seat order, kind or faction");
+        previous_seat = seat.seat;
+    }
+    for (const auto& unit : setup.units) {
+        // WAD-38: an artificial enemy-owned aim marker is never a command unit.
+        if (unit.barrage_source != invalid_entity_id) {
+            const auto* source = setup_unit(setup, unit.barrage_source);
+            const auto owner = std::find_if(setup.players.begin(), setup.players.end(),
+                [&](const auto& player) { return player.player_id == unit.owner; });
+            const auto source_owner = source ? std::find_if(setup.players.begin(), setup.players.end(),
+                [&](const auto& player) { return player.player_id == source->owner; }) : setup.players.end();
+            if (unit.barrage_source >= unit.entity_id || unit.control != UnitControl::none
+                || unit.controller_seat.value != 0 || unit.purchase_type != 0
+                || unit.purchase_token != 0 || !unit.contained.empty() || owner == setup.players.end()
+                || (source && (source->barrage_source != invalid_entity_id
+                    || source_owner == setup.players.end() || source_owner->team_id == owner->team_id)))
+                return invalid("artificial barrage marker has invalid source, owner or controller metadata");
+            continue;
+        }
+        const auto faction = std::find_if(policy.factions.begin(), policy.factions.end(), [&](const auto& f) { return f.player == unit.owner; });
+        if (faction == policy.factions.end()) {
+            if (unit.control != UnitControl::none || unit.controller_seat.value != 0)
+                return invalid("unmapped unit has controller fields");
+            continue;
+        }
+        if (unit.control == UnitControl::shared_structure && unit.controller_seat.value == 0) continue;
+        if (unit.control != UnitControl::mobile) return invalid("mapped mobile unit requires an explicit controller");
+        const auto seat = std::find_if(policy.seats.begin(), policy.seats.end(), [&](const auto& row) {
+            return row.seat == unit.controller_seat && row.player == unit.owner
+                && (row.active || faction->mode == FactionController::passive);
+        });
+        if (seat == policy.seats.end()
+            || (faction->mode == FactionController::humans && seat->kind != SeatKind::human)
+            || (faction->mode == FactionController::ai && seat->kind != SeatKind::ai))
+            return invalid("mobile controller is inactive or belongs to another faction/control mode");
+    }
+    for (const auto& squadron : setup.squadrons) {
+        const auto* root = setup_unit(setup, squadron.container);
+        if (!root || root->control == UnitControl::shared_structure || root->barrage_source != invalid_entity_id)
+            return invalid("controller squadron requires a mobile root");
+        for (const auto id : squadron.members) {
+            const auto* member = setup_unit(setup, id);
+            if (!member || member->barrage_source != invalid_entity_id
+                || member->controller_seat != root->controller_seat || member->control != root->control)
+                return invalid("squadron controller differs from its root");
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> validate_command_provenance(const PlayerCommand& command, const TacticalSetup& setup) {
+    const auto invalid = [] { return fail<void>(diagnostic_codes::invalid_issuer, "invalid command controller provenance", {}); };
+    if (std::holds_alternative<BattleControlPayload>(command.payload)
+        && (command.origin != CommandOrigin::engine || !setup.controllers)) return invalid();
+    if (std::holds_alternative<GiftPayload>(command.payload)) {
+        if (!setup.controllers || command.origin != CommandOrigin::seat) return invalid();
+        const auto sender = std::lower_bound(setup.controllers->seats.begin(), setup.controllers->seats.end(), command.issuing_seat,
+            [](const auto& row, const auto id) { return row.seat < id; });
+        if (sender == setup.controllers->seats.end() || sender->seat != command.issuing_seat
+            || sender->kind != SeatKind::human) return invalid();
+    }
+    if (command.origin == CommandOrigin::ordinary)
+        return !setup.controllers && command.issuing_seat.value == 0 ? core::Result<void>::success() : invalid();
+    if (!setup.controllers) return invalid();
+    if (command.origin == CommandOrigin::engine)
+        return command.issuing_seat.value == 0 ? core::Result<void>::success() : invalid();
+    if (command.origin != CommandOrigin::seat || command.issuing_seat.value == 0) return invalid();
+    for (const auto& seat : setup.controllers->seats)
+        if (seat.seat == command.issuing_seat && seat.player == command.key.player_id)
+            return core::Result<void>::success();
+    return invalid();
+}
+
+core::Result<void> detail::apply_battle_control_policy(TacticalSetup& setup, const PlayerCommand& command) {
+    const auto invalid = [] { return fail<void>(diagnostic_codes::invalid_command, "invalid battle-control transition", {}); };
+    const auto* change = std::get_if<BattleControlPayload>(&command.payload);
+    if (!change || !setup.controllers || command.origin != CommandOrigin::engine
+        || command.issuing_seat.value != 0 || !command.units.empty()
+        || change->policy.factions.size() != 1 || change->policy.factions.front().player != command.key.player_id)
+        return invalid();
+    auto next = *setup.controllers;
+    const auto owner = command.key.player_id;
+    const auto departed = std::find_if(next.seats.begin(), next.seats.end(), [&](const auto& row) {
+        return row.seat == change->departed && row.player == owner && row.kind == SeatKind::human && row.active;
+    });
+    if (departed == next.seats.end()) return invalid();
+    const auto count = std::count_if(next.seats.begin(), next.seats.end(), [&](const auto& row) { return row.player == owner; });
+    if (change->policy.seats.size() != static_cast<std::size_t>(count)) return invalid();
+    std::size_t index{};
+    for (auto& row : next.seats) if (row.player == owner) {
+        const auto& proposed = change->policy.seats[index++];
+        if (proposed.seat != row.seat || proposed.player != owner || proposed.kind != row.kind
+            || (row.kind == SeatKind::human && proposed.active != (row.active && row.seat != change->departed)))
+            return invalid();
+        row.active = proposed.active;
+    }
+    const auto faction = std::find_if(next.factions.begin(), next.factions.end(), [&](const auto& row) { return row.player == owner; });
+    if (faction == next.factions.end()) return invalid();
+    faction->mode = change->policy.factions.front().mode;
+    auto validation = setup;
+    validation.controllers = next; validation.units.clear(); validation.squadrons.clear();
+    if (auto valid = validate_controllers(validation); !valid) return valid;
+    const bool humans = faction->mode == FactionController::humans;
+    const auto active_ai = std::count_if(next.seats.begin(), next.seats.end(), [&](const auto& row) {
+        return row.player == owner && row.kind == SeatKind::ai && row.active;
+    });
+    if ((humans && active_ai != 0) || (!humans && faction->mode == FactionController::ai && active_ai != 1)
+        || (!humans && faction->mode == FactionController::passive && active_ai > 1)) return invalid();
+    setup.controllers = std::move(next);
+    return core::Result<void>::success();
+}
+
 core::Result<void> validate_setup(const TacticalSetup& setup) {
     if (setup.domain != BattleDomain::space && setup.domain != BattleDomain::land) {
         return fail<void>(diagnostic_codes::invalid_setup, "unknown tactical battle domain", {});
@@ -351,7 +505,7 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
             previous = id;
         }
     }
-    return core::Result<void>::success();
+    return validate_controllers(setup);
 }
 
 core::Result<void> validate_replay(const TacticalReplay& replay) {
@@ -385,6 +539,7 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
         return fail<void>(diagnostic_codes::resource_limit,
             "tick/command count exceeds tactical replay resource limits", path);
     }
+    std::optional<TacticalSetup> effective;
     for (std::size_t index = 0; index < replay.commands.size(); ++index) {
         const auto& command = replay.commands[index];
         const auto label = command_label(index, command);
@@ -396,9 +551,14 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
             return fail<void>(diagnostic_codes::order,
                 label + " does not strictly follow the previous (tick, player, sequence)", path);
         }
+        if (auto provenance = validate_command_provenance(command, replay.setup); !provenance) return provenance;
         const auto shape = detail::validate_command_shape(command, replay.setup.players, label, path);
         if (!shape) {
             return shape;
+        }
+        if (std::holds_alternative<BattleControlPayload>(command.payload)) {
+            if (!effective) effective = replay.setup;
+            if (auto valid = detail::apply_battle_control_policy(*effective, command); !valid) return valid;
         }
         if (const auto* cancel = std::get_if<CancelPayload>(&command.payload);
             cancel != nullptr && cancel->entry_id != 0 && !replay.setup.queue_identities) {

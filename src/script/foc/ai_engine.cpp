@@ -465,7 +465,10 @@ void Engine::note_handle(const tactical::PlayerId owner) const noexcept {
 }
 
 void Engine::queue_event(authoritative::ScriptEvent event) {
-    if (auto* turn = staged()) { turn->scheduler.push_back(PlayerEffects::SchedulerEvent{std::move(event), false}); return; }
+    if (auto* turn = staged()) {
+        turn->scheduler.emplace_back(std::in_place_type<PlayerEffects::SchedulerEvent>, std::move(event), false);
+        return;
+    }
     event.key.sequence = sequence_++;
     events_.push_back(std::move(event));
 }

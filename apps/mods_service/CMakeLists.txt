@@ -4,9 +4,12 @@
 #
 # Compile shared portable helpers in this target so all objects use the static CRT.
 include("${PROJECT_SOURCE_DIR}/src/mods/sources.cmake")
+# VFS mounting/byte reads stay in the existing engine-linked load-check helper.
+list(FILTER EAWR_MODS_SOURCES EXCLUDE REGEX "/file_index_build[.]cpp$")
 include("${PROJECT_SOURCE_DIR}/cmake/EawrBuildIdentity.cmake")
 set(EAWR_MODS_SERVICE_SOURCES
     src/line_framer.cpp
+    src/file_methods.cpp
     src/loadcheck.cpp
     src/methods.cpp
     src/model_methods.cpp

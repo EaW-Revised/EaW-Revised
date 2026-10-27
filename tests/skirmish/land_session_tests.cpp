@@ -43,7 +43,7 @@ TacticalContent content(std::shared_ptr<const LandTerrain> terrain, std::size_t 
         member.create_team = true; member.movement_class = "walker"; member.max_speed = whole(80);
         member.locomotor = "synthetic-walking";
         binding.company.members.push_back(member);
-        binding.members.push_back({12, {whole(80), whole(120), whole(150), whole(2), whole(1), false}});
+        binding.members.push_back({12, {whole(80), whole(120), whole(150), whole(2), whole(1), false, eawr::units::LandCollisionGroup::infantry}, 0, {}, {}, {}});
     }
     result.land.companies.push_back(std::move(binding));
     return result;
@@ -210,7 +210,8 @@ void contracts() {
         expect(routed.unit_state(5) == structure, "static structure remains fixed while squads move");
     }
     expect(detoured && crossed, "squad ordered through blocking structure routes around and passes it");
-    expect(!session.submit({{0, 1, 1}, {1}, AttackPayload{3}}), "land command surface excludes combat");
+    expect(static_cast<bool>(session.submit({{0, 1, 1}, {1}, AttackPayload{3}})), "land command surface accepts attack");
+    expect(!session.submit({{0, 1, 2}, {1}, AttackMovePayload{}}), "land attack-move remains explicitly unavailable");
     expect(!session.submit({{0, 1, 1}, {1}, MovePayload{{}, false, true}}), "land waypoint queue is explicitly unavailable");
     auto partial = tables;
     partial.land.companies[0].members[1].type = 0;
@@ -225,7 +226,7 @@ void contracts() {
     expect(take(space_session.save_land_checkpoint_state()).empty(), "space raw land checkpoint bytes are absent");
     auto parsed = take(checkpoint::parse_checkpoint(checkpoint_bytes(session)));
     const auto* section = parsed.find(checkpoint::SectionId::land_state);
-    expect(section && section->version == 5 && !section->required, "land services use the optional allocated section");
+    expect(section && section->version == 6 && !section->required, "land services use the optional allocated section");
     auto missing = parsed;
     std::erase_if(missing.sections, [](const auto& s) { return s.id == static_cast<std::uint16_t>(checkpoint::SectionId::land_state); });
     expect(!checkpoint::load_tactical_checkpoint(take(checkpoint::write_checkpoint(missing)),

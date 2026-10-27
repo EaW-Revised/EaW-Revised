@@ -65,6 +65,12 @@ struct GatheredObject {
 class GalacticSession::Impl {
 public:
     GalacticSetup setup;
+    core::LoadNoteCollector load_note_collector; // diagnostics only, never checkpointed or hashed
+    std::size_t load_note_count{};
+    void merge_load_notes(core::LoadNoteBuffer& buffer) {
+        load_note_collector.merge(buffer);
+        load_note_count = load_note_collector.snapshot().size();
+    }
     std::shared_ptr<const session_detail::NativePopulationSchema> native_population_schema;
     std::shared_ptr<const IncomeSetup> native_income_schema;
     std::shared_ptr<const FiscalSetup> native_fiscal_schema;
@@ -149,6 +155,7 @@ public:
     void execute_corruption(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     void refresh_ability_actor(const CensusObject&);
     void lose_ability_actor(EntityId);
+    void sync_auto_spies(EntityId, TypeId, const CensusObject*); // WGUI-101 automatic unit/structure spies
     const CensusObject* movement_actor(EntityId id) const {
         const auto at = actor_records.find(id); return at == actor_records.end() ? nullptr : &at->second;
     }

@@ -20,6 +20,7 @@
 #include <ios>
 #include <iostream>
 #include <optional>
+#include <set>
 #include <span>
 #include <sstream>
 #include <string>
@@ -210,6 +211,38 @@ void synthetic_special_sources() {
 }
 
 void synthetic_roster_gate() {
+    {
+        eawr::units::UnitTables tables;
+        auto rejected = unit_type("Rejected_Unit", UnitKind::ship, "Empire", 100);
+        eawr::units::Ability replenish;
+        replenish.type = "REPLENISH_WINGMEN";
+        rejected.abilities.push_back(replenish); // No replenishment team: rejected by the ability loader.
+        tables.units.push_back(rejected);
+        auto retained = unit_type("Warning_Unit", UnitKind::ship, "Empire", 100);
+        eawr::units::Ability bomb;
+        bomb.type = "HARMONIC_BOMB";
+        bomb.recharge_seconds = whole(20);
+        retained.abilities.push_back(bomb); // Empty Spawned_Object_Type: ability retained with a warning.
+        tables.units.push_back(retained);
+        std::vector<eawr::core::Diagnostic> diagnostics;
+        const auto content = eawr::units::ability_table(tables, {}, nullptr, true,
+            eawr::units::ContentErrors::skip_object, &diagnostics);
+        expect(content && skirmish::skipped_type_ids(diagnostics) == std::vector<std::string>{"Rejected_Unit"},
+            "#5064: only the actually rejected type enters the skip set");
+        expect(skirmish::content_load_summary(diagnostics) == "1 unit type skipped, 1 unit with content warnings",
+            "#5064: rejected and retained warning types have separate counts");
+        if (content) {
+            const auto* kept = content.value().find(eawr::assets::object_type_crc("Warning_Unit"));
+            expect(kept && kept->abilities.size() == 1 && kept->abilities[0].unresolved_spawn
+                    && kept->abilities[0].unresolved_spawn->empty() && kept->abilities[0].recharge_frames == 600
+                    && !content.value().find(eawr::assets::object_type_crc("Rejected_Unit")),
+                "#5064: warning retains the authored ability and cooldown; the rejected profile is absent");
+        }
+        expect(std::any_of(diagnostics.begin(), diagnostics.end(), [](const auto& diagnostic) {
+            return diagnostic.severity == eawr::core::Severity::warning
+                && diagnostic.message.find("creation skipped; ability retained") != std::string::npos;
+        }), "#5064: the detailed retained-ability warning survives");
+    }
     eawr::units::UnitTables ability_tables;
     auto authored = unit_type("Admonitor_Star_Destroyer", UnitKind::ship, "Empire", 100);
     eawr::units::Ability unsupported;
@@ -309,6 +342,43 @@ void synthetic_roster_gate() {
 }
 
 void synthetic_start() {
+    {
+        auto selected_tables = synthetic_tables();
+        auto selected_fixture = synthetic_fixture();
+        selected_fixture.slots.resize(2);
+        selected_fixture.slots[0].fleet.push_back("Courier");
+        selected_fixture.slots[1].faction = "Nova";
+        auto selected_inputs = synthetic_inputs(selected_tables);
+        selected_inputs.factions.push_back({"Nova", true, false, false, std::nullopt, "Nova_AI"});
+        selected_inputs.faction_forces.push_back({"nOvA", {"Spindle"}});
+        selected_inputs.faction_forces.push_back({"Unused", {"Unselected_Force"}});
+        for (auto& placement : selected_inputs.placements) {
+            if (placement.type == "Team_01_Space_Station") {
+                placement.marker_for.push_back({"Observatory", "Wildlife, NOVA"});
+                placement.marker_for.push_back({"Unselected_Station", "Unused"});
+            }
+        }
+        const auto missing = skirmish::missing_start_types(selected_fixture, selected_inputs, selected_tables);
+        expect(missing == std::set<std::string>{"Courier", "Observatory", "Spindle"},
+            "SC-01: selected fleet, arbitrary-named station and faction forces extend the closure without unrelated factions");
+        expect(!skirmish::build_start(selected_fixture, selected_inputs),
+            "SC-01: selected types outside the loaded roots cannot start before extension");
+        selected_tables.units.push_back(unit_type("Observatory", UnitKind::station, "Nova", 100));
+        selected_tables.units.push_back(unit_type("Spindle", UnitKind::ship, "Nova", 20));
+        selected_tables.units.push_back(unit_type("Courier", UnitKind::ship, "Rebel", 10));
+        expect(skirmish::missing_start_types(selected_fixture, selected_inputs, selected_tables).empty(),
+            "SC-01: an already loaded closure needs no reload");
+        const auto selected_start = skirmish::build_start(selected_fixture, selected_inputs);
+        expect(static_cast<bool>(selected_start), "SC-01: nonstock faction starts with its authored types");
+        if (selected_start) {
+            for (const auto& [name, owner] : std::vector<std::pair<std::string, std::uint32_t>>{
+                    {"Observatory", 2}, {"Spindle", 2}, {"Courier", 1}}) {
+                expect(std::any_of(selected_start.value().units.begin(), selected_start.value().units.end(),
+                    [&](const auto& unit) { return unit.type == name && unit.state.owner == owner; }),
+                    "SC-01: extended start places the selected authored type for its owner");
+            }
+        }
+    }
     const auto tables = synthetic_tables();
     const auto fixture = synthetic_fixture();
     const auto inputs = synthetic_inputs(tables);

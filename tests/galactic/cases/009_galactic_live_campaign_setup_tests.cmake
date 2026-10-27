@@ -35,3 +35,9 @@ set_tests_properties(galactic_mp_all_stock_protection_live PROPERTIES LABELS gam
 
 eawr_add_game_data_test(NAME galactic_retail_production_numbers_stock COMMAND galactic_live_campaign_setup_tests --retail-production-numbers)
 set_tests_properties(galactic_retail_production_numbers_stock PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 600)
+
+eawr_add_game_data_test(NAME galactic_unresolved_location COMMAND galactic_live_campaign_setup_tests --unresolved-location)
+set_tests_properties(galactic_unresolved_location PROPERTIES LABELS game-data SKIP_REGULAR_EXPRESSION "SKIPPED:")
+
+eawr_add_game_data_test(NAME galactic_guard_load_notes_stock COMMAND galactic_live_campaign_setup_tests --guard-load-notes)
+eawr_add_game_data_test(NAME galactic_production_load_notes_stock COMMAND galactic_live_campaign_setup_tests --production-load-notes)

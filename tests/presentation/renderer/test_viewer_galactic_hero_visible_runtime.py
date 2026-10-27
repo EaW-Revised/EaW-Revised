@@ -132,6 +132,8 @@ class GalacticHeroVisibleRuntime(unittest.TestCase):
         report = directory / (name + ".json")
         command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
                    "--path", str(ROOT / "apps/viewer/project")]
+        if os.environ.get("EAWR_JOB_GC_RENDER_THREAD"):
+            command += ["--render-thread", os.environ["EAWR_JOB_GC_RENDER_THREAD"]]
         if script:
             command += ["--script", str(script)]
         command += ["--", "--eawr-galactic", self.campaign, "--eawr-game-root", GAME_ROOT,

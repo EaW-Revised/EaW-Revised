@@ -58,17 +58,23 @@ void EawrTacticalHud::set_alternate(const std::optional<std::uint32_t> index, co
 
 void EawrTacticalHud::set_probe(std::function<void()> probe) {
     probe_ = std::move(probe);
-    set_process(static_cast<bool>(probe_));
+    set_process(static_cast<bool>(probe_) || static_cast<bool>(movie_warmup_));
+}
+
+void EawrTacticalHud::set_movie_warmup(std::function<bool()> warmup) {
+    movie_warmup_ = std::move(warmup);
+    set_process(static_cast<bool>(probe_) || static_cast<bool>(movie_warmup_));
 }
 
 void EawrTacticalHud::_notification(const int what) {
     if (what == NOTIFICATION_RESIZED || what == NOTIFICATION_READY || what == NOTIFICATION_ENTER_TREE) relayout();
+    if (what == NOTIFICATION_PROCESS && movie_warmup_ && movie_warmup_()) movie_warmup_ = nullptr;
     if (what == NOTIFICATION_PROCESS && probe_ && laid_out_.x > 0.0F) {
         const std::function<void()> probe = std::move(probe_);
         probe_ = nullptr;
-        set_process(false);
         probe();
     }
+    if (what == NOTIFICATION_PROCESS) set_process(static_cast<bool>(probe_) || static_cast<bool>(movie_warmup_));
 }
 
 void EawrTacticalHud::_draw() {}

@@ -274,7 +274,53 @@ void test_default_worker_count_table() {
     }
 }
 
+void test_deferred_frame_uploads() {
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        RecordingBackend backend, reference_backend;
+        particles::EffectRegistry registry(backend), reference(reference_backend);
+        ThreadExecutor executor(workers);
+        registry.set_executor(&executor);
+        reference.set_executor(&executor);
+        std::vector<particles::EffectHandle> handles, reference_handles;
+        for (std::uint32_t seed = 1; seed <= 4; ++seed) {
+            handles.push_back(registry.spawn(mixed_system(), seed, 256).value());
+            reference_handles.push_back(reference.spawn(mixed_system(), seed, 256).value());
+        }
+        const auto camera = test_camera();
+        std::vector<particles::EffectFrameStats> actual, expected;
+        {
+            const auto uploads = registry.defer_uploads();
+            const auto immediate = reference.defer_uploads(false);
+            for (int tick = 0; tick < 36; ++tick) {
+                expect(bool(registry.advance_all(handles, 1.0F / 30.0F, camera, actual)), "deferred batch advances");
+                expect(bool(reference.advance_all(reference_handles, 1.0F / 30.0F, camera, expected)), "reference advances");
+                for (std::size_t index = 0; index < actual.size(); ++index)
+                    expect(same_stats(actual[index], expected[index]), "deferred uploads retain every CPU sample and statistic");
+                expect(backend.record.empty(), "catch-up samples never upload intermediate streams");
+                expect(!reference_backend.record.empty(), "disabled scope retains immediate submission");
+            }
+            {
+                const auto nested = registry.defer_uploads();
+                expect(bool(registry.present_all(handles, camera)), "nested presentation succeeds");
+            }
+            expect(backend.record.empty(), "nested scope does not flush an unfinished frame");
+            // A released group must not leave a queued dangling pointer or submit a dead RID.
+            expect(bool(registry.release(handles.back())), "release during deferred frame succeeds");
+            expect(bool(reference.release(reference_handles.back())), "reference releases the same group");
+        }
+        expect(backend.record.size() == 9, "one final upload per live drawable emitter across 36 samples");
+        for (const auto& [resource, stream] : backend.last)
+            expect(particles::stream_hash(stream) == particles::stream_hash(reference_backend.last.at(resource)),
+                "the frame submits the final sample's stream");
+        expect(backend.invalid_updates == 0 && backend.wrong_thread == 0, "deferred commits use live resources on the owner thread");
+        const auto before = backend.record.size();
+        expect(bool(registry.present_all(std::span<const particles::EffectHandle>(handles).first(3), camera)), "ordinary present after deferral succeeds");
+        expect(backend.record.size() == before + 9, "scope exit restores immediate submission");
+    }
+}
+
 void test_batch_matches_serial() {
+    test_deferred_frame_uploads();
     particles::EffectRegistry::set_stream_bucketing_default(false);
     const Script serial = play(false, nullptr, true);
     particles::EffectRegistry::set_stream_bucketing_default(true);

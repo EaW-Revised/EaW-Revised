@@ -7,6 +7,9 @@ namespace eawr::sim::tactical::session_detail {
 // Ordered fragments preserve the session's original member lifetime order.
 struct SessionStoreRules {
     TacticalSetup setup;
+    // Only opt-in battles retain a second setup: live policy may change, the
+    // sealed replay entry and campaign binding must remain immutable.
+    std::optional<TacticalSetup> controller_entry;
     std::vector<SensorProfile> sensors;
     DurabilityTable durability;
     // Derived from durability.difficulty at creation, never hashed: one scaled copy of every
@@ -27,7 +30,8 @@ struct SessionStoreRules {
         const DurabilityTable& table, const MotionTable& motion_table, const CombatTable& combat_table,
         const VictoryRules& victory_rules, const AbilityTable& ability_table, const EconomyRules& economy_rules,
         const MapBox& box)
-        : setup(source), sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
+        : setup(source), controller_entry(source.controllers ? std::optional(source) : std::nullopt),
+          sensors(sensor_table.begin(), sensor_table.end()), durability(table), motion(motion_table),
           combat(combat_table), victory(victory_rules), abilities(ability_table), economy(economy_rules), map_box(box) {}
 };
 

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -598,8 +599,129 @@ void test_launch_state() {
     expect(near(state.value().velocity.x, 3536) && near(state.value().velocity.z, -3536), "FL-06: full speed along the vector");
 }
 
+static void controller_launch_attribution() {
+    for (const auto humans : {2U, 3U, 4U}) for (const bool shared : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup start;
+            start.seed = seed; start.players = players();
+            start.players.push_back({3, 1, 1, tactical::player_flag_commandable});
+            start.departure_policy = tactical::MultiplayerDeparturePolicy{{empire, rebel, 3}};
+            start.units = {unit(1, carrier_type, empire, at(0, 0))};
+            start.first_free_entity_id = 2;
+            tactical::EconomyRules money; money.campaign = true;
+            for (const auto owner : {empire, rebel, 3U}) {
+                tactical::EconomyPlayer account;
+                account.player = owner; account.credit_cap = Fixed{}; account.population_cap = 20;
+                account.ai = owner == rebel; money.players.push_back(account);
+            }
+            start.campaign.emplace(); start.campaign->players = money.players;
+            start.controllers.emplace();
+            start.controllers->factions = {{empire, tactical::FactionController::humans},
+                {rebel, tactical::FactionController::ai}, {3, tactical::FactionController::humans}};
+            for (std::uint32_t seat = 1; seat <= humans; ++seat)
+                start.controllers->seats.push_back({{seat}, empire, eawr::sim::SeatKind::human, true});
+            start.controllers->seats.push_back({{humans + 1}, rebel, eawr::sim::SeatKind::ai, true});
+            for (std::uint32_t seat = humans + 2; seat <= humans * 2 + 1; ++seat)
+                start.controllers->seats.push_back({{seat}, 3, eawr::sim::SeatKind::human, true});
+            start.units.front().control = shared ? tactical::UnitControl::shared_structure : tactical::UnitControl::mobile;
+            start.units.front().controller_seat = {shared ? 0U : humans};
+            auto table = motion();
+            table.squadrons.spawners.front().entries = {{squadron_a, static_cast<std::int32_t>(humans + 1), 1}};
+            table.squadrons.spawners.front().delay_frames = 1;
+            tactical::CombatTable weapons;
+            if (shared) {
+                tactical::CombatProfile station;
+                station.type_id = carrier_type; station.star_base = true;
+                weapons.profiles.push_back(station);
+            }
+            auto made = tactical::TacticalSession::create(start, sensors(), durability(), table, std::nullopt, weapons, {}, {}, money);
+            expect(static_cast<bool>(made), "P3: shared/mobile launch fixture creates for 2/3/4 humans");
+            if (!made) continue;
+            auto world = std::move(made).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::optional<tactical::TacticalSession> restored;
+            std::vector<eawr::sim::EntityId> births;
+            std::vector<std::string> hashes;
+            std::vector<eawr::sim::EntityId> first_members;
+            bool saved_first_birth{};
+            bool gifted_carrier{};
+            // FC-28 services every 30 frames, independently of the one-frame spawn delay.
+            for (unsigned frame = 0; frame < 280; ++frame) {
+                if (!shared && !gifted_carrier && !births.empty()) {
+                    tactical::PlayerCommand gift{{frame, empire, frame}, {1}, tactical::GiftPayload{{1}},
+                        {humans}, tactical::CommandOrigin::seat};
+                    expect(static_cast<bool>(world.submit(gift)), "P4: carrier gift submits after its first independent launch");
+                    if (restored) expect(static_cast<bool>(restored->submit(gift)), "P4: restored carrier receives the gift");
+                    gifted_carrier = true;
+                }
+                if (frame == 200 || frame == 250) {
+                    tactical::PlayerCommand command{{frame, empire, frame}, first_members, tactical::DamagePayload{units(1000)}};
+                    if (frame == 250) { command.units.clear(); command.payload = tactical::QuitPayload{}; }
+                    command.origin = tactical::CommandOrigin::engine;
+                    expect(static_cast<bool>(world.submit(command)), "P3: replacement or conversion event submits");
+                    if (restored) expect(static_cast<bool>(restored->submit(command)), "P3: restored producer receives the same event");
+                }
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto advanced = world.step(executor);
+                expect(static_cast<bool>(advanced), "P3: carrier attribution advances");
+                if (!advanced) { std::cerr << advanced.error().message << '\n'; break; }
+                hashes.push_back(advanced.value().state_sha256 + advanced.value().snapshot->sha256());
+                if (restored) {
+                    const auto resumed = restored->step(executor);
+                    expect(resumed && resumed.value().state_sha256 == advanced.value().state_sha256
+                        && resumed.value().snapshot->canonical_bytes() == advanced.value().snapshot->canonical_bytes(),
+                        "P3: restored output cursor and replacement/conversion equal live");
+                }
+                for (const auto& group : world.squadrons()) {
+                    const auto* container = instance(*world.snapshot(), group.container);
+                    if (!container) { expect(false, "P3: launched group publishes its root"); continue; }
+                    const auto known = std::find(births.begin(), births.end(), group.container);
+                    if (known == births.end()) {
+                        const auto seat = shared ? 1U + static_cast<std::uint32_t>(births.size() % humans)
+                            : gifted_carrier ? 1U : humans;
+                        expect(container->controller_seat.value == seat && container->control == tactical::UnitControl::mobile,
+                            "P3: mobile output inherits producer; shared output rotates eligible humans per successful birth");
+                        births.push_back(group.container);
+                        if (first_members.empty()) first_members = group.members;
+                    }
+                    if (!shared && gifted_carrier && frame < 200 && !births.empty() && group.container == births.front())
+                        expect(container->controller_seat.value == humans,
+                            "P4: launched squadron retains its previous controller after gifting its carrier");
+                    for (const auto id : group.members) {
+                        const auto* craft = instance(*world.snapshot(), id);
+                        expect(craft && craft->owner == container->owner && craft->controller_seat == container->controller_seat,
+                            "P3: launch, replacement and conversion retain one controller across root and members");
+                    }
+                    if (frame >= 251) expect(container->owner == 3
+                        && container->controller_seat.value >= humans + 2 && container->controller_seat.value <= humans * 2 + 1,
+                        "P3: ownership conversion remaps every independent squadron into the new faction's controller domain");
+                }
+                if (frame == 0 || (births.size() == 1 && !saved_first_birth)) {
+                    if (births.size() == 1) saved_first_birth = true;
+                    const auto saved = world.save_checkpoint_state();
+                    auto fresh = tactical::TacticalSession::from_replay(world.record(), sensors(), durability(), table, std::nullopt, weapons, {}, {}, money);
+                    expect(saved && fresh, "P3: carrier checkpoint factory creates");
+                    if (saved && fresh) {
+                        const auto loaded = fresh.value().load_checkpoint_state(saved.value());
+                        expect(static_cast<bool>(loaded), "P3: checkpoint restores shared producer output ordinal");
+                        if (!loaded) { std::cerr << loaded.error().message << '\n'; break; }
+                        const auto recaptured = fresh.value().save_checkpoint_state();
+                        expect(recaptured && recaptured.value() == saved.value(), "P3: producer continuation round-trips exactly");
+                        restored.emplace(std::move(fresh).value());
+                    }
+                }
+            }
+            expect(births.size() == humans + 2, "P3: initial output and a depleted squadron's replacement both appear");
+            if (reference.empty()) reference = hashes;
+            expect(hashes == reference, "P3: producer attribution and conversion agree on 1/2/4/8 workers");
+        }
+    }
+}
+
 // C-04 (FL-06, FL-07): the station's squadron leaves its bay; craft first, then the container.
 void test_launch() {
+    controller_launch_attribution();
     tactical::TacticalSetup setup;
     setup.seed = seed;
     setup.players = players();

@@ -78,7 +78,12 @@ struct ScriptedInput final {
 
 struct Options final {
     bool land{};
+    bool observer_multiplayer{};
+    sim::SeatId controller_seat{};
+    std::vector<std::pair<sim::SeatId, std::string>> controller_names;
     std::filesystem::path land_bindings;
+    // #5130: names belong to the observer, outside deterministic battle content.
+    std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
     std::shared_ptr<const PreparedBattle> borrowed_battle;
     std::shared_ptr<platform::TacticalFeed> borrowed_feed;
     std::shared_ptr<LanMatch> lan;
@@ -184,6 +189,8 @@ struct Options final {
     // bookkeeping (voice slots, the 0.1 s grace) stays correct either way; only the real
     // Godot playback the report's bus levels measure depends on the schedule.
     bool audio_pace{};
+    // Hidden start-time A/B diagnostic; never persisted in player settings.
+    bool audio_preload{true};
     // --eawr-live-verify on|off: whether finish() replays the recorded command stream headlessly
     // and compares the hashes (report row headless_hashes_equal, else null). The replay costs about
     // as long as the battle did, on one thread, so an interactive (real-time) session skips it by

@@ -197,9 +197,12 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 if (published != instances.end() && published->entity_id == state.entity_id) {
                     entry.visible_to = published->visible_to;
                 }
-                entry.profile = combat.find_target_type(state.type_id);
-                entry.footprint = combat.footprint(state.type_id);
-                entry.durability_profile = health_profile(unit);
+                // Land combat slice: fog has no land provider yet. Only the copied phase input is unmasked.
+                if (land) entry.visible_to = ~std::uint64_t{0};
+                const bool land_wrapper = land && land->requests.contains(state.entity_id);
+                entry.profile = land_wrapper ? nullptr : combat.find_target_type(state.type_id);
+                entry.footprint = land_wrapper ? nullptr : combat.footprint(state.type_id);
+                entry.durability_profile = land_wrapper ? nullptr : health_profile(unit);
                 entry.durability = unit.durability ? &*unit.durability : nullptr;
                 entry.combat = unit.combat ? &*unit.combat : nullptr;
                 // A-04: only a unit at rest turns toward its target.

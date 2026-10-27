@@ -370,7 +370,8 @@ public:
     // Creates an instance from a manifest module, runs its chunk with the
     // service budget at the current tick, then seals its globals. Instance IDs
     // are stable and unique; a failing chunk leaves no instance.
-    [[nodiscard]] core::Result<void> create_instance(std::uint64_t instance, std::string_view root_module);
+    [[nodiscard]] core::Result<void> create_instance(std::uint64_t instance, std::string_view root_module,
+        bool* initial_syntax_error = nullptr);
 
     // Ordered structural commit of the host's partitioned attachment proposals.
     // Fresh initialization events run in the normal partitioned service, with

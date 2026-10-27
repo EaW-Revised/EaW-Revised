@@ -502,8 +502,18 @@ void alignment_strength() {
         signed_config.control->state[0].current = f(6);
         expect(bool(gc::validate_setup(signed_config)), "CGS-17 current control above five remains admitted");
         auto extreme = first; extreme.current = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
-        expect(!gc::calculate_planet_control(control, p, extreme, {}, nullptr, {}, 0),
-            "CGS-17 signed current arithmetic overflow is a typed refusal");
+        auto recovered = gc::calculate_planet_control(control, p, extreme, {}, nullptr, {}, 0);
+        expect(recovered && recovered.value().state.current == f(5) && recovered.value().degraded,
+            "CGS-17 signed current overflow accepts the bounded target under class C");
+        if (recovered) {
+            eawr::core::LoadNoteCollector notes; notes.merge(recovered.value().notes);
+            const auto emitted = notes.snapshot();
+            expect(std::any_of(emitted.begin(), emitted.end(), [](const auto& note) {
+                return note.code == "EAWR-LOAD-1114" && note.classification == eawr::core::LoadCategory::unknown_degrade
+                    && note.action == eawr::core::LoadAction::runtime_degraded && note.object == "1"
+                    && note.effective_value == std::to_string(f(5).raw());
+            }), "CGS-17 signed current overflow records its class-C effective value");
+        }
         auto session = eawr::campaign::GameSession::create(config).value();
         const auto identities = cp::game_identities(config);
         const auto saved = cp::save_game_checkpoint(session, identities).value();
@@ -2748,8 +2758,72 @@ void adapter() {
         && bound.value().ability_types[0].abilities[1].category == 7,
         "automatic control profiles bind authored mod types and direct transition time values");
     types.types[0].control_abilities[0].activation_style = "Galactic_Activated";
-    expect(!eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes), "unsupported control activation style refuses explicitly");
-    data.constants.clear(); expect(!eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes), "omitted transition constants do not acquire guessed defaults");
+    eawr::core::LoadNoteBuffer notes;
+    auto degraded = eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes, &notes);
+    expect(degraded && degraded.value().ability_types[0].abilities.size() == 1, "unknown activation skips only that ability");
+    data.constants.clear();
+    degraded = eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes, &notes);
+    expect(degraded && degraded.value().change_seconds == f(1) && degraded.value().max_ground_forces == 1,
+        "unknown missing constants use documented one-second and one-slot defaults");
+    types.types[0].political_control = f(-4);
+    const auto accepted = eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes, &notes);
+    expect(accepted && accepted.value().types[0].signed_political_control == -4,
+        "LSA-19 binds the signed authored integer before final planet clamp");
+    eawr::core::LoadNoteCollector collector; collector.merge(notes); const auto recorded = collector.snapshot();
+    for (const auto code : {"EAWR-LOAD-1100", "EAWR-LOAD-1101", "EAWR-LOAD-1102", "EAWR-LOAD-1103"})
+        expect(std::any_of(recorded.begin(), recorded.end(), [&](const auto& note) { return note.code == code; }),
+            "B/C political families emit their load notes");
+    const auto b = std::find_if(recorded.begin(), recorded.end(), [](const auto& note) { return note.code == "EAWR-LOAD-1100"; });
+    expect(b != recorded.end() && b->classification == eawr::core::LoadCategory::retail_accepts && b->effective_value == "-4",
+        "B note records LSA-19 effective signed value");
+}
+void load_guard_contracts() {
+    auto signed_setup = setup();
+    signed_setup.control->types[0].political_control = 0;
+    signed_setup.control->types[0].signed_political_control = -4;
+    signed_setup.control->types[1].signed_political_control = 3;
+    const gc::GalacticReplay authored{signed_setup, 4, {}};
+    const auto bytes = gc::write_replay(authored).value();
+    const auto parsed = gc::parse_replay(bytes);
+    expect(parsed && parsed.value() == authored, "signed political escape round trips without changing binary-row encoding");
+    const auto identity = cp::game_identities(signed_setup);
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = eawr::campaign::GameSession::from_replay(authored).value();
+        expect(game.galaxy().snapshot()->control()->state[0].current == f(1),
+            "LSA-19 sums -4 + 3 before clamping; per-type clamp would incorrectly yield two");
+        const auto saved = cp::save_game_checkpoint(game, identity).value();
+        auto restored = cp::load_game_checkpoint(saved, identity, {}, pool).value();
+        expect(restored.session.galaxy().snapshot()->control()->types[0].signed_political_control == -4,
+            "checkpoint retains signed political escape");
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto hash = game.step(pool).value().state_hash.get();
+            if (workers == 1) reference.push_back(hash); else expect(hash == reference[i], "signed political 1/2/4/8 parity");
+        }
+    }
+    reference.clear();
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto extreme = setup();
+        const auto huge = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+        extreme.control->planets[0].transition_modifiers = {{1, 1, huge, 0}, {2, 2, huge, 0}};
+        auto game = gc::GalacticSession::create(extreme).value();
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        for (std::size_t i = 0; i < 4; ++i) {
+            const auto tick = game.step(pool);
+            expect(tick.has_value(), "C transition overflow keeps GC stepping");
+            if (!tick) break;
+            const auto hash = tick.value().state_hash.get();
+            if (workers == 1) reference.push_back(hash); else expect(hash == reference[i], "C transition degrade 1/2/4/8 parity");
+        }
+        const auto notes = game.load_notes();
+        expect(std::count_if(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1114" && note.object == "1";
+        }) == 1, "runtime control note once per code/object over repeated steps");
+        expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) {
+            return note.code == "EAWR-LOAD-1115" && note.effective_value == "one level per admitted frame";
+        }), "C service rate note records the effective fallback");
+    }
 }
 void generate(const std::filesystem::path& directory) {
     std::filesystem::create_directories(directory); const auto r = replay();
@@ -2804,7 +2878,7 @@ int main(int argc, const char* const argv[]) {
         if (argc == 2 && std::string_view(argv[1]) == "--capture-build-list") {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
-        authored_mixed_surface_owners(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
+        load_guard_contracts(); authored_mixed_surface_owners(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
         native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;

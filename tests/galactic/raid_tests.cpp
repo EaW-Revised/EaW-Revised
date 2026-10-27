@@ -8,6 +8,9 @@
 #include "eawr/sim/galactic/raid.hpp"
 #include "../../apps/viewer/src/galactic/raid_input.hpp"
 #include <iostream>
+#include <array>
+#include <cstdint>
+#include <utility>
 #include <stdexcept>
 
 namespace {
@@ -44,6 +47,13 @@ void authored_policy() {
         expect(!take(campaign::build_raid_inputs(types, absent, bindings, factions)),
             "all five raid tags absent produce an empty RaidSetup without failure");
     }
+    for (const auto& [text, expected] : std::array<std::pair<std::string_view, std::int32_t>, 4>{{
+            {"-1.9", -1}, {"2.9", 2}, {"text", 0}, {"9999999999999999999", INT32_MAX}}}) {
+        auto numeric = data; numeric.constants[3].text = text; numeric.constants[4].text = text;
+        const auto parsed = take(campaign::build_raid_inputs(types, numeric, bindings, factions));
+        expect(parsed && parsed->rules.max_heroes == static_cast<std::uint32_t>(expected)
+            && parsed->rules.max_limited == static_cast<std::uint32_t>(expected), "LSA-36 caps retain signed atoi bits");
+    }
     const auto built = take(campaign::build_raid_inputs(types, data, bindings, factions));
     expect(built && built->rules.required_faction == 44 && built->rules.max_heroes == 4 && built->rules.max_limited == 7,
         "raid faction and caps follow modified effective constants");
@@ -64,7 +74,9 @@ void authored_policy() {
         data.constants[2].text = "ModGround | ModAir";
     }
     data.constants.back().number = f(-1);
-    expect(!campaign::build_raid_inputs(types, data, bindings, factions), "malformed raid caps fail setup");
+    const auto from_text = take(campaign::build_raid_inputs(types, data, bindings, factions));
+    expect(from_text && from_text->rules.max_limited == 7,
+        "LSA-36 raid caps parse authored integer text rather than the cached numeric projection");
 }
 
 void qualification_and_input() {

@@ -1091,7 +1091,16 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
     expect(take(provider->content(resolved.conflict)).durability == resolved.content.durability,
         "stock recorded child rebinds exact content");
     const auto hash_before_presentation = staging.state_sha256();
-    const auto view = take(provider->presentation(resolved.conflict, resolved.content));
+    auto diagnostic_content = resolved.content;
+    core::LoadNote diagnostic_note;
+    diagnostic_note.code = "EAWR-LOAD-0001"; diagnostic_note.object = "synthetic-presentation-note";
+    diagnostic_note.message = "preserve startup diagnostics";
+    diagnostic_content.load_notes.push_back(diagnostic_note);
+    const auto view = take(provider->presentation(resolved.conflict, diagnostic_content));
+    expect(view->content.load_notes.size() == diagnostic_content.load_notes.size()
+        && view->content.load_notes.back().object == diagnostic_note.object
+        && view->content.load_notes.back().message == diagnostic_note.message,
+        "prepared stock presentation retains startup load notes");
     expect(view->setup == resolved.conflict.tactical, "presentation receives exact immutable resolved setup");
     expect(view->start && view->start->setup == resolved.conflict.tactical && !view->start->markers.empty(),
         "first presentation copies already prepared native start metadata");

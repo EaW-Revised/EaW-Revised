@@ -60,6 +60,7 @@ public:
         // False in a capture run, whose window is pinned: the window's mode and size are saved
         // but not applied.
         bool apply_window{true};
+        bool multiplayer{}; // #5130 contextual hover-name default.
     };
 
     // One state a control showed, for the report and the GPU case.

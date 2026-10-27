@@ -13,6 +13,23 @@ namespace {
 
 using math::Fixed;
 
+[[nodiscard]] std::string fixed_decimal(const math::Fixed value) {
+    const auto raw = value.raw();
+    const auto magnitude =
+        raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw) : static_cast<std::uint64_t>(raw);
+    const auto scale = static_cast<std::uint64_t>(math::Fixed::scale);
+    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
+    auto remainder = magnitude % scale;
+    if (remainder)
+        text += '.';
+    while (remainder) {
+        remainder *= 10;
+        text += static_cast<char>('0' + remainder / scale);
+        remainder %= scale;
+    }
+    return text;
+}
+
 constexpr std::int64_t one_raw = Fixed::scale;
 constexpr std::int64_t multiplier_limit_raw = max_damage_multiplier * Fixed::scale;
 constexpr std::int64_t health_limit_raw = max_durability_health * Fixed::scale;
@@ -28,18 +45,21 @@ constexpr std::uint64_t never_hit_frames = 999'999;
 // Rounded Q24 arithmetic that remembers its first failure, so a formula reads as one expression.
 struct Arithmetic {
     std::optional<core::Diagnostic> error;
+    bool saturating{};
 
-    Fixed take(core::Result<Fixed> value) {
+    Fixed take(core::Result<Fixed> value, const bool negative = false) {
         if (!value) {
             if (!error) error = value.error();
-            return Fixed{};
+            if (!saturating) return Fixed{};
+            return Fixed::from_raw(negative ? std::numeric_limits<std::int64_t>::min()
+                                            : std::numeric_limits<std::int64_t>::max());
         }
         return value.value();
     }
-    Fixed add(const Fixed a, const Fixed b) { return take(math::add(a, b)); }
-    Fixed sub(const Fixed a, const Fixed b) { return take(math::subtract(a, b)); }
-    Fixed mul(const Fixed a, const Fixed b) { return take(math::multiply(a, b)); }
-    Fixed div(const Fixed a, const Fixed b) { return take(math::divide(a, b)); }
+    Fixed add(const Fixed a, const Fixed b) { return take(math::add(a, b), a.raw() < 0); }
+    Fixed sub(const Fixed a, const Fixed b) { return take(math::subtract(a, b), a.raw() < 0); }
+    Fixed mul(const Fixed a, const Fixed b) { return take(math::multiply(a, b), (a.raw() < 0) != (b.raw() < 0)); }
+    Fixed div(const Fixed a, const Fixed b) { return take(math::divide(a, b), (a.raw() < 0) != (b.raw() < 0)); }
 };
 
 [[nodiscard]] Fixed whole(const std::int64_t value) noexcept { return Fixed::from_raw(value * Fixed::scale); }
@@ -103,6 +123,149 @@ void drain_shields(const DurabilityProfile& profile, const DamageRules& rules, D
     set_shields(profile, rules, state, Fixed::from_raw(std::max<std::int64_t>(0, state.shields.raw() - amount.raw())), frame);
 }
 
+void normalize_damage(DurabilityTable& table, core::LoadNoteBuffer& notes) {
+    if (!table.damage) return;
+    auto& rules = *table.damage;
+    const auto record = [&](const char* code, const std::string& tag, const std::string& before,
+                            const std::string& after, const std::string& message) {
+        core::LoadNote note;
+        note.code = code;
+        note.tag = tag;
+        const auto separator = message.find(": ");
+        note.object = separator == std::string::npos ? "damage rules" : message.substr(0, separator);
+        constexpr std::string_view prefix = "durability profile of type ";
+        if (note.object.starts_with(prefix))
+            note.object.erase(0, prefix.size());
+        note.authored_value = before;
+        note.action = core::LoadAction::clamped;
+        note.effective_value = after;
+        note.diagnostic_code = "EAWR-SIM-0305";
+        note.message = message;
+        notes.append(std::move(note));
+    };
+    const auto clamp_value = [&](Fixed& value, std::int64_t low, std::int64_t high, const char* tag,
+                                 const std::string& message) {
+        const auto before = value.raw();
+        const auto after = std::clamp(before, low, high);
+        if (before != after) {
+            core::LoadNote helper_note;
+            helper_note.code = "EAWR-LOAD-0110";
+            core::LoadNoteBuffer temporary;
+            const auto effective = core::clamp_note(before, low, high, std::move(helper_note), temporary);
+            record("EAWR-LOAD-0110", tag, fixed_decimal(value), fixed_decimal(Fixed::from_raw(effective)), message);
+            value = Fixed::from_raw(effective);
+        }
+    };
+    clamp_value(rules.ion_storm_disable_seconds, 0, curve_x_limit_raw, "Ion_Storm_Shield_Disable_Time",
+                "damage rules: ion-storm window must be between zero and one hour");
+    if (rules.shield_recharge_frames == 0) {
+        record("EAWR-LOAD-0111", "ShieldRechargeIntervalInSecs", "0", "1",
+               "damage rules: the shield recharge interval must be at least one frame");
+        rules.shield_recharge_frames = 1;
+    }
+    const auto depleted = "damage rules: depleted-shield values must be >= 0 and bounded by the health limit";
+    clamp_value(rules.depleted_disable_seconds, 0, health_limit_raw, "Depleted_Shield_Disable_Time", depleted);
+    clamp_value(rules.depleted_increment_seconds, 0, health_limit_raw, "Depleted_Shield_Damage_Increment", depleted);
+    clamp_value(rules.depleted_regen_cap, 0, health_limit_raw, "Depleted_Shield_Regen_Cap", depleted);
+    auto original_curve = rules.diminishing;
+    for (auto& p : rules.diminishing) {
+        p.x = Fixed::from_raw(std::clamp(p.x.raw(), std::int64_t{0}, curve_x_limit_raw));
+        p.y = Fixed::from_raw(std::clamp(p.y.raw(), std::int64_t{0}, multiplier_limit_raw));
+    }
+    std::stable_sort(rules.diminishing.begin(), rules.diminishing.end(),
+                     [](const auto& a, const auto& b) { return a.x < b.x; });
+    std::vector<CurvePoint> unique;
+    for (const auto& p : rules.diminishing) {
+        if (!unique.empty() && unique.back().x == p.x) unique.back() = p;
+        else
+            unique.push_back(p);
+    }
+    if (unique.size() > max_curve_points) unique.resize(max_curve_points);
+    rules.diminishing = std::move(unique);
+    if (original_curve.size() > max_curve_points)
+        record("EAWR-LOAD-0117", "Diminishing_Firepower", std::to_string(original_curve.size()),
+               std::to_string(rules.diminishing.size()),
+               "damage rules: the diminishing-firepower curve has more than " + std::to_string(max_curve_points) +
+                   " points");
+    if (rules.diminishing != original_curve)
+        record("EAWR-LOAD-0112", "Diminishing_Firepower", std::to_string(original_curve.size()),
+               std::to_string(rules.diminishing.size()),
+               "damage rules: curve point needs x in [0, 3600] strictly increasing and y in [0, " +
+                   std::to_string(max_damage_multiplier) + "]");
+    {
+        Arithmetic q;
+        q.saturating = true;
+        const auto second = spline_seconds(rules.diminishing, q);
+        for (std::size_t i = 1; i < rules.diminishing.size() && !q.error; ++i) {
+            const auto h = q.sub(rules.diminishing[i].x, rules.diminishing[i - 1].x);
+            const auto magnitude = [](std::int64_t v) -> std::int64_t {
+                return v == std::numeric_limits<std::int64_t>::min() ? std::numeric_limits<std::int64_t>::max()
+                                                                     : std::llabs(v);
+            };
+            const auto reach =
+                q.add(Fixed::from_raw(magnitude(second[i - 1].raw())), Fixed::from_raw(magnitude(second[i].raw())));
+            (void)q.mul(q.mul(q.add(reach, reach), h), h);
+        }
+        const bool previous_fallback = rules.diminishing_linear_fallback;
+        rules.diminishing_linear_fallback = q.error.has_value();
+        if (q.error && !previous_fallback) {
+            // Saturated spline intermediates cannot guarantee the curve evaluation; use
+            // bounded linear interpolation instead.
+            record("EAWR-LOAD-0116", "Diminishing_Firepower", "spline overflow", "bounded linear interpolation",
+                   "damage rules: the diminishing-firepower curve overflows between its points");
+        }
+    }
+    const auto old_damage = rules.damage_types, old_armor = rules.armor_types;
+    const auto new_damage = std::min(old_damage, max_damage_types), new_armor = std::min(old_armor, max_damage_types);
+    if (old_damage != new_damage || old_armor != new_armor ||
+        rules.armor_mods.size() != static_cast<std::size_t>(old_damage) * old_armor) {
+        std::vector<Fixed> matrix(static_cast<std::size_t>(new_damage) * new_armor, Fixed::from_raw(one_raw));
+        for (std::size_t d = 0; d < new_damage; ++d)
+            for (std::size_t a = 0; a < new_armor; ++a) {
+            const auto old = d * static_cast<std::size_t>(old_armor) + a;
+                if (old < rules.armor_mods.size())
+                    matrix[d * new_armor + a] = rules.armor_mods[old];
+        }
+        record("EAWR-LOAD-0113", "Damage_To_Armor_Mod", std::to_string(old_damage) + "x" + std::to_string(old_armor),
+               std::to_string(new_damage) + "x" + std::to_string(new_armor),
+               "damage rules: the armor table must be damage types x armor types, each at most " +
+                   std::to_string(max_damage_types));
+        rules.damage_types = new_damage;
+        rules.armor_types = new_armor;
+        rules.armor_mods = std::move(matrix);
+    }
+    for (auto& value : rules.armor_mods)
+        clamp_value(value, 0, multiplier_limit_raw, "Damage_To_Armor_Mod",
+                    "damage rules: armor multipliers must be in [0, " + std::to_string(max_damage_multiplier) + "]");
+    for (auto& profile : table.profiles) {
+        const auto type_name = "type#" + std::to_string(profile.type_id);
+        const auto context = "durability profile of type " + type_name;
+        const auto shield = context + ": shields must be in [0, " + std::to_string(max_durability_health) + "]";
+        clamp_value(profile.max_shields, 0, health_limit_raw, "Shield_Points", shield);
+        clamp_value(profile.shield_refresh, 0, health_limit_raw, "Shield_Refresh_Rate", shield);
+        for (auto* armor : {&profile.armor_type, &profile.shield_armor_type})
+            if (*armor != no_type_index && *armor >= rules.armor_types) {
+                record("EAWR-LOAD-0114", "Armor_Type", std::to_string(*armor), "no_type_index",
+                       context + ": armor type index " + std::to_string(*armor) + " is not in the table");
+                *armor = no_type_index;
+        }
+        const auto energy = context + ": energy must be in [0, " + std::to_string(max_durability_health) + "]";
+        clamp_value(profile.max_energy, 0, health_limit_raw, "Energy_Capacity", energy);
+        clamp_value(profile.energy_refresh, 0, health_limit_raw, "Energy_Refresh_Rate", energy);
+    }
+    const auto asteroid = "damage rules: asteroid damage, probability or armor/default damage type is out of range";
+    clamp_value(rules.asteroid_damage, 0, health_limit_raw, "Asteroid_Field_Damage", asteroid);
+    clamp_value(rules.asteroid_rate, 0, one_raw, "Asteroid_Field_Damage_Rate", asteroid);
+    for (auto* type : {&rules.asteroid_damage_type, &rules.default_damage_type})
+        if (*type != no_type_index && *type >= rules.damage_types) {
+            record("EAWR-LOAD-0115", "Damage_Type", std::to_string(*type), "no_type_index", asteroid);
+            *type = no_type_index;
+    }
+    clamp_value(rules.energy_to_shield, 0, multiplier_limit_raw, "EnergyToShieldExchangeRate",
+                "damage rules: the energy-to-shield rate must be in [0, " + std::to_string(max_damage_multiplier) +
+                    "]");
+}
+
 core::Result<void> validate_damage(const DurabilityTable& table) {
     const auto invalid = [](const std::string& message) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, message));
@@ -145,11 +308,14 @@ core::Result<void> validate_damage(const DurabilityTable& table) {
         for (std::size_t i = 1; i < points.size() && !q.error; ++i) {
             const auto h = q.sub(points[i].x, points[i - 1].x);
             const auto reach = q.add(
-                Fixed::from_raw(std::llabs(second[i - 1].raw())), Fixed::from_raw(std::llabs(second[i].raw())));
+                Fixed::from_raw(second[i - 1].raw() == std::numeric_limits<std::int64_t>::min()
+                    ? std::numeric_limits<std::int64_t>::max() : std::llabs(second[i - 1].raw())),
+                Fixed::from_raw(second[i].raw() == std::numeric_limits<std::int64_t>::min()
+                    ? std::numeric_limits<std::int64_t>::max() : std::llabs(second[i].raw())));
             // Twice the reach leaves room for the evaluation's rounding.
             (void)q.mul(q.mul(q.add(reach, reach), h), h);
         }
-        if (q.error) {
+        if (q.error && !rules.diminishing_linear_fallback) {
             return invalid("damage rules: the diminishing-firepower curve overflows between its points");
         }
     }
@@ -218,9 +384,20 @@ core::Result<Fixed> diminishing_factor(const DamageRules& rules, const std::uint
     if (above == points.end()) return core::Result<Fixed>::success(points.back().y);
     if (above == points.begin()) return core::Result<Fixed>::success(points.front().y);
 
+    const auto hi = static_cast<std::size_t>(above - points.begin());
+    if (rules.diminishing_linear_fallback) {
+        const auto lo = hi - 1;
+        const auto t = q.div(q.sub(x, points[lo].x), q.sub(points[hi].x, points[lo].x));
+        const auto value = q.add(points[lo].y, q.mul(t, q.sub(points[hi].y, points[lo].y)));
+        if (q.error) {
+            const auto endpoint = x.raw() - points[lo].x.raw() <= points[hi].x.raw() - x.raw()
+                ? points[lo].y : points[hi].y;
+            return core::Result<Fixed>::success(clamp(endpoint, Fixed{}, Fixed::from_raw(multiplier_limit_raw)));
+        }
+        return core::Result<Fixed>::success(clamp(value, Fixed{}, Fixed::from_raw(multiplier_limit_raw)));
+    }
     const auto second = spline_seconds(points, q);
 
-    const auto hi = static_cast<std::size_t>(above - points.begin());
     const auto lo = hi - 1;
     const auto h = q.sub(points[hi].x, points[lo].x);
     const auto a = q.div(q.sub(points[hi].x, x), h);

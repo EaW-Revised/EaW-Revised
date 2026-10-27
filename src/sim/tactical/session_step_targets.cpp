@@ -187,11 +187,14 @@ core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit
             auto& source = moving[decision.index];
             if (!decision.apply) {
                 source.abilities->pending_buzz_position.reset();
+                source.abilities->pending_buzz_controller = {};
                 continue;
             }
             if (next_id == invalid_entity_id) continue;
             const auto point = *source.abilities->pending_buzz_position;
-            auto droid = impl_->create_buzz_droids(source, point, tick, next_id);
+            auto made = impl_->create_buzz_droids(source, point, tick, next_id);
+            if (!made) return core::Result<void>::failure(made.error());
+            auto droid = std::move(made).value();
             if (impl_->motion.squadrons.find_spawner(droid.state.type_id, droid.state.owner) != nullptr)
                 staging_->born_spawners.push_back(droid.state.entity_id);
             track_victory_change(nullptr, &droid.state, false);

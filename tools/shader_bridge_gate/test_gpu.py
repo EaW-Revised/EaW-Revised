@@ -4,6 +4,7 @@ The rig provides a private JSON artifact via EAWR_JOB_BRIDGE_MANIFEST and the
 separately built probe through the normal probe-library staging mechanism.
 """
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -20,7 +21,14 @@ class BridgeGpu(unittest.TestCase):
         destination = Path(os.environ["EAWR_SHADER_BRIDGE_OUTPUT"])
         destination.mkdir(parents=True, exist_ok=True)
         manifest = Path(os.environ["EAWR_JOB_BRIDGE_MANIFEST"])
-        cases = json.loads(manifest.read_text(encoding="utf-8"))["cases"]
+        specification = json.loads(manifest.read_text(encoding="utf-8"))
+        cases = specification["cases"]
+        for case in cases:
+            for texture in case.get("textures", {}).values():
+                if "file" in texture:
+                    path = manifest.parent / texture["file"]
+                    self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), texture["sha256"])
+                    texture["file"] = str(path)
         with tempfile.TemporaryDirectory(prefix="eawr-bridge-") as temporary:
             project = Path(temporary)
             library = Path(os.environ["EAWR_SHADER_BRIDGE_PROBE_LIBRARY"])
@@ -40,9 +48,11 @@ class BridgeGpu(unittest.TestCase):
                 '[node name="Bridge" type="EawrShaderBridgeProbe"]\n', encoding="utf-8")
             (project / ".godot").mkdir()
             (project / ".godot/extension_list.cfg").write_text("res://bridge.gdextension\n", encoding="utf-8")
-            environment = dict(os.environ, EAWR_SHADER_BRIDGE_MANIFEST=str(manifest))
+            staged_manifest = project / "manifest.json"
+            staged_manifest.write_text(json.dumps(specification), encoding="utf-8")
+            environment = dict(os.environ, EAWR_SHADER_BRIDGE_MANIFEST=str(staged_manifest))
             try:
-                result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "safe", "--path", str(project),
+                result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--render-thread", "separate", "--path", str(project),
                                          "--rendering-method", "forward_plus", "--rendering-driver", "vulkan"],
                                         env=environment, capture_output=True, text=True, timeout=180)
             except subprocess.TimeoutExpired as error:
@@ -56,11 +66,26 @@ class BridgeGpu(unittest.TestCase):
             self.assertEqual(result.returncode, 0, output)
             self.assertNotIn("SHADER ERROR:", output)
             self.assertNotIn("ERROR:", output)
+            self.assertIn("bridge observed_render_thread=Separate", output)
+            self.assertNotIn("bridge observed_render_thread=Safe", output)
+            driver = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                                     "Get-CimInstance Win32_VideoController | Select-Object Name,DriverVersion | ConvertTo-Json"],
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(driver.returncode, 0, driver.stderr)
+            (destination / "gpu-driver.json").write_text(driver.stdout, encoding="utf-8")
             report = (destination / "probe.txt").read_text()
             self.assertIn("status=passed", report)
             self.assertIn(f"panels={len(cases)}", report)
             receipts = []
+            if "orientation-stored-colour" in {case["name"] for case in cases}:
+                orientation = Image.open(destination / "orientation-stored-colour.png").convert("RGBA")
+                samples = [orientation.getpixel(point) for point in ((96,96), (160,96), (96,160), (160,160))]
+                self.assertEqual(len(set(samples)), 4, "orientation panel did not sample four distinct texels")
+                receipts.append({"case": "orientation-stored-colour", "sample_points": [[96,96],[160,96],[96,160],[160,160]],
+                                 "samples_rgba": samples, "alpha_extrema": orientation.getextrema()[3]})
             for name in ("synthetic-ps2", "synthetic-ps1"):
+                if name not in {case["name"] for case in cases}:
+                    continue
                 actual = Image.open(destination / (name + ".png")).convert("RGB")
                 reference = Image.open(destination / "synthetic-reference.png").convert("RGB")
                 error = max(ImageStat.Stat(ImageChops.difference(actual, reference)).mean)
@@ -78,6 +103,17 @@ class BridgeGpu(unittest.TestCase):
                     self.assertLessEqual(max(abs(a-b) for a,b in zip(found,wanted)), 3,
                                          f"stored texel probe {found} != {wanted}")
                 receipts.append({"case": name, "mean_error": error, "stored_samples": samples})
+            for pair in specification.get("comparisons", []):
+                actual = Image.open(destination / (pair["actual"] + ".png")).convert("RGBA")
+                reference = Image.open(destination / (pair["reference"] + ".png")).convert("RGBA")
+                difference = ImageChops.difference(actual, reference)
+                difference.save(destination / (pair["name"] + "-delta.png"))
+                extrema = difference.getextrema()
+                changed = sum(any(pixel[:3]) for pixel in difference.getdata())
+                receipts.append({**pair, "mean_rgba": ImageStat.Stat(difference).mean,
+                                 "max_rgba": [extent[1] for extent in extrema], "changed_rgb_pixels": changed,
+                                 "actual_sha256": hashlib.sha256((destination / (pair["actual"] + ".png")).read_bytes()).hexdigest(),
+                                 "reference_sha256": hashlib.sha256((destination / (pair["reference"] + ".png")).read_bytes()).hexdigest()})
             (destination / "comparison.json").write_text(json.dumps(receipts, indent=2), encoding="utf-8")
 
 

@@ -1,4 +1,5 @@
 #include "scene_content.hpp"
+#include "eawr/assets/asset_names.hpp"
 #include "eawr/core/text.hpp"
 
 #include "eawr/data/retail_values.hpp"
@@ -74,9 +75,8 @@ private:
 };
 
 [[nodiscard]] std::string model_path(const std::string& name) {
-    if (name.empty()) return {};
-    std::string path = folded(name);
-    std::replace(path.begin(), path.end(), '\\', '/');
+    const std::string path = assets::normalized_model_name(name);
+    if (path.empty()) return {};
     return path.starts_with("data/") ? path : "data/art/models/" + path;
 }
 

@@ -38,10 +38,9 @@ bool GalacticMode::State::build_destruction_hud() {
     // slot's dimensions from its authored art, like the other HUD adapters.
     if (background.is_valid()) state.authored_size = background->get_size();
     state.slot->set_texture_hover(texture(data::ui::Field::mouse_over_texture_name));
-    // This authored texture table uses Rebel/Empire/pirates/raid order, not ALT order.
-    const std::size_t faction = command_faction == presentation::ui::HudFaction::rebel ? 0
-        : command_faction == presentation::ui::HudFaction::empire ? 1 : 2;
-    state.slot->set_order_icon(texture(data::ui::Field::icon_alternate_texture_name, faction), false);
+    // WGCH-186: alternate textures are choices, not a default icon. The shared
+    // galaxy action preview retains the template's Icon_Texture_Name, if any.
+    state.slot->set_order_icon(texture(data::ui::Field::icon_texture_name), false);
     state.slot->set_tooltip_text(String::utf8(battle_text("TEXT_TOOLTIP_ABILITY_DESTROY_PLANET_NAME").c_str()));
     // WGCH-154: a click is only consumed; this surface is neither a drag source
     // nor a confirmation button. EawrFleetDrag owns the left-release route.
@@ -98,7 +97,7 @@ void GalacticMode::State::update_destruction_hud() {
     const auto key = static_cast<const void*>(displayed_snapshot.get());
     const bool changed = dragged_fleet != state.drop_fleet || key != state.drop_publication;
     if (changed) {
-        state.drop_fleet = dragged_fleet; state.drop_publication = key; state.raids.clear();
+        state.drop_fleet = dragged_fleet; state.drop_publication = key; state.raids.clear(); state.abilities.clear();
         if (dragged_fleet && !state.fixture && dragged_stack.size() <= 1 && dragged_members.empty()) {
             const auto planets = input_planets();
             for (const auto& planet : planets)
@@ -106,10 +105,19 @@ void GalacticMode::State::update_destruction_hud() {
                     dragged_fleet, planet.id, planets)) state.raids.push_back(std::move(*raid));
         }
     }
+    if (changed && dragged_fleet && galaxy_setup.ability_host && !state.fixture && !prepared_slot) {
+        state.abilities = galactic_view::ability_drop_candidates(input_planets(),
+            [this](auto planet) { return hero_ability_drop(dragged_fleet, planet); });
+        std::erase_if(state.abilities, [&](const auto& ability) {
+            return std::any_of(state.raids.begin(), state.raids.end(),
+                [&](const auto& raid) { return raid.planet == ability.planet; });
+        });
+    }
     if (changed || state.drop_target != fleet_drag_planet) {
         state.drop_target = fleet_drag_planet; state.drop.reset();
-        if (dragged_fleet && state.raids.empty() && galaxy_setup.ability_host && !state.fixture)
-            state.drop = hero_ability_drop(dragged_fleet, fleet_drag_planet);
+        const auto found = std::find_if(state.abilities.begin(), state.abilities.end(),
+            [&](const auto& ability) { return ability.planet == fleet_drag_planet; });
+        if (found != state.abilities.end()) state.drop = *found;
     }
     const auto label = !prepared_slot && state.drop ? std::optional(state.drop->kind) : std::nullopt;
     if (label != state.drop_label) {
@@ -118,10 +126,15 @@ void GalacticMode::State::update_destruction_hud() {
             label.value_or(sim::galactic::AbilityKind::planet_destruction))).c_str()));
         state.slot->set_tooltip_text(state.text->get_text());
     }
-    state.slot->set_visible(state.projected && state.enabled && state.raids.empty() && (prepared_slot || state.drop));
+    state.slot->set_visible(state.projected && state.enabled && state.raids.empty() && (prepared_slot || (state.drop && state.abilities.empty())));
     for (auto& [planet, slot] : state.raid_slots) {
         const bool candidate = std::any_of(state.raids.begin(), state.raids.end(),
             [&](const auto& raid) { return raid.planet == planet; });
+        slot.button->set_visible(candidate && slot.projected && state.enabled);
+    }
+    for (auto& [planet, slot] : state.ability_slots) {
+        const bool candidate = std::any_of(state.abilities.begin(), state.abilities.end(),
+            [&](const auto& ability) { return ability.planet == planet; });
         slot.button->set_visible(candidate && slot.projected && state.enabled);
     }
 }
@@ -153,6 +166,48 @@ void GalacticMode::State::position_destruction_hud(galactic_view::ObjectId plane
             const auto tint = style->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255,255,255,255});
             slot.text->add_theme_color_override("font_color", Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
             slot.text->set_horizontal_alignment(state.right_justified ? HORIZONTAL_ALIGNMENT_RIGHT : HORIZONTAL_ALIGNMENT_LEFT);
+        }
+        slot.projected = alpha > 0;
+        slot.button->set_position(anchor + state.authored_offset * scale);
+        slot.button->set_size(state.authored_size * scale);
+        slot.button->set_modulate(Color(1,1,1,alpha));
+        if (const auto* style = command_catalog.find("g_special_ability"))
+            slot.text->add_theme_font_size_override("font_size", std::max(1,
+                presentation::ui::font_pixel_height(style->integer(data::ui::Field::font_point_size).value_or(0), camera.height)));
+        slot.text->set_size(slot.text->get_minimum_size());
+        slot.text->set_position(state.text_offset * scale - Vector2(state.right_justified ? slot.text->get_size().x : 0, 0));
+        slot.button->set_visible(slot.projected && state.enabled);
+        return;
+    }
+    const auto ability = std::find_if(state.abilities.begin(), state.abilities.end(), [&](const auto& row) { return row.planet == planet; });
+    if (ability != state.abilities.end()) {
+        auto& slot = state.ability_slots[planet];
+        if (!slot.button) {
+            const auto* style = command_catalog.find("g_special_ability");
+            if (!style) return;
+            slot.button = memnew(EawrHudButton); hud->add_child(slot.button);
+            slot.button->set_name(String::utf8(("galaxy_ability_slot_" + std::to_string(planet)).c_str()));
+            const auto texture = [&](data::ui::Field field, std::size_t index = 0) {
+                const auto names = style->list(field);
+                return index < names.size() ? command_texture(names[index]) : Ref<Texture2D>{};
+            };
+            slot.button->set_texture_normal(texture(data::ui::Field::blank_texture_name));
+            slot.button->set_texture_hover(texture(data::ui::Field::mouse_over_texture_name));
+            slot.button->set_order_icon(texture(data::ui::Field::icon_texture_name), false);
+            slot.button->set_action([this] { static_cast<void>(map_input.hud_event()); });
+            slot.text = memnew(Label); slot.button->add_child(slot.text);
+            slot.text->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            const auto face = hud_fonts->resolve({std::string(style->text(data::ui::Field::font_name)),
+                style->integer(data::ui::Field::font_point_size).value_or(0)}, "english");
+            slot.text->add_theme_font_override("font", hud_fonts->font(face));
+            const auto tint = style->color(data::ui::Field::text_color).value_or(data::ui::Rgba8{255,255,255,255});
+            slot.text->add_theme_color_override("font_color", Color(tint.r/255.0F,tint.g/255.0F,tint.b/255.0F,tint.a/255.0F));
+            slot.text->set_horizontal_alignment(state.right_justified ? HORIZONTAL_ALIGNMENT_RIGHT : HORIZONTAL_ALIGNMENT_LEFT);
+        }
+        if (slot.kind != ability->kind) {
+            slot.kind = ability->kind;
+            slot.text->set_text(String::utf8(battle_text(ability_slot_text(ability->kind)).c_str()));
+            slot.button->set_tooltip_text(slot.text->get_text());
         }
         slot.projected = alpha > 0;
         slot.button->set_position(anchor + state.authored_offset * scale);
@@ -235,10 +290,10 @@ bool GalacticMode::State::drop_raid(galactic_view::ObjectId source, galactic_vie
     }
     return true;
 }
-bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool submit) {
+bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool submit, galactic_view::ObjectId target) {
     auto& state = destruction_hud;
     if (!state.enabled || source != dragged_fleet || !game || state.fixture || !galaxy_setup.ability_host) return false;
-    const auto drop = hero_ability_drop(source, state.drop ? state.drop->planet : fleet_drag_planet);
+    const auto drop = hero_ability_drop(source, target ? target : state.drop ? state.drop->planet : fleet_drag_planet);
     if (!drop) return false;
     galactic_view::DropIntent intent;
     intent.kind = galactic_view::DropKind::ability;
@@ -284,12 +339,18 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
         return row.actor == state.accepted_source && row.planet == state.accepted_planet
             && row.kind == sim::galactic::AbilityKind::planet_destruction;
     });
-    const auto rect = state.slot ? state.slot->get_global_rect() : Rect2{};
+    const auto visible_abilities = std::count_if(state.ability_slots.begin(), state.ability_slots.end(),
+        [](const auto& row) { return row.second.button && row.second.button->is_visible_in_tree(); });
+    auto rect = state.slot ? state.slot->get_global_rect() : Rect2{};
+    if (visible_abilities) for (const auto& [planet, slot] : state.ability_slots) {
+        static_cast<void>(planet);
+        if (slot.button && slot.button->is_visible_in_tree()) { rect = slot.button->get_global_rect(); break; }
+    }
     output << "{\"source\": " << galactic_detail::json(state.fixture ? "controlled-observer-snapshot" : "campaign-snapshot")
         << ", \"preparation\": \"eight-kind ranked ground-ability producer WGCH-152\", \"execution_seam\": \"typed shared galactic ability host WGUI-172\""
         << ", \"unsupported\": \"siphon #1143; removal #1141; raw restrictions/story #2042; remote slots/travel #4471\""
-        << ", \"geometry_qualification\": \"WGCH-DB-U01\", \"second_visible\": false"
-        << ", \"visible\": " << (state.slot && state.slot->is_visible_in_tree() ? "true" : "false")
+        << ", \"geometry_qualification\": \"WGCH-DB-U01\", \"second_visible\": " << (visible_abilities > 1 ? "true" : "false")
+        << ", \"visible\": " << ((state.slot && state.slot->is_visible_in_tree()) || visible_abilities ? "true" : "false")
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"source_id\": " << (facts ? facts->source : 0)
         << ", \"planet\": " << (facts ? facts->planet : 0) << ", \"refusal\": " << (facts ? static_cast<int>(facts->refusal) : 0)
         << ", \"outcome\": " << (result == results.end() ? 0 : static_cast<int>(result->outcome))

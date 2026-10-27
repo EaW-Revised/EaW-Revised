@@ -156,7 +156,14 @@ void campaign_boundary() {
     data.constants.clear();
     expect(!eawr::campaign::build_campaign_galaxy(data, types, campaign, 7, 100), "missing constant does not invent stock limit");
     data.constants = {{"MaximumFleetMovementDistance", "5", f(5)}}; data.trade_routes[0].hs_speed_factor.reset();
-    expect(!eawr::campaign::build_campaign_galaxy(data, types, campaign, 7, 100), "missing factor does not invent stock speed");
+    for (const auto speed : {std::optional<Fixed>{}, std::optional<Fixed>{f(0)}, std::optional<Fixed>{f(-1)}}) {
+        data.trade_routes[0].hs_speed_factor = speed;
+        const auto fallback = eawr::campaign::build_campaign_galaxy(data, types, campaign, 7, 100).value();
+        expect(fallback.routes.size() == 1 && fallback.routes[0].hs_speed_factor == f(1)
+            && fallback.diagnostics.size() == 1 && fallback.diagnostics[0].code == "campaign_route_speed_default"
+            && fallback.diagnostics[0].severity == eawr::core::Severity::warning,
+            "invalid route speed loads with a warning and the neutral fallback");
+    }
     data.trade_routes[0].hs_speed_factor = f(4); data.planets[0].galactic_position.reset();
     expect(!eawr::campaign::build_campaign_galaxy(data, types, campaign, 7, 100), "missing position diagnosed");
 }

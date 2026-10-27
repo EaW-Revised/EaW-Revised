@@ -39,8 +39,8 @@ struct LandStartBindings {
     std::array<std::uint8_t, 32> identity{};
     std::vector<LandStaticBinding> static_objects;
     std::vector<std::string> static_notes;
-    // LS shoot PR 1: the land types' combat and durability rows (empty when the tables carry none). Inert until
-    // the land step fires; they are part of the content identity.
+    // The land types' combat and durability rows (empty when the tables carry none),
+    // applied by the land step and included in content identity.
     sim::tactical::DurabilityTable durability;
     sim::tactical::CombatTable combat;
 };

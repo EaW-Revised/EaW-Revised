@@ -795,6 +795,8 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
     }
     impl->live_object_count = setup.planets.size() + setup.routes.size() + setup.fleets.size();
     for (const auto& fleet : setup.fleets) impl->live_object_count += fleet.members.size();
+    // WGUI-19/101: the ability actors were refreshed before the planets existed, so automatic spies apply here, in actor order.
+    if (impl->ability_host) for (const auto& [id, row] : impl->actor_records) impl->sync_auto_spies(id, row.current_type, &row);
     if (setup.fleet_control) for (const auto& unit : setup.fleet_control->detached_units) {
         impl->detached_units.emplace(unit.member.id, unit);
         highest = std::max(highest, unit.member.id);

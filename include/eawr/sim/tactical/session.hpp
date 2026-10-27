@@ -35,6 +35,10 @@
 
 namespace eawr::sim::tactical {
 
+// ADR-020: one load-time deal of final deployed roots, after entry ID remapping.
+// Existing shared_structure classifications are retained; reserves are not setup units.
+[[nodiscard]] core::Result<void> split_initial_controllers(TacticalSetup& setup, const EconomyRules& economy);
+
 // SAE-10: requested point, then ten-angle rings, clamped to playable XY bounds.
 [[nodiscard]] std::optional<math::Vec3> reinforcement_search_candidate(const math::Vec3& requested,
     std::uint32_t attempt, math::Fixed yaw = {},
@@ -129,24 +133,31 @@ public:
     // queues and hyperspace arrival; without it the session has no economy and every buy, cancel
     // or reinforce is rejected. `map_box` is the space map's box, whose low corner both fighter
     // grids start from (WDF-05); the default lays them from the world origin.
+    [[nodiscard]] const std::optional<BattleControllerPolicy>& controller_policy() const noexcept;
+    [[nodiscard]] const TacticalSetup& initial_setup() const noexcept;
+    // Effective prebattle roles may change the roster while the child is held at tick zero.
+    // Never used to restore a checkpoint or to redistribute a running battle.
+    [[nodiscard]] core::Result<void> set_initial_controller_policy(BattleControllerPolicy policy);
     [[nodiscard]] static core::Result<TacticalSession> create(const TacticalSetup& setup,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
         const AbilityTable& abilities = AbilityTable{},
-        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{});
+        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{},
+        core::LoadNoteBuffer* load_notes = nullptr);
     // Creates the setup session and submits every recorded command.
     [[nodiscard]] static core::Result<TacticalSession> from_replay(const TacticalReplay& replay,
         std::span<const SensorProfile> sensors = {}, const DurabilityTable& durability = DurabilityTable{},
         const MotionTable& motion = MotionTable{}, const std::optional<FogRules>& fog = std::nullopt,
         const CombatTable& combat = CombatTable{}, const VictoryRules& victory = VictoryRules{},
         const AbilityTable& abilities = AbilityTable{},
-        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{});
+        const EconomyRules& economy = EconomyRules{}, const MapBox& map_box = MapBox{},
+        core::LoadNoteBuffer* load_notes = nullptr);
     // The same two with the content as one value.
     [[nodiscard]] static core::Result<TacticalSession> create(const TacticalSetup& setup,
-        const TacticalContent& content);
+        const TacticalContent& content, core::LoadNoteBuffer* load_notes = nullptr);
     [[nodiscard]] static core::Result<TacticalSession> from_replay(const TacticalReplay& replay,
-        const TacticalContent& content);
+        const TacticalContent& content, core::LoadNoteBuffer* load_notes = nullptr);
 
     // Rejects, without changing the session, an unknown or non-commandable issuer, a
     // malformed payload, a command for a tick that has already executed, and a command
@@ -174,6 +185,9 @@ public:
     // stage_spawn(), stage_remove(), configure_retreat() and request_projectile_explosion() fail or
     // refuse (the re-entrancy guard); the void setters cannot, and a provider must not call them.
     [[nodiscard]] core::Result<void> set_object_turn_service(std::shared_ptr<ObjectTurnService> service);
+    // Content admission at script binding (also after checkpoint reconstruction).
+    // Sorted type IDs omit automatic decisions, preserving manually usable abilities.
+    [[nodiscard]] core::Result<void> omit_object_script_decisions(std::span<const TypeId> types);
     // Replay input: a use the world applies at the seam of `record.tick` (no provider needed). Like
     // submit(), it refuses a tick that has already executed and keeps (tick, unit, sequence) strictly
     // increasing within the session. A tick that has a recorded use must not also have a due provider.

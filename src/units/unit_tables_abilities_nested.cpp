@@ -163,6 +163,14 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
     if (std::any_of(unit.abilities.begin(), unit.abilities.end(), [](const Ability& ability) {
             return ability.type == "REPLENISH_WINGMEN";
         })) {
+        // WHE-70: a TEAM's declaration supplies its display button, not a local refill.
+        // Only the member executing the ability reads its own Create_Team_Type.
+        unit.replenish_via_members = has_behavior(object, "TEAM");
+        if (unit.replenish_via_members) {
+            report_.note(unit.id, "Unit_Ability", "REPLENISH_WINGMEN",
+                "TEAM dispatches replenishment to members owning the ability; no local team binding (WHE-70)");
+            return;
+        }
         unit.replenish_team = trim(object.text("Create_Team_Type"));
         if (unit.replenish_team.empty()) report_.missing(unit.id, "Create_Team_Type", {}, "wingman replenishment requires an authored team");
         else enqueue(unit.replenish_team, UnitKind::squadron);

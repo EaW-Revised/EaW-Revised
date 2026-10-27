@@ -99,6 +99,28 @@ core::Result<void> session_detail::Tick::CommandHandlers::economy(const PlayerCo
     auto& construction = phase.impl_->construction_stage.values;
     const auto& table = phase.impl_->motion;
     auto& diagnostics = phase.commands_.value().diagnostics.value();
+    // Source-mutating routes bypass the ordinary per-unit order loop. Cancel and
+    // reinforcement have no source: their faction queue/pool remains shared.
+    if (phase.impl_->setup.controllers && !command.units.empty()) {
+        const auto source = staged.find(command.units.front());
+        if (source != staged.end()) {
+            const auto type = source->second.state.type_id;
+            const auto* footprint = table.footprint(type);
+            const auto* combat = phase.impl_->combat.find(type);
+            const bool mobile = table.find(type) || (footprint && footprint->locomotor)
+                || table.squadrons.find_squadron(type) || table.squadrons.find_craft(type);
+            const bool structure = (combat && (combat->star_base || combat->planetary_weapon))
+                || (!mobile && std::any_of(phase.impl_->economy.menus.begin(), phase.impl_->economy.menus.end(),
+                    [&](const auto& menu) { return menu.station == type; }))
+                || (footprint && footprint->layer == SpaceLayer::static_object && !footprint->locomotor);
+            const auto reason = controller_admission(phase.impl_->setup, command, source->second.state, structure);
+            if (reason != RejectReason::none) {
+                events.push_back(Event{command_tick, EventKind::order_rejected, command.key.player_id,
+                    command.key.sequence, source->first, order_kind(command.payload), reason});
+                return core::Result<void>::success();
+            }
+        }
+    }
     Impl::EconomyStage stage{ledgers, arrivals, shares, crafts, minds, arrived_squadrons,
         phase.staging_.value().born_spawners, earners, next_id,
         pads, construction, pad_requests, phase.impl_->pad_stage, phase.impl_->construction_stage, phase.pending_economy_cues_, &reinforcement_work};

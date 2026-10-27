@@ -90,9 +90,6 @@ void validate(const AutoResolveStrength& strength, const units::GalacticTypeTabl
     for (const auto& name : gathered.built_structures) static_cast<void>(type(types, name));
     if (!gathered.bomber_type.empty()) static_cast<void>(type(types, gathered.bomber_type));
 }
-void validate_rules(const AutoResolveRoundRules& rules) {
-    if (rules.display_seconds < Fixed{} || rules.tactical_multiplier < Fixed{}) invalid("negative round duration or tactical multiplier");
-}
 void attack(const GalacticType& attacker, const AutoResolveSideStrength& side,
     const AutoResolveStrength& strength, const std::span<const units::EnumValue> bits,
     const AutoResolveRoundContext& context, const AutoResolveAttackServices& services, std::vector<Fixed>& enemy) {
@@ -211,7 +208,6 @@ AutoResolveRoundOutcome combat(const AutoResolveStrength& strength, const units:
     const std::span<const units::EnumValue> bits, const AutoResolveRoundRules& rules, const AutoResolveRoundContext& context,
     const AutoResolveAttackServices& services, const AutoResolvePick& pick, PlayerId retreating) {
     validate(strength, types);
-    validate_rules(rules);
     if (context.mid_tactical) invalid("mid-tactical allocation waits for the interleaved death-projectile service (#2026)");
     if (retreating && retreating != strength.gathered.sides[0].owner && retreating != strength.gathered.sides[1].owner)
         invalid("retreat request is not from a battle side");
@@ -391,7 +387,6 @@ core::Result<AutoResolveRoundRules> auto_resolve_round_rules(const data::galacti
         result.allowance = read("AutoResolveAttritionAllowanceFactor", "0.33333");
         result.transport_losses = read("AutoResolveTransportLosses", "0.333333");
         result.tactical_multiplier = read("Auto_Resolve_Tactical_Multiplier", "1");
-        validate_rules(result);
         return core::Result<AutoResolveRoundRules>::success(result);
     } catch (const Failure& error) { return core::Result<AutoResolveRoundRules>::failure(error.diagnostic); }
 }
@@ -420,7 +415,7 @@ core::Result<AutoResolveRoundStep> step_auto_resolve_round(const AutoResolveRoun
     const std::span<const units::EnumValue> bits, const AutoResolveRoundRules& rules, const AutoResolveRoundContext& context,
     const AutoResolveAttackServices& services, const AutoResolvePick& pick) {
     try {
-        validate(strength, types); validate_rules(rules);
+        validate(strength, types);
         AutoResolveRoundStep result; result.state = previous;
         if (now_seconds < previous.start_seconds) invalid("round logical clock moved backwards");
         const auto threshold = mul(rules.display_seconds, number("0.6666")); // WAR-28 code constant

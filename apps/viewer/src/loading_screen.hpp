@@ -83,6 +83,9 @@ public:
     void request_begin() noexcept;
     // BLD-13: the screen leaves. Without a Begin (a driven run that began itself) it only hides.
     void dismiss();
+    // Presentation preparation may finish over a few rendered loading frames.
+    // A deferred dismissal is retried only while this screen remains shown.
+    void hold_dismiss(std::function<bool()> ready);
     void viewport_changed(float width, float height);
 
     [[nodiscard]] bool shown() const noexcept { return shown_; }
@@ -134,6 +137,8 @@ private:
     std::vector<std::string> captures_;
     bool captured_half_{};
     bool shown_{};
+    bool dismiss_pending_{};
+    std::function<bool()> dismiss_ready_;
     bool ready_{};
     bool failed_{}, failure_acknowledged_{}, native_progress_{};
     std::shared_ptr<const platform::CampaignLoadingView> preparation_;

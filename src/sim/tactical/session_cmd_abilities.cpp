@@ -466,6 +466,11 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_concentr
             const auto parent = staged.find(promoted);
             if (parent == staged.end() || parent->second.state.owner != source.state.owner || promoted == unit_id
                 || arrivals.contains(promoted)) continue;
+            // ADR-020: automatic derived attacks retain a mobile source's control
+            // scope as well as its faction; engine origin cannot recruit a teammate.
+            if (phase.impl_->setup.controllers && source.state.control == UnitControl::mobile
+                && (parent->second.state.control != UnitControl::mobile
+                    || parent->second.state.controller_seat != source.state.controller_seat)) continue;
             recruited[i] = promoted;
         }
     });
@@ -498,7 +503,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_concentr
 core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_droids(EntityId unit_id,
         const AbilityPayload& payload, const std::uint64_t& command_tick, detail::MapStage<SquadronState>& minds,
         EntityId& next_id, const std::uint64_t& frame, UnitStage& staged, const SquadronTable& squadron_table,
-        const MotionTable& table) const {
+        const MotionTable& table, const SeatId caller) const {
     auto& source = staged.at(unit_id);
     const auto* profile = phase.impl_->abilities.find(source.state.type_id);
     const auto index = profile != nullptr ? ability_slot(*profile, AbilityKind::buzz_droids) : std::nullopt;
@@ -523,10 +528,15 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_dro
     // FS-23/FC-51 establish retries for admitted requests, not this admission.
     if (buzz.min_range.raw() > 0 && within_range(source.state.position, point, buzz.min_range, RangeMetric::planar))
         return core::Result<RejectReason>::success(RejectReason::invalid_position);
+    UnitState attribution{0, buzz.droid_type, source.state.owner};
+    if (auto assigned = phase.impl_->attribute_output(attribution,
+            caller.value != 0 ? caller : source.state.controller_seat, next_id); !assigned)
+        return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
     if (const auto mind = minds.find(unit_id); mind != minds.end()) {
         // FS-23/FD-32: the admitted team event retains one special attack and gives
         // its holder the coordinated approach destination. FC-51 retries before scans.
         source.abilities->pending_buzz_position = point;
+        source.abilities->pending_buzz_controller = attribution.controller_seat;
         source.state.order = order_for(MovePayload{point}, command_tick);
         auto& team = minds.at(unit_id);
         const auto target = team.target;
@@ -546,7 +556,9 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_dro
         return core::Result<RejectReason>::success(RejectReason::invalid_position);
     // WAB-71: the holder stops, starts its full recharge and creates the droids at the
     // point, unturned, for its owner; the droids act from the arming frame on.
-    auto droid = phase.impl_->create_buzz_droids(source, point, command_tick, next_id);
+    auto made = phase.impl_->create_buzz_droids(source, point, command_tick, next_id, attribution.controller_seat);
+    if (!made) return core::Result<RejectReason>::failure(made.error());
+    auto droid = std::move(made).value();
     const auto droid_id = droid.state.entity_id;
     if (squadron_table.find_spawner(droid.state.type_id, droid.state.owner) != nullptr)
         phase.staging_.value().born_spawners.push_back(droid_id);
@@ -824,7 +836,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ordinary
     return core::Result<RejectReason>::success(RejectReason::none);
 }
 
-core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(const EntityId unit_id, const AbilityPayload& payload) const {
+core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(const EntityId unit_id, const AbilityPayload& payload, const SeatId caller) const {
     const auto command_tick = phase.tick;
     auto& reinforcement_work = phase.gather_.value().reinforcement_work.value();
     auto& minds = phase.craft_prep_.value().minds.value();
@@ -869,7 +881,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_ability(
     }
     // WAB-70/71: BUZZ_DROIDS acts on its holder (a squadron's team container, AB-60) at a point.
     if (payload.ability == AbilityKind::buzz_droids) {
-        return apply_buzz_droids(unit_id, payload, command_tick, minds, next_id, frame, staged, squadron_table, table);
+        return apply_buzz_droids(unit_id, payload, command_tick, minds, next_id, frame, staged, squadron_table, table, caller);
     }
     // AB-61 to AB-65 (#561): ION_CANNON_SHOT acts on the squadron's team container itself.
     if (payload.ability == AbilityKind::ion_cannon_shot) {

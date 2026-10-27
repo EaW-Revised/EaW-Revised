@@ -80,6 +80,20 @@ core::Result<void> TacticalSession::set_object_turn_service(std::shared_ptr<Obje
     return core::Result<void>::success();
 }
 
+core::Result<void> TacticalSession::omit_object_script_decisions(const std::span<const TypeId> types) {
+    if (impl_->object_turn_running) return core::Result<void>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_command, "object-script admission during an object-turn provider call"));
+    if (!std::is_sorted(types.begin(), types.end())) return core::Result<void>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_setup, "object-script omission type IDs must be sorted"));
+    for (auto& profile : impl_->abilities.profiles) {
+        if (!std::binary_search(types.begin(), types.end(), profile.type_id)) continue;
+        profile.defend_script = false;
+        profile.self_destruct_script = false;
+        profile.mc30_script = false;
+    }
+    return core::Result<void>::success();
+}
+
 core::Result<void> TacticalSession::submit_object_turn(const ObjectTurnRecord& record) {
     if (impl_->land) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
         "land movement host does not support object-turn records"));

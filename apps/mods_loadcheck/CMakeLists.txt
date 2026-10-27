@@ -1,7 +1,7 @@
 add_executable(eawr_loadcheck WIN32 main.cpp report.cpp)
 set_target_properties(eawr_loadcheck PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:eawr_mods_service>")
 add_dependencies(eawr_mods_service eawr_loadcheck)
-target_link_libraries(eawr_loadcheck PRIVATE eawr::mods eawr::skirmish)
+target_link_libraries(eawr_loadcheck PRIVATE eawr::mods eawr::skirmish eawr::platform)
 if(WIN32)
     target_link_libraries(eawr_loadcheck PRIVATE shell32)
 endif()

@@ -869,6 +869,31 @@ int main() {
         epoch.reset();
         expect(!lan.pending_intent_epoch(), "scripted gesture releases the LAN epoch");
     }
+    {
+        ui::CommandScheduler scheduler(local_player, 0, 0, {}, sim::SeatId{11});
+        auto gift = intent(ui::TacticalVerb::gift, {7, 3, 7}); gift.gift_recipient = {12};
+        expect(static_cast<bool>(scheduler.issue(gift)), "gift enters the ordinary command queue");
+        const auto gifts = scheduler.take(0);
+        expect(gifts.size() == 1 && gifts[0].units == std::vector<sim::EntityId>({3, 7})
+            && gifts[0].issuing_seat == sim::SeatId{11} && gifts[0].origin == tactical::CommandOrigin::seat
+            && std::get<tactical::GiftPayload>(gifts[0].payload).recipient == sim::SeatId{12},
+            "gift command retains sorted units, recipient and authenticated local seat");
+        gift.gift_recipient = {};
+        expect(!scheduler.issue(gift), "zero recipient cannot enter the queue");
+        gift.gift_recipient = {12}; gift.units.clear();
+        expect(!scheduler.issue(gift), "empty gift cannot enter the queue");
+        expect(static_cast<bool>(scheduler.issue(intent(ui::TacticalVerb::move, {3, 7}, point(20, 30)))), "queued mixed move accepted");
+        expect(static_cast<bool>(scheduler.issue(intent(ui::TacticalVerb::stop, {3}))), "queued donor stop accepted");
+        scheduler.discard_unit_orders(3);
+        const auto pending = scheduler.take(1);
+        expect(pending.size() == 1 && pending[0].units == std::vector<sim::EntityId>{7},
+            "transfer prunes local queued gesture units and removes empty unit orders");
+        ui::CommandScheduler ordinary(local_player);
+        expect(static_cast<bool>(ordinary.issue(intent(ui::TacticalVerb::stop, {3}))), "legacy command accepted");
+        const auto legacy = ordinary.take(0);
+        expect(legacy.size() == 1 && legacy[0].issuing_seat.value == 0 && legacy[0].origin == tactical::CommandOrigin::ordinary,
+            "policy OFF retains identical ordinary provenance");
+    }
     paused_reservation_contracts();
     command_scheduler_cross_thread();
     input_routing_contracts();

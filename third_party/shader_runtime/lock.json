@@ -1,0 +1,247 @@
+{
+  "schema": "eawr-shader-runtime/1",
+  "platform": "windows-x64",
+  "activation": "disabled",
+  "sources": [
+    {
+      "name": "vkd3d",
+      "version": "2.1",
+      "url": "https://dl.winehq.org/vkd3d/source/vkd3d-2.1.tar.xz",
+      "sha256": "7510146aff2adfb4ae07ab890701a607e5ff7c66e57100cfc9f630ec92eeda6a",
+      "license": "LGPL-2.1-or-later",
+      "modified": false
+    },
+    {
+      "name": "SPIRV-Cross",
+      "version": "vulkan-sdk-1.3.290.0",
+      "url": "https://github.com/KhronosGroup/SPIRV-Cross/archive/refs/tags/vulkan-sdk-1.3.290.0.tar.gz",
+      "sha256": "1333fd2a05ab8a0572106e3b7fb8161ea0b67ab7d0a1b8bdd14b47f89ac8a611",
+      "license": "Apache-2.0",
+      "modified": false
+    },
+    {
+      "name": "SPIRV-Headers",
+      "version": "vulkan-sdk-1.3.290.0",
+      "url": "https://github.com/KhronosGroup/SPIRV-Headers/archive/refs/tags/vulkan-sdk-1.3.290.0.tar.gz",
+      "sha256": "1b9ff8a33e07814671dee61fe246c67ccbcfc9be6581f229e251784499700e24",
+      "license": "MIT"
+    },
+    {
+      "name": "Vulkan-Headers",
+      "version": "v1.3.290",
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.3.290.tar.gz",
+      "sha256": "f38a653bf93cab7a2a229a53d2d53b1cba9a2819e4c0a7de13c54085bde9bcf5",
+      "license": "Apache-2.0 OR MIT"
+    }
+  ],
+  "abi": {
+    "vkd3d": [
+      2,
+      1
+    ],
+    "spirv_cross": [
+      0,
+      61,
+      0
+    ],
+    "calling_convention": "public C cdecl; Windows x64",
+    "ownership": "vkd3d free_shader_code/free_messages; SPIRV-Cross context owns child handles and text"
+  },
+  "builds": {
+    "vkd3d": {
+      "compiler": "x86_64-w64-mingw32-gcc 9.3-win32 20200320; x64 SEH",
+      "origin": "retained unmodified gate build; source archive/extracted-file content comparison passed",
+      "configure": [
+        "--host=x86_64-w64-mingw32",
+        "--disable-doxygen-doc",
+        "--without-spirv-tools",
+        "--without-opengl",
+        "--without-xcb",
+        "--without-ncurses"
+      ],
+      "CPPFLAGS": "-I<Vulkan-Headers>/include -I<SPIRV-Headers>/include",
+      "CFLAGS": "configure default -g -O2",
+      "LDFLAGS": "",
+      "target": "make -j2 libvkd3d-shader.la"
+    },
+    "spirv_cross": {
+      "compiler": "x86_64-w64-mingw32-g++-win32 13-win32 (GCC); Ubuntu 13.2.0-6ubuntu1+26.1; x64 SEH",
+      "compiler_sha256": "700d63d40cdf85fd3b3e6c54eb75ea8ee0aa707cfaa7a5bf03e5d1306f69da07",
+      "binutils": "2.41.90.20240122-1ubuntu1+11.4",
+      "linker_sha256": "24ae8dc9ce6a34df398a7ddff2ba4a7d159eb18e4c60dd8f1c06687461ce1daa",
+      "mingw_headers": "11.0.1-3build1",
+      "cmake": "3.28.3",
+      "ninja": "1.11.1",
+      "recipe": "tools/shader_runtime_package/build_cross.sh",
+      "source_date_epoch": 0,
+      "features": [
+        "SHARED",
+        "GLSL",
+        "C API reflection"
+      ],
+      "disabled": [
+        "STATIC",
+        "CLI",
+        "TESTS",
+        "HLSL",
+        "MSL",
+        "CPP",
+        "JSON_REFLECT",
+        "UTIL"
+      ],
+      "shared_linker_flags": [
+        "-static-libgcc",
+        "-static-libstdc++"
+      ],
+      "recipe_sha256": "02c32a8360d1501fb9f62e7898d0ea67620a9394bfe1229c11d02d6c339d353f"
+    },
+    "gcc_runtime": {
+      "separate": "GCC 9.3-win32 20200320 libgcc_s_seh-1.dll",
+      "embedded_in_cross": "GCC 13.2 libstdc++ and libgcc",
+      "license": "GPL-3.0-or-later WITH GCC-exception-3.1",
+      "source_urls": [
+        "https://ftp.gnu.org/gnu/gcc/gcc-9.3.0/gcc-9.3.0.tar.xz",
+        "https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz"
+      ]
+    }
+  },
+  "system_dlls": [
+    "kernel32.dll",
+    "msvcrt.dll"
+  ],
+  "files": [
+    {
+      "path": "libgcc_s_seh-1.dll",
+      "sha256": "c82f84171b9246d1cac261100b2199789c96c37b03b375f33b2c72afab060b05",
+      "size": 1269387,
+      "role": "dll",
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ]
+    },
+    {
+      "path": "libvkd3d-shader-1.dll",
+      "sha256": "72deb87ff34c29e7332bccf56042cc76e87bc48e382718307a37f3f80c650099",
+      "size": 8016955,
+      "role": "dll",
+      "imports": [
+        "kernel32.dll",
+        "libgcc_s_seh-1.dll",
+        "msvcrt.dll"
+      ]
+    },
+    {
+      "path": "libspirv-cross-c-shared.dll",
+      "sha256": "1de1b5c8242f23986b3ed9788d0468f0421e7c1b881fbf6235734dd1015ba792",
+      "size": 2438402,
+      "role": "dll",
+      "imports": [
+        "kernel32.dll",
+        "msvcrt.dll"
+      ]
+    },
+    {
+      "path": "ATTRIBUTION.md",
+      "sha256": "24a4ae023a3e3fba9b07689a263e10ccfbe2127fdd62516cac87131572a32af3",
+      "size": 999,
+      "role": "notice"
+    },
+    {
+      "path": "SOURCE-OFFER.md",
+      "sha256": "c7612b88df95322cae3b993d886699fcc461595d82ee0e2e9d2426863b2d6c4b",
+      "size": 2704,
+      "role": "notice"
+    },
+    {
+      "path": "include/spirv.h",
+      "sha256": "a05ce9d4085f9bab61358a8a080a87468d718ee803c857c5f54e54ae9f6fd805",
+      "size": 133093,
+      "role": "header"
+    },
+    {
+      "path": "include/spirv_cross_c.h",
+      "sha256": "924f06fda83297640735cc3d8b3a557f55b7ef5a28d887cc753f7d5dd6b4ef6d",
+      "size": 54668,
+      "role": "header"
+    },
+    {
+      "path": "include/vkd3d_shader.h",
+      "sha256": "27bb621f86f2d4b2bd0aa1efe169c88551dc3a0f2914196617d74acc3798c89c",
+      "size": 137398,
+      "role": "header"
+    },
+    {
+      "path": "include/vkd3d_types.h",
+      "sha256": "c3e55c06f6fbfe9523d3a35b0ecad474fcdc20fd8dfb077decf951e4659128d2",
+      "size": 2649,
+      "role": "header"
+    },
+    {
+      "path": "licenses/GCC-GPL-3",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "size": 35149,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/GCC-MinGW-copyright",
+      "sha256": "a481f772f7a53335f13b32c6c54eb1c8577ce97704edd3757ab7ed4287a8e96a",
+      "size": 75729,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/MinGW-w64-copyright",
+      "sha256": "af23297b7d17e8e31817a5d58088de6fdafe34705bb5a7d1d330f08711b31314",
+      "size": 37808,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/SPIRV-Cross-LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "size": 11358,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/SPIRV-Headers-LICENSE",
+      "sha256": "ff04ae7e6a468587fe59434fee2e67c0e2a749b592c794b764ff80f30b94a084",
+      "size": 4812,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/Vulkan-Headers-LICENSE.md",
+      "sha256": "ac24e5ea920e4318e4d02c4086ae51f53cfb03feed06c18df1019e7ada1ec7bc",
+      "size": 458,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/vkd3d-AUTHORS",
+      "sha256": "0ce4d5c704e7c3261735a39e6ce8879cc4806c97953e5de61d99b48180b29243",
+      "size": 699,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/vkd3d-COPYING",
+      "sha256": "1f69abfaeee0131bba28ad72d87683a223743d8c9ee1da113fde10cb082f3c91",
+      "size": 786,
+      "role": "notice"
+    },
+    {
+      "path": "licenses/vkd3d-LICENSE",
+      "sha256": "dc626520dcd53a22f727af3ee42c770e56c97a64fe3adb063799d8ab032fe551",
+      "size": 26530,
+      "role": "notice"
+    },
+    {
+      "path": "sources/spirv-cross.tar.gz",
+      "sha256": "1333fd2a05ab8a0572106e3b7fb8161ea0b67ab7d0a1b8bdd14b47f89ac8a611",
+      "size": 1809915,
+      "role": "source"
+    },
+    {
+      "path": "sources/vkd3d-2.1.tar.xz",
+      "sha256": "7510146aff2adfb4ae07ab890701a607e5ff7c66e57100cfc9f630ec92eeda6a",
+      "size": 1486656,
+      "role": "source"
+    }
+  ]
+}

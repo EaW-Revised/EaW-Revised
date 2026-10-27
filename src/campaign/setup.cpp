@@ -1,3 +1,5 @@
+#include "eawr/campaign/load_notes.hpp"
+#include "eawr/campaign/load_setup.hpp"
 #include "eawr/campaign/setup.hpp"
 #include "eawr/campaign/starting_forces.hpp"
 #include "eawr/campaign/control.hpp"
@@ -175,14 +177,18 @@ core::Result<gc::EconomicType> prepare_economic_type(const units::GalacticEconom
     return core::Result<gc::EconomicType>::success(std::move(result));
 }
 core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type, gc::TypeId id,
-    std::span<const FleetTypeBinding> bindings) {
+    std::span<const FleetTypeBinding> bindings, core::LoadNoteBuffer* notes) {
     // WGEP-69: the table resolves variant inheritance; GC ignores tactical overrides.
-    const auto population = sim::math::Fixed::from_integer(type.population_value.value_or(sim::math::Fixed{}).trunc_to_integer()).value();
-    const auto additional_capacity = type.additional_population_capacity.value_or(0);
-    if (id == 0 || population.raw() < 0
-        || population.raw() > (std::int64_t{1} << 40)
-        || additional_capacity < std::numeric_limits<std::int32_t>::min()
-        || additional_capacity > std::numeric_limits<std::int32_t>::max()) {
+    const auto authored_population = sim::math::Fixed::from_integer(type.population_value.value_or(sim::math::Fixed{}).trunc_to_integer()).value();
+    const auto population = sim::math::Fixed::from_raw(std::clamp(authored_population.raw(), std::int64_t{0}, std::int64_t{1} << 40));
+    const auto authored_capacity = type.additional_population_capacity.value_or(0);
+    const auto additional_capacity = std::clamp(authored_capacity, static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()),
+        static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()));
+    if (population != authored_population) campaign_type_note(notes, "EAWR-LOAD-1010", type, "Population_Value",
+        std::to_string(authored_population.trunc_to_integer()), std::to_string(population.trunc_to_integer()));
+    if (additional_capacity != authored_capacity) campaign_type_note(notes, "EAWR-LOAD-1010", type, "Additional_Population_Capacity",
+        std::to_string(authored_capacity), std::to_string(additional_capacity));
+    if (id == 0) {
         core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup); d.severity = core::Severity::error;
         d.logical_path = type.file;
         d.message = "census " + type.name + ": rejected Population_Value=" + std::to_string(population.trunc_to_integer())
@@ -226,9 +232,9 @@ core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type
     for (const auto& name : names) {
         const auto at = identities.find(normalized(name));
         if (at == identities.end()) {
-            core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup); d.severity = core::Severity::error;
-            d.message = "census composite member requires an original-type binding: " + name;
-            return core::Result<gc::CensusType>::failure(std::move(d));
+            campaign_type_note(notes, "EAWR-LOAD-1012", type, "Composite_Members", name,
+                "unbound member omitted", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+            continue;
         }
         result.members.push_back(at->second);
     }
@@ -238,22 +244,29 @@ core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type
     if (result.company) {
         const auto at = identities.find(normalized(type.company_transport));
         if (at == identities.end() || type.company_units.empty()) {
-            core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
-            d.message = "census company requires its exact authored transport and members";
-            return core::Result<gc::CensusType>::failure(std::move(d));
+            campaign_type_note(notes, "EAWR-LOAD-1012", type, "Company_Transport", type.company_transport,
+                "invalid company omitted from creation", "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_object);
+            result.company = false;
+            return core::Result<gc::CensusType>::success(std::move(result));
         }
         result.transport = at->second;
     }
     return core::Result<gc::CensusType>::success(std::move(result));
 }
 core::Result<gc::CensusType> prepare_census_planet(const data::galactic::Planet& planet, gc::TypeId id,
-    std::optional<sim::math::Fixed> combat_power) {
+    std::optional<sim::math::Fixed> combat_power, core::LoadNoteBuffer* notes) {
     units::GalacticType original;
-    auto population = sim::math::Fixed::from_integer(planet.population_value.value_or(0));
+    original.name = planet.name; original.file = planet.file;
+    const auto authored_population = planet.population_value.value_or(0);
+    const auto effective_population = std::clamp(authored_population, std::int64_t{0},
+        (std::int64_t{1} << 40) / sim::math::Fixed::scale);
+    if (authored_population != effective_population) campaign_type_note(notes, "EAWR-LOAD-1010", planet,
+        "Population_Value", std::to_string(authored_population), std::to_string(effective_population));
+    auto population = sim::math::Fixed::from_integer(effective_population);
     if (!population) return core::Result<gc::CensusType>::failure(population.error());
     original.population_value = population.value();
     original.additional_population_capacity = planet.additional_population_capacity;
-    auto result = prepare_census_type(original, id);
+    auto result = prepare_census_type(original, id, {}, notes);
     if (result) {
         if (combat_power) result.value().history->power = *combat_power;
         else result.value().history.reset();
@@ -265,8 +278,9 @@ gc::CensusPlayer prepare_census_player(const data::galactic::Faction& faction, g
     return {id, faction.base_population_capacity.value_or(0), faction.ai_uses_galactic_pop_cap.value_or(false), std::move(unusable_planets)};
 }
 core::Result<gc::ProductionOffer> prepare_production_offer(const units::GalacticType& type,
-    gc::ProductionOffer admission, const ProductionPreparation& inputs) {
+    gc::ProductionOffer admission, const ProductionPreparation& inputs, core::LoadNoteBuffer* notes) {
     using sim::math::Fixed;
+    constexpr std::int64_t max_retail_base_level = 5; // LSA-09: base levels 0..5; unusual authored values remain accepted.
     const auto fail = [&](const char* why) {
         core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
         d.severity = core::Severity::error; d.message = "production offer requires sourced price/time and complete modifier inputs: " + type.name + " (" + why + ")";
@@ -278,11 +292,15 @@ core::Result<gc::ProductionOffer> prepare_production_offer(const units::Galactic
         || !inputs.factory_count || *inputs.factory_count < 1) return fail("modifier inputs");
     // WGEP-42: authoring supplies an unsigned target, not an increment/flag.
     if (type.build_advances_tech_level) {
-        if (*type.build_advances_tech_level < 0 || *type.build_advances_tech_level > std::numeric_limits<std::int32_t>::max()) return fail("tech target");
-        if (*type.build_advances_tech_level > 0) {
-            admission.kind = gc::ProductionKind::technology;
-            admission.target_tech = *type.build_advances_tech_level;
-        }
+        const auto authored = *type.build_advances_tech_level;
+        const auto target = authored < 0
+            ? static_cast<std::int64_t>(static_cast<std::uint32_t>(std::clamp(authored,
+                static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()), std::int64_t{-1})))
+            : std::min(authored, static_cast<std::int64_t>(std::numeric_limits<std::uint32_t>::max()));
+        if (target != authored) campaign_type_note(notes, "EAWR-LOAD-1000", type, "Build_Advances_Tech_Level",
+            std::to_string(authored), std::to_string(target), "LSA-08 / WGEP-42: unsigned target parser bits",
+            core::LoadCategory::retail_accepts, core::LoadAction::accepted);
+        if (target > 0) { admission.kind = gc::ProductionKind::technology; admission.target_tech = target; }
     }
     // WGEP-92: defaults apply at consumption, never to hashed authored facts.
     auto price = type.build_cost_credits.value_or(Fixed{});
@@ -312,12 +330,24 @@ core::Result<gc::ProductionOffer> prepare_production_offer(const units::Galactic
         if (!factories || !sim::math::try_divide(seconds, factories.value(), seconds)) return fail("factory division");
     }
     admission.seconds = seconds;
-    if (type.tech_level) admission.tech = *type.tech_level;
+    const auto level = [&](std::int64_t value, std::string_view tag, bool unusual) {
+        const auto effective = std::clamp(value, static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min()),
+            static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()));
+        if (effective != value || unusual) campaign_type_note(notes, "EAWR-LOAD-1001", type, tag,
+            std::to_string(value), std::to_string(effective), "LSA-09: parsed levels reach availability comparison",
+            core::LoadCategory::retail_accepts, core::LoadAction::accepted);
+        return effective;
+    };
+    if (type.tech_level) admission.tech = level(*type.tech_level, "Tech_Level", *type.tech_level < 0);
     // WGEP-69: GC population is the original type's integer, never a tactical override.
     admission.population = sim::math::Fixed::from_integer(type.population_value.value_or(sim::math::Fixed{}).trunc_to_integer()).value();
-    if (type.required_ground_base_level) admission.required_ground_level = *type.required_ground_base_level;
-    if (type.required_star_base_level) admission.required_space_level = *type.required_star_base_level;
-    if (type.base_level) admission.base_level = *type.base_level;
+    const auto authored_population = admission.population;
+    admission.population = Fixed::from_raw(std::clamp(admission.population.raw(), std::int64_t{0}, std::int64_t{1} << 40));
+    if (admission.population != authored_population) campaign_type_note(notes, "EAWR-LOAD-1010", type, "Population_Value",
+        std::to_string(authored_population.trunc_to_integer()), std::to_string(admission.population.trunc_to_integer()));
+    if (type.required_ground_base_level) admission.required_ground_level = level(*type.required_ground_base_level, "Required_Ground_Base_Level", *type.required_ground_base_level < 0 || *type.required_ground_base_level > max_retail_base_level);
+    if (type.required_star_base_level) admission.required_space_level = level(*type.required_star_base_level, "Required_Star_Base_Level", *type.required_star_base_level < 0 || *type.required_star_base_level > max_retail_base_level);
+    if (type.base_level) admission.base_level = level(*type.base_level, "Base_Level", *type.base_level < 0 || *type.base_level > max_retail_base_level);
     if (type.build_limit_current_per_player) admission.current_limit = *type.build_limit_current_per_player;
     if (type.build_limit_lifetime_per_player) admission.lifetime_limit = *type.build_limit_lifetime_per_player;
     if (type.build_initially_locked) admission.initially_locked = *type.build_initially_locked;
@@ -768,8 +798,40 @@ void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& op
 
 core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, const std::string_view campaign_name, const CampaignSetupOptions& options) {
-    const auto* campaign = data.campaign(campaign_name);
-    if (!campaign) return invalid<CampaignSetupPlan>("unknown selected campaign " + std::string(campaign_name));
+    const auto* authored_campaign = data.campaign(campaign_name);
+    if (!authored_campaign) return invalid<CampaignSetupPlan>("unknown selected campaign " + std::string(campaign_name));
+    auto owned_campaign = *authored_campaign;
+    const auto* campaign = &owned_campaign;
+    core::LoadNoteBuffer load_buffer;
+    // PlanetGraph has a bounded dense work domain. Trim its source lists before
+    // graph construction, not the live identities and dependent tables afterward.
+    if (owned_campaign.planets.size() > 4096) {
+        setup_load_note(load_buffer, "EAWR-LOAD-1036", campaign->name, "Planets",
+            std::to_string(owned_campaign.planets.size()), "4096; later locations and their forces omitted", core::LoadAction::skipped_placement);
+        std::set<std::string> dropped;
+        for (std::size_t i = 4096; i < owned_campaign.planets.size(); ++i) dropped.insert(key(owned_campaign.planets[i]));
+        owned_campaign.planets.resize(4096);
+        for (const auto& name : owned_campaign.planets) dropped.erase(key(name));
+        std::erase_if(owned_campaign.locations, [&](const auto& name) { return dropped.contains(key(name)); });
+    }
+    if (owned_campaign.trade_routes.size() > 500'000) {
+        std::set<std::string> listed;
+        for (const auto& name : owned_campaign.planets) listed.insert(key(name));
+        std::set<std::pair<std::string, std::string>> pairs;
+        const auto authored_count = owned_campaign.trade_routes.size();
+        std::erase_if(owned_campaign.trade_routes, [&](const auto& name) {
+            const auto* route = data.trade_route(name);
+            if (!route) return false;
+            auto a = key(route->point_a), b = key(route->point_b);
+            if (!listed.contains(a) || !listed.contains(b) || a == b) return false;
+            if (b < a) std::swap(a, b);
+            if (pairs.contains({a, b})) return false;
+            if (pairs.size() == 500'000) return true;
+            pairs.emplace(std::move(a), std::move(b)); return false;
+        });
+        if (authored_count != owned_campaign.trade_routes.size()) setup_load_note(load_buffer, "EAWR-LOAD-1036", campaign->name, "Trade_Routes",
+            std::to_string(authored_count), "first 500000 distinct live links; later links omitted", core::LoadAction::skipped_object);
+    }
     if (options.mode != CampaignSetupMode::single_player && options.mode != CampaignSetupMode::multiplayer)
         return invalid<CampaignSetupPlan>("unknown galactic mode", campaign->file);
     if (options.seat_control && options.mode != CampaignSetupMode::multiplayer)
@@ -874,6 +936,7 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     if (options.fiscal_players) {
         if (auto phase = plan_fiscal_setup(data, options, campaign, model, plan.fiscal_); !phase)
             return core::Result<CampaignSetupPlan>::failure(phase.error());
+        normalize_campaign_fiscal(*plan.fiscal_, plan.galaxy_.planets.size(), load_buffer, campaign->name);
     }
     if (auto phase = plan_location_requests(campaign, neutral, planets, plan.galaxy_, plan.locations_); !phase)
         return core::Result<CampaignSetupPlan>::failure(phase.error());
@@ -887,6 +950,8 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
         return core::Result<CampaignSetupPlan>::failure(phase.error());
     if (auto valid = gc::validate_setup(plan.galaxy_); !valid) return core::Result<CampaignSetupPlan>::failure(valid.error());
     seal_campaign_identity(campaign, options, plan.galaxy_);
+    core::LoadNoteCollector load_collector; load_collector.merge(load_buffer);
+    plan.load_notes_ = load_collector.snapshot();
     return core::Result<CampaignSetupPlan>::success(std::move(plan));
 }
 
@@ -925,6 +990,7 @@ std::vector<std::string> campaign_referenced_types(const data::galactic::Galacti
 core::Result<CampaignSetupPlan> plan_live_campaign_setup(const vfs::Vfs& filesystem,
     const data::galactic::GalacticData& data, const units::GalacticTypeTable& types,
     std::string_view campaign, CampaignSetupOptions options, std::string_view difficulty) {
+    core::LoadNoteBuffer load_buffer;
     auto document = data::load_document(filesystem, "data/xml/difficultyadjustments.xml");
     if (!document) return core::Result<CampaignSetupPlan>::failure(document.error());
     std::optional<sim::math::Fixed> multiplier;
@@ -935,9 +1001,10 @@ core::Result<CampaignSetupPlan> plan_live_campaign_setup(const vfs::Vfs& filesys
         for (const auto& node : adjustment.children) if (key(node.name) == "CREDIT_MULTIPLIER") {
             data::tag_trace::used(&node);
             auto value = data::fixed_value(node);
-            if (!value || value.value().raw() < 0)
-                return invalid<CampaignSetupPlan>("invalid difficulty Credit_Multiplier");
-            multiplier = value.value();
+            if (!value || value.value().raw() < 0) {
+                multiplier = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
+                campaign_load_note(&load_buffer, "EAWR-LOAD-1022", &node, difficulty, "Credit_Multiplier", "1");
+            } else multiplier = value.value();
         }
     }
     if (!multiplier) return invalid<CampaignSetupPlan>("missing selected difficulty Credit_Multiplier");
@@ -965,6 +1032,9 @@ core::Result<CampaignSetupPlan> plan_live_campaign_setup(const vfs::Vfs& filesys
     auto planned = plan_campaign_setup(data, types, campaign, options);
     if (!planned) return planned;
     auto& plan = planned.value();
+    core::LoadNoteCollector load_collector;
+    for (const auto& note : plan.load_notes()) load_collector.append(note);
+    load_collector.merge(load_buffer); plan.load_notes_ = load_collector.snapshot();
     plan.galaxy_.fiscal = plan.fiscal_;
     plan.galaxy_.player_economy.emplace();
     for (const auto& credit : plan.credits_) {
@@ -1036,6 +1106,9 @@ core::Result<void> initialize_layout_observer(const data::galactic::GalacticData
 CampaignRoot::CampaignRoot(CampaignSetupPlan plan, GameSession game, std::vector<CampaignCreditCap> caps)
     : plan_(std::move(plan)), game_(std::move(game)), caps_(std::move(caps)) {}
 core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const CampaignSetupServices& services) {
+    core::LoadNoteBuffer load_buffer;
+    core::LoadNoteCollector load_collector;
+    for (const auto& note : plan.load_notes()) load_collector.append(note);
     if (!services.location || (!services.political_control && !services.initial_political_control && !services.stock_starting_forces) || !services.credit_cap || !services.home)
         return invalid<CampaignRoot>("unimplemented location/control/credit-cap/home setup provider");
     if (!plan.tech().empty() && !services.assign_tech)
@@ -1061,9 +1134,33 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         auto prepared = services.placement_context(plan);
         if (!prepared) return core::Result<CampaignRoot>::failure(prepared.error());
         placement_context = std::move(prepared).value();
-        auto nested = prepare_nested_creation(*services.stock_starting_forces);
+        auto omitted = normalize_campaign_census(placement_context->census, load_buffer, plan.campaign_name());
+        placement_context->omitted_templates.insert(omitted.begin(), omitted.end());
+        auto nested = prepare_nested_creation(*services.stock_starting_forces, &load_buffer, &placement_context->omitted_templates);
         if (!nested) return core::Result<CampaignRoot>::failure(nested.error());
         placement_context->production.nested_creation = std::move(nested).value();
+        // Census and production share the same authored composites. Disable the
+        // affected template and its ancestors, rather than inventing live children.
+        auto& nested_types = placement_context->production.nested_creation->types;
+        for (const auto& row : nested_types) if (row.role == gc::NestedCreationRole::company) {
+            const auto transport = std::lower_bound(nested_types.begin(), nested_types.end(), row.transport,
+                [](const auto& type, auto id) { return type.type < id; });
+            if (transport == nested_types.end() || transport->type != row.transport || transport->role != gc::NestedCreationRole::transport)
+                placement_context->omitted_templates.insert(row.type);
+        }
+        const auto squadron = placement_context->production.nested_creation->squadron_type;
+        if (std::none_of(nested_types.begin(), nested_types.end(), [&](const auto& row) { return row.type == squadron; }))
+            for (const auto& row : nested_types) if (row.role == gc::NestedCreationRole::squadron)
+                placement_context->omitted_templates.insert(row.type);
+        std::map<gc::TypeId, std::vector<gc::TypeId>> parents;
+        for (const auto& row : nested_types) for (auto member : row.members) parents[member].push_back(row.type);
+        std::vector<gc::TypeId> pending(placement_context->omitted_templates.begin(), placement_context->omitted_templates.end());
+        for (std::size_t i = 0; i < pending.size(); ++i) for (auto parent : parents[pending[i]])
+            if (placement_context->omitted_templates.insert(parent).second) pending.push_back(parent);
+        for (auto& row : nested_types) if (placement_context->omitted_templates.contains(row.type)) {
+            row.role = gc::NestedCreationRole::other; row.members.clear(); row.transport = 0;
+        }
+        normalize_campaign_offers(placement_context->production, load_buffer, plan.campaign_name());
         if (!placement_context->control.state.empty() || !placement_context->control.captured_types.empty()
             || !placement_context->control.absent_forces.empty() || !placement_context->movement.contents.empty()
             || !placement_context->census.objects.empty())
@@ -1082,6 +1179,43 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         if (auto valid = gc::validate_setup(setup); !valid) return core::Result<CampaignRoot>::failure(valid.error());
     }
     auto next = plan.first_free_entity_id();
+    const auto object_budget = std::min(services.object_budget, gc::galactic_max_objects);
+    std::uint64_t object_count = setup.planets.size() + setup.routes.size();
+    bool placement_budget_full{};
+    const auto admit_initial_base = [&](std::string_view name) {
+        if (!services.stock_starting_forces) return true;
+        const auto* source = services.stock_starting_forces->types.find(name);
+        if (!source || std::find(source->behavior.begin(), source->behavior.end(), "DUMMY_STAR_BASE") == source->behavior.end()
+            || (source->base_level && *source->base_level >= 1 && *source->base_level <= 5)) return true;
+        campaign_type_note(&load_buffer, "EAWR-LOAD-1035", *source, "Base_Level",
+            std::to_string(source->base_level.value_or(0)), "unsupported initial base placement omitted",
+            "unknown", core::LoadCategory::unknown_degrade, core::LoadAction::skipped_placement);
+        return false;
+    };
+    const auto admit_placement = [&](gc::TypeId type, const StartingForcePlacement& placed,
+        sim::EntityId first_free) {
+        const auto additional = placed.next_id - first_free;
+        if (!placement_budget_full && additional > object_budget - std::min<std::uint64_t>(object_count, object_budget)) {
+            // Recount live IDs only at the boundary: merging fleets and replacing
+            // bases can have retired earlier allocations. The common path is O(1).
+            std::set<sim::EntityId> ids;
+            for (const auto& row : setup.planets) ids.insert(row.id);
+            for (const auto& row : setup.routes) ids.insert(row.id);
+            for (const auto& row : setup.fleets) { ids.insert(row.id); for (const auto& member : row.members) ids.insert(member.id); }
+            for (const auto& row : setup.fleet_control->detached_units) ids.insert(row.member.id);
+            if (placement_context) for (const auto& row : placement_context->census.objects) ids.insert(row.id);
+            object_count = ids.size();
+            placement_budget_full = additional > object_budget - std::min<std::uint64_t>(object_count, object_budget);
+        }
+        if (placement_budget_full) {
+            setup_load_note(load_buffer, "EAWR-LOAD-1033", plan.campaign_name(), "Starting_Forces",
+                "type " + std::to_string(type) + ", " + std::to_string(additional) + " objects",
+                "complete placement omitted; object budget " + std::to_string(object_budget), core::LoadAction::skipped_placement);
+            return false;
+        }
+        object_count += additional;
+        return true;
+    };
     std::map<gc::PlanetId, std::vector<StartingAllegiance>> allegiance;
     // WGS-09: complete the neutral location pass before any force pass.
     for (const auto& location : plan.locations())
@@ -1095,7 +1229,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
                     [&](const auto& row) { return row.planet == mark.planet; });
                 if (at == placement_context->production.planets.end()) return invalid<CampaignRoot>("initial-placement planet context is absent");
                 const auto offer = std::find_if(at->offers.begin(), at->offers.end(), [&](const auto& row) { return row.type == mark.type; });
-                if (offer == at->offers.end()) return invalid<CampaignRoot>("initial-placement production type is absent");
+                if (offer == at->offers.end()) continue; // An over-budget offer was explicitly omitted above.
                 offer->initially_placed = true;
             }
             if (services.mark_initial_placement)
@@ -1108,6 +1242,17 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
             // WGS-70's target amount is code 1.0; it is not a current political-owner assignment.
             const StartingAllegiance value{request.owner, request.target_allegiance};
             if (target == targets.end()) targets.push_back(value); else *target = value;
+            if (placement_budget_full) {
+                setup_load_note(load_buffer, "EAWR-LOAD-1033", plan.campaign_name(), "Starting_Forces",
+                    request.original_type, "later placement omitted after object budget exhausted", core::LoadAction::skipped_placement);
+                continue;
+            }
+            if (!admit_initial_base(request.original_type)) continue;
+            if (placement_context && placement_context->omitted_templates.contains(request.type)) {
+                setup_load_note(load_buffer, "EAWR-LOAD-1034", request.original_type, "Starting_Forces",
+                    "invalid composite template", "placement omitted", core::LoadAction::skipped_placement);
+                continue;
+            }
             const auto first_free = next;
             auto placed = services.stock_starting_forces
                 ? place_starting_force(*services.stock_starting_forces, request, next, setup, *placement_context)
@@ -1115,6 +1260,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
             if (!placed) return core::Result<CampaignRoot>::failure(placed.error());
             auto frontier = placement_frontier(placed.value(), next, request, setup, plan);
             if (!frontier) return core::Result<CampaignRoot>::failure(frontier.error());
+            if (!admit_placement(request.type, placed.value(), next)) continue;
             next = frontier.value();
             setup.fleets.insert(setup.fleets.end(), placed.value().fleets.begin(), placed.value().fleets.end());
             auto& detached = setup.fleet_control->detached_units;
@@ -1163,7 +1309,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
     // Separate control pass: every force on every planet exists before it begins.
     if (services.initial_political_control || services.stock_starting_forces) {
         auto control = services.initial_political_control ? services.initial_political_control(plan, setup)
-            : prepare_initial_control(setup, *setup.control);
+            : prepare_initial_control(setup, *setup.control, &load_buffer);
         if (!control) return core::Result<CampaignRoot>::failure(control.error());
         if (!control.value().captured_types.empty() || !control.value().absent_forces.empty())
             return invalid<CampaignRoot>("initial political provider returned a conquest/death journal");
@@ -1197,6 +1343,8 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
     // Keep duplicate authored records; a newly live original type guards later repeats.
     std::map<gc::PlayerId, std::set<gc::TypeId>> created_originals;
     for (const auto& hero : plan.multiplayer_heroes()) {
+        if (placement_context && placement_context->omitted_templates.contains(hero.original_type_id)) continue;
+        if (!admit_initial_base(hero.original_type)) continue;
         const StartingForceRequest context{hero.home, hero.player, hero.original_type_id, hero.original_type, false, {}};
         if (services.home_has_production) {
             auto production = services.home_has_production(hero.home);
@@ -1226,6 +1374,7 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         if (!placed) return core::Result<CampaignRoot>::failure(placed.error());
         auto frontier = placement_frontier(placed.value(), next, context, setup, plan);
         if (!frontier) return core::Result<CampaignRoot>::failure(frontier.error());
+        if (!admit_placement(hero.original_type_id, placed.value(), next)) continue;
         next = frontier.value();
         setup.fleets.insert(setup.fleets.end(), placed.value().fleets.begin(), placed.value().fleets.end());
         auto& detached = setup.fleet_control->detached_units;
@@ -1296,6 +1445,13 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
         if (!prepared) return core::Result<CampaignRoot>::failure(prepared.error());
         setup.census = std::move(prepared).value();
     }
+    if (setup.production) {
+        normalize_campaign_offers(*setup.production, load_buffer, plan.campaign_name());
+        if (placement_context) for (auto& planet : setup.production->planets) for (auto& offer : planet.offers)
+            if (placement_context->omitted_templates.contains(offer.type)) offer.direct_build_allowed = false;
+    }
+    if (setup.census) (void)normalize_campaign_census(*setup.census, load_buffer, plan.campaign_name());
+    if (setup.fiscal) normalize_campaign_fiscal(*setup.fiscal, setup.planets.size(), load_buffer, plan.campaign_name());
     // GPC-01: the control pass above runs before the census exists, so the live actors seed the source ledger here.
     if (setup.control && setup.census) {
         setup.control->ability_sources.clear();
@@ -1341,7 +1497,12 @@ core::Result<CampaignRoot> CampaignRoot::create(CampaignSetupPlan plan, const Ca
     bind_story_identities(game.value(), plan);
     if (game.value().galaxy().next_entity_id() != next)
         return invalid<CampaignRoot>("setup provider lost its allocator frontier; an unrepresented object requires its owning subsystem");
-    return core::Result<CampaignRoot>::success(CampaignRoot(std::move(plan), std::move(game).value(), std::move(caps)));
+    CampaignRoot root(std::move(plan), std::move(game).value(), std::move(caps));
+    if (services.load_notes) for (const auto& note : services.load_notes()) load_collector.append(note);
+    load_collector.merge(load_buffer);
+    root.load_notes_ = load_collector.snapshot();
+    if (services.annotate_load_notes) services.annotate_load_notes(root.load_notes_);
+    return core::Result<CampaignRoot>::success(std::move(root));
 }
 void bind_story_identities(GameSession& game, const CampaignSetupPlan& plan) {
     std::map<gc::PlanetId, std::string> planets;
@@ -1352,7 +1513,15 @@ void bind_story_identities(GameSession& game, const CampaignSetupPlan& plan) {
         factions.emplace(binding.player.player_id, binding.faction);
     game.set_story_identities(std::move(planets), std::move(factions));
 }
+std::span<const core::LoadNote> CampaignRoot::load_notes() const {
+    combined_load_notes_ = load_notes_;
+    if (game_) {
+        auto runtime = game_->galaxy().load_notes();
+        combined_load_notes_.insert(combined_load_notes_.end(), runtime.begin(), runtime.end());
+    }
+    return combined_load_notes_;
+}
 void CampaignRoot::stop_root() noexcept {
-    game_.reset(); plan_.reset(); caps_.clear();
+    game_.reset(); plan_.reset(); caps_.clear(); load_notes_.clear(); combined_load_notes_.clear();
 }
 } // namespace eawr::campaign

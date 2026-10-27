@@ -102,6 +102,8 @@ public:
     [[nodiscard]] ui::SpecialWeaponButton special_weapon_button(const LiveSessionView& live) const;
     bool special_weapon_click(LiveSessionView& live);
     bool beacon_click(LiveSessionView& live);
+    [[nodiscard]] bool gift_enabled(const LiveSessionView& live) const;
+    bool gift_click(sim::SeatId recipient, LiveSessionView& live);
     [[nodiscard]] bool beacon_targeting() const noexcept { return beacon_targeting_; }
     [[nodiscard]] bool beacon_enabled(const LiveSessionView& live) const noexcept {
         return beacon_delay_.has_value() && live.beacon_available() && (beacon_targeting_ || beacon_remaining_ <= 0);
@@ -225,6 +227,7 @@ private:
     void acknowledge(Acknowledgement::Kind kind, sim::EntityId target = sim::invalid_entity_id,
                      std::uint32_t hardpoint = sim::tactical::attack_hull,
                      std::optional<sim::math::Vec3> destination = std::nullopt);
+    [[nodiscard]] std::vector<sim::EntityId> controlled_selection(const LiveSessionView& live) const;
     [[nodiscard]] bool local_order_selection(const LiveSessionView& live) const;
     void refresh_cards(const LiveSessionView& live);
     void refresh_hero_types(const units::UnitTables* tables);
@@ -236,6 +239,7 @@ private:
     std::array<float, 2> viewport_{};
     std::vector<ui::BattleUnit> units_;
     ui::Selection selection_;
+    std::optional<std::uint64_t> controller_tick_;
     std::uint64_t replacement_tick_{};
     std::size_t card_slots_{};
     std::vector<ui::CardUnit> card_units_;

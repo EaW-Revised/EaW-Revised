@@ -529,6 +529,21 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "cancel_join") return action_cancel_join();
     if (verb == "name" && page_ != Page::staging) return action_name(argument);
     if (verb == "colour" && page_ != Page::staging) return action_colour(argument, number);
+    if (verb == "chat_enter" && (page_ == Page::lobby || page_ == Page::staging)) {
+        auto* edit = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT");
+        auto* viewport = get_viewport();
+        if (!edit || !viewport) return false;
+        edit->set_text(text(argument));
+        edit->grab_focus();
+        Ref<InputEventKey> key;
+        key.instantiate();
+        key->set_keycode(KEY_ENTER);
+        key->set_pressed(true);
+        viewport->push_input(key, true);
+        key->set_pressed(false);
+        viewport->push_input(key, true);
+        return true;
+    }
     if (verb == "chat") return action_chat(argument);
     if (verb == "sort") return action_sort(impl, argument);
     if (verb == "filter") return action_filter(impl, argument, number);

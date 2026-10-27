@@ -17,15 +17,18 @@ template<class T> core::Result<T> fail(std::string message) {
     d.message = "tactical return content: " + std::move(message); return core::Result<T>::failure(std::move(d));
 }
 core::Result<Fixed> number(const data::XmlNode& node) {
-    const auto value = data::retail::leading_number(node.raw_text);
+    const auto value = data::retail::float_value(node.raw_text);
     if (!value) return fail<Fixed>("invalid " + node.name);
     data::tag_trace::used(node); return core::Result<Fixed>::success(value->value);
 }
 core::Result<std::uint32_t> frames(const Fixed seconds) {
-    const auto value = sim::math::multiply(seconds, Fixed::from_raw(gc::galactic_frames_per_second * Fixed::scale));
-    if (!value || value.value().raw() < 0 || value.value().trunc_to_integer() > std::numeric_limits<std::uint32_t>::max())
-        return fail<std::uint32_t>("countdown exceeds frame range");
-    return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(value.value().trunc_to_integer()));
+    // LSA-37: a nonpositive delay is already elapsed. Bound only the frame representation.
+    constexpr auto maximum = std::numeric_limits<std::uint32_t>::max();
+    if (seconds <= Fixed{}) return core::Result<std::uint32_t>::success(0);
+    if (seconds.raw() > static_cast<std::int64_t>(maximum) * Fixed::scale / gc::galactic_frames_per_second)
+        return core::Result<std::uint32_t>::success(maximum);
+    return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(
+        seconds.raw() * gc::galactic_frames_per_second / Fixed::scale));
 }
 struct Inputs { data::Catalog catalog; CampaignSetupPlan plan; Fixed hero, factor; std::uint32_t lockout{}; };
 bool carries_named_hero(const std::span<const tactical::CarriedObject> children,
@@ -92,7 +95,7 @@ core::Result<StockTacticalReturnServices> prepare_stock_tactical_return(const vf
     const auto hero = read("Default_Hero_Respawn_Time"), factor = read("Space_Retreat_Attrition_Factor"), seconds = read("Space_Retreat_Allowed_Countdown_Seconds");
     if (!hero || !factor || !seconds) return fail<StockTacticalReturnServices>("required return constants are unavailable");
     auto lockout = frames(seconds.value()); if (!lockout) return core::Result<StockTacticalReturnServices>::failure(lockout.error());
-    auto input = std::make_shared<Inputs>(Inputs{catalog, plan, hero.value(), factor.value(), lockout.value()});
+    auto input = std::make_shared<Inputs>(Inputs{catalog, plan, hero.value(), std::clamp(factor.value(), Fixed{}, Fixed::from_raw(Fixed::scale)), lockout.value()});
     StockTacticalReturnServices services;
     services.bind_game = [input](GameSession& game) -> core::Result<void> {
         auto starting = rebuild_starting_force_inputs(*game.galaxy().snapshot(), input->plan);

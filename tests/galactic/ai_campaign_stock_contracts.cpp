@@ -542,7 +542,7 @@ void free_fleet_signal_contracts() {
 
 // Supporting composition fixture, with explicitly empty gameplay inputs. All
 // retained owners are production implementations; this is not opponent proof.
-void real_factory_contracts(bool configured_cadence) {
+void real_factory_contracts(bool configured_cadence, bool invalid_freestore) {
     std::string baseline;
     for (const auto workers : eawr::platform::determinism_worker_counts()) {
         auto executor = std::make_shared<eawr::platform::ThreadWorkerAdapter>(workers);
@@ -591,6 +591,11 @@ void real_factory_contracts(bool configured_cadence) {
         };
         for (const auto& [path, text] : setup->lifecycle.xml) { static_cast<void>(text); setup->lifecycle.xml_paths.push_back(path); }
         setup->modules = {{"Data/Scripts/Library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={} FriendlyContrastTypes={} end"}};
+        if (invalid_freestore) {
+            setup->lifecycle.xml["data/xml/ai/players/fixture.xml"] = R"(<AIPlayerType><Name>Fixture</Name><GalacticFreeStoreScript>Broken</GalacticFreeStoreScript><Templates><Galactic>Default</Galactic></Templates><Difficulty_Adjustments><Normal>Normal</Normal></Difficulty_Adjustments></AIPlayerType>)";
+            setup->modules.emplace("Data/Scripts/FreeStore/Broken.lua", "require('BrokenChild')");
+            setup->modules.emplace("Data/Scripts/FreeStore/BrokenChild.lua", "T = { A = {nil, true}\n B = {nil, false} }");
+        }
         cp::GalacticAiRuntimeProviders providers;
         providers.execution_input = [](auto player, const auto&, const auto&, const auto&, const auto*) {
             ga::ExecutionRouteInput input; input.player = player;
@@ -731,6 +736,24 @@ void real_factory_contracts(bool configured_cadence) {
             "funding restore cannot replace the actual unserviced mode timeline");
         must(game.restore_galactic_ai(before_manager));
         for (unsigned frame = 0; frame < 3; ++frame) must(game.step(*executor));
+        if (invalid_freestore) {
+            expect(std::any_of(setup->load_diagnostics.begin(), setup->load_diagnostics.end(), [](const auto& note) {
+                return note.find("galactic freestore disabled for player 1") != std::string::npos;
+            }), "invalid required freestore module produces a player-specific load note");
+            const auto identities = ck::game_identities(layout);
+            const auto saved = must(ck::save_game_checkpoint(game, identities));
+            auto restored = must(ck::load_game_checkpoint(saved, identities, configuration->restore, *executor));
+            std::string continuation;
+            for (unsigned frame = 0; frame < 30; ++frame) {
+                const auto expected = must(game.step(*executor)).state_hash.get();
+                expect(must(restored.session.step(*executor)).state_hash.get() == expected,
+                    "disabled freestore remains disabled after checkpoint restore");
+                continuation += expected;
+            }
+            if (baseline.empty()) baseline = continuation;
+            else expect(baseline == continuation, "invalid freestore continuation equals on 1/2/4/8 workers");
+            continue;
+        }
         const auto ordinary_budget = must(game.save_galactic_ai());
         auto revised_budget = ordinary_budget;
         auto funding = must(ga::decode_funding_state(revised_budget.state->components.at("funding")));

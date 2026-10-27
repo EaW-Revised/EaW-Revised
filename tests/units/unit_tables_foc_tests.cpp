@@ -89,6 +89,11 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     expect(static_cast<bool>(loaded), "FoC unit tables load");
     if (!loaded) return;
     const auto& tables = loaded.value();
+    for (const auto& unit : tables.units) for (const auto& hardpoint : unit.hardpoints) {
+        if (!hardpoint.destroyable) continue;
+        expect(hardpoint.health && hardpoint.health->raw() > 0,
+            "HD-06: stock destroyable hardpoint has authored positive Health: " + unit.id + "/" + hardpoint.id);
+    }
     foc_planetary_sources(tables, input);
     // WWP-72: only the Nebulon-B in the pinned ship/craft roster has nonzero aim height.
     // Live map structures are checked separately by the resource-container fixture.
@@ -978,13 +983,15 @@ void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     print_rows("note", tables.notes);
     expect(tables.projectiles.size() >= 13 && tables.constants.damage_to_armor.size() >= 168,
            "production closure retains the pinned projectile and damage rows");
-    expect(tables.unresolved.size() == 5 && std::all_of(tables.unresolved.begin(), tables.unresolved.end(),
+    expect(tables.unresolved.size() == 4 && std::all_of(tables.unresolved.begin(), tables.unresolved.end(),
         [](const auto& row) {
             return (row.owner == "Empire_Defense_Satellite_Repair" || row.owner == "Rebel_Defense_Satellite_Repair")
                 ? row.field == "Space_FOW_Reveal_Range"
-                : ((row.owner == "Slave_I" || row.owner == "TIE_Prototype") && row.field == "Targeting_Priority_Set")
-                  || (row.owner == "Darth_Vader_TIE_Fighter_Container" && row.field == "Create_Team_Type");
-        }), "only authored repair reveal, hero targeting and container replenishment gaps remain unresolved");
+                : ((row.owner == "Slave_I" || row.owner == "TIE_Prototype") && row.field == "Targeting_Priority_Set");
+        }), "only authored repair reveal and hero targeting gaps remain unresolved");
+    expect(std::count_if(tables.notes.begin(), tables.notes.end(), [](const auto& row) {
+        return row.owner == "Darth_Vader_TIE_Fighter_Container" && row.reason.find("WHE-70") != std::string::npos;
+    }) == 1, "WHE-70: stock container replenishment is one member-dispatch note");
     // ML-53: the loader tolerates an unknown restriction name, so this is the stock-data guard against typos.
     expect(std::none_of(tables.unresolved.begin(), tables.unresolved.end(), [](const auto& row) {
         return row.field == "Fire_Category_Restrictions";

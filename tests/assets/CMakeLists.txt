@@ -5,7 +5,7 @@ eawr_target_project_warnings(asset_tests)
 
 add_test(NAME asset_contracts COMMAND asset_tests)
 
-add_executable(effect_reader_tests effect_reader_tests.cpp effect_reader_fuzz.cpp)
+add_executable(effect_reader_tests effect_reader_tests.cpp effect_reader_fuzz.cpp effect_inventory.cpp effect_native_probe.cpp)
 target_link_libraries(effect_reader_tests PRIVATE eawr::assets)
 target_compile_features(effect_reader_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(effect_reader_tests)

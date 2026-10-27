@@ -37,6 +37,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 | ST-G1 | Tactical and galactic game speed sliders | step 0..4 (five steps) | 2 and 2 | debug build |
 | ST-G2 | Camera scroll speed slider | stop 0..9, a value 0..3 in ten stops | stop 3 (1.0) | debug build |
 | ST-G1 | Absolute scrolling, delayed tooltips, right-button scroll, both-buttons rotate, alternate mouse controls, simplified faction colours, ability autofire, ask for auto-resolve | 0/1 | on, off, off, off, off, off, on, off | debug build |
+| PD-01 | Reinforcement areas only while placing | `gameplay.reinforcement_areas_only_while_placing`, 0/1 | on | owner request (legacy EAWR-5136) |
 | ST-N1 | Network port (1234 is "use the default port"), NAT negotiation, firewall bypass, UPnP | integer, 0/1 | 1234, on, on, on | debug build |
 | ST-N1 | Quickmatch default, connection speed, preferred faction, lobby locale | integers | 1 (land), 0 (modem), 0 (random), -1 (the game language) | debug build |
 | ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference | empty host, port 27020, pin trust, relay-only off | project |
@@ -67,6 +68,7 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 | ST-V5 | Windowed check, vsync check | Apply applies changed values and stays; Accept applies changed values and leaves; Cancel leaves without applying. An unchanged Accept makes no video calls, including when accepting another page. Vsync, window mode/size, texture detail and render profile are compared independently against the last committed values. Apply is disabled until something changes. The shared engine apply also checks current mode, size, vsync and texture detail, including at startup. Vsync on requests FIFO directly. Render-profile setters compare current viewport values. Retail release capture confirms no visible display reset on unchanged Accept. |
 | ST-P1 | Anti-aliasing slider | Off is the retail look, Max the enhanced one (section 4). |
 | ST-G3 | Tactical game speed | The battle's speed step (TM-01) unless `--eawr-live-speed` chose one. |
+| PD-01 | Reinforcement areas only while placing | Enabled Gameplay checkbox. On: red no-drop areas appear only during placement; off: follows the retail/mod panel-or-drag rule. Accept saves immediately, Cancel discards edits, Defaults enables it. Presentation only. |
 | ST-O1 | Gamma, detail sliders, advanced page, widescreen, hardware cursor, subtitles, audio provider | Disabled: the detail levels and cursor kind are not built, the layout follows the window already. |
 | ST-O1 | Galactic speed, auto-resolve | Disabled: the galactic game is not part of this build. |
 | ST-O1 | Scroll speed, absolute scroll, right-button scroll, rotate with both buttons, alternate mouse | Disabled: the camera takes its controls from the project's bindings. |
@@ -76,6 +78,11 @@ table of controls and reasons lives next to the record (`find_option_status`) an
 
 The retail difficulty radios appear only in a campaign game (debug build); this build has no
 campaign, so they are hidden.
+
+Reinforcement areas only while placing is enabled by default in **Options > Gameplay**.
+The red no-drop grid appears during placement and disappears when placement ends, even with the panel open.
+Turn it off to follow the retail/mod panel-or-drag rule. Accept saves the choice; Cancel discards edits; Defaults enables it.
+This changes presentation only and takes effect without restarting.
 
 ## 4. The render profile
 

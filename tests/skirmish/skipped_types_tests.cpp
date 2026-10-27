@@ -40,6 +40,28 @@ int main() {
     const auto ids = eawr::skirmish::skipped_type_ids(with_note);
     check(ids.size() == 2 && ids[0] == "Another_Type" && ids[1] == "Republic_Light_Assault_Cruiser",
         "skip ids are sorted and unique; warnings are not types");
+    auto warning = note;
+    warning.severity = eawr::core::Severity::warning;
+    warning.message = "unit 'Retained_Type' ability 'HARMONIC_BOMB': creation skipped; ability retained";
+    const std::vector<eawr::core::Diagnostic> warnings_only{warning, warning};
+    check(eawr::skirmish::content_load_summary(warnings_only) == "0 unit types skipped, 1 unit with content warnings"
+            && eawr::skirmish::skipped_type_ids(warnings_only).empty(),
+        "#5064: warning-only content retains its unit and counts it once");
+    with_note.push_back(warning);
+    with_note.push_back(warning);
+    warning.message = "unit type 'Retained_Type' authors a repeated ability";
+    with_note.push_back(warning);
+    warning.message = "unit 'Another_Type' ability warning before its rejection";
+    with_note.push_back(warning);
+    check(eawr::skirmish::content_load_summary(with_note) == "2 unit types skipped, 1 unit with content warnings",
+        "#5064: duplicate diagnostics count types once; rejected types are excluded from retained warnings");
+    warning.message = "projectile 'P' has a content warning";
+    with_note.push_back(warning);
+    check(eawr::skirmish::content_load_summary(with_note)
+            == "2 unit types skipped, 1 unit with content warnings, 1 other content warning",
+        "#5064: warnings without a unit owner remain visible separately");
+    check(eawr::skirmish::content_load_summary({}) == "0 unit types skipped, 0 units with content warnings",
+        "#5064: clean content has zero rejected and warned types");
 
     // B1: a placed skipped type fails the start, naming the type and the reason.
     eawr::battle::BattleStart start;
@@ -77,7 +99,7 @@ int main() {
     eawr::sim::tactical::EconomyRules rules;
     rules.menus.resize(1);
     rules.menus[0].station = 7;
-    for (const std::string& name : {"Victory_Class_Star_Destroyer", "Another_Type", "Republic_Light_Assault_Cruiser"}) {
+    for (const char* name : {"Victory_Class_Star_Destroyer", "Another_Type", "Republic_Light_Assault_Cruiser"}) {
         eawr::sim::tactical::BuildOption option;
         option.type = eawr::battle::type_id(name);
         rules.menus[0].options.push_back(option);

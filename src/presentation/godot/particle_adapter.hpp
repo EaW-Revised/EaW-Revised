@@ -47,7 +47,9 @@ public:
         std::uint8_t maximum_attenuation{};
     };
 
-    GodotParticleBackend(godot::Node3D& host, TextureResolver resolver, FogCallbacks fog = {});
+    GodotParticleBackend(godot::Node3D& host, TextureResolver resolver, FogCallbacks fog = {},
+                        std::size_t warm_policy_limit = 32,
+                        std::uint64_t warm_texture_limit = 8U * 1024U * 1024U);
     ~GodotParticleBackend() override;
     GodotParticleBackend(const GodotParticleBackend&) = delete;
     GodotParticleBackend& operator=(const GodotParticleBackend&) = delete;
@@ -58,9 +60,26 @@ public:
     void set_spawn_context(std::string_view effect, std::uint64_t tick) noexcept;
     // Construction-time provenance for diagnostics only; ordinary particles are the default.
     void set_churn_owner(render_churn::Owner owner) noexcept;
-    // Population-time hidden, empty emitters pin shared textures/shaders. Runtime
-    // instances retain ordinary creation order. Oversized/refused plans fall back.
+    // Population-time preparation pins shared textures/shaders, then releases
+    // empty draw RIDs and active membership. Runtime instances retain ordinary
+    // creation order. Oversized/refused plans fall back.
     [[nodiscard]] bool prewarm_emitter(const particles::EmitterRenderPlan& plan);
+    // Load-only diagnostic: preserve the warmed shader/texture references and
+    // allocation order, but remove every retained warm Emitter record.
+    void retain_prewarm_cache_only();
+    // Population-only source census. Visit the complete closure before warming;
+    // it resolves texture charges without creating any GPU or logical resource.
+    void inventory_prewarm_emitter(const particles::EmitterRenderPlan& plan);
+    struct EmitterPrewarmWork final {
+        std::size_t demand_references{}, demand_policies{}, demand_textures{}, unresolved_policies{};
+        std::uint64_t demand_texture_bytes{};
+        bool demand_complete{};
+        std::size_t policy_limit{};
+        std::uint64_t texture_limit{};
+        std::size_t retained_holders{}, cache_only_policies{};
+        std::size_t refused_policy_limit{}, refused_texture_limit{}, refused_missing_texture{}, refused_backend{};
+    };
+    [[nodiscard]] EmitterPrewarmWork emitter_prewarm_work() const noexcept;
     // Pin only the compiled program of a loaded render plan, bounded separately
     // from the texture-bearing warm emitters. No texture, material, mesh or
     // instance is created. A refused plan keeps the ordinary runtime fallback.

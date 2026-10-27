@@ -146,6 +146,7 @@ void plots_per_faction(const Installed& installed) {
 // The plots inside the campaign's own GameSession, stepped on 1/2/4/8 workers.
 void session(const Installed& installed) {
     std::vector<std::string> baseline;
+    std::string baseline_holocron;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         const auto plan = installed.plan();
         const auto services = must(cp::prepare_live_campaign_services(*installed.files, installed.loaded.catalog, installed.data, installed.types, plan, "Normal_Default"));
@@ -158,8 +159,17 @@ void session(const Installed& installed) {
         std::vector<std::string> trail;
         std::uint64_t underworld_tick{};
         std::size_t refused{};
+        std::string holocron; // WST-58: the stock intro goal and its summary request, as published
+        std::size_t opens{};
         for (int i = 0; i < 40; ++i) {
             auto tick = must(game->step(executor));
+            for (const auto& event : tick.story_presentation) {
+                if (const auto* goal = std::get_if<st::GoalChanged>(&event.payload)) holocron += "goal " + goal->tag + " @" + std::to_string(tick.completed_tick) + ";";
+                if (const auto* summary = std::get_if<st::SummaryRequest>(&event.payload)) {
+                    holocron += "summary " + summary->tag + " chapter " + std::to_string(summary->chapter) + ";";
+                    opens += summary->action == st::SummaryAction::open;
+                }
+            }
             for (const auto& row : tick.story_triggers) {
                 trail.push_back(row.event);
                 if (row.event == "SPAWN_TYBER") underworld_tick = tick.completed_tick;
@@ -173,6 +183,11 @@ void session(const Installed& installed) {
         expect(underworld_tick > 25 && underworld_tick < 40, "the Underworld plot starts after about thirty frames");
         expect(game->story_engine()->triggered("Story_Sandbox_56_Underworld.XML", "Spawn_Tyber"), "Tyber is granted");
         expect(refused == 0, "no unit or unlock reward of the start events is refused");
+        expect(opens == 1 && holocron.find("goal ") == holocron.rfind("goal "),
+            "WST-58 the stock intro holocron goal appears once and opens its summary once");
+        const auto* intro = game->story_goals(installed.player_of(plan, "Underworld"));
+        expect(intro && intro->goals.size() == 1 && !intro->goals.front().remove_after_viewed, "WST-58 the stock intro goal is the tagged one and stays");
+        std::cout << "story stock holocron workers=" << workers << ' ' << holocron << std::endl;
         // Part 2 (WST-40/64): the start heroes are in the galaxy and the X-wing unlock locks the Z-95.
         const auto rebel = installed.player_of(plan, "Rebel"), empire = installed.player_of(plan, "Empire"), underworld = installed.player_of(plan, "Underworld");
         auto snapshot = game->galaxy().snapshot();
@@ -210,8 +225,11 @@ void session(const Installed& installed) {
         expect(copy.galaxy().state_sha256() == game->galaxy().state_sha256(), "the native journal reconstructs the story heroes, locks and levels");
         const auto digest = game->story_engine()->digest();
         std::cout << "story stock workers=" << workers << " triggers=" << trail.size() << " digest=" << digest << '\n';
-        if (workers == 1) baseline = {digest, game->state_sha256()};
-        else expect(baseline == (std::vector<std::string>{digest, game->state_sha256()}), "1/2/4/8 workers give equal plot and session digests");
+        if (workers == 1) { baseline = {digest, game->state_sha256()}; baseline_holocron = holocron; }
+        else {
+            expect(baseline == (std::vector<std::string>{digest, game->state_sha256()}), "1/2/4/8 workers give equal plot and session digests");
+            expect(baseline_holocron == holocron, "1/2/4/8 workers publish the same holocron requests on the same ticks");
+        }
     }
 }
 } // namespace

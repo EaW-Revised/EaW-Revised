@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/result.hpp"
+#include "eawr/core/load_note.hpp"
 #include "eawr/sim/math/fixed.hpp"
 #include "eawr/vfs/vfs.hpp"
 
@@ -157,6 +158,11 @@ struct MergeRule {
 
 struct LoadOptions {
     std::vector<MergeRule> merge_rules;
+    // The physical inventory (Catalog::physical_inventory) also records whether every effective XML outside the
+    // registries parses. That second pass reads and parses all of them again; tools and tests want it, a player's
+    // start does not (#5197). Off: those records keep parsed=false and say so in their outcome; registry files, the
+    // definitions and every load health count are unchanged.
+    bool parse_unregistered_xml{true};
 };
 
 // One changed value for with_overrides (the tag perturbation check, docs/tag-applied-check.md).
@@ -234,6 +240,7 @@ struct LoadResult {
     Catalog catalog;
     std::vector<core::Diagnostic> diagnostics;
     LoadHealth health;
+    std::vector<core::LoadNote> notes;
 };
 
 // One line naming every non-zero health count ("registry_invalid=1 include_failed=2"), empty when

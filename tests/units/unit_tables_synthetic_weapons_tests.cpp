@@ -580,6 +580,38 @@ void rocket_variant_inputs() {
     }
     expect(identity != eawr::units::content_identity(changed), "RFL-02: authored rocket geometry changes content identity");
 
+    // RFL-16: authored travel allowance is independent of world-coordinate limits.
+    TempTree huge_tree;
+    auto huge_xml = xml;
+    const std::string distance = "<Projectile_Max_Flight_Distance>3000";
+    huge_xml.replace(huge_xml.find(distance), distance.size(), "<Projectile_Max_Flight_Distance>9999999");
+    write_fixture(huge_tree.root, huge_xml);
+    const auto huge_loaded = load(huge_tree.root, models(-40.0F));
+    expect(huge_loaded.tables.has_value(), "RFL-16: oversized flight allowance loads from synthetic XML");
+    if (!huge_loaded.tables) return;
+    const auto huge_combat = eawr::units::combat_table(*huge_loaded.tables);
+    expect(static_cast<bool>(huge_combat), "RFL-16: oversized ROCKET binds without coordinate-derived rejection");
+    if (!huge_combat) return;
+    const auto* huge_craft = huge_combat.value().find(eawr::assets::object_type_crc("Test_Fighter"));
+    expect(huge_craft && !huge_craft->weapons.empty() && huge_craft->weapons[0].shot
+        && huge_craft->weapons[0].shot->flight
+        && huge_craft->weapons[0].shot->flight->authored_distance == Fixed::from_raw(raw(9999999)),
+        "RFL-16: bound ROCKET retains its huge authored allowance exactly");
+    auto malformed = *huge_loaded.tables;
+    for (auto& projectile : malformed.projectiles)
+        if (projectile.id == "Proj_Test_Small") projectile.rocket_curve_distance = Fixed{};
+    const auto refused = eawr::units::combat_table(malformed);
+    expect(!refused && refused.error().message.find("Proj_Test_Small") != std::string::npos
+        && refused.error().message.find("Projectile_Rocket_Curve_Distance must be positive") != std::string::npos
+        && refused.error().message.find("4294967295") == std::string::npos,
+        "RFL-09/16: malformed flight names the projectile and failed input instead of a weapon sentinel");
+    std::vector<eawr::core::Diagnostic> skipped;
+    const auto lenient = eawr::units::combat_table(malformed, eawr::units::ContentErrors::skip_object, &skipped);
+    expect(lenient && std::any_of(skipped.begin(), skipped.end(), [](const auto& note) {
+        return note.message.find("Proj_Test_Small") != std::string::npos
+            && note.message.find("Projectile_Rocket_Curve_Distance must be positive") != std::string::npos;
+    }), "RFL-09/16: lenient loading preserves the actionable malformed-flight diagnostic");
+
     // RFL-03: synthetic inputs match the projectile reached by UM06_EclipseDefensePad.
     TempTree authored_tree;
     auto authored = xml;

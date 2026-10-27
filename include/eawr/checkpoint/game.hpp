@@ -21,7 +21,8 @@ namespace eawr::checkpoint {
 // v34 (#4058): a save keeps the history since the previous save or load. The session section carries the history base
 // (boundary tick, chained frontier digest, last sealed key, dropped counts); the frontier input digest is
 // sha256(previous digest || replay window bytes), never a digest of the window alone.
-inline constexpr std::uint16_t galaxy_section_version = 47;
+// v48 (#2044): the owner tail ends with the holocron story goals and objectives per plot owner, after the plot state.
+inline constexpr std::uint16_t galaxy_section_version = 48;
 
 [[nodiscard]] Identities game_identities(const sim::galactic::GalacticSetup& setup);
 [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_game_checkpoint(

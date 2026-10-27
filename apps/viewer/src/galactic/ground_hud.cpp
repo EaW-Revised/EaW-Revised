@@ -85,6 +85,13 @@ void layout_sale(GalacticMode::State& state, bool place = false) {
 EawrGroundInput::EawrGroundInput() { set_mouse_filter(MOUSE_FILTER_PASS); set_focus_mode(FOCUS_NONE); }
 bool EawrGroundInput::_has_point(const Vector2& point) const { return hit && hit(point); }
 void EawrGroundInput::_gui_input(const Ref<InputEvent>& input) {
+    // Leave unused wheel events to the map after GUI dispatch (#5085).
+    if (const auto* button = input.is_valid() ? Object::cast_to<InputEventMouseButton>(input.ptr()) : nullptr;
+        button && (button->get_button_index() == MOUSE_BUTTON_WHEEL_UP
+            || button->get_button_index() == MOUSE_BUTTON_WHEEL_DOWN)) {
+        if (rectangle && rectangle()) accept_event(); // Keep an active box selection in the GUI.
+        return;
+    }
     if (const auto* button = input.is_valid() ? Object::cast_to<InputEventMouseButton>(input.ptr()) : nullptr;
         button && button->get_button_index() == MOUSE_BUTTON_RIGHT) {
         if (right_event && right_event(button->get_position(), button->is_pressed())) accept_event();

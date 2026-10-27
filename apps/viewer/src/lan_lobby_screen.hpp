@@ -105,6 +105,7 @@ public:
         std::vector<std::string> games;      // lobby rows as shown
         std::vector<std::string> players;    // lobby player list
         std::vector<std::string> chat;       // the chat log (the model's lines)
+        bool chat_focused{};                 // the chat edit owns keyboard focus
         std::size_t chat_shown{};            // items in the drawn chat list
         std::string chat_last_shown;         // the drawn list's last item
         std::vector<RowState> rows;          // staging rows

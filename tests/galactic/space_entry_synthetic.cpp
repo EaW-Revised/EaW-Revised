@@ -2,6 +2,7 @@
 #include "space_entry_private.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/campaign/standalone_replay.hpp"
 #include "eawr/campaign/tactical_return.hpp"
 #include "eawr/campaign/space_rules.hpp"
 #include "eawr/checkpoint/game.hpp"
@@ -289,9 +290,11 @@ void script_manifest_contracts() {
     const auto plain = take(skirmish::select_ai_modules(cached, {}, true));
     expect(plain.size() == cached.size(), "a plain battle admits the same mounted corpus (ML-34)");
     auto incomplete = cached; incomplete.erase(vader);
-    const auto missing_root = skirmish::select_ai_modules(incomplete, battle, true);
-    expect(!missing_root && missing_root.error().code == auth::codes::module_rejected
-        && missing_root.error().message.find(vader) != std::string::npos, "a missing reachable root fails during closure selection with its path");
+    std::vector<core::Diagnostic> load_notes;
+    const auto missing_root = skirmish::select_ai_modules(incomplete, battle, true, &load_notes);
+    expect(missing_root && !missing_root.value().contains(vader) && load_notes.size() == 1
+        && load_notes.front().severity == core::Severity::warning && load_notes.front().logical_path == vader,
+        "SOS-46: a missing reachable root emits one warning and omits only its attachment");
     expect(static_cast<bool>(skirmish::select_ai_modules(incomplete, {}, true)), "an unrelated missing root does not refuse a plain battle");
     incomplete = cached; incomplete.erase(state_machine);
     expect(!skirmish::select_ai_modules(incomplete, battle, true), "a missing shared object dependency cannot be silently omitted");
@@ -537,7 +540,15 @@ void ground_passenger_contracts() {
             expect(attached != combined_plan.conflict.forces.end() && attached->role == outer.role,
                 "ground riders leave outer transport deployment unchanged");
         }
+        combined_record.tactical.controllers = tt::BattleControllerPolicy{
+            {{{1}, 1, sim::SeatKind::human, true}, {{2}, 1, sim::SeatKind::human, true},
+                {{3}, 2, sim::SeatKind::ai, true}},
+            {{1, tt::FactionController::humans}, {2, tt::FactionController::ai}}};
         auto combined = take(campaign::build_space_entry(combined_record, combined_input, 100, 17));
+        const auto initial_carrier = std::find_if(combined.start.units.begin(), combined.start.units.end(),
+            [](const auto& unit) { return unit.state.entity_id == 23; });
+        const auto carried_before = initial_carrier == combined.start.units.end()
+            ? std::vector<tt::CarriedObject>{} : initial_carrier->state.contained;
         campaign::SpaceRuleInputs combined_rules; combined_rules.reserve_order = combined_plan.reserve_order;
         for (const auto owner : {1U, 2U}) {
             campaign::SpaceRulePlayer player; player.player = owner; player.max_tech = 5; combined_rules.players.push_back(player);
@@ -550,6 +561,11 @@ void ground_passenger_contracts() {
             combined_rules.reserve_attachments.push_back({carrier, outer.contained});
         }
         check(campaign::apply_space_rules(combined, combined_input.map, combined_rules));
+        const auto deployed_carrier = std::find_if(combined.start.units.begin(), combined.start.units.end(),
+            [](const auto& unit) { return unit.state.entity_id == 23; });
+        expect(deployed_carrier != combined.start.units.end() && deployed_carrier->state.contained == carried_before
+            && !carried_before.empty() && deployed_carrier->state.controller_seat.value != 0,
+            "co-op binding preserves deployed passenger trees while publishing a mobile controller");
         auto combined_battle = take(tt::TacticalSession::create(combined.conflict.tactical, combined.content));
         expect(combined_battle.ledgers().front().pool_tokens == std::vector<std::uint64_t>{32, 27},
             "only outer transports receive ordered reserve tokens on 1/2/4/8 workers");
@@ -748,7 +764,7 @@ void preparation_contracts() {
     flagged.roster_order = {20, 22, 21, 23, 30};
     auto pathfinder_record = record; pathfinder_record.forces.push_back({31, 1, 2, 12});
     const auto pathfinder = take(campaign::prepare_space_entry(pathfinder_record, flagged, 100, 17));
-    const auto role = [](const auto& plan, const auto id) {
+    const auto role = [](const auto& plan, const sim::EntityId id) {
         return std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [id](const auto& f) { return f.id == id; })->role;
     };
     expect(role(pathfinder, 20) == campaign::ForceRole::deployed
@@ -898,7 +914,123 @@ void preparation_contracts() {
         "WGT-11 structure gate includes planetary weapons");
 }
 
+void controller_entry_contracts() {
+    auto tables = tables_for_entry();
+    tables.campaign_scene = true;
+    units::NamedConstant credit_cap; credit_cap.tag = "Credit_Cap_Per_Planet"; credit_cap.value = whole(10000);
+    tables.constants.scalars.push_back(credit_cap);
+    auto input = entry_inputs(tables);
+    for (auto& faction : input.map.factions) faction.space_unit_cap = 3;
+    input.types[0].escorts.clear();
+    input.sides[0].cap = whole(3);
+    input.sides[1].human = true;
+    input.riders.front().transport = 23;
+    for (auto& type : tables.units) {
+        if (type.id == "Ship") type.production.population_value = 1;
+        if (type.id == "ReserveShip") type.production.population_value = 2;
+    }
+    campaign::ConflictRecord record;
+    record.id = 90; record.planet = 2; record.invader = 1; record.defender = 2;
+    record.map_identity = input.map.map; record.station_level = 1;
+    record.forces = {{20, 1, 1, 10}, {21, 1, 1, 10}, {22, 2, 1, 10}, {23, 3, 1, 10}, {30, 1, 2, 12}};
+    campaign::SpaceRuleInputs rules;
+    rules.players = {{1,whole(100),0,5,1,{},false,{}},{2,whole(100),0,5,1,{},false,{}}};
+    auto baseline = take(campaign::build_space_entry(record, input, 100, 17));
+    check(campaign::apply_space_rules(baseline, input.map, rules));
+    expect(std::any_of(baseline.conflict.forces.begin(), baseline.conflict.forces.end(), [](const auto& force) {
+        return force.role == campaign::ForceRole::reinforcement;
+    }), "controller entry fixture includes over-cap reserves");
+    for (const auto humans : {2U, 3U, 4U}) {
+        auto controlled = record;
+        controlled.tactical.controllers.emplace();
+        for (const auto player : {1U, 2U}) {
+            controlled.tactical.controllers->factions.push_back({player, tt::FactionController::humans});
+            for (std::uint32_t seat = 1; seat <= humans; ++seat)
+                controlled.tactical.controllers->seats.push_back({{(player - 1) * humans + seat}, player, sim::SeatKind::human, true});
+        }
+        auto entry = take(campaign::build_space_entry(controlled, input, 100, 17));
+        expect(!entry.start.setup.controllers && !entry.start.setup.campaign,
+            "scene preparation defers controller policy until loaded campaign rules are bound");
+        check(campaign::apply_space_rules(entry, input.map, rules));
+        expect(entry.conflict.forces == baseline.conflict.forces
+            && entry.start.setup.campaign->reserves == baseline.start.setup.campaign->reserves,
+            "co-op changes neither over-cap selection nor transport/hero/reserve identity");
+        for (const auto& unit : entry.start.setup.units) {
+            if (unit.owner != 1 && unit.owner != 2) continue;
+            const auto view = std::find_if(entry.start.units.begin(), entry.start.units.end(), [&](const auto& row) {
+                return row.state.entity_id == unit.entity_id;
+            });
+            expect(view != entry.start.units.end() && view->state == unit,
+                "final remapped scene and replay setup publish the same controllers");
+            if (unit.type_id == skirmish::type_id("Pad") || unit.entity_id == entry.conflict.station)
+                expect(unit.control == tt::UnitControl::shared_structure && unit.controller_seat.value == 0,
+                    "data-defined orbital building and station stay shared");
+            if (unit.control == tt::UnitControl::mobile)
+                expect(unit.controller_seat.value != 0, "every deployed mobile root and member has a controller");
+        }
+        entry.conflict.tactical.controllers.reset();
+        for (auto& unit : entry.conflict.tactical.units) { unit.control = tt::UnitControl::none; unit.controller_seat = {}; }
+        expect(entry.conflict.tactical == baseline.conflict.tactical,
+            "removing temporary controller metadata yields byte-identical campaign entry state");
+    }
+}
+
 void scene_contracts() {
+    controller_entry_contracts();
+    {
+        // WCB-01/02, WAD-35: nested projectile references survive the GC table reduction,
+        // even when neither projectile is referenced by an ordinary weapon or ability row.
+        units::UnitTables source; source.campaign_scene = true;
+        for (unsigned index = 0; index < 8; ++index) {
+            units::Projectile projectile; projectile.id = "Projectile_" + std::to_string(index);
+            projectile.damage = whole(static_cast<std::int64_t>(index + 1));
+            projectile.max_speed = whole(12);
+            source.projectiles.push_back(projectile);
+        }
+        units::UnitType hero; hero.id = "Cluster_Hero"; hero.named_hero = true;
+        hero.kind = units::UnitKind::ship;
+        hero.cluster_bomb.emplace(); hero.cluster_bomb->name = "Ring";
+        hero.cluster_bomb->bomb_type = source.projectiles[5].id;
+        hero.cluster_bomb->style = tt::SpecialActivationStyle::user_input;
+        hero.cluster_bomb->projectile_index = 5; hero.cluster_bomb->count = 6;
+        units::Ability ability; ability.type = "CLUSTER_BOMB"; ability.gui_activated_ability_name = "Ring";
+        hero.abilities.push_back(ability);
+        hero.weapon.emplace(); hero.weapon->projectile_index = 3; hero.weapon->charged_projectile_index = 6;
+        units::Hardpoint hp; hp.id = "Charged_Gun"; hp.weapon.emplace();
+        hp.weapon->projectile_index = 3; hp.weapon->charged_projectile_index = 7;
+        hp.weapon->projectile = source.projectiles[3].id;
+        hp.weapon->charged_projectile = source.projectiles[7].id;
+        hero.hardpoints.push_back(hp); source.units.push_back(hero);
+        auto unused = hero; unused.id = "Unreachable_Hero"; source.units.push_back(unused);
+        tt::ReplayNativeScene scene; scene.battle_types = {hero.id};
+        const auto reduced = take(campaign::native_scene_tables(source, scene, {}));
+        expect(reduced.units.size() == 1 && reduced.projectiles.size() == 4,
+            "GC reduction collects cluster-bomb and charged hardpoint projectiles without unrelated rows");
+        const auto& kept = reduced.units.front();
+        expect(kept.cluster_bomb->projectile_index == 1
+            && kept.weapon->projectile_index == 0 && kept.weapon->charged_projectile_index == 2
+            && kept.hardpoints.front().weapon->projectile_index == 0
+            && kept.hardpoints.front().weapon->charged_projectile_index == 3,
+            "GC reduction remaps all nested projectile indices into the reduced table");
+        const auto full_abilities = take(units::ability_table(source));
+        const auto reduced_abilities = take(units::ability_table(reduced));
+        const auto* full_profile = full_abilities.find(skirmish::type_id(hero.id));
+        const auto* reduced_profile = reduced_abilities.find(skirmish::type_id(hero.id));
+        expect(full_profile && reduced_profile && *full_profile == *reduced_profile,
+            "cluster-bomb profile remains identical after GC reduction and passes the WHE-61 guard");
+        expect(source.units.front().cluster_bomb->projectile_index == 5
+            && source.units.front().hardpoints.front().weapon->charged_projectile_index == 7,
+            "GC reduction leaves the source table indices unchanged");
+        source.units.front().cluster_bomb->projectile_index = units::no_index;
+        source.units.front().weapon->charged_projectile_index = units::no_index;
+        source.units.front().hardpoints.front().weapon->charged_projectile_index = units::no_index;
+        const auto unresolved = take(campaign::native_scene_tables(source, scene, {}));
+        expect(unresolved.projectiles.size() == 1
+            && unresolved.units.front().cluster_bomb->projectile_index == units::no_index
+            && unresolved.units.front().weapon->charged_projectile_index == units::no_index
+            && unresolved.units.front().hardpoints.front().weapon->charged_projectile_index == units::no_index,
+            "unresolved nested projectile references keep the no-index sentinel during GC reduction");
+    }
     auto tables = tables_for_entry(); auto input = entry_inputs(tables);
     campaign::ConflictRecord record; record.id = 90; record.planet = 2; record.invader = 1; record.defender = 2;
     record.map_identity = input.map.map; record.station_level = 1;

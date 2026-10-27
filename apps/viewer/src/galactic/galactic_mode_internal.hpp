@@ -1,4 +1,5 @@
 #pragma once
+#include "galactic_memory.hpp"
 #include <iosfwd>
 #include <unordered_map>
 #include "eawr/platform/campaign_battle_view.hpp"
@@ -48,6 +49,7 @@
 #include "campaign_score_dialog.hpp"
 #include "live_battle_dialog_view.hpp"
 #include "reference_pages_widget.hpp"
+#include "story_summary_widget.hpp"
 #include "galactic_save.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -223,6 +225,8 @@ struct GalacticMode::State final {
     galactic_view::GalaxySnapshotStub metadata;
     sim::galactic::GalacticSetup galaxy_setup;
     std::unique_ptr<platform::PreparedLiveCampaign> campaign_root;
+    std::function<std::vector<std::string>()> memory_reader;
+    std::vector<GalacticMemorySnapshot> memory_snapshots;
     // Faction and AI player type the runtime installed (log-only; empty when AI is off or restored).
     struct NativeAiRow { sim::galactic::PlayerId player{}; std::string faction, player_type; };
     std::vector<NativeAiRow> native_ai_players;
@@ -264,6 +268,7 @@ struct GalacticMode::State final {
     godot::Control* hud{};
     godot::Control* world_overlays{};
     std::unique_ptr<ReferencePages> reference_pages;
+    std::unique_ptr<StorySummaryWidget> story_summary; // WST-58: the summary of the intro holocron goal
     EawrTacticalHud* command_bar{};
     std::optional<assets::MegaTextureAtlas> command_atlas;
     std::unique_ptr<UiTextures> command_textures;
@@ -418,7 +423,7 @@ struct GalacticMode::State final {
     void position_destruction_hud(galactic_view::ObjectId, godot::Vector2, float, float);
     [[nodiscard]] bool destruction_source(galactic_view::ObjectId) const;
     bool drop_destruction(galactic_view::ObjectId, bool);
-    bool drop_hero_ability(galactic_view::ObjectId, bool);
+    bool drop_hero_ability(galactic_view::ObjectId, bool, galactic_view::ObjectId target = 0);
     bool drop_raid(galactic_view::ObjectId, galactic_view::ObjectId, bool);
     [[nodiscard]] std::optional<galactic_view::AbilityDrop> hero_ability_drop(galactic_view::ObjectId, galactic_view::ObjectId target = 0) const;
     void write_destruction_report(std::ostream&) const;
@@ -645,6 +650,7 @@ struct GalacticMode::State final {
     bool dragged_type_stack{};
     std::uint64_t fleet_cell_reorders{};
     bool fleet_layout_dirty{};
+    bool fleet_ground_drop_targets_held{};
     // #3072: during a drag, the hovered planet's empty local stack icons (by icon index).
     std::array<godot::TextureButton*, 3> fleet_empty_slots{};
     std::array<bool, 3> fleet_empty_shown{};
@@ -1058,7 +1064,7 @@ struct GalacticMode::State final {
     [[nodiscard]] std::string perf_report_json() const;
     [[nodiscard]] galactic_view::OrbitCamera& seat_camera();
     [[nodiscard]] galactic_view::PlanetCamera& seat_flight();
-    [[nodiscard]] const galactic_view::PlanetView* picked_planet(float x, float y) const;
+    [[nodiscard]] const galactic_view::PlanetView* picked_planet(float x, float y, bool through_panel = false) const;
 };
 
 } // namespace eawr::presentation::godot_backend

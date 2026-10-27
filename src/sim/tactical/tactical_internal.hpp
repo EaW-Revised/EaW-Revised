@@ -11,7 +11,13 @@
 #include <string_view>
 #include <vector>
 
+namespace eawr::sim::tactical { struct TacticalSetup; }
+
 namespace eawr::sim::tactical::detail {
+
+// Validate and apply only the departing faction's effective roster. Other sides
+// are independent even when their outer boundaries share a child tick.
+[[nodiscard]] core::Result<void> apply_battle_control_policy(TacticalSetup& setup, const PlayerCommand& command);
 
 inline constexpr std::size_t player_record_size = 24;
 inline constexpr std::size_t unit_record_size = 80;
@@ -46,7 +52,9 @@ inline constexpr std::uint8_t opcode_special_fire = 27; // coordinator-reserved:
 inline constexpr std::uint8_t opcode_retreat = 28; // WR-43..47
 inline constexpr std::uint8_t opcode_retreat_cinematic = 30; // WR-50..53 recorded playback
 inline constexpr std::uint8_t opcode_beacon = 31; // coordinator-reserved, HCB-12
-inline constexpr std::uint8_t max_command_opcode = opcode_beacon;
+inline constexpr std::uint8_t opcode_gift = 32; // ADR-020: coordinator-reserved controller transfer.
+inline constexpr std::uint8_t opcode_battle_control = 33; // ADR-020: coordinator-reserved engine transition.
+inline constexpr std::uint8_t max_command_opcode = opcode_battle_control;
 
 [[nodiscard]] core::Diagnostic diagnostic(
     std::string_view code,
@@ -61,6 +69,9 @@ inline constexpr std::uint8_t max_command_opcode = opcode_beacon;
 [[nodiscard]] std::size_t command_body_size(const PlayerCommand& command) noexcept;
 
 void append_player(std::vector<std::uint8_t>& bytes, const Player& player);
+void append_controller_policy(std::vector<std::uint8_t>& bytes, const BattleControllerPolicy& policy,
+    std::uint32_t version = 4);
+void append_controller_unit(std::vector<std::uint8_t>& bytes, const UnitState& unit);
 void append_unit_record(std::vector<std::uint8_t>& bytes, const UnitState& unit);
 void append_order(std::vector<std::uint8_t>& bytes, const Order& order);
 void append_command(std::vector<std::uint8_t>& bytes, const PlayerCommand& command);

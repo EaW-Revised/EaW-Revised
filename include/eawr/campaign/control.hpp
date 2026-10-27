@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/campaign/fleets.hpp"
+#include "eawr/campaign/load_notes.hpp"
 #include "eawr/sim/galactic/control.hpp"
 
 namespace eawr::campaign {
@@ -21,9 +22,10 @@ struct ControlObjectBinding { sim::EntityId id{}; std::string original_type; };
 [[nodiscard]] core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
     const data::galactic::GalacticData& data, const units::GalacticTypeTable& types,
     sim::galactic::PoliticalControlSetup presence, std::span<const ControlTypeBinding> objects,
-    std::span<const ControlObjectBinding> planets, std::span<const ControlObjectBinding> routes);
+    std::span<const ControlObjectBinding> planets, std::span<const ControlObjectBinding> routes,
+    core::LoadNoteBuffer* notes = nullptr);
 // CGS-02 / WGM-C04: immutable complete placement presence, no trade influence,
 // no conquest rewards. Retain the returned current/target state at tick zero.
 [[nodiscard]] core::Result<sim::galactic::PoliticalControlSetup> prepare_initial_control(
-    const sim::galactic::GalacticSetup&, sim::galactic::PoliticalControlSetup);
+    const sim::galactic::GalacticSetup&, sim::galactic::PoliticalControlSetup, core::LoadNoteBuffer* notes = nullptr);
 } // namespace eawr::campaign

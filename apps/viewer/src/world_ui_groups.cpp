@@ -235,7 +235,7 @@ void WorldUiView::draw_identity(const Frame& frame, const RID canvas_item, const
     const float bar_scale = ui::squadron_bar_scale * ui_scale;
     bar(canvas_item, x, y + ui::squadron_bar_offset * ui_scale, ui::bar_width(ui::BarSize::small) * bar_scale,
         ui::bar_height * bar_scale, fraction, ui::health_bar_colour(level));
-    icons_.push_back({entity, battle::type_id(type.name), owner == frame.live->local_player(), hostile,
+    icons_.push_back({entity, battle::type_id(type.name), owner == frame.live->local_player() && frame.live->can_control(entity), hostile,
                       type.selectable, frame_rect.position.x, frame_rect.position.y,
                       frame_rect.position.x + frame_rect.size.x, frame_rect.position.y + frame_rect.size.y});
     icon_rows_.push_back(std::to_string(entity) + ":" + (selected ? "selected" : hovered ? "hovered" : "normal")

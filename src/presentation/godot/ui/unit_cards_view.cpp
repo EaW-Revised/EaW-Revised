@@ -149,6 +149,34 @@ void EawrUnitCards::setup(Setup setup) {
     redraw();
 }
 
+void EawrUnitCards::show_units(const model::CardLayout& layout, const std::span<const model::CardUnit> units) {
+    ++unit_card_syncs_;
+    std::size_t index{};
+    bool same = borders_.size() == layout.borders.size()
+        && std::equal(layout.borders.begin(), layout.borders.end(), borders_.begin(), [](const auto& a, const auto& b) {
+            return a.column == b.column && a.piece == b.piece;
+        });
+    for (const auto& card : layout.cards) {
+        if (card.unit >= units.size()) continue;
+        if (index >= cards_.size()) { same = false; break; }
+        const auto& previous = cards_[index++];
+        if (previous.slot != card.slot || previous.type != units[card.unit].type
+            || previous.count != card.count || previous.stacked != card.stacked
+            || previous.health_level != card.health_level || previous.shield != card.shield
+            || previous.price || !previous.room || previous.disabled || previous.build_frames
+            || !previous.disabled_reason.empty() || previous.pad || previous.cooldown_progress != 1.0) same = false;
+    }
+    if (same && index == cards_.size()) return;
+    ++unit_card_batches_;
+    std::vector<Card> cards;
+    cards.reserve(layout.cards.size());
+    for (const auto& card : layout.cards) {
+        if (card.unit >= units.size()) continue;
+        cards.push_back({card.slot, units[card.unit].type, card.count, card.stacked, card.health_level, card.shield});
+    }
+    show(std::move(cards), layout.borders);
+}
+
 void EawrUnitCards::show(std::vector<Card> cards, std::vector<model::CardBorder> borders) {
     if (!cards.empty() && cards.front().price) ++build_card_batches_;
     const auto same_card = [](const Card& a, const Card& b) {
@@ -791,6 +819,7 @@ std::string EawrUnitCards::report_json() const {
     std::ostringstream output;
     output << "{\"slots\": " << setup_.slots.size() << ", \"borders\": " << setup_.borders.size()
            << ", \"build_card_batches\": " << build_card_batches_ << ", \"build_state_updates\": " << build_state_updates_
+           << ", \"unit_card_syncs\": " << unit_card_syncs_ << ", \"unit_card_batches\": " << unit_card_batches_
            << ", \"popup_content_builds\": " << popup_content_builds_
            << ", \"clicks\": " << clicks_ << ", \"double_clicks\": " << double_clicks_ << ", \"drawn\": [";
     for (std::size_t index = 0; index < cards_.size(); ++index) {

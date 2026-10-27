@@ -256,9 +256,13 @@ command-seat bound, subject to the loaded map's owner-row capacity (eight on an
 eight-row map). Skirmish refuses shared-owner seat mappings and requires at least
 two opposing teams, including cooperative humans against AI.
 
-Galactic shared seats command their faction, last order wins in canonical seat order.
-In battle the session forwards seat commands as the faction's tactical player, so the
-tactical session and M2 replays need no seat concept. Selection, control groups and
+Galactic shared seats retain one faction owner. Optional cooperative battle controller
+policy separates temporary mobile-unit control from that owner: mobile roots carry a
+controller seat, while explicitly classified structures remain shared. The parent stamps
+authenticated issuing-seat provenance before forwarding commands as the faction's
+tactical player. Child replay, immutable snapshots and checkpoint continuation retain
+this identity. The foundation does not enable splitting or command restrictions;
+subsequent integration supplies deployment, spawn, transfer and departure rules. Selection, control groups and
 camera are per-seat presentation state. A seat leaving is a session command; remaining
 seats retain control and the configured AI/passive handover applies only when none
 remain. Setup, replay, checkpoint and loopback carry the seat/side tables. Galactic

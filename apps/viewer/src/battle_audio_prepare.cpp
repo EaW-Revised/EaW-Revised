@@ -5,6 +5,7 @@
 #include "eawr/presentation/space/space.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/data/tag_trace.hpp"
+#include "eawr/platform/sim_workers.hpp"
 
 #include <godot_cpp/classes/audio_effect_hard_limiter.hpp>
 #include <godot_cpp/classes/audio_server.hpp>
@@ -20,12 +21,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <span>
+#include <sstream>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 #include "battle_audio_internal.hpp"
@@ -147,8 +151,7 @@ const audio::SfxEvent* BattleAudio::event(const std::string_view name, const std
 }
 
 void BattleAudio::expand_initial_audio_types(const units::UnitTables& tables, std::set<sim::tactical::TypeId>& first_types) {
-    // Follow automatic spawners and squadron composition from the actual force.
-    // The rest of the table still binds all sounds, but no longer delays Begin.
+    // Follow authored squadron, hangar reserve and ability-created object edges.
     bool changed = true;
     while (changed) {
         const auto count = first_types.size();
@@ -160,9 +163,19 @@ void BattleAudio::expand_initial_audio_types(const units::UnitTables& tables, st
             for (const auto& member : type.members) add_index(member.craft_index);
             if (type.spawner) {
                 for (const auto& entry : type.spawner->starting) if (entry.count > 0) add_index(entry.squadron_index);
+                for (const auto& entry : type.spawner->reserves) if (entry.count > 0) add_index(entry.squadron_index);
                 for (const auto& list : type.spawner->campaign_starting)
                     for (const auto& entry : list) if (entry.count > 0) add_index(entry.squadron_index);
+                for (const auto& list : type.spawner->campaign_reserves)
+                    for (const auto& entry : list) if (entry.count > 0) add_index(entry.squadron_index);
             }
+            for (const auto* abilities : {&type.abilities, &type.team_abilities})
+                for (const auto& ability : *abilities)
+                    if (!ability.spawned_object.empty()) first_types.insert(battle::type_id(ability.spawned_object));
+            for (const auto* buzz : {&type.buzz_droids, &type.team_buzz_droids})
+                if (*buzz && !(*buzz)->object_type.empty()) first_types.insert(battle::type_id((*buzz)->object_type));
+            if (type.cluster_bomb && !type.cluster_bomb->bomb_type.empty())
+                first_types.insert(battle::type_id(type.cluster_bomb->bomb_type));
         }
         changed = first_types.size() != count;
     }
@@ -320,6 +333,20 @@ void BattleAudio::prepare_music_and_faction_cues(const std::string_view local_fa
     }
     // MAT-18, SND-71: the demo battle starts no tactical music; the menu's music is the front end's.
     if (!options_.attract_silent) {
+        const auto collect = [this](const audio::MusicEvent* music) {
+            if (music) preload_music_files_.insert(music->files.begin(), music->files.end());
+        };
+        for (const auto* music : ambient) collect(music);
+        for (const auto* music : battle) collect(music);
+        for (const auto* music : summary_events_) collect(music);
+        // Include authored win/lose faction overrides without drawing music RNG.
+        for (const auto& [key, value] : tactical_music_fields_) {
+            if (!lower(key).starts_with("music_event_tactical_")) continue;
+            const auto comma = value.find(',');
+            const auto name = trim(comma == std::string::npos ? std::string_view(value)
+                : std::string_view(value).substr(comma + 1));
+            for (const auto& music : music_events_) if (same(music.name, name)) collect(&music);
+        }
         music_ = std::make_unique<audio::MusicDirector>(
             std::move(ambient), std::move(battle),
             static_cast<std::uint64_t>(std::llround(peace_seconds * tactical::logical_frames_per_second)));
@@ -397,10 +424,12 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         }
         const auto spotted_type = spotted.find(battle::type_id(type.id));
         sounds.spotted = spotted_type == spotted.end() ? generic_spotted : spotted_type->second;
-        const auto production_speech = [this, &value](const std::string_view key) {
+        const auto production_speech = [this, &value, &first_type](const std::string_view key) {
             const auto field = value.single(key);
             if (!field) return static_cast<const SpeechEvent*>(nullptr);
-            return speech_event(trim(field->value.raw_text));
+            const auto* speech = speech_event(trim(field->value.raw_text));
+            if (first_type && speech) preload_speech_events_.insert(lower(speech->name));
+            return speech;
         };
         sounds.build_underway_speech = production_speech("Build_Speech_Underway");
         sounds.build_completed_speech = production_speech("Build_Speech_Completed");
@@ -594,13 +623,14 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
                           const std::string_view local_faction, std::set<tactical::TypeId> first_types) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::audio);
     local_faction_ = std::string(local_faction);
-    expand_initial_audio_types(tables, first_types);
+    if (options_.preload) expand_initial_audio_types(tables, first_types);
     std::set<std::string> immediate_roots;
     bool binding_unit = false, first_type = true;
     const auto event = [this, &immediate_roots, &binding_unit, &first_type](
             const std::string_view name, const std::string& where) {
         const audio::SfxEvent* cue = this->event(name, where);
-        if (cue && (!binding_unit || (first_type && cue->is_3d))) immediate_roots.insert(cue->name);
+        if (cue && (!binding_unit || (first_type && (options_.preload || cue->is_3d))))
+            immediate_roots.insert(cue->name);
         return cue;
     };
     prepare_event_registry();
@@ -664,7 +694,8 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
     // WST-14: the debug build's stealth service starts this event by name.
     stealth_reveal_ = event("SFX_Stealth_Reveal", "stealth reveal");
     static_cast<void>(event("GUI_Text_Hint_SFX", "local Begin"));
-    std::set<std::string> visited, scheduled_samples;
+    std::set<std::string> visited;
+    std::set<LoadKey> scheduled;
     const auto warm = [&](std::set<std::string> roots) {
         while (!roots.empty()) {
             const std::string name = *roots.begin();
@@ -673,21 +704,42 @@ void BattleAudio::prepare(const units::UnitTables& tables, const tactical::Comba
             if (!cue || !visited.insert(audio::upper(cue->name)).second) continue;
             for (const auto* stage : {&cue->pre_samples, &cue->samples, &cue->post_samples}) {
                 for (const auto& file : *stage) {
-                    if (!scheduled_samples.insert(file).second) continue;
-                    static_cast<void>(sample(file));
+                    scheduled.emplace(LoadKind::sfx, file);
                 }
             }
             if (!cue->chained.empty()) roots.insert(cue->chained);
         }
     };
-    // Warm only global and initial-force spatial cues. Other sounds retain
-    // synchronous first-use loading rather than decoding unused PCM.
+    // All stages/variants of reachable 2D and 3D cues finish before Begin.
     warm(std::move(immediate_roots));
+    for (const auto& [name, speech] : speech_events_) {
+        // The diagnostic keeps the former eager speech registry behavior.
+        if (options_.preload && !preload_speech_events_.contains(name)) continue;
+        for (const auto& file : speech.files) scheduled.emplace(LoadKind::speech, file);
+    }
+    if (options_.preload) {
+        for (const auto& file : preload_music_files_) scheduled.emplace(LoadKind::music, file);
+        prepare_audio_batch(scheduled);
+    } else {
+        // Diagnostic control: legacy global/initial spatial warmup, no music
+        // preload, then synchronous first-use reads. Never a settings option.
+        const auto begin = std::chrono::steady_clock::now();
+        for (const auto& key : scheduled) commit_audio(key, prepare_audio(filesystem_, key), false);
+        audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    }
     for (const auto& [name, cached] : samples_) {
         static_cast<void>(cached);
         preloaded_samples_.insert(name);
     }
     samples_prepared_ = true;
+    if (!options_.preload) return;
+    try {
+        audio_loader_ = std::make_unique<BattleAudioLoadQueue<LoadKey, PreparedAudio>>(
+            [filesystem = filesystem_](const LoadKey& key) { return prepare_audio(filesystem, key); });
+    } catch (const std::system_error& error) {
+        // Thread exhaustion must never turn a gameplay miss into a blocking read.
+        problems_.push_back("audio worker unavailable; unanticipated cues remain deferred: " + std::string(error.what()));
+    }
 }
 
 namespace {
@@ -722,22 +774,17 @@ namespace {
 // lets its decoder tell WAVE from MP3 by content (#1708), so a WAVE named `.mp3` plays too.
 godot::Ref<godot::AudioStream> BattleAudio::open_stream(const std::string& path, const std::string& key,
                                                         const std::string_view kind) {
-    godot::Ref<godot::AudioStream> result;
-    auto bytes = filesystem_->open(path);
-    if (!bytes) {
-        missing_samples_[key] = "missing: " + std::string(kind) + " " + core::format_diagnostic(bytes.error());
-        return result;
+    static_cast<void>(path); // kind retains the existing authored directory policy.
+    const auto load_kind = kind == "speech" ? LoadKind::speech : LoadKind::music;
+    auto& cache = load_kind == LoadKind::speech ? speech_streams_ : music_streams_;
+    if (const auto found = cache.find(key); found != cache.end()) return found->second;
+    const LoadKey request{load_kind, key};
+    if (samples_prepared_) {
+        if (audio_ready(request)) return cache.at(key);
+        return {};
     }
-    std::string error;
-    result = audio::decode_stream(bytes.value(), error,
-        [](const audio::WavPcm& pcm) -> godot::Ref<godot::AudioStream> { return wav_stream(pcm); },
-        [](const std::span<const std::byte> data) -> godot::Ref<godot::AudioStream> {
-            auto stream = mp3_stream(data);
-            return stream->get_length() > 0.0 ? godot::Ref<godot::AudioStream>(stream) : godot::Ref<godot::AudioStream>{};
-        });
-    if (result.is_null()) missing_samples_[key] = "undecodable: "
-        + (error.empty() ? "Godot's MP3 decoder read no audio" : error);
-    return result;
+    commit_audio(request, prepare_audio(filesystem_, request), false);
+    return cache.at(key);
 }
 
 const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view name) {
@@ -747,62 +794,155 @@ const BattleAudio::SpeechEvent* BattleAudio::speech_event(const std::string_view
         missing_events_.insert("speech: " + std::string(name));
         return nullptr;
     }
-    auto& speech = found->second;
-    if (!speech.streams.empty()) return &speech;
-    // Preload only reachable speech at preparation. The current viewer language
-    // is English; SND-62 requires an explicit language route before adding others.
-    speech.streams.reserve(speech.files.size());
-    for (const auto& file : speech.files) {
-        speech.streams.push_back(open_stream(audio::speech_sample_path("english", file), file, "speech"));
-    }
-    return &speech;
+    if (samples_prepared_) for (const auto& file : found->second.files)
+        static_cast<void>(audio_ready({LoadKind::speech, file}));
+    return &found->second;
 }
 
-BattleAudio::DecodedSample BattleAudio::decode_sample(const std::string& name) const {
-    DecodedSample decoded;
-    // The original opens the name as written (#1708); see audio::sfx_sample_candidates.
-    const auto bytes = audio::open_sfx_sample(*filesystem_, name);
+BattleAudio::PreparedAudio BattleAudio::prepare_audio(const std::shared_ptr<const vfs::Vfs>& filesystem,
+                                                     const LoadKey& key) {
+    using Clock = std::chrono::steady_clock;
+    const auto begin = Clock::now();
+    PreparedAudio prepared;
+    prepared.reader_thread = std::this_thread::get_id();
+    auto bytes = key.first == LoadKind::sfx ? audio::open_sfx_sample(*filesystem, key.second)
+        : filesystem->open(key.first == LoadKind::speech ? audio::speech_sample_path("english", key.second)
+                                                        : audio::music_sample_path(key.second));
+    const auto opened = Clock::now();
+    prepared.open_ms = std::chrono::duration<double, std::milli>(opened - begin).count();
     if (!bytes) {
-        decoded.cause = "missing: " + core::format_diagnostic(bytes.error());
-        return decoded;
+        prepared.cause = "missing: " + core::format_diagnostic(bytes.error());
+        return prepared;
     }
+    prepared.encoded_bytes = bytes.value().size();
+    prepared.bytes = std::move(bytes.value());
     std::string error;
-    const auto pcm = audio::parse_wav(bytes.value(), error);
-    if (!pcm) {
-        decoded.cause = "undecodable: " + error;
-        return decoded;
+    // Workers own native buffers only. A malformed RIFF stays a WAV failure;
+    // other speech/music bytes remain encoded until main-thread publication.
+    const auto& data = prepared.bytes;
+    const bool wave = data.size() >= 4 && data[0] == std::byte{'R'} && data[1] == std::byte{'I'}
+        && data[2] == std::byte{'F'} && data[3] == std::byte{'F'};
+    if (key.first == LoadKind::sfx || wave) {
+        prepared.pcm = audio::parse_wav(data, error);
+        if (prepared.pcm) prepared.pcm_bytes = prepared.pcm->data.size();
+        else prepared.cause = "undecodable: " + error;
     }
-    decoded.rate = pcm->sample_rate;
-    decoded.channels = pcm->channels;
-    decoded.pcm.assign(pcm->data.begin(), pcm->data.end());
-    return decoded;
+    prepared.decode_ms = std::chrono::duration<double, std::milli>(Clock::now() - opened).count();
+    return prepared;
 }
 
 const BattleAudio::Sample& BattleAudio::sample(const std::string& name) {
     core::load_profile::Scope sample_scope(core::load_profile::Phase::audio);
     const auto found = samples_.find(name);
     if (found != samples_.end()) return found->second;
-    if (samples_prepared_) ++synchronous_runtime_loads_;
-    auto decoded = decode_sample(name);
-    Sample sample;
-    sample.cause = std::move(decoded.cause);
-    if (sample.cause.empty()) {
-        audio::WavPcm pcm(decoded.rate, decoded.channels);
-        pcm.converted = std::move(decoded.pcm);
-        pcm.data = pcm.converted;
-        sample.stream = wav_stream(pcm);
+    const LoadKey key{LoadKind::sfx, name};
+    if (samples_prepared_) {
+        if (audio_ready(key)) return samples_.at(name);
+        return pending_sample_;
     }
-    if (!sample.stream.is_valid()) missing_samples_[name] = sample.cause;
-    return samples_.emplace(name, std::move(sample)).first->second;
+    commit_audio(key, prepare_audio(filesystem_, key), false);
+    return samples_.at(name);
 }
 
 godot::Ref<godot::AudioStream> BattleAudio::music_stream(const std::string& file) {
     core::load_profile::Scope music_scope(core::load_profile::Phase::audio);
-    const auto found = music_streams_.find(file);
-    if (found != music_streams_.end()) return found->second;
-    auto result = open_stream(audio::music_sample_path(file), file, "music");
-    music_streams_.emplace(file, result);
-    return result;
+    return open_stream(audio::music_sample_path(file), file, "music");
+}
+
+void BattleAudio::prepare_audio_batch(const std::set<LoadKey>& keys) {
+    using Clock = std::chrono::steady_clock;
+    const auto begin = Clock::now();
+    std::vector<LoadKey> ordered(keys.begin(), keys.end());
+    const auto workers = std::min<std::size_t>(8, platform::ThreadWorkerAdapter::hardware_worker_count());
+    platform::ThreadWorkerAdapter pool(workers);
+    audio_worker_count_ = workers;
+    // Bound temporary decoded/encoded payloads; each finished batch is published
+    // before the next batch starts, without sharing a resource between tasks.
+    const auto batch_size = std::max<std::size_t>(1, workers * 2);
+    for (std::size_t at = 0; at < ordered.size(); at += batch_size) {
+        const auto count = std::min(batch_size, ordered.size() - at);
+        std::vector<PreparedAudio> prepared(count);
+        const auto phase = pool.execute_phase("audio_prepare", count, [&](const std::size_t index) {
+            prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
+        });
+        if (!phase) {
+            // This fallback is confined to the loading barrier, never gameplay.
+            problems_.push_back("audio loading pool: " + core::format_diagnostic(phase.error()));
+            for (std::size_t index = 0; index < count; ++index)
+                prepared[index] = prepare_audio(filesystem_, ordered[at + index]);
+        }
+        for (std::size_t index = 0; index < count; ++index)
+            commit_audio(ordered[at + index], std::move(prepared[index]), false);
+    }
+    audio_prepare_wall_ms_ = std::chrono::duration<double, std::milli>(Clock::now() - begin).count();
+}
+
+void BattleAudio::commit_audio(const LoadKey& key, PreparedAudio prepared, const bool runtime) {
+    const auto begin = std::chrono::steady_clock::now();
+    // All Godot calls, including resource creation and MP3 metadata decoding,
+    // belong to the owner thread. Runtime publication handles one file/frame.
+    godot::Ref<godot::AudioStream> stream;
+    if (prepared.cause.empty()) {
+        if (prepared.pcm) stream = wav_stream(*prepared.pcm);
+        else {
+            const auto mp3 = mp3_stream(prepared.bytes);
+            if (mp3->get_length() > 0.0) stream = mp3;
+            else prepared.cause = "undecodable: Godot's MP3 decoder read no audio";
+        }
+    }
+    auto requested = std::pair<std::uint64_t, double>{frames_, presented_tick_};
+    if (const auto pending = pending_audio_.find(key); pending != pending_audio_.end()) {
+        requested = pending->second;
+        pending_audio_.erase(pending);
+    }
+    if (!stream.is_valid()) missing_samples_[key.second] = prepared.cause;
+    if (key.first == LoadKind::sfx) samples_.emplace(key.second, Sample{stream, prepared.cause});
+    else if (key.first == LoadKind::speech) speech_streams_.emplace(key.second, stream);
+    else music_streams_.emplace(key.second, stream);
+    const auto commit_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    const bool reader_on_main = prepared.reader_thread == audio_owner_thread_;
+    if (runtime && reader_on_main) ++synchronous_runtime_loads_;
+    std::ostringstream reader;
+    if (prepared.reader_thread == std::thread::id{}) reader << "not-run";
+    else reader << prepared.reader_thread;
+    audio_load_rows_.push_back({key, requested.first, frames_, requested.second, presented_tick_, runtime,
+        prepared.encoded_bytes, prepared.pcm_bytes, prepared.open_ms, prepared.decode_ms, commit_ms,
+        std::move(prepared.cause), reader.str(), reader_on_main});
+}
+
+bool BattleAudio::audio_ready(const LoadKey& key) {
+    const bool cached = key.first == LoadKind::sfx ? samples_.contains(key.second)
+        : key.first == LoadKind::speech ? speech_streams_.contains(key.second) : music_streams_.contains(key.second);
+    if (cached) return true; // A cached failure takes the ordinary no-sample path.
+    if (!options_.preload) {
+        // Deliberate diagnostic control only; production defaults to preload.
+        commit_audio(key, prepare_audio(filesystem_, key), samples_prepared_);
+        return true;
+    }
+    if (pending_audio_.contains(key)) return false;
+    if (!audio_loader_) {
+        PreparedAudio failed;
+        failed.cause = "missing: audio worker unavailable (no synchronous fallback)";
+        commit_audio(key, std::move(failed), true);
+        return true;
+    }
+    if (audio_loader_->request(key)) {
+        pending_audio_.emplace(key, std::pair{frames_, presented_tick_});
+        ++deferred_audio_requests_;
+    } else ++audio_queue_retries_;
+    return false;
+}
+
+void BattleAudio::commit_ready_audio() {
+    if (!audio_loader_) return;
+    for (auto& ready : audio_loader_->take_ready(1)) {
+        if (ready.value) commit_audio(ready.key, std::move(*ready.value), true);
+        else {
+            PreparedAudio failed;
+            failed.cause = "undecodable: audio worker " + ready.error;
+            commit_audio(ready.key, std::move(failed), true);
+        }
+    }
 }
 
 } // namespace eawr::presentation::godot_backend

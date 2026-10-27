@@ -541,6 +541,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         MapMode::Options map;
         map.game_root = options.game_root; map.mod_root = options.mod_root;
         map.map_path = frame.conflict->map_identity;
+        if (campaign_briefing) map.campaign_briefing_movie = campaign_briefing->content.command_bar_movie;
         const auto planet = std::find_if(metadata.planets.begin(), metadata.planets.end(),
             [&](const auto& row) { return row.id == frame.conflict->planet; });
         if (planet != metadata.planets.end()) map.campaign_planet = planet->name;
@@ -553,6 +554,21 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         const bool begin_barrier = map.loading_begin_barrier;
         map.borrowed_battle = prepared; map.borrowed_feed = feed;
         map.borrowed_player = seat->player;
+        map.controller_seat = sim::SeatId{galaxy->local.seat};
+        for (const auto& identity : options.lan_players)
+            map.controller_names.emplace_back(identity.seat, identity.player);
+        map.observer_multiplayer = options.lan_match != nullptr;
+        // #5130: the player fallback remains faction-wide; mobile names use the
+        // separate observer seat identities when controller policy is enabled.
+        for (const auto& binding : frame.conflict->seats) {
+            const auto count = std::count_if(frame.conflict->seats.begin(), frame.conflict->seats.end(),
+                [&](const auto& other) { return other.player == binding.player; });
+            if (count != 1) continue;
+            const auto identity = std::find_if(options.lan_players.begin(), options.lan_players.end(),
+                [&](const auto& player) { return player.seat == binding.seat; });
+            if (identity != options.lan_players.end() && !identity->player.empty())
+                map.observer_names.emplace_back(binding.player, identity->player);
+        }
         if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
             const auto view = match->view();
             if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};
@@ -825,6 +841,9 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.borrowed_battle = prepared;
         map.borrowed_feed = feed;
         map.borrowed_player = battle_player;
+        map.controller_seat = sim::SeatId{galaxy->local.seat};
+        for (const auto& identity : options.lan_players)
+            map.controller_names.emplace_back(identity.seat, identity.player);
         if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
             const auto view = match->view();
             if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};

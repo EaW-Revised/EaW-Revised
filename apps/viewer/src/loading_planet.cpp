@@ -1,4 +1,5 @@
 #include "gpu_debug_labels.hpp"
+#include "eawr/assets/asset_names.hpp"
 #include "eawr/core/json_text.hpp"
 #include "eawr/core/text.hpp"
 #include "loading_planet.hpp"
@@ -91,6 +92,7 @@ bool LoadingPlanet::build(Control& parent, const Rect2& rect, const BattleConten
     // Current-model identity wins; fallback is the location's authored model, never map art.
     state.model = current_model ? *current_model : descriptor && descriptor->current_model ? *descriptor->current_model
         : descriptor && descriptor->authored_model ? *descriptor->authored_model : field(definition.value(), "Galactic_Model_Name");
+    state.model = assets::normalized_model_name(state.model);
     if (state.model.empty()) return fail("loading planet has no model");
     state.model = path(state.model, "data/art/models/");
     if (descriptor && descriptor->model_scale) state.scale = number(*descriptor->model_scale);

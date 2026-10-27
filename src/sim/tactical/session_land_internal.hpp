@@ -14,6 +14,10 @@ namespace eawr::sim::tactical::session_detail {
 inline constexpr std::uint64_t land_session_path_budget = 4096;
 inline constexpr std::uint64_t land_session_path_slice = 256;
 
+struct LandCombatState {
+    std::map<EntityId, std::pair<EntityId, std::uint64_t>> targets;
+};
+
 // Stable allocation: searches retain references to this occupancy and arena.
 struct LandSession final {
     LandSessionContent content;
@@ -24,12 +28,17 @@ struct LandSession final {
     std::map<EntityId, LandSearch> searches;
     std::vector<LandSearch*> search_order;
     std::map<EntityId, LandPathRequest> requests;
+    // Q1/Q2: retained shared target and next opportunity scan frame for each living squad.
+    LandCombatState combat_state;
     std::map<EntityId, std::pair<TypeId, PlayerId>> bindings; // derived from setup expansion, never archived
     std::map<EntityId, UnitState> static_roots; // immutable setup poses, rederived on restore
     // Retained canonical-encoding scratch, never state: per-partition record bytes (worker phase) and the
     // previous tail size. Cleared and refilled every tick; capacity persists so the tick does not allocate.
     using EncodedParts = std::array<std::vector<std::uint8_t>, tick_partition_count>;
     EncodedParts occupation_parts, squad_parts, member_parts;
+    // Pure-query scratch, one retained crossing buffer per projectile partition.
+    std::array<std::vector<math::Fixed>, tick_partition_count> projectile_crossings;
+    math::Fixed target_query_margin{}; // derived once from immutable combat geometry
     std::size_t canonical_size_hint{};
     explicit LandSession(LandSessionContent source, LandOccupancy field)
         : content(std::move(source)), occupancy(std::move(field)) {}

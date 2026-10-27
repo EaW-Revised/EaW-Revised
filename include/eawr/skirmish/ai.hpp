@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace eawr::skirmish {
 
@@ -38,10 +39,12 @@ namespace eawr::skirmish {
 // ML-34: freeze the bounded mounted logical script inventory, keeping winners
 // and source/compiled candidates. With `plans`, require the plan library roots.
 [[nodiscard]] core::Result<std::map<std::string, std::string>> ai_modules(
-    const vfs::Vfs& files, const script::foc::AiSetup& setup, bool plans = false);
+    const vfs::Vfs& files, const script::foc::AiSetup& setup, bool plans = false,
+    std::vector<core::Diagnostic>* load_notes = nullptr);
 
 // Validate required session roots and retain the previously frozen inventory.
 [[nodiscard]] core::Result<std::map<std::string, std::string>> select_ai_modules(
-    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, bool plans = false);
+    const std::map<std::string, std::string>& cached, const script::foc::AiSetup& setup, bool plans = false,
+    std::vector<core::Diagnostic>* load_notes = nullptr);
 
 } // namespace eawr::skirmish

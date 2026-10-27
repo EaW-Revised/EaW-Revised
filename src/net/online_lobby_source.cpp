@@ -1,5 +1,6 @@
 #include "eawr/net/online_lobby_source.hpp"
 #include "relay_directory_codec.hpp"
+#include "menu_chat_poll.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <stop_token>
@@ -83,7 +84,7 @@ struct OnlineLobbyGameSource::Impl {
     std::vector<LobbyPlayer> menu_players;
     std::deque<std::string> menu_sends;
     OnlineMenuState menu{OnlineMenuState::idle};
-    bool menu_visible{true};
+    bool menu_visible{true}, menu_focused{};
     std::vector<LobbyChatMessage> incoming;
     std::vector<OnlineLobbyJoinCompletion> results;
     std::optional<core::Diagnostic> failure;
@@ -111,10 +112,11 @@ struct OnlineLobbyGameSource::Impl {
         std::uint32_t chat_sequence{};
         // Menu channel state of this worker. menu_dead latches when the relay predates the channel (EAWR-NET-1521).
         bool menu_connected{}, menu_dead{};
+        MenuChatPollSchedule menu_poll_schedule;
         std::string menu_name;
         std::uint32_t menu_after{}, menu_version{}, menu_seen{};
         auto menu_retry = std::chrono::seconds(5);
-        auto next_menu_try = Clock::now(), next_menu_poll = next_menu_try, next_menu_send = next_menu_try;
+        auto next_menu_try = Clock::now(), next_menu_send = next_menu_try;
         auto next_list = Clock::now(), next_heartbeat = next_list, next_chat = next_list, next_publish = next_list;
         auto last_list = Clock::time_point{};
         std::string cursor;
@@ -225,8 +227,11 @@ struct OnlineLobbyGameSource::Impl {
             // It never feeds error() or the notices: a relay without it only changes the state, and the room list is unaffected.
             if (!menu_dead) {
                 std::string want;
+                bool focused{};
                 { std::lock_guard lock(mutex);
+                  focused = menu_visible && menu_focused;
                   if (menu_visible && presence.place == LobbyPlace::lobby && !current_attempt && !leave_requested) want = relay::clean_text(presence.name, 20); }
+                menu_poll_schedule.set_focused(focused, Clock::now());
                 if (admitted || publication || wants_host || join) want.clear();
                 if (want.empty() || want != menu_name) { if (menu_connected || !menu_name.empty()) menu_drop(OnlineMenuState::idle); }
                 const auto menu_now = Clock::now();
@@ -238,7 +243,7 @@ struct OnlineLobbyGameSource::Impl {
                         if (result.value().through < menu_seen) menu_seen = 0; // the service restarted
                         menu_apply(result.value());
                         std::lock_guard lock(mutex); menu = OnlineMenuState::active;
-                        next_menu_poll = Clock::now() + std::chrono::seconds(2);
+                        menu_poll_schedule.received(Clock::now());
                     } else if (result.error().code == "EAWR-NET-1521") {
                         menu_dead = true; std::lock_guard lock(mutex); menu = OnlineMenuState::unavailable; changed = true;
                     } else {
@@ -252,13 +257,13 @@ struct OnlineLobbyGameSource::Impl {
                     bool lost = false;
                     if (!say.empty()) {
                         // The relay spaces a player's lines one second apart; ours go out a little wider than that.
-                        next_menu_send = Clock::now() + std::chrono::milliseconds(1100);
-                        auto sent = service->menu_say(std::move(say));
+                        next_menu_send = Clock::now() + MenuChatPollSchedule::send_interval;
+                        auto sent = service->menu_say(say);
                         if (!sent && sent.error().code != "EAWR-NET-1551" && sent.error().code != "EAWR-NET-1540") lost = true;
                     }
-                    if (!lost && menu_now >= next_menu_poll) {
+                    if (!lost && menu_poll_schedule.due(Clock::now(), !say.empty())) {
                         auto page = service->menu_poll(menu_after, menu_version);
-                        if (page) { menu_apply(page.value()); next_menu_poll = Clock::now() + std::chrono::seconds(2); }
+                        if (page) { menu_apply(page.value()); menu_poll_schedule.received(Clock::now()); }
                         else lost = true;
                     }
                     if (lost) { menu_drop(OnlineMenuState::connecting); next_menu_try = Clock::now() + std::chrono::seconds(3); }
@@ -429,6 +434,10 @@ std::vector<LobbyGame> OnlineLobbyGameSource::games() const { std::lock_guard lo
 void OnlineLobbyGameSource::set_menu_visible(bool visible) {
     std::lock_guard lock(impl_->mutex);
     if (impl_->menu_visible != visible) { impl_->menu_visible = visible; impl_->condition.notify_all(); }
+}
+void OnlineLobbyGameSource::set_menu_focused(bool focused) {
+    std::lock_guard lock(impl_->mutex);
+    if (impl_->menu_focused != focused) { impl_->menu_focused = focused; impl_->condition.notify_all(); }
 }
 OnlineMenuState OnlineLobbyGameSource::menu_state() const { std::lock_guard lock(impl_->mutex); return impl_->menu; }
 std::vector<LobbyPlayer> OnlineLobbyGameSource::players() const {

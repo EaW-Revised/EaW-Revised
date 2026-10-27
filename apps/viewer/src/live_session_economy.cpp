@@ -2,6 +2,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 #include "eawr/presentation/ui/pads.hpp"
+#include "eawr/presentation/ui/skirmish_setup.hpp"
 
 #include "shutdown_trace.hpp"
 #include "frame_timer.hpp"
@@ -42,6 +43,87 @@
 namespace eawr::presentation::godot_backend {
 namespace tactical = sim::tactical;
 using namespace live_session_detail;
+
+std::vector<ui::ObserverOwner> LiveSessionView::observer_owners() const {
+    std::vector<ui::ObserverOwner> result;
+    if (!start_) return result;
+    const auto lobby = options_.lan ? options_.lan->lobby_state() : std::nullopt;
+    std::vector<ui::ObserverOwner> seats;
+    if (lobby) {
+        for (const auto& seat : lobby->snapshot.seats)
+            seats.push_back({seat.player ? seat.player : seat.selection.slot, seat.selection.name, {}, {}});
+    }
+    for (const auto& [player, name] : options_.observer_names) {
+        const auto count = std::count_if(seats.begin(), seats.end(),
+            [&](const auto& seat) { return seat.player == player; });
+        if (count == 0) seats.push_back({player, name, {}, {}});
+        else if (count == 1) {
+            const auto seat = std::find_if(seats.begin(), seats.end(),
+                [&](const auto& candidate) { return candidate.player == player; });
+            if (seat->name.empty()) seat->name = name;
+        }
+    }
+    const auto* controller_policy = battle_frame_.latest && battle_frame_.latest->controller_policy()
+        ? &*battle_frame_.latest->controller_policy() : setup_ && setup_->controllers ? &*setup_->controllers : nullptr;
+    for (const auto& entry : start_->players) {
+        std::string name(ui::resolve_owner_name(entry.player.player_id, seats, entry.faction,
+            entry.lobby ? std::string_view{} : std::string_view(entry.faction), controller_policy));
+        std::string text_key;
+        if (name.empty() && !entry.human && entry.lobby)
+            text_key = ui::skirmish_setup_text_key(entry.difficulty == tactical::AiLevel::easy
+                ? ui::SetupText::ai_easy_player : entry.difficulty == tactical::AiLevel::hard
+                ? ui::SetupText::ai_hard_player : ui::SetupText::ai_player);
+        result.push_back({entry.player.player_id, std::move(name),
+            owner_ui_colour(entry.player.player_id).value_or(ui::Rgb{255, 255, 255}), std::move(text_key)});
+    }
+    if (controller_policy) {
+        for (const auto& binding : controller_policy->seats) {
+            const auto identity = std::find_if(options_.controller_names.begin(), options_.controller_names.end(),
+                [&](const auto& row) { return row.first == binding.seat; });
+            const auto fallback = std::find_if(result.begin(), result.end(),
+                [&](const auto& row) { return row.player == binding.player; });
+            ui::ObserverOwner owner{binding.player, identity != options_.controller_names.end() ? identity->second
+                : fallback != result.end() ? fallback->name : std::string{},
+                owner_ui_colour(binding.player).value_or(ui::Rgb{255, 255, 255}), {}, binding.seat};
+            if (binding.kind == sim::SeatKind::ai && identity == options_.controller_names.end()) {
+                owner.name.clear();
+                owner.text_key = ui::skirmish_setup_text_key(ui::SetupText::ai_player);
+            } else if (owner.name.empty() && fallback != result.end()) owner.text_key = fallback->text_key;
+            result.push_back(std::move(owner));
+        }
+    }
+    return result;
+}
+
+bool LiveSessionView::can_control(const tactical::TacticalInstance& instance) const noexcept {
+    if (!controller_policy_enabled()) return true;
+    // Existing authored community/pad rights survive the mobile-seat gate.
+    bool shared = instance.control == tactical::UnitControl::shared_structure && is_ally_of_local(instance.owner);
+    if (instance.control == tactical::UnitControl::none && is_ally_of_local(instance.owner)) {
+        const auto type = presentation_types_.find(instance.type_id);
+        shared = type != presentation_types_.end() && type->second->station_community_property;
+        if (const auto* point = economy_.pads.point(instance.type_id)) shared = shared || point->community_property || point->build_pad;
+    }
+    return ui::can_control(options_.controller_seat, instance, battle_frame_.latest->controller_policy(), shared);
+}
+
+const std::vector<ui::ObserverOwner>& LiveSessionView::gift_recipients() const {
+    if (!controller_policy_enabled()) {
+        gift_policy_.reset(); gift_roster_.clear();
+        return gift_roster_;
+    }
+    const auto& policy = battle_frame_.latest->controller_policy();
+    if (gift_policy_ == policy) return gift_roster_;
+    gift_policy_ = policy;
+    gift_roster_.clear();
+    const auto eligible = ui::gift_recipients(options_.controller_seat, policy);
+    const auto owners = observer_owners();
+    for (const auto seat : eligible) {
+        const auto owner = std::find_if(owners.begin(), owners.end(), [seat](const auto& row) { return row.seat == seat; });
+        if (owner != owners.end() && !owner->name.empty()) gift_roster_.push_back(*owner);
+    }
+    return gift_roster_;
+}
 
 std::optional<std::array<std::uint8_t, 3>> LiveSessionView::player_colour(const tactical::PlayerId player) const {
     if (!start_) return std::nullopt;
@@ -220,6 +302,7 @@ void LiveSessionView::Abilities::request(const ui::AbilityRequest& request) {
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::ability;
     intent.units = request.units;
+    if (view_.controller_policy_enabled()) std::erase_if(intent.units, [&](const auto id) { return !view_.can_control(id); });
     intent.unit_ability = kind;
     intent.target = aimed ? request.target : sim::invalid_entity_id;
     if (request.position) intent.destination = *request.position;
@@ -381,7 +464,7 @@ bool LiveSessionView::sell_pad_structure(const sim::EntityId child, const bool s
 }
 
 bool LiveSessionView::special_fire(const sim::EntityId source, const sim::EntityId target) {
-    if (phase_ != Phase::running) return false;
+    if (phase_ != Phase::running || (controller_policy_enabled() && !can_control(source))) return false;
     ui::TacticalIntent intent;
     intent.verb = ui::TacticalVerb::special_fire;
     intent.units = {source};

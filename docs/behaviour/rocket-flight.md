@@ -30,7 +30,8 @@ establish retail presentation acceptance. Seeded nonzero offsets and post-aim ex
 GC space entry admits these same profiles through its reachable-content
 projection. It does not impose a separate zero-offset or target-radius-only
 restriction. Its curve-distance guard names every invalid reachable rocket;
-the common combat and flight validators retain their existing bounds.
+the common combat and flight validators retain their geometry domains, while
+RFL-16 separates the authored travel allowance from world-coordinate limits.
 Retail detour parity, forward-firing launch alignment, and retail height/endpoint
 captures remain presentation review gates. Arc length recursively compares the chord with the two midpoint chords.
 It returns their sum when either the relative or absolute difference is at most
@@ -128,6 +129,38 @@ reproduction, larger routes, extension and detour crossings, cumulative visits
 above the former threshold against an unlimited recursive reference, atomic
 refusal, Q24 nonprogress, malformed setup separation, and mixed successful/refused
 flight and real-session hashes/diagnostic ordering on 1/2/4/8 workers.
+
+## RFL-16: authored flight allowance is not a world coordinate
+
+Read-only debug-build observations of the space path constructor, authored
+distance accessor and rocket service establish that `Projectile_Max_Flight_Distance`
+is retained directly, without a coordinate-derived cap or saturation. With
+`Explode_When_Reached_Target_Radius` enabled the constructed route ends at the aim;
+the authored allowance remains a separate endpoint input. Otherwise RFL-05 uses
+the unchanged allowance in its extension and trim. It does not convert that
+allowance into a lifetime.
+
+Every representable nonnegative Q24 allowance is accepted, including `9999999`.
+This removes only the allowance's coordinate-derived upper bound; it does not
+establish retail rejection of negative values or alter the existing project
+domains for geometry, subdivision spacing or lifetime. Invalid profiles report
+the projectile name and failed XML input during binding; direct combat-table
+validation distinguishes an object weapon from a numbered hardpoint.
+
+Checked Q24 extension arithmetic and RFL-09 construction refusal remain in
+effect. At the largest positive Q24 allowance, a ten-unit final sample delta
+produces a finite endpoint in the debug build's floating-point domain that is
+outside Q24. The project preserves the authored allowance and refuses that
+individual unrepresentable construction atomically with one diagnostic, then
+expires only that projectile at its current pose. This is RFL-09's documented
+numerical deviation, not a retail clamp or a load-time rejection.
+
+`tactical_rocket_contracts` (`oversized_flight_allowance`) covers seeded nonzero
+offsets with `9999999`, a representable extension with that allowance, the
+largest parsed Q24 allowance with target-radius expiry, actual extension
+overflow, and canonical flight bytes and diagnostics on 1/2/4/8 workers.
+`unit_tables_contracts` (`rocket_variant_inputs`) covers XML binding of the
+large allowance and actionable malformed-subdivision diagnostics.
 
 ## RFL-10..RFL-15: unit-level salvo launch and ROCKET guidance ((legacy EAWR-4986) walk, 2026-10-25)
 

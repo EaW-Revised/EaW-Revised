@@ -53,6 +53,7 @@ void UnitEmitters::release() {
         if (proxy.life) static_cast<void>(proxy.life->release_all());
     }
     clone_orphans_.clear();
+    backend_->release_prewarm();
 }
 
 UnitEmitters::Emitting UnitEmitters::emitting_units() const {
@@ -83,6 +84,25 @@ void UnitEmitters::write_report(std::ostream& output) const {
     counts(output, "late_bind_frame_cache_misses", unprepared_frames_);
     counts(output, "late_mesh_binding_misses", unprepared_bindings_);
     output << '}';
+    output << ", \"backend_prewarm\": {\"requested\":" << backend_warm_requested_
+           << ",\"admitted\":" << backend_warm_admitted_ << ",\"refused\":" << backend_warm_refused_
+           << ",\"complete\":" << (assets_prepared_ && backend_warm_refused_ == 0 ? "true" : "false")
+           << ",\"policies\":" << backend_warm_policies_ << ",\"texture_bytes\":" << backend_warm_texture_bytes_
+           << ",\"prepare_ms\":" << backend_warm_ms_ << ",\"fallback\":\"synchronous\""
+           << ",\"policy_limit\":" << backend_warm_work_.policy_limit
+           << ",\"texture_limit\":" << backend_warm_work_.texture_limit
+           << ",\"retained_holders\":" << backend_warm_work_.retained_holders
+           << ",\"cache_only_policies\":" << backend_warm_work_.cache_only_policies
+           << ",\"demand_references\":" << backend_warm_work_.demand_references
+           << ",\"demand_policies\":" << backend_warm_work_.demand_policies
+           << ",\"demand_textures\":" << backend_warm_work_.demand_textures
+           << ",\"demand_texture_bytes\":" << backend_warm_work_.demand_texture_bytes
+           << ",\"demand_complete\":" << (backend_warm_work_.demand_complete ? "true" : "false")
+           << ",\"unresolved_policies\":" << backend_warm_work_.unresolved_policies
+           << ",\"refusal_references\":{\"policy_limit\":" << backend_warm_work_.refused_policy_limit
+           << ",\"texture_limit\":" << backend_warm_work_.refused_texture_limit
+           << ",\"missing_texture\":" << backend_warm_work_.refused_missing_texture
+           << ",\"backend_create\":" << backend_warm_work_.refused_backend << "}}";
     counts(output, "started", started_);
     output << ", \"model_axis\": {";
     bool first_axis = true;

@@ -142,7 +142,12 @@ void discover_library(const DiscoveryInput& input, const fs::path& library, Cata
         }
         if (has_folder && listed) {
             const bool newer = subscribed
-                               && ((!details->second.latest_manifest.empty() && details->second.latest_manifest != installed->second.manifest)
+                               && !installed->second.manifest.empty() && installed->second.time_updated > 0
+                               && ((!installed->second.manifest.empty() && !details->second.manifest.empty()
+                                    && details->second.manifest != installed->second.manifest)
+                                   || (installed->second.time_updated > 0
+                                       && details->second.time_updated > installed->second.time_updated)
+                                   || (!details->second.latest_manifest.empty() && details->second.latest_manifest != installed->second.manifest)
                                    || details->second.latest_time_updated > installed->second.time_updated);
             if (newer && manifest->needs_download) {
                 record.state = ModState::downloading;

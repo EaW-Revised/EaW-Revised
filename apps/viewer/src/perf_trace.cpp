@@ -71,7 +71,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
         for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
             output_ << ',' << name << '_' << metric;
     render_churn::write_csv_header(output_);
-    output_ << ",slots_grown,slot_growth_ms";
+    output_ << ",slots_grown,slot_growth_ms,report_query_ms,report_nonquery_ms,report_render_query_ms,report_performance_query_ms,report_setup_query_ms,report_display_query_ms";
     output_ << '\n';
     return true;
 }
@@ -88,21 +88,33 @@ void PerfTrace::begin_frame() {
 void PerfTrace::frame(const Frame& frame) {
     if (!output_) return;
     const double viewer_main_ms = std::chrono::duration<double, std::milli>(Clock::now() - frame_entry_).count();
+    // Opt-in attribution of the reporting tail excluded from viewer_main_ms.
+    // Non-query work includes CSV formatting/writes; the final timing fields
+    // themselves are outside this interval. Frame/tick identify every sample.
+    const auto report_began = fine_particle_timings_ ? Clock::now() : Clock::time_point{};
+    double render_query_ms{}, performance_query_ms{}, setup_query_ms{}, display_query_ms{};
+    const auto query = [&](double& elapsed, auto&& read) {
+        if (!fine_particle_timings_) return read();
+        const auto began = Clock::now();
+        const auto value = read();
+        elapsed += std::chrono::duration<double, std::milli>(Clock::now() - began).count();
+        return value;
+    };
     auto* server = RenderingServer::get_singleton();
     auto* performance = Performance::get_singleton();
     // The two render-time queries make the Separate render thread synchronize with the main thread on every
     // frame (the engine warns); --eawr-perf-no-render-timing skips them and leaves both columns empty (not measured).
     const bool timed = render_timing_ && viewport_.is_valid();
-    const double cpu = timed ? server->viewport_get_measured_render_time_cpu(viewport_) : 0.0;
-    const double gpu = timed ? server->viewport_get_measured_render_time_gpu(viewport_) : 0.0;
-    const double process = performance->get_monitor(Performance::TIME_PROCESS) * 1000.0;
+    const double cpu = timed ? query(render_query_ms, [&] { return server->viewport_get_measured_render_time_cpu(viewport_); }) : 0.0;
+    const double gpu = timed ? query(render_query_ms, [&] { return server->viewport_get_measured_render_time_gpu(viewport_); }) : 0.0;
+    const double process = query(performance_query_ms, [&] { return performance->get_monitor(Performance::TIME_PROCESS); }) * 1000.0;
     output_ << frames_++ << ',' << std::fixed << std::setprecision(3) << frame.frame_ms << ',' << process << ',';
     if (render_timing_) output_ << cpu << ',' << gpu;
     else output_ << ',';
     output_
-            << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
-            << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_OBJECTS_IN_FRAME))
-            << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_PRIMITIVES_IN_FRAME))
+            << ',' << static_cast<std::uint64_t>(query(performance_query_ms, [&] { return performance->get_monitor(Performance::RENDER_TOTAL_DRAW_CALLS_IN_FRAME); }))
+            << ',' << static_cast<std::uint64_t>(query(performance_query_ms, [&] { return performance->get_monitor(Performance::RENDER_TOTAL_OBJECTS_IN_FRAME); }))
+            << ',' << static_cast<std::uint64_t>(query(performance_query_ms, [&] { return performance->get_monitor(Performance::RENDER_TOTAL_PRIMITIVES_IN_FRAME); }))
             << ',' << frame.presented_tick << ',' << frame.units << ',' << frame.projectiles << ',' << frame.effects << ','
             << frame.effect_particles << ',' << frame.emitter_particles << ',' << frame.particle_ms << ',' << frame.ticks
             << ',' << frame.tick_ms << ',' << frame.submit_ms << ',' << frame.pieces << ',' << frame.sent
@@ -113,7 +125,7 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << frame.particle_work.conversion_ms << ',' << frame.particle_work.submission_ms
             << ',' << frame.emitter_prepare_ms << ',' << frame.projectile_prepare_ms << ',' << frame.clone_prepare_ms
             << ',' << wall_frame_ms_ << ',' << viewer_main_ms << ',' << outside_viewer_ms_
-            << ',' << server->get_frame_setup_time_cpu() << ',' << frame.tick_wait_ms << ',' << frame.live_frame_ms
+            << ',' << query(setup_query_ms, [&] { return server->get_frame_setup_time_cpu(); }) << ',' << frame.tick_wait_ms << ',' << frame.live_frame_ms
             << ',' << frame.session_tail_ms << ',' << frame.clip_pose_ms << ',' << frame.emitter_frame_ms
             << ',' << frame.effects_frame_ms << ',' << frame.debris_frame_ms
             << ',' << frame.idle_frame_ms << ',' << frame.idle_sample_ms << ',' << frame.idle_upload_ms
@@ -133,8 +145,8 @@ void PerfTrace::frame(const Frame& frame) {
     output_ << ',' << frame.world_ms << ',' << frame.worker_ms << ',' << frame.serial_ms << ',' << frame.sim_fog_ms
             << ",\"";
     for (const auto& [name, elapsed] : frame.worker_phases) output_ << name << '=' << elapsed << ';';
-    output_ << "\"," << static_cast<int>(DisplayServer::get_singleton()->window_get_vsync_mode())
-            << ',' << Engine::get_singleton()->get_max_fps()
+    output_ << "\"," << static_cast<int>(query(display_query_ms, [&] { return DisplayServer::get_singleton()->window_get_vsync_mode(); }))
+            << ',' << query(display_query_ms, [&] { return Engine::get_singleton()->get_max_fps(); })
             << ',' << frame.sim_lock_ms << ',' << frame.sim_publish_ms;
     for (const bool caller : {true, false}) {
         std::array<double, 5> stages{};
@@ -172,6 +184,12 @@ void PerfTrace::frame(const Frame& frame) {
         output_ << ',' << role.submitted << ',' << role.retained << ',' << role.eligible_casters << ',' << role.retained_surfaces;
     render_churn::write_csv_row(output_, render_churn::frame);
     output_ << ',' << frame.slots_grown << ',' << frame.slot_growth_ms;
+    if (fine_particle_timings_) {
+        const double query_ms = render_query_ms + performance_query_ms + setup_query_ms + display_query_ms;
+        const double report_ms = std::chrono::duration<double, std::milli>(Clock::now() - report_began).count();
+        output_ << ',' << query_ms << ',' << report_ms - query_ms << ',' << render_query_ms
+                << ',' << performance_query_ms << ',' << setup_query_ms << ',' << display_query_ms;
+    } else output_ << ",,,,,,";
     output_ << '\n';
     previous_report_end_ = Clock::now();
 }

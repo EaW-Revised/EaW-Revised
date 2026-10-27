@@ -14,7 +14,7 @@ import xml_literal_check as gate  # noqa: E402
 
 # Merge-base size of the allowlist: fallback pin when git or origin/main is missing (the gate compares against the base).
 # Raising it takes a reviewed growth_override in the allowlist plus an edit here.
-ALLOWLIST_PIN = 28
+ALLOWLIST_PIN = 37
 _DIRS = []
 TAGS = ["Volume_Saturation_Distance", "Laser_Beam_Z_Scale_Factor", "Encyclopedia_Delay"]
 

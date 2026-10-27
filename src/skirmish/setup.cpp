@@ -158,6 +158,18 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
             // Keep load_map's allocation guard before opening a TED. Metadata
             // and body are read from the same effective winner and same bytes.
             if (record.size > 512U * 1024U * 1024U) return;
+            // The picker's eligibility is the authored root header at the file's start: read a prefix first, so a map
+            // the picker rejects costs one small read instead of the whole TED (#5197). A header that does not fit
+            // the prefix, or any prefix failure, takes the whole-file path, which decides exactly as before.
+            constexpr std::uint64_t header_prefix_bytes = 64U * 1024U;
+            if (!query.read_whole_headers && record.size > header_prefix_bytes) {
+                if (auto prefix = filesystem.open_prefix(record.canonical_path, header_prefix_bytes)) {
+                    auto prefix_source = assets::source_from(record);
+                    prefix_source.stored_size = 0;
+                    auto prefix_header = assets::load_map_header(prefix.value(), std::move(prefix_source));
+                    if (prefix_header && !setup_map_eligible(prefix_header.value(), query)) return;
+                }
+            }
             auto bytes = filesystem.open(record.canonical_path);
             if (!bytes) return;
             auto header = assets::load_map_header(bytes.value(), assets::source_from(record));

@@ -5,6 +5,7 @@
 #include "damage_support.hpp"
 #include "eawr/sim/tactical/durability.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -137,7 +138,22 @@ void test_difficulty_validation() {
     table.difficulty = {scale(1, "16", "1", "1")};
     expect(static_cast<bool>(tactical::validate_durability(table)), "a scale that keeps every hull inside the health limit is valid");
     table.profiles[0].max_hull = units(tactical::max_durability_health / 16 + 1);
-    expect(!tactical::validate_durability(table), "a scale that pushes a hull past the health limit is rejected");
+    expect(static_cast<bool>(tactical::validate_durability(table)), "a scale that pushes a hull past the health limit saturates");
+    eawr::core::LoadNoteBuffer buffer;
+    tactical::normalize_durability(table, buffer);
+    eawr::core::LoadNoteCollector collector; collector.merge(buffer);
+    const auto notes = collector.snapshot();
+    auto shield_profile = table.profiles[0];
+    shield_profile.max_shields = units(1 << 22);
+    const auto shield_scale = scale(1, "1", "128", "1");
+    const auto scaled_shield = tactical::scale_profile(shield_profile, shield_scale);
+    expect(scaled_shield && scaled_shield.value().max_shields == units(1LL << 29),
+        "valid scaled shields remain above the ordinary health bound");
+    const auto scaled = tactical::scale_profile(table.profiles[0], table.difficulty[0]);
+    expect(scaled && scaled.value().max_hull == units(tactical::max_durability_health),
+        "scaled hull saturates at the supported maximum");
+    expect(std::any_of(notes.begin(), notes.end(), [](const auto& note) { return note.code == "EAWR-LOAD-0103"; }),
+        "scaled hull saturation records a note");
     expect(table.difficulty_of(1) != nullptr && table.difficulty_of(2) == nullptr, "difficulty_of finds the player's entry");
 }
 

@@ -1,4 +1,6 @@
 #include "session_impl.hpp"
+#include "session_tick.hpp"
+#include "session_land_combat_internal.hpp"
 #include "tactical_internal.hpp"
 #include "eawr/core/tick_profile.hpp"
 #include "eawr/core/text.hpp"
@@ -36,6 +38,12 @@ public:
 }
 
 core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent& source) {
+    if (land_origin_muzzle) for (auto& profile : combat.profiles) for (auto& weapon : profile.weapons) {
+        if (weapon.hardpoint != object_weapon) continue;
+        // Q5: authored damage/aim remain effective; animated muzzle poses have no land provider yet.
+        weapon.muzzles.clear(); weapon.fire_a = {}; weapon.fire_b = {}; weapon.has_fire_b = false;
+        weapon.fire_axes.reset();
+    }
     // Member IDs start above the final setup root; enforce that local precondition
     // before allocating even though ordinary setup validation also checks it.
     EntityId previous{};
@@ -46,6 +54,12 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
     auto field = LandOccupancy::create(source.land_terrain, source.land.clear_bit);
     if (!field) return core::Result<void>::failure(field.error());
     land = std::make_unique<LandSession>(source.land, std::move(field).value());
+    for (const auto& row : combat.profiles) {
+        auto extent = detail::type_soft_radius(combat, &motion, row.type_id);
+        if (const auto* footprint = combat.footprint(row.type_id))
+            extent = std::max({extent, footprint->x_extent, footprint->y_extent});
+        land->target_query_margin = std::max(land->target_query_margin, extent);
+    }
     if (auto committed = land->occupancy.commit(source.land.occupations, InlineExecutor{}); !committed) return committed;
     // L1 canonicalizes cells and object order. Retain that immutable witness for
     // restore checks, including explicit inputs with repeated or unsorted cells.
@@ -175,7 +189,11 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
             auto root = entry; root.entity_id = squad.object;
             root.position.x = squad.position.x; root.position.y = squad.position.y;
             root.position.z = source.land_terrain->height_at(squad.position.x, squad.position.y).value_or(Fixed{});
-            live.push_back(new_unit(root, 0));
+            auto wrapper = new_unit(root, 0);
+            // LC-01/05: a direct object's binding may share its type with its member.
+            // The command wrapper is never a second physical body, gun or health pool.
+            wrapper.combat.reset(); wrapper.durability.reset();
+            live.push_back(std::move(wrapper));
             std::vector<std::uint32_t> masks;
             Fixed largest, area;
             for (const auto index : group.members) {
@@ -213,6 +231,7 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
             request.entity = squad.object; request.mask = *common; request.radius = largest;
             request.width = land_formation_width(static_cast<std::uint32_t>(group.members.size()), largest, area);
             land->requests.emplace(squad.object, request);
+            land->combat_state.targets.emplace(squad.object, std::pair{invalid_entity_id, std::uint64_t{0}});
             moving.squads.push_back(std::move(squad));
         }
     }
@@ -233,13 +252,22 @@ core::Result<void> TacticalSession::Impl::initialize_land(const TacticalContent&
     return core::Result<void>::success();
 }
 
-core::Result<TacticalTick> TacticalSession::Impl::step_land(const PartitionExecutor& executor) {
+core::Result<TacticalTick> TacticalSession::Impl::step_land(TacticalSession& session, const PartitionExecutor& executor) {
     core::tick_profile::Scope profile("serial.tactical.land");
     const auto tick = completed_tick;
     auto live = [&] {
         core::tick_profile::Scope phase("land-serial-prepare");
         return sorted_live();
     }();
+    std::vector<std::pair<EntityId, math::Vec3>> starts;
+    if (!combat.profiles.empty()) {
+        starts.resize(live.size());
+        const auto copied = executor.execute_phase("land-combat-history", tick_partition_count, [&](std::size_t partition) {
+            const auto range = partition_range(partition, live.size());
+            for (auto i = range.begin; i < range.end; ++i) starts[i] = {live[i].state.entity_id, live[i].state.position};
+        });
+        if (!copied) return core::Result<TacticalTick>::failure(copied.error());
+    }
     std::vector<core::Diagnostic> diagnostics;
     for (auto command = pending.begin(); command != pending.end() && command->first.tick == tick;) {
         for (const auto id : command->second.units) {
@@ -255,6 +283,57 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(const PartitionExecu
             }
             const auto index = static_cast<std::size_t>(squad - squads.begin());
             const auto* move = std::get_if<MovePayload>(&command->second.payload);
+            const auto* attack = std::get_if<AttackPayload>(&command->second.payload);
+            const bool stop = std::holds_alternative<StopPayload>(command->second.payload);
+            if (!move && !attack && !stop) {
+                diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                    "land command payload has no supported handler"));
+                continue;
+            }
+            if (attack) {
+                const auto target = std::lower_bound(live.begin(), live.end(), attack->target,
+                    [](const auto& row, EntityId key) { return row.state.entity_id < key; });
+                const auto enemy_squad = std::find_if(squads.begin(), squads.end(),
+                    [&](const auto& row) { return row.object == attack->target; });
+                const auto targetable = [&](const auto& candidate) {
+                    const auto* row = combat.find(candidate.state.type_id);
+                    return row && row->valid_target && row->living_projectile_collision
+                        && candidate.durability && candidate.durability->hull > Fixed{};
+                };
+                bool target_admitted = target != live.end() && target->state.entity_id == attack->target && targetable(*target);
+                if (enemy_squad != squads.end()) {
+                    const auto target_index = static_cast<std::size_t>(enemy_squad - squads.begin());
+                    for (const auto& member : land->movement.members()) if (member.squad == target_index) {
+                        const auto child = std::lower_bound(live.begin(), live.end(), member.object,
+                            [](const auto& row, EntityId key) { return row.state.entity_id < key; });
+                        if (child != live.end() && child->state.entity_id == member.object && targetable(*child)) {
+                            target_admitted = true; break;
+                        }
+                    }
+                }
+                if (target == live.end() || target->state.entity_id != attack->target
+                    || !players_hostile(snapshot_players, unit->state.owner, target->state.owner)
+                    || !target_admitted || attack->hardpoint != attack_hull) {
+                    diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                        "land attack requires a living hostile member or squad, without a hardpoint selector"));
+                    continue;
+                }
+                if (!land_attack_chases) {
+                    const auto members = land->movement.members();
+                    const auto leader = std::find_if(members.begin(), members.end(),
+                        [index](const auto& row) { return row.squad == index; });
+                    const auto binding = leader != members.end() ? land->bindings.find(leader->object) : land->bindings.end();
+                    const auto* profile_row = binding != land->bindings.end() ? combat.find(binding->second.first) : nullptr;
+                    Fixed reach;
+                    if (profile_row && profile_row->max_attack_distance
+                        && math::try_add(*profile_row->max_attack_distance, land->target_query_margin, reach)
+                        && !within_range(unit->state.position, target->state.position,
+                            reach, RangeMetric::planar))
+                        diagnostics.push_back(detail::diagnostic(diagnostic_codes::command_rejected,
+                            "land attack retained out of range; move the squad into range to fire",
+                            {}, core::Severity::warning));
+                }
+            }
             auto request = land->requests.at(id);
             if (move) {
                 request.start = squad->position;
@@ -279,7 +358,25 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(const PartitionExecu
                 land->requests[id] = request;
                 land->searches.emplace(id, LandPathService::begin(land->occupancy, land->arena, request));
                 unit->state.order.kind = OrderKind::move; unit->state.order.destination = move->destination;
+            } else if (attack) {
+                unit->state.order.kind = OrderKind::attack;
+                unit->state.order.target = attack->target;
             } else unit->state.order.kind = OrderKind::stop;
+            land->combat_state.targets[id] = {attack ? attack->target : invalid_entity_id,
+                attack ? tick : tick + land_opportunity_scan_frames};
+            // Commands are sparse ordered commits. The ordinary member target/fire service is partitioned.
+            for (const auto& member : land->movement.members()) if (member.squad == index) {
+                const auto child = std::lower_bound(live.begin(), live.end(), member.object,
+                    [](const auto& row, EntityId key) { return row.state.entity_id < key; });
+                child->state.order = unit->state.order;
+                if (child->combat) {
+                    child->combat->attack_target = attack ? attack->target : invalid_entity_id;
+                    child->combat->attack_hardpoint = no_hardpoint;
+                    child->combat->direct = attack != nullptr;
+                    child->combat->next_scan_frame = tick;
+                    for (auto& weapon : child->combat->weapons) weapon.opportunity.target = invalid_entity_id;
+                }
+            }
         }
         executed.push_back(command->second);
         command = pending.erase(command);
@@ -359,10 +456,15 @@ core::Result<TacticalTick> TacticalSession::Impl::step_land(const PartitionExecu
         if (std::any_of(publication_errors.begin(), publication_errors.end(), [](auto error) { return error != 0; }))
             return core::Result<TacticalTick>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
                 "land publication pose is outside the supported range"));
-        rebuild(live, false);
-        ++completed_tick;
-        publish_staged(live, {}, {});
     }
+    std::vector<Event> events;
+    std::vector<CombatEvent> combat_events;
+    Tick phases(session, this, executor);
+    if (auto fought = phases.land_combat(live, starts, events, combat_events); !fought)
+        return core::Result<TacticalTick>::failure(fought.error());
+    rebuild(live, false);
+    ++completed_tick;
+    publish_staged(live, std::move(events), std::move(combat_events));
     TacticalTick result;
     result.completed_tick = completed_tick; result.snapshot = current_snapshot; result.diagnostics = std::move(diagnostics);
     auto bytes = [&] {

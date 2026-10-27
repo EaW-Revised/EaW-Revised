@@ -110,6 +110,7 @@ struct ScriptedTacticalSession::Impl {
         player_command.key = {tick, order.value().issuer, next_sequence(order.value().issuer)};
         player_command.units = std::move(order.value().units);
         player_command.payload = std::move(order.value().payload);
+        if (world.controller_policy()) player_command.origin = tactical::CommandOrigin::engine;
         const auto submitted = order.value().reinforcement_search
             ? world.submit_reinforcement_search(player_command, *order.value().reinforcement_search)
             : world.submit(player_command);
@@ -232,6 +233,10 @@ core::Result<void> ScriptedTacticalSession::set_engine(std::shared_ptr<ScriptEng
 
 void ScriptedTacticalSession::set_order_admission(std::function<bool(const TacticalOrder&)> admission) {
     impl_->order_admission = std::move(admission);
+}
+
+bool ScriptedTacticalSession::supports_battle_ai(const tactical::PlayerId player) const noexcept {
+    return impl_->engine && impl_->engine->supports_battle_ai(player);
 }
 
 core::Result<ScriptedTick> ScriptedTacticalSession::step(
@@ -374,6 +379,14 @@ diagnostics::MemoryCapacity ScriptedTacticalSession::memory_capacity() const {
 }
 
 const tactical::TacticalSession& ScriptedTacticalSession::world() const noexcept { return impl_->world; }
+core::Result<void> ScriptedTacticalSession::omit_object_script_decisions(const std::span<const tactical::TypeId> types) {
+    if (impl_->stepped) return core::Result<void>::failure(make_error(
+        codes::invalid_request, "object-script admission precedes the first bridge step"));
+    return impl_->world.omit_object_script_decisions(types);
+}
+core::Result<void> ScriptedTacticalSession::set_initial_controller_policy(tactical::BattleControllerPolicy policy) {
+    return impl_->world.set_initial_controller_policy(std::move(policy));
+}
 
 std::uint64_t ScriptedTacticalSession::completed_tick() const noexcept { return impl_->world.completed_tick(); }
 

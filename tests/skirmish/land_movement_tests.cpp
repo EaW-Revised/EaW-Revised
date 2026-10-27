@@ -19,11 +19,18 @@ void* operator new(std::size_t size) {
     throw std::bad_alloc();
 }
 void* operator new[](std::size_t size) { return ::operator new(size); }
+// Keep the allocation guard's malloc/free pairing behind the matching delete operators.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete(void* pointer) noexcept { std::free(pointer); }
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 #if defined(__cpp_sized_deallocation)
-void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
-void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete[](pointer); }
 #endif
 
 namespace {
@@ -55,6 +62,7 @@ LandMovement movement(const Field& field, std::size_t squads = 1, std::size_t me
             m.profile.maximum_speed = *m.source.max_speed;
             m.profile.acceleration = whole(45); m.profile.deceleration = whole(60);
             m.profile.turn_rate = whole(1);
+            m.profile.collision_class = units::LandCollisionGroup::infantry; // WLPA-82: the class makes the pair soft
             m.mask = walker;
             m.slot = at(0, static_cast<std::int64_t>(j) * 2 - static_cast<std::int64_t>(members - 1));
             m.position = {s.position.x, Fixed::from_raw(s.position.y.raw() + m.slot.y.raw())};

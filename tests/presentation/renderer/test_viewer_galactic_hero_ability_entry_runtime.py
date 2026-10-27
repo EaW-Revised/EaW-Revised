@@ -87,13 +87,20 @@ func _process(delta):
             release_frame = frame + 4
             print("ENTRY_SLOT=true")
             var slot = viewport.find_child("galaxy_destruction_first_slot",true,false)
+            var icons = 0
             for child in slot.get_children():
                 if child is Label: print("ENTRY_CAPTION=", child.text.to_upper())
-            motion(point,true)
-            viewport.get_texture().get_image().save_png(%(capture)s)
+                if child is TextureRect and child.texture != null: icons += 1
+            print("ENTRY_ICON_COUNT=", icons)
+            print("ENTRY_SLOT_RECT=", JSON.stringify([slot.global_position.x, slot.global_position.y, slot.size.x, slot.size.y]))
+            # Keep the held pointer beside the slot so its centre remains visible.
+            motion(point + Vector2(slot.size.x,0),true)
         elif frame == 200:
             print("ENTRY_SLOT=false RAW=", viewer_slot(), " DRAG=", viewport.gui_is_dragging())
+    if slot_seen and frame == release_frame - 2:
+        viewport.get_texture().get_image().save_png(%(capture)s)
     if slot_seen and frame == release_frame:
+        motion(centre("galaxy_destruction_first_slot"),true)
         mouse(centre("galaxy_destruction_first_slot"),false)
     if release_frame != 0 and frame > release_frame:
         var modal = viewport.find_child("hero_action_modal",true,false)
@@ -146,6 +153,9 @@ class GalacticHeroAbilityEntryRuntime(unittest.TestCase):
         (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ENTRY_SLOT=true", result.stdout, "the hero slot must show while the hero fleet is dragged")
+        self.assertIn("ENTRY_ICON_COUNT=0", result.stdout,
+            "WGCH-186: the stock shared drop template has no default icon; alternates are not defaults")
+        self.assertTrue(capture.is_file(), "capture the held drop slot with its centre unobscured")
         self.assertIn("ENTRY_CAPTION=" + ("SABOTAGE" if fixture == "sabotage-entry" else "NEUTRALIZE"), result.stdout)
         self.assertIn("ENTRY_MODAL=true", result.stdout, "the release must open the hero action menu")
         data = json.loads(report.read_text(encoding="utf-8"))

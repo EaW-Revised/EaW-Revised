@@ -363,7 +363,16 @@ int main(const int argc, char** argv) {
         std::vector<eawr::core::Diagnostic> skipped;
         const auto combat = eawr::units::combat_table(value, eawr::units::ContentErrors::skip_object, &skipped);
         if (!combat) std::cout << "REFUSAL combat-table - " << combat.error().code << ' ' << combat.error().message << '\n';
-        for (const auto& row : skipped) std::cout << "REFUSAL combat-type - " << row.code << ' ' << row.message << '\n';
+        std::set<std::string> rejected_combat_types;
+        for (const auto& row : skipped) {
+            std::cout << (row.severity == eawr::core::Severity::warning ? "WARNING" : "REFUSAL")
+                      << " combat-type - " << row.code << ' ' << row.message << '\n';
+            constexpr std::string_view prefix = "skipped unit type '";
+            if (row.message.starts_with(prefix)) {
+                const auto end = row.message.find('\'', prefix.size());
+                if (end != std::string::npos) rejected_combat_types.insert(row.message.substr(prefix.size(), end - prefix.size()));
+            }
+        }
         const auto report = [&](const char* table, const std::string& type, const eawr::core::Diagnostic& error) {
             std::cout << "REFUSAL " << table << ' ' << type << ' ' << error.code << ' ' << error.message << '\n';
         };
@@ -386,7 +395,7 @@ int main(const int argc, char** argv) {
             if (const auto motion = eawr::units::motion_table(one.value()); !motion) report("motion", unit.id, motion.error());
         }
         std::cout << "refusal scan: " << value.units.size() << " units, " << scanned << " single-type loads, "
-                  << skipped.size() << " combat types skipped\n";
+                  << rejected_combat_types.size() << " combat types skipped\n";
     }
     std::cout << "content identity " << identity << '\n';
 

@@ -53,6 +53,7 @@ struct EventDef {
     std::string dialog, tag, variable;
     std::int64_t chapter{};
     bool popup{true}, sound{true};
+    std::optional<bool> authored_tag_present{}; // before a nonempty Story_Incoming overrides the tag (WST-58/70)
     friend bool operator==(const EventDef&, const EventDef&) = default;
 };
 // One sub-plot file of a plot (WST-02/03). `name` is the file name as written.
@@ -108,6 +109,7 @@ struct Triggered {
     std::string dialog, tag, variable;
     std::int64_t chapter{};
     bool popup{true}, sound{true};
+    bool remove_after_viewed{}; // resolved from authored Story_Tag, independently of Story_Incoming
     bool engine_applied{}; // a graph/flag reward the engine already ran (WST-46); consumers skip it
     std::string refusal; // non-empty: the reward is refused (land_battle_refusal) and must not run
     std::string outcome; // filled by the consumer that applied the record: "applied" or "refused: <reason>"

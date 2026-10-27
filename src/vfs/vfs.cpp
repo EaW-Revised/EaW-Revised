@@ -14,6 +14,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -576,6 +577,9 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
 
         std::unordered_map<std::string, std::string> loose_seen;
         std::error_code walk_error;
+        std::optional<core::load_profile::Scope> walk_scope;
+        walk_scope.emplace(core::load_profile::Phase::vfs_loose_walk);
+        const auto walk_start = core::load_profile::active ? core::load_profile::Clock::now() : core::load_profile::Clock::time_point{};
         for (std::filesystem::recursive_directory_iterator it(
                  layer.data_root, std::filesystem::directory_options::none, walk_error), end;
              !walk_error && it != end; it.increment(walk_error)) {
@@ -632,6 +636,11 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
             impl->by_path[stored.record.canonical_path].push_back(impl->assets.size());
             impl->assets.push_back(std::move(stored));
         }
+        walk_scope.reset();
+        core::load_profile::layer_cost(layer.layer_id, [&](core::load_profile::LayerCost& cost) {
+            cost.loose_ms += core::load_profile::since_ms(walk_start);
+            cost.loose_files += loose_seen.size();
+        });
         if (walk_error) {
             return core::Result<Vfs>::failure(native_io_error(
                 layer.data_root, "cannot read loose layer", std::nullopt, layer.layer_id));
@@ -646,8 +655,14 @@ core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
                     layer.layer_id
                 ));
             }
+            core::load_profile::Scope meg_scope(core::load_profile::Phase::vfs_meg_parse);
+            const auto meg_start = core::load_profile::active ? core::load_profile::Clock::now() : core::load_profile::Clock::time_point{};
             auto parsed = parse_meg(archive->path, archive->source_id, archive->logical_prefix);
             if (!parsed) return core::Result<Vfs>::failure(parsed.error());
+            core::load_profile::layer_cost(layer.layer_id, [&](core::load_profile::LayerCost& cost) {
+                cost.meg_ms += core::load_profile::since_ms(meg_start);
+                cost.meg_entries += parsed.value().entries.size();
+            });
             for (const auto& entry : parsed.value().entries) {
                 Impl::StoredAsset stored{
                     .record = AssetRecord{
@@ -714,6 +729,37 @@ core::Result<std::vector<std::byte>> Vfs::open(const std::string_view logical_pa
     if (!input) return core::Result<std::vector<std::byte>>::failure(error(
         diagnostic_codes::native_io, "cannot seek asset source", canonical.value(), asset.record.source_id));
     std::vector<std::byte> bytes(static_cast<std::size_t>(asset.record.size));
+    if (!read_exact(input, bytes.data(), bytes.size())) {
+        return core::Result<std::vector<std::byte>>::failure(error(
+            diagnostic_codes::native_io, "short read from asset source", canonical.value(), asset.record.source_id));
+    }
+    return core::Result<std::vector<std::byte>>::success(std::move(bytes));
+}
+
+core::Result<std::vector<std::byte>> Vfs::open_prefix(const std::string_view logical_path,
+                                                     const std::uint64_t max_bytes) const {
+    auto canonical = canonicalize(logical_path);
+    if (!canonical) return core::Result<std::vector<std::byte>>::failure(canonical.error());
+    if (!impl_) return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::mount_invalid, "VFS is not mounted", canonical.value()));
+    const auto found = impl_->by_path.find(canonical.value());
+    if (found == impl_->by_path.end()) {
+        return core::Result<std::vector<std::byte>>::failure(error(
+            diagnostic_codes::not_found, "asset is not present in the mounted view", canonical.value()));
+    }
+    const auto& asset = impl_->assets[found->second.front()];
+    if (asset.record.size > max_asset_bytes ||
+        asset.record.size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        return core::Result<std::vector<std::byte>>::failure(error(
+            diagnostic_codes::archive_limit, "asset exceeds the bounded read limit", canonical.value(), asset.record.source_id));
+    }
+    std::ifstream input(asset.native_path, std::ios::binary);
+    if (!input) return core::Result<std::vector<std::byte>>::failure(native_io_error(
+        asset.native_path, "cannot read asset source", canonical.value(), asset.record.source_id));
+    input.seekg(static_cast<std::streamoff>(asset.offset), std::ios::beg);
+    if (!input) return core::Result<std::vector<std::byte>>::failure(error(
+        diagnostic_codes::native_io, "cannot seek asset source", canonical.value(), asset.record.source_id));
+    std::vector<std::byte> bytes(static_cast<std::size_t>(std::min(asset.record.size, max_bytes)));
     if (!read_exact(input, bytes.data(), bytes.size())) {
         return core::Result<std::vector<std::byte>>::failure(error(
             diagnostic_codes::native_io, "short read from asset source", canonical.value(), asset.record.source_id));

@@ -342,6 +342,7 @@ struct SpawnerState {
     bool ready{};                       // the first service built the entries (FL-02)
     std::vector<SpawnEntryState> entries;
     std::vector<SpawnedShip> ships;     // single ships of ship entries alive now, ascending ID
+    std::uint64_t controller_output_ordinal{}; // ADR-020: successful shared-producer output rotation.
     friend bool operator==(const SpawnerState&, const SpawnerState&) = default;
 };
 

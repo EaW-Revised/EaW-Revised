@@ -5,6 +5,7 @@
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/sim/tactical/replay.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
+#include "eawr/skirmish/ai.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1341,6 +1342,81 @@ void native_object_script_ownership() {
         expect(foc::tactical_ai_detail::service_objects(sim::InlineExecutor{}, scene.host, scheduler.value(),
             sequence, diagnostics, active, pumps).has_value() && diagnostics.empty() && active == 0
             && scheduler.value().object_scripts().empty(), "SOS-44: all five native owners suppress duplicate Lua attachment");
+
+        // SOS-46: both module admission routes freeze the same native omission,
+        // including after rebuilding a world whose content still names the script.
+        setup.players = {{1, "OWNER", false, false, ""}};
+        auto admission_table = table;
+        tactical::DurabilityTable health;
+        if (kind == 1) {
+            auto& manual = admission_table.profiles.front().abilities.front();
+            manual.kind = tactical::AbilityKind::self_destruct;
+            manual.spawned = tactical::SpawnedAbilityProfile{};
+            manual.spawned->type = 999;
+            manual.spawned->blast.damage = sim::math::Fixed::from_integer(1).value();
+            manual.spawned->blast.radius = sim::math::Fixed::from_integer(1).value();
+            tactical::DurabilityProfile hull; hull.type_id = 102;
+            hull.max_hull = sim::math::Fixed::from_integer(100).value();
+            health.profiles = {hull};
+        }
+        for (const bool omitted : {false, true}) for (const bool cached : {false, true}) {
+            std::map<std::string, std::string> modules;
+            for (const auto& path : foc::required_modules(setup, false)) modules.emplace(path, "");
+            modules["Data/Scripts/Library/PGAICommands.lua"] =
+                "function Base_Definitions() EnemyContrastTypes={} FriendlyContrastTypes={} end";
+            if (!omitted) modules[std::string("Data/Scripts/GameObject/") + names[kind] + ".lua"] = "function main() end";
+            if (cached) {
+                auto selected = eawr::skirmish::select_ai_modules(modules, setup);
+                expect(selected.has_value(), "SOS-46: cached native root admission succeeds");
+                if (!selected) return;
+                modules = std::move(selected).value();
+            }
+            auto session_world = tactical::TacticalSession::create(initial, {}, health, {}, std::nullopt, {}, {}, admission_table);
+            if (!session_world) { expect(false, "SOS-46: native omission world creates"); return; }
+            auto session = foc::create_session(std::move(session_world).value(), setup, modules);
+            expect(session.has_value(), "SOS-46: missing native-owned root permits session creation");
+            if (!session) return;
+            const auto check_profiles = [&](const auto& bound) {
+                const auto* admitted = bound.world().abilities().find(102);
+                expect(admitted && admitted->abilities == admission_table.profiles.front().abilities
+                    && admitted->special == profile.special
+                    && admitted->defend_script == (!omitted && kind == 0)
+                    && admitted->self_destruct_script == (!omitted && kind == 1)
+                    && admitted->mc30_script == (!omitted && kind == 2),
+                    "SOS-46: omit only native script decisions, preserving manual ability profiles");
+            };
+            check_profiles(session.value());
+            expect(session.value().step(sim::InlineExecutor{}).has_value(), "SOS-46: native omission session advances");
+            if (kind == 1) {
+                const auto state = session.value().world().ability_state(50);
+                expect(state && state->self_destruct_script.has_value() == !omitted,
+                    "SOS-46: absent Krayt Lua runs no native self-destruct service; present control runs");
+            }
+            auto saved = session.value().save_scripts();
+            auto checkpoint = session.value().world().save_checkpoint_state();
+            auto rebuilt_world = tactical::TacticalSession::from_replay(session.value().record(), {}, health, {}, std::nullopt, {}, {}, admission_table);
+            auto prepared = foc::prepare_session(setup, modules);
+            expect(saved && checkpoint && rebuilt_world && prepared, "SOS-46: native omission checkpoint prepares");
+            if (!saved || !checkpoint || !rebuilt_world || !prepared) return;
+            expect(rebuilt_world.value().load_checkpoint_state(checkpoint.value()).has_value(), "SOS-46: native omission checkpoint loads");
+            auto restored = auth::ScriptedTacticalSession::restore(std::move(rebuilt_world).value(), std::move(prepared.value().scripts), saved.value());
+            expect(restored && prepared.value().bind(restored.value()), "SOS-46: restored bridge rebinds native omission");
+            if (!restored) return;
+            check_profiles(restored.value());
+            const auto continued = session.value().step(sim::InlineExecutor{});
+            const auto resumed = restored.value().step(sim::InlineExecutor{});
+            expect(continued && resumed && continued.value().state_sha256 == resumed.value().state_sha256,
+                "SOS-46: native omission checkpoint continuation is identical");
+            if (kind == 1 && omitted) {
+                const tactical::PlayerCommand manual{{restored.value().completed_tick(), 1, 0}, {50},
+                    tactical::AbilityPayload{tactical::AbilityKind::self_destruct, tactical::AbilityAction::activate}};
+                expect(restored.value().step(sim::InlineExecutor{}, std::span(&manual, 1)).has_value(),
+                    "SOS-46: manual self-destruct still executes after missing-script restore");
+                const auto state = restored.value().world().ability_state(50);
+                expect(state && state->slots.front().active && !state->self_destruct_script,
+                    "SOS-46: manual self-destruct countdown needs no object-script attachment");
+            }
+        }
     }
 }
 
@@ -1693,6 +1769,98 @@ end
 
 
 void object_script_contracts() {
+    // SOS-46: production session creation keeps an unscripted object alongside
+    // a working scripted control; the omission is immutable across worker counts.
+    {
+        tactical::TacticalSetup initial;
+        initial.seed = 718;
+        initial.players = {{1, 1, 1, tactical::player_flag_commandable}};
+        initial.units = {{10, 100, 1}, {20, 101, 1}};
+        foc::AiSetup config;
+        config.seed = initial.seed;
+        config.players = {{1, "FIRST", false, false, ""}};
+        foc::AiType missing; missing.type_id = 100; missing.name = "MISSING_OWNER"; missing.lua_script = "MissingObjectRoot";
+        foc::AiType unused = missing; unused.type_id = 102; unused.name = "UNPLACED_OWNER";
+        foc::AiType healthy; healthy.type_id = 101; healthy.name = "CONTROL"; healthy.lua_script = "HealthyObjectRoot";
+        config.content.types = {missing, unused, healthy};
+        tactical::AbilityProfile ability;
+        ability.kind = tactical::AbilityKind::invulnerability;
+        ability.expiration_frames = 1; ability.recharge_frames = 1;
+        tactical::AbilityTable abilities;
+        abilities.profiles = {{101, {ability}, false}};
+        const std::map<std::string, std::string> modules{
+            {"Data/Scripts/Library/PGAICommands.lua", "function Base_Definitions() EnemyContrastTypes={} FriendlyContrastTypes={} end"},
+            {"Data/Scripts/GameObject/HealthyObjectRoot.lua",
+                "function Base_Definitions() ServiceRate=0 end\n"
+                "function main() while true do Object.Activate_Ability('INVULNERABILITY',true); coroutine.yield(true) end end"}};
+        const auto make_world = [&] { return tactical::TacticalSession::create(initial, {}, {}, {}, std::nullopt, {}, {}, abilities); };
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto prepared = foc::prepare_session(config, modules);
+            expect(prepared && prepared.value().load_notes.size() == 1
+                && prepared.value().load_notes.front().severity == eawr::core::Severity::warning,
+                "SOS-46: preparation exposes one warning for a shared absent root");
+            auto world = make_world();
+            expect(world.has_value(), "SOS-46: both objects exist in the synthetic world");
+            if (!prepared || !world) return;
+            auto session = auth::ScriptedTacticalSession::create(std::move(world).value(), std::move(prepared.value().scripts));
+            if (!session) { expect(false, "SOS-46: scripted session creates"); return; }
+            expect(prepared.value().bind(session.value()).has_value(), "SOS-46: missing root does not refuse the session bind");
+            if (workers != 1) session.value().scramble_storage_for_testing();
+            std::vector<std::string> hashes;
+            std::size_t root_notes = 0, control_turns = 0;
+            for (unsigned frame = 0; frame < 5; ++frame) {
+                auto tick = session.value().step(executor);
+                expect(tick.has_value(), "SOS-46: world keeps advancing after missing attachment");
+                if (!tick) return;
+                for (const auto& diagnostic : tick.value().scripts.diagnostics) {
+                    expect(diagnostic.code == auth::codes::script_warning, "SOS-46: absent root raises no runtime error");
+                    if (diagnostic.message.find("missing object Lua root") != std::string::npos) ++root_notes;
+                }
+                control_turns += tick.value().world.object_turn.size();
+                const auto units = session.value().world().units();
+                expect(units.size() == 2 && std::any_of(units.begin(), units.end(), [](const auto& unit) {
+                    return unit.entity_id == 10 && unit.type_id == 100;
+                }), "SOS-46: object with missing Lua remains present on every tick");
+                hashes.push_back(tick.value().state_sha256);
+            }
+            expect(root_notes == 1 && control_turns > 0, "SOS-46: warn once, no attachment retries, healthy control still runs");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "SOS-46: missing-root session is deterministic on 1/2/4/8 workers and shuffled storage");
+        }
+        auto changed = config;
+        changed.content.types[1].lua_script = "DifferentUnplacedRoot";
+        auto first = foc::create_session(std::move(make_world()).value(), config, modules);
+        auto second = foc::create_session(std::move(make_world()).value(), changed, modules);
+        expect(first && second, "SOS-46: sessions with different omitted unplaced roots create");
+        if (first && second) {
+            const sim::InlineExecutor executor;
+            const auto a = first.value().step(executor);
+            const auto b = second.value().step(executor);
+            expect(a && b && a.value().world.state_sha256 == b.value().world.state_sha256
+                && a.value().state_sha256 != b.value().state_sha256,
+                "SOS-46: the frozen omission set enters the session identity even without a placed instance");
+            auto saved = first.value().save_scripts();
+            auto checkpoint = first.value().world().save_checkpoint_state();
+            auto rebuilt_world = make_world();
+            auto prepared = foc::prepare_session(changed, modules);
+            expect(saved && saved.value().native && checkpoint && rebuilt_world && prepared,
+                "SOS-46: an otherwise stateless owner retains its omission identity in the checkpoint");
+            if (saved && checkpoint && rebuilt_world && prepared) {
+                expect(rebuilt_world.value().load_checkpoint_state(checkpoint.value()).has_value(),
+                    "SOS-46: identity refusal fixture restores the same world");
+                auto restored = auth::ScriptedTacticalSession::restore(std::move(rebuilt_world).value(),
+                    std::move(prepared.value().scripts), saved.value());
+                expect(restored.has_value(), "SOS-46: identity refusal fixture restores the Lua checkpoint");
+                if (restored) {
+                    const auto bound = prepared.value().bind(restored.value());
+                    expect(!bound && bound.error().code == auth::codes::load_rejected,
+                        "SOS-46: checkpoint binding refuses a different omitted unplaced root");
+                }
+            }
+        }
+    }
     const auto fixed = [](int n) { return sim::math::Fixed::from_integer(n).value(); };
     const std::string falcon = R"LUA(
 function Base_Definitions()

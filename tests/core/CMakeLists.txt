@@ -1,5 +1,10 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 
+add_executable(core_load_note_tests load_note_tests.cpp)
+target_link_libraries(core_load_note_tests PRIVATE eawr::core eawr::platform)
+eawr_target_project_warnings(core_load_note_tests)
+add_test(NAME core_load_notes COMMAND core_load_note_tests "${CMAKE_CURRENT_BINARY_DIR}/load-note-user")
+
 add_executable(tests main.cpp)
 target_link_libraries(tests PRIVATE eawr::core eawr::sim)
 target_compile_features(tests PRIVATE cxx_std_20)

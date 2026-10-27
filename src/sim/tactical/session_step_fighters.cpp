@@ -691,6 +691,11 @@ core::Result<void> session_detail::Tick::hangars() {
             for (auto index = range.begin; index < range.end; ++index) {
                 const auto& unit = *survivor(hangars[index].first);
                 const auto& profile = *squadron_table.find_spawner(unit.state.type_id, unit.state.owner);
+                const bool service_due = frame == hangars[index].second.next_service_frame;
+                const bool no_controller = impl_->setup.controllers && service_due
+                    && std::any_of(impl_->setup.controllers->factions.begin(), impl_->setup.controllers->factions.end(),
+                        [&](const auto& row) { return row.player == unit.state.owner; })
+                    && impl_->output_controller(unit.state.owner, unit.state.controller_seat, 0).value == 0;
                 std::vector<bool> intact;
                 const auto* hull = impl_->health_profile(unit);
                 for (const auto& bay : profile.bays) {
@@ -705,13 +710,18 @@ core::Result<void> session_detail::Tick::hangars() {
                     squadron_lost(profile, hangars[index].second, ship.entry, frame);
                     return true;
                 });
-                const bool service_due = frame == hangars[index].second.next_service_frame;
                 decisions[index] = service_spawner(profile, hangars[index].second, impl_->setup.seed, frame,
-                    hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled);
+                    hangars[index].first, intact, arrivals.contains(hangars[index].first) || !unit.state.garrison_enabled || no_controller);
                 if (!decisions[index] && service_due && profile.starbase
-                    && !arrivals.contains(hangars[index].first) && hangars[index].second.next_spawn_frame <= frame
-                    && allied_pending(unit.state.owner) != garrisons.end()) {
-                    free_bays[index] = free_garrison_bay(profile, impl_->setup.seed, frame, hangars[index].first, intact);
+                    && !arrivals.contains(hangars[index].first) && hangars[index].second.next_spawn_frame <= frame) {
+                    const auto pending = allied_pending(unit.state.owner);
+                    if (pending != garrisons.end()) {
+                        const bool eligible = !impl_->setup.controllers
+                            || std::none_of(impl_->setup.controllers->factions.begin(), impl_->setup.controllers->factions.end(),
+                                [&](const auto& row) { return row.player == pending->setup.player; })
+                            || impl_->output_controller(pending->setup.player, {}, 0).value != 0;
+                        if (eligible) free_bays[index] = free_garrison_bay(profile, impl_->setup.seed, frame, hangars[index].first, intact);
+                    }
                 }
             }
         });
@@ -731,13 +741,19 @@ core::Result<void> session_detail::Tick::hangars() {
             }
             const auto decision = decisions[index].value_or(SpawnDecision{0, free_bays[index].value_or(0)});
             const auto first_id = next_id;
+            const auto output_owner = pending != garrisons.end() ? pending->setup.player : spawner.state.owner;
+            const auto controller = impl_->output_controller(output_owner, spawner.state.controller_seat,
+                spawners.at(hangars[index].first).controller_output_ordinal);
             const auto flown_out = impl_->launch(spawner, profile, decision, frame, next_id, survivors, instances,
                 squadrons, crafts, minds, pending != garrisons.end() ? pending->pending.front() : 0,
                 pending != garrisons.end() ? pending->setup.player : 0,
-                pending != garrisons.end() ? &pending->registered : nullptr, &arrivals);
+                pending != garrisons.end() ? &pending->registered : nullptr, &arrivals, controller);
             if (!flown_out) {
                 return core::Result<void>::failure(flown_out.error());
             }
+            if (impl_->setup.controllers && spawner.state.control == UnitControl::shared_structure
+                && survivors.size() != first_added)
+                ++spawners.at(hangars[index].first).controller_output_ordinal;
             if (decisions[index] && profile.entries[decision.entry].ship) {
                 auto& hangar = spawners.at(hangars[index].first);
                 if (survivors.size() == first_added) {
@@ -771,7 +787,9 @@ core::Result<void> session_detail::Tick::hangars() {
             if (next_id == invalid_entity_id) return core::Result<void>::failure(
                 detail::diagnostic(diagnostic_codes::resource_limit, "respawn exhausted stable IDs"));
             const auto id = next_id;
-            auto unit = impl_->new_unit(UnitState{id, request.type, request.owner, request.position, request.rotation, {}}, tick);
+            UnitState state{id, request.type, request.owner, request.position, request.rotation, {}};
+            if (auto assigned = impl_->attribute_output(state, request.controller_seat, id); !assigned) return assigned;
+            auto unit = impl_->new_unit(state, tick);
             const auto transform = unit_transform(unit);
             if (!transform) return core::Result<void>::failure(transform.error());
             instances.push_back(impl_->instance_for(unit, transform.value(), tick + 1));

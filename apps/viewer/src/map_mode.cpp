@@ -91,7 +91,14 @@ bool MapMode::briefing_queue_empty() const {
     return !state_->battle_audio || state_->battle_audio->briefing_queue_empty();
 }
 bool MapMode::campaign_briefing(const std::string_view event_name) {
-    return state_->battle_audio && state_->battle_audio->campaign_briefing(event_name);
+    if (!state_->battle_audio || !state_->battle_audio->campaign_briefing(event_name)) return false;
+    // SND-41/69: movie failure does not cancel accepted speech or the battle.
+    if (state_->hud) static_cast<void>(state_->hud->play_command_bar_movie(event_name));
+    return true;
+}
+bool MapMode::command_bar_movie_playing() const { return state_->hud && state_->hud->command_bar_movie_playing(); }
+void MapMode::write_command_bar_movie_report(std::ostream& output) const {
+    if (state_->hud) state_->hud->write_command_bar_movie_report(output); else output << "null";
 }
 TacticalHud* MapMode::tactical_hud() const noexcept { return state_->hud.get(); }
 void MapMode::update_retreat_countdown(const sim::tactical::RetreatState& state, const std::uint64_t tick, const bool cinematic_playing) {

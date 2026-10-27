@@ -15,6 +15,7 @@
 #include "eawr/sim/galactic/session.hpp"
 #include "eawr/sim/galactic/snapshot.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
+#include "eawr/sim/galactic/story_goals.hpp"
 #include "eawr/sim/galactic/story_rewards.hpp"
 #include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/story_notices.hpp"
@@ -107,6 +108,9 @@ struct GameTick {
     // WST-20: this step's triggered plot events with their rewards, in trigger order, each with the outcome of
     // its application (#683: engine-run graph rewards, the bound reward provider, or a named refusal).
     std::vector<sim::galactic::story::Triggered> story_triggers;
+    // WST-58: this step's presentation requests for the holocron goals (goal rows and the summary request, in
+    // trigger order). Local rendering input only: never saved, hashed or replayed.
+    std::vector<sim::galactic::story::PresentationEvent> story_presentation;
     [[nodiscard]] std::vector<GameStoryNotice> observer_story_notices(sim::galactic::PlayerId) const;
     // WGP-26: retain emission context even when this step selects or retires the conflict.
     std::map<sim::EntityId, PendingConflictAlert> pending_alerts;
@@ -163,6 +167,12 @@ struct GameRecording {
 [[nodiscard]] core::Result<HistoryBoundary> history_frontier_of(const GameRecording& recording,
     std::span<const std::uint8_t> replay_bytes, std::uint64_t completed_tick);
 
+struct PendingBattleInput {
+    sim::galactic::CommandOrderKey outer{};
+    std::vector<std::uint8_t> body;
+    std::uint64_t producer_sequence{};
+    friend bool operator==(const PendingBattleInput&, const PendingBattleInput&) = default;
+};
 struct BattleCheckpoint {
     std::vector<std::uint8_t> state;
     script::authoritative::TacticalScriptSave scripts;
@@ -172,6 +182,7 @@ struct BattleCheckpoint {
     // Parent tick (completed) at which the child timeline was last serviced; it lags the parent
     // across save-only and paused barriers, so a restore cannot derive it from the parent clock.
     std::uint64_t timeline_tick{};
+    std::optional<std::vector<PendingBattleInput>> controller_inputs;
 };
 // WGS-P06: immutable, seat-approved battle perspective; observers have no command sink.
 struct SeatBattleView {
@@ -338,6 +349,8 @@ public:
     [[nodiscard]] core::Result<void> install_story(sim::galactic::story::Config, std::vector<sim::galactic::story::PlotRecord>,
         std::vector<sim::galactic::story::SubPlotDef>, std::vector<std::string> notes = {});
     [[nodiscard]] const sim::galactic::story::Engine* story_engine() const noexcept;
+    // WST-58: a plot owner's holocron goals; null before the owner's first story dialog. Checkpointed, not hashed.
+    [[nodiscard]] const sim::galactic::story::GoalsState* story_goals(sim::galactic::story::Player) const noexcept;
     void set_feedback_notice_handler(sim::galactic::GalacticSession::FeedbackNoticeHandler);
     [[nodiscard]] core::Result<sim::math::Fixed> set_technology_price_modifier(const sim::galactic::GalacticSession::TechnologyPriceWrite&);
     // WGEP-05/163..165 native credit-halt sabotage writer and explicit source removal.

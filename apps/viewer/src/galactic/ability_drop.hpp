@@ -229,4 +229,13 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     }
     return std::nullopt;
 }
+// Cache one eligible action per destination when the dragged fleet or snapshot changes.
+template<class Planets, class Resolve>
+[[nodiscard]] std::vector<AbilityDrop> ability_drop_candidates(const Planets& planets, Resolve resolve) {
+    std::vector<AbilityDrop> result;
+    for (const auto& planet : planets)
+        if (auto drop = resolve(planet.id)) result.push_back(*drop);
+    return result;
+}
+
 }

@@ -210,7 +210,7 @@ struct FleetControlSetup {
     std::vector<DetachedUnit> detached_units; // ascending member ID
     std::vector<FleetTypeTraits> types; // ascending supplied TypeId
     FleetManagementGates gates;
-    PausePolicy pause; // the sim default is retail (all refuse); the campaign builder chooses
+    PausePolicy pause{}; // the sim default is retail (all refuse); the campaign builder chooses
     friend bool operator==(const FleetControlSetup&, const FleetControlSetup&) = default;
 };
 
@@ -292,9 +292,11 @@ struct SurfaceForce {
 };
 struct ControlType {
     TypeId type{};
-    std::uint8_t political_control{}; // WGM-67: eligible flattened forces author 0 or 1
+    std::uint8_t political_control{}; // Compact representation for binary authored values.
     bool stealth{}; // supplied by the live ability service
     bool ground_capable{}; // supplied capability predicate, WGM-U09
+    // LSA-19: signed contributions are summed before the planet clamps to -1..1.
+    std::optional<std::int64_t> signed_political_control{};
     friend bool operator==(const ControlType&, const ControlType&) = default;
 };
 // GPC-01: an ability instance is keyed by actor and its authored profile index.
@@ -660,7 +662,7 @@ struct CensusType {
     math::Fixed authored_price{};
     std::uint8_t sale_policy{}; // 0 default, 1 always, 2 never
     bool named_hero{}, superweapon{};
-    std::optional<HistoryType> history;
+    std::optional<HistoryType> history{};
     friend bool operator==(const CensusType&, const CensusType&) = default;
 };
 struct CensusObject {
@@ -1112,6 +1114,14 @@ struct SpyAbilityProfile {
     bool initially_enabled{true}, causes_despawn{}, hero{};
     friend bool operator==(const SpyAbilityProfile&, const SpyAbilityProfile&) = default;
 };
+// WGUI-19/101: an authored Galactic_Automatic System_Spy_Ability applied while its source object sits at a planet.
+struct AutoSpyProfile {
+    std::string text_identity;
+    std::uint64_t identity{1}; // source-key ability identity; unique per authored spy record
+    math::Fixed duration, influence_range;
+    std::uint32_t mask{};
+    friend bool operator==(const AutoSpyProfile&, const AutoSpyProfile&) = default;
+};
 struct GalacticAbilityProfile {
     TypeId type{};
     BlackMarketBuyer market;
@@ -1128,6 +1138,7 @@ struct GalacticAbilityProfile {
     std::optional<NeutralizeAbilityProfile> neutralize{};
     std::optional<SpyAbilityProfile> spy{};
     std::vector<AbilityKind> ground_activated{}; // WGCH-157: authored Activation_Style membership
+    std::vector<AutoSpyProfile> auto_spies{}; // initially enabled automatic spies, authored order
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
 struct GalacticAbilitySetup {

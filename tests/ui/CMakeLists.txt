@@ -8,7 +8,7 @@ target_compile_features(ui_data_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_data_tests)
 add_test(NAME ui_data_contracts COMMAND ui_data_tests)
 
-add_executable(ui_model_tests model_main.cpp layout_tests.cpp font_tests.cpp hud_tests.cpp hud_shell_tests.cpp theme_tests.cpp)
+add_executable(ui_model_tests model_main.cpp layout_tests.cpp font_tests.cpp hud_tests.cpp hud_shell_tests.cpp theme_tests.cpp story_summary_tests.cpp)
 target_link_libraries(ui_model_tests PRIVATE eawr::ui_model)
 target_compile_features(ui_model_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_model_tests)

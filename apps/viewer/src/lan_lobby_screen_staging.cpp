@@ -153,6 +153,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
 
     if (auto* chat = EAWR_CONTROL(EawrUiEdit, "IDC_LAN_CHAT_EDIT")) {
         chat->set_max_length(static_cast<int>(model::lan_chat_max));
+        chat->set_keep_editing_on_text_submit(true);
         chat->connect("text_submitted", callable_mp(this, &EawrLanLobby::on_text_submitted).bind(String("IDC_LAN_CHAT_EDIT")));
         chat->grab_focus();
     }

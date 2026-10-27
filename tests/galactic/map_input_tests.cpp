@@ -279,7 +279,8 @@ void hero_fleet_drop_offers_authored_ability() {
     gc::PoliticalControlSetup control;
     control.players = {{1, false, true}, {2, false, true}};
     control.relations = {{1, 1, true}, {1, 2, false}};
-    control.planets = {{1}, {2}};
+    control.planets = {{.planet = 1, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}},
+        {.planet = 2, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}}};
     control.state.resize(2);
     control.state[0].current_player = control.state[0].target_player = 1;
     control.state[1].current_player = control.state[1].target_player = 2;
@@ -301,15 +302,16 @@ void hero_fleet_drop_offers_authored_ability() {
     host.activated_destruction_abilities = {"D"}; host.activated_neutralize_abilities = {"N"};
     host.activated_corruption_abilities = {"C"}; host.activated_hack_abilities = {"H"};
     host.sabotage_costs = {{70, Fixed::from_integer(100).value()}};
-    host.technologies = {{70}};
-    host.theft_planets = {{2}};
+    host.technologies = {{70, {}, false}};
+    host.theft_planets = {{2, {}, {}, {}, {}}};
     gc::CorruptionPlanet corruption; corruption.planet = 2; corruption.retains_influence = true;
     corruption.slots[0].type = gc::corruption_fixture::Type::piracy; host.corruption_planets = {corruption};
     gc::AbilityActorState service; service.actor = 30; service.type = 8; service.sabotage_enabled = true;
     std::shared_ptr<const gc::MovementSetup> movement;
+    std::vector<gc::Planet> test_planets{{1, {}, 1}, {2, {}, 2}};
     const auto snapshot = [&] {
         auto base = std::shared_ptr<const gc::GalacticSnapshot>(new gc::GalacticSnapshot(0, {}, {},
-            {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {}, std::nullopt, std::nullopt, movement,
+            test_planets, {}, fleets, {}, std::nullopt, std::nullopt, movement,
             std::nullopt, {}, accounts, production, control, {}, {}, std::nullopt, std::nullopt, std::nullopt,
             {}, {}, std::nullopt, {}, std::nullopt, std::nullopt, economy));
         gc::NativeSnapshotChanges changes;
@@ -369,6 +371,25 @@ void hero_fleet_drop_offers_authored_ability() {
         policy.kind_restricted = [kind](auto, auto candidate) { return candidate == kind; };
         assert(!ability_drop_candidate(*snapshot(), 1, 10, host, policy)); policy.kind_restricted = {};
     }
+    // One drag resolves all planets once, including the same own planet with an enemy fleet in orbit.
+    test_planets.push_back({3, {}, 2}); test_planets.push_back({4, {}, 0});
+    control.planets.push_back({.planet = 3, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}});
+    control.planets.push_back({.planet = 4, .landed = {}, .special_control = {}, .caps = {}, .transition_modifiers = {}, .built_structures = {}});
+    control.state.resize(4);
+    control.state[2].current_player = control.state[2].target_player = 2;
+    control.state[3].current_player = control.state[3].target_player = 0;
+    fleets.push_back({12, 2, 1, {{40, 99}}}); // Blockades our planet, not its ownership.
+    auto& spy = host.profiles[0]; spy = {}; spy.type = 8; spy.spy.emplace(); spy.spy->name = "SPY";
+    spy.ground_activated = {AbilityKind::system_spy}; host.activated_spy_abilities = {"SPY"};
+    service = {}; service.actor = 30; service.type = 8; service.spy_enabled = true;
+    const auto live = snapshot();
+    const auto candidates = ability_drop_candidates(test_planets, [&](auto id) {
+        return ability_drop_candidate(*live, 1, 10, host, {}, id);
+    });
+    assert(candidates.size() == 3);
+    assert(candidates[0].planet == 2 && candidates[1].planet == 3 && candidates[2].planet == 4);
+    assert(std::all_of(candidates.begin(), candidates.end(), [](const auto& row) { return row.kind == AbilityKind::system_spy; }));
+    fleets.pop_back(); test_planets.resize(2); control.planets.resize(2); control.state.resize(2);
     // Rank uses ORIGINAL type, includes ineligible entries, and retains stored order on ties.
     auto& p = host.profiles[0]; p = {}; p.type = 8; p.has_market = false;
     p.destruction = gc::DestructionAbilityProfile{"D"}; service = {}; service.actor = 30; service.type = 8; service.destruction_enabled = true;
@@ -471,7 +492,7 @@ void probe_move_and_ground_admission() {
         return gc::GalacticSnapshot(0, {}, {}, {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {},
             std::nullopt, fleet_control, movement, std::nullopt, {}, std::nullopt, std::nullopt, control);
     };
-    const gc::MoveFleet move{10, {1, 2}};
+    const gc::MoveFleet move{10, {1, 2}, {}};
     const AbilityDrop spy{31, 2, gc::AbilityKind::system_spy, 30};
     const auto prepared = ability_move_order(snapshot(), 1, move, spy);
     assert(prepared && prepared->destination_actor == 30 && prepared->path == move.path);
@@ -496,7 +517,7 @@ void probe_move_and_ground_admission() {
     const auto stacked = ability_move_order(snapshot(), 1, move, spy, stack);
     assert(stacked && stacked->destination_actor == 0);
     assert(fleet_can_land(snapshot(), 1, 10, stack));
-    const DropIntent intent{DropKind::move, 10, 0, 2, {1, 2}};
+    const DropIntent intent{DropKind::move, 10, 0, 2, {1, 2}, 0, {}, {}};
     const auto orders = fleet_stack_orders(snapshot(), 1, intent, stack, move,
         [&](ObjectId, ObjectId) { return std::optional{spy}; });
     assert(orders && orders->size() == 2 && std::get<gc::MergeFleets>((*orders)[0]) == (gc::MergeFleets{11, 10}));
@@ -997,6 +1018,35 @@ void space_proof_selects_reachable_authored_defenders() {
     movement.access.clear();
     assert(!select()); // Missing published access never invents presence or admits a route.
 }
+void wheel_stays_blocked_until_widget_gestures_end() {
+    MapInput input;
+    assert(input.wheel_zoom());
+    input.dragged = 50; assert(!input.wheel_zoom());
+    input.dragged = 0; assert(input.wheel_zoom());
+    assert(input.begin_box({10, 10}, true, true));
+    assert(!input.wheel_zoom());
+    input.move_box({1200, 400}); // Wheel remains owned after leaving the pad.
+    assert(input.box_end && !input.wheel_zoom());
+    input.cancel_pointer(); assert(input.wheel_zoom());
+}
+void unused_wheel_follows_focus_and_advanced_states() {
+    MapInput input;
+    PlanetCamera camera;
+    PlanetView planet; planet.id = 1; planet.position = {10, 20, 0}; planet.scale = 1;
+    const auto wheel = [&](bool inward) {
+        return input.wheel_zoom() && (inward ? camera.zoom_in(planet, true) : camera.zoom_out());
+    };
+    assert(wheel(true)); camera.service(0); camera.service(1000);
+    assert(camera.state() == CameraState::focused && !camera.advanced_map());
+    assert(wheel(true) && camera.advanced_map());
+    assert(!wheel(true) && camera.advanced_map()); // Inward boundary still belongs to the camera.
+    input.dragged = 50;
+    assert(!wheel(false) && camera.advanced_map()); // Propagation cannot bypass the gesture guard.
+    input.cancel_pointer();
+    assert(wheel(false) && !camera.advanced_map() && camera.state() == CameraState::focused);
+    assert(wheel(false)); camera.service(1000); camera.service(2000);
+    assert(camera.state() == CameraState::overview);
+}
 void surface_world_orbit_targets() {
     namespace gc = eawr::sim::galactic;
     std::vector<gc::Fleet> fleets{{10, 1, 1, {}}, {11, 2, 1, {}}, {12, 1, 3, {}}, {13, 1, 1, {}}};
@@ -1005,7 +1055,7 @@ void surface_world_orbit_targets() {
     MapInput input;
     const auto target = surface_orbit_target(snapshot, 1, 1, 1, 1, 10, std::uint8_t{2});
     assert(target && target->fleet == 10 && target->slot == 0);
-    const auto command = input.command({DropKind::launch, 50, target->fleet, 1, {}, target->slot}, planets);
+    const auto command = input.command({DropKind::launch, 50, target->fleet, 1, {}, target->slot, {}, {}}, planets);
     assert(command && std::get<gc::LaunchFromSurface>(*command).target == 10);
     for (std::uint8_t slot = 0; slot < 3; ++slot) {
         const auto empty = surface_orbit_target(snapshot, 1, 1, 1, 1, 0, slot);
@@ -1018,7 +1068,7 @@ void surface_world_orbit_targets() {
     for (const auto fleet : {0U, 11U, 12U, 99U}) {
         const auto neighbour = surface_orbit_target(snapshot, 1, 1, 3, 2, fleet, std::uint8_t{2});
         assert(neighbour && !neighbour->fleet && neighbour->slot == 0);
-        const auto move = input.command({DropKind::launch, 50, neighbour->fleet, 1, {1, 3}, 2}, planets);
+        const auto move = input.command({DropKind::launch, 50, neighbour->fleet, 1, {1, 3}, 2, {}, {}}, planets);
         assert(move && std::holds_alternative<gc::LaunchFleet>(*move));
         assert((std::get<gc::LaunchFleet>(*move).path == std::vector<ObjectId>{1, 3}));
     }
@@ -1027,6 +1077,8 @@ void surface_world_orbit_targets() {
     assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::uint8_t{3}));
 }
 int main() {
+    wheel_stays_blocked_until_widget_gestures_end();
+    unused_wheel_follows_focus_and_advanced_states();
     surface_world_orbit_targets();
     space_proof_selects_reachable_authored_defenders();
     scheduled_hero_map_uses_published_frames();

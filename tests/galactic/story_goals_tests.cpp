@@ -65,6 +65,19 @@ void dialogs() {
     expect(restored.state().goals == goals.state().goals && restored.state().goals[0].completed && restored.state().goals[0].hidden, "goal fixture snapshot");
     expect(goals.apply(st::GoalReward{st::GoalAction::remove, "fixture_intro_2"}, sink) && goals.state().goals.empty(), "WST-58 remove goal");
     expect(!goals.dialog({}, local, sink), "empty dialog inert");
+    d.tag = "first"; d.popup = false; local.defer_summary_state = true; sink.events.clear();
+    expect(goals.dialog(d, local, sink) && sink.events.size() == 2, "WST-70 live quiet requests defer advisor and sound admission");
+    const auto& deferred = std::get<st::SummaryRequest>(sink.events[1].payload);
+    expect(deferred.action == st::SummaryAction::refresh_or_flash && deferred.transmission_text == "transmission"
+        && deferred.mission_added_sound == "added", "WST-70 the local consumer receives the closed-branch outputs together");
+    auto second = d; second.tag = "incoming"; second.remove_after_viewed = true;
+    expect(goals.dialog(second, local, sink) && goals.state().goals.size() == 2
+        && goals.state().goals[0].tag == "incoming" && goals.state().goals[0].remove_after_viewed
+        && goals.state().goals[1].tag == "first" && !goals.state().goals[1].remove_after_viewed,
+        "WST-58 new goals prepend and an incoming override preserves the tagless removal policy");
+    d.variable = "first updated";
+    expect(goals.dialog(d, local, sink) && goals.state().goals[0].tag == "incoming"
+        && goals.state().goals[1].variable == "first updated", "a repeated goal updates its existing slot");
 }
 void adapter_sequence() {
     // Stock GC shape (WST-30/58): elapsed start -> reward -> human intro dialog.

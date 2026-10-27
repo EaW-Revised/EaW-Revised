@@ -437,6 +437,13 @@ void land_combat_rows() {
     const auto moved = eawr::skirmish::build_land_bindings(edited, companies, inputs);
     expect(moved && moved.value().identity != bound.identity, "LS-P1: a weapon row change moves the land content identity");
 
+    auto malformed_static = tables;
+    malformed_static.unresolved.push_back({"Shoot_Wall", "Tactical_Health", "bad", "malformed synthetic health"});
+    const auto noted_static = eawr::skirmish::build_land_bindings(malformed_static, companies, inputs);
+    expect(noted_static && std::any_of(noted_static.value().static_notes.begin(), noted_static.value().static_notes.end(),
+        [](const auto& note) { return note.find("Shoot_Wall") != std::string::npos; }),
+        "an unresolved static combat row is named in binding notes while its obstacle geometry remains usable");
+
     // Without a damageable or armed type the binding carries no combat tables (movement-only content).
     auto bare = tables;
     for (auto& unit : bare.units) { unit.hull.reset(); unit.weapon.reset(); }

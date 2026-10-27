@@ -1167,6 +1167,84 @@ void setup_contract(const std::filesystem::path& fixtures) {
         expect(!wrong && wrong.error().message.find("match policy") != std::string::npos,
             "a replay with a different bound policy fails clearly before ticking");
     }
+    // The header-prefix read (#5197) lists exactly what the whole-file read lists: a normal map, a root header over the 64 KiB
+    // prefix (the prefix cannot decide, so the whole file does), a rejected map whose header fits the prefix while the file
+    // does not, and a truncated root.
+    {
+        using Bytes = std::vector<std::byte>;
+        const auto variant = [&](const std::string& name, const std::function<Bytes(const Bytes&, std::uint32_t)>& rewrite,
+                                 const std::uint32_t capacity, const std::size_t expected_maps) {
+            const auto directory = std::filesystem::temp_directory_path()
+                / ("eawr-setup-prefix-" + name + "-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+            setup_map_golden::write_team_corpus(directory, capacity);
+            const auto ted = directory / "art/maps/team_contract.ted";
+            Bytes original;
+            {
+                std::ifstream in(ted, std::ios::binary);
+                const std::string raw((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                original.resize(raw.size());
+                std::transform(raw.begin(), raw.end(), original.begin(), [](const char c) { return static_cast<std::byte>(c); });
+            }
+            std::uint32_t root_size{};
+            for (unsigned i = 0; i < 4; ++i) root_size |= static_cast<std::uint32_t>(std::to_integer<unsigned>(original[4 + i])) << (8 * i);
+            const Bytes rewritten = rewrite(original, root_size);
+            { std::ofstream out(ted, std::ios::binary | std::ios::trunc); out.write(reinterpret_cast<const char*>(rewritten.data()), static_cast<std::streamsize>(rewritten.size())); }
+            const eawr::vfs::MountSpec mount{.layer_id = "synthetic-prefix", .data_root = directory, .loose_logical_prefix = "data", .active_archives = {}};
+            auto filesystem = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+            expect(static_cast<bool>(filesystem), "prefix variant " + name + " mounts");
+            if (!filesystem) return;
+            const eawr::data::Catalog empty;
+            skirmish::SetupMapQuery prefix_query;
+            skirmish::SetupMapQuery whole_query;
+            whole_query.read_whole_headers = true;
+            const auto by_prefix = skirmish::setup_maps(filesystem.value(), empty, prefix_query);
+            const auto by_whole = skirmish::setup_maps(filesystem.value(), empty, whole_query);
+            expect(by_prefix && by_whole && by_prefix.value().size() == expected_maps && by_whole.value().size() == expected_maps
+                    && setup_map_golden::map_digest(by_prefix.value()) == setup_map_golden::map_digest(by_whole.value()),
+                "prefix variant " + name + ": the header-prefix list is byte-identical to the whole-read list (" + std::to_string(expected_maps) + " map(s))");
+            std::error_code ignored;
+            std::filesystem::remove_all(directory, ignored);
+        };
+        const auto put_u32 = [](Bytes& bytes, const std::size_t at, const std::uint32_t value) {
+            for (unsigned i = 0; i < 4; ++i) bytes[at + i] = static_cast<std::byte>(value >> (8 * i));
+        };
+        const auto filler = [](const std::size_t count) { return Bytes(count, std::byte{0}); };
+        // (a) a normal map, well under the prefix size.
+        variant("normal", [](const Bytes& original, std::uint32_t) { return original; }, 4, 1);
+        // (b) a root over 64 KiB: mini-chunks of an unknown id pad the root, so the header does not fit the prefix.
+        variant("large-root", [&](const Bytes& original, const std::uint32_t root_size) {
+            Bytes padded(original.begin(), original.begin() + 8 + root_size);
+            for (unsigned count = 0; count < 340; ++count) {
+                padded.push_back(std::byte{200});
+                padded.push_back(std::byte{200});
+                const Bytes payload = filler(200);
+                padded.insert(padded.end(), payload.begin(), payload.end());
+            }
+            put_u32(padded, 4, static_cast<std::uint32_t>(padded.size() - 8));
+            padded.insert(padded.end(), original.begin() + 8 + root_size, original.end());
+            return padded;
+        }, 4, 1);
+        // (c) a rejected map (capacity 1 < 2) whose header fits the prefix while the file is over 64 KiB: the prefix decides.
+        variant("rejected-large-file", [&](const Bytes& original, std::uint32_t) {
+            Bytes padded = original;
+            const std::size_t at = padded.size();
+            padded.resize(at + 8 + 70000, std::byte{0});
+            put_u32(padded, at, 9999);
+            put_u32(padded, at + 4, 70000);
+            return padded;
+        }, 1, 0);
+        // (d) a truncated root: the declared root size runs past the end of the file.
+        variant("truncated-root", [](const Bytes& original, const std::uint32_t root_size) {
+            return Bytes(original.begin(), original.begin() + 8 + root_size / 2);
+        }, 4, 0);
+        // (e) the same truncation on a file over 64 KiB: the prefix is cut inside the root and falls back to the whole file.
+        variant("truncated-large", [&](const Bytes& original, const std::uint32_t root_size) {
+            Bytes truncated(original.begin(), original.begin() + 8 + root_size / 2);
+            put_u32(truncated, 4, root_size + 80000);
+            truncated.resize(truncated.size() + 90000, std::byte{0});
+            return truncated;
+        }, 4, 0);
+    }
 }
 
 

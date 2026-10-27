@@ -33,6 +33,7 @@ inline constexpr std::int64_t max_damage_multiplier = 256;
 // armor_types with both at most max_damage_types, every multiplier is in [0,
 // max_damage_multiplier], and every profile's shields and armor indices fit the table.
 [[nodiscard]] core::Result<void> validate_damage(const DurabilityTable& table);
+void normalize_damage(DurabilityTable& table, core::LoadNoteBuffer& notes);
 
 // Damage_To_Armor_Mod for the pair; 1 when either index is not in the table.
 [[nodiscard]] math::Fixed armor_multiplier(
@@ -189,6 +190,9 @@ struct FlightProfile {
     math::Fixed straight_distance{};
     friend bool operator==(const FlightProfile&, const FlightProfile&) = default;
 };
+// Empty for a supported profile; otherwise names the authored input and its failed domain.
+// RFL-16: flight allowance is a scalar, not a bounded world coordinate.
+[[nodiscard]] std::string_view flight_profile_error(const FlightProfile& profile) noexcept;
 struct RocketSegment {
     math::Vec3 a{}, b{}, c{}, d{}; // cubic a + t*(b + t*(c + t*d))
     math::Fixed length{};

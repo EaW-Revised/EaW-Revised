@@ -7,6 +7,10 @@
 #include <cstdint>
 
 namespace eawr::mods {
+struct Profile;
+// Same material/order as the service loadcheck marker. Empty means unavailable.
+[[nodiscard]] std::string loadcheck_chain_fingerprint(const Profile& profile,
+    const steam::fs::path& game, std::string_view engine);
 
 // Directory entries (files and folders) one walk visits before it stops. Large total conversions hold tens of
 // thousands of files; the cap keeps a stray huge folder (a Steam library picked as a mod) from stalling

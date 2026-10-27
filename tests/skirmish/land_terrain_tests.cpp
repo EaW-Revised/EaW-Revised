@@ -28,11 +28,18 @@ void* operator new(const std::size_t size) {
     throw std::bad_alloc();
 }
 void* operator new[](const std::size_t size) { return ::operator new(size); }
+// Keep the allocation guard's malloc/free pairing behind the matching delete operators.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete(void* pointer) noexcept { std::free(pointer); }
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete[](void* pointer) noexcept { std::free(pointer); }
 #if defined(__cpp_sized_deallocation)
-void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
-void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { ::operator delete(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { ::operator delete[](pointer); }
 #endif
 
 namespace {
@@ -274,8 +281,13 @@ void segment_property_check() {
         }
         if (is_hit) {
             ++hits;
-            const auto p = at(stop);
-            const double h = mesh_height(hill_heights, 6, 6, p[0], p[1]);
+            auto p = at(stop);
+            // Fixed rounding of the contact fraction may land a double recomputation a hair off the grid edge.
+            constexpr double edge_slack = 1e-3;
+            expect(p[0] >= -edge_slack && p[0] <= extent + edge_slack && p[1] >= -edge_slack && p[1] <= extent + edge_slack,
+                "terrain contact remains inside the sampled grid");
+            if (p[0] < -edge_slack || p[0] > extent + edge_slack || p[1] < -edge_slack || p[1] > extent + edge_slack) continue;
+            const double h = mesh_height(hill_heights, 6, 6, std::clamp(p[0], 0.0, extent), std::clamp(p[1], 0.0, extent));
             // Otherwise the contact is the start of the segment or of the grid, already below the surface.
             const bool at_start = p[2] < h && (stop == 0.0 || !inside(at(std::max(0.0, stop - 1e-3))));
             expect(close_to(p[2], h, 0.02) || at_start, "the reported contact lies on the two-triangle mesh");

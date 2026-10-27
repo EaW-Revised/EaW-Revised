@@ -140,6 +140,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         failure = "live session content: " + core::format_diagnostic(content.error());
         return false;
     }
+    if (!skipped.empty()) std::cerr << "EAWR live session content: " << skirmish::content_load_summary(skipped) << std::endl;
     // #4589: a recording that places a skipped type would replay it unarmed; refuse it like a live start.
     if (auto placed = skirmish::refuse_skipped_setup(setup, skipped); !placed) {
         failure = "live session start: " + core::format_diagnostic(placed.error());

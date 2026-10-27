@@ -125,7 +125,6 @@ bool MapMode::State::write_report() const {
         output << "  \"land_live\": {\"locomotion\":\"authored\",\"external_inputs\":\"unverified\",\"pose_trace\":[";
         for (std::size_t i = 0; i < land_pose_trace.size(); ++i) { if (i) output << ","; output << land_pose_trace[i]; }
         output << "]},\n";
-        if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
         live_session->write_report(output);
         if (battle) { LandBattleCamera view(camera, map_camera.get()); battle->write_report(output, view); }
     }

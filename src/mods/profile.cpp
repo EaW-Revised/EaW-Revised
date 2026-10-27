@@ -264,6 +264,7 @@ ProfileArguments expand_profile_arguments(const std::vector<std::string>& args, 
     if (!roots.empty()) { out.arguments.emplace_back(root_flag); out.arguments.push_back(roots); }
     out.report.push_back("EAWR mods: profile " + resolved.profile->id);
     out.report.push_back("EAWR mods: mount roots=" + roots);
+    out.profile = std::move(resolved.profile);
     return out;
 }
 } // namespace eawr::mods

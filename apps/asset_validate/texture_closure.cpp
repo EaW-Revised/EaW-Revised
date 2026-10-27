@@ -146,7 +146,8 @@ struct Scan {
         first = true;
         for (const auto& shader : shaders) {
             if (shader.empty()) continue;
-            if (!first) out << ','; first = false;
+            if (!first) out << ',';
+            first = false;
             out << json_string(shader);
             const auto dot = shader.find_last_of('.');
             for (const auto suffix : {".fx", ".fxo"}) {
@@ -160,7 +161,8 @@ struct Scan {
         for (const auto& path : shader_files) {
             auto bytes = fs.open(path);
             if (!bytes) continue;
-            if (!first) out << ','; first = false;
+            if (!first) out << ',';
+            first = false;
             const auto suffix = path.substr(path.find_last_of('.'));
             ++shader_containers[suffix];
             std::set<std::string> profiles;
@@ -177,7 +179,8 @@ struct Scan {
             out << "{\"path\":" << json_string(path) << ",\"first_word\":" << word(bytes.value(), 0) << ",\"profiles\":[";
             bool profile_first = true;
             for (const auto& profile : profiles) {
-                if (!profile_first) out << ','; profile_first = false;
+                if (!profile_first) out << ',';
+                profile_first = false;
                 out << json_string(profile); ++shader_profiles[profile];
             }
             out << "]}";

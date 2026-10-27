@@ -1,4 +1,5 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
 #include "eawr/sim/tactical/formation.hpp"
@@ -38,6 +39,111 @@
 
 namespace eawr::sim::tactical {
 
+core::Result<void> split_initial_controllers(TacticalSetup& setup, const EconomyRules& economy) {
+    if (!setup.controllers) return core::Result<void>::success();
+    auto prepared = setup;
+    auto& units = prepared.units;
+    std::sort(units.begin(), units.end(), [](const auto& a, const auto& b) { return a.entity_id < b.entity_id; });
+    std::map<EntityId, UnitState*> by_id;
+    for (auto& unit : units) {
+        if (!by_id.emplace(unit.entity_id, &unit).second)
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "duplicate initial controller unit"));
+    }
+    std::set<EntityId> members;
+    for (const auto& squadron : prepared.squadrons)
+        members.insert(squadron.members.begin(), squadron.members.end());
+    const auto population = [&](const UnitState& unit) {
+        const auto type = purchase_identity(unit);
+        if (economy.campaign) {
+            const auto found = std::lower_bound(economy.campaign_population.begin(), economy.campaign_population.end(), type,
+                [](const auto& row, const auto id) { return row.first < id; });
+            return found != economy.campaign_population.end() && found->first == type ? found->second : 0U;
+        }
+        for (const auto& menu : economy.menus) if (const auto* option = menu.find(type)) return option->population;
+        return 0U;
+    };
+    for (const auto& faction : prepared.controllers->factions) {
+        std::vector<SeatId> seats;
+        for (const auto& seat : prepared.controllers->seats)
+            if (seat.active && seat.player == faction.player
+                && seat.kind == (faction.mode == FactionController::humans ? SeatKind::human : SeatKind::ai))
+                seats.push_back(seat.seat);
+        std::sort(seats.begin(), seats.end());
+        struct Root { UnitState* unit; std::uint32_t population; };
+        std::vector<Root> roots;
+        for (auto& unit : units) {
+            if (unit.owner != faction.player) continue;
+            unit.controller_seat = {};
+            if (unit.control == UnitControl::shared_structure) continue;
+            unit.control = UnitControl::mobile;
+            if (!members.contains(unit.entity_id)) roots.push_back({&unit, population(unit)});
+        }
+        if (seats.empty() && !roots.empty()) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "initial mobile controller faction has no eligible seat"));
+        std::sort(roots.begin(), roots.end(), [](const auto& a, const auto& b) {
+            return a.population != b.population ? a.population > b.population : a.unit->entity_id < b.unit->entity_id;
+        });
+        for (std::size_t i = 0; i < roots.size(); ++i) roots[i].unit->controller_seat = seats[i % seats.size()];
+    }
+    for (const auto& squadron : prepared.squadrons) {
+        const auto root = by_id.find(squadron.container);
+        if (root == by_id.end()) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "initial controller squadron root is absent"));
+        for (const auto id : squadron.members) {
+            const auto member = by_id.find(id);
+            if (member == by_id.end() || member->second->owner != root->second->owner)
+                return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                    "initial controller squadron member differs from root"));
+            member->second->control = root->second->control;
+            member->second->controller_seat = root->second->controller_seat;
+        }
+    }
+    if (auto valid = validate_controllers(prepared); !valid) return valid;
+    setup = std::move(prepared);
+    return core::Result<void>::success();
+}
+
+core::Result<void> TacticalSession::set_initial_controller_policy(BattleControllerPolicy policy) {
+    if (!impl_->setup.controllers || impl_->completed_tick != 0 || !impl_->pending.empty()
+        || !impl_->executed.empty() || impl_->object_turn_running || impl_->land)
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+            "controller role installation requires an idle opt-in child at tick zero"));
+    auto setup = impl_->setup;
+    setup.controllers = std::move(policy);
+    if (auto split = split_initial_controllers(setup, impl_->economy); !split) return split;
+    auto binding = impl_->campaign_binding;
+    if (setup.campaign) {
+        TacticalReplay recording; recording.setup = setup;
+        const auto encoded = write_replay(recording);
+        if (!encoded) return core::Result<void>::failure(encoded.error());
+        binding = core::sha256(encoded.value());
+    }
+    auto live = impl_->sorted_live();
+    for (auto& unit : live) {
+        const auto found = std::lower_bound(setup.units.begin(), setup.units.end(), unit.state.entity_id,
+            [](const auto& row, const auto id) { return row.entity_id < id; });
+        if (found == setup.units.end() || found->entity_id != unit.state.entity_id)
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "initial controller unit differs from setup"));
+        unit.state.control = found->control;
+        unit.state.controller_seat = found->controller_seat;
+    }
+    impl_->setup = std::move(setup);
+    impl_->controller_entry = impl_->setup;
+    impl_->campaign_binding = binding;
+    impl_->rebuild(live, false);
+    impl_->publish_staged(live, {}, {});
+    return core::Result<void>::success();
+}
+
+const std::optional<BattleControllerPolicy>& TacticalSession::controller_policy() const noexcept {
+    return impl_->setup.controllers;
+}
+const TacticalSetup& TacticalSession::initial_setup() const noexcept {
+    return impl_->controller_entry ? *impl_->controller_entry : impl_->setup;
+}
+
 std::span<const DepartureControl> TacticalSession::departure_controls() const noexcept { return impl_->departure_controls; }
 
 std::span<const PlayerId> TacticalSession::basic_ai_players() const noexcept { return impl_->basic_ai; }
@@ -51,6 +157,10 @@ core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBindin
     auto admitted = admit_human_command(binding, command);
     if (!admitted) return admitted;
     admitted.value().command.key.sequence = faction_sequence;
+    if (impl_->setup.controllers) {
+        admitted.value().command.issuing_seat = binding.seat;
+        admitted.value().command.origin = CommandOrigin::seat;
+    }
     const auto submitted = submit(admitted.value().command);
     if (!submitted) return core::Result<AdmittedSeatCommand>::failure(submitted.error());
     return admitted;
@@ -58,15 +168,28 @@ core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBindin
 
 core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
     if (impl_->land && (!std::holds_alternative<MovePayload>(command.payload)
-        && !std::holds_alternative<StopPayload>(command.payload)))
+        && !std::holds_alternative<StopPayload>(command.payload)
+        && !std::holds_alternative<AttackPayload>(command.payload)))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
-            "land sessions currently accept move and stop only"));
+            "land sessions accept move, stop and attack only; attack-move and guard are not supported"));
     if (impl_->land) if (const auto* move = std::get_if<MovePayload>(&command.payload); move && (move->append || move->through_hazards))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "land move does not support waypoints or hazard overrides"));
     if (impl_->object_turn_running) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "submit during an object-turn provider call"));
+    }
+    if (auto provenance = validate_command_provenance(command, initial_setup()); !provenance) return provenance;
+    if (impl_->setup.controllers && command.origin == CommandOrigin::seat) {
+        const auto& seats = impl_->setup.controllers->seats;
+        const auto seat = std::lower_bound(seats.begin(), seats.end(), command.issuing_seat,
+            [](const auto& row, const auto id) { return row.seat < id; });
+        // A campaign token is qualified by its owner/pool at the ordered call.
+        // Other embedded engine routes must not reach execution with a human seat.
+        if (seat != seats.end() && seat->kind == SeatKind::human
+            && !std::holds_alternative<ReinforcePayload>(command.payload) && !human_wire_payload(command.payload))
+            return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+                "human controller cannot issue an engine-only tactical route"));
     }
     const auto context = command_context(command.key);
     const auto shape = detail::validate_command_shape(command, impl_->setup.players, context, {});
@@ -341,11 +464,11 @@ std::shared_ptr<const TacticalSnapshot> TacticalSession::snapshot() const noexce
 }
 
 TacticalReplay TacticalSession::record() const {
-    return TacticalReplay{impl_->setup, impl_->completed_tick, impl_->executed, impl_->object_turns_executed};
+    return TacticalReplay{initial_setup(), impl_->completed_tick, impl_->executed, impl_->object_turns_executed};
 }
 
 TacticalReplay TacticalSession::record_through_next_tick() const {
-    TacticalReplay replay{impl_->setup, impl_->completed_tick + 1, impl_->executed, impl_->object_turns_executed};
+    TacticalReplay replay{initial_setup(), impl_->completed_tick + 1, impl_->executed, impl_->object_turns_executed};
     // The next step executes the commands keyed to the completed tick, in the queue's canonical order.
     for (const auto& [key, command] : impl_->pending) {
         if (key.tick > impl_->completed_tick) break;

@@ -453,6 +453,7 @@ struct AbilityState {
     std::optional<SelfDestructScript> self_destruct_script{};
     std::optional<ChargedBlastState> charged_blast{}; // optional canonical BLST block
     std::optional<Mc30Script> mc30_script{};
+    SeatId pending_buzz_controller{}; // ADR-020: initiating seat survives an admitted delayed request.
     friend bool operator==(const AbilityState&, const AbilityState&) = default;
 };
 

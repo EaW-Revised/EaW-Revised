@@ -67,10 +67,16 @@ std::string mods_key(std::string path) {
     while (path.size() > 1 && path.back() == '/') path.pop_back();
     return "mods:" + path;
 }
+const std::string* usable_name(const J& json) {
+    if (const auto* name = json.string_member("name"); name && !name->empty()) return name;
+    const auto* steamdata = json.member("steamdata");
+    const auto* title = steamdata && steamdata->kind == J::Kind::object ? steamdata->string_member("title") : nullptr;
+    return title && !title->empty() ? title : nullptr;
+}
 std::optional<ModInfo> info_from_value(const J& j) {
     if (j.kind != J::Kind::object) return std::nullopt;
-    const auto* name = j.string_member("name");
-    if (!name || name->empty()) return std::nullopt;
+    const auto* name = usable_name(j);
+    if (!name) return std::nullopt;
     ModInfo info; info.metadata = j; info.name = *name;
     if (const auto* version = j.member("version")) {
         if (version->kind != J::Kind::string) return std::nullopt;
@@ -246,7 +252,7 @@ void read_mod_metadata(Catalog& catalog) {
             }
             if (is_main) has_main = true;
             const auto json = text ? mod_json(*text) : std::nullopt;
-            if (!json || json->kind != J::Kind::object || !json->string_member("name") || json->string_member("name")->empty()) {
+            if (!json || json->kind != J::Kind::object || !usable_name(*json)) {
                 record.warnings.push_back({std::string(codes::malformed_modinfo), "a modinfo file could not be read"}); continue;
             }
             if (is_main) {
@@ -262,10 +268,12 @@ void read_mod_metadata(Catalog& catalog) {
         for (auto& [filename, json] : variants) {
             J merged = main ? main->metadata : J{};
             for (std::size_t i = 0; i < json.keys.size(); ++i) put(merged, json.keys[i], json.values[i]);
-            const auto info = info_from_value(merged);
+            auto info = info_from_value(merged);
             if (!info) {
                 record.warnings.push_back({std::string(codes::malformed_modinfo), "variant modinfo has malformed fields"}); continue;
             }
+            // A variant supplies its own identity/name while other fields inherit.
+            info->name = *usable_name(json);
             ModRecord entry = base;
             entry.key += "#variant:" + filename;
             put(entry.metadata, "variant_file", string_value(filename));
@@ -444,7 +452,7 @@ OrderCheck check_order(std::span<const std::string> layers, std::span<const ModR
         const auto* r = find_record(records, key);
         const auto canonical = r ? r->key : key;
         if (!positions.emplace(canonical, roots.size()).second) {
-            result.warnings.push_back({std::string(codes::chain_duplicate), canonical, "layer repeats in player order"});
+            result.warnings.push_back({std::string(codes::chain_duplicate), canonical, "layer repeats in player order", false, {}});
         } else roots.push_back(canonical);
     }
     std::vector<std::pair<std::string, std::string>> constraints;
@@ -457,20 +465,20 @@ OrderCheck check_order(std::span<const std::string> layers, std::span<const ModR
     for (const auto& key : chain.layers) {
         const auto* r = find_record(records, key);
         if (r && r->has_warning(codes::scan_incomplete)) {
-            result.diagnostics.push_back({std::string(codes::scan_incomplete), key, "top-level metadata scan is incomplete"});
+            result.diagnostics.push_back({std::string(codes::scan_incomplete), key, "top-level metadata scan is incomplete", false, {}});
             result.launchable = false;
         }
         const bool diagnosed = std::any_of(result.diagnostics.begin(), result.diagnostics.end(),
             [&](const auto& d) { return d.key == key; });
         if (!positions.contains(key) && !diagnosed) {
-            result.diagnostics.push_back({std::string(codes::parent_not_installed), key, "required layer is absent from player order"});
+            result.diagnostics.push_back({std::string(codes::parent_not_installed), key, "required layer is absent from player order", false, {}});
             result.launchable = false;
         }
     }
     for (const auto& [child, parent] : constraints) {
         const auto c = positions.find(child), p = positions.find(parent);
         if (c != positions.end() && p != positions.end() && p->second < c->second)
-            result.warnings.push_back({std::string(codes::chain_order), child, "declared order requires " + child + " above " + parent});
+            result.warnings.push_back({std::string(codes::chain_order), child, "declared order requires " + child + " above " + parent, false, {}});
     }
     for (const auto& w : result.warnings)
         if (std::find(accepted_warnings.begin(), accepted_warnings.end(), w.code) == accepted_warnings.end()) result.launchable = false;

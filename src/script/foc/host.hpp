@@ -95,6 +95,8 @@ struct ContrastEntry {
 
 struct Host {
     AiSetup setup;
+    // SOS-46: immutable after preparation; rejected roots never get attachment retries.
+    std::set<std::string> omitted_object_scripts;
     bool ai_suspended{}; // FD-72: ordered host gate, never written from a Lua worker.
     bool suspension_used{};
     bool in_object_turn{}; // bindings read staged rows; completed-world queries trip a diagnostic
@@ -142,6 +144,10 @@ struct Host {
     // outside the engine's player loop. The engine answers and counts reads of other players' deltas.
     [[nodiscard]] std::int64_t uncommitted_credits(tactical::PlayerId id) const noexcept;
 
+    [[nodiscard]] bool object_script_omitted(const AiType& value) const {
+        return !omitted_object_scripts.empty() && omitted_object_scripts.contains(
+            "Data/Scripts/GameObject/" + upper(value.lua_script) + ".lua");
+    }
     [[nodiscard]] const AiType* type(tactical::TypeId id) const {
         const auto found = types.find(id);
         return found == types.end() ? nullptr : found->second;
@@ -166,6 +172,10 @@ struct Host {
         return found != players.end() && found->second->neutral;
     }
     [[nodiscard]] bool ai_admitted(tactical::PlayerId id) const {
+        if (snapshot && snapshot->controller_policy()) {
+            for (const auto& row : snapshot->controller_policy()->factions)
+                if (row.player == id && row.mode != tactical::FactionController::ai) return false;
+        }
         const auto start = setup.player_ai_start_ticks.find(id);
         return start == setup.player_ai_start_ticks.end() || start->second == 0
             || (view != nullptr && start->second <= view->tick);

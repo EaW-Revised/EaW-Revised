@@ -96,6 +96,71 @@ void ggs_02_known_ground_counts_and_ggs_04_local_launches() {
     }
 }
 
+void empty_ground_slot_returns_only_while_ground_units_are_held() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-slot-return", traits, visibility, names);
+    auto count_only = setup;
+    for (auto& planet : count_only.control->planets) if (planet.planet == 101) planet.landed.clear();
+    for (auto& planet : count_only.observer->planets) if (planet.planet == 101) planet.landed_transports.clear();
+    for (auto& record : count_only.observer->records) if (record.player == 1 && record.planet == 101)
+        record.mask &= ~gc::bit(gc::Intelligence::ground_contents);
+    const gc::GalacticSnapshot empty_count(0, {}, count_only.players, count_only.planets, count_only.routes,
+        count_only.fleets, {}, {}, count_only.fleet_control, {}, {}, {}, {}, {}, count_only.control,
+        {}, {}, count_only.observer);
+    const auto anonymous_target = ground_stack(empty_count, 1, 101, 6, true);
+    assert(anonymous_target && !anonymous_target->contents_known && anonymous_target->contents.empty());
+    eawr::platform::LiveGameSession::Options options;
+    options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
+    auto started = eawr::platform::LiveGameSession::start(setup, options);
+    assert(started);
+    auto game = std::move(started).value();
+    const auto submit = [&](auto order, std::uint64_t tick) {
+        game->submit(eawr::platform::LiveGameOrder{gc::SeatId{1}, order, {}});
+        game->advance_to(tick);
+        assert(game->wait_for(tick, std::chrono::seconds(5)));
+        assert(game->rejected_orders().empty());
+    };
+    submit(gc::LaunchFromSurface{{8001, 8002}, 601, 0}, 1);
+    const auto orbit = game->frame(gc::SeatId{1}).latest;
+    assert(!ground_stack(*orbit, 1, 101, 6));
+    assert(!ground_drop_stack(*orbit, 1, 101, 6, 0));
+    assert(!ground_drop_stack(*orbit, 1, 101, 6, 602)); // Space-only fleet.
+    const auto roster = ground_roster(*orbit, 1, 101);
+    assert(roster.accessible);
+    assert(roster.allied);
+    assert(roster.contents_known || roster.count_known);
+    assert(fleet_can_land(*orbit, 1, 601));
+    const auto target = ground_drop_stack(*orbit, 1, 101, 6, 601);
+    assert(target);
+    assert(target->count == 0);
+    assert(target->texture == 0);
+    assert(target->contents.empty());
+    assert(ground_stack_units(*target).empty()); // Receiver never becomes a launch source.
+    const std::array<gc::FleetMemberRef, 1> space_member{{{601, 7003}}};
+    const std::array<gc::FleetMemberRef, 1> ground_member{{{601, 8001}}};
+    assert(!ground_drop_stack(*orbit, 1, 101, 6, 601, {}, false, space_member));
+    assert(ground_drop_stack(*orbit, 1, 101, 6, 601, {}, false, ground_member));
+    assert(!ground_drop_stack(*orbit, 1, 102, 6, 601)); // Same-planet landing only.
+    assert(ground_drop_stack(*orbit, 1, 106, 6, 0, {}, true)); // Surface transfer.
+    MapInput input;
+    const std::vector<InputPlanet> planets{{101, {}, 1, true}};
+    const DropIntent drop{DropKind::land, 601, 0, 101, {}, 0, {}, {}};
+    const auto order = input.command(drop, planets);
+    assert(order && fleet_stack_orders(*orbit, 1, drop, {}, *order, {}));
+    submit(std::get<gc::LandFleet>(*order), 2);
+    const auto returned = ground_stack(*game->frame(gc::SeatId{1}).latest, 1, 101, 6);
+    assert(returned && returned->count >= 2);
+    const auto units = ground_stack_units(*returned);
+    assert(std::find(units.begin(), units.end(), 8001) != units.end());
+    assert(std::find(units.begin(), units.end(), 8002) != units.end());
+    game->stop();
+}
+
 void ggs_09_native_fixture_qualifies_all_live_combat_queries() {
     namespace gc = eawr::sim::galactic;
     auto setup = synthetic_live_setup();
@@ -1174,6 +1239,7 @@ void pathfinder_slot_contracts() {
 
 int main() {
     ggs_02_known_ground_counts_and_ggs_04_local_launches();
+    empty_ground_slot_returns_only_while_ground_units_are_held();
     ggs_09_sanitized_ground_representatives();
     ggs_09_native_fixture_qualifies_all_live_combat_queries();
     pause_preview_matches_published_policy_and_holds();

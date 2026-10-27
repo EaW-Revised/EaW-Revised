@@ -152,7 +152,7 @@ room_aliases=1
 turn_provider=cloudflare
 ```
 
-Optional keys, shown with their defaults: `cloudflare_turn_calls_per_minute=30` (at most this many
+Optional keys, shown with their defaults: `cloudflare_turn_calls_per_minute=120` (at most this many
 outbound Cloudflare calls in any rolling minute, pairings and revokes together) and
 `cloudflare_turn_timeout_ms=4000` (how long one call may take; 500..30000).
 
@@ -177,7 +177,7 @@ docker run -d --name eawr-relay --restart unless-stopped \
   -p 27020:27020/tcp \
   --env-file /srv/eawr/config/turn.env \
   --mount type=bind,source=/srv/eawr/config,target=/config,readonly \
-  --memory 512m --cpus 1.5 \
+  --memory 1g --cpus 1.5 --ulimit nofile=4096:4096 \
   eawr-relay:server-source-2026-10-15.3
 docker ps                          # STATUS shows "healthy" after about 30 s
 docker logs --tail 50 eawr-relay   # sanitized; no secrets, codes or addresses

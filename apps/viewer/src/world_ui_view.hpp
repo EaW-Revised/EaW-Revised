@@ -11,6 +11,7 @@
 
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/font.hpp>
+#include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/text_line.hpp>
 #include <godot_cpp/classes/plane_mesh.hpp>
 #include <godot_cpp/classes/node3d.hpp>
@@ -110,6 +111,14 @@ public:
 private:
     void prepare_waypoints(const vfs::Vfs& filesystem, const std::shared_ptr<GodotShaderCache>& shaders);
     void draw_waypoints(const Frame& frame, godot::RID canvas_item);
+    void draw_owner_name(const Frame& frame);
+    godot::CanvasLayer* owner_layer_{};
+    godot::RID owner_canvas_;
+    std::vector<ui::ObserverOwner> owner_roster_;
+    std::vector<godot::Ref<godot::TextLine>> owner_lines_;
+    int owner_pixels_{};
+    const ui::ObserverOwner* owner_shown_{};
+    sim::EntityId owner_entity_{};
     std::unique_ptr<GodotRenderer> waypoint_renderer_;
     std::vector<sim::AssetId> waypoint_assets_;
     std::string waypoint_model_, waypoint_texture_;

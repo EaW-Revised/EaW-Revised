@@ -13,6 +13,7 @@
 #include "eawr/vfs/vfs.hpp"
 
 #include <cstddef>
+#include <array>
 #include <span>
 #include <string>
 #include <string_view>
@@ -63,5 +64,17 @@ struct HudMovie {
 // The file name of the movie's converted Theora entry in the player's movie
 // cache directory: `<cache_key>.ogv`.
 [[nodiscard]] std::string movie_cache_file(const HudMovie& movie);
+
+// SND-41/69: an authored association, never inferred from a sound event name.
+struct SpeechMovieRequest { std::string speech, movie; };
+struct SpeechMovie { std::string speech; HudMovie movie; };
+[[nodiscard]] core::Result<SpeechMovie> resolve_speech_movie(const vfs::Vfs& filesystem,
+    const SpeechMovieRequest& request);
+struct CommandBarMovieStyle {
+    float offset_x{}, offset_y{};
+    std::array<float, 4> colour{1, 1, 1, 1};
+};
+// G12: global command-bar offset/tint, in addition to each movie's offset.
+[[nodiscard]] CommandBarMovieStyle command_bar_movie_style(const vfs::Vfs& filesystem);
 
 } // namespace eawr::data::ui

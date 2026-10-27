@@ -36,7 +36,7 @@ inline void configure_synthetic_hud_production(sim::galactic::GalacticSetup& set
     setup.fleet_control.emplace(); setup.production.emplace(); setup.observer.emplace();
     setup.fleet_control->types = {{1, false, true, false}, {1000, false, true, false}};
     setup.production->maximum_human_queue = 5;
-    setup.observer->human_observers = {local}; setup.observer->solo_reference_human = local; setup.observer->reveal_delay_seconds = whole(1);
+    setup.observer->human_observers.push_back(local); setup.observer->solo_reference_human = local; setup.observer->reveal_delay_seconds = whole(1);
     setup.observer->types = {{1, false, false, false}};
     for (auto& seat : setup.seats) if (seat.player == local) {
         seat.kind = sim::SeatKind::human; seat.human_side_id = local == 3 ? 1 : local;
@@ -50,8 +50,10 @@ inline void configure_synthetic_hud_production(sim::galactic::GalacticSetup& set
         setup.observer->players.push_back({player, !human, false, 0, 1, {}});
     }
     setup.census.emplace();
-    setup.census->types = {{1, whole(1), 0}, {1000, whole(1), 0}, {1001, whole(0), 0},
-        {1002, whole(0), 0}, {1003, whole(1), 0}, {1004, whole(0), 0}};
+    setup.census->types = {{.type = 1, .population = whole(1), .history = {}},
+        {.type = 1000, .population = whole(1), .history = {}}, {.type = 1001, .population = whole(0), .history = {}},
+        {.type = 1002, .population = whole(0), .history = {}}, {.type = 1003, .population = whole(1), .history = {}},
+        {.type = 1004, .population = whole(0), .history = {}}};
     for (const auto& player : setup.players) setup.census->players.push_back({player.player_id, 100, false, {}});
     for (auto& player : setup.fiscal->players) player.earns_planet_income = true;
     for (auto& planet : setup.fiscal->planets) planet.credits = whole(135);

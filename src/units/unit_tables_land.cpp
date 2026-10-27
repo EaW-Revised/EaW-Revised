@@ -61,6 +61,7 @@ bool land_ground_object(Object& object) {
 }
 
 void Loader::load_land_body(Object& object, UnitType& unit) {
+    // Shared combat profile classification; the land session supplies its own locomotion.
     unit.kind = UnitKind::ship;
     // WSU-10/13/21: the land body also publishes the authored selection and pick flags.
     load_selection(object, unit);

@@ -78,7 +78,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
 | 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state | galaxy v35 |
-| 18 | land-state | terrain identity, occupancy, squad paths, movement and retained contacts | optional v4, absent for space |
+| 18 | land-state | terrain identity, occupancy, squad paths, movement and retained contacts | optional v6, absent for space |
 | 0x8000 | presentation-hints | camera and selection per seat; never hashed | player saves |
 | 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v3 |
 | 0x8002 | campaign-identity | authored campaign/set/difficulty, saving seat/faction and optional custom startup economy/hero values (WGP-190) | player saves of authored campaigns, v2 |
@@ -155,14 +155,20 @@ tick of the battle; `RestoreWork` counts the ticks re-simulated and the bytes re
 child-state section replaces this once a battle's full state can be restored; a reader then
 accepts both.
 
-### Land state (ID 18, version 5)
+### Land state (ID 18, version 6)
 
 Land tactical checkpoints add an optional `land-state` section; space checkpoints
 omit it entirely. A land reader requires it alongside child-state and never
 reconstructs a missing land section by replaying. The section begins with its
 u16 ID/version, the terrain identity and the content-supplied Clear bit, followed
 by occupancy sources/revision/changed cells, movement and retained contacts,
-the per-squad request ledger and in-flight search checkpoints. The explicit
+the per-squad request ledger, shared combat target/next-scan ledger and in-flight search checkpoints.
+Version 6 validates the surviving roster against the original bindings by identity, preserving member
+slots through deaths and compacted squad indices. Combat health, weapon pulses, live projectiles,
+next projectile identity and delayed blast delivery remain in the existing child-state fields;
+they are included in the existing partitioned canonical encoding. Terrain/water terminals publish
+one projectile-expired event with ground-contact reason 6 at the contact and use the shared blast path.
+Earlier land versions are refused; space state and checkpoint formats are unchanged. The explicit
 field lists in `src/sim/tactical/land_checkpoint_fields_internal.hpp` use the
 same archive primitives and bounds as child-state. Restore checks terrain,
 content bindings, object poses and canonical re-encoding before publication.
@@ -179,7 +185,7 @@ engine-fixed UnitCollisionClass enum) to each member's locomotion profile (WLPA-
 
 Version 5 adds each member's own terrain detour (WLPA-69): a short temporary path and its tracker,
 owned by the member's locomotor while a terrain contact is installed. The squad route is unchanged.
-Versions 1 to 4 are refused.
+Versions 1 to 5 are refused.
 
 ### Child state (ID 11, version 4)
 
@@ -649,3 +655,59 @@ contacts, the two preceding positions of a moving target (PHST), and each squadr
 attack path with its route, member trackers and refresh state (SQAP), and each player's
 collected tactical salvage tally. Transform caches
 remain derived. The shared Lua scheduler uses tactical save-v4; its galactic clock profile uses `eawr-script-galactic-save-v2`.
+
+### Optional tactical controller continuation
+
+A child whose sealed setup contains the ADR-020 cooperative controller policy appends
+one required `CTRL` continuation block to its existing child-state payload. It contains
+uint32 tag `0x4c525443`, uint32 version=4, checkpoint-encoded effective policy,
+uint64 live unit count, then ascending rows
+of uint64 entity, uint32 controller seat, uint32 control kind and uint32 pending
+Buzz request seat (zero without a request). Version 4 replaces version 3 and retains
+the effective roster through trusted departure boundaries. Current live
+controllers survive restore without an initial split or reclaim history. Pending gifts
+remain in the sealed command log, including the recipient and authenticated sender.
+The block then retains these pending-output records, in existing container order:
+
+- uint64 ledger count; each ledger has uint32 player, two queues (uint64 count,
+  then uint64 entry ID and uint32 initiating seat per entry), and a sparse pool
+  map (uint64 count, then ascending uint64 purchase token and uint32 seat).
+- uint64 respawn batch count; each batch has uint64 due frame, uint64 object
+  count, and uint32 last controller per object in the batch's existing order.
+- uint64 spawner count; each ascending row has uint64 entity and uint64 shared
+  output ordinal. Successful births advance the ordinal; failed placement does not.
+
+The sealed child log
+retains policy/roster and pending-command provenance through replay extension 18 and
+command tails. Restore validates identity/count, faction membership, active seats and
+root/member consistency before publication; it never re-splits units. Pending records
+must match their prefix identities and counts, pool tokens must exist, and retained
+seats must belong to the output owner. Retained inactive seats are resolved to an
+eligible controller when output appears. Missing, malformed
+or unsupported blocks fail. Without the setup policy this block must be absent, leaving
+the container, section versions and every ordinary continuation byte unchanged.
+
+Artificial barrage aim markers retain control kind `none` and seat zero. They
+identify an earlier source entity, carry no purchase identity or passengers, and
+cannot be squadron roots or members. When their source is live, its owner must
+be on a different team from the marker's declared owner. These markers never
+receive an enemy player's command seat during creation, conversion or restore.
+
+The optional tactical `CTRL` continuation requires version 4. Immediately after
+its tag/version, it stores the effective controller policy with the checkpoint
+archive codec, then the existing live-unit count and continuation records. Restore
+checks that policy against the executed departure prefix of the sealed child log,
+validates live root/member ownership and resumes without splitting again.
+
+An opt-in ChildOwner appends `CTRL`, uint32 version 4 and the ordered pending child
+input vector after its pause-ownership flag. Each entry contains its outer command
+key, checked command-body bytes and producer sequence. The ordinary child-host
+section also carries this optional tail, after its death-attribution rows, with a
+uint64 count and per entry tick:u64, seat:u32, sequence:u64, producer:u64 and a
+length-framed command body. Direct-owner version 5 and policy-disabled bytes stay
+unchanged. The queue, effective roster and sequence cursors are authoritative;
+normal battle return discards all temporary control state.
+
+An unsupported takeover records passive mode without stopping the match. Live roots
+and scheduled outputs may retain an inactive seat of their own faction in this
+mode; restore validates membership, and the inactive seat grants no authority.

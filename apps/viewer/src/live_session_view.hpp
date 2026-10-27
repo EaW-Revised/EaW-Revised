@@ -29,8 +29,10 @@
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/battle_results.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
+#include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/team_dock.hpp"
+#include "eawr/presentation/ui/world_ui.hpp"
 #include "eawr/presentation/ui/time_controls.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/sim/math/geometry.hpp"
@@ -124,6 +126,8 @@ public:
         std::uint64_t issued_{};
         std::uint64_t refused_{};
     };
+    [[nodiscard]] std::vector<ui::ObserverOwner> observer_owners() const;
+    [[nodiscard]] bool observer_multiplayer() const noexcept { return options_.observer_multiplayer || multiplayer(); }
     [[nodiscard]] bool multiplayer() const noexcept { return options_.lan != nullptr; }
     [[nodiscard]] LanView lan_view() const {
         auto view = options_.lan ? options_.lan->view() : LanView{};
@@ -209,15 +213,50 @@ public:
         return placed_ships_;
     }
     [[nodiscard]] const std::vector<std::uint32_t>& session_records() const noexcept { return session_records_; }
-    // Presentation preload seeds: the actual initial force and local reserve bar.
+    // Presentation preload seeds: initial/contained force, both reserve bars,
+    // and the authored purchase/upgrade closure of reachable producers.
     [[nodiscard]] std::set<sim::tactical::TypeId> audio_preload_types() const {
         std::set<sim::tactical::TypeId> types;
         if (!setup_) return types;
-        for (const auto& unit : setup_->units) types.insert(unit.type_id);
+        if (!options_.audio_preload) {
+            // Diagnostic control: retain the former initial/local-reserve seeds.
+            for (const auto& unit : setup_->units) types.insert(unit.type_id);
+            if (setup_->campaign) for (const auto& reserve : setup_->campaign->reserves) {
+                if (reserve.owner != player_ || reserve.restricted) continue;
+                types.insert(reserve.type);
+                if (reserve.purchase_type) types.insert(reserve.purchase_type);
+            }
+            return types;
+        }
+        const auto contained = [&types](auto&& self, const auto& objects) -> void {
+            for (const auto& object : objects) {
+                types.insert(object.type_id);
+                self(self, object.members);
+            }
+        };
+        for (const auto& unit : setup_->units) {
+            types.insert(unit.type_id);
+            if (unit.purchase_type) types.insert(unit.purchase_type);
+            contained(contained, unit.contained);
+        }
         if (setup_->campaign) for (const auto& reserve : setup_->campaign->reserves) {
-            if (reserve.owner != player_ || reserve.restricted) continue;
+            if (reserve.restricted) continue;
             types.insert(reserve.type);
             if (reserve.purchase_type) types.insert(reserve.purchase_type);
+            contained(contained, reserve.contained);
+        }
+        bool changed = true;
+        while (changed) {
+            const auto before = types.size();
+            for (const auto& menu : economy_.menus) if (types.contains(menu.station)) {
+                if (menu.next_level) types.insert(menu.next_level);
+                for (const auto& option : menu.options) types.insert(option.type);
+            }
+            for (const auto& hero : economy_.heroes) if (types.contains(hero.purchase)) {
+                types.insert(hero.deployed);
+                for (const auto& rider : hero.riders) types.insert(rider.type);
+            }
+            changed = before != types.size();
         }
         return types;
     }
@@ -246,6 +285,20 @@ public:
     // The local player's order input on the view's CommandScheduler (UI-07; selection and
     // clicks come with #82). Main thread only; null before start().
     [[nodiscard]] ui::CommandSink* command_sink() noexcept { return input_sink_ ? input_sink_.get() : scheduler_.get(); }
+    void discard_unit_orders(const sim::EntityId entity) {
+        if (scheduler_) scheduler_->discard_unit_orders(entity);
+    }
+    [[nodiscard]] sim::SeatId local_controller_seat() const noexcept { return options_.controller_seat; }
+    [[nodiscard]] bool controller_policy_enabled() const noexcept {
+        return battle_frame_.latest && battle_frame_.latest->controller_policy().has_value();
+    }
+    [[nodiscard]] bool can_control(const sim::tactical::TacticalInstance& instance) const noexcept;
+    [[nodiscard]] bool can_control(const sim::EntityId entity) const noexcept {
+        if (!controller_policy_enabled()) return true;
+        const auto* instance = snapshot_index_.instance(entity);
+        return instance && can_control(*instance);
+    }
+    [[nodiscard]] const std::vector<ui::ObserverOwner>& gift_recipients() const;
     [[nodiscard]] ui::OrderInput* order_input() noexcept { return order_input_.get(); }
     [[nodiscard]] const ui::OrderInput* order_input() const noexcept { return order_input_.get(); }
     [[nodiscard]] bool beacon_available() const noexcept {
@@ -362,6 +415,7 @@ public:
     // that tick it had not appeared yet or had faded out. `death` is empty for a clone whose clip
     // did not start (it keeps its pose).
     using CloneFrame = live_session::CloneFrame;
+    [[nodiscard]] std::optional<double> clone_birth_tick(std::size_t ship) const;
     [[nodiscard]] std::optional<CloneFrame> clone_frame(const BattleScene& population, std::size_t ship,
                                                         double tick) const;
     // #429: retires the ships of the clones frame() stopped drawing. The map mode calls it once
@@ -744,6 +798,8 @@ private:
     std::map<std::pair<sim::EntityId, sim::EntityId>, std::uint64_t> first_hits_;
     std::map<sim::tactical::PlayerId, sim::tactical::TeamId> team_of_player_;
     std::vector<VisibleUnit> visible_;
+    mutable std::optional<sim::tactical::BattleControllerPolicy> gift_policy_;
+    mutable std::vector<ui::ObserverOwner> gift_roster_;
     space::SnapshotIndex snapshot_index_;
     std::vector<live::LiveUnitPose> poses_;
     std::vector<BattleScene::LivePose> live_poses_;

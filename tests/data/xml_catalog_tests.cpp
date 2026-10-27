@@ -413,6 +413,35 @@ void run_contracts() {
                }),
            "numeric-leading compatibility never repairs a child element");
 
+    // #5197: a player's start skips the second parse of every XML outside the registries; the definitions, the registry
+    // records and the load health are those of the full load, and only the inventory records say they were not parsed.
+    {
+        auto lean_options = options;
+        lean_options.parse_unregistered_xml = false;
+        auto lean = eawr::data::load_catalog(mounted.value(), eawr::data::Profile::eaw, lean_options);
+        expect(static_cast<bool>(lean), "catalog loads without the unregistered-XML inventory parse");
+        if (lean) {
+            const auto& skipped = lean.value().catalog;
+            expect(skipped.definitions().size() == catalog.definitions().size() &&
+                       skipped.registry_files().size() == catalog.registry_files().size() &&
+                       skipped.physical_inventory().size() == catalog.physical_inventory().size(),
+                   "skipping the inventory parse changes no definition, registry file or inventory record");
+            expect(lean.value().health.clean() == loaded.value().health.clean() &&
+                       lean.value().health.registry_invalid == loaded.value().health.registry_invalid &&
+                       lean.value().health.include_failed == loaded.value().health.include_failed,
+                   "skipping the inventory parse keeps the load health");
+            const auto lean_parsed = std::count_if(skipped.physical_inventory().begin(), skipped.physical_inventory().end(),
+                                                   [](const auto& file) { return file.parsed; });
+            const auto full_parsed = std::count_if(catalog.physical_inventory().begin(), catalog.physical_inventory().end(),
+                                                   [](const auto& file) { return file.parsed; });
+            const auto lean_registry_parsed = std::count_if(skipped.physical_inventory().begin(), skipped.physical_inventory().end(),
+                                                            [](const auto& file) { return file.parsed && file.active_registry_file; });
+            expect(lean_parsed == lean_registry_parsed && lean_parsed <= full_parsed &&
+                       !has_code(lean.value().diagnostics, eawr::data::diagnostic_codes::forbidden_doctype),
+                   "only the active registry files are parsed, so the parse diagnostics of unregistered XML are not produced");
+        }
+    }
+
     inheritance_contracts(catalog, mounted, options);
     if (mounted) override_contracts(catalog, mounted.value());
     category_contracts(catalog);

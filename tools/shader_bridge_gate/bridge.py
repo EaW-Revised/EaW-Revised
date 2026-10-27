@@ -239,7 +239,12 @@ def bridge(vertex, pixel, vertex_reflection, pixel_reflection, policy):
                 if kind != "sampler2D" or not key:
                     raise Unsupported(f"unbound resource {stage}:{name}")
                 names[name] = key
-                source.append(f"uniform sampler2D {key} : filter_nearest, repeat_disable;")
+                sampler = policy[stage].get("sampler_states", {}).get(name, "nearest_clamp")
+                hints = {"nearest_clamp": "filter_nearest, repeat_disable",
+                         "linear_repeat": "filter_linear, repeat_enable"}.get(sampler)
+                if hints is None:
+                    raise Unsupported(f"unsupported experiment sampler state {sampler}")
+                source.append(f"uniform sampler2D {key} : {hints};")
             else:
                 if extra:
                     raise Unsupported("local arrays")

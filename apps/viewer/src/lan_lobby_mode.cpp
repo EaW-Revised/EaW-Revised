@@ -88,6 +88,7 @@ constexpr double default_wait_seconds = 60.0;
            << ", \"ready_seats\": " << shot.ready_seats
            << ", \"dialog_rows\": " << shot.dialog_rows << ", \"games\": " << strings_json(shot.games)
            << ", \"players\": " << strings_json(shot.players) << ", \"chat\": " << strings_json(shot.chat)
+           << ", \"chat_focused\": " << (shot.chat_focused ? "true" : "false")
            << ", \"chat_shown\": " << shot.chat_shown << ", \"chat_last_shown\": " << json(shot.chat_last_shown)
            << ", \"box_open\": " << (shot.box_open ? "true" : "false") << ", \"hidden\": " << strings_json(shot.hidden)
            << ", \"source\": " << json(shot.source) << ", \"room_page\": " << shot.room_page
@@ -384,6 +385,11 @@ bool LanLobbyMode::State::run_action(const std::string& action) {
         // cooldown:clear: the fixed service forgets the wrong-password count (a minute has passed).
         if (!fixed_online || argument != "clear") return false;
         fixed_online->clear_cooldown();
+        return true;
+    }
+    if (verb == "online_menu") {
+        if (!fixed_online || argument != "active") return false;
+        fixed_online->set_menu_state(net::OnlineMenuState::active);
         return true;
     }
     if (verb == "online_chat") {

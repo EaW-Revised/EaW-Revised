@@ -47,6 +47,9 @@ void synthetic() {
     test::ui::write_text(tree.root / "parent/art/movies/binked/two.bk2", "KB2j bytes");
     test::ui::write_text(tree.root / "parent/art/movies/binked/named.bik", "OggS bytes");
     test::ui::write_text(tree.root / "parent/art/movies/binked/junk.bik", "RIFF bytes");
+    test::ui::write_text(tree.root / "parent/xml/gameconstants.xml",
+        "<GameConstants><CB_Movie_Offset>7 -13</CB_Movie_Offset>"
+        "<CB_Movie_Color>128 64 32 220</CB_Movie_Color></GameConstants>");
     const std::array mounts{vfs::MountSpec{"leaf", tree.root / "leaf", "data", {}},
                             vfs::MountSpec{"parent", tree.root / "parent", "data", {}}};
     auto chain = vfs::Vfs::mount(mounts);
@@ -73,6 +76,18 @@ void synthetic() {
             "replaced movie bytes select another cache entry");
     }
     const auto plain = ui::resolve_hud_movie(chain.value(), "Plain");
+    const auto paired = ui::resolve_speech_movie(chain.value(), {"RENAMED_EVENT", "pOrTrAiT"});
+    expect(paired && paired.value().speech == "RENAMED_EVENT"
+        && paired.value().movie.source.layer_id == "leaf", "an arbitrary authored event/movie pair follows the mod chain");
+    const auto changed = ui::resolve_speech_movie(chain.value(), {"RENAMED_EVENT", "Plain"});
+    expect(changed && paired && changed.value().movie.cache_key != paired.value().movie.cache_key,
+        "the same event uses its supplied movie association, not an event-name portrait table");
+    const auto absent_pair = ui::resolve_speech_movie(chain.value(), {"RENAMED_EVENT", "Missing"});
+    expect(!absent_pair && absent_pair.error().code == ui::diagnostic_codes::movie_file,
+        "a missing paired movie is a recoverable diagnostic independent of speech admission");
+    const auto style = ui::command_bar_movie_style(chain.value());
+    expect(style.offset_x == 7 && style.offset_y == -13 && style.colour[3] == 220.0F / 255.0F,
+        "command-bar offset and tint are authored data");
     expect(plain && !plain.value().alpha && plain.value().cache_key.ends_with("-hud-v1-rgb"),
         "a movie without <Alpha> is converted without the alpha packing");
     const auto later = ui::resolve_hud_movie(chain.value(), "Later");

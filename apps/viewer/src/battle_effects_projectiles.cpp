@@ -251,12 +251,49 @@ float BattleEffects::projectile_model_opacity(const std::size_t ship) const {
     return state != projectile_visibility_.end() ? state->second.hide.opacity() : 0.0F;
 }
 
+std::optional<std::pair<double, std::uint64_t>> BattleEffects::projectile_model_birth(const std::size_t ship,
+    const tactical::TacticalSnapshot& latest, const SnapshotAt& snapshot_at) {
+    const auto slot = model_ship_slot_.find(ship);
+    if (slot == model_ship_slot_.end()) return std::nullopt;
+    const auto pool = model_pools_.find(slot->second.first);
+    if (pool == model_pools_.end()) return std::nullopt;
+    const auto id = pool->second.slots.bound(slot->second.second);
+    if (!id) return std::nullopt;
+    if (const auto cached = model_births_.find(*id); cached != model_births_.end())
+        return std::pair{cached->second, *id};
+    const auto visible_in = [id](const tactical::TacticalSnapshot& snapshot) {
+        const auto rows = snapshot.projectiles();
+        const auto found = std::lower_bound(rows.begin(), rows.end(), *id,
+            [](const auto& row, const auto wanted) { return row.id < wanted; });
+        return found != rows.end() && found->id == *id
+            && (found->muzzle_delay_until == 0 || snapshot.completed_tick() > found->muzzle_delay_until);
+    };
+    if (!visible_in(latest)) return std::nullopt;
+    auto first = latest.completed_tick();
+    while (first > 0 && snapshot_at) {
+        const auto earlier = snapshot_at(first - 1U);
+        if (!earlier || !visible_in(*earlier)) break;
+        --first;
+    }
+    const double birth = static_cast<double>(first > 0 ? first - 1U : 0U);
+    model_births_.emplace(*id, birth);
+    return std::pair{birth, *id};
+}
+
 void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& previous,
                                            const tactical::TacticalSnapshot& latest, const double alpha,
                                            const UnitLookup&, std::vector<SpacePopulation::LivePose>& live,
                                            BattleScene* population, GodotRenderer* renderer) {
     modelled_now_.clear();
     if (released_ || model_pools_.empty()) return;
+    // Birth metadata follows the projectile identity, not its reusable renderer slot.
+    // Retire it with the snapshot so the cache stays bounded by live demand.
+    const auto projectiles = latest.projectiles();
+    std::erase_if(model_births_, [&](const auto& entry) {
+        const auto found = std::lower_bound(projectiles.begin(), projectiles.end(), entry.first,
+            [](const auto& row, const auto wanted) { return row.id < wanted; });
+        return found == projectiles.end() || found->id != entry.first;
+    });
     note_types(previous, latest);
     // WPJ-38/39: per pool, projectile observer admission, ascending ID.
     std::map<std::string, std::vector<const tactical::Projectile*>> flying;

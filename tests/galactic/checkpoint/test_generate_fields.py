@@ -69,6 +69,18 @@ class FieldCompletenessTests(unittest.TestCase):
                 errors, _ = generate_fields.check({path: source})
                 self.assertTrue(any("missing=['future_cursor']" in error for error in errors), errors)
 
+    def test_plain_duplicate_fails_but_indexed_slots_do_not(self):
+        path = "src/sim/tactical/checkpoint_fields_internal.hpp"
+        wire = source_text(path)
+        self.assertIn("a(v.upgrade_bonuses[6]);", wire)
+        doubled = wire.replace("a(v.state, v.durability,", "a(v.state, v.state, v.durability,", 1)
+        self.assertNotEqual(doubled, wire)
+        errors, _ = generate_fields.check({path: doubled})
+        self.assertTrue(any("LiveUnit:" in error and "duplicate=True" in error for error in errors), errors)
+        repeated = wire.replace("a(v.upgrade_bonuses[6]);", "a(v.upgrade_bonuses[6]); a(v.upgrade_bonuses[6]);", 1)
+        errors, _ = generate_fields.check({path: repeated})
+        self.assertTrue(any("LiveUnit:" in error and "duplicate=True" in error for error in errors), errors)
+
     def test_omitted_cloak_deadline_fails(self):
         root = Path(__file__).resolve().parents[3]
         path = "src/sim/tactical/checkpoint_fields_internal.hpp"

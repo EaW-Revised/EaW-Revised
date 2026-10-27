@@ -46,6 +46,21 @@ void parsing() {
     REQUIRE(info->dependencies->parents == (std::vector<std::string>{"mods:Base", "workshop:100"}));
     REQUIRE(parse_modinfo("{/*comment*/\"name\":\"a//b\",\"dependencies\":[\"FullResolved\",],}//tail"));
     REQUIRE(parse_modinfo(R"({"name":"A","dependencies":[]})"));
+    const auto titled = parse_modinfo(R"({"steamdata":{"title":"Local Steam title"},"dependencies":[]})");
+    REQUIRE(titled && titled->name == "Local Steam title" && titled->dependencies);
+    REQUIRE(parse_modinfo(R"({"name":"Explicit","steamdata":{"title":"Lower priority"}})")->name == "Explicit");
+    REQUIRE(parse_modinfo(R"({"name":"","steamdata":{"title":"Fallback"}})")->name == "Fallback");
+    REQUIRE(!parse_modinfo(R"({"steamdata":{"title":42}})"));
+    REQUIRE(!parse_modinfo(R"({"steamdata":{"title":""}})"));
+    Catalog named;
+    auto title_record = record("workshop:10");
+    title_record.name = titled->name;
+    title_record.metadata = *steam::parse_json(R"({"modinfo":{"steamdata":{"title":"Local Steam title"}}})");
+    named.records.push_back(title_record);
+    KnownChains lower_names;
+    lower_names.chains.push_back({"10", "Known chain name", {}, ModRole::unknown});
+    apply_known_chains(named, lower_names);
+    REQUIRE(named.records.front().name == "Local Steam title");
     for (const auto* bad : {"{", "[]", "{}", "{\"name\":null}", "{\"name\":\"\"}",
                            R"({"name":"x","version":1})", R"({"name":"x","dependencies":null})",
                            R"({"name":"x","dependencies":["Unknown"]})", R"({"name":"x","dependencies":[{"modtype":1,"identifier":"abc"}]})",
@@ -209,6 +224,20 @@ void player_orders() {
 }
 void files() {
     Fixture f;
+    f.write("Titled/Data/XML/a.xml", "synthetic");
+    f.write("Titled/modinfo.json", R"({"steamdata":{"title":"Discovered title"}})");
+    DiscoveryInput title_input; title_input.manual_folders = {f.root / "Titled"};
+    const auto title_catalog = discover(title_input);
+    REQUIRE(title_catalog.records.size() == 1 && title_catalog.records.front().name == "Discovered title");
+    f.write("Named/Data/XML/a.xml", "synthetic");
+    f.write("Named/modinfo.json", R"({"name":"Explicit main","steamdata":{"title":"Lower main title"}})");
+    f.write("Named/variant-modinfo.json", R"({"steamdata":{"title":"Variant title"}})");
+    title_input.manual_folders = {f.root / "Named"};
+    const auto variant_catalog = discover(title_input);
+    REQUIRE(variant_catalog.records.size() == 2);
+    REQUIRE(variant_catalog.records[0].name == "Explicit main");
+    REQUIRE(variant_catalog.records[1].name == "Variant title");
+    REQUIRE(variant_catalog.records[1].metadata.member("variant_file"));
     f.write("Leaf/Data/XML/a.xml", "synthetic");
     f.write("Leaf/modinfo.json", R"({"name":"Main","version":"1.0.0","dependencies":[{"modtype":0,"identifier":"Base"}]})");
     f.write("Leaf/a-modinfo.json", R"({"name":"Variant A"})");

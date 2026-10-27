@@ -205,6 +205,14 @@ core::Result<void> validate_combat(const CombatTable& table) {
             for (const auto* candidate : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot, &weapon.charged_shot}) {
                 if (!*candidate) continue;
                 const auto& shot = **candidate;
+                const auto weapon_name = weapon.hardpoint == object_weapon ? std::string("object weapon")
+                    : "hardpoint " + std::to_string(weapon.hardpoint);
+                if (shot.flight) {
+                    if (const auto reason = flight_profile_error(*shot.flight); !reason.empty())
+                        return invalid(name + "projectile of " + weapon_name + ": " + std::string(reason));
+                    if (shot.homing && shot.flight->kind == FlightKind::rocket)
+                        return invalid(name + "projectile of " + weapon_name + ": ROCKET cannot use homing guidance");
+                }
                 const auto damage_ok = shot.damage.raw() >= 0 && shot.damage.raw() <= max_hit_damage * one_raw;
                 const auto& blast = shot.blast;
                 const auto blast_ok = blast.damage.raw() >= 0 && blast.damage.raw() <= max_hit_damage * one_raw
@@ -214,11 +222,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
                     [&](const InaccuracyRow& row) { return distance_ok(row.distance); });
                 if (shot.damage_delay.raw() > 3600 * one_raw || shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !range_ok(shot.max_travel)
                     || !cone_ok(shot.turn_rate)
-                    || !inaccuracy_ok || (shot.ion_stun && !valid_ion_stun(*shot.ion_stun))
-
-                    || (shot.flight && (!detail::valid_flight(*shot.flight)
-                        || (shot.homing && shot.flight->kind == FlightKind::rocket)))) {
-                    return invalid(name + "invalid projectile of weapon " + std::to_string(weapon.hardpoint));
+                    || !inaccuracy_ok || (shot.ion_stun && !valid_ion_stun(*shot.ion_stun))) {
+                    return invalid(name + "invalid projectile of " + weapon_name);
                 }
             }
         }

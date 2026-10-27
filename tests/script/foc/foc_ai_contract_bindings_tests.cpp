@@ -1141,6 +1141,50 @@ void mounted_ai_discovery() {
             && nested && nested.value() && std::get<Real>(nested.value()->data) == ai::real(19),
             "AI-16 / ML-34: isolated freestores use leaf, parent and space-directory modules");
     }
+    // SOS-46: optional object roots differ from the selected AI/library closure.
+    write("leaf", "scripts/library/PGStateMachine.lua", "");
+    write("leaf", "scripts/gameobject/AliveControl.lua", "function Base_Definitions() end function main() end");
+    auto object_files = eawr::vfs::Vfs::mount(mounts);
+    expect(object_files.has_value(), "SOS-46: object-root fixture mounts");
+    if (!object_files) return;
+    auto object_setup = setup;
+    foc::AiType missing; missing.type_id = 700; missing.name = "ZED"; missing.lua_script = "AbsentRoot";
+    foc::AiType inherited = missing; inherited.type_id = 701; inherited.name = "ALPHA"; inherited.lua_script = "absentroot";
+    foc::AiType control; control.type_id = 702; control.name = "CONTROL"; control.lua_script = "AliveControl";
+    object_setup.content.types = {missing, inherited, control};
+    std::vector<eawr::core::Diagnostic> load_notes;
+    auto object_modules = eawr::skirmish::ai_modules(object_files.value(), object_setup, true, &load_notes);
+    expect(object_modules && load_notes.size() == 1 && load_notes.front().severity == eawr::core::Severity::warning
+        && load_notes.front().code == auth::codes::script_warning && load_notes.front().logical_path
+        && load_notes.front().logical_path->find("ABSENTROOT") != std::string::npos
+        && load_notes.front().message.find("ALPHA, ZED") != std::string::npos,
+        "SOS-46: fresh admission groups referencing types in one warning without inventing a root");
+    if (!object_modules) return;
+    expect(std::none_of(object_modules.value().begin(), object_modules.value().end(), [](const auto& row) {
+        return row.first.find("ABSENTROOT") != std::string::npos;
+    }), "SOS-46: an omitted root has no replacement bytes");
+    std::vector<eawr::core::Diagnostic> cached_notes;
+    const auto cached_objects = eawr::skirmish::select_ai_modules(object_modules.value(), object_setup, true, &cached_notes);
+    expect(cached_objects && cached_objects.value() == object_modules.value() && cached_notes.size() == 1
+        && cached_notes.front().severity == eawr::core::Severity::warning
+        && cached_notes.front().message == load_notes.front().message,
+        "SOS-46: cached admission keeps the same omission and warning");
+    auto required_missing = object_modules.value();
+    std::erase_if(required_missing, [](const auto& row) {
+        return auth::ModuleManifest::normalise(row.first) == "DATA/SCRIPTS/LIBRARY/PGCOMMANDS.LUA";
+    });
+    expect(!eawr::skirmish::select_ai_modules(required_missing, object_setup, true),
+        "SOS-46: a missing required library still refuses cached admission");
+    auto invalid_path_setup = object_setup;
+    invalid_path_setup.content.types.front().lua_script = "../escape";
+    expect(!eawr::skirmish::ai_modules(object_files.value(), invalid_path_setup, true),
+        "SOS-46: invalid authored paths are not treated as optional missing files");
+    write("leaf", "scripts/gameobject/AbsentRoot.lua", "this is invalid lua !");
+    auto broken_root_files = eawr::vfs::Vfs::mount(mounts);
+    load_notes.clear();
+    auto broken_root = eawr::skirmish::ai_modules(broken_root_files.value(), object_setup, true, &load_notes);
+    expect(broken_root && load_notes.empty(), "SOS-46: a present invalid script is retained for its existing compile-error path");
+
     write("leaf", "scripts/library/ParentHelper.lua", "this is invalid lua !");
     auto invalid = eawr::vfs::Vfs::mount(mounts);
     auto invalid_modules = invalid ? eawr::skirmish::ai_modules(invalid.value(), setup) : decltype(modules)::failure(invalid.error());

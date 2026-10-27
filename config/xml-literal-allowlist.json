@@ -1,6 +1,6 @@
 {
  "comment": "Existing findings of tools/inventory/xml_literal_check.py, each with its ticket. May only shrink: fix the site (read the XML, or mark `// xml-fallback: <Tag>`) and delete the entry. ticket \"false-positive\" needs a reason.",
- "max_entries": 28,
+ "max_entries": 37,
  "entries": [
   {
    "file": "src/presentation/godot/ui/minimap_view.cpp",
@@ -165,10 +165,64 @@
    "text": "lightning.start = colour(\"Color_Start\", {100.0F / 255.0F, 100.0F / 255.0F, 1.0F, 1.0F});",
    "ticket": 3305,
    "reason": "unsourced fallback; FoC data carries the tag; reached only when a mod removes the tag, and the load reports nothing yet (follow-up in the ticket: debug-build citation or loader diagnostic)"
+  },
+  {
+   "file": "src/campaign/planet_economy.cpp",
+   "text": "auto factors = numbers(child(constants.root, \"Corruption_Choice_Income_Percentage\"), 8, notes, \"GameConstants\");",
+   "ticket": 5331,
+   "reason": "GC G3 corruption default; the site owner (GC) decides marker or XML read"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto constraint = fallback(\"Hull_Vs_Hard_Points_Health_Constraint\", raw(1,5), durability_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto engines = fallback(\"Engines_Disabled_Speed_Modifier\", raw(2,5), durability_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto damaged = fallback(\"Health_Low_Percent_Threshold\", raw(33,100), durability_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto recharge = fallback(\"ShieldRechargeIntervalInSecs\", raw(3), damage_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto disable = fallback(\"Depleted_Shield_Disable_Time\", raw(5), damage_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto cap = fallback(\"Depleted_Shield_Regen_Cap\", raw(1,4), damage_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto energy_interval = fallback(\"EnergyRechargeIntervalInSecs\", raw(5), damage_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
+  },
+  {
+   "file": "src/units/unit_durability.cpp",
+   "text": "const auto exchange = fallback(\"EnergyToShieldExchangeRate\", raw(5), damage_message);",
+   "ticket": 5331,
+   "reason": "GameConstants fallback (LSA-P5 stock value) reported via EAWR-LOAD-0120 in durability_table; the gate does not recognise the local fallback helper"
   }
  ],
  "growth_override": {
-  "ticket": 3305,
-  "reason": "release v0.2.5 gate: seven engine defaults added by recent presentation work (retreat countdown colour, lightning beam defaults) are listed until their loads report a miss; tracked in the ticket"
+  "ticket": 5331,
+  "reason": "0.3.1 cut: main red after #5273 (durability LSA-P5 fallbacks via a local helper the gate does not recognise) and #5286 (planet_economy corruption default); entries are removed when #5331 restructures the helper and GC marks its site"
  }
 }

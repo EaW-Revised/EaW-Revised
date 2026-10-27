@@ -14,6 +14,115 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticGroundStackRuntime(unittest.TestCase):
+    def test_empty_ground_slot_returns_for_ground_drag_and_accepts_landing(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-ground-slot-return-"))
+        report, probe, driver = [directory / name for name in ["report.json", "probe.json", "driver.gd"]]
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+var viewport
+var ground_point = Vector2.ZERO
+var orbit_point = Vector2.ZERO
+var space_point = Vector2.ZERO
+var samples = {}
+var directory = %s
+func _initialize():
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280, 720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(load("res://main.tscn").instantiate())
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+func key(code):
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = down
+        viewport.push_input(event, true)
+func pointer(point, down, motion):
+    var event
+    if motion:
+        event = InputEventMouseMotion.new()
+        event.relative = Vector2(24, 0)
+        event.button_mask = MOUSE_BUTTON_MASK_LEFT if down else 0
+    else:
+        event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event, true)
+func sample(phase):
+    var ground = current_scene.find_child("ground_presence_101", true, false)
+    samples[phase] = {"visible": ground != null and ground.is_visible_in_tree(),
+        "dragging": viewport.gui_is_dragging()}
+    viewport.get_texture().get_image().save_png(directory + "/" + phase + ".png")
+func _process(delta):
+    elapsed += delta
+    if elapsed < 1.5: return false
+    frame += 1
+    if frame == 10: key(KEY_PAGEUP)
+    if frame == 12: key(KEY_PAGEDOWN)
+    if frame == 68:
+        var ground = current_scene.find_child("ground_presence_101", true, false)
+        var orbit = current_scene.find_child("fleet_presence_101_0", true, false)
+        var space = current_scene.find_child("fleet_presence_101_1", true, false)
+        assert(ground and orbit and space)
+        ground_point = ground.get_global_rect().get_center()
+        orbit_point = orbit.get_global_rect().get_center()
+        space_point = space.get_global_rect().get_center()
+        sample("before")
+    if frame == 90: pointer(ground_point, true, false)
+    if frame == 94: pointer(ground_point + Vector2(24, 0), true, true)
+    if frame == 98: pointer(orbit_point, true, true)
+    if frame == 100: pointer(orbit_point, false, false)
+    if frame == 150: sample("empty")
+    if frame == 160: pointer(space_point, true, false)
+    if frame == 164: pointer(space_point + Vector2(24, 0), true, true)
+    if frame == 168: pointer(ground_point, true, true)
+    if frame == 180: sample("space-held")
+    if frame == 184: pointer(Vector2(1260, 20), false, false)
+    if frame == 210: pointer(orbit_point, true, false)
+    if frame == 214: pointer(orbit_point + Vector2(24, 0), true, true)
+    if frame == 218: pointer(ground_point, true, true)
+    if frame == 230: sample("ground-held")
+    if frame == 235: pointer(ground_point, false, false)
+    if frame == 290:
+        sample("returned")
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(samples))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(directory.as_posix()), json.dumps(probe.as_posix())), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "ground-slot-return",
+            "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on",
+            "--eawr-report", str(report)], cwd=support.ROOT, capture_output=True, text=True,
+            timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        samples = json.loads(probe.read_text(encoding="utf-8"))
+        self.assertTrue(samples["before"]["visible"], samples)
+        self.assertFalse(samples["empty"]["visible"], samples)
+        self.assertTrue(samples["space-held"]["dragging"], samples)
+        self.assertFalse(samples["space-held"]["visible"], samples)
+        self.assertTrue(samples["ground-held"]["dragging"] and samples["ground-held"]["visible"], samples)
+        self.assertTrue(samples["returned"]["visible"], samples)
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["ground_hud"]["launch_orders"], 1)
+        self.assertEqual(data["ground_hud"]["launch"]["units"], [8001, 8002])
+        drag = data["fleet_hud"]["drag"]
+        self.assertEqual((drag["orders"], drag["last_kind"]), (1, 2))
+        ground = next(row for row in data["fleet_hud"]["presence"] if row["ground"] and row["planet"] == 101)
+        self.assertTrue(ground["visible"])
+        self.assertGreaterEqual(sum(row["count"] for row in ground["contents"]), 2)
+
     def test_count_only_payload_representative_keeps_tooltip_anonymous(self):
         directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-ground-representative-"))
         report, capture, driver = [directory / name for name in ["report.json", "capture.png", "driver.gd"]]

@@ -120,7 +120,7 @@ Build the container from the repository root:
 
 ```sh
 docker build -f apps/relay_server/Dockerfile -t eawr-relay .
-docker run --rm --name eawr-relay -p 27020:27020/tcp --mount type=bind,source="$(pwd)/out/relay",target=/config,readonly eawr-relay --config /config/relay.local.conf --listen-address 0.0.0.0
+docker run --rm --name eawr-relay -p 27020:27020/tcp --ulimit nofile=4096:4096 --mount type=bind,source="$(pwd)/out/relay",target=/config,readonly eawr-relay --config /config/relay.local.conf --listen-address 0.0.0.0
 ```
 
 Probe the container with `docker exec eawr-relay eawr_relay_server --health --config /config/relay.local.conf`;
@@ -294,13 +294,13 @@ secrets as CLI arguments; keep them in the protected config or environment.
 | `turn_uri`, `turn_secret` | Empty together disables TURN credentials; otherwise `turn:` URI and 32..256-byte shared secret (coturn provider only) |
 | `turn_provider` | `coturn` (default) or `cloudflare`; mismatched combinations fail startup with `EAWR-NET-1555` |
 | `cloudflare_turn_key_id`, `cloudflare_turn_api_token` | Secrets of the Cloudflare provider; use `EAWR_RELAY_CLOUDFLARE_TURN_KEY_ID` / `EAWR_RELAY_CLOUDFLARE_TURN_API_TOKEN` or a protected config file |
-| `cloudflare_turn_calls_per_minute`, `cloudflare_turn_timeout_ms` | 30 outbound calls per rolling minute (1..600), 4000 ms request timeout (500..30000) |
-| `max_connections`, `max_sessions` | 128, 64 (caps 4096 / 2048) |
+| `cloudflare_turn_calls_per_minute`, `cloudflare_turn_timeout_ms` | 120 outbound calls per rolling minute (1..600), 4000 ms request timeout (500..30000) |
+| `max_connections`, `max_sessions` | 1,024, 512 (caps 4096 / 2048); see Capacity |
 | `connections_per_ip`, `accepts_per_minute`, `unpaired_sessions_per_ip` | 18 live connections (twice `max_match_seats`: nine room members behind one NAT, each with a directory and a room connection), 30 accepts/minute, 2 unpaired sessions per IPv4 address or IPv6 /64; mapped IPv4 shares the IPv4 key. Outstanding room seat reservations count as unpaired sessions |
 | `room_operations_per_member_per_minute`, `room_bytes_per_member_per_minute` | 480 operations / 2,097,152 bytes per room member per minute (the room gets seat-count times that, a prefix `connections_per_ip` times); separate from the legacy session and per-prefix budgets. Provisional: raise them if the cross-network test shows signal bursts |
 | `room_reservation_timeout_ms`, `room_hold_timeout_ms` | 30,000 for an admitted guest to attach (1 s..10 min); 300,000 a started match holds a lost seat for repair (1 s..24 h) |
 | `directory_operations_per_minute`, `directory_bytes_per_minute` | 2,048 operations / 8,388,608 bytes per prefix for directory traffic; independent of legacy session budgets |
-| `menu_operations_per_minute`, `menu_bytes_per_minute`, `menu_max_members` | 1,024 operations / 4,194,304 bytes per prefix and 256 members (clamped to 1,024, the largest roster a client decodes) for the browser's room-less presence and chat channel (legacy EAWR-3758); needs a relay redeploy to appear. **Connection budget:** a browsing player now holds two connections (directory + menu), so the per-prefix and global connection budgets roughly halve per browser (about 9 browsers per NAT and 64 in total at the 18 / 128 defaults); raise `connections_per_ip` and `max_connections` before the redeploy if that is too tight |
+| `menu_operations_per_minute`, `menu_bytes_per_minute`, `menu_max_members` | 1,024 operations / 4,194,304 bytes per prefix and 512 members (clamped to 1,024, the largest roster a client decodes) for the browser's room-less presence and chat channel (legacy EAWR-3758); needs a relay redeploy to appear. **Connection budget:** a browsing player now holds two connections (directory + menu), so the per-prefix and global connection budgets roughly halve per browser (about 9 browsers per NAT and about 512 in total at the 18 / 1,024 defaults); raise `connections_per_ip` and `max_connections` before the redeploy if that is too tight |
 | `operations_per_minute`, `bytes_per_minute` | 120 operations / 1,048,576 bytes per IP and per session; IP bytes include incoming TLS records, session bytes count protocol bodies |
 | `queue_bytes`, `queue_frames` | 262,144 / 64 outgoing bytes/frames per connection |
 | `admission_timeout_ms`, `max_join_lifetime_ms` | 10,000 before publish/join, 900,000 maximum accepted join lifetime; longer requests are capped |
@@ -340,6 +340,48 @@ logs itself. No scheduled task, DNS record, purchase or firewall change is part
 of startup.
 
 
+## Capacity
+
+A browsing player holds two connections to the relay: the room directory and the menu channel. A room member also
+holds two (directory and room). `max_connections` therefore counts connections, not players, and the defaults
+(1,024 connections, 512 sessions, 512 menu members, 120 TURN calls per minute) carry about 512 concurrent players.
+Per-address limits (`connections_per_ip`, `accepts_per_minute`) do not scale with the totals and stay as they are.
+
+| Limit | Default | Hard cap | Notes |
+| --- | --- | --- | --- |
+| `max_connections` | 1,024 | 4,096 | about 2,048 players at two connections each |
+| `max_sessions` | 512 | 2,048 | rooms and signalling sessions |
+| `menu_max_members` | 512 | 1,024 (accepted up to 4,096, then clamped to the roster size a client decodes) | menu list is full beyond it |
+| `cloudflare_turn_calls_per_minute` | 120 | 600 | one full room costs about 20 provider calls |
+
+* **Open files.** Each connection is one file descriptor, plus a few for the listener and logs. The container's
+  open-files limit must be at least 4,096 (`--ulimit nofile=4096:4096` on `docker run`, or `ulimits: nofile:
+  {soft: 4096, hard: 4096}` in a compose file); a runtime default of 1,024 equals the connection default and
+  refuses connections below it. Keep the open-files limit above `max_connections` with headroom (at least
+  `max_connections` + 64); raise both together.
+* **Memory.** Output queues are bounded by `max_connections` times `queue_bytes` (1,024 x 256 KiB = 256 MiB at the
+  defaults) in the worst case where every client stalls; plain browsing is far below that (the load smoke measured about 58 MiB resident with 1,024
+  idle directory and menu connections open on Linux). Leave the container a memory limit of at least 1 GiB at the defaults.
+* **CPU.** The deployment default is `--cpus 1.5`. CPU use under load has not been measured yet; watch `docker stats`
+  during a busy hour and raise the cap if the relay stays near it.
+* **Replacing the container.** The limits live on the `docker run` line (or the compose file), not in the image: a
+  new or swapped container must keep `--ulimit nofile=4096:4096` and `--memory 1g` (and `--cpus`), or it falls back to
+  the runtime defaults and refuses connections early.
+* **What to raise first.** Watch the refusals in the logs. When connections run out, raise `max_connections` (and
+  the open-files limit and memory with it, up to 4,096). Raise `max_sessions` with it to keep the 2:1 ratio. Raise
+  `cloudflare_turn_calls_per_minute` when pairings are delayed in busy hours. Leave the per-address limits alone
+  unless a legitimate network (a school, a LAN party) is refused.
+* **Restarts.** Restarting the relay drops every pending invitation, room and lobby state; clients reconnect and
+  recreate their rooms. Apply configuration changes at a quiet moment.
+* **Load smoke.** `python tools/net/relay_load_smoke.py <path to eawr_relay_server>` starts a local relay with its
+  defaults and opens directory plus menu connections for 64, 128, 256 and 512 simulated players (each from its own
+  loopback address), then a couple of players past the cap. It prints accepted and refused connections, the relay's memory
+  and the first failure per step. It never contacts a deployed relay. The CTest `net_relay_load_smoke` runs a small
+  version of it.
+* **Beyond one process.** One relay process is the unit of scaling. Running several instances (for example one per
+  supported version behind a front router) is tracked as a separate scaling plan; sharing one directory between
+  processes would be a larger change.
+
 ## Directory and chat limits
 
 The same optional TLS service hosts the always-on room directory. No accounts
@@ -369,8 +411,8 @@ invoke `RelayServer::remove_chat_member` on the poll owner thread. Both deny
 chat reads/writes while leaving the seat reserved until leave/disconnect.
 Directory operation/byte budgets default to 2,048 requests and 8 MiB/minute per
 prefix, independent of legacy signalling's 120 requests and 1 MiB/minute. At
-default capacity a distributed fill needs at least 32 prefixes for all 64 rooms,
-and 128 at sustained creation rates (64 in a boundary burst) for 512 principal
+default capacity a distributed fill needs at least 256 prefixes for all 512 rooms,
+and 1,024 at sustained creation rates (512 in a boundary burst) for 4,096 principal
 history slots; a prefix is not a verified account. Use directory budgets to control egress,
 and coturn limits separately for game traffic. Do not add passwords, principal
 or ownership capabilities, peer addresses, or rejoin secrets to logs/metrics.
@@ -386,7 +428,7 @@ Operator-visible limits:
   directory still lists rooms up to 64 seats; only 2..9 can open a signalling scope.
 * Each member holds two connections (directory and room), so a prefix needs
   `connections_per_ip` of at least 18 for nine members behind one NAT (the default).
-  Raise `max_connections` (default 128, cap 4,096) to host more than seven full rooms
+  Raise `max_connections` (default 1,024, cap 4,096) to host more than 56 full rooms
   at two connections per member.
 * Per-member room budgets (`room_operations_per_member_per_minute`,
   `room_bytes_per_member_per_minute`) replace the legacy 120-operation budget for
@@ -395,8 +437,8 @@ Operator-visible limits:
 * TURN credentials are issued per member. With the Cloudflare provider a full room
   costs about 20 provider calls over its life (nine generates, nine revokes, one
   pair per kick, refused newcomer or reattach); at the default
-  `cloudflare_turn_calls_per_minute` of 30 that serves roughly one to one and a
-  half full rooms filling per minute. Raise it on busy servers.
+  `cloudflare_turn_calls_per_minute` of 120 that serves roughly six full rooms
+  filling per minute. Raise it on busy servers.
 * **coturn credentials cannot be revoked.** A kicked or refused member keeps the
   right to allocate until its credential expires (`max_session_lifetime_ms` plus the
   60-second margin, clamped to 48 hours).

@@ -7,6 +7,7 @@
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/campaign/setup.hpp"
+#include "eawr/campaign/load_setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/victory.hpp"
@@ -219,7 +220,30 @@ void content_and_placement() {
             "numeric technology offer survives canonical checkpoint round trip");
     }
     source.build_advances_tech_level = -1;
-    expect(!campaign::prepare_production_offer(source, prototype, factors), "negative technology offer target refuses");
+    {
+        eawr::core::LoadNoteBuffer notes; eawr::core::LoadNoteCollector collector;
+        source.name = "OddLevels"; source.file = "data/xml/modded.xml";
+        source.tech_level = -2; source.required_ground_base_level = -1;
+        source.required_star_base_level = 99; source.base_level = 99;
+        const auto offer = take(campaign::prepare_production_offer(source, prototype, factors, &notes));
+        expect(offer.target_tech == 4294967295LL && offer.tech == -2 && offer.required_ground_level == -1
+            && offer.required_space_level == 99 && offer.base_level == 99, "LSA-08/09 authored parser values reach the consumer");
+        auto config = setup(); config.production->planets.front().offers.front() = offer;
+        config.production->technology_types = {{1000, -2, false, false, {1}}};
+        auto game = take(campaign::GameSession::create(config));
+        eawr::sim::InlineExecutor executor; static_cast<void>(take(game.step(executor)));
+        const auto& producer = config.production->planets.front();
+        const auto admission = galactic::production_admission({*config.production, producer,
+            config.production->players.front(), config.player_economy->players.front(), config.fleets,
+            config.planets.front().owner, nullptr, 10000, 1}, &offer, offer.domain);
+        expect(admission != galactic::ProductionAdmission::allowed, "unusual requirements load and availability declines the purchase");
+        collector.merge(notes); const auto snapshot = collector.snapshot();
+        expect(snapshot.size() == 5 && std::all_of(snapshot.begin(), snapshot.end(), [](const auto& note) {
+            return note.classification == eawr::core::LoadCategory::retail_accepts
+                && note.action == eawr::core::LoadAction::accepted && note.file == "data/xml/modded.xml";
+        }), "each unusual numeric authoring emits a sourced B note");
+        source.tech_level = 2; source.required_ground_base_level.reset(); source.required_star_base_level.reset(); source.base_level.reset();
+    }
     source.build_advances_tech_level.reset();
     {
         // GHUD-S57 with a mod's uncorrupted price factor 1.2 (stock FoC authors 1.0 for non-benefiting factions): the
@@ -1088,7 +1112,11 @@ void company_original_binding() {
     const auto prepared = take(campaign::prepare_census_type(type, 1002, bindings));
     expect(prepared.company && prepared.transport == 1000, "company binding is sourced from original behaviour and authored transport link");
     type.company_transport.clear();
-    expect(!campaign::prepare_census_type(type, 1002, bindings), "missing authored company transport cannot become a guessed binding");
+    eawr::core::LoadNoteBuffer notes; eawr::core::LoadNoteCollector collector;
+    const auto absent = take(campaign::prepare_census_type(type, 1002, bindings, &notes));
+    collector.merge(notes);
+    expect(!absent.company && !absent.transport && !collector.snapshot().empty(),
+        "missing company transport is noted and cannot become a guessed binding");
 }
 
 void census_container_and_capacity() {
@@ -1192,7 +1220,10 @@ void census_rounding_and_data() {
         expect(bool(galactic::validate_setup(signed_setup)), "RGC-140 census admits signed 32-bit capacity");
     }
     type.additional_population_capacity = std::int64_t{1} << 31;
-    expect(!campaign::prepare_census_type(type, 10), "capacity outside signed source integer range is refused");
+    eawr::core::LoadNoteBuffer notes; eawr::core::LoadNoteCollector collector;
+    expect(take(campaign::prepare_census_type(type, 10, {}, &notes)).additional_capacity == std::numeric_limits<std::int32_t>::max(),
+        "capacity beyond the supported source width saturates");
+    collector.merge(notes); expect(!collector.snapshot().empty(), "capacity saturation emits a C load note");
     type.additional_population_capacity = 7;
     type.population_value = take(Fixed::from_decimal("3.9"));
     expect(take(campaign::prepare_census_type(type, 10)).population == f(3), "authored population uses the source integer overlay");
@@ -1209,6 +1240,32 @@ void census_rounding_and_data() {
         && campaign::prepare_census_player(faction, 1, {}).ai_uses_cap, "explicit faction policy wins");
     config.census->objects[0].container = 999999;
     expect(!galactic::validate_setup(config), "missing immediate container is rejected");
+    {
+        auto owned = census_setup();
+        owned.census->types[0].members = {1001}; owned.census->types[1].members = {1000};
+        galactic::CensusType extra{2000, Fixed::from_raw(std::numeric_limits<std::int64_t>::max()), std::int64_t{1} << 40};
+        extra.members = {999999}; owned.census->types.push_back(extra);
+        owned.census->players.front().base_capacity = std::int64_t{1} << 40;
+        eawr::core::LoadNoteBuffer repairs; eawr::core::LoadNoteCollector repaired;
+        expect(!galactic::validate_setup(owned), "unbound/cyclic census and unsupported magnitudes initially fail");
+        const auto omitted = campaign::normalize_campaign_census(*owned.census, repairs, "GraphFixture");
+        campaign::normalize_campaign_offers(*owned.production, repairs, "GraphFixture", 3);
+        expect(omitted.contains(1000) && omitted.contains(1001) && omitted.contains(2000),
+            "invalid composite templates are identified without discarding unrelated types");
+        expect(owned.production->planets[0].offers.size() == 2 && owned.production->planets[1].offers.size() == 1
+            && owned.production->planets.back().offers.empty(), "offer cap retains its ordered prefix across planets");
+        expect(bool(galactic::validate_setup(owned)), "owned census repairs reach strict validation");
+        const auto effective = owned;
+        (void)campaign::normalize_campaign_census(*owned.census, repairs, "GraphFixture");
+        campaign::normalize_campaign_offers(*owned.production, repairs, "GraphFixture", 3);
+        expect(owned == effective, "census and offer normalizers are idempotent");
+        auto live = take(galactic::GalacticSession::create(owned));
+        static_cast<void>(take(live.step(serial)));
+        repaired.merge(repairs); const auto load_notes = repaired.snapshot();
+        expect(std::any_of(load_notes.begin(), load_notes.end(), [](const auto& note) { return note.code == "EAWR-LOAD-1030"; })
+            && std::any_of(load_notes.begin(), load_notes.end(), [](const auto& note) { return note.code == "EAWR-LOAD-1031"; }),
+            "offer and census graph repairs emit C notes and continue stepping");
+    }
 }
 
 void census_stock_composite_boundary() {

@@ -150,6 +150,7 @@ void GalacticMode::State::update_hud() {
     }
     service_production_tooltip();
     service_reference_pages(*this);
+    service_story_summary(*this);
     { const auto measured = measure_frame(FramePhase::hud_commands); update_command_bar(); }
     { const auto measured = measure_frame(FramePhase::hud_fleets); update_fleet_hud(); }
     { const auto measured = measure_frame(FramePhase::hud_ground); update_ground_hud(); }
@@ -310,6 +311,10 @@ void GalacticMode::State::update_planet_labels() {
     const galactic_view::HudView view{static_cast<float>(camera.width), static_cast<float>(camera.height)};
     destruction_hud.projected = false;
     for (auto& [planet, slot] : destruction_hud.raid_slots) {
+        static_cast<void>(planet); slot.projected = false;
+        if (slot.button) slot.button->hide();
+    }
+    for (auto& [planet, slot] : destruction_hud.ability_slots) {
         static_cast<void>(planet); slot.projected = false;
         if (slot.button) slot.button->hide();
     }
@@ -1029,6 +1034,7 @@ void GalacticMode::State::build_command_bar_advisor(const data::ui::TextDatabase
 
 bool GalacticMode::State::build_command_bar_shell() {
     auto* mask = memnew(EawrUiHitMask);
+    mask->set_force_pass_scroll_events(true); // #5085: only wheel consumers stop map zoom.
     // Planet overlays stay below the shell and all of its controls, including
     // overlays created after the command bar (owner playtest, GHUDL-13).
     mask->set_z_index(1);

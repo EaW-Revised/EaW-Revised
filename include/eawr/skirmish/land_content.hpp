@@ -231,6 +231,12 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
         if (equal(bit.name, "Clear")) result.land.clear_bit = bit.bits;
     }
     if (!result.land.clear_bit) return fail("land content", "unverified-passability-bits", "Clear bit must be supplied explicitly (R2/R3)");
+    for (const auto& unresolved : tables.unresolved) {
+        if (!land_combat_field(unresolved.field)) continue;
+        if (std::any_of(tables.land_static_objects.begin(), tables.land_static_objects.end(),
+            [&](const auto& object) { return equal(object.id, unresolved.owner); }))
+            result.static_notes.push_back(unresolved.owner + ": " + unresolved.field + ": " + unresolved.reason);
+    }
     std::set<std::string> static_gates;
     for (const auto& gate : inputs.unverified_static_objects) {
         if (gate.type.empty() || !static_gates.insert(core::to_lower(gate.type)).second)
@@ -417,7 +423,7 @@ inline constexpr sim::math::Fixed land_physical_limit = sim::math::Fixed::from_r
     const auto number = [&](std::uint64_t value) { for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift)); };
     const auto fixed = [&](Fixed value) { number(static_cast<std::uint64_t>(value.raw())); };
     const auto text = [&](const std::string& value) { number(value.size()); bytes.insert(bytes.end(), value.begin(), value.end()); };
-    text("land-content-adapter-v4");
+    text("land-content-adapter-v5");
     number(result.static_objects.size());
     for (const auto& row : result.static_objects) {
         number(row.type); fixed(row.width); fixed(row.height); fixed(row.x_offset); fixed(row.y_offset);

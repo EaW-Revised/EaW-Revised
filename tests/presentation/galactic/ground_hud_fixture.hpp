@@ -22,7 +22,7 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
     setup.fleet_control->types[0].transport = true;
-    if (name == "ground-launch-move" || name == "ground-transfer") {
+    if (name == "ground-launch-move" || name == "ground-transfer" || name == "ground-slot-return") {
         setup.planets[1].position = setup.planets[0].position;
         setup.planets[1].position.x = sim::math::Fixed::from_raw(setup.planets[0].position.x.raw()
             + 4 * sim::math::Fixed::scale);
@@ -64,6 +64,19 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         planet.allegiance = planet.target_owner = planet.ground_owner = planet.space_owner = owner;
         planet.current_owner = planet.current_controller = owner;
         planet.landed_transports = {{8004,owner,false,false}};
+    }
+    if (name == "ground-slot-return") {
+        // Two launchable companies, an empty return surface, and a space-only
+        // control in the neighbouring orbit position.
+        // Keep the empty landing/transfer surfaces allied independently of the
+        // troops: political control otherwise has no base or residual controller.
+        for (auto& planet : control.planets) if (planet.planet == 101 || planet.planet == 106)
+            planet.ground_base = {local, 1};
+        for (auto& planet : control.planets) if (planet.planet == 101) planet.landed.pop_back();
+        for (auto& planet : setup.observer->planets) if (planet.planet == 101) planet.landed_transports.pop_back();
+        for (auto& fleet : setup.fleets) if (fleet.id == 602) fleet.members = {{7004, 1001}};
+        std::erase_if(setup.movement->contents,
+            [](const auto& row) { return row.container == 7004 || row.container == 8003; });
     }
     if (structures) {
         // Five land positions, three built: two of the planet owner's, one owned by the other side.

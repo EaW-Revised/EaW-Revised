@@ -117,6 +117,10 @@ void BattleAudio::set_mix_levels(const audio::MixLevels& levels) {
 void BattleAudio::release() {
     if (released_) return;
     released_ = true;
+    // The worker owns its VFS and private resources; join before player/node teardown.
+    audio_loader_.reset();
+    pending_audio_.clear();
+    pending_music_.reset();
     const auto backend = event_backend();
     for (const auto& [handle, state] : event_states_) {
         (void)state;

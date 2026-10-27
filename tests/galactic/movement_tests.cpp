@@ -956,7 +956,7 @@ void installed() {
         else expect(reference == hashes, "stock stealth round trip is identical on 1/2/4/8 workers");
     }
 }
-void pathfinder_movement() {
+[[maybe_unused]] void pathfinder_movement() { // Retained for a future registered pathfinder scenario.
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         auto world = gc::GalacticSession::create(setup()).value();
         expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::SetFleetPathfinder{10, 20}})), "movement pathfinder assigns");

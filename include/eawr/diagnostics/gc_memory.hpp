@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <atomic>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -32,7 +33,10 @@ public:
         }();
         return configured;
     }
-    static bool enabled() { return !directory().empty(); }
+    // Viewer diagnostic setup enables this before constructing any live owner.
+    // It does not change pacing or enable unsafe reads of a running session.
+    inline static std::atomic<bool> census_enabled{false};
+    static bool enabled() { return census_enabled.load(std::memory_order_relaxed) || !directory().empty(); }
     std::map<std::string, std::uint64_t> rows;
     std::set<const void*> seen;
     template<class T> std::uint64_t bytes(const T& value, [[maybe_unused]] bool object_counted = false) {
@@ -42,6 +46,10 @@ public:
             const auto start = reinterpret_cast<std::uintptr_t>(&value);
             return data >= start && data < start + sizeof(value) ? 0 :
                 (seen.insert(value.data()).second ? value.capacity() + 1 : 0);
+        } else if constexpr (requires { value.definitions(); }) {
+            return bytes(value.definitions());
+        } else if constexpr (requires { value.has_value(); *value; }) {
+            return value.has_value() ? bytes(*value) : 0;
         } else if constexpr (requires { value.get(); *value; bool(value); }) {
             if (!value || !seen.insert(value.get()).second) return 0;
             return sizeof(*value) + bytes(*value, true);
@@ -51,7 +59,13 @@ public:
             for (const auto& row : value) result += bytes(row);
             return result;
         } else if constexpr (requires { std::tuple_size<V>::value; value.begin(); value.end(); }) {
+            // Fixed-size inline arrays have no separate backing allocation.
             std::uint64_t result = 0;
+            for (const auto& row : value) result += bytes(row);
+            return result;
+        } else if constexpr (requires { value.size_bytes(); value.data(); value.begin(); }) {
+            if (value.empty() || !seen.insert(value.data()).second) return 0;
+            std::uint64_t result = value.size_bytes();
             for (const auto& row : value) result += bytes(row);
             return result;
         } else if constexpr (requires { value.begin(); value.end(); value.size(); }) {
@@ -77,6 +91,26 @@ public:
             EAWR_GC_PAYLOAD(space_units); EAWR_GC_PAYLOAD(ground_units);
             EAWR_GC_PAYLOAD(space_presence); EAWR_GC_PAYLOAD(ground_presence); EAWR_GC_PAYLOAD(nearby);
             EAWR_GC_PAYLOAD(triangles); EAWR_GC_PAYLOAD(nodes);
+            EAWR_GC_PAYLOAD(source); EAWR_GC_PAYLOAD(logical_path); EAWR_GC_PAYLOAD(source_id); EAWR_GC_PAYLOAD(layer_id);
+            EAWR_GC_PAYLOAD(catalog); EAWR_GC_PAYLOAD(data); EAWR_GC_PAYLOAD(types);
+            EAWR_GC_PAYLOAD(campaigns); EAWR_GC_PAYLOAD(planets); EAWR_GC_PAYLOAD(galaxy_art_objects);
+            EAWR_GC_PAYLOAD(trade_routes); EAWR_GC_PAYLOAD(factions); EAWR_GC_PAYLOAD(constants);
+            EAWR_GC_PAYLOAD(issues); EAWR_GC_PAYLOAD(inputs); EAWR_GC_PAYLOAD(file); EAWR_GC_PAYLOAD(text);
+            EAWR_GC_PAYLOAD(campaign_set); EAWR_GC_PAYLOAD(text_id); EAWR_GC_PAYLOAD(description_text);
+            EAWR_GC_PAYLOAD(locations); EAWR_GC_PAYLOAD(home_locations); EAWR_GC_PAYLOAD(starting_active_player);
+            EAWR_GC_PAYLOAD(starting_credits); EAWR_GC_PAYLOAD(starting_tech_levels); EAWR_GC_PAYLOAD(max_tech_levels);
+            EAWR_GC_PAYLOAD(starting_forces); EAWR_GC_PAYLOAD(ai_player_control); EAWR_GC_PAYLOAD(markup_filenames);
+            EAWR_GC_PAYLOAD(story_names); EAWR_GC_PAYLOAD(rebel_story_name); EAWR_GC_PAYLOAD(empire_story_name);
+            EAWR_GC_PAYLOAD(underworld_story_name); EAWR_GC_PAYLOAD(autoresolve_exclusion_locations);
+            EAWR_GC_PAYLOAD(faction); EAWR_GC_PAYLOAD(location); EAWR_GC_PAYLOAD(type);
+            EAWR_GC_PAYLOAD(galactic_model_name); EAWR_GC_PAYLOAD(destroyed_galactic_model_name);
+            EAWR_GC_PAYLOAD(space_tactical_map); EAWR_GC_PAYLOAD(land_tactical_map);
+            EAWR_GC_PAYLOAD(behaviors); EAWR_GC_PAYLOAD(galactic_behaviors); EAWR_GC_PAYLOAD(encyclopedia_text);
+            EAWR_GC_PAYLOAD(allies); EAWR_GC_PAYLOAD(enemies); EAWR_GC_PAYLOAD(tag); EAWR_GC_PAYLOAD(reason);
+            EAWR_GC_PAYLOAD(surfaces); EAWR_GC_PAYLOAD(mesh); EAWR_GC_PAYLOAD(shader); EAWR_GC_PAYLOAD(route);
+            EAWR_GC_PAYLOAD(texture); EAWR_GC_PAYLOAD(status); EAWR_GC_PAYLOAD(cause); EAWR_GC_PAYLOAD(sha256);
+            EAWR_GC_PAYLOAD(offers); EAWR_GC_PAYLOAD(queues); EAWR_GC_PAYLOAD(players); EAWR_GC_PAYLOAD(fleets);
+            EAWR_GC_PAYLOAD(members); EAWR_GC_PAYLOAD(garrisons); EAWR_GC_PAYLOAD(objects);
 #undef EAWR_GC_PAYLOAD
             return result;
         }

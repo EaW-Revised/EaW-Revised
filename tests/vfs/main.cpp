@@ -292,6 +292,16 @@ int main(const int argc, char** argv) {
             return a.canonical_path < b.canonical_path;
         }), "effective enumeration is deterministic and sorted");
         expect(!mounted.value().open("data/xml/missing.xml"), "missing asset returns an error");
+        // #5197: a prefix read returns the first bytes of the same effective winner, loose or archived, whole when short.
+        auto loose_prefix = mounted.value().open_prefix("data/xml/LOOSE.xml", 3);
+        expect(loose_prefix && bytes_as_string(loose_prefix.value()) == "loo", "loose prefix is the first bytes");
+        auto archive_prefix = mounted.value().open_prefix("DATA/XML/shared.xml", 4);
+        expect(archive_prefix && bytes_as_string(archive_prefix.value()) == "mod-", "archive prefix is the winner's first bytes");
+        auto whole_prefix = mounted.value().open_prefix("data/xml/order.xml", 4096);
+        expect(whole_prefix && bytes_as_string(whole_prefix.value()) == "high", "a prefix longer than the asset is the whole asset");
+        auto empty_prefix = mounted.value().open_prefix("data/xml/order.xml", 0);
+        expect(empty_prefix && empty_prefix.value().empty(), "a zero-byte prefix is empty");
+        expect(!mounted.value().open_prefix("data/xml/missing.xml", 4), "a missing asset has no prefix");
     }
 
     write_bytes(fixture.root / "truncated.meg", std::array<std::byte, 3>{});

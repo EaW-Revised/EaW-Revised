@@ -397,7 +397,7 @@ std::uint64_t GalacticWorld::producer_demand_offer_checks() const noexcept {
 core::Result<void> GalacticWorld::prepare_catalog_slice(const sim::PartitionExecutor& executor, std::uint64_t frame) {
     if (!bound().live_deltas_ || !bound().prepared_producer_offers_ || bound().last_catalog_slice_ == frame) return core::Result<void>::success();
     const auto& jobs = bound().prepared_producer_offers_->job_list();
-    const auto count = jobs.size() / perception_period_ + (jobs.size() % perception_period_ != 0 ? 1 : 0);
+    const std::size_t count = jobs.size() / perception_period_ + (jobs.size() % perception_period_ != 0 ? 1 : 0);
     const auto slice = frame % perception_period_;
     // Fixed sim-frame slices: no wall-clock budgets, worker timing or catch-up.
     if (count && slice < (jobs.size() + count - 1) / count) {

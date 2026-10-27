@@ -259,6 +259,13 @@ if(EAWR_ENABLE_RELAY)
         "${CMAKE_CURRENT_SOURCE_DIR}/relay_server_processes.py" "$<TARGET_FILE:eawr_relay_server>"
         "${PROJECT_BINARY_DIR}/relay-process-artifacts")
     set_tests_properties(net_relay_server_process PROPERTIES TIMEOUT 60)
+    # Small load smoke: 64 browsing players against a relay capped at 128 connections, then a couple of players more.
+    # The full-size run (up to the default cap) is tools/net/relay_load_smoke.py <eawr_relay_server> without other arguments.
+    # The script bounds its own runtime (--max-seconds, default 100) below the TIMEOUT so CTest never orphans the relay.
+    add_test(NAME net_relay_load_smoke COMMAND "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tools/net/relay_load_smoke.py" "$<TARGET_FILE:eawr_relay_server>"
+        --steps 16,64 --max-connections 128)
+    set_tests_properties(net_relay_load_smoke PROPERTIES TIMEOUT 120)
     # Stages only the relay Dockerfile's build-stage COPY inputs and runs its cmake steps there (Linux; skips elsewhere).
     add_test(NAME net_relay_dockerfile_stage COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/relay_dockerfile_stage.py" "${PROJECT_SOURCE_DIR}")

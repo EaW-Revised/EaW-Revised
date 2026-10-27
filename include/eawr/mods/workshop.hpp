@@ -26,6 +26,7 @@ struct WorkshopItemDetails {     // WorkshopItemDetails/<id>: what the account i
 };
 
 struct WorkshopManifest {
+    bool needs_update = false;       // App-wide hint, not evidence that every installed item is stale
     bool needs_download = false;     // AppWorkshop/NeedsDownload (Steam is fetching items of this app)
     std::map<std::string, WorkshopInstalledItem> installed;   // keyed by the decimal item id
     std::map<std::string, WorkshopItemDetails> details;

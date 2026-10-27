@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <limits>
 #include <stdexcept>
 
 namespace eawr::script::foc::ai {
@@ -682,6 +683,8 @@ struct Parameters {
     std::vector<std::string> factions;  // Parameter_Faction
     std::optional<Real> difficulty;
     std::optional<Real> hard_point;
+    std::optional<Real> count;
+    std::optional<Real> complete;
 };
 
 Parameters read_parameters(const std::vector<Binding>& bindings) {
@@ -699,6 +702,10 @@ Parameters read_parameters(const std::vector<Binding>& bindings) {
             out.factions.push_back(*text);
         } else if (binding.parameter == "PARAMETER_DIFFICULTY_LEVEL_TYPE" && number != nullptr) {
             out.difficulty = *number;
+        } else if (binding.parameter == "PARAMETER_COUNT" && number != nullptr) {
+            out.count = *number;
+        } else if (binding.parameter == "PARAMETER_ONLY_CONSIDER_COMPLETE" && number != nullptr) {
+            out.complete = *number;
         } else if (binding.parameter == "PARAMETER_HARD_POINT_TYPE" && number != nullptr) {
             out.hard_point = *number;
         }
@@ -992,6 +999,50 @@ struct TacticalWorld::Evaluator final : LookupResolver {
             return real(allowed ? 1 : 0);
         }
         const auto* account = host().economy(id);
+        if (token == "HASUNIT") {
+            // PE-34: exact original identities, independent of category and fog.
+            if (!view().player(id) || parameters.types.empty() || !host().ai_world) return std::nullopt;
+            const auto requested = parameters.count.value_or(real(1));
+            if ((requested.repr & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL
+                || requested < real(std::numeric_limits<std::int32_t>::min())
+                || real(std::numeric_limits<std::int32_t>::max()) < requested) return std::nullopt;
+            auto remaining = truncate(requested);
+            const bool complete = Real{} < parameters.complete.value_or(Real{});
+            std::set<tactical::TypeId> types;
+            for (const auto& name : parameters.types) {
+                const auto found = host().types_by_name.find(name);
+                if (found != host().types_by_name.end()) types.insert(found->second->type_id);
+            }
+            if (remaining <= 0) return real(1);
+            // Read the completed active view once. A production census also includes
+            // held research and logical purchase identities, which are not originals.
+            std::set<std::pair<tactical::PlayerId, tactical::TypeId>> allied_matches;
+            for (const auto& unit : view().units) {
+                const auto* original = host().type(unit.type);
+                if (!original) continue;
+                const auto constructed = complete ? tactical::TypeId{} : original->constructed_type;
+                if (unit.owner == id) {
+                    if (types.contains(unit.type) || (constructed != 0 && types.contains(constructed))) --remaining;
+                } else if (!host().neutral(unit.owner) && host().allied(id, unit.owner)) {
+                    // PE-34: each ally contributes at most one match per requested type.
+                    for (const auto type : {unit.type, constructed}) {
+                        const auto* info = host().type(type);
+                        if (types.contains(type) && info && info->community_property
+                            && allied_matches.emplace(unit.owner, type).second) --remaining;
+                    }
+                }
+                if (remaining <= 0) return real(1);
+            }
+            for (const auto type : types) {
+                std::uint64_t total = 0;
+                if (account)
+                    total += static_cast<std::uint64_t>(std::count(account->pool.begin(), account->pool.end(), type));
+                if (!complete) total += host().ai_world->production_counts(id, type).queued_player;
+                if (total >= static_cast<std::uint64_t>(remaining)) return real(1);
+                remaining -= static_cast<std::int64_t>(total);
+            }
+            return real(0);
+        }
         if (token == "BASELEVEL") {
             core::tick_profile::Scope scope("serial.goal.base-level");
             return engine.station_base_level(id);

@@ -80,7 +80,7 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
         outcome_tick = entry.completed_tick;
     }
     if (setup.players.empty() || setup.players.size() > galactic_max_players) {
-        return invalid("a galaxy needs 1 to " + std::to_string(galactic_max_players) + " players");
+        return invalid("a galaxy needs 1 to " + std::to_string(galactic_max_players) + " players; player/faction count exceeds this implementation limit (#4286); no factions were dropped");
     }
     if (setup.players.front().player_id == 0
         || !strictly_increasing(setup.players, [](const GalacticPlayer& player) { return player.player_id; })) {

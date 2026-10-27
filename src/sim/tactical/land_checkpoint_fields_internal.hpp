@@ -2,8 +2,13 @@
 
 #include "checkpoint_archive_internal.hpp"
 #include "eawr/sim/tactical/land_movement.hpp"
+#include "session_land_internal.hpp"
 
 namespace eawr::sim::tactical::checkpoint_detail {
+
+template <> struct Fields<session_detail::LandCombatState> {
+    template <class A, class T> static void apply(A& a, T& v) { a(v.targets); }
+};
 
 template <> struct Fields<LandOccupation> {
     template <class A, class T> static void apply(A& a, T& v) {

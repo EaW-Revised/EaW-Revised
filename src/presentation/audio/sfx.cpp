@@ -826,15 +826,21 @@ std::vector<EventQueue::Chain> EventQueue::service(const double elapsed_ms, cons
                 if (entry.stage == Stage::postdelay) entry.delay_ms = entry.postdelay_ms;
                 break;
             }
-            auto& cursors = cursors_[event];
-            auto& cursor = entry.stage == Stage::pre ? cursors.pre : entry.stage == Stage::main ? cursors.main : cursors.post;
-            const auto pick = event->play_sequentially ? cursor % samples.size()
-                : static_cast<std::size_t>(random.between(0, static_cast<int>(samples.size()) - 1));
-            if (event->play_sequentially) cursor = (pick + 1) % samples.size();
-            entry.values.sample = samples[pick];
-            entry.values.admitted = true;
+            if (!entry.sample_pending) {
+                auto& cursors = cursors_[event];
+                auto& cursor = entry.stage == Stage::pre ? cursors.pre : entry.stage == Stage::main ? cursors.main : cursors.post;
+                const auto pick = event->play_sequentially ? cursor % samples.size()
+                    : static_cast<std::size_t>(random.between(0, static_cast<int>(samples.size()) - 1));
+                if (event->play_sequentially) cursor = (pick + 1) % samples.size();
+                entry.values.sample = samples[pick];
+                entry.values.admitted = true;
+                entry.sample_pending = true;
+            }
             const bool continuous = entry.stage == Stage::main && (event->play_count == -1 || entry.request.continuous_main);
-            const auto start = backend.start({entry.handle, entry.request, entry.values, entry.stage, continuous});
+            const Sample selected{entry.handle, entry.request, entry.values, entry.stage, continuous};
+            if (backend.ready && !backend.ready(selected)) break;
+            entry.sample_pending = false;
+            const auto start = backend.start(selected);
             if (start.stopped) {
                 // SND-08/18: release the stolen slot, then complete its former event loop.
                 for (auto& previous : entries_) {

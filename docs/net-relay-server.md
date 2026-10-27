@@ -109,7 +109,7 @@ queues and never perform socket I/O or call GNS under a lock.
 
 ## Bounds and credentials
 
-Defaults: 128 live connections, 64 sessions, 18 connections per IPv4 address or
+Defaults: 1,024 live connections, 512 sessions, 18 connections per IPv4 address or
 IPv6 /64 prefix; at most 2 unpaired sessions per such prefix;
 30 accepted connections per IP per minute; 120 protocol operations and 1 MiB
 incoming TLS record bytes per IP per minute; 120 operations and 1 MiB per
@@ -311,7 +311,7 @@ Directory defaults and hard bounds:
 
 | Resource | Default/bound |
 | --- | --- |
-| Rooms | `max_sessions` (64 by default, at most 2,048), at most two concurrent rooms per prefix, separate from signalling sessions |
+| Rooms | `max_sessions` (512 by default, at most 2,048), at most two concurrent rooms per prefix, separate from signalling sessions |
 | Principal history | at most four times `max_connections`; at most four new principals per prefix per minute; disconnected entries retained 60 seconds after their last use and only removed when no room is hosted |
 | Queries | at most one per second per principal, also across resumed connections |
 | Page | at most 50 rows; keyset cursor is the last room ID when more rows exist |
@@ -407,14 +407,14 @@ in-match lockstep wire) is untouched.
 - The reply to menu_open carries the recent lines (at most 50, none older than ten minutes) and the roster. The reply to
   menu_poll carries the lines after the given sequence, and the roster only when its version differs from the caller's.
   The reply to menu_chat is a page without lines or roster; the line itself reaches everybody, the sender included,
-  through the next poll (clients poll every two seconds).
+  through a poll (visible, focused browsers poll every 1.1 seconds and background windows every two seconds; a post-send poll shares the same 1.1-second minimum spacing).
 - A menu member is a connection in the menu. **Leaving is closing the connection**: a client that hosts or joins a room
   closes its menu connection first, so it stops receiving menu chat and leaves the list; on leaving the room it opens the
   channel again. The list shows the players who are in the menu now, not the players in rooms (a room shows its own roster).
 - Names are display names only. They are sanitised like room names and are not identities: two players may share a name
   in the menu (a room still refuses duplicates). Nothing but the display name already sent for a room is collected, and the
   recent lines are held in memory only (no history, no persistence; a restart empties them).
-- Limits: 256 members (1549 when full; `menu_max_members` accepts up to 4096 but is clamped to 1024, the largest roster a client decodes), one line per second per member (1551), 128 bytes per line (1540), 50 recent lines,
+- Limits: 512 members by default (1549 when full; `menu_max_members` accepts up to 4096 but is clamped to 1024, the largest roster a client decodes), one line per second per member (1551), 128 bytes per line (1540), 50 recent lines,
   `menu_operations_per_minute` (1024) and `menu_bytes_per_minute` (4 MiB) per address prefix, the usual idle timeout. A
   connection must open the menu first, may only send menu kinds (and ping) afterwards, and a directory, room or session
   connection cannot enter the menu (1540).

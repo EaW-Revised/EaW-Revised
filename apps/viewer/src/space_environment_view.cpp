@@ -113,8 +113,10 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         const auto& source = *options_.map_camera;
         const Vector2 viewport = host.get_viewport()->get_visible_rect().size;
         const bool capture = !options_.capture_path.empty();
-        const std::uint32_t width = capture ? defaults.width : static_cast<std::uint32_t>(viewport.x);
-        const std::uint32_t height = capture ? defaults.height : static_cast<std::uint32_t>(viewport.y);
+        const std::uint32_t width = capture ? defaults.width
+            : static_cast<std::uint32_t>(camera_input::whole_viewport_extent(viewport.x));
+        const std::uint32_t height = capture ? defaults.height
+            : static_cast<std::uint32_t>(camera_input::whole_viewport_extent(viewport.y));
         auto* display = DisplayServer::get_singleton();
         bridge_ = std::make_unique<viewer::MapCameraBridge>(
             display && display->window_is_focused(), camera_input::Context::space);
@@ -162,8 +164,8 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
         tactical::TacticalFrame frame{defaults.width, defaults.height, vertical.value(),
             tactical_.constants->near_clip, tactical_.constants->far_clip, eye.value(), target};
         if (viewport.x >= 1.0F && viewport.y >= 1.0F) {
-            frame.width = static_cast<std::uint32_t>(viewport.x);
-            frame.height = static_cast<std::uint32_t>(viewport.y);
+            frame.width = static_cast<std::uint32_t>(camera_input::whole_viewport_extent(viewport.x));
+            frame.height = static_cast<std::uint32_t>(camera_input::whole_viewport_extent(viewport.y));
         }
         locked_frame_ = frame;
         camera_ = fixed_camera(frame);
@@ -592,8 +594,8 @@ void EnvironmentView::camera_pointer_left() {
 
 void EnvironmentView::camera_viewport(const float width, const float height) {
     if (locked_view_ && renderer_ && !completed_ && width >= 1.0F && height >= 1.0F) {
-        camera_.width = static_cast<std::uint32_t>(width);
-        camera_.height = static_cast<std::uint32_t>(height);
+        camera_.width = static_cast<std::uint32_t>(camera_input::whole_viewport_extent(width));
+        camera_.height = static_cast<std::uint32_t>(camera_input::whole_viewport_extent(height));
         locked_frame_.width = camera_.width;
         locked_frame_.height = camera_.height;
         renderer_->set_camera(camera_);

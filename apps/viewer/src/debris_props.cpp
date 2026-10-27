@@ -418,8 +418,14 @@ bool DebrisProps::start(const std::string& particle, const space::DebrisPose& po
     Effect effect{handle.handle, particle, born, 0U, type->lifetime_frames, false, follows};
     // Born before the clock's present: it catches up.
     bool gone = false;
-    for (std::uint64_t sample = born; sample < samples_ && !gone; ++sample) {
-        if (!step(effect, sample, gone)) return false;
+    for (std::uint64_t sample = born; sample < samples_ && !gone;) {
+        auto count = particles::EffectRegistry::catchup_folding_default() && samples_ - sample > 2 ? samples_ - sample : 1U;
+        count = std::min<std::uint64_t>(count, std::numeric_limits<std::uint32_t>::max() - effect.age);
+        if (!effect.detached) count = std::min<std::uint64_t>(count,
+            effect.lifetime > effect.age ? effect.lifetime - effect.age : 1U);
+        if (count == 0) break;
+        if (!step(effect, sample, gone, static_cast<std::uint32_t>(count))) return false;
+        sample += count;
     }
     if (!gone) effects_.push_back(std::move(effect));
     return true;
@@ -437,21 +443,21 @@ bool DebrisProps::follow(const Effect& effect, const std::uint64_t sample) {
     return true;
 }
 
-bool DebrisProps::step(Effect& effect, const std::uint64_t sample, bool& gone) {
+bool DebrisProps::step(Effect& effect, const std::uint64_t sample, bool& gone, const std::uint32_t elapsed) {
     gone = false;
-    if (!follow(effect, sample)) return false;
-    auto advanced = registry_->advance(effect.handle, presentation_constants::logical_frame_seconds, camera_frame_);
+    if (!follow(effect, sample + elapsed - 1U)) return false;
+    auto advanced = registry_->advance(effect.handle, static_cast<float>(elapsed) * presentation_constants::logical_frame_seconds, camera_frame_);
     if (!advanced) {
         failure_ = "breakoff effect " + effect.particle + ": " + core::format_diagnostic(advanced.error());
         return false;
     }
-    after_step(effect, advanced.value(), gone);
+    after_step(effect, advanced.value(), gone, elapsed);
     return true;
 }
 
-void DebrisProps::after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone) {
+void DebrisProps::after_step(Effect& effect, const particles::EffectFrameStats& advanced, bool& gone, const std::uint32_t elapsed) {
     gone = false;
-    ++effect.age;
+    effect.age += elapsed;
     if (!effect.detached && effect.age >= effect.lifetime) {
         // The particle object's lifetime ends: FoC detaches its system, which drains.
         auto detached = registry_->detach(effect.handle);
@@ -464,6 +470,53 @@ void DebrisProps::after_step(Effect& effect, const particles::EffectFrameStats& 
 }
 
 bool DebrisProps::advance_until(const std::uint64_t target) {
+    // Ordinary frames retain their exact sample path. A stalled frame folds all
+    // elapsed time into at most two worker batches per effect: live, then drain.
+    if (particles::EffectRegistry::catchup_folding_default() && target > samples_ && target - samples_ > 2) {
+        std::vector<float> deltas;
+        std::vector<std::uint32_t> elapsed;
+        for (unsigned phase = 0; phase < 2; ++phase) {
+            batch_handles_.clear();
+            deltas.clear();
+            elapsed.clear();
+            for (const auto& effect : effects_) {
+                const auto start = std::max(samples_, effect.born);
+                const auto consumed = static_cast<std::uint64_t>(effect.age);
+                const auto wanted = target > effect.born ? target - effect.born : 0U;
+                if (start >= target || consumed >= wanted) continue;
+                const auto room = std::numeric_limits<std::uint32_t>::max() - effect.age;
+                auto count = std::min<std::uint64_t>(wanted - consumed, room);
+                if (!effect.detached) count = std::min<std::uint64_t>(count,
+                    effect.lifetime > effect.age ? effect.lifetime - effect.age : 1U);
+                if (count == 0) continue;
+                if (!follow(effect, effect.born + consumed + count - 1U)) return false;
+                batch_handles_.push_back(effect.handle);
+                elapsed.push_back(static_cast<std::uint32_t>(count));
+                deltas.push_back(static_cast<float>(count) * presentation_constants::logical_frame_seconds);
+            }
+            if (auto advanced = registry_->advance_all(batch_handles_, deltas, camera_frame_, batch_stats_); !advanced) {
+                failure_ = "folded effect: " + core::format_diagnostic(advanced.error());
+                return false;
+            }
+            std::size_t next = 0;
+
+            auto kept = effects_.begin();
+            for (auto effect = effects_.begin(); effect != effects_.end(); ++effect) {
+                bool gone = false;
+                if (next != batch_handles_.size() && batch_handles_[next] == effect->handle) {
+                    after_step(*effect, batch_stats_[next], gone, elapsed[next]);
+                    ++next;
+                }
+                if (!gone) {
+                    if (kept != effect) *kept = std::move(*effect);
+                    ++kept;
+                }
+            }
+            effects_.erase(kept, effects_.end());
+        }
+        samples_ = target;
+        return true;
+    }
     for (; samples_ < target; ++samples_) {
         // #638: the effects born by this sample stand at their frames, step in one batch on the
         // particle workers, then age, detach or go in effect order, as one step after another did.
@@ -497,6 +550,8 @@ bool DebrisProps::effects(const FixedCamera& camera, const double presented_tick
         return static_cast<std::uint64_t>(std::max(0.0, std::ceil(tick - *clock_start_ - 1.0e-9)));
     };
     const auto due = static_cast<std::uint64_t>(std::max(0.0, std::floor(presented_tick - *clock_start_ + 1.0e-9)));
+    const bool folded = particles::EffectRegistry::catchup_folding_default() && due > samples_ && due - samples_ > 2;
+    const auto frame_uploads = registry_->defer_uploads(folded);
     // BP-33: each new prop carries its fire from its birth.
     for (const auto& [serial, flight] : flights_.flights()) {
         if (serial <= fired_through_) continue;

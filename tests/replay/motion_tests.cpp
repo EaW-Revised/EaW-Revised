@@ -733,7 +733,7 @@ void test_waypoints() {
             else reference = result;
         }
     }
-    for (const tactical::CommandPayload replacement : std::vector<tactical::CommandPayload>{
+    for (const tactical::CommandPayload& replacement : std::vector<tactical::CommandPayload>{
             tactical::MovePayload{at(-300, 0, 0)}, tactical::StopPayload{}, tactical::AttackPayload{2},
             tactical::AttackMovePayload{at(-300, 0, 0)}, tactical::GuardPayload{at(-300, 0, 0)}}) {
         auto cancelled = replay;

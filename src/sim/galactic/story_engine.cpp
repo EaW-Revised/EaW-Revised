@@ -255,6 +255,7 @@ core::Result<void> Engine::Impl::reward(std::size_t s, std::size_t e, int depth)
     record.owner = defs[s].owner; record.subplot = defs[s].name; record.event = def.name;
     record.dialog = def.dialog; record.tag = def.tag; record.variable = def.variable;
     record.chapter = def.chapter; record.popup = def.popup; record.sound = def.sound;
+    record.remove_after_viewed = !def.authored_tag_present.value_or(!def.tag.empty());
     if (rewarded) {
         record.reward_type = def.reward_type; record.reward_params = def.reward_params; record.reward_list = def.reward_list;
         if (tactical_reward_type(def.reward_type)) record.refusal = std::string(land_battle_refusal);

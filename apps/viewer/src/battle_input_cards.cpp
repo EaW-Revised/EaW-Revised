@@ -31,7 +31,7 @@ using namespace godot;
 std::optional<sim::tactical::TypeId> BattleInput::own_squadron_leader_type(const sim::EntityId squadron) const {
     const auto icons = world_ui_->icon_units();
     const auto icon = std::find_if(icons.begin(), icons.end(), [&](const ui::BattleUnit& unit) { return unit.entity == squadron; });
-    if (icon == icons.end() || !icon->own) return std::nullopt;
+    if (icon == icons.end() || !icon->own || (live_ && !live_->can_control(squadron))) return std::nullopt;
     if (live_ != nullptr) {
         const auto latest = live_->battle_frame().latest;
         const auto members = live_->squadron_members().find(squadron);
@@ -176,6 +176,7 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
     // selects the squadron as one unit.
     std::vector<sim::EntityId> shown;
     for (const sim::EntityId entity : selection_.units()) {
+        if (!live.can_control(entity)) continue;
         const auto squadron = live.squadron_members().find(entity);
         if (squadron == live.squadron_members().end()) {
             shown.push_back(entity);
@@ -202,37 +203,59 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
             unit.shield = std::clamp(static_cast<double>(durability->shields->raw())
                                          / static_cast<double>(durability->max_shields->raw()), 0.0, 1.0);
         }
+        // #5162: a land squad is a team too. Its roster (bind_land_roster) has no space Squadron
+        // entry, so the team comes from the roster: the squad root is the container, its type (the
+        // authored company) gives the card's icon, and the members' mean health is the card's.
+        sim::EntityId container{};
+        const std::vector<sim::EntityId>* roster = nullptr;
         if (const sim::tactical::Squadron* squadron = live.squadron_of(entity)) {
-            const auto* container = instances.instance(squadron->container);
-            const units::UnitType* squadron_type = container == nullptr ? nullptr : type_of(*container);
+            container = squadron->container;
+            roster = &squadron->members;
+        } else if (const auto land = live.squadron_of().find(entity); land != live.squadron_of().end()) {
+            const auto members = live.squadron_members().find(land->second);
+            if (members != live.squadron_members().end()) {
+                container = land->second;
+                roster = &members->second;
+            }
+        }
+        if (roster != nullptr) {
+            const auto* container_instance = instances.instance(container);
+            const units::UnitType* squadron_type = container_instance == nullptr ? nullptr : type_of(*container_instance);
+            std::string team_name;
+            bool homogeneous = true; // authored Is_Homogeneous, default yes (L-2)
+            std::uint32_t team_ability = ability_of(squadron_type);
+            std::uint32_t team_second = second_ability_of(squadron_type);
             if (squadron_type != nullptr) {
-                ui::SquadronOf team;
-                team.container = squadron->container;
-                team.type = squadron_type->id;
-                team.ability = ability_of(squadron_type);
-                team.second_ability = second_ability_of(squadron_type);
+                team_name = squadron_type->id;
+                homogeneous = squadron_type->homogeneous;
                 // WHE-63 / AB-01: the authored team container supplies the bar's
                 // ability pair; the purchase squadron's default is not its display type.
                 if (!squadron_type->team_abilities.empty()) {
-                    team.ability = ui::ability_index(squadron_type->team_abilities.front().type);
-                    team.second_ability = squadron_type->team_abilities.size() < 2 ? ui::ability_none
+                    team_ability = ui::ability_index(squadron_type->team_abilities.front().type);
+                    team_second = squadron_type->team_abilities.size() < 2 ? ui::ability_none
                         : ui::ability_index(squadron_type->team_abilities[1].type);
                 }
-                if (team.ability == ui::ability_none) {
-                    team.ability = unit.ability;
-                    team.second_ability = unit.second_ability;
-                }
-                team.homogeneous = squadron_type->homogeneous;
+            } else if (container_instance != nullptr) {
+                // #5162: a land squad root is an authored company, which the land tables keep apart from
+                // the unit types. Its card is the team type the company authors (Create_Team_Type, the
+                // squad's own container, as a space squadron's is), else the company itself.
+                const auto company = std::find_if(tables->land_companies.begin(), tables->land_companies.end(),
+                    [&](const units::LandCompany& row) { return battle::type_id(row.id) == container_instance->type_id; });
+                if (company != tables->land_companies.end())
+                    team_name = company->team_type_authored && !company->team_type.empty() ? company->team_type : company->id;
+            }
+            if (team_ability == ui::ability_none) {
+                team_ability = unit.ability;
+                team_second = unit.second_ability;
+            }
+            if (!team_name.empty()) {
                 // L-9 (foc-unit-cards): a squadron's health is the mean health of the craft still standing.
-                double sum = 0.0;
-                for (const sim::EntityId craft : squadron->members) {
-                    const auto* live_craft = instances.instance(craft);
-                    if (live_craft == nullptr) continue;
-                    team.members.push_back(craft);
-                    sum += health_of(*live_craft);
+                std::vector<ui::TeamMember> standing;
+                for (const sim::EntityId craft : *roster) {
+                    if (const auto* live_craft = instances.instance(craft)) standing.push_back({craft, health_of(*live_craft)});
                 }
-                team.health = team.members.empty() ? 0.0 : sum / static_cast<double>(team.members.size());
-                unit.squadron = std::move(team);
+                unit.squadron = ui::make_squadron(container, std::move(team_name), team_ability, team_second,
+                                                  homogeneous, standing);
             }
         }
         selected.push_back(std::move(unit));
@@ -299,6 +322,7 @@ void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const
             return squadron == live.squadron_of().end() ? represented : squadron->second;
         },
         [&](const sim::tactical::TacticalInstance& target, const bool focus) {
+            if (!live.can_control(target)) return;
             const sim::EntityId entity = target.entity_id;
             const std::array<sim::EntityId, 1> selected{entity};
             const bool changed = selection_.replace(selected);
@@ -325,7 +349,7 @@ void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const
             const sim::math::Vec3 point{target.fixed_transform.rows[0][3], target.fixed_transform.rows[1][3],
                                        target.fixed_transform.rows[2][3]};
             const ui::OrderMode mode = input->mode();
-            input->set_selection(selection_.units());
+            input->set_selection(controlled_selection(live));
             const auto issued = input->world_command({point, entity, true}, ui::CommandOrigin::hud_button);
             if (!issued) {
                 ++refused_;
@@ -429,7 +453,9 @@ bool BattleInput::card_click(const std::size_t slot, const bool shift, const Liv
     const auto next = ui::card_click(card_layout_, card_units_, slot, shift, selection_.units());
     if (!next) return false;
     ++card_clicks_;
-    const bool changed = selection_.replace(*next);
+    auto controlled = *next;
+    if (live.controller_policy_enabled()) std::erase_if(controlled, [&](const auto id) { return !live.can_control(id); });
+    const bool changed = selection_.replace(controlled);
     refresh_cards(live);
     note((shift ? "card deselect " : "card select ") + std::to_string(slot) + ": " + std::to_string(next->size())
          + " selected");

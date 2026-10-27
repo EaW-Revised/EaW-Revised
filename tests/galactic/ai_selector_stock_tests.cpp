@@ -538,6 +538,38 @@ int main(int argc, char** argv) {
         for (const auto& [id, type] : content->types) { (void)id; special_weapons += type.special_weapon; }
         expect(indigenous_rows && multiple_indigenous_planets && empty_indigenous_planets && special_weapons,
             "original campaign exercises empty, single and repeated indigenous authoring plus special weapon metadata");
+        // Compare every stock mask with the pre-recovery selection algorithm.
+        const auto previous_bits = [&](std::string_view raw) {
+            std::uint64_t result{};
+            for (const auto& name : ai::split_names(raw, ", |\t\r\n")) {
+                const auto found = content->ai.categories.find(ai::upper_case(name));
+                expect(found != content->ai.categories.end(), "stock category vocabulary is complete");
+                if (found != content->ai.categories.end()) result |= found->second;
+            }
+            return result;
+        };
+        const auto previous_text = [&](const auto& object, std::string_view tag) {
+            const auto* value = object.value(tag);
+            return value ? ai::upper_case(ai::trimmed(value->value.raw_text)) : std::string{};
+        };
+        for (const auto& [id, row] : content->types) {
+            std::uint64_t prior{};
+            for (const auto& category : row.original->category_mask) prior |= previous_bits(category);
+            const auto found = std::find_if(content->ai.types.begin(), content->ai.types.end(),
+                [&](const auto& type) { return type.type_id == id; });
+            expect(found != content->ai.types.end() && found->category_bits == prior,
+                "stock category mask matches the previous selection algorithm");
+            const auto object = must(loaded.catalog.resolve(row.name, eawr::data::Category::game_object));
+            const auto garrison = previous_text(object, "Garrison_Category");
+            expect(row.garrison_categories == previous_bits(garrison.empty() ? "Capital" : garrison),
+                "stock garrison mask matches the previous selection algorithm");
+        }
+        for (const auto& location : planned.locations()) if (location.planet) {
+            const auto object = must(loaded.catalog.resolve(location.original_type, eawr::data::Category::game_object));
+            expect(content->planets.at(location.planet->id).restricted_categories
+                    == previous_bits(previous_text(object, "Planet_Restricted_Unit_Categories")),
+                "stock planet restriction mask matches the previous selection algorithm");
+        }
         // WGA-279/280: exercise the actual catalog/provider path, including
         // present no-digit tokens versus occurrences missing their second token.
         const auto empty_planet = std::find_if(content->planets.begin(), content->planets.end(),
@@ -567,6 +599,35 @@ int main(int argc, char** argv) {
                     && std::any_of(unresolved->unresolved_names.begin(), unresolved->unresolved_names.end(),
                         [](const auto& line) { return line.ends_with(": UNRESOLVED_INDIGENOUS_TYPE"); }),
                 "unresolved indigenous type is reported and adds no synthetic row");
+        }
+        {
+            const auto category_catalog = must(eawr::data::with_overrides(loaded.catalog,
+                std::array{eawr::data::ValueOverride{location->original_type, "Planet_Restricted_Unit_Categories",
+                    {"Capital | UNRESOLVED_CATEGORY | Fighter"}}}));
+            const auto categories = must(cp::prepare_ai_selection_content(fs, category_catalog, data, types, planned));
+            const auto prior_catalog = must(eawr::data::with_overrides(loaded.catalog,
+                std::array{eawr::data::ValueOverride{location->original_type, "Planet_Restricted_Unit_Categories", {}}}));
+            const auto prior = must(cp::prepare_ai_selection_content(fs, prior_catalog, data, types, planned));
+            expect(categories->planets.at(empty_planet->first).restricted_categories
+                    == prior->planets.at(empty_planet->first).restricted_categories
+                && std::any_of(categories->unresolved_names.begin(), categories->unresolved_names.end(),
+                    [](const auto& line) { return line.ends_with(": UNRESOLVED_CATEGORY"); }),
+                "unknown selection category is reported while the inherited mask survives");
+        }
+        {
+            const auto company = std::find_if(content->types.begin(), content->types.end(),
+                [](const auto& entry) { return entry.second.company && entry.second.original && !entry.second.original->company_transport.empty(); });
+            expect(company != content->types.end(), "stock company with transport available");
+            if (company != content->types.end()) {
+                const auto modified = must(eawr::data::with_overrides(loaded.catalog,
+                    std::array{eawr::data::ValueOverride{company->second.name, "Company_Transport_Unit", {"UNRESOLVED_TRANSPORT_TYPE"}}}));
+                const auto modified_types = eawr::units::galactic_type_table(modified);
+                const auto result = must(cp::prepare_ai_selection_content(fs, modified, data, modified_types, planned));
+                expect(result->types.contains(company->first)
+                    && std::any_of(result->unresolved_names.begin(), result->unresolved_names.end(),
+                        [](const auto& line) { return line.ends_with(": UNRESOLVED_TRANSPORT_TYPE"); }),
+                    "missing company transport is reported without discarding AI content");
+            }
         }
         {
             const auto rejected_catalog = must(eawr::data::with_overrides(loaded.catalog,

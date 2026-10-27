@@ -11,6 +11,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -43,6 +44,8 @@ public:
     [[nodiscard]] std::string_view failure() const noexcept;
     [[nodiscard]] bool briefing_queue_empty() const;
     [[nodiscard]] bool campaign_briefing(std::string_view event_name);
+    [[nodiscard]] bool command_bar_movie_playing() const;
+    void write_command_bar_movie_report(std::ostream&) const;
     // The live battle's command bar, for a campaign parent's controls (HCB-15); null without one.
     [[nodiscard]] TacticalHud* tactical_hud() const noexcept;
     // RP-05: the campaign parent's retreat press was refused; plays the local faction's not-allowed cue.
@@ -61,6 +64,7 @@ public:
         // UI-11: a campaign battle names its conflict planet independently of the map.
         // The HUD resolves this object identity through its effective Text_ID.
         std::optional<std::string> campaign_planet{};
+        std::string campaign_briefing_movie; // prepared while the loading screen owns presentation
         std::filesystem::path report_path;
         std::filesystem::path capture_path;
         // Frames rendered before the timed window is closed and the capture is
@@ -118,6 +122,11 @@ public:
         EawrLoadingScreen* loading{};
         bool loading_begin_barrier{true};
         // ADR-019: compose the ordinary tactical presentation over the retained child.
+        bool observer_multiplayer{};
+        sim::SeatId controller_seat{};
+        std::vector<std::pair<sim::SeatId, std::string>> controller_names;
+        // #5130: names belong to the observer, outside deterministic battle content.
+        std::vector<std::pair<sim::tactical::PlayerId, std::string>> observer_names;
         std::shared_ptr<const LiveSessionView::PreparedBattle> borrowed_battle;
         std::shared_ptr<platform::TacticalFeed> borrowed_feed;
         std::function<std::string()> shared_pause_notice{};

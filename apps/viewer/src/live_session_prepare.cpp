@@ -1,3 +1,4 @@
+#include "viewer_load_notes.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
@@ -87,6 +88,13 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
                               std::string& failure) {
     if (options_.land) return prepare_land(filesystem, catalog, map_path, failure);
     shield_flash_constants_ = presentation_constants::load_flash(filesystem);
+    auto preview_colours = ui::reinforcement_colours(filesystem);
+    // Missing mod presentation constants keep the model's ordinary light multiplier.
+    preview_colours_ = preview_colours ? preview_colours.value()
+        : ui::ReinforcementColours{{{1.0F, 1.0F, 1.0F}, {1.0F, 1.0F, 1.0F}}};
+    if (!preview_colours) godot::UtilityFunctions::printerr(godot::String(
+        ("reinforcement preview colours: " + core::format_diagnostic(preview_colours.error())
+         + "; using untinted previews").c_str()));
     deployment_facing_.reset(); // WR-X01: per local player, per battle
     core::load_profile::Scope load_scope(core::load_profile::Phase::session);
     const auto minimap_settings = ui::minimap_settings(filesystem);
@@ -321,6 +329,9 @@ bool LiveSessionView::start(std::string& failure) {
         return false;
     }
     platform::LiveSession::Options session_options;
+    session_options.load_note_sink = [](std::span<const core::LoadNote> notes) {
+        if (!notes.empty()) publish_viewer_load_notes({notes.begin(), notes.end()}, {}, true);
+    };
     session_options.workers = options_.workers.value_or(platform::LiveSession::game_worker_count());
     session_options.measure_phases = trace_frames_;
     session_options.pacing = options_.real_time ? platform::LiveSession::Pacing::real_time
@@ -350,7 +361,7 @@ bool LiveSessionView::start(std::string& failure) {
         intent_epoch = [feed = std::weak_ptr(options_.borrowed_feed)] {
             const auto source = feed.lock(); return source ? source->completed_tick() : 0U;
         };
-    scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch));
+    scheduler_ = std::make_shared<ui::CommandScheduler>(player_, 0, 0, std::move(intent_epoch), setup_->controllers ? options_.controller_seat : sim::SeatId{});
     if (options_.lan) options_.lan->set_input_epoch_provider([scheduler = std::weak_ptr(scheduler_)] {
         const auto producer = scheduler.lock();
         return producer ? producer->pending_intent_epoch() : std::nullopt;
@@ -401,6 +412,7 @@ bool LiveSessionView::start(std::string& failure) {
     content.victory = victory_;
     content.economy = economy_;
     if (land_content_) content = *land_content_;
+    content.load_notes.insert(content.load_notes.end(), content_->load_notes.begin(), content_->load_notes.end());
     if (replay_) {
         auto companion = options_.replay_input; companion += ".session";
         std::error_code code;

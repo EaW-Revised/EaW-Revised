@@ -283,7 +283,7 @@ LiveSessionView session(const bool campaign) {
     LiveSessionView view;
     units::UnitTables tables;
     tables.units = {{"Station"}, {"Nebulon_B"}, {"Corvette"}, {"Tartan"}, {"XWing"}, {"XWing_Squadron"}, {"Station2"}, {"TIE"}, {"TIE_Squadron"},
-                    {"Carrier"}};
+                    {"Carrier"}, {"RestrictedShip"}};
     tables.units[5].members = {{"XWing"}, {"XWing"}};
     tables.units[5].kind = units::UnitKind::squadron;
     tables.units[8].members = {{"TIE"}};
@@ -317,6 +317,7 @@ LiveSessionView session(const bool campaign) {
         add(1, "XWing_Squadron", 2);  // a squadron: its craft are what is drawn
         add(2, "Tartan", 12);         // and the other side
         roster.reserves.push_back({next++, skirmish::type_id("Corvette"), 1, true});  // restricted: never arrives
+        roster.reserves.push_back({next++, skirmish::type_id("RestrictedShip"), 1, true});
         // A carrier whose hangar holds one squadron container with its two craft listed as members.
         tactical::CampaignReserve carrier{next++, skirmish::type_id("Carrier"), 1};
         tactical::CarriedObject squadron{next++, skirmish::type_id("XWing_Squadron"), {}};
@@ -375,6 +376,18 @@ int main() {
     if (battle.slots(1, "Nebulon_B") != 11 || battle.slots(1, "Corvette") != 1
         || battle.slots(1, "XWing") != 3 || battle.slots(2, "Tartan") != 13
         || battle.slots(2, "TIE") != 2 || battle.slots(1, "Carrier") != 1) return 1;
+    // One private preview per selectable local type, even without a purchase menu.
+    const auto previews = [&](const char* type) {
+        return std::count_if(battle.placement_clones_.begin(), battle.placement_clones_.end(),
+            [&](const auto& clone) { return clone.type == skirmish::type_id(type); });
+    };
+    if (previews("Nebulon_B") != 1 || previews("Corvette") != 1 || previews("XWing_Squadron") != 2
+        || previews("Carrier") != 1 || previews("Tartan") != 0 || previews("RestrictedShip") != 0) return 50;
+    for (const auto& clone : battle.placement_clones_) {
+        const auto& ship = battle.placed_ships_[clone.ship];
+        if (!ship.placement_preview || !ship.launch_slot) return 51;
+        for (const auto& slot : battle.launch_slots_) if (slot.ship == clone.ship) return 52;
+    }
     // Full simultaneous demand survives lazy realization, and carried craft count once.
     std::size_t corvettes = 0, xwings = 0;
     for (const auto& row : battle.arrival_slots_.plan.rows) if (row.source == battle::ArrivalSource::reinforcement_pool) {

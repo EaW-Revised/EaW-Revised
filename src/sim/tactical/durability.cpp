@@ -11,6 +11,10 @@
 
 namespace eawr::sim::tactical {
 
+core::Result<DurabilityTable> prepare_durability(const DurabilityTable& source, core::LoadNoteBuffer& notes) {
+    return core::normalize_owned_load_table(source, notes, normalize_durability, validate_durability);
+}
+
 math::Fixed healing_fraction(const DurabilityProfile& profile, const DurabilityState& state) {
     auto current = state.hull;
     auto maximum = profile.max_hull;
@@ -18,7 +22,8 @@ math::Fixed healing_fraction(const DurabilityProfile& profile, const DurabilityS
         [](const auto& point) { return point.destroyable; })) {
         current = {}; maximum = {};
         for (std::size_t i = 0; i < profile.hardpoints.size(); ++i) {
-            if (!profile.hardpoints[i].destroyable || state.hardpoints[i].raw() <= 0) continue;
+            if (!profile.hardpoints[i].destroyable || profile.hardpoints[i].max_health.raw() <= 0
+                || state.hardpoints[i].raw() <= 0) continue;
             current = math::Fixed::from_raw(current.raw() + state.hardpoints[i].raw());
             maximum = math::Fixed::from_raw(maximum.raw() + profile.hardpoints[i].max_health.raw());
         }
@@ -48,6 +53,10 @@ core::Result<std::uint32_t> heal_health(const DurabilityProfile& profile, Durabi
     math::Fixed lowest = math::Fixed::from_raw(math::Fixed::scale);
     for (std::size_t i = 0; i < profile.hardpoints.size(); ++i) {
         const auto& point = profile.hardpoints[i];
+        if (point.destroyable && point.max_health.raw() == 0) {
+            state.hardpoints[i] = {}; // HD-06: healing cannot revive a zero-maximum slot.
+            continue;
+        }
         if (!point.destroyable || state.hardpoints[i].raw() <= 0) continue;
         const auto fraction = math::divide(state.hardpoints[i], point.max_health).value();
         if (fraction < lowest) { lowest = fraction; picked = static_cast<std::uint32_t>(i); }
@@ -66,6 +75,23 @@ core::Result<std::uint32_t> heal_health(const DurabilityProfile& profile, Durabi
 namespace {
 
 namespace wide = math::detail;
+
+[[nodiscard]] std::string fixed_decimal(const math::Fixed value) {
+    const auto raw = value.raw();
+    const auto magnitude =
+        raw < 0 ? std::uint64_t{0} - static_cast<std::uint64_t>(raw) : static_cast<std::uint64_t>(raw);
+    const auto scale = static_cast<std::uint64_t>(math::Fixed::scale);
+    auto text = (raw < 0 ? std::string("-") : std::string{}) + std::to_string(magnitude / scale);
+    auto remainder = magnitude % scale;
+    if (remainder)
+        text += '.';
+    while (remainder) {
+        remainder *= 10;
+        text += static_cast<char>('0' + remainder / scale);
+        remainder %= scale;
+    }
+    return text;
+}
 
 constexpr std::int64_t health_limit_raw = max_durability_health * math::Fixed::scale;
 constexpr auto scale = static_cast<std::uint64_t>(math::Fixed::scale);
@@ -113,6 +139,10 @@ struct Exact {
 
 [[nodiscard]] bool within_health(const math::Fixed value) noexcept {
     return value.raw() > 0 && value.raw() <= health_limit_raw;
+}
+
+[[nodiscard]] bool within_hardpoint_health(const math::Fixed value) noexcept {
+    return value.raw() == 0 || within_health(value); // HD-06: zero starts destroyed.
 }
 
 // Sums of maximum (T) and current (S) health over the destroyable hardpoints.
@@ -165,21 +195,160 @@ const DifficultyScale* DurabilityTable::difficulty_of(const PlayerId player) con
 core::Result<DurabilityProfile> scale_profile(const DurabilityProfile& profile, const DifficultyScale& factors) {
     using Result = core::Result<DurabilityProfile>;
     auto scaled = profile;
-    const auto hull = math::multiply(profile.max_hull, factors.health);
-    if (!hull) return Result::failure(hull.error());
-    scaled.max_hull = hull.value();
+    const auto bounded_product = [](math::Fixed value, math::Fixed factor, std::int64_t minimum) {
+        auto product = math::multiply(value, factor);
+        if (!product) return math::Fixed::from_raw((value.raw() < 0) != (factor.raw() < 0) ? minimum : health_limit_raw);
+        return math::Fixed::from_raw(std::clamp(product.value().raw(), minimum, health_limit_raw));
+    };
+    scaled.max_hull = bounded_product(profile.max_hull, factors.health, 1);
     for (auto& hardpoint : scaled.hardpoints) {
-        if (!hardpoint.destroyable) continue;
-        const auto health = math::multiply(hardpoint.max_health, factors.health);
-        if (!health) return Result::failure(health.error());
-        hardpoint.max_health = health.value();
+        if (hardpoint.destroyable) hardpoint.max_health = bounded_product(hardpoint.max_health, factors.health, 0);
     }
     if (profile.max_shields.raw() > 0) {
         const auto shields = math::multiply(profile.max_shields, factors.shield);
-        if (!shields) return Result::failure(shields.error());
-        scaled.max_shields = shields.value();
+        scaled.max_shields =
+            shields ? shields.value() : math::Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
     }
     return Result::success(std::move(scaled));
+}
+
+void normalize_durability(DurabilityTable& table, core::LoadNoteBuffer& notes) {
+    const auto clamp = [&](math::Fixed& value, std::int64_t low, std::int64_t high, const char* tag,
+                           const std::string& message) {
+        const auto before = value.raw();
+        const auto after = std::clamp(before, low, high);
+        if (before == after) return;
+        core::LoadNote note;
+        note.code = "EAWR-LOAD-0100";
+        note.tag = tag;
+        const auto separator = message.find(": ");
+        note.object = separator == std::string::npos ? "durability rules" : message.substr(0, separator);
+        constexpr std::string_view prefix = "durability profile of type ";
+        if (note.object.starts_with(prefix))
+            note.object.erase(0, prefix.size());
+        note.authored_value = fixed_decimal(value);
+        note.diagnostic_code = "EAWR-SIM-0305";
+        note.message = message;
+        core::LoadNoteBuffer temporary;
+        const auto effective = core::clamp_note(before, low, high, std::move(note), temporary);
+        core::LoadNoteCollector collector;
+        collector.merge(temporary);
+        for (auto emitted : collector.snapshot()) {
+            emitted.effective_value = fixed_decimal(math::Fixed::from_raw(effective));
+            notes.append(std::move(emitted));
+        }
+        value = math::Fixed::from_raw(effective);
+    };
+    const auto sort_unique = [&](auto& entries, const auto key, const char* code, const char* label) {
+        const auto original = entries;
+        std::stable_sort(entries.begin(), entries.end(), [&](const auto& a, const auto& b) { return key(a) < key(b); });
+        const auto end =
+            std::unique(entries.begin(), entries.end(), [&](const auto& a, const auto& b) { return key(a) == key(b); });
+        entries.erase(end, entries.end());
+        if (entries != original) {
+            core::LoadNote note;
+            note.code = code;
+            note.object = label;
+            note.action = core::LoadAction::clamped;
+            note.authored_value = std::to_string(original.size());
+            note.effective_value = std::to_string(entries.size());
+            note.diagnostic_code = "EAWR-SIM-0305";
+            note.message = std::string(label) + " IDs must strictly increase";
+            notes.append(std::move(note));
+        }
+    };
+    sort_unique(
+        table.profiles, [](const auto& profile) { return profile.type_id; }, "EAWR-LOAD-0104", "durability type");
+    sort_unique(
+        table.difficulty, [](const auto& scale) { return scale.player; }, "EAWR-LOAD-0105", "difficulty player");
+    const auto rule_message = "durability rules must be >= 0, the speed modifier and damaged fraction at most 1";
+    clamp(table.rules.hull_vs_hardpoints, 0, health_limit_raw, "Hull_Vs_Hard_Points_Health_Constraint", rule_message);
+    clamp(table.rules.engines_disabled_speed, 0, math::Fixed::scale, "Engines_Disabled_Speed_Modifier", rule_message);
+    clamp(table.rules.damaged_fraction, 0, math::Fixed::scale, "Health_Low_Percent_Threshold", rule_message);
+    for (auto& profile : table.profiles) {
+        const auto type_name = "type#" + std::to_string(profile.type_id);
+        const auto context = "durability profile of type " + type_name;
+        clamp(profile.max_hull, 1, health_limit_raw, "Tactical_Health",
+              context + ": hull must be in (0, " + std::to_string(max_durability_health) + "]");
+        if (profile.max_speed)
+            clamp(*profile.max_speed, 0, health_limit_raw, "Max_Speed",
+                  context + ": maximum speed must be in [0, " + std::to_string(max_durability_health) + "]");
+        if (profile.hardpoints.size() > max_hardpoints_per_type) {
+            core::LoadNote note;
+            note.code = "EAWR-LOAD-0101";
+            note.tag = "HardPoints";
+            note.object = type_name;
+            note.authored_value = std::to_string(profile.hardpoints.size());
+            note.action = core::LoadAction::clamped;
+            note.effective_value = std::to_string(max_hardpoints_per_type);
+            note.diagnostic_code = "EAWR-SIM-0305";
+            note.message = context + ": more than " + std::to_string(max_hardpoints_per_type) + " hardpoints";
+            notes.append(std::move(note));
+            profile.hardpoints.resize(max_hardpoints_per_type);
+        }
+        for (std::size_t slot = 0; slot < profile.hardpoints.size(); ++slot) {
+            auto& hp = profile.hardpoints[slot];
+            const auto where = context + " hardpoint " + std::to_string(slot);
+            const auto health_message = where + ": a destroyable hardpoint needs health in [0, " +
+                                        std::to_string(max_durability_health) + "], any other hardpoint zero";
+            if (hp.destroyable) clamp(hp.max_health, 0, health_limit_raw, "Health", health_message);
+            else if (hp.max_health.raw() != 0) {
+                core::LoadNote note;
+                note.code = "EAWR-LOAD-0102";
+                note.object = type_name + " hardpoint " + std::to_string(slot);
+                note.tag = "Health";
+                note.authored_value = fixed_decimal(hp.max_health);
+                note.action = core::LoadAction::clamped;
+                note.effective_value = "0";
+                note.diagnostic_code = "EAWR-SIM-0305";
+                note.message = health_message;
+                notes.append(std::move(note));
+                hp.max_health = {};
+            }
+            const auto repair_message = where + ": repair values must be >= 0 and bounded by the health limit";
+            clamp(hp.repair_amount_per_frame, 0, health_limit_raw, "Repair_Amount_Per_Frame", repair_message);
+            clamp(hp.repair_cost_per_frame, 0, std::numeric_limits<std::int64_t>::max(), "Repair_Cost_Per_Frame",
+                  repair_message);
+        }
+    }
+    const auto limit = max_damage_multiplier * math::Fixed::scale;
+    for (auto& entry : table.difficulty) {
+        const auto message = "difficulty scale of player " + std::to_string(entry.player) +
+                             ": the health scale must be in (0, " + std::to_string(max_damage_multiplier) +
+                             "], the shield and damage scales in [0, " + std::to_string(max_damage_multiplier) + "]";
+        clamp(entry.health, 1, limit, "difficulty health", message);
+        clamp(entry.shield, 0, limit, "difficulty shield", message);
+        clamp(entry.damage, 0, limit, "difficulty damage", message);
+        for (const auto& profile : table.profiles) {
+            const auto inspect = [&](math::Fixed value, std::int64_t minimum, const char* tag) {
+                const auto product = math::multiply(value, entry.health);
+                if (product && product.value().raw() >= minimum && product.value().raw() <= health_limit_raw) return;
+                core::LoadNote note;
+                note.code = "EAWR-LOAD-0103";
+                const auto key = std::to_string(entry.player) + ":" + std::to_string(profile.type_id) + ":" + tag;
+                if (std::find(table.noted_scaled_health.begin(), table.noted_scaled_health.end(), key) !=
+                    table.noted_scaled_health.end())
+                    return;
+                table.noted_scaled_health.push_back(key);
+                note.object = "type#" + std::to_string(profile.type_id);
+                note.tag = tag;
+                note.authored_value = fixed_decimal(value);
+                note.action = core::LoadAction::clamped;
+                const auto effective =
+                    product ? std::clamp(product.value().raw(), minimum, health_limit_raw) : health_limit_raw;
+                note.effective_value = fixed_decimal(math::Fixed::from_raw(effective));
+                note.diagnostic_code = "EAWR-SIM-0305";
+                note.message = "difficulty scale of player " + std::to_string(entry.player) +
+                               ": scaled health outside supported range";
+                notes.append(std::move(note));
+            };
+            inspect(profile.max_hull, 1, "Tactical_Health");
+            for (const auto& hp : profile.hardpoints)
+                if (hp.destroyable)
+                    inspect(hp.max_health, 0, "Health");
+        }
+    }
+    normalize_damage(table, notes);
 }
 
 core::Result<void> validate_durability(const DurabilityTable& table) {
@@ -190,9 +359,9 @@ core::Result<void> validate_durability(const DurabilityTable& table) {
         return core::Result<void>::success();
     }
     const auto& rules = table.rules;
-    if (rules.hull_vs_hardpoints.raw() < 0 || rules.hull_vs_hardpoints.raw() > health_limit_raw
-        || rules.engines_disabled_speed.raw() < 0 || rules.engines_disabled_speed.raw() > math::Fixed::scale
-        || rules.damaged_fraction.raw() < 0 || rules.damaged_fraction.raw() > math::Fixed::scale) {
+    if (rules.hull_vs_hardpoints.raw() < 0 || rules.hull_vs_hardpoints.raw() > health_limit_raw ||
+        rules.engines_disabled_speed.raw() < 0 || rules.engines_disabled_speed.raw() > math::Fixed::scale ||
+        rules.damaged_fraction.raw() < 0 || rules.damaged_fraction.raw() > math::Fixed::scale) {
         return invalid("durability rules must be >= 0, the speed modifier and damaged fraction at most 1");
     }
     for (std::size_t index = 0; index < table.profiles.size(); ++index) {
@@ -213,8 +382,8 @@ core::Result<void> validate_durability(const DurabilityTable& table) {
         for (std::size_t slot = 0; slot < profile.hardpoints.size(); ++slot) {
             const auto& hardpoint = profile.hardpoints[slot];
             const auto where = context + " hardpoint " + std::to_string(slot);
-            if (hardpoint.destroyable ? !within_health(hardpoint.max_health) : hardpoint.max_health.raw() != 0) {
-                return invalid(where + ": a destroyable hardpoint needs health in (0, "
+            if (hardpoint.destroyable && !within_hardpoint_health(hardpoint.max_health)) {
+                return invalid(where + ": a destroyable hardpoint needs health in [0, "
                     + std::to_string(max_durability_health) + "], any other hardpoint zero");
             }
             if (hardpoint.repair_amount_per_frame.raw() < 0 || hardpoint.repair_cost_per_frame.raw() < 0
@@ -244,9 +413,9 @@ core::Result<void> validate_durability(const DurabilityTable& table) {
                     + " must be in (0, " + std::to_string(max_durability_health) + "]");
             }
             for (const auto& hardpoint : scaled.value().hardpoints) {
-                if (hardpoint.destroyable && !within_health(hardpoint.max_health)) {
+                if (hardpoint.destroyable && !within_hardpoint_health(hardpoint.max_health)) {
                     return invalid(context + ": a scaled hardpoint health of type " + std::to_string(profile.type_id)
-                        + " must be in (0, " + std::to_string(max_durability_health) + "]");
+                        + " must be in [0, " + std::to_string(max_durability_health) + "]");
                 }
             }
         }
@@ -275,11 +444,17 @@ bool hardpoint_disabled(const DurabilityState& state, const std::size_t index) n
 }
 
 void carry_station_hardpoints(const DurabilityProfile& previous_profile, const DurabilityState& previous,
-    DurabilityState& replacement) {
+    const DurabilityProfile& replacement_profile, DurabilityState& replacement) {
     replacement.disabled.resize(replacement.hardpoints.size());
     replacement.repairing_players.resize(replacement.hardpoints.size());
     const auto count = std::min(previous.hardpoints.size(), replacement.hardpoints.size());
     for (std::size_t index = 0; index < count; ++index) {
+        if (replacement_profile.hardpoints[index].max_health.raw() == 0) {
+            replacement.hardpoints[index] = {};
+            replacement.disabled[index] = false;
+            replacement.repairing_players[index].clear();
+            continue; // HD-06: neither repairing nor disabled carry may introduce positive health.
+        }
         if (index < previous.repairing_players.size() && !previous.repairing_players[index].empty()) {
             replacement.hardpoints[index] = previous.hardpoints[index];
             replacement.repairing_players[index] = previous.repairing_players[index];
@@ -459,6 +634,10 @@ core::Result<RepairOutcome> repair_frame(
         return core::Result<RepairOutcome>::success(outcome);
     }
     const auto& hardpoint = profile.hardpoints[index];
+    if (hardpoint.destroyable && hardpoint.max_health.raw() == 0) {
+        state.hardpoints[index] = {}; // HD-06: never complete a repair by reviving this slot.
+        return core::Result<RepairOutcome>::success(outcome);
+    }
     // HR-05: another healing source may have filled this slot before its paid service.
     // Complete even without credits; no health increment means no additional debit.
     if (!hardpoint.destroyable || state.hardpoints[index].raw() <= 0) {

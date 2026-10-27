@@ -13,9 +13,13 @@ set(EAWR_MODS_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/chain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/discovery.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fingerprint.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/file_index.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/file_index_build.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/profile.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/record.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_translation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/workshop.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/workshop_watch.cpp"
 )
 if(WIN32)
     list(APPEND EAWR_MODS_SOURCES "${CMAKE_CURRENT_LIST_DIR}/profile_windows.cpp")

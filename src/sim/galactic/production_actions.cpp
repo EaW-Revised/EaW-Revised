@@ -628,7 +628,19 @@ core::Result<std::shared_ptr<void>> GalacticSession::NativeActionBarrier::player
 core::Result<void> GalacticSession::NativeActionBarrier::finish_independent_players(
     const std::function<core::Result<void>()>& commit) {
     if (!state_ || state_->finished || state_->independent_players.empty() || !commit
-        || native_action_barrier_context.lock().get() != state_.get() || state_->closing.exchange(true, std::memory_order_acq_rel))
+        || native_action_barrier_context.lock().get() != state_.get())
+        return invalid<void>("native independent join requires its owning barrier, joined players and one ordered commit");
+    // #4594: GCC 14 warns despite the non-null guard. The constructor-owned
+    // state_ is never reassigned and retains State throughout this join.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+    const bool was_closing = state_->closing.exchange(true, std::memory_order_acq_rel);
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
+    if (was_closing)
         return invalid<void>("native independent join requires its owning barrier, joined players and one ordered commit");
     std::vector<std::unique_lock<std::recursive_mutex>> locks;
     std::size_t actions{}, journal_entries{};

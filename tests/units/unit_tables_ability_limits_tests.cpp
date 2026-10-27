@@ -78,6 +78,83 @@ const t::AbilityProfile* ability_of(const t::AbilityTable& table, const std::str
     return slot ? &profile->abilities[*slot] : nullptr;
 }
 
+void container_replenishment_loading() {
+    const std::string refill = "<Unit_Ability><Type>REPLENISH_WINGMEN</Type>"
+        "<Recharge_Seconds>60</Recharge_Seconds><Particle_Effect>test_refill</Particle_Effect></Unit_Ability>";
+    // WHE-70: effective TEAM behaviour controls dispatch, including a modded XML class.
+    for (const bool container_class : {false, true}) {
+        for (const bool authored_team : {false, true}) {
+            TempTree tree;
+            auto xml = with_second_frigate(layer_xml("15", "0.8"));
+            const auto ability_end = xml.find("</Unit_Abilities_Data>");
+            xml.insert(ability_end, refill);
+            expect(replace_once(xml, "<Behavior>SELECTABLE</Behavior>",
+                "<Behavior>SELECTABLE, TEAM</Behavior>"), "WHE-70: fixture authors TEAM behaviour");
+            if (authored_team) expect(replace_once(xml, "<Lua_Script>ObjectScript_Test</Lua_Script>",
+                "<Create_Team_Type>Test_Squadron</Create_Team_Type><Lua_Script>ObjectScript_Test</Lua_Script>"),
+                "WHE-70: a container-local creation-team reference is not used for refill");
+            if (container_class) {
+                const auto start = xml.find("<SpaceUnit Name=\"Test_Frigate\">");
+                const auto end = xml.find("</SpaceUnit>", start);
+                xml.replace(end, std::string_view("</SpaceUnit>").size(), "</Container>");
+                xml.replace(start, std::string_view("<SpaceUnit").size(), "<Container");
+            }
+            write_fixture(tree.root, xml);
+            const auto tables = load_layers({tree.root});
+            if (!tables) continue;
+            const auto* unit = tables->find("Test_Frigate");
+            expect(unit && unit->replenish_via_members && unit->replenish_team.empty()
+                && unit->abilities.size() == 2 && unit->abilities.back().type == "REPLENISH_WINGMEN",
+                "WHE-70: container keeps authored display ability without inventing a team");
+            expect(std::none_of(tables->unresolved.begin(), tables->unresolved.end(), [](const auto& row) {
+                return row.owner == "Test_Frigate" && row.field == "Create_Team_Type";
+            }), "WHE-70: container has no missing creation-team diagnostic");
+            expect(std::count_if(tables->notes.begin(), tables->notes.end(), [](const auto& row) {
+                return row.owner == "Test_Frigate" && row.reason.find("WHE-70") != std::string::npos;
+            }) == 1, "WHE-70: member dispatch emits one load note per type");
+            const auto before = eawr::units::content_identity(*tables);
+            for (const auto policy : {eawr::units::ContentErrors::strict, eawr::units::ContentErrors::skip_object}) {
+                std::vector<eawr::core::Diagnostic> diagnostics;
+                const auto result = eawr::units::ability_table(*tables, {}, nullptr, true, policy, &diagnostics);
+                expect(result && diagnostics.empty(), "WHE-70: strict and tolerant binding retain the container");
+                if (!result) continue;
+                expect(ability_of(result.value(), "Test_Frigate", t::AbilityKind::replenish_wingmen) == nullptr
+                    && ability_of(result.value(), "Test_Frigate", t::AbilityKind::defend) != nullptr,
+                    "WHE-70: no local refill executes and unrelated abilities survive");
+            }
+            expect(before == eawr::units::content_identity(*tables), "WHE-70: binding preserves authored identity");
+            auto changed = *tables;
+            for (auto& row : changed.units) if (row.id == "Test_Frigate") row.replenish_via_members = false;
+            expect(before != eawr::units::content_identity(changed), "WHE-70: standalone dispatch affects mod identity");
+        }
+    }
+    // The stock shape: display container is temporary metadata; only the leader binds a refill.
+    TempTree tree;
+    auto xml = with_second_frigate(layer_xml("15", "0.8"));
+    xml.insert(xml.find("</Unit_Abilities_Data>"), refill);
+    expect(replace_once(xml, "<Lua_Script>ObjectScript_Test</Lua_Script>",
+        "<Create_Team_Type>Test_Squadron</Create_Team_Type><Lua_Script>ObjectScript_Test</Lua_Script>"),
+        "WHE-63: leader authors its creation team");
+    expect(replace_once(xml, "<Container Name=\"Team\">", "<Container Name=\"Team\">"
+        "<Unit_Abilities_Data>" + refill + "</Unit_Abilities_Data>"), "WHE-70: display container authors refill");
+    write_fixture(tree.root, xml);
+    const auto tables = load_layers({tree.root});
+    if (!tables) return;
+    const auto result = eawr::units::ability_table(*tables);
+    const auto* leader = result ? ability_of(result.value(), "Test_Frigate", t::AbilityKind::replenish_wingmen) : nullptr;
+    const auto* squadron = tables->find("Test_Squadron");
+    expect(leader && leader->replenish_team == eawr::assets::object_type_crc("Test_Squadron")
+        && leader->recharge_frames == 1800 && leader->replenish_particle == "test_refill",
+        "WHE-63: leader retains its authored team, recharge and effect");
+    expect(squadron && !squadron->replenish_via_members && squadron->replenish_team.empty()
+        && squadron->team_abilities.size() == 1 && squadron->team_abilities.front().type == "REPLENISH_WINGMEN",
+        "WHE-70: stock-shaped squadron retains display data without standalone dispatch metadata");
+    const auto bytes = eawr::units::canonical_encoding(*tables);
+    const std::string marker = "member-replenishment-v1";
+    expect(std::search(bytes.begin(), bytes.end(), marker.begin(), marker.end()) == bytes.end(),
+        "WHE-70: stock-shaped loading writes no dispatch extension bytes");
+}
+
 void rocket_hero_loading() {
     TempTree tree;
     auto xml = with_second_frigate(layer_xml("15", "0.8"));
@@ -199,6 +276,7 @@ void bad_entry_skips_only_its_type() {
 } // namespace
 
 void ability_limits() {
+    container_replenishment_loading();
     rocket_hero_loading();
     // WHE-61: unknown and omitted references retain the ability and its sibling in both modes.
     for (const auto kind : {"HARMONIC_BOMB", "WEAKEN_ENEMY", "SELF_DESTRUCT", "FOW_REVEAL_PING"}) {

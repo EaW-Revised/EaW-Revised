@@ -282,6 +282,9 @@ public:
         bool initially_paused{};
         // Development perf trace only: named executor wall times, never canonical state.
         bool measure_phases{};
+        // Load-time diagnostic side channel, called synchronously before the
+        // simulation thread starts. Recovery never calls a presentation sink.
+        std::function<void(std::span<const core::LoadNote>)> load_note_sink{};
     };
 
     // The pool size of the game build: the hardware threads minus the Godot main and render

@@ -15,6 +15,7 @@ struct Goal {
     std::string dialog, variable, tag;
     std::int64_t chapter{};
     bool completed{}, hidden{};
+    bool remove_after_viewed{}; // WST-58: set exactly when the event authored no Story_Tag
     bool operator==(const Goal&) const = default;
 };
 struct GoalsState { // WST-47/58/60: authoritative fixture copy, excluding local UI state.
@@ -22,6 +23,10 @@ struct GoalsState { // WST-47/58/60: authoritative fixture copy, excluding local
     std::vector<Goal> goals;
     bool objectives_visible{true};
 };
+// One owner's goals and objectives, as the campaign checkpoint carries them. The tail is deliberately outside the
+// state digest: the goal rows derive from the digested plot state (an event triggers once), so they add no
+// independent state to compare between peers; they only need to survive a save.
+struct OwnerGoals { Player owner{}; GoalsState state; };
 enum class ObjectiveAction { add, replace, complete, fail, remove, remove_all, display };
 struct ObjectiveReward {
     ObjectiveAction action{};
@@ -35,12 +40,21 @@ struct Dialog {
     std::string file, variable, tag;
     std::int64_t chapter{};
     bool popup{}, sound{};
+    std::optional<bool> remove_after_viewed{}; // authored Story_Tag presence before Story_Incoming replaces the tag
 };
-struct LocalPresentation { bool summary_open{}; std::string transmission_text, mission_added_sound; };
+struct LocalPresentation {
+    bool summary_open{};
+    std::string transmission_text, mission_added_sound;
+    bool defer_summary_state{}; // a live renderer resolves its own open/closed state
+};
 struct ObjectiveChanged { ObjectiveAction action{}; std::string identity; std::optional<Objective> value; bool visible{}; };
 struct GoalChanged { std::string tag; std::optional<Goal> value; };
-enum class SummaryAction { refresh, open, flash_button };
-struct SummaryRequest { SummaryAction action{}; std::string tag; std::int64_t chapter{}; };
+enum class SummaryAction { refresh, open, flash_button, refresh_or_flash };
+struct SummaryRequest {
+    SummaryAction action{}; std::string tag; std::int64_t chapter{};
+    // WST-70 closed-summary advisor/history and sound payload; live providers/sinks remain goals_policy_seam.
+    std::string transmission_text{}, mission_added_sound{};
+};
 struct AdvisorRequest { std::string text_id; };
 struct SoundRequest { std::string sound_id; };
 // WST-48/49: consumer-owned execution and U09 layouts. Preserve authored inputs.
@@ -59,12 +73,13 @@ public:
     void receive(const PresentationEvent& event) override { events.push_back(event); }
 };
 using GoalCommand = std::variant<ObjectiveReward, GoalReward, ConsumerRequest>;
-// Unverified identity/order seam: exact authored text/tag keys, stable insertion order,
+// Unverified objective identity/order seam: exact authored text/tag keys, stable insertion order,
 // duplicate add updates in place; replace keeps its slot and refuses a conflicting key.
 // Repeated dialog tags update content while preserving completed/hidden flags.
 // Hide is a fixture-only policy (WST-58 verifies removal, not a hide operation).
 inline constexpr std::string_view goals_policy_seam =
-    "WST-47/58: objective key/case, duplicate/update/order, goal update preservation, chapter default and hide semantics unverified";
+    "WST-47/58: objective key/case, duplicate/update/order, goal update preservation, chapter default and hide semantics unverified; "
+    "WST-70: quiet advisor/history and mission-sound local providers/sinks are not wired";
 class Goals {
 public:
     explicit Goals(Player owner, GoalsState state = {});
