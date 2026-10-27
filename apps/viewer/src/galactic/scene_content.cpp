@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <set>
 #include <limits>
 #include <sstream>
 
@@ -117,7 +118,8 @@ std::map<std::string, ProductionArt> load_production_art(
         if (const auto* rank = fields.node("Ranking_In_Category"))
             if (const auto value = data::retail::leading_number(rank->raw_text))
                 art.hero_rank = value->value.trunc_to_integer();
-        art.hero = art.named_hero || fields.flag("Is_Generic_Hero") || fields.flag("Is_Special_Weapon_In_Space");
+        art.generic_hero = fields.flag("Is_Generic_Hero");
+        art.hero = art.named_hero || art.generic_hero || fields.flag("Is_Special_Weapon_In_Space");
         art.force_sensitive = fields.flag("Is_Force_Sensitive");
         // Shared object content (CARD-17): negative Population_Value usage.
         art.population = looks.population;
@@ -401,6 +403,41 @@ core::Result<SceneContent> load_scene_content(const vfs::Vfs& filesystem, const 
         }
     }
     return core::Result<SceneContent>::success(std::move(result));
+}
+
+void rebind_players(SceneContent& content, const std::vector<std::pair<PlayerId, std::string>>& roster) {
+    std::map<std::string, const StubPlayer*> by_faction;
+    for (const auto& player : content.snapshot.players) by_faction.emplace(folded(player.faction), &player);
+    std::map<PlayerId, PlayerId> moved; // scene id -> roster id
+    std::set<PlayerId> taken;
+    std::vector<StubPlayer> players;
+    std::map<PlayerId, Affiliation> factions;
+    std::map<PlayerId, std::string> homes, leaders;
+    for (const auto& [id, faction] : roster) {
+        const auto source = by_faction.find(folded(faction));
+        if (source == by_faction.end() || !taken.insert(id).second) continue;
+        const PlayerId old = source->second->id;
+        moved.emplace(old, id);
+        StubPlayer player = *source->second;
+        player.id = id;
+        players.push_back(std::move(player));
+        if (const auto found = content.factions.find(old); found != content.factions.end()) factions.emplace(id, found->second);
+        if (const auto found = content.home_types.find(old); found != content.home_types.end()) homes.emplace(id, found->second);
+        if (const auto found = content.leader_types.find(old); found != content.leader_types.end()) leaders.emplace(id, found->second);
+    }
+    const auto owner_of = [&](const PlayerId old) -> std::optional<PlayerId> {
+        const auto found = moved.find(old);
+        return found == moved.end() ? std::nullopt : std::optional(found->second);
+    };
+    for (auto& planet : content.snapshot.planets) if (planet.owner) planet.owner = owner_of(*planet.owner);
+    std::erase_if(content.snapshot.fleets, [&](const auto& fleet) { return !owner_of(fleet.owner); });
+    for (auto& fleet : content.snapshot.fleets) fleet.owner = *owner_of(fleet.owner);
+    std::erase_if(content.snapshot.seats, [&](const auto& seat) { return !owner_of(seat.player); });
+    for (auto& seat : content.snapshot.seats) seat.player = *owner_of(seat.player);
+    content.snapshot.players = std::move(players);
+    content.factions = std::move(factions);
+    content.home_types = std::move(homes);
+    content.leader_types = std::move(leaders);
 }
 
 const StubPlanet* initial_home(const SceneContent& content, const PlayerId player) {

@@ -274,6 +274,8 @@ const std::vector<std::string_view>& galactic_constant_tags() {
         "Credit_Cap_Per_Planet",
         "MaxCreditIncomeAlignmentBonus",
         "MaxCreditIncomeAlignmentPenalty",
+        "MaxInfluenceTransitionAlignmentBonus", // CGS-16 / RGC-19
+        "MaxInfluenceTransitionAlignmentPenalty",
         "Political_Income_Curve",
         "MaximumPoliticalControl",
         "Political_Control_Change_Time_Seconds",
@@ -317,6 +319,13 @@ void load_constants(const vfs::Vfs& filesystem, GalacticData& data) {
     const Record record("GameConstants", document.value().root, document.value().source.logical_path, data.issues);
     for (const auto tag : galactic_constant_tags()) {
         const auto* node = record.node(tag);
+        // CGS-15: raid masks reset to zero. An absent/empty scalar leaves that
+        // empty category set intact; it does not make the raid policy incomplete.
+        if (node == nullptr && (tag == "Raid_Force_Free_Object_Category_Mask"
+            || tag == "Raid_Force_Limited_Object_Category_Mask")) {
+            data.constants.push_back({std::string(tag), {}, std::nullopt});
+            continue;
+        }
         if (node == nullptr) {
             record.issue(IssueKind::missing_required, nullptr, std::string(tag), {},
                 "absent; its consumer must not invent a default");
@@ -433,6 +442,7 @@ void check_references(const Catalog& catalog, GalacticData& data) {
         }
         for (const auto& value : campaign.ai_player_control) faction("AI_Player_Control", value.faction);
         for (const auto& value : campaign.markup_filenames) faction("Markup_Filename", value.faction);
+        for (const auto& value : campaign.story_names) faction("Story_Name", value.faction);
         for (const auto& force : campaign.starting_forces) {
             faction("Starting_Forces", force.faction);
             placement_location("Starting_Forces", force.location);

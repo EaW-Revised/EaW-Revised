@@ -16,7 +16,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::admit_native_
     const bool fleet_command = std::holds_alternative<CreateFleet>(payload)
         || std::holds_alternative<AddFleetMembers>(payload) || std::holds_alternative<RemoveFleetMembers>(payload)
         || std::holds_alternative<MergeFleets>(payload) || std::holds_alternative<SetFleetOrbitSlot>(payload)
-        || std::holds_alternative<TransferFleetMembers>(payload);
+        || std::holds_alternative<TransferFleetMembers>(payload) || std::holds_alternative<SetFleetPathfinder>(payload);
     const bool movement = std::holds_alternative<MoveFleet>(payload);
     if (impl.failed || encode_payload(payload).size() > galactic_replay_max_payload - 38 || (!fleet_command && !movement)
         || decode_payload(layer_of(payload), opcode_of(payload), encode_payload(payload)) != std::optional(payload))
@@ -30,7 +30,8 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::admit_native_
     std::vector<GalacticEvent> events(impl.snapshot->events().begin(), impl.snapshot->events().end());
     const auto first = events.size();
     if (movement) impl.execute_movement(command, impl.completed_tick, events, pending_local_conflict);
-    else impl.execute_fleet(command, impl.completed_tick, events, pending_local_conflict);
+    else impl.execute_fleet(command, impl.completed_tick, events, pending_local_conflict, false,
+        impl.launch_leg ? session_detail::PausedKind::surface_deploy : session_detail::PausedKind::fleet_management);
     NativeFleetReceipt receipt;
     for (auto i = first; i < events.size(); ++i) {
         if (events[i].kind == GalacticEventKind::command_rejected) receipt.reason = events[i].reason;
@@ -93,13 +94,14 @@ core::Result<bool> fleet_move_without_ability(const Fleet& fleet, const std::spa
 
 FleetControlSetup GalacticSession::Impl::fleet_control_state() const {
     FleetControlSetup result; result.types = setup.fleet_control->types; result.gates = setup.fleet_control->gates;
+    result.pause = setup.fleet_control->pause;
     for (const auto& [id, row] : detached_units) { (void)id; result.detached_units.push_back(row); }
     return result;
 }
 
 void GalacticSession::Impl::execute_fleet(const GameCommand& command, std::uint64_t tick,
-    std::vector<GalacticEvent>& events, bool pending_local_conflict, bool production_placement) {
-    session_detail::execute_native_fleet(*this, command, tick, events, pending_local_conflict, production_placement);
+    std::vector<GalacticEvent>& events, bool pending_local_conflict, bool production_placement, session_detail::PausedKind kind) {
+    session_detail::execute_native_fleet(*this, command, tick, events, pending_local_conflict, production_placement, kind);
 }
 
 } // namespace eawr::sim::galactic

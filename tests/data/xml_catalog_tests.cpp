@@ -207,8 +207,62 @@ void load_health_contracts() {
     }
 }
 
+// SG-CLS-01: FoC reads no class from an element name. A mod's own element name takes the class its variant chain
+// names, else the class its effective tags imply; the origin is recorded so a loader can log the row.
+void object_class_contracts() {
+    TempTree tree;
+    registries(tree.root);
+    write(tree.root / "XML" / "objects-a.xml", R"xml(<Objects>
+<SpaceUnit Name="STOCK_SHIP"><Tactical_Health>10</Tactical_Health></SpaceUnit>
+<Space_Unit Name="CUSTOM_SHIP"><Variant_Of_Existing_Type>stock_ship</Variant_Of_Existing_Type></Space_Unit>
+<Template Name="TEMPLATE_SQUAD"><Squadron_Units>stock_ship, 3</Squadron_Units></Template>
+<Template Name="TEMPLATE_HERO"><Is_Named_Hero>Yes</Is_Named_Hero></Template>
+<Template Name="TEMPLATE_PLAIN"><Tactical_Health>5</Tactical_Health></Template>
+<Template Name="TEMPLATE_DUMMY_BASE"><Behavior>SELECTABLE, DUMMY_STAR_BASE</Behavior></Template>
+<Template Name="TEMPLATE_HERO_COMPANY"><Company_Units>stock_ship, 2</Company_Units><Is_Named_Hero>Yes</Is_Named_Hero></Template>
+<Template Name="TEMPLATE_UPGRADE"><CategoryMask>Upgrade</CategoryMask></Template>
+<Deathclone Name="CLONE_SQUAD"><Variant_Of_Existing_Type>template_squad</Variant_Of_Existing_Type></Deathclone>
+<SpaceHero Name="LONE_HERO"><Variant_Of_Existing_Type>template_hero</Variant_Of_Existing_Type></SpaceHero>
+<Deathclone Name="LONE_PLAIN"><Variant_Of_Existing_Type>template_plain</Variant_Of_Existing_Type></Deathclone>
+<Ground_Structure_Tauri Name="LONE_BASE"><Variant_Of_Existing_Type>template_dummy_base</Variant_Of_Existing_Type></Ground_Structure_Tauri>
+<Props_Wave Name="LONE_COMPANY"><Company_Units>stock_ship, 2</Company_Units></Props_Wave>
+<Props_Wave Name="LONE_HERO_COMPANY"><Variant_Of_Existing_Type>template_hero_company</Variant_Of_Existing_Type></Props_Wave>
+<Props_Wave Name="LONE_UPGRADE"><Variant_Of_Existing_Type>template_upgrade</Variant_Of_Existing_Type></Props_Wave>
+<Space_Unit Name="ANCESTOR_BEATS_TAGS"><Variant_Of_Existing_Type>stock_ship</Variant_Of_Existing_Type><Squadron_Units>stock_ship, 3</Squadron_Units></Space_Unit>
+</Objects>)xml");
+    write(tree.root / "XML" / "objects-b.xml", "<Objects/>");
+    const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto mounted = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "class fixture mounts");
+    if (!mounted) return;
+    auto loaded = eawr::data::load_catalog(mounted.value(), eawr::data::Profile::eaw);
+    expect(static_cast<bool>(loaded), "class fixture loads");
+    if (!loaded) return;
+    const auto resolve = [&](const char* id) { return loaded.value().catalog.resolve(id, eawr::data::Category::game_object); };
+    const auto check = [&](const char* id, const char* type, const char* origin) {
+        const auto object = resolve(id);
+        expect(static_cast<bool>(object), std::string(id) + " resolves");
+        if (!object) return;
+        expect(object.value().type_name == type, std::string(id) + " class is " + type + ", got " + object.value().type_name);
+        expect(object.value().class_origin == origin, std::string(id) + " origin is " + origin + ", got " + object.value().class_origin);
+    };
+    check("STOCK_SHIP", "SpaceUnit", "");
+    check("CUSTOM_SHIP", "SpaceUnit", "ancestor:SpaceUnit");
+    check("CLONE_SQUAD", "Squadron", "tags:Squadron");
+    check("LONE_HERO", "HeroUnit", "tags:HeroUnit");
+    check("LONE_PLAIN", "Deathclone", "unclassed");
+    check("LONE_BASE", "StarBase", "tags:StarBase");
+    check("LONE_COMPANY", "GroundCompany", "tags:GroundCompany");
+    check("LONE_HERO_COMPANY", "HeroCompany", "tags:HeroCompany");
+    check("LONE_UPGRADE", "UpgradeObject", "tags:UpgradeObject");
+    check("ANCESTOR_BEATS_TAGS", "SpaceUnit", "ancestor:SpaceUnit");
+    expect(eawr::data::is_foc_object_class("spaceUNIT") && !eawr::data::is_foc_object_class("Space_Unit"),
+           "FoC class names match without case, a mod label does not");
+}
+
 void run_contracts() {
     locale_contracts();
+    object_class_contracts();
     load_health_contracts();
     TempTree tree;
     registries(tree.root);

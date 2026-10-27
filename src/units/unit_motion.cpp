@@ -1,8 +1,10 @@
 #include "eawr/assets/map.hpp"
+#include "eawr/units/domain_tags.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "unit_internal.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -248,6 +250,7 @@ void append_squadron_motion_profiles(const UnitTables& tables, tactical::MotionT
         const bool solo = unit.kind == UnitKind::craft && is_craft(assets::object_type_crc(unit.id));
         if (!solo && (unit.kind != UnitKind::squadron || unit.members.empty())) continue;
         tactical::SquadronProfile squadron;
+        squadron.max_squad_size = unit.max_squad_size;
         squadron.type_id = assets::object_type_crc(unit.id);
         // WHE-SQ-02: a parentless fighter uses its own flight/order state; no extra entity is created.
         if (solo) {
@@ -285,7 +288,7 @@ void append_squadron_motion_profiles(const UnitTables& tables, tactical::MotionT
 }
 
 void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTable& table,
-    const SpawnPolicy& spawn_policy, const bool& campaign, const bool& single_ships,
+    const SpawnPolicy& spawn_policy, const bool& campaign,
     const Fixed& one, std::optional<core::Diagnostic>& error) {
     auto& squadrons = table.squadrons;
     const auto times = [&](const Fixed value, const Fixed factor, const std::string& what) {
@@ -308,9 +311,9 @@ void append_spawner_motion_profiles(const UnitTables& tables, tactical::MotionTa
             std::vector<tactical::SpawnEntryProfile> result;
             for (const auto& entry : starting) {
                 const auto id = assets::object_type_crc(entry.squadron);
-                // WSL-16/WGT-10: a campaign station also launches a type without squadron members as one single
-                // ship; skirmish tables keep dropping such entries (the owner's station-spawn decision).
-                const auto* spawned = single_ships && !has_squadron(id) ? tables.find(entry.squadron) : nullptr;
+                // WSL-04/16a: generic spawners accept ordinary ships in either tactical mode.
+                // Marker-created skirmish stations suppress garrisons on the live object instead.
+                const auto* spawned = !has_squadron(id) ? tables.find(entry.squadron) : nullptr;
                 const bool ship = spawned != nullptr && spawned->kind == UnitKind::ship;
                 if (!has_squadron(id) && !ship) continue;
                 tactical::SpawnEntryProfile row;
@@ -393,10 +396,10 @@ core::Result<tactical::Footprint> detail::space_footprint(const std::string& id,
     return core::Result<tactical::Footprint>::success(*footprint);
 }
 
-core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy) {
+core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const SpawnPolicy& spawn_policy,
+    std::vector<core::Diagnostic>* const notes) {
     using Result = core::Result<tactical::MotionTable>;
     const bool campaign = spawn_policy.mode == SpawnPolicy::Mode::campaign;
-    const bool single_ships = spawn_policy.mode != SpawnPolicy::Mode::skirmish;
     for (const auto& owner : spawn_policy.owners)
         if (owner.tech >= Spawner{}.campaign_starting.size())
             return Result::failure(failure("garrison owner tech outside 0..5"));
@@ -406,7 +409,7 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
         }
         return std::nullopt;
     };
-    const auto multiplier = scalar("Object_Max_Speed_Multiplier_Space");
+    const auto multiplier = scalar(domain_tag(tables.domain, DomainTag::speed_multiplier));
     const auto rotations = scalar("MaxRotationsSpace");
     const auto expansion = scalar("XYExpansionDistanceSpace");
     const auto corvette = scalar("TurnInPlaceSlowdownCorvette");
@@ -434,11 +437,11 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
         table.rules.reevaluation_frames = static_cast<std::uint32_t>(interval->raw() / Fixed::scale);
     }
     if (const auto max_waypoints = scalar("MaxWaypointsPerPath")) {
-        if (max_waypoints->raw() < 0 || max_waypoints->raw() % Fixed::scale != 0
-            || max_waypoints->raw() / Fixed::scale > (1 << 16)) {
-            return Result::failure(failure("MaxWaypointsPerPath must be a whole number, 0 to 65536"));
-        }
-        table.rules.max_waypoints = static_cast<std::uint32_t>(max_waypoints->raw() / Fixed::scale);
+        // HCB-58 (#4992): FoC reads the constant with atoi into a 32-bit int and the queue compares the count
+        // against it as unsigned, so a negative authoring (-1) wraps to 4294967295, no practical limit,
+        // and 0 refuses every queued point. A value with a fraction keeps its whole part.
+        const auto whole = std::clamp<std::int64_t>(max_waypoints->trunc_to_integer(), INT32_MIN, INT32_MAX);
+        table.rules.max_waypoints = static_cast<std::uint32_t>(static_cast<std::int32_t>(whole));
     }
     if (const auto guard = scalar("Space_Guard_Range")) {
         if (guard->raw() < 0) return Result::failure(failure("Space_Guard_Range must not be negative"));
@@ -460,7 +463,7 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
     const Fixed one = Fixed::from_raw(Fixed::scale);
     append_craft_motion_profiles(tables, table, multiplier, error);
     append_squadron_motion_profiles(tables, table, multiplier, error);
-    append_spawner_motion_profiles(tables, table, spawn_policy, campaign, single_ships, one, error);
+    append_spawner_motion_profiles(tables, table, spawn_policy, campaign, one, error);
 
     if (error) return Result::failure(*error);
     std::sort(table.profiles.begin(), table.profiles.end(),
@@ -472,6 +475,16 @@ core::Result<tactical::MotionTable> motion_table(const UnitTables& tables, const
     }
     auto valid = tactical::validate_motion(table);
     if (!valid) return Result::failure(failure(valid.error().message));
+    if (notes) {
+        for (const auto& footprint : table.footprints) {
+            if (footprint.layer != tactical::SpaceLayer::static_object || footprint.locomotor
+                || table.find(footprint.type_id) != nullptr) continue;
+            auto note = failure("static footprint " + std::to_string(footprint.type_id)
+                + ": no locomotor; destination-search rings are not built or validated");
+            note.severity = core::Severity::info;
+            notes->push_back(std::move(note));
+        }
+    }
     return Result::success(std::move(table));
 }
 

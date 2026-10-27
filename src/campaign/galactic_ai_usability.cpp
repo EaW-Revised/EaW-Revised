@@ -173,8 +173,132 @@ GalacticAiUsabilityProvider::GalacticAiUsabilityProvider(std::shared_ptr<const G
     if (!content_ || !content_->logical_fps || content_->players.empty())
         throw std::invalid_argument("usability requires immutable campaign identities");
 }
+thread_local const GalacticAiUsabilityProvider* GalacticAiUsabilityProvider::frontier_owner_{};
+thread_local GalacticAiUsabilityProvider* GalacticAiUsabilityProvider::frontier_provider_{};
+
+GalacticAiUsabilityProvider* GalacticAiUsabilityProvider::selected_frontier() const noexcept {
+    if (decision_frontiers_.empty()) return nullptr;
+    return frontier_owner_ == this ? frontier_provider_ : nullptr;
+}
+const GalacticAiUsabilityProvider::Cache* GalacticAiUsabilityProvider::find_cache(gc::PlayerId player) const {
+    const auto found = caches_.find(player);
+    if (found != caches_.end()) return &found->second;
+    return frozen_provider_ ? frozen_provider_->find_cache(player) : nullptr;
+}
+GalacticAiUsabilityProvider::PlayerFrontier::PlayerFrontier(GalacticAiUsabilityProvider& owner, gc::PlayerId player)
+    : previous_owner_(frontier_owner_), previous_frontier_(frontier_provider_) {
+    if (owner.decision_frontiers_.empty()) return;
+    const auto at = owner.decision_frontiers_.find(player);
+    if (at == owner.decision_frontiers_.end()) throw std::logic_error("unprepared usability frontier owner");
+    auto* selected = at->second.get();
+    if (previous_owner_ != &owner || previous_frontier_ != selected) {
+        if (selected->frontier_active_.exchange(true, std::memory_order_acq_rel))
+            throw std::logic_error("usability frontier already has an active chain");
+        acquired_ = selected;
+    }
+    frontier_owner_ = &owner; frontier_provider_ = selected;
+}
+GalacticAiUsabilityProvider::PlayerFrontier::~PlayerFrontier() {
+    frontier_owner_ = previous_owner_; frontier_provider_ = previous_frontier_;
+    if (acquired_) acquired_->frontier_active_.store(false, std::memory_order_release);
+}
+core::Result<void> GalacticAiUsabilityProvider::prepare_decision_frontiers(const sim::PartitionExecutor& executor,
+    std::span<const gc::PlayerId> players) {
+    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+        return refuse<void>("usability frontiers require an unselected barrier owner");
+    gc::PlayerId previous{};
+    for (const auto player : players) {
+        const auto* facts = find(content_->players, player, [](const auto& row) { return row.player; });
+        if (!facts || !facts->ai || player <= previous)
+            return refuse<void>("usability frontier owners must be sorted unique AI players");
+        previous = player;
+    }
+    if (players.size() <= 1) return core::Result<void>::success();
+    std::vector<GalacticAiUsabilityProvider*> blocks;
+    for (const auto player : players) {
+        auto block = std::make_unique<GalacticAiUsabilityProvider>(content_);
+        blocks.push_back(block.get()); decision_frontiers_.emplace(player, std::move(block));
+    }
+    auto prepared = executor.execute_phase("galactic-ai-usability-frontiers", blocks.size(), [&](std::size_t index) {
+        auto& block = *blocks[index];
+        block.frozen_provider_ = this;
+        block.observed_session_ = observed_session_; block.observed_world_ = observed_world_;
+        block.stealth_generation_ = stealth_generation_; block.stealth_fleets_ = stealth_fleets_;
+        block.publication_revision_ = publication_revision_; block.output_epoch_ = output_epoch_;
+        block.live_stealth_unavailable_ = live_stealth_unavailable_;
+        block.story_path_unavailable_ = story_path_unavailable_; block.incremental_ = incremental_;
+    });
+    if (!prepared) decision_frontiers_.clear();
+    return prepared;
+}
+core::Result<void> GalacticAiUsabilityProvider::discard_decision_frontiers() {
+    for (const auto& [player, block] : decision_frontiers_) {
+        static_cast<void>(player);
+        if (block->frontier_active_.load(std::memory_order_acquire))
+            return refuse<void>("usability join requires all player scopes to exit");
+    }
+    decision_frontiers_.clear();
+    return core::Result<void>::success();
+}
+core::Result<void> GalacticAiUsabilityProvider::commit_decision_frontiers() {
+    for (const auto& [player, block] : decision_frontiers_) {
+        static_cast<void>(player);
+        if (block->frontier_active_.load(std::memory_order_acquire))
+            return refuse<void>("usability join requires all player scopes to exit");
+    }
+    // Foreign-player misses belong to the querying chain's read overlay. Only
+    // an owner's own cache/deadline replaces its canonical row at this join.
+    for (auto& [player, block] : decision_frontiers_) {
+        if (auto at = block->caches_.find(player); at != block->caches_.end()) {
+            const auto old = caches_.find(player);
+            if (old == caches_.end() || old->second.output_version != at->second.output_version)
+                at->second.output_version = ++output_epoch_;
+            caches_.insert_or_assign(player, std::move(at->second));
+        }
+        if (const auto at = block->prepared_through_.find(player); at != block->prepared_through_.end()) {
+            if (!prepared_through_.contains(player) || prepared_through_.at(player) != at->second) mark_state_changed();
+            prepared_through_.insert_or_assign(player, at->second);
+        }
+        work_.generations += block->work_.generations; work_.planets += block->work_.planets;
+        work_.searches += block->work_.searches; work_.edges += block->work_.edges;
+        work_.stealth_preparations += block->work_.stealth_preparations;
+        work_.site_searches += block->work_.site_searches; work_.island_reuses += block->work_.island_reuses;
+        work_.access_reuses += block->work_.access_reuses; work_.presence_reuses += block->work_.presence_reuses;
+        work_.island_read_reuses += block->work_.island_read_reuses; work_.row_reuses += block->work_.row_reuses;
+        work_.block_row_reuses += block->work_.block_row_reuses;
+        if (block->stealth_generation_ != stealth_generation_ || block->stealth_fleets_ != stealth_fleets_)
+            stealth_generation_.reset(); // derive from the merged live owner at the next ordinary read
+        live_stealth_unavailable_ = live_stealth_unavailable_ || block->live_stealth_unavailable_;
+        story_path_unavailable_ = story_path_unavailable_ || block->story_path_unavailable_;
+    }
+    decision_frontiers_.clear();
+    return core::Result<void>::success();
+}
+void GalacticAiUsabilityProvider::refuse_live_stealth() noexcept {
+    if (auto* block = selected_frontier()) { block->refuse_live_stealth(); return; }
+    live_stealth_unavailable_ = true;
+}
+void GalacticAiUsabilityProvider::refuse_story_path_inputs() noexcept {
+    if (auto* block = selected_frontier()) { block->refuse_story_path_inputs(); return; }
+    story_path_unavailable_ = true;
+}
+void GalacticAiUsabilityProvider::set_incremental(bool enabled) noexcept {
+    if (auto* block = selected_frontier()) { block->set_incremental(enabled); return; }
+    incremental_ = enabled;
+}
+GalacticAiUsabilityProvider::Work GalacticAiUsabilityProvider::work() const noexcept {
+    if (const auto* block = selected_frontier()) return block->work();
+    return work_;
+}
+std::size_t GalacticAiUsabilityProvider::record_byte_upper_bound() const noexcept {
+    if (const auto* block = selected_frontier()) return block->record_byte_upper_bound();
+    return frozen_provider_ ? frozen_provider_->records_.byte_size()
+        + (frozen_provider_->prepared_through_.size() + prepared_through_.size()) * 13 + 1024
+        : records_.byte_size() + prepared_through_.size() * 13 + 1024;
+}
 core::Result<bool> GalacticAiUsabilityProvider::usability(gc::PlayerId player,
     const gc::GalacticSnapshot& snapshot, gc::PlanetId planet) const {
+    if (const auto* block = selected_frontier()) return block->usability(player, snapshot, planet);
     const auto* selected = find(content_->players, player, [](const auto& row) { return row.player; });
     if (!selected) return refuse<bool>("unknown AI usability player");
     if (!selected->ai || multiplayer(snapshot)) return core::Result<bool>::success(true);
@@ -207,10 +331,86 @@ core::Result<void> GalacticAiUsabilityProvider::prepare_stealth(const gc::Galact
     ++work_.stealth_preparations;
     return core::Result<void>::success();
 }
+struct GalacticAiUsabilityProvider::PlayerPreparation {
+    ai::GalacticPlayerFacts player;
+    gc::PlayerId knowledge_player{};
+    std::vector<gc::ObservedPlanet> projected_knowledge;
+    std::optional<Cache> cache;
+    std::optional<PreparedInput> prepared;
+    struct Undo { std::pair<gc::PlayerId, gc::PlanetId> key; Reach* row; Reach before; };
+    std::vector<Undo> undo;
+    std::vector<std::pair<gc::PlayerId, gc::PlanetId>> inserted;
+    std::vector<Reach*> held;
+    std::vector<unsigned char> new_rows;
+    Work work;
+    std::uint64_t perception_revision{}; // frozen aggregate; normalized to the joined revision at publication
+    std::uint64_t movement_before{}, movement_after{};
+    bool refreshed{}, correcting{};
+    bool changed{};
+    bool due{}, output_changed{};
+    std::optional<core::Diagnostic> error;
+    std::vector<gc::PathPlanet> access;
+    std::vector<std::optional<core::Diagnostic>> access_errors;
+    std::vector<std::array<ai::SharedPlanetList, 6>> sites;
+    std::vector<std::array<bool, 6>> searched, updated;
+};
+// The ordinary path lends its existing scratch, transaction and counters.
+// Parallel owners lend the same view over their private preparation instead.
+struct GalacticAiUsabilityProvider::ConnectivityFinish {
+    const ai::GalacticPlayerFacts& player;
+    PreparedInput* prepared;
+    std::vector<PlayerPreparation::Undo>& undo;
+    std::vector<std::pair<gc::PlayerId, gc::PlanetId>>& inserted;
+    std::vector<Reach*>& held;
+    std::vector<std::array<ai::SharedPlanetList, 6>>& sites;
+    std::vector<std::array<bool, 6>>& searched;
+    std::vector<std::array<bool, 6>>& updated;
+    Work& work;
+    std::span<const unsigned char> new_rows;
+    std::optional<std::uint64_t> perception_revision;
+    bool& changed;
+    bool& output_changed;
+};
+core::Result<gc::PathPlanet> GalacticAiUsabilityProvider::access_row(
+    const PlayerPreparation& task, const gc::GalacticSnapshot& snapshot, std::size_t index) const {
+    const auto owner = task.player.player;
+    const auto* observer = find(snapshot.observer()->players, owner, [](const auto& row) { return row.player; });
+    if (!observer) return refuse<gc::PathPlanet>("B selected observer is absent");
+    const auto allied = [&](gc::PlayerId other) {
+        return other == owner || std::binary_search(observer->allies.begin(), observer->allies.end(), other);
+    };
+    const auto relation = [&](gc::PlayerId other) {
+        if (allied(other)) return gc::PathRelation::allied;
+        const auto* player = find(content_->players, other, [](const auto& row) { return row.player; });
+        return !player || player->neutral ? gc::PathRelation::neutral : gc::PathRelation::hostile;
+    };
+    const auto id = snapshot.planets()[index].id;
+    const auto* facts = find(snapshot.observer()->planets, id, [](const auto& row) { return row.planet; });
+    const auto usable = usability(owner, snapshot, id);
+    if (!usable) return core::Result<gc::PathPlanet>::failure(usable.error());
+    if (!facts) return refuse<gc::PathPlanet>("B live planetary observer facts are absent");
+    gc::PathPlanet row; row.id = id; row.ai_usable = usable.value();
+    row.owner_visible = false;
+    row.relation = relation(facts->allegiance); row.corrupted = facts->corrupted;
+    const auto* local = find(snapshot.observer()->records, std::pair{task.knowledge_player, id},
+        [](const auto& at) { return std::pair{at.player, at.planet}; });
+    row.revealed = local && local->discovered;
+    const std::span<const gc::ObservedPlanet> observations = task.knowledge_player == snapshot.view_player()
+        ? snapshot.observations() : std::span<const gc::ObservedPlanet>(task.projected_knowledge);
+    for (const auto& knowledge : observations)
+        if (knowledge.player == task.knowledge_player && knowledge.planet == id) {
+            row.owner_visible = knowledge.knowledge.ownership;
+            row.fleet_presence_visible = knowledge.knowledge.fleet_presence; break;
+        }
+    if (facts->space_level != 0) row.starbase_relation = relation(facts->space_owner);
+    for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == id && !fleet.motion.transit && !allied(fleet.owner))
+        row.nonallied_fleet = true;
+    return core::Result<gc::PathPlanet>::success(std::move(row));
+}
 core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvider::refresh(
     gc::PlayerId owner, const gc::GalacticSnapshot& snapshot, const World& world,
-    const Engine& engine, const sim::PartitionExecutor& executor, const ai::DerivedExecutionRestore* reconstruction, bool force) {
-    if (auto prepared = prepare_stealth(snapshot); !prepared) return core::Result<const Cache*>::failure(prepared.error());
+    const Engine& engine, const sim::PartitionExecutor& executor, const ai::DerivedExecutionRestore* reconstruction, bool force, PlayerPreparation* player_stage) {
+    if (auto prepared = player_stage ? core::Result<void>::success() : prepare_stealth(snapshot); !prepared) return core::Result<const Cache*>::failure(prepared.error());
     if (story_path_unavailable_) return refuse<const Cache*>("B-U02/WST-52: live story path predicate owner is unavailable");
     if (!world.available() || world.observer_input_generation() != snapshot.observer_input_generation())
         return refuse<const Cache*>("B perception facts are not bound to the current completed world");
@@ -221,12 +421,33 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
         return refuse<const Cache*>("B live player, observer and access owners are required");
     const auto generation = snapshot.observer_input_generation();
     const auto access_generation = snapshot.planet_access()->generation;
-    const auto old = caches_.find(owner);
-    if (!force && old != caches_.end() && !old->second.source_changed && old->second.observer_generation == generation
-        && old->second.access_generation == access_generation
-        && old->second.perception_revision == world.movement_input_revision()
-        && Real(world.synchronized_frame()) <= old->second.valid_through)
-        return core::Result<const Cache*>::success(&old->second);
+    if (frozen_provider_ && !caches_.contains(owner)) {
+        const auto* frozen = frozen_provider_->find_cache(owner);
+        if (frozen && !force && !frozen->source_changed && frozen->observer_generation == generation
+            && frozen->access_generation == access_generation
+            && frozen->perception_revision == world.movement_input_revision()
+            && Real(world.synchronized_frame()) <= frozen->valid_through)
+            return core::Result<const Cache*>::success(frozen);
+        // Copy on the first miss only. A valid frozen row is read directly;
+        // later reads in this chain observe its own replacement, including for
+        // foreign players, without reading another chain's mutable cache.
+        if (frozen) caches_.emplace(owner, *frozen);
+        if (const auto at = frozen_provider_->prepared_through_.find(owner); at != frozen_provider_->prepared_through_.end())
+            prepared_through_.try_emplace(owner, at->second);
+    }
+    const auto existing_cache = caches_.find(owner);
+    auto* old = player_stage ? (player_stage->cache ? &*player_stage->cache : nullptr)
+        : existing_cache == caches_.end() ? nullptr : &existing_cache->second;
+    auto& work = player_stage ? player_stage->work : work_;
+    const auto prepared_input_of = [&]() -> const PreparedInput& {
+        return player_stage ? player_stage->prepared.value() : prepared_through_.at(owner);
+    };
+    if (!force && old != nullptr && !old->source_changed && old->observer_generation == generation
+        && old->access_generation == access_generation
+        && old->perception_revision == (player_stage ? player_stage->perception_revision : world.movement_input_revision())
+        && Real(world.synchronized_frame()) <= old->valid_through)
+        return core::Result<const Cache*>::success(old);
+    if (player_stage) player_stage->refreshed = true;
     const auto* observer = find(snapshot.observer()->players, owner, [](const auto& row) { return row.player; });
     if (!observer) return refuse<const Cache*>("B selected observer is absent");
     const auto allied = [&](gc::PlayerId other) {
@@ -246,29 +467,33 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     // partitioned phase below does not query perception or lazy engine caches.
     // Reconstruction reads archived values and refreshes nothing.
     std::optional<World::PartitionedReads> reads;
-    if (!reconstruction) reads.emplace(world.partitioned_reads());
+    if (!reconstruction && !player_stage) reads.emplace(world.partitioned_reads());
     // The access rows below are a pure function of the snapshot, whose observer generation advances with every
     // observer, orbit/membership and live-content commit, and of the access generation. When both are equal and only
     // the perception deadline or revision moved, replay the previous rows; the perception tokens still re-query below.
-    const bool replay_rows = !reconstruction && !force && old != caches_.end() && !old->second.source_changed
-        && old->second.observer_generation == generation && old->second.access_generation == access_generation
-        && old->second.movement.access.size() == snapshot.planets().size()
-        && old->second.movement.ai_player == next.movement.ai_player
-        && old->second.movement.multiplayer == next.movement.multiplayer
-        && old->second.movement.benefits_from_corruption == next.movement.benefits_from_corruption;
+    const bool replay_rows = !reconstruction && !force && old != nullptr && !old->source_changed
+        && old->observer_generation == generation && old->access_generation == access_generation
+        && old->movement.access.size() == snapshot.planets().size()
+        && old->movement.ai_player == next.movement.ai_player
+        && old->movement.multiplayer == next.movement.multiplayer
+        && old->movement.benefits_from_corruption == next.movement.benefits_from_corruption;
     if (replay_rows) {
         const gc::PathPlanet defaults{};
         for (std::size_t index = 0; index < next.movement.access.size(); ++index) {
-            auto& row = next.movement.access[index] = old->second.movement.access[index];
+            auto& row = next.movement.access[index] = old->movement.access[index];
             // Token-derived fields are rewritten by the serial pass below; start from the fresh-row defaults.
             row.ai_classification_succeeded = defaults.ai_classification_succeeded;
             row.ai_relation = defaults.ai_relation; row.ai_enemy_space_force = defaults.ai_enemy_space_force;
         }
-        ++work_.access_reuses;
+        ++work.access_reuses;
     }
     const auto knowledge_player = multiplayer(snapshot) ? owner : snapshot.observer()->solo_reference_human;
     if (!knowledge_player) return refuse<const Cache*>("solo reference human is absent");
-    if (!replay_rows) {
+    if (!replay_rows && player_stage && !player_stage->access.empty()) {
+        for (const auto& error : player_stage->access_errors) if (error)
+            return core::Result<const Cache*>::failure(*error);
+        next.movement.access = std::move(player_stage->access);
+    } else if (!replay_rows) {
         // Solo already publishes this reference human; MP AI needs its own knowledge.
         std::vector<gc::ObservedPlanet> projected_knowledge;
         std::span<const gc::ObservedPlanet> knowledge = snapshot.observations();
@@ -316,7 +541,7 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
     // stands and the read is not repeated. The ownership getter is re-evaluated and re-remembered on every frame: it
     // always runs. Any visibility change, restore, other context, planet set or starbase change repeats the read.
     const auto planet_count = snapshot.planets().size();
-    const Cache* const prior = !reconstruction && old != caches_.end() ? &old->second : nullptr;
+    const Cache* const prior = !reconstruction ? old : nullptr;
     const bool record_presence = selected->ai && !reconstruction;
     const auto visibility_revision = record_presence ? world.visibility_revision(owner) : std::uint64_t{};
     const bool replay_presence = incremental_ && record_presence && prior
@@ -343,7 +568,7 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
                 if (before.id == id && !before.starbase_relation && before.ai_enemy_space_force.has_value()
                     && memo.trace.serves(world.synchronized_frame())) {
                     row.ai_enemy_space_force = before.ai_enemy_space_force; next.presence[index] = memo;
-                    ++work_.presence_reuses;
+                    ++work.presence_reuses;
                     continue;
                 }
             }
@@ -373,39 +598,326 @@ core::Result<const GalacticAiUsabilityProvider::Cache*> GalacticAiUsabilityProvi
                 b.ai_usable, b.ai_classification_succeeded, b.ai_relation, b.starbase_relation,
                 b.fleet_presence_visible, b.nonallied_fleet, b.ai_enemy_space_force);
     };
-    if (old != caches_.end() && old->second.movement.ai_player == next.movement.ai_player
-        && old->second.movement.multiplayer == next.movement.multiplayer
-        && old->second.movement.benefits_from_corruption == next.movement.benefits_from_corruption
-        && std::equal(old->second.movement.access.begin(), old->second.movement.access.end(),
+    if (old != nullptr && old->movement.ai_player == next.movement.ai_player
+        && old->movement.multiplayer == next.movement.multiplayer
+        && old->movement.benefits_from_corruption == next.movement.benefits_from_corruption
+        && std::equal(old->movement.access.begin(), old->movement.access.end(),
             next.movement.access.begin(), next.movement.access.end(), same_access)) {
-        next.site_graph = old->second.site_graph;
-        next.site_memos = std::move(old->second.site_memos);
+        next.site_graph = old->site_graph;
+        next.site_memos = std::move(old->site_memos);
     }
-    if (old != caches_.end() && !reconstruction) {
+    if (old != nullptr && !reconstruction) {
         // Derived outputs carried to the replacement cache: the keyed connecting-path pass and the previously
         // published goal-reach rows, which the rebuild below keeps whenever a row is unchanged. Past the last refusal.
-        next.island_memo = old->second.island_memo;
-        next.goal_reach = std::move(old->second.goal_reach);
-        next.force = std::move(old->second.force); next.islands = std::move(old->second.islands);
-        next.island_sizes = old->second.island_sizes; next.island_pass = std::move(old->second.island_pass);
-        next.output_version = old->second.output_version;
-    } else next.output_version = ++output_epoch_;
+        next.island_memo = old->island_memo;
+        next.goal_reach = std::move(old->goal_reach);
+        next.force = std::move(old->force); next.islands = std::move(old->islands);
+        next.island_sizes = old->island_sizes; next.island_pass = std::move(old->island_pass);
+        next.output_version = old->output_version;
+    } else if (player_stage) player_stage->output_changed = true;
+    else next.output_version = ++output_epoch_;
     next.site_memos.resize(snapshot.planets().size());
-    next.perception_revision = world.movement_input_revision();
-    next.valid_through = reconstruction ? prepared_through_.at(owner).through
+    next.perception_revision = player_stage ? player_stage->perception_revision : world.movement_input_revision();
+    next.valid_through = reconstruction ? prepared_input_of().through
         : world.force_cache_deadline(owner, content_->logical_fps, content_->uses_fog);
-    next.source_changed = reconstruction && (prepared_through_.at(owner).pending_changes & 1U) != 0;
+    next.source_changed = reconstruction && (prepared_input_of().pending_changes & 1U) != 0;
     const PreparedInput prepared_input{next.valid_through, 0};
-    if (!reconstruction && selected->ai && (!prepared_through_.contains(owner) || prepared_through_.at(owner) != prepared_input)) {
-        prepared_through_[owner] = prepared_input; mark_state_changed();
+    const bool had_prepared = player_stage ? player_stage->prepared.has_value() : prepared_through_.contains(owner);
+    if (!reconstruction && selected->ai && (!had_prepared || prepared_input_of() != prepared_input)) {
+        if (player_stage) { player_stage->prepared = prepared_input; player_stage->changed = true; }
+        else { prepared_through_[owner] = prepared_input; mark_state_changed(); }
     }
-    ++work_.generations; work_.planets += snapshot.planets().size();
-    auto [at, inserted] = caches_.insert_or_assign(owner, std::move(next)); static_cast<void>(inserted);
-    return core::Result<const Cache*>::success(&at->second);
+    ++work.generations; work.planets += snapshot.planets().size();
+    if (player_stage) {
+        player_stage->cache = std::move(next);
+        return core::Result<const Cache*>::success(&*player_stage->cache);
+    }
+    auto [installed, inserted] = caches_.insert_or_assign(owner, std::move(next)); static_cast<void>(inserted);
+    return core::Result<const Cache*>::success(&installed->second);
+}
+core::Result<void> GalacticAiUsabilityProvider::finish_connectivity(ConnectivityFinish& task, Cache& cache,
+    const gc::GalacticSnapshot& snapshot, const World& world, const Engine& engine,
+    const gc::PlanetGraph& graph, std::uint64_t frame) {
+    const auto& player = task.player;
+    if (!cache.connectivity_ready || frame > cache.connectivity_through) {
+        const auto& movement = cache.movement;
+        auto& sites = task.sites; auto& searched = task.searched; auto& updated = task.updated;
+        auto& held = task.held; const auto planet_total = snapshot.planets().size();
+        const auto site_list = [&](std::size_t index, std::size_t policy) {
+            auto& memo = cache.site_memos[index][policy];
+            if (!memo) {
+                memo = std::make_shared<const std::vector<gc::PlanetId>>(
+                    production_sites(graph, snapshot.planets()[index].id, movement, policy));
+                searched[index][policy] = true;
+            }
+            return ai::SharedPlanetList(memo);
+        };
+        const auto index_of = [&](gc::PlanetId id) {
+            return static_cast<std::size_t>(std::lower_bound(snapshot.planets().begin(), snapshot.planets().end(), id,
+                [](const auto& row, auto key) { return row.id < key; }) - snapshot.planets().begin());
+        };
+        const auto access = [&](gc::PlanetId id) -> const gc::PathPlanet& { return movement.access[index_of(id)]; };
+        std::vector<gc::PlanetId> representatives;
+        const auto previous_sizes = cache.island_sizes;
+        cache.island_sizes = {-1, -1};
+        for (const auto id : content_->planet_order) {
+            const auto* facts = find(snapshot.observer()->planets, id, [](const auto& at) { return at.planet; });
+            const auto* owner = facts ? find(content_->players, facts->allegiance, [](const auto& at) { return at.player; }) : nullptr;
+            if (!owner || owner->faction != player.faction) continue;
+            bool represented = false;
+            for (const auto representative : representatives) {
+                const auto& component = sites[index_of(representative)][1];
+                if (std::find(component.begin(), component.end(), id) != component.end()) { represented = true; break; }
+            }
+            if (!represented) {
+                representatives.push_back(id);
+                // GFS-A14: changed connectivity forces component representatives;
+                // reconstruction retains the archived producer lists/deadlines.
+                if (!reconstructed_) { sites[index_of(id)][1] = site_list(index_of(id), 1); updated[index_of(id)][1] = true; }
+            }
+        }
+        // A row that keeps its value is not touched; the first change to a row lists its previous value.
+        std::vector<unsigned char> listed;
+        if (task.new_rows.empty()) listed.resize(planet_total);
+        else listed.assign(task.new_rows.begin(), task.new_rows.end());
+        const auto touch = [&](std::size_t index) {
+            if (listed[index]) return;
+            listed[index] = 1;
+            task.undo.push_back({{player.player, snapshot.planets()[index].id}, held[index], *held[index]});
+        };
+        // Whether any retained site list differs from the one this player's reach rows were built from, and the
+        // earliest expiry of the retained rows (the rows below need both).
+        bool sites_changed = false, island_flags_changed = false;
+        auto through_min = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t index = 0; index < sites.size(); ++index) {
+            if (!held[index]) {
+                const std::pair<gc::PlayerId, gc::PlanetId> key{player.player, snapshot.planets()[index].id};
+                held[index] = &retained_[key]; task.inserted.push_back(key); listed[index] = 1;
+            }
+            auto& saved = *held[index];
+            if (saved.shortest) { touch(index); saved.shortest = false; }
+            for (std::size_t policy = 0; policy < policies.size(); ++policy) {
+                if (!(saved.sites[policy] == sites[index][policy])) {
+                    touch(index); saved.sites[policy] = sites[index][policy]; sites_changed = true;
+                }
+                if (updated[index][policy]) {
+                    if (saved.frames[policy] != frame) { touch(index); saved.frames[policy] = frame; }
+                    ++task.work.searches;
+                }
+                if (searched[index][policy]) ++task.work.site_searches;
+                through_min = std::min(through_min, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
+            }
+        }
+        // WGA-476: retail reads the two largest component sizes only when at least two disconnected components exist.
+        if (representatives.size() > 1) for (const auto representative : representatives) {
+            const auto count = static_cast<std::int32_t>(sites[index_of(representative)][1].size());
+            if (!count) continue;
+            if (cache.island_sizes[0] < count) { cache.island_sizes[1] = cache.island_sizes[0]; cache.island_sizes[0] = count; }
+            else if (cache.island_sizes[1] < count) cache.island_sizes[1] = count;
+        }
+        // Connecting paths use selected manager cached raw space+ground totals,
+        // ordinary world edges, and their own single-precision hop policy.
+        if (representatives.size() > 1) {
+            TokenReader island_tokens(world, engine, player.player);
+            std::vector<gc::PlanetId> unallied;
+            for (const auto& row : snapshot.planets()) if (access(row.id).relation != gc::PathRelation::allied) unallied.push_back(row.id);
+            // The force reads are cached for several seconds. When the same planets are read again while every row
+            // that served them still serves them, nothing is stored and the values `force` holds stand.
+            const auto island_revision = world.visibility_revision(player.player);
+            auto& pass = cache.island_pass;
+            const bool replay_reads = incremental_ && pass.valid && pass.revision == island_revision
+                && pass.enemy == island_tokens.context().enemy && pass.human == island_tokens.context().human
+                && pass.planets == unallied && cache.force.size() == unallied.size() && pass.trace.serves(frame);
+            if (replay_reads) ++task.work.island_read_reuses;
+            else {
+                pass = {}; cache.force.clear();
+                World::ReadTrace trace;
+                {
+                    const auto traced = world.trace_reads(player.player, trace);
+                    for (const auto id : unallied) {
+                        auto space = island_tokens(id, TokenReader::Kind::space_total);
+                        auto ground = island_tokens(id, TokenReader::Kind::ground_total);
+                        if (!space || !ground) return refuse<void>("WGA-261: qualified island force perception is unavailable for player "
+                            + std::to_string(player.player) + " planet " + std::to_string(id)
+                            + (space ? " (ground; WGA-184/273 qualified authored force inputs)" : " (space; WGA-181..190 force owner)"));
+                        cache.force[id] = {single(*space), single(*ground)};
+                    }
+                }
+                pass.valid = trace.replayable; pass.trace = trace; pass.revision = island_revision;
+                pass.enemy = island_tokens.context().enemy; pass.human = island_tokens.context().human;
+                pass.planets = std::move(unallied);
+            }
+            const auto position = [&](gc::PlanetId id) -> const sim::math::Vec3& { return graph.node(id)->position; };
+            const auto connect = [&](const std::vector<gc::PlanetId>& reps, std::size_t target_index,
+                bool shortest, std::set<gc::PlanetId>& connectors) -> core::Result<void> {
+                const auto target = reps[target_index]; auto nearest = gc::PlanetId{}; auto nearest_distance = Real(std::numeric_limits<std::int64_t>::max());
+                for (const auto other : reps) if (other != target) {
+                    const auto distance = separation(position(other), position(target), true);
+                    if (distance < nearest_distance) { nearest = other; nearest_distance = distance; }
+                }
+                const auto& goal = sites[index_of(target)][0];
+                const auto is_goal = [&](gc::PlanetId id) { return id == target || std::find(goal.begin(), goal.end(), id) != goal.end(); };
+                struct Label { Real cost; gc::PlanetId previous{}; };
+                struct Entry { Real priority{}; gc::PlanetId planet{}; Real cost{}; };
+                GalacticAiConnectingHeap<Entry> open;
+                std::map<gc::PlanetId, Label> labels; labels.emplace(nearest, Label{}); open.push({Real{}, nearest, Real{}});
+                std::set<gc::PlanetId> closed;
+                std::size_t allocated = 1;
+                const auto capacity = snapshot.planets().size() * 3; // WGA-325 fixed header/component storage.
+                ++task.work.searches;
+                while (!open.empty()) {
+                    const auto [priority, current, cost] = open.pop(); static_cast<void>(priority);
+                    if (labels.at(current).cost != cost) continue;
+                    if (!closed.insert(current).second) continue;
+                    if (is_goal(current)) {
+                        for (auto id = current; id != 0; id = labels.at(id).previous)
+                            if (access(id).relation != gc::PathRelation::allied) connectors.insert(id);
+                        return core::Result<void>::success();
+                    }
+                    for (const auto& edge : graph.node(current)->edges) {
+                        ++task.work.edges;
+                        // WGA-324: connecting search skips closed neighbors,
+                        // even for a lower signed cost. It never reopens them.
+                        if (closed.contains(edge.to)) continue;
+                        Real hop{};
+                        const bool free = access(edge.to).relation == gc::PathRelation::allied || connectors.contains(edge.to);
+                        if (!access(current).ai_usable || !access(edge.to).ai_usable)
+                            hop = single(Real(1000000000000000000LL)); // WGA-322/331: finite sentinel is still enqueued.
+                        else if (!free) {
+                            hop = separation(position(current), position(edge.to));
+                            if (edge.route) {
+                                const auto* route = find(snapshot.routes(), edge.route, [](const auto& at) { return at.id; });
+                                hop = single(hop / single(script::numeric::from_fixed(route->hs_speed_factor)));
+                            }
+                            if (shortest) hop = single(hop + Real(100));
+                            else { hop = single(hop + cache.force.at(edge.to).first); hop = single(hop + cache.force.at(edge.to).second); }
+                        }
+                        const auto next = single(cost + hop); const auto old = labels.find(edge.to);
+                        if (old != labels.end() && old->second.cost <= next) continue;
+                        if (allocated == capacity)
+                            return refuse<void>("B-U06/WGA-325: connecting path exhausted the original three-times-node storage ceiling");
+                        ++allocated;
+                        labels.insert_or_assign(edge.to, Label{next, current});
+                        Real estimate{};
+                        if (!is_goal(edge.to)) {
+                            estimate = separation(position(edge.to), position(target));
+                            if (graph.largest_route_factor()) estimate = single(estimate / single(script::numeric::from_fixed(*graph.largest_route_factor())));
+                            if (free) estimate = single(estimate / Real(2));
+                        }
+                        // WGA-327: strict total priority, with heap-derived tie order.
+                        open.push({single(next + estimate), edge.to, next});
+                    }
+                }
+                return core::Result<void>::success();
+            };
+            // The three searches are a pure function of: the representatives, each planet's relation and AI
+            // usability, the force terms just queried, each representative's goal list and component size, the
+            // graph and its route factors. Replay the stored connector sets only on an exact match of all of them;
+            // the perception queries above always run.
+            GalacticAiIslandMemo inputs;
+            for (const auto& planet : snapshot.planets()) {
+                const auto& at = access(planet.id);
+                inputs.planets.push_back(planet.id);
+                inputs.access.push_back(static_cast<std::uint8_t>(static_cast<unsigned>(at.relation) | (at.ai_usable ? 4U : 0U)));
+            }
+            inputs.representatives = representatives;
+            for (const auto& [planet, terms] : cache.force)
+                inputs.force.push_back({planet, terms.first.repr, terms.second.repr});
+            for (const auto representative : representatives) {
+                inputs.goals.push_back(sites[index_of(representative)][0]);
+                inputs.sizes.push_back(sites[index_of(representative)][1].size());
+            }
+            const auto& memo = cache.island_memo;
+            const bool replay = memo && memo->planets == inputs.planets && memo->representatives == inputs.representatives
+                && memo->access == inputs.access && memo->force == inputs.force && memo->goals == inputs.goals
+                && memo->sizes == inputs.sizes && memo->largest_factor == graph.largest_route_factor()
+                && std::equal(memo->nodes.begin(), memo->nodes.end(), graph.nodes().begin(), graph.nodes().end())
+                && std::equal(memo->routes.begin(), memo->routes.end(), snapshot.routes().begin(), snapshot.routes().end());
+            std::set<gc::PlanetId> shortest, least, largest;
+            if (replay) {
+                shortest = memo->shortest; least = memo->least; largest = memo->largest; ++task.work.island_reuses;
+            } else {
+            for (std::size_t i = 0; i < representatives.size(); ++i) {
+                auto result = connect(representatives, i, true, shortest);
+                if (!result) return core::Result<void>::failure(result.error());
+            }
+            for (std::size_t i = 0; i < representatives.size(); ++i) {
+                auto result = connect(representatives, i, false, least);
+                if (!result) return core::Result<void>::failure(result.error());
+            }
+            auto ordered = representatives;
+            std::stable_sort(ordered.begin(), ordered.end(), [&](auto a, auto b) { return sites[index_of(a)][1].size() > sites[index_of(b)][1].size(); });
+            ordered.resize(2); auto result = connect(ordered, 0, true, largest);
+            if (!result) return core::Result<void>::failure(result.error());
+            inputs.nodes.assign(graph.nodes().begin(), graph.nodes().end()); inputs.largest_factor = graph.largest_route_factor();
+            inputs.routes.assign(snapshot.routes().begin(), snapshot.routes().end());
+            inputs.shortest = shortest; inputs.least = least; inputs.largest = largest;
+            cache.island_memo = std::make_shared<const GalacticAiIslandMemo>(std::move(inputs));
+            }
+            const auto mark = [&](const std::set<gc::PlanetId>& ids, bool Reach::*flag) {
+                for (const auto id : ids) {
+                    const auto index = index_of(id);
+                    if (index >= planet_total || snapshot.planets()[index].id != id) throw std::out_of_range("unknown connector planet");
+                    auto& saved = *held[index];
+                    if (!(saved.*flag)) {
+                        touch(index); saved.*flag = true;
+                        if (flag != &Reach::shortest) island_flags_changed = true;
+                    }
+                }
+            };
+            mark(shortest, &Reach::shortest); mark(least, &Reach::least_force); mark(largest, &Reach::largest);
+        }
+        // A row of the previous generation that is unchanged (same player, planet, policy and site list) is kept in
+        // place instead of being copied again; the rows and their order are exactly those of a clean rebuild.
+        const bool keep_rows = cache.goal_reach.size() == planet_total * policies.size();
+        bool rows_changed = !keep_rows, islands_changed = false;
+        // The rows and islands this cache carries were built from the retained rows by this player's last block;
+        // when no site list and no connector flag moved since, they already describe them.
+        if (incremental_ && keep_rows && !sites_changed && !island_flags_changed && cache.islands.size() == planet_total) {
+            cache.connectivity_through = through_min;
+            ++task.work.block_row_reuses;
+        } else {
+        cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
+        std::vector<ai::GalacticConnectivity::Island> islands;
+        islands.reserve(planet_total);
+        std::size_t reach_at = 0;
+        static const std::array<std::string, 6> policy_names{policies[0], policies[1], policies[2], policies[3], policies[4], policies[5]};
+        for (std::size_t index = 0; index < planet_total; ++index) {
+            const auto row = snapshot.planets()[index].id;
+            const auto& saved = *held[index];
+            for (std::size_t policy = 0; policy < policies.size(); ++policy) {
+                if (keep_rows) {
+                    auto& kept = cache.goal_reach[reach_at++];
+                    if (kept.player != player.player || kept.source != row || kept.policy != policy_names[policy]
+                        || kept.production_sites != saved.sites[policy]) {
+                        kept = {player.player, row, policy_names[policy], saved.sites[policy]};
+                        rows_changed = true;
+                    }
+                } else cache.goal_reach.push_back({player.player, row, policy_names[policy], saved.sites[policy]});
+                cache.connectivity_through = std::min(cache.connectivity_through, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
+            }
+            islands.push_back({player.player, row, saved.least_force, saved.largest});
+        }
+        islands_changed = !std::equal(islands.begin(), islands.end(), cache.islands.begin(), cache.islands.end(),
+            [](const auto& a, const auto& b) { return a.player == b.player && a.planet == b.planet && a.least_force == b.least_force && a.largest == b.largest; });
+        if (islands_changed) cache.islands = std::move(islands);
+        }
+        // The published rows of this player are the same as before unless one of the three changed.
+        if (rows_changed || islands_changed || previous_sizes != cache.island_sizes) task.output_changed = true;
+        cache.connectivity_ready = true;
+        cache.perception_revision = task.perception_revision ? *task.perception_revision : world.movement_input_revision();
+        cache.valid_through = world.force_cache_deadline(player.player, content_->logical_fps, content_->uses_fog);
+        if (task.prepared->through != cache.valid_through) {
+            task.prepared->through = cache.valid_through; task.changed = true;
+        }
+    }
+    return core::Result<void>::success();
 }
 core::Result<GalacticAiUsabilityProvider::MovementInput> GalacticAiUsabilityProvider::movement(
     gc::PlayerId player, const gc::GalacticSnapshot& snapshot, const World& world,
     const Engine& engine, const sim::PartitionExecutor& executor) {
+    if (auto* block = selected_frontier()) return block->movement(player, snapshot, world, engine, executor);
+    if (!decision_frontiers_.empty()) return refuse<MovementInput>("movement requires a selected usability frontier");
     auto cached = refresh(player, snapshot, world, engine, executor);
     if (!cached) return core::Result<MovementInput>::failure(cached.error());
     return core::Result<MovementInput>::success(cached.value()->movement);
@@ -419,6 +931,8 @@ core::Result<ai::GalacticConnectivity> GalacticAiUsabilityProvider::connectivity
 }
 core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsabilityProvider::connectivity_publication(
     const gc::GalacticSession& session, World& world, const Engine& engine, const sim::PartitionExecutor& executor) {
+    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+        return refuse<ConnectivityPublication>("connectivity publication requires the joined barrier owner");
     observed_session_ = &session; observed_world_ = &world;
     const auto snapshot = session.snapshot(); const auto* graph = session.graph();
     if (!graph || !snapshot->observer() || !snapshot->planet_access())
@@ -505,10 +1019,15 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             || frame > at->second.connectivity_through || Real(frame) > at->second.valid_through;
     }
     if (!dirty) return core::Result<ConnectivityPublication>::success(published_);
+    // #4529: keep ordinary owner order and scratch through four workers; the
+    // measured two-worker prepass adds work at 250/12. Higher worker counts
+    // retain the parallel player pass. This cutover changes scheduling only.
+    if (executor.worker_count() > 4 && std::count_if(content_->players.begin(), content_->players.end(),
+        [](const auto& player) { return player.ai; }) > 1)
+        return parallel_connectivity(*snapshot, world, engine, executor, *graph, frame);
     // The retained rows change in place: a row keeps the value it had before its first change here, a created row is
     // listed, and a refusal anywhere below puts every row back exactly as the old full copy of the map would have.
-    struct ReachUndo { std::pair<gc::PlayerId, gc::PlanetId> key; Reach* row; Reach before; };
-    std::vector<ReachUndo> undo;
+    std::vector<PlayerPreparation::Undo> undo;
     std::vector<std::pair<gc::PlayerId, gc::PlanetId>> inserted;
     struct CacheTransaction {
         std::function<void()> discard;
@@ -585,261 +1104,13 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
                 });
                 if (!phase) return core::Result<ConnectivityPublication>::failure(phase.error());
             }
-            const auto index_of = [&](gc::PlanetId id) {
-                return static_cast<std::size_t>(std::lower_bound(snapshot->planets().begin(), snapshot->planets().end(), id,
-                    [](const auto& row, auto key) { return row.id < key; }) - snapshot->planets().begin());
-            };
-            const auto access = [&](gc::PlanetId id) -> const gc::PathPlanet& { return movement.access[index_of(id)]; };
-            std::vector<gc::PlanetId> representatives;
-            const auto previous_sizes = cache.island_sizes;
-            cache.island_sizes = {-1, -1};
-            for (const auto id : content_->planet_order) {
-                const auto* facts = find(snapshot->observer()->planets, id, [](const auto& at) { return at.planet; });
-                const auto* owner = facts ? find(content_->players, facts->allegiance, [](const auto& at) { return at.player; }) : nullptr;
-                if (!owner || owner->faction != player.faction) continue;
-                bool represented = false;
-                for (const auto representative : representatives) {
-                    const auto& component = sites[index_of(representative)][1];
-                    if (std::find(component.begin(), component.end(), id) != component.end()) { represented = true; break; }
-                }
-                if (!represented) {
-                    representatives.push_back(id);
-                    // GFS-A14: changed connectivity forces component representatives;
-                    // reconstruction retains the archived producer lists/deadlines.
-                    if (!reconstructed_) { sites[index_of(id)][1] = site_list(index_of(id), 1); updated[index_of(id)][1] = true; }
-                }
-            }
-            // A row that keeps its value is not touched; the first change to a row lists its previous value.
-            std::vector<unsigned char> listed(planet_total, 0);
-            const auto touch = [&](std::size_t index) {
-                if (listed[index]) return;
-                listed[index] = 1;
-                undo.push_back({{player.player, snapshot->planets()[index].id}, held[index], *held[index]});
-            };
-            // Whether any retained site list differs from the one this player's reach rows were built from, and the
-            // earliest expiry of the retained rows (the rows below need both).
-            bool sites_changed = false, island_flags_changed = false;
-            auto through_min = std::numeric_limits<std::uint64_t>::max();
-            for (std::size_t index = 0; index < sites.size(); ++index) {
-                if (!held[index]) {
-                    const std::pair<gc::PlayerId, gc::PlanetId> key{player.player, snapshot->planets()[index].id};
-                    held[index] = &retained_[key]; inserted.push_back(key); listed[index] = 1;
-                }
-                auto& saved = *held[index];
-                if (saved.shortest) { touch(index); saved.shortest = false; }
-                for (std::size_t policy = 0; policy < policies.size(); ++policy) {
-                    if (!(saved.sites[policy] == sites[index][policy])) {
-                        touch(index); saved.sites[policy] = sites[index][policy]; sites_changed = true;
-                    }
-                    if (updated[index][policy]) {
-                        if (saved.frames[policy] != frame) { touch(index); saved.frames[policy] = frame; }
-                        ++work_.searches;
-                    }
-                    if (searched[index][policy]) ++work_.site_searches;
-                    through_min = std::min(through_min, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
-                }
-            }
-            // WGA-476: retail reads the two largest component sizes only when at least two disconnected components exist.
-            if (representatives.size() > 1) for (const auto representative : representatives) {
-                const auto count = static_cast<std::int32_t>(sites[index_of(representative)][1].size());
-                if (!count) continue;
-                if (cache.island_sizes[0] < count) { cache.island_sizes[1] = cache.island_sizes[0]; cache.island_sizes[0] = count; }
-                else if (cache.island_sizes[1] < count) cache.island_sizes[1] = count;
-            }
-            // Connecting paths use selected manager cached raw space+ground totals,
-            // ordinary world edges, and their own single-precision hop policy.
-            if (representatives.size() > 1) {
-                TokenReader island_tokens(world, engine, player.player);
-                std::vector<gc::PlanetId> unallied;
-                for (const auto& row : snapshot->planets()) if (access(row.id).relation != gc::PathRelation::allied) unallied.push_back(row.id);
-                // The force reads are cached for several seconds. When the same planets are read again while every row
-                // that served them still serves them, nothing is stored and the values `force` holds stand.
-                const auto island_revision = world.visibility_revision(player.player);
-                auto& pass = cache.island_pass;
-                const bool replay_reads = incremental_ && pass.valid && pass.revision == island_revision
-                    && pass.enemy == island_tokens.context().enemy && pass.human == island_tokens.context().human
-                    && pass.planets == unallied && cache.force.size() == unallied.size() && pass.trace.serves(frame);
-                if (replay_reads) ++work_.island_read_reuses;
-                else {
-                    pass = {}; cache.force.clear();
-                    World::ReadTrace trace;
-                    {
-                        const auto traced = world.trace_reads(player.player, trace);
-                        for (const auto id : unallied) {
-                            auto space = island_tokens(id, TokenReader::Kind::space_total);
-                            auto ground = island_tokens(id, TokenReader::Kind::ground_total);
-                            if (!space || !ground) return refuse<ConnectivityPublication>("WGA-261: qualified island force perception is unavailable for player "
-                                + std::to_string(player.player) + " planet " + std::to_string(id)
-                                + (space ? " (ground; WGA-184/273 qualified authored force inputs)" : " (space; WGA-181..190 force owner)"));
-                            cache.force[id] = {single(*space), single(*ground)};
-                        }
-                    }
-                    pass.valid = trace.replayable; pass.trace = trace; pass.revision = island_revision;
-                    pass.enemy = island_tokens.context().enemy; pass.human = island_tokens.context().human;
-                    pass.planets = std::move(unallied);
-                }
-                const auto position = [&](gc::PlanetId id) -> const sim::math::Vec3& { return graph->node(id)->position; };
-                const auto connect = [&](const std::vector<gc::PlanetId>& reps, std::size_t target_index,
-                    bool shortest, std::set<gc::PlanetId>& connectors) -> core::Result<void> {
-                    const auto target = reps[target_index]; auto nearest = gc::PlanetId{}; auto nearest_distance = Real(std::numeric_limits<std::int64_t>::max());
-                    for (const auto other : reps) if (other != target) {
-                        const auto distance = separation(position(other), position(target), true);
-                        if (distance < nearest_distance) { nearest = other; nearest_distance = distance; }
-                    }
-                    const auto& goal = sites[index_of(target)][0];
-                    const auto is_goal = [&](gc::PlanetId id) { return id == target || std::find(goal.begin(), goal.end(), id) != goal.end(); };
-                    struct Label { Real cost; gc::PlanetId previous{}; };
-                    struct Entry { Real priority{}; gc::PlanetId planet{}; Real cost{}; };
-                    GalacticAiConnectingHeap<Entry> open;
-                    std::map<gc::PlanetId, Label> labels; labels.emplace(nearest, Label{}); open.push({Real{}, nearest, Real{}});
-                    std::set<gc::PlanetId> closed;
-                    std::size_t allocated = 1;
-                    const auto capacity = snapshot->planets().size() * 3; // WGA-325 fixed header/component storage.
-                    ++work_.searches;
-                    while (!open.empty()) {
-                        const auto [priority, current, cost] = open.pop(); static_cast<void>(priority);
-                        if (labels.at(current).cost != cost) continue;
-                        if (!closed.insert(current).second) continue;
-                        if (is_goal(current)) {
-                            for (auto id = current; id != 0; id = labels.at(id).previous)
-                                if (access(id).relation != gc::PathRelation::allied) connectors.insert(id);
-                            return core::Result<void>::success();
-                        }
-                        for (const auto& edge : graph->node(current)->edges) {
-                            ++work_.edges;
-                            // WGA-324: connecting search skips closed neighbors,
-                            // even for a lower signed cost. It never reopens them.
-                            if (closed.contains(edge.to)) continue;
-                            Real hop{};
-                            const bool free = access(edge.to).relation == gc::PathRelation::allied || connectors.contains(edge.to);
-                            if (!access(current).ai_usable || !access(edge.to).ai_usable)
-                                hop = single(Real(1000000000000000000LL)); // WGA-322/331: finite sentinel is still enqueued.
-                            else if (!free) {
-                                hop = separation(position(current), position(edge.to));
-                                if (edge.route) {
-                                    const auto* route = find(snapshot->routes(), edge.route, [](const auto& at) { return at.id; });
-                                    hop = single(hop / single(script::numeric::from_fixed(route->hs_speed_factor)));
-                                }
-                                if (shortest) hop = single(hop + Real(100));
-                                else { hop = single(hop + cache.force.at(edge.to).first); hop = single(hop + cache.force.at(edge.to).second); }
-                            }
-                            const auto next = single(cost + hop); const auto old = labels.find(edge.to);
-                            if (old != labels.end() && old->second.cost <= next) continue;
-                            if (allocated == capacity)
-                                return refuse<void>("B-U06/WGA-325: connecting path exhausted the original three-times-node storage ceiling");
-                            ++allocated;
-                            labels.insert_or_assign(edge.to, Label{next, current});
-                            Real estimate{};
-                            if (!is_goal(edge.to)) {
-                                estimate = separation(position(edge.to), position(target));
-                                if (graph->largest_route_factor()) estimate = single(estimate / single(script::numeric::from_fixed(*graph->largest_route_factor())));
-                                if (free) estimate = single(estimate / Real(2));
-                            }
-                            // WGA-327: strict total priority, with heap-derived tie order.
-                            open.push({single(next + estimate), edge.to, next});
-                        }
-                    }
-                    return core::Result<void>::success();
-                };
-                // The three searches are a pure function of: the representatives, each planet's relation and AI
-                // usability, the force terms just queried, each representative's goal list and component size, the
-                // graph and its route factors. Replay the stored connector sets only on an exact match of all of them;
-                // the perception queries above always run.
-                GalacticAiIslandMemo inputs;
-                for (const auto& planet : snapshot->planets()) {
-                    const auto& at = access(planet.id);
-                    inputs.planets.push_back(planet.id);
-                    inputs.access.push_back(static_cast<std::uint8_t>(static_cast<unsigned>(at.relation) | (at.ai_usable ? 4U : 0U)));
-                }
-                inputs.representatives = representatives;
-                for (const auto& [planet, terms] : cache.force)
-                    inputs.force.push_back({planet, terms.first.repr, terms.second.repr});
-                for (const auto representative : representatives) {
-                    inputs.goals.push_back(sites[index_of(representative)][0]);
-                    inputs.sizes.push_back(sites[index_of(representative)][1].size());
-                }
-                const auto& memo = cache.island_memo;
-                const bool replay = memo && memo->planets == inputs.planets && memo->representatives == inputs.representatives
-                    && memo->access == inputs.access && memo->force == inputs.force && memo->goals == inputs.goals
-                    && memo->sizes == inputs.sizes && memo->largest_factor == graph->largest_route_factor()
-                    && std::equal(memo->nodes.begin(), memo->nodes.end(), graph->nodes().begin(), graph->nodes().end())
-                    && std::equal(memo->routes.begin(), memo->routes.end(), snapshot->routes().begin(), snapshot->routes().end());
-                std::set<gc::PlanetId> shortest, least, largest;
-                if (replay) {
-                    shortest = memo->shortest; least = memo->least; largest = memo->largest; ++work_.island_reuses;
-                } else {
-                for (std::size_t i = 0; i < representatives.size(); ++i) {
-                    auto result = connect(representatives, i, true, shortest);
-                    if (!result) return core::Result<ConnectivityPublication>::failure(result.error());
-                }
-                for (std::size_t i = 0; i < representatives.size(); ++i) {
-                    auto result = connect(representatives, i, false, least);
-                    if (!result) return core::Result<ConnectivityPublication>::failure(result.error());
-                }
-                auto ordered = representatives;
-                std::stable_sort(ordered.begin(), ordered.end(), [&](auto a, auto b) { return sites[index_of(a)][1].size() > sites[index_of(b)][1].size(); });
-                ordered.resize(2); auto result = connect(ordered, 0, true, largest);
-                if (!result) return core::Result<ConnectivityPublication>::failure(result.error());
-                inputs.nodes.assign(graph->nodes().begin(), graph->nodes().end()); inputs.largest_factor = graph->largest_route_factor();
-                inputs.routes.assign(snapshot->routes().begin(), snapshot->routes().end());
-                inputs.shortest = shortest; inputs.least = least; inputs.largest = largest;
-                cache.island_memo = std::make_shared<const GalacticAiIslandMemo>(std::move(inputs));
-                }
-                const auto mark = [&](const std::set<gc::PlanetId>& ids, bool Reach::*flag) {
-                    for (const auto id : ids) {
-                        const auto index = index_of(id);
-                        if (index >= planet_total || snapshot->planets()[index].id != id) throw std::out_of_range("unknown connector planet");
-                        auto& saved = *held[index];
-                        if (!(saved.*flag)) {
-                            touch(index); saved.*flag = true;
-                            if (flag != &Reach::shortest) island_flags_changed = true;
-                        }
-                    }
-                };
-                mark(shortest, &Reach::shortest); mark(least, &Reach::least_force); mark(largest, &Reach::largest);
-            }
-            // A row of the previous generation that is unchanged (same player, planet, policy and site list) is kept in
-            // place instead of being copied again; the rows and their order are exactly those of a clean rebuild.
-            const bool keep_rows = cache.goal_reach.size() == planet_total * policies.size();
-            bool rows_changed = !keep_rows, islands_changed = false;
-            // The rows and islands this cache carries were built from the retained rows by this player's last block;
-            // when no site list and no connector flag moved since, they already describe them.
-            if (incremental_ && keep_rows && !sites_changed && !island_flags_changed && cache.islands.size() == planet_total) {
-                cache.connectivity_through = through_min;
-                ++work_.block_row_reuses;
-            } else {
-            cache.connectivity_through = std::numeric_limits<std::uint64_t>::max();
-            std::vector<ai::GalacticConnectivity::Island> islands;
-            islands.reserve(planet_total);
-            std::size_t reach_at = 0;
-            static const std::array<std::string, 6> policy_names{policies[0], policies[1], policies[2], policies[3], policies[4], policies[5]};
-            for (std::size_t index = 0; index < planet_total; ++index) {
-                const auto row = snapshot->planets()[index].id;
-                const auto& saved = *held[index];
-                for (std::size_t policy = 0; policy < policies.size(); ++policy) {
-                    if (keep_rows) {
-                        auto& kept = cache.goal_reach[reach_at++];
-                        if (kept.player != player.player || kept.source != row || kept.policy != policy_names[policy]
-                            || kept.production_sites != saved.sites[policy]) {
-                            kept = {player.player, row, policy_names[policy], saved.sites[policy]};
-                            rows_changed = true;
-                        }
-                    } else cache.goal_reach.push_back({player.player, row, policy_names[policy], saved.sites[policy]});
-                    cache.connectivity_through = std::min(cache.connectivity_through, *saved.frames[policy] + std::uint64_t(content_->logical_fps) * 10);
-                }
-                islands.push_back({player.player, row, saved.least_force, saved.largest});
-            }
-            islands_changed = !std::equal(islands.begin(), islands.end(), cache.islands.begin(), cache.islands.end(),
-                [](const auto& a, const auto& b) { return a.player == b.player && a.planet == b.planet && a.least_force == b.least_force && a.largest == b.largest; });
-            if (islands_changed) cache.islands = std::move(islands);
-            }
-            // The published rows of this player are the same as before unless one of the three changed.
-            if (rows_changed || islands_changed || previous_sizes != cache.island_sizes) cache.output_version = ++output_epoch_;
-            cache.connectivity_ready = true; cache.perception_revision = world.movement_input_revision();
-            cache.valid_through = world.force_cache_deadline(player.player, content_->logical_fps, content_->uses_fog);
-            if (prepared_through_.at(player.player).through != cache.valid_through) {
-                prepared_through_[player.player].through = cache.valid_through; mark_state_changed();
-            }
+            bool changed = false, output_changed = false;
+            ConnectivityFinish task{player, &prepared_through_.at(player.player), undo, inserted,
+                held, sites, searched, updated, work_, {}, std::nullopt, changed, output_changed};
+            auto finished = finish_connectivity(task, cache, *snapshot, world, engine, *graph, frame);
+            if (!finished) return core::Result<ConnectivityPublication>::failure(finished.error());
+            if (output_changed) cache.output_version = ++output_epoch_;
+            if (changed) mark_state_changed();
         }
     }
     // Every cache version is the one the published rows were flattened from: the flattened rows are those already
@@ -865,6 +1136,237 @@ core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsa
             for (const auto& entry : undo) if (*entry.row != entry.before)
                 records_.set(entry.key.first, 0, entry.key.second, reach_record(entry.key, *entry.row));
             for (const auto& key : inserted) records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+        }
+        ++publication_revision_; mark_state_changed();
+    }
+    reconstructed_ = false;
+    // Each player's cache has now consumed this immutable boundary. Recording
+    // the final shared perception revision prevents another player's initial
+    // cache fills from invalidating an already completed generation.
+    const auto perception_revision = world.movement_input_revision();
+    for (auto& [player, cache] : caches_) { static_cast<void>(player); cache.perception_revision = perception_revision; }
+    for (auto& [player, prepared] : prepared_through_) {
+        static_cast<void>(player);
+        if (prepared.pending_changes) { prepared.pending_changes = 0; mark_state_changed(); }
+    }
+    output.revision = publication_revision_;
+    // Rows equal to the published ones share its storage, so the runtime's route publication copies a pointer and
+    // the world's rebind finds the same rows without walking them.
+    if (published_->goal_reach == output.goal_reach) output.goal_reach = published_->goal_reach;
+    published_ = std::make_shared<const ai::GalacticConnectivity>(std::move(output));
+    published_versions_ = std::move(versions);
+    transaction.committed = true;
+    return core::Result<ConnectivityPublication>::success(published_);
+}
+core::Result<GalacticAiUsabilityProvider::ConnectivityPublication> GalacticAiUsabilityProvider::parallel_connectivity(
+    const gc::GalacticSnapshot& snapshot, World& world, const Engine& engine, const sim::PartitionExecutor& executor,
+    const gc::PlanetGraph& graph, std::uint64_t frame) {
+    std::vector<PlayerPreparation> players;
+    struct CacheTransaction {
+        std::function<void()> discard;
+        bool committed{};
+        ~CacheTransaction() { if (!committed) discard(); }
+    } transaction{[this, prepared = prepared_through_, &players]() mutable {
+        caches_.clear(); prepared_through_ = std::move(prepared);
+        for (auto& task : players) {
+            for (auto at = task.undo.rbegin(); at != task.undo.rend(); ++at) *at->row = std::move(at->before);
+            for (const auto& key : task.inserted) retained_.erase(key);
+        }
+    }};
+    ai::GalacticConnectivity output; output.stealth_fleets = stealth_fleets_;
+    const auto frozen_perception_revision = world.movement_input_revision();
+    const auto prepare_retained = [&](PlayerPreparation& task) {
+        const auto owner = task.player.player;
+        task.held.reserve(snapshot.planets().size()); task.new_rows.reserve(snapshot.planets().size());
+        auto walker = retained_.lower_bound({owner, 0}); gc::PlanetId previous{};
+        for (const auto& planet : snapshot.planets()) {
+            const std::pair<gc::PlayerId, gc::PlanetId> key{owner, planet.id};
+            if (!(previous < planet.id)) walker = retained_.lower_bound(key);
+            previous = planet.id;
+            while (walker != retained_.end() && walker->first < key) ++walker;
+            const bool added = walker == retained_.end() || walker->first != key;
+            if (added) { walker = retained_.emplace_hint(walker, key, Reach{}); task.inserted.push_back(key); }
+            task.held.push_back(&walker->second); task.new_rows.push_back(added ? 1 : 0);
+        }
+    };
+    for (const auto& player : content_->players) if (player.ai) {
+        auto& task = players.emplace_back(); task.player = player; task.perception_revision = frozen_perception_revision;
+        if (const auto at = caches_.find(player.player); at != caches_.end()) task.cache = std::move(at->second);
+        if (const auto at = prepared_through_.find(player.player); at != prepared_through_.end()) task.prepared = at->second;
+        caches_.try_emplace(player.player); // all map nodes exist before worker tasks
+        prepare_retained(task); // map nodes must exist before concurrent player work
+        task.access.resize(snapshot.planets().size()); task.access_errors.resize(snapshot.planets().size());
+    }
+    std::sort(players.begin(), players.end(), [](const auto& a, const auto& b) { return a.player.player < b.player.player; });
+    // ADR-009: the parallel path prepares pure access rows before player queries.
+    // No player task calls the executor recursively.
+    const auto reads = world.partitioned_reads();
+    // Project each MP owner's knowledge once, before the flat planet phase.
+    // The projection is pure and each partition owns its vector.
+    auto knowledge_phase = executor.execute_phase("galactic-ai-connectivity-knowledge", players.size(), [&](std::size_t index) {
+        auto& task = players[index];
+        task.knowledge_player = multiplayer(snapshot) ? task.player.player : snapshot.observer()->solo_reference_human;
+        if (!task.knowledge_player) {
+            task.error = refuse<void>("solo reference human is absent").error();
+        } else if (task.knowledge_player != snapshot.view_player()) {
+            task.projected_knowledge = gc::observed_planets(*snapshot.observer(), snapshot.fleets(),
+                {task.knowledge_player}, snapshot.movement(), snapshot.actor_records());
+        }
+    });
+    if (!knowledge_phase) return core::Result<ConnectivityPublication>::failure(knowledge_phase.error());
+    for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    {
+        auto access_phase = executor.execute_phase("galactic-ai-usability", sim::tick_partition_count, [&](std::size_t part) {
+            const auto range = sim::partition_range(part, players.size() * snapshot.planets().size());
+            for (auto flat = range.begin; flat < range.end; ++flat) {
+                auto& task = players[flat / snapshot.planets().size()]; const auto index = flat % snapshot.planets().size();
+                auto row = access_row(task, snapshot, index);
+                if (!row) task.access_errors[index] = row.error();
+                else task.access[index] = std::move(row).value();
+            }
+        });
+        if (!access_phase) return core::Result<ConnectivityPublication>::failure(access_phase.error());
+    }
+    const auto prepare_player = [&](PlayerPreparation& task) {
+        const bool pending = task.cache && task.cache->source_changed;
+        auto refreshed = refresh(task.player.player, snapshot, world, engine, executor, nullptr, pending, &task);
+        if (!refreshed) { task.error = refreshed.error(); return; }
+        auto& cache = task.cache.value();
+        task.due = !cache.connectivity_ready || frame > cache.connectivity_through;
+        if (!task.due) return;
+        if (cache.site_graph != &graph) {
+            cache.site_memos.assign(snapshot.planets().size(), {}); cache.site_graph = &graph;
+        }
+        task.sites.resize(snapshot.planets().size());
+        task.searched.assign(snapshot.planets().size(), {});
+        task.updated.assign(snapshot.planets().size(), {});
+    };
+    const auto prepare_site = [&](PlayerPreparation& task, std::size_t index) {
+        const auto id = snapshot.planets()[index].id;
+        const auto* saved = task.held[index];
+        for (std::size_t policy = 0; policy < policies.size(); ++policy) {
+            const bool valid = saved->frames[policy]
+                && frame <= *saved->frames[policy] + std::uint64_t(content_->logical_fps) * 10;
+            if (valid) task.sites[index][policy] = saved->sites[policy];
+            else {
+                auto& memo = task.cache->site_memos[index][policy];
+                if (!memo) {
+                    memo = std::make_shared<const std::vector<gc::PlanetId>>(
+                        production_sites(graph, id, task.cache->movement, policy));
+                    task.searched[index][policy] = true;
+                }
+                task.sites[index][policy] = ai::SharedPlanetList(memo); task.updated[index][policy] = true;
+            }
+        }
+    };
+    const auto prepare_sites = [&](std::size_t part, bool correcting) {
+        const auto range = sim::partition_range(part, players.size() * snapshot.planets().size());
+        for (auto flat = range.begin; flat < range.end; ++flat) {
+            auto& task = players[flat / snapshot.planets().size()]; const auto index = flat % snapshot.planets().size();
+            if (task.due && (!correcting || task.correcting)) prepare_site(task, index);
+        }
+    };
+    const auto finish_player = [&](PlayerPreparation& task) {
+        const auto owner_reads = world.owner_reads(task.player.player);
+        ConnectivityFinish input{task.player, &task.prepared.value(), task.undo, task.inserted,
+            task.held, task.sites, task.searched, task.updated, task.work, task.new_rows,
+            task.perception_revision, task.changed, task.output_changed};
+        auto finished = finish_connectivity(input, *task.cache, snapshot, world, engine, graph, frame);
+        if (!finished) task.error = finished.error();
+        task.movement_after = world.movement_input_revision(task.player.player);
+    };
+    auto refresh_phase = executor.execute_phase("galactic-ai-connectivity-refresh", players.size(), [&](std::size_t index) {
+        auto& task = players[index];
+        const auto owner_reads = world.owner_reads(task.player.player);
+        task.movement_before = world.movement_input_revision(task.player.player);
+        prepare_player(task);
+    });
+    if (!refresh_phase) return core::Result<ConnectivityPublication>::failure(refresh_phase.error());
+    for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    auto sites_phase = executor.execute_phase("galactic-ai-production-sites", sim::tick_partition_count,
+        [&](std::size_t part) { prepare_sites(part, false); });
+    if (!sites_phase) return core::Result<ConnectivityPublication>::failure(sites_phase.error());
+    auto players_phase = executor.execute_phase("galactic-ai-connectivity-players", players.size(),
+        [&](std::size_t index) { finish_player(players[index]); });
+    if (!players_phase) return core::Result<ConnectivityPublication>::failure(players_phase.error());
+    for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    // Preserve the existing ordered observation bytes: each player refreshed
+    // ordinary ownership before its GFS-A14 finishing force reads, after all
+    // earlier players' reads. WGA-65 keeps the synchronization stamp observable.
+    // Those finishing reads can change the shared movement revision on a quiet
+    // snapshot. A frozen revision must not hide that dependency (8aa394290).
+    // Only the bounded revision prefix is ordered: missed queries and all site
+    // work still execute on their physical player partitions. Foreign cache
+    // writes invalidate reuse, but cannot change another shard's read values.
+    // Each skipped player refreshes at most once; any new revision changes
+    // propagate to still-skipped later players in the next joined wave.
+    for (;;) {
+        auto prefix = frozen_perception_revision;
+        bool missed{};
+        for (auto& task : players) {
+            task.correcting = !task.refreshed && task.cache->perception_revision != prefix;
+            if (task.correcting) { task.perception_revision = prefix; missed = true; }
+            prefix += task.movement_after - task.movement_before;
+        }
+        if (!missed) break;
+        auto corrected = executor.execute_phase("galactic-ai-connectivity-revision-refresh", players.size(), [&](std::size_t index) {
+            auto& task = players[index];
+            if (!task.correcting) return;
+            const auto owner_reads = world.owner_reads(task.player.player);
+            prepare_player(task);
+        });
+        if (!corrected) return core::Result<ConnectivityPublication>::failure(corrected.error());
+        for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+        corrected = executor.execute_phase("galactic-ai-connectivity-revision-sites", sim::tick_partition_count,
+            [&](std::size_t part) { prepare_sites(part, true); });
+        if (!corrected) return core::Result<ConnectivityPublication>::failure(corrected.error());
+        corrected = executor.execute_phase("galactic-ai-connectivity-revision-players", players.size(), [&](std::size_t index) {
+            if (players[index].correcting) finish_player(players[index]);
+        });
+        if (!corrected) return core::Result<ConnectivityPublication>::failure(corrected.error());
+        for (const auto& task : players) if (task.error) return core::Result<ConnectivityPublication>::failure(*task.error);
+    }
+    // Shared contributor state and rows publish only after the join, in player order.
+    for (auto& task : players) {
+        auto& cache = caches_.at(task.player.player) = std::move(task.cache.value());
+        if (task.output_changed || !cache.output_version) cache.output_version = ++output_epoch_;
+        if (task.prepared) prepared_through_[task.player.player] = *task.prepared;
+        if (task.changed) mark_state_changed();
+        work_.generations += task.work.generations; work_.planets += task.work.planets;
+        work_.searches += task.work.searches; work_.edges += task.work.edges;
+        work_.site_searches += task.work.site_searches; work_.island_reuses += task.work.island_reuses;
+        work_.access_reuses += task.work.access_reuses;
+        work_.presence_reuses += task.work.presence_reuses;
+        work_.island_read_reuses += task.work.island_read_reuses;
+        work_.block_row_reuses += task.work.block_row_reuses;
+    }
+    std::vector<std::pair<gc::PlayerId, std::uint64_t>> versions;
+    for (const auto& task : players) versions.emplace_back(task.player.player, caches_.at(task.player.player).output_version);
+    if (incremental_ && versions == published_versions_) {
+        output.goal_reach = published_->goal_reach; output.island_paths = published_->island_paths;
+        output.island_sizes = published_->island_sizes; ++work_.row_reuses;
+    } else for (const auto& task : players) {
+        const auto& cache = caches_.at(task.player.player);
+        output.goal_reach.append(cache.goal_reach.begin(), cache.goal_reach.end());
+        output.island_paths.insert(output.island_paths.end(), cache.islands.begin(), cache.islands.end());
+        output.island_sizes.push_back({task.player.player, cache.island_sizes[0], cache.island_sizes[1]});
+    }
+    bool reach_changed{};
+    for (const auto& task : players) {
+        if (reach_changed) break;
+        reach_changed = !task.inserted.empty() || std::any_of(task.undo.begin(), task.undo.end(),
+            [](const auto& entry) { return *entry.row != entry.before; });
+    }
+    if (reach_changed || published_->stealth_fleets != output.stealth_fleets) {
+        if (publication_revision_ == std::numeric_limits<std::uint64_t>::max())
+            return refuse<ConnectivityPublication>("B publication revision is exhausted");
+        {
+            gc_profile::Scope profile_scope(gc_profile::Phase::usability_record_maintenance);
+            for (const auto& task : players) {
+                for (const auto& entry : task.undo) if (*entry.row != entry.before)
+                    records_.set(entry.key.first, 0, entry.key.second, reach_record(entry.key, *entry.row));
+                for (const auto& key : task.inserted) records_.set(key.first, 0, key.second, reach_record(key, retained_.at(key)));
+            }
         }
         ++publication_revision_; mark_state_changed();
     }
@@ -916,11 +1418,13 @@ void GalacticAiUsabilityProvider::update_reach_records(const decltype(retained_)
     for (; old != retained_.end(); ++old) records_.erase(old->first.first, 0, old->first.second);
 }
 core::RecordDigest GalacticAiUsabilityProvider::rebuild_records() const {
+    if (frozen_provider_) return frozen_provider_->rebuild_records();
     core::RecordDigest rebuilt;
     for (const auto& [key, row] : retained_) rebuilt.set(key.first, 0, key.second, reach_record(key, row));
     return rebuilt;
 }
 core::Result<std::string> GalacticAiUsabilityProvider::record_sync_hash(bool cold) const {
+    if (const auto* block = selected_frontier()) return block->record_sync_hash(cold);
     // Pending invalidations are derived by the archive from upstream owners.
     // Re-read only this bounded player header at the completed boundary; the
     // potentially large retained site lists have already updated on publication.
@@ -928,24 +1432,32 @@ core::Result<std::string> GalacticAiUsabilityProvider::record_sync_hash(bool col
     core::RecordDigest::Bytes bytes; core::RecordDigest::append(bytes, publication_revision_); pending.set(0, 0, 0, bytes);
     const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
     const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
-    for (const auto& [player, prepared] : prepared_through_) {
+    std::optional<decltype(prepared_through_)> overlay;
+    if (frozen_provider_) {
+        overlay.emplace(frozen_provider_->prepared_through_);
+        for (const auto& [player, prepared] : prepared_through_) overlay->insert_or_assign(player, prepared);
+    }
+    const auto& prepared_inputs = overlay ? *overlay : prepared_through_;
+    for (const auto& [player, prepared] : prepared_inputs) {
         std::uint64_t flags = prepared.pending_changes;
         if (current && observed_world_) {
-            const auto cached = caches_.find(player);
-            if (cached == caches_.end() || !current->planet_access()) flags |= 3U;
-            if (cached != caches_.end() && current->planet_access()) {
-                if (cached->second.source_changed || cached->second.observer_generation != current->observer_input_generation()
-                    || cached->second.access_generation != current->planet_access()->generation || cached->second.perception_revision != perception) flags |= 1U;
-                if (!cached->second.connectivity_ready) flags |= 2U;
+            const auto* cached = find_cache(player);
+            if (!cached || !current->planet_access()) flags |= 3U;
+            if (cached && current->planet_access()) {
+                if (cached->source_changed || cached->observer_generation != current->observer_input_generation()
+                    || cached->access_generation != current->planet_access()->generation || cached->perception_revision != perception) flags |= 1U;
+                if (!cached->connectivity_ready) flags |= 2U;
             }
         }
         bytes.clear(); core::RecordDigest::append(bytes, player); core::RecordDigest::append(bytes, prepared.through.repr);
         core::RecordDigest::append(bytes, flags); pending.set(player, 0, 0, bytes);
     }
-    const auto retained = cold ? rebuild_records().digest("GALACTIC_USABILITY") : records_.digest("GALACTIC_USABILITY");
+    const auto retained = cold ? rebuild_records().digest("GALACTIC_USABILITY")
+        : (frozen_provider_ ? frozen_provider_->records_ : records_).digest("GALACTIC_USABILITY");
     return core::Result<std::string>::success(ga::compose_native_sync_digests({{"sites", retained}, {"pending", pending.digest("GALACTIC_USABILITY-pending")}}));
 }
 core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
+    if (const auto* block = selected_frontier()) return block->capture();
     if (auto verified = verify_record_sync_hash(); !verified) return core::Result<ga::NativeState>::failure(verified.error());
     std::vector<std::uint8_t> bytes;
     const auto put = [&](std::uint64_t value, unsigned width) {
@@ -957,25 +1469,32 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
     const auto current = observed_session_ ? observed_session_->snapshot() : nullptr;
     const auto perception = observed_world_ ? observed_world_->movement_input_revision() : 0;
     // WGA-329/GFS-A14: exact flags, ordered site lists and producer deadlines.
-    put(3, 4); put(publication_revision_, 8); put(prepared_through_.size(), 4);
-    for (const auto& [player, prepared] : prepared_through_) {
+    std::optional<decltype(prepared_through_)> overlay;
+    if (frozen_provider_) {
+        overlay.emplace(frozen_provider_->prepared_through_);
+        for (const auto& [player, prepared] : prepared_through_) overlay->insert_or_assign(player, prepared);
+    }
+    const auto& prepared_inputs = overlay ? *overlay : prepared_through_;
+    put(3, 4); put(publication_revision_, 8); put(prepared_inputs.size(), 4);
+    for (const auto& [player, prepared] : prepared_inputs) {
         put(player, 4); put(prepared.through.repr, 8);
         std::uint64_t pending = prepared.pending_changes;
         if (current && observed_world_) {
-            const auto cached = caches_.find(player);
-            if (cached == caches_.end() || !current->planet_access()) pending |= 3U;
-            if (cached != caches_.end() && current->planet_access()) {
-                if (cached->second.source_changed
-                    || cached->second.observer_generation != current->observer_input_generation()
-                    || cached->second.access_generation != current->planet_access()->generation
-                    || cached->second.perception_revision != perception) pending |= 1U;
-                if (!cached->second.connectivity_ready) pending |= 2U;
+            const auto* cached = find_cache(player);
+            if (!cached || !current->planet_access()) pending |= 3U;
+            if (cached && current->planet_access()) {
+                if (cached->source_changed
+                    || cached->observer_generation != current->observer_input_generation()
+                    || cached->access_generation != current->planet_access()->generation
+                    || cached->perception_revision != perception) pending |= 1U;
+                if (!cached->connectivity_ready) pending |= 2U;
             }
         }
         put(pending, 1);
     }
-    put(retained_.size(), 4);
-    for (const auto& [key, row] : retained_) {
+    const auto& retained = frozen_provider_ ? frozen_provider_->retained_ : retained_;
+    put(retained.size(), 4);
+    for (const auto& [key, row] : retained) {
         put(key.first, 4); put(key.second, 8);
         put(row.shortest, 1); put(row.least_force, 1); put(row.largest, 1);
         for (std::size_t policy = 0; policy < policies.size(); ++policy) {
@@ -991,6 +1510,8 @@ core::Result<ga::NativeState> GalacticAiUsabilityProvider::capture() const {
     return core::Result<ga::NativeState>::success(std::move(out));
 }
 core::Result<void> GalacticAiUsabilityProvider::restore(const ga::NativeState& state) {
+    if (frozen_provider_ || !decision_frontiers_.empty() || selected_frontier())
+        return refuse<void>("usability restore requires the joined barrier owner");
     const auto found = state.components.find("GALACTIC_USABILITY");
     if (state.version != ga::native_state_version || found == state.components.end()
         || found->second.size() > ga::native_state_max_bytes) return refuse<void>("required B native component is absent or unsupported");

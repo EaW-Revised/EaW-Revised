@@ -14,7 +14,7 @@ namespace eawr::viewer::galactic {
         || !snapshot.movement() || !snapshot.control()
         || !sim::galactic::qualifies_raid(*fleet, target, *snapshot.movement(), *snapshot.control(),
             snapshot.actor_records(), snapshot.planet_access())) return {};
-    auto intent = fleet_destination_intent(snapshot, local, source, target, planets);
+    auto intent = fleet_destination_intent(snapshot, local, source, target, planets, {});
     if (!intent) return {};
     intent->kind = DropKind::ability;
     intent->ability = sim::galactic::MoveFleet{source, intent->path, {}, true};

@@ -1,11 +1,15 @@
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <unordered_set>
+#include <vector>
 #include <utility>
 
 namespace eawr::presentation::animation {
@@ -196,7 +200,71 @@ struct Trs final { Vec3 translation; Vec3 scale; Quat rotation; };
 } // namespace
 
 struct Player::Bone final { std::string name; std::int32_t parent{}; Matrix bind_local{}, bind_model{}, inverse_bind{}; bool visible{}; };
-struct Player::Track final { std::size_t bone{}; assets::AnimationTrack track; };
+// Channels whose samples are bit-equal across all stored frames keep one value (stride 0); the others keep one per
+// frame (stride 1). interpolate() indexes value[frame * stride], so the hot loop has no per-sample branch.
+struct Player::Track final {
+    std::size_t bone{};
+    assets::Interpolation translation_interpolation{}, scale_interpolation{}, rotation_interpolation{};
+    std::vector<assets::Vec3f> translation, scale;
+    std::vector<assets::Vec4f> rotation;
+    std::vector<std::uint8_t> visible;
+    std::size_t translation_stride{1}, scale_stride{1}, rotation_stride{1}, visible_stride{1};
+    std::string bone_name;
+};
+
+namespace {
+
+// Keeps a single value when every frame is bit-equal to the first; returns the stride (0 = elided).
+template <typename Value>
+std::size_t elide_constant(std::vector<Value>& values) {
+    if (values.empty()) return 1;
+    for (const Value& value : values) {
+        if (std::memcmp(&value, &values.front(), sizeof(Value)) != 0) return 1;
+    }
+    values.resize(1);
+    values.shrink_to_fit();
+    return 0;
+}
+
+} // namespace
+
+void Player::owner_census(diagnostics::OwnerCensus& output) const noexcept {
+    using Census = diagnostics::OwnerCensus;
+    output.player_reference();
+    if (!output.range(Census::animation, this, sizeof(Player))) return;
+    auto& parts = output.player_parts();
+    ++parts.players;
+    parts.bones += bones_.size();
+    parts.tracks += tracks_.size();
+    parts.bone_bytes += bones_.capacity() * sizeof(Bone);
+    parts.track_bytes += tracks_.capacity() * sizeof(Track);
+    parts.frames += static_cast<std::uint64_t>(stored_frames_) * tracks_.size();
+    parts.unelided_sample_bytes += static_cast<std::uint64_t>(stored_frames_) * tracks_.size()
+        * sizeof(assets::AnimationSample);
+    for (const auto& track : tracks_) {
+        parts.sample_bytes += track.translation.capacity() * sizeof(assets::Vec3f)
+            + track.scale.capacity() * sizeof(assets::Vec3f) + track.rotation.capacity() * sizeof(assets::Vec4f)
+            + track.visible.capacity();
+        parts.constant_translation += track.translation_stride == 0 ? 1U : 0U;
+        parts.constant_scale += track.scale_stride == 0 ? 1U : 0U;
+        parts.constant_rotation += track.rotation_stride == 0 ? 1U : 0U;
+        parts.constant_visible += track.visible_stride == 0 ? 1U : 0U;
+    }
+    output.vector(Census::animation, bones_);
+    output.vector(Census::animation, tracks_);
+    for (const auto& bone : bones_) {
+        if (!output.step(Census::animation)) break;
+        output.string(Census::animation, bone.name);
+    }
+    for (const auto& track : tracks_) {
+        if (!output.step(Census::animation)) break;
+        output.string(Census::animation, track.bone_name);
+        output.vector(Census::animation, track.translation);
+        output.vector(Census::animation, track.scale);
+        output.vector(Census::animation, track.rotation);
+        output.vector(Census::animation, track.visible);
+    }
+}
 
 Player::~Player() = default;
 Player::Player(Player&&) noexcept = default;
@@ -280,6 +348,7 @@ core::Result<Player> Player::create(const assets::Model& model, const assets::An
     result.frames_per_second_ = animation->frames_per_second;
     result.duration_seconds_ = animation->duration_seconds;
     result.playable_frames_ = animation->playable_frame_count;
+    result.stored_frames_ = animation->stored_frame_count;
     std::unordered_set<std::size_t> bound_bones;
     for (const assets::AnimationTrack& source : animation->tracks) {
         const auto valid_interpolation = [](const assets::Interpolation value) {
@@ -297,7 +366,23 @@ core::Result<Player> Player::create(const assets::Model& model, const assets::An
         }
         for (const auto& sample : source.samples) if (!finite(sample.translation) || !finite(sample.scale) || !finite(sample.rotation))
             return core::Result<Player>::failure(failure(diagnostic_codes::invalid_animation, "animation track has non-finite sample", animation->source.logical_path));
-        result.tracks_.push_back({source.bone_index, source});
+        Track track{source.bone_index, source.translation_interpolation, source.scale_interpolation,
+            source.rotation_interpolation, {}, {}, {}, {}, 1, 1, 1, 1, source.bone_name};
+        track.translation.reserve(source.samples.size());
+        track.scale.reserve(source.samples.size());
+        track.rotation.reserve(source.samples.size());
+        track.visible.reserve(source.samples.size());
+        for (const auto& sample : source.samples) {
+            track.translation.push_back(sample.translation);
+            track.scale.push_back(sample.scale);
+            track.rotation.push_back(sample.rotation);
+            track.visible.push_back(sample.visible ? 1U : 0U);
+        }
+        track.translation_stride = elide_constant(track.translation);
+        track.scale_stride = elide_constant(track.scale);
+        track.rotation_stride = elide_constant(track.rotation);
+        track.visible_stride = elide_constant(track.visible);
+        result.tracks_.push_back(std::move(track));
     }
     return core::Result<Player>::success(std::move(result));
 }
@@ -392,12 +477,17 @@ core::Result<void> Player::interpolate(const std::size_t first, const std::size_
     result.origin_ = origin_; result.sampled_time_seconds = sampled; result.bones.resize(bones_.size());
     for (std::size_t index = 0; index < bones_.size(); ++index) { result.bones[index].local_asset = bones_[index].bind_local; result.bones[index].visible = bones_[index].visible; }
     for (const Track& binding : tracks_) {
-        const auto& a = binding.track.samples[first]; const auto& b = binding.track.samples[second];
-        Trs value{lerp(a.translation, b.translation, interpolation_amount(binding.track.translation_interpolation, fraction)),
-                  lerp(a.scale, b.scale, interpolation_amount(binding.track.scale_interpolation, fraction)),
-                  binding.track.rotation_interpolation == assets::Interpolation::spherical
-                    ? slerp(normalized(a.rotation), normalized(b.rotation), fraction)
-                    : nlerp(normalized(a.rotation), normalized(b.rotation), interpolation_amount(binding.track.rotation_interpolation, fraction))};
+        const auto& a_translation = binding.translation[first * binding.translation_stride];
+        const auto& b_translation = binding.translation[second * binding.translation_stride];
+        const auto& a_scale = binding.scale[first * binding.scale_stride];
+        const auto& b_scale = binding.scale[second * binding.scale_stride];
+        const auto& a_rotation = binding.rotation[first * binding.rotation_stride];
+        const auto& b_rotation = binding.rotation[second * binding.rotation_stride];
+        Trs value{lerp(a_translation, b_translation, interpolation_amount(binding.translation_interpolation, fraction)),
+                  lerp(a_scale, b_scale, interpolation_amount(binding.scale_interpolation, fraction)),
+                  binding.rotation_interpolation == assets::Interpolation::spherical
+                    ? slerp(normalized(a_rotation), normalized(b_rotation), fraction)
+                    : nlerp(normalized(a_rotation), normalized(b_rotation), interpolation_amount(binding.rotation_interpolation, fraction))};
         // Intermediate blends support only a proper TRS on both ends; see
         // docs/asset-formats.md#presentation-animation-and-attachments.
         std::string_view unsupported;
@@ -413,7 +503,7 @@ core::Result<void> Player::interpolate(const std::size_t first, const std::size_
                 "intermediate bind blend is unsupported for tracked bone '" + bones_[binding.bone].name + "': "
                 + std::string(unsupported)));
         result.bones[binding.bone].local_asset = local;
-        result.bones[binding.bone].visible = a.visible;
+        result.bones[binding.bone].visible = binding.visible[first * binding.visible_stride] != 0;
     }
     for (std::size_t index = 0; index < bones_.size(); ++index) {
         const Matrix parent = bones_[index].parent < 0 ? identity_matrix() : result.bones[static_cast<std::size_t>(bones_[index].parent)].model_asset;

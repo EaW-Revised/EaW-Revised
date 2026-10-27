@@ -1,6 +1,7 @@
 #include "lan_match_internal.hpp"
 #include "galactic_launch.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "galactic_lobby_backend.hpp"
 #include "eawr/net/galactic_adapter.hpp"
 
@@ -37,6 +38,7 @@ void TcpLanMatch::pump_galactic_start() {
         if (!view().host && !lobby_setup_accepted_ && lobby_->setup_phase() == net::SetupPhase::reviewing_offer) {
             auto accepted = lobby_->accept_setup();
             if (!accepted) { set_failure(accepted.error()); return; }
+            core::gc_load::trace.mark("setup_accepted");
             lobby_setup_accepted_ = true;
         }
         if (!lobby_->result_ready()) return;
@@ -44,6 +46,7 @@ void TcpLanMatch::pump_galactic_start() {
         if (!committed) { set_failure(committed.error()); return; }
         auto ready = lobby_->take_result();
         if (!ready) { set_failure(ready.error()); return; }
+        core::gc_load::trace.mark("setup_committed");
         lobby_result_ = std::make_shared<net::LobbyResult>(std::move(ready).value());
         io_->room_lifetime = lobby_result_; io_->application_stream = lobby_stream_;
         lobby_room_committed_ = true;
@@ -81,6 +84,7 @@ std::shared_ptr<GalacticLaunch> TcpLanMatch::take_galactic_launch() {
     if (!agreement || !agreement->session || !agreement->plan || !io_->monitor || !lobby_stream_) {
         set_failure(net::lobby_diagnostic(net::LobbyReason::setup_failed, "The agreed campaign owner is unavailable.")); return {};
     }
+    core::gc_load::trace.mark("launch_handover");
     auto launch = std::make_shared<GalacticLaunch>();
     launch->options = galactic_start_->options;
     launch->roster = lobby_result_->snapshot();

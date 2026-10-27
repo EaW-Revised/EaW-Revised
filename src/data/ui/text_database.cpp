@@ -222,6 +222,14 @@ std::u16string TextLookup::text(const std::string_view key) {
     return widen_key(key);
 }
 
+bool TextLookup::contains(const std::string_view key) const noexcept {
+    if (database_->find(key) != nullptr) return true;
+    for (const BuiltinText& builtin : builtin_texts) {
+        if (builtin.key == key) return true;
+    }
+    return false;
+}
+
 core::Result<TextDatabase> load_text_database(const std::span<const std::byte> bytes,
                                               Source source) {
     const auto layout = diagnostic_codes::text_database_layout;

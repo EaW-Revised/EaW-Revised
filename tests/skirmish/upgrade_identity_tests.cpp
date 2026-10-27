@@ -33,8 +33,15 @@ static int paired(bool shadow) {
     write(dir/"XML/FactionFiles.xml","<Faction_Files><File>factions.xml</File></Faction_Files>");
     write(dir/"XML/factions.xml","<Factions><Faction Name=\"Underworld\"/></Factions>");
     // Invented station/target fixture; the repeated upgrade/ability identity is the stock pattern.
-    write(dir/"XML/probe.xml", "<Objects><StarBase Name=\"Probe_Station\"><Affiliation>Underworld</Affiliation>"
-        "<Tactical_Buildable_Objects_Multiplayer>Underworld,"+upgrade+"</Tactical_Buildable_Objects_Multiplayer></StarBase>"
+    write(dir/"XML/probe.xml", "<Objects><SpaceBuildable Name=\"Probe_Station\"><Affiliation>Underworld</Affiliation>"
+        "<Tactical_Buildable_Objects_Multiplayer>Underworld,"+upgrade+",Probe_Token</Tactical_Buildable_Objects_Multiplayer></SpaceBuildable>"
+        "<UpgradeObject Name=\"Probe_Token\"><Behavior>DUMMY_UPGRADE</Behavior><Affiliation>Underworld</Affiliation>"
+        "<Tactical_Build_Cost_Multiplayer>25</Tactical_Build_Cost_Multiplayer><Tactical_Build_Time_Seconds>2</Tactical_Build_Time_Seconds>"
+        "<Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue></UpgradeObject>"
+        "<SpaceBuildable Name=\"Probe_Pad\"><Affiliation>Underworld</Affiliation><Behavior>TACTICAL_BUILD_OBJECTS</Behavior>"
+        "<Tactical_Buildable_Objects_Multiplayer>Underworld,Probe_Token</Tactical_Buildable_Objects_Multiplayer></SpaceBuildable>"
+        "<SpaceBuildable Name=\"Probe_UC\"><Affiliation>Underworld</Affiliation><Behavior>TACTICAL_UNDER_CONSTRUCTION</Behavior>"
+        "<Tactical_Buildable_Objects_Multiplayer>Underworld,Probe_Token</Tactical_Buildable_Objects_Multiplayer></SpaceBuildable>"
         "<UpgradeObject Name=\""+upgrade+"\"><Behavior>DUMMY_UPGRADE</Behavior><Affiliation>Underworld</Affiliation>"
         "<Tactical_Build_Cost_Multiplayer>950</Tactical_Build_Cost_Multiplayer><Tactical_Build_Time_Seconds>23</Tactical_Build_Time_Seconds>"
         "<Tactical_Production_Queue>Tactical_Upgrades</Tactical_Production_Queue><Abilities SubObjectList=\"Yes\">"
@@ -50,7 +57,7 @@ static int paired(bool shadow) {
     const auto legacy=catalog.resolve(upgrade);
     if(!legacy) return 2;
     eawr::units::LoadInput input; input.catalog=&catalog; input.filesystem=&vfs.value();
-    input.types={"Probe_Station","Probe_Target"};
+    input.types={"Probe_Station","Probe_Target","Probe_Pad","Probe_UC"};
     auto loaded_tables=eawr::units::load_unit_tables(input); if(!loaded_tables) return 2;
     auto& tables=loaded_tables.value();
     for(const auto& tag: {"MP_Default_Credits","Tactical_Build_Time_Multiplier","Space_Elevated_Vulnerability_Factor",
@@ -61,6 +68,18 @@ static int paired(bool shadow) {
     const auto* menu=rules.value().menu(eawr::skirmish::type_id("Probe_Station"),eawr::skirmish::faction_id("Underworld"));
     const auto* option=menu?menu->find(eawr::skirmish::type_id(upgrade)):nullptr;
     const auto* profile=rules.value().upgrade(eawr::skirmish::type_id(upgrade));
+    const auto* producer=tables.find("Probe_Station");
+    const auto* token=menu?menu->find(eawr::skirmish::type_id("Probe_Token")):nullptr;
+    const auto* token_profile=rules.value().upgrade(eawr::skirmish::type_id("Probe_Token"));
+    const bool generic_producer=producer&&producer->kind!=eawr::units::UnitKind::station
+        &&producer->production.income.empty()&&!producer->capture_point&&!producer->build_pad&&!producer->under_construction
+        &&menu&&menu->station_producer;
+    const bool token_available=token&&token->available&&token->kind==eawr::sim::tactical::BuildKind::upgrade
+        &&token->price==Fixed::from_raw(25*Fixed::scale)&&token->build_frames==60&&token_profile
+        &&!token_profile->level_up&&!token_profile->increments_tech&&token_profile->bonuses.empty();
+    const auto* pad_menu=rules.value().menu(eawr::skirmish::type_id("Probe_Pad"),eawr::skirmish::faction_id("Underworld"));
+    const auto* uc_menu=rules.value().menu(eawr::skirmish::type_id("Probe_UC"),eawr::skirmish::faction_id("Underworld"));
+    const bool construction_excluded=pad_menu&&!pad_menu->station_producer&&uc_menu&&!uc_menu->station_producer;
     std::cout<<"shadow="<<shadow
         <<" table_type="<<(unit?unit->xml_type:"absent")<<" upgrade_object="<<(unit&&unit->production.upgrade_object)
         <<" price="<<(option?option->price.raw()/Fixed::scale:-1)<<" frames="<<(option?option->build_frames:0)
@@ -68,7 +87,7 @@ static int paired(bool shadow) {
         <<" bonuses="<<(profile?profile->bonuses.size():0)<<'\n';
     const auto legacy_again=catalog.resolve(upgrade);
     eawr::testing::remove_temp_directory(dir);
-    return !(legacy_again&&legacy_again.value().type_name==legacy.value().type_name&&unit&&unit->xml_type=="UpgradeObject"&&unit->production.upgrade_object&&option&&option->available
+    return !(generic_producer&&token_available&&construction_excluded&&legacy_again&&legacy_again.value().type_name==legacy.value().type_name&&unit&&unit->xml_type=="UpgradeObject"&&unit->production.upgrade_object&&option&&option->available
         &&option->price.raw()==950*Fixed::scale&&option->build_frames==690&&profile&&!profile->bonuses.empty());
 }
 

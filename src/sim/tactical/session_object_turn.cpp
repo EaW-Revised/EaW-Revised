@@ -49,6 +49,7 @@ bool object_turn_supports(const AbilityKind kind) noexcept {
     case AbilityKind::sensor_jamming:
     case AbilityKind::laser_defense:
     case AbilityKind::full_salvo:
+    case AbilityKind::rocket_attack:
     case AbilityKind::self_destruct:
     case AbilityKind::cluster_bomb:
     case AbilityKind::harmonic_bomb:
@@ -69,6 +70,8 @@ bool object_turn_supports(const AbilityKind kind) noexcept {
 }
 
 core::Result<void> TacticalSession::set_object_turn_service(std::shared_ptr<ObjectTurnService> service) {
+    if (impl_->land && service) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+        "land movement host does not support object-turn providers"));
     if (impl_->object_turn_running) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "set_object_turn_service during an object-turn provider call"));
@@ -78,6 +81,8 @@ core::Result<void> TacticalSession::set_object_turn_service(std::shared_ptr<Obje
 }
 
 core::Result<void> TacticalSession::submit_object_turn(const ObjectTurnRecord& record) {
+    if (impl_->land) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+        "land movement host does not support object-turn records"));
     const auto context = "object-turn use (tick " + std::to_string(record.tick) + ", unit "
         + std::to_string(record.use.unit) + ", sequence " + std::to_string(record.use.sequence) + ")";
     if (impl_->object_turn_running) {
@@ -85,7 +90,7 @@ core::Result<void> TacticalSession::submit_object_turn(const ObjectTurnRecord& r
             context + ": submitted during an object-turn provider call"));
     }
     if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::blast)
+        || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
         || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
         || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -185,7 +190,7 @@ core::Result<void> session_detail::Tick::object_turn_seam() {
                 const auto label = "object-turn use (tick " + std::to_string(tick) + ", unit " + std::to_string(use.unit)
                     + ", sequence " + std::to_string(use.sequence) + ")";
                 if (use.unit == invalid_entity_id || use.ability == AbilityKind::none
-                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::blast)
+                    || static_cast<std::uint8_t>(use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
                     || static_cast<std::uint8_t>(use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
                     || static_cast<std::uint8_t>(use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
                     return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
@@ -276,13 +281,13 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
             if (!object_turn_supports(use.ability)) return Result::success(RejectReason::ability_unavailable);
             if (use.action == AbilityAction::activate && (use.ability == AbilityKind::cluster_bomb
                 || use.ability == AbilityKind::harmonic_bomb || use.ability == AbilityKind::weaken_enemy)) {
-                if (!ability.spawned || !impl_->durability.damage) return Result::success(RejectReason::ability_unavailable);
+                if ((!ability.spawned && !ability.unresolved_spawn) || !impl_->durability.damage) return Result::success(RejectReason::ability_unavailable);
                 if (use.ability == AbilityKind::cluster_bomb && use.target != invalid_entity_id && use.target != use.unit)
                     return Result::success(RejectReason::ability_unavailable);
                 if ((use.ability == AbilityKind::weaken_enemy) && !use.position)
                     return Result::success(RejectReason::ability_unavailable);
                 const auto position = use.position && *use.position != math::Vec3{} ? *use.position : live->state.position;
-                if (use.ability == AbilityKind::weaken_enemy && ability.spawned->reach.raw() > 0
+                if (use.ability == AbilityKind::weaken_enemy && ability.spawned && ability.spawned->reach.raw() > 0
                     && !within_range(live->state.position, position, ability.spawned->reach, RangeMetric::planar))
                     return Result::success(RejectReason::ability_unavailable);
             }
@@ -426,15 +431,15 @@ core::Result<RejectReason> session_detail::Tick::apply_object_turn_use(const Obj
     }
     if (use.ability == AbilityKind::cluster_bomb || use.ability == AbilityKind::harmonic_bomb
         || use.ability == AbilityKind::weaken_enemy) {
-        if (!ability.spawned || !impl_->durability.damage
+        if ((!ability.spawned && !ability.unresolved_spawn) || !impl_->durability.damage
             || (use.ability == AbilityKind::cluster_bomb && use.target != invalid_entity_id && use.target != use.unit)
             || ((use.ability == AbilityKind::weaken_enemy) && !use.position))
             return Result::success(RejectReason::ability_unavailable);
         const auto position = use.position && *use.position != math::Vec3{} ? *use.position : unit->state.position;
-        if (use.ability == AbilityKind::weaken_enemy && ability.spawned->reach.raw() > 0
+        if (use.ability == AbilityKind::weaken_enemy && ability.spawned && ability.spawned->reach.raw() > 0
             && !within_range(unit->state.position, position, ability.spawned->reach, RangeMetric::planar))
             return Result::success(RejectReason::ability_unavailable);
-        spawn_instant_ability(*unit, use.ability, *ability.spawned, position);
+        if (ability.spawned) spawn_instant_ability(*unit, use.ability, *ability.spawned, position);
         slot.started_tick = tick;
         slot.ready_tick = tick + ability.recharge_frames;
         return Result::success(RejectReason::none);

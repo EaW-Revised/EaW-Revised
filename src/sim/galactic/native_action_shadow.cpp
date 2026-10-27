@@ -37,6 +37,7 @@ void GalacticSession::NativeActionShadow::Data::inherit_reads(const std::shared_
         return;
     }
     auto checkpoint = std::make_shared<Data>(); checkpoint->base = previous->base;
+    checkpoint->system_hold = previous->system_hold;
     const auto merge_newest = [](auto& into, const auto& from) {
         for (const auto& [key, value] : from) into.try_emplace(key, value);
     };
@@ -289,6 +290,7 @@ public:
     } setup;
     std::span<const Seat> seats;
     const GalacticClock& clock;
+    const bool system_hold;
     EntityId& next_id;
     std::size_t& live_object_count;
     std::shared_ptr<const MovementSetup> movement_inputs;
@@ -365,7 +367,7 @@ public:
     } detached_units;
     explicit FleetOwner(Data& data)
         : data_(data), setup{data.base->fleet_control(), data.base->movement()}, seats(data.base->seats()),
-          clock(data.base->clock()), next_id(data.next_id), live_object_count(data.live_objects),
+          clock(data.base->clock()), system_hold(data.system_hold), next_id(data.next_id), live_object_count(data.live_objects),
           movement_inputs(data.movement),
           graph(data.graph.get()), native_movement_listener(data.movement_listener), registry{*this}, fleets{*this, {}}, planets{*data.base}, detached_units(data) {}
     bool raid_qualified(FleetId id, PlanetId destination) const {
@@ -381,6 +383,12 @@ public:
     std::vector<Planet> sorted_planets() const { return {data_.base->planets().begin(), data_.base->planets().end()}; }
     std::vector<Route> sorted_routes() const { return {data_.base->routes().begin(), data_.base->routes().end()}; }
     void invalidate_observer_projection() { ++data_.observer_generation; }
+    // WGM-150: the shadow holds no corruption economy; its recorded request accrues when the real session commits it.
+    void accrue_departure_piracy(FleetId, PlayerId, PlanetId, const std::vector<FleetMember>&) {}
+    // WGM-84/85: the shadow models single-hop AI requests, which have no intermediate planet to pay, so every planet
+    // reads as unowned (nothing to pay); AI paid-path billing and the difficulty multiplier stay with #3981.
+    std::pair<PlayerId, PlayerId> bribe_planet_state(PlanetId) const { return {}; }
+    GalacticRejectReason settle_movement_bribe(PlayerId, const std::vector<std::pair<PlayerId, math::Fixed>>&, math::Fixed) { return GalacticRejectReason::none; }
     void relocate_actor(EntityId id, PlayerId player, PlanetId planet, EntityId container) {
         if (const auto* before = data_.actor(id)) {
             auto row = *before; row.owner = player; row.planet = planet; row.container = container;
@@ -632,6 +640,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
     if (!std::holds_alternative<CreateFleet>(payload) && !std::holds_alternative<AddFleetMembers>(payload)
         && !std::holds_alternative<RemoveFleetMembers>(payload) && !std::holds_alternative<MergeFleets>(payload)
         && !std::holds_alternative<SetFleetOrbitSlot>(payload) && !std::holds_alternative<TransferFleetMembers>(payload)
+        && !std::holds_alternative<SetFleetPathfinder>(payload)
         && !std::holds_alternative<MoveFleet>(payload))
         return invalid<NativeFleetReceipt>("native fleet layer requires a fleet command");
     if (!data_->player || (!data_->tail && !data_->prelude && data_->player != player) || data_->work.requests >= data_->max_requests || encode_payload(payload).size() > galactic_replay_max_payload - 38
@@ -678,7 +687,7 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::NativeActionS
             if (issuer == owner.seats.end()) return core::Result<NativeFleetReceipt>::success({false, 0, GalacticRejectReason::inactive_seat});
             const auto first = data_->events.size();
             session_detail::execute_native_fleet(owner, GameCommand{{data_->base->completed_tick(), issuer->seat_id, 0}, payload},
-                data_->base->completed_tick(), data_->events, pending_local_conflict, false);
+                data_->base->completed_tick(), data_->events, pending_local_conflict, false, session_detail::PausedKind::surface_deploy);
             NativeFleetReceipt receipt;
             for (auto i = first; i < data_->events.size(); ++i) {
                 if (data_->events[i].kind == GalacticEventKind::command_rejected) receipt.reason = data_->events[i].reason;
@@ -846,6 +855,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionS
         return invalid<NativeActionShadow>("native player layers require ascending known players and bounded requests");
     auto state = std::make_shared<Data>();
     state->owner = data_->owner; state->base = data_->base; state->parent = data_;
+    state->system_hold = data_->system_hold;
     state->inherit_reads(data_);
     state->player = player; state->first_id = state->next_id = data_->next_id;
     state->live_objects = data_->live_objects; state->max_requests = max_requests;
@@ -872,6 +882,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::NativeActionS
         return invalid<NativeActionShadow>("native root forks require known players, bounded requests and a reserved identity block");
     auto state = std::make_shared<Data>();
     state->owner = data_->owner; state->base = data_->base; state->parent = data_;
+    state->system_hold = data_->system_hold;
     state->inherit_reads(data_);
     state->player = player; state->first_id = state->next_id = first_id;
     state->range_end = first_id + galactic_max_objects; state->independent_player = true;

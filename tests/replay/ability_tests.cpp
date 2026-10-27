@@ -13,6 +13,14 @@ int& failures = local_checker.failures;
 using namespace ability_tests;
 
 int main(int argc, char* argv[]) {
+    if (argc == 2 && std::string_view(argv[1]) == "--mod-loadability") {
+        test_spawned_hero_abilities();
+        test_self_destruct();
+        test_hero_beams();
+        if (failures != 0) return EXIT_FAILURE;
+        std::cout << "mod loadability ability contracts accepted\n";
+        return EXIT_SUCCESS;
+    }
     if (!eawr::testing::support_contract_self_test()) {
         std::cerr << "FAIL: shared check/require self-test\n";
         return 1;
@@ -38,6 +46,8 @@ int main(int argc, char* argv[]) {
     test_replenished_radar_creation();
     test_hardpoint_dependencies();
     test_space_healing();
+    test_passive_damage_aura();
+    test_passive_damage_edges();
     test_peacebringer_blast_session();
     test_deployment_abilities();
     test_lure();
@@ -46,6 +56,7 @@ int main(int argc, char* argv[]) {
     test_corrupt_scatter();
     test_corrupt_systems();
     test_full_salvo();
+    test_rocket_attack();
     test_stealth_session();
     test_stealth_duration_modifiers();
     test_squadron_stealth();
@@ -57,6 +68,7 @@ int main(int argc, char* argv[]) {
     test_projectile_defence_producers();
     test_projectile_defence_transaction();
     test_impact_shooter_bonus();
+    test_fire_range_bonus();
     test_hero_environment_damage_routing();
     test_hero_damage_after_escorts_die();
     test_hero_wingmen();

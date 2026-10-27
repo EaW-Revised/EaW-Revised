@@ -199,6 +199,7 @@ void EawrResourceChurnProbe::_ready() {
             report_path_ = arguments[i + 1].utf8().get_data();
         }
         if (arguments[i] == String("--eawr-churn-leak-control")) leak_control_ = true;
+        if (arguments[i] == String("--eawr-churn-model-recipes-only")) model_recipes_only_ = true;
     }
     viewport_ = memnew(SubViewport);
     viewport_->set_size(Vector2i(view_width, view_height));

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/state_hash.hpp"
@@ -83,6 +85,7 @@ struct TacticalTick {
     // #3644: what the object-turn seam did with each use of this tick, in (unit, sequence) order; empty
     // without a provider or when none was due. Diagnostics only: never hashed, never in a snapshot.
     std::vector<ObjectTurnOutcome> object_turn;
+    std::vector<DamageChange> damage_changes{}; // WCC-54: delivery order, never hashed
 };
 
 // Deterministic home of one tactical session. Commands are queued by submit() in
@@ -100,6 +103,11 @@ public:
     [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_checkpoint_state() const;
     // Apply to a freshly constructed inactive session, never directly to a running battle.
     [[nodiscard]] core::Result<void> load_checkpoint_state(std::span<const std::uint8_t> bytes);
+    // Optional land section. Space returns empty bytes and refuses a land payload.
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> save_land_checkpoint_state() const;
+    [[nodiscard]] core::Result<void> load_land_checkpoint_state(std::span<const std::uint8_t> bytes);
+    [[nodiscard]] const LandMovement* land_movement() const noexcept;
+    [[nodiscard]] const LandOccupancy* land_occupancy() const noexcept;
     TacticalSession(TacticalSession&&) noexcept;
     TacticalSession& operator=(TacticalSession&&) noexcept;
     ~TacticalSession();
@@ -156,6 +164,8 @@ public:
     // the digest the synchronous path returns in state_sha256. Null (the default) hashes on the
     // stepping thread. The hasher is not state: it never changes a hash or a replay.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;
+    // Diagnostic publication only; changing it leaves canonical state/checkpoints identical.
+    void set_damage_notifications(bool enabled) noexcept;
     // #3644: installs (or, with null, removes) the object-turn provider. Not state: a session with none
     // installed steps exactly as before. The provider is called from inside step(), at the seam after the
     // ability service and its special handlers and before tracking, late impacts and the commands (see
@@ -259,6 +269,9 @@ public:
     [[nodiscard]] std::optional<AbilityState> ability_state(EntityId unit) const;
     // The unit's movement, or nothing when it is not live or its type has no motion profile.
     [[nodiscard]] std::optional<MotionState> motion_state(EntityId unit) const;
+    // Diagnostic const query at a completed tick; caller excludes concurrent stepping.
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
+
     // PC-08 (#520): the path searches running in slices now, and the memory they hold (their
     // copied layer views and search scratch). Diagnostics only: not state.
     struct SlicedSearchUse {

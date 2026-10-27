@@ -38,6 +38,8 @@ struct Mat3x4 {
 [[nodiscard]] core::Result<Vec3> cross(Vec3 left, Vec3 right);
 [[nodiscard]] core::Result<Fixed> length(Vec2 value);
 [[nodiscard]] core::Result<Fixed> length(Vec3 value);
+// Exact ordering of squared raw magnitudes, without rounding a length or overflowing Fixed.
+[[nodiscard]] int compare_squared_lengths(Vec3 left, Vec3 right) noexcept;
 [[nodiscard]] core::Result<Fixed> length(Quat value);
 // length(Vec2) and dot(Vec2) without a diagnostic for the hot loops (#520): false where the
 // Result form fails; the value is always the Result form's.

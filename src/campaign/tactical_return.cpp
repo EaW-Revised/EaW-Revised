@@ -1,5 +1,6 @@
 #include "eawr/campaign/tactical_return.hpp"
 #include "eawr/sim/galactic/control.hpp"
+#include "battle_return_internal.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -17,19 +18,22 @@ template<typename T> core::Result<T> fail(std::string message) {
 bool destroyed(const ForceResult& row) {
     return row.disposition == ForceDisposition::destroyed || row.disposition == ForceDisposition::destroy_after_tactical;
 }
-core::Result<gc::PlanetId> destination(const gc::GalacticSnapshot& snapshot, const gc::PlanetId source,
+}
+core::Result<gc::PlanetId> retreat_destination(const gc::GalacticSnapshot& snapshot, const gc::PlanetId source,
     const gc::PlayerId owner, const bool surface) {
     const auto src = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == source; });
     if (src == snapshot.planets().end()) return fail<gc::PlanetId>("retreat source is absent");
     const auto orbital = [&](const auto id) { return std::any_of(snapshot.fleets().begin(), snapshot.fleets().end(),
-        [&](const auto& fleet) { return fleet.orbit == id && fleet.owner == owner && !fleet.motion.transit; }); };
+        [&](const auto& fleet) { return fleet.orbit == id && fleet.owner == owner; }); };
     const auto base = [&](const auto id) { return snapshot.control() && std::any_of(snapshot.control()->planets.begin(), snapshot.control()->planets.end(),
         [&](const auto& row) { return row.planet == id && (row.starbase.owner == owner || row.ground_base.owner == owner); }); };
     const auto neutral = [&](const auto player) { return snapshot.control() && std::any_of(snapshot.control()->players.begin(), snapshot.control()->players.end(),
         [&](const auto& row) { return row.player == player && row.neutral; }); };
     for (unsigned tier = 0; tier < 4; ++tier) {
-        std::optional<sim::math::Fixed> nearest; gc::PlanetId selected{}; bool tied{};
-        for (const auto& planet : snapshot.planets()) {
+        std::optional<sim::math::Vec3> nearest; gc::PlanetId selected{};
+        // WGM-212 / WGS-184: planets have increasing creation IDs; live objects are front-inserted.
+        for (auto at = snapshot.planets().rbegin(); at != snapshot.planets().rend(); ++at) {
+            const auto& planet = *at;
             if (planet.id == source || (tier == 0 && !(surface ? base(planet.id) : orbital(planet.id)))
                 || (tier == 1 && !(surface ? orbital(planet.id) : base(planet.id)))
                 || (tier == 2 && !neutral(planet.owner))) continue;
@@ -37,18 +41,19 @@ core::Result<gc::PlanetId> destination(const gc::GalacticSnapshot& snapshot, con
             const auto y = sim::math::subtract(planet.position.y, src->position.y);
             const auto z = sim::math::subtract(planet.position.z, src->position.z);
             if (!x || !y || !z) return fail<gc::PlanetId>("retreat destination distance overflow");
-            const auto distance = sim::math::length(sim::math::Vec3{x.value(), y.value(), z.value()});
-            if (!distance) return core::Result<gc::PlanetId>::failure(distance.error());
-            if (!nearest || distance.value() < *nearest) { nearest = distance.value(); selected = planet.id; tied = false; }
-            else if (distance.value() == *nearest) tied = true;
+            const sim::math::Vec3 distance{x.value(), y.value(), z.value()};
+            // WGM-211: compare squared distances strictly; equal candidates retain the first hit.
+            if (!nearest || sim::math::compare_squared_lengths(distance, *nearest) < 0) {
+                nearest = distance; selected = planet.id;
+            }
         }
         if (selected) {
-            if (tied) return fail<gc::PlanetId>("unqualified equal-distance retreat destinations (WGM-U03)");
             return core::Result<gc::PlanetId>::success(selected);
         }
     }
     return core::Result<gc::PlanetId>::success(source); // WGM-99 orbital fallback
 }
+namespace {
 void put(std::vector<std::uint8_t>& bytes, std::uint64_t value, unsigned size = 8) {
     for (unsigned i = 0; i < size; ++i) { bytes.push_back(static_cast<std::uint8_t>(value)); value >>= 8U; }
 }
@@ -175,7 +180,7 @@ core::Result<void> apply_tactical_return(gc::GalacticSession& galaxy, const Conf
                 && std::find(plan.retreat_fleets.begin(), plan.retreat_fleets.end(), fleet.id) != plan.retreat_fleets.end();
         });
         const bool surface = conflict.layer == BattleLayer::land && !orbital_raid;
-        const auto selected = destination(*snapshot, conflict.planet, *plan.result.retreat_player, surface);
+        const auto selected = retreat_destination(*snapshot, conflict.planet, *plan.result.retreat_player, surface);
         if (!selected) return core::Result<void>::failure(selected.error());
         std::vector<gc::FleetId> live;
         for (const auto id : plan.retreat_fleets)

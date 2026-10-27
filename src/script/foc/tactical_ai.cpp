@@ -5,6 +5,7 @@
 #include "eawr/script/foc/tactical_ai.hpp"
 
 #include "ai_mode.hpp"
+#include "ai_script_evaluators.hpp"
 #include "tactical_ai_internal.hpp"
 #include "mode_time.hpp"
 #include "tactical_ai_world.hpp"
@@ -225,6 +226,7 @@ public:
     }
 
     core::Result<void> after_service(authoritative::ServiceReport& report) override {
+        host_->script_service_active.store(false, std::memory_order_relaxed);
         report.commands.insert(report.commands.end(), std::make_move_iterator(turn_report_.commands.begin()),
             std::make_move_iterator(turn_report_.commands.end()));
         report.diagnostics.insert(report.diagnostics.end(), std::make_move_iterator(turn_report_.diagnostics.begin()),
@@ -277,6 +279,7 @@ public:
     core::Result<authoritative::ServiceOptions> before_service(const sim::PartitionExecutor& executor,
         const tactical::TacticalSession& world, const tactical::TacticalTick& tick, ScriptScheduler& scripts) override {
         using OptionsResult = core::Result<authoritative::ServiceOptions>;
+        host_->script_service_active.store(false, std::memory_order_relaxed);
         executor_ = &executor;
         host_->view = [&] {
             core::tick_profile::Scope scope("serial.ai.view");
@@ -377,6 +380,8 @@ public:
         options.defer_instance = [initialized = initialized_](std::uint64_t instance) {
             return std::binary_search(initialized.begin(), initialized.end(), instance);
         };
+        // The scheduler services its instances next, partitioned: serial-only Lua stays out until after_service.
+        host_->script_service_active.store(true, std::memory_order_relaxed);
         return OptionsResult::success(std::move(options));
     }
 
@@ -676,6 +681,10 @@ core::Result<PreparedAiSession> prepare_session(
             setup.journal->append_plan({0, 0, {}, {}, {}, "definition_diagnostic", note});
         goals = std::make_shared<ai::Engine>(host, std::move(data).value(), std::move(plans).value());
         host->engine = goals.get();
+        // #1702: Script_* perception runs the corpus's own evaluator modules (WGA-453).
+        auto evaluators = ScriptEvaluators::create(host, modules);
+        if (!evaluators) return SessionResult::failure(evaluators.error());
+        goals->attach_script_evaluators(std::move(evaluators).value());
     }
 
     authoritative::ModuleManifest manifest;

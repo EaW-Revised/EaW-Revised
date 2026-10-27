@@ -28,6 +28,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "tests/presentation/renderer"))
@@ -630,6 +631,66 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertEqual(lan["source"], "lan")
         self.assertEqual(lan["chat"], [], "no online chat leaks into the LAN window")
 
+    def test_host_credits_dialog_accept_cancel_defaults(self):
+        sys.path.insert(0, str(ROOT))
+        from tools.inventory.corpus import Corpus
+        source = Corpus(GAME_ROOT).read_effective("foc", "data/xml/gameconstants.xml").data
+        for modded in (False, True):
+            with self.subTest(modded=modded):
+                constants = ET.fromstring(source)
+                low = int(constants.find(".//Min_Skirmish_Credits").text)
+                high = int(constants.find(".//Max_Skirmish_Credits").text)
+                default = int(constants.find(".//MP_Default_Credits").text)
+                extra = []
+                name = "lobby-credit-mod" if modded else "lobby-credit-stock"
+                if modded:
+                    low, high = low + 250, high + 750
+                    default = low + 501
+                    constants.find(".//Min_Skirmish_Credits").text = str(low)
+                    constants.find(".//Max_Skirmish_Credits").text = str(high)
+                    constants.find(".//MP_Default_Credits").text = str(default)
+                    data = self.directory / name / "Data"
+                    (data / "XML").mkdir(parents=True)
+                    (data / "MegaFiles.xml").write_text("<Mega_Files><File>Absent.meg</File></Mega_Files>", encoding="utf-8")
+                    ET.ElementTree(constants).write(data / "XML/GameConstants.xml", encoding="utf-8")
+                    extra = ["--eawr-mod-root", str(data.parent)]
+                chosen = low + 1000
+                steps = ("host_options", "host:Credit options", "snapshot", "options:open", "snapshot",
+                         f"options:credits={low + 1}", "sleep:3", "snapshot", f"shot:{name}-edit",
+                         "options:cancel", "snapshot", "options:open", f"options:credits={low + 1}",
+                         "options:accept", "sleep:3", "snapshot", "options:open",
+                         f"options:credits={high - 1}", "options:defaults", "snapshot",
+                         "options:cancel", "snapshot", "options:open", "options:defaults", "options:accept",
+                         "sleep:3", "snapshot", "leave")
+                actions = [arg for step in steps for arg in ("--eawr-lan-do", step)]
+                completed = subprocess.run(command(
+                    self.cache, name, self.pictures, self.pictures / f"{name}.png",
+                    "--eawr-lan-name", "Credits host", "--eawr-lan-game-port", "0",
+                    "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), *extra, *actions),
+                    cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+                self.assertEqual(completed.returncode, 0, completed.stdout[-6000:])
+                before, opened, edited, cancelled, accepted, reset, reset_cancelled, reset_accepted = load(
+                    self, self.pictures, name, completed.stdout)["snapshots"]
+                self.assertEqual((opened["credits_min"], opened["credits_max"]), (low, high))
+                self.assertTrue(opened["options_open"] and opened["credits_enabled"])
+                for shown in (opened, reset):
+                    self.assertEqual(shown["credits"], default)
+                    self.assertEqual(shown["credits_caption"], str(default))
+                    self.assertFalse(shown["credits_custom"])
+                self.assertEqual(edited["credits"], chosen)
+                self.assertEqual(edited["credits_caption"], str(chosen))
+                self.assertTrue(edited["credits_custom"])
+                self.assertEqual(cancelled["credits"], before["credits"])
+                self.assertFalse(cancelled["options_open"] or cancelled["credits_custom"])
+                for shown in (accepted, reset_cancelled):
+                    self.assertEqual(shown["credits"], chosen)
+                    self.assertTrue(shown["credits_custom"])
+                    self.assertFalse(shown["options_open"])
+                self.assertGreater(accepted["room_revision"], before["room_revision"])
+                self.assertEqual(reset_accepted["credits"], default)
+                self.assertFalse(reset_accepted["credits_custom"] or reset_accepted["options_open"])
+                self.assertGreater(reset_accepted["room_revision"], accepted["room_revision"])
+
     def test_vacant_seat_controls_change_count_inside_lobby(self):
         name = "lobby-seat-controls"
         steps = ("host_options", "shot:host-options-without-count", "host:Seat controls",
@@ -844,6 +905,29 @@ class LanLobbyGraphical(unittest.TestCase):
         self.assertIn("Solo: anyone there", after_chat["chat_last_shown"])
         # Cancel on the staging leaves it for the lobby, which the second Cancel closes: the run reports closed.
         self.assertTrue(report["closed"], report["actions"])
+        self.assertNotIn("ERROR:", completed.stdout)
+
+    def test_a_campaign_room_lists_readable_names_and_describes_the_selected_campaign(self):
+        # #4553: the host's campaign list shows the Text_ID names, not the raw IDs, and the selected campaign's
+        # Description_Text fills the panel where the map preview sits.
+        name = "campaign-names"
+        steps = ("host_options", "host_dropdown:game_type=TEXT_GAME_TYPE_CAMPAIGN", "host:Campaign night", "snapshot",
+                 "shot:" + name, "cancel", "cancel")
+        completed = subprocess.run(
+            command(self.cache, name, self.pictures, self.pictures / (name + ".png"),
+                    "--eawr-lan-name", "Solo", "--eawr-lan-colour", "1",
+                    "--eawr-lan-broadcast-port", str(free_udp_ports(1)[0]), "--eawr-lan-game-port", "0",
+                    *[arg for step in steps for arg in ("--eawr-lan-do", step)]),
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False, timeout=600)
+        self.assertEqual(completed.returncode, 0, completed.stdout[-3000:])
+        report = load(self, self.pictures, name, completed.stdout)
+        (staging,) = report["snapshots"]
+        self.assertEqual(staging["page"], "staging")
+        self.assertTrue(staging["campaigns"], "the host lists the installed multiplayer campaigns")
+        for title in staging["campaigns"]:
+            self.assertFalse(title.upper().startswith(("MULTIPLAYER_", "TEXT_")), title)
+        self.assertTrue(staging["campaign_description"].strip(), "the selected campaign has a description")
+        self.assertFalse(staging["campaign_description"].startswith("TEXT_"), staging["campaign_description"])
         self.assertNotIn("ERROR:", completed.stdout)
 
     def test_the_chat_list_keeps_showing_new_lines_once_the_log_is_full(self):

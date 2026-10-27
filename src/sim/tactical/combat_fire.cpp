@@ -56,6 +56,8 @@ core::Result<CombatStep> UnitCombat::run() {
         face_target();
         for (std::uint32_t slot = 0; slot < profile_.weapons.size(); ++slot) {
             service_weapon(slot);
+            // HPT-02 / FS-12: weapon work reads the old pose; turret work commits the next one.
+            if (!profile_.weapons[slot].requires_manual_target) hardpoint_turret(slot);
         }
         // FS-33/FC-61: the later turret turn adjusts only when object tracking is off.
         for (std::uint32_t slot = 0; slot < profile_.weapons.size(); ++slot) {
@@ -81,6 +83,8 @@ core::Result<CombatStep> UnitCombat::fire_planetary(const CombatUnit& target) {
 
 bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, CombatRandom& random,
     const bool burst_begun, const CombatUnit* planetary_target) {
+        const auto& mode_weapon = profile_.weapons[slot];
+        if (!mode_weapon.fires_in_mode(unit_.rocket_attack)) return false;
         if (!unit_.weapons_enabled) return false; // WR-44/46: covers direct/manual/burst fire too
         // WAD-34, FD-54: these gates read the budget after each earlier successful attempt.
         if (charged_blast_ && charged_blast_->charge_remaining != 0) return false;
@@ -136,6 +140,10 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             return false;
         }
         if (!planetary_target && !hostile(*target)) return false; // WHZ-51; WSW-20 continuation retains its target.
+        if (!weapon.requires_manual_target && weapon.manual_turret_required) {
+            if (!weapon.manual_turret || !assignment || !pointable(weapon, {}, target->position)
+                || !hardpoint_turret_fire(weapon, *assignment, *target)) return false;
+        }
         if (weapon.object_turret_required) {
             const auto& turret = state_.weapons[slot].turret;
             if (!turret || !turret->ready) return false;
@@ -143,7 +151,9 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         if (ion && target->id != unit_.ion_target && world_.container_of(target->id) != unit_.ion_target) {
             return false;
         }
-        const auto midpoint = world_point(unit_, local_midpoint(weapon));
+        const auto local_middle = !weapon.requires_manual_target && weapon.manual_turret && assignment
+            ? hardpoint_turret_position(weapon, *assignment, local_midpoint(weapon)) : local_midpoint(weapon);
+        const auto midpoint = world_point(unit_, local_middle);
         // WWP-47: the object weapon's next muzzle bone, else the unit's origin. The shot leaves it,
         // the lead starts there and the weapon's cone opens about the unit's facing there (WWP-53).
         std::optional<Aim> aim;
@@ -197,7 +207,7 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
             if (!aim) return false;
         }
         // W-05 / WWP-21: planar aim distance includes the target's loaded soft radius.
-        const auto reach = take(math::add(weapon.range, target_soft_radius(world_.motion, *target)));
+        const auto reach = take(math::add(this->fire_reach(weapon), target_soft_radius(world_.motion, *target)));
         if (!planetary_target && !within_range(midpoint, aim->point, reach, RangeMetric::planar)) {
             return false;
         }
@@ -205,9 +215,30 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         // on its lead or cone (debug build), so a rejected shot still uses its muzzle up.
         if (muzzled) state_.weapons[slot].next_muzzle = static_cast<std::uint32_t>((muzzle_index + 1) % weapon.muzzles.size());
         auto origin = muzzled ? weapon.muzzles[muzzle_index] : weapon.fire_a;
-        if (!muzzled && weapon.has_fire_b && random.uniform(0, 99) >= 50U) origin = weapon.fire_b;
+        const bool random_box = !own_weapon && weapon.has_fire_b && weapon.randomize_between_fire_bones;
+        if (!muzzled && weapon.has_fire_b && !random_box && random.uniform(0, 99) >= 50U) origin = weapon.fire_b;
+        if (!weapon.requires_manual_target && weapon.manual_turret && assignment)
+            origin = hardpoint_turret_position(weapon, *assignment, origin);
         if (muzzled && state_.weapons[slot].turret) origin = object_turret_muzzle(weapon, *state_.weapons[slot].turret, origin);
-        const auto muzzle = world_point(unit_, origin);
+        auto muzzle = world_point(unit_, origin);
+        if (random_box) {
+            auto other = weapon.fire_b;
+            if (!weapon.requires_manual_target && weapon.manual_turret && assignment)
+                other = hardpoint_turret_position(weapon, *assignment, other);
+            other = world_point(unit_, other);
+            // WWP-22: three synchronized draws, even for equal bounds, after posing both
+            // endpoints. Sampling before their world transform would rotate the box.
+            const auto coordinate = [&](const math::Fixed a, const math::Fixed b) {
+                constexpr std::uint32_t fraction_max = 32767; // WWP-22: inclusive 15-bit fraction
+                const auto fraction = take(math::Fixed::from_ratio(random.uniform(0, fraction_max), fraction_max));
+                const auto low = std::min(a, b);
+                const auto span = take(math::subtract(std::max(a, b), low));
+                return take(math::add(low, take(math::multiply(span, fraction))));
+            };
+            muzzle.x = coordinate(muzzle.x, other.x);
+            muzzle.y = coordinate(muzzle.y, other.y);
+            muzzle.z = coordinate(muzzle.z, other.z);
+        }
         // WWP-53: the object weapon's cone is tested at its muzzle; the range above stays the unit's.
         const auto cone_origin = muzzled ? muzzle : midpoint;
         // W-10, W-11: the shot leads the target; the weapon must point at the led point.
@@ -230,6 +261,25 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         events_.push_back(CombatEvent{world_.frame, CombatEventKind::weapon_fired, unit_.id, weapon.hardpoint,
             target->id, aim->hardpoint, muzzle, scattered,
             (ion ? fired_ability_shot : barrage ? fired_barrage_shot : 0U) | (charged ? fired_charged_shot : 0U)});
+        // RFL-15: a ROCKET is created facing its firing bone's x axis (the muzzle bone, else the fire
+        // bone, posed with its turret), else the unit's facing; the aim stays the scattered point.
+        if (weapon.shot && weapon.shot->flight && weapon.shot->flight->kind == FlightKind::rocket) {
+            math::Vec3 axis{math::Fixed::from_raw(one_raw), {}, {}};
+            if (muzzled) {
+                if (muzzle_index < weapon.muzzle_axes.size() && weapon.muzzle_axes[muzzle_index] != math::Vec3{}) {
+                    axis = weapon.muzzle_axes[muzzle_index];
+                    if (state_.weapons[slot].turret) axis = object_turret_muzzle(weapon, *state_.weapons[slot].turret, axis, true);
+                }
+            } else if (weapon.fire_axes) {
+                axis = (*weapon.fire_axes)[0];
+                if (!weapon.requires_manual_target && weapon.manual_turret && assignment)
+                    axis = hardpoint_turret_position(weapon, *assignment, axis, true);
+            }
+            events_.back().launch = take(math::normalize(take(math::transform_vector(unit_.transform, axis))));
+        }
+        // HPT-04: keep the last fired reference independently of the directed/opportunity target.
+        if (!weapon.requires_manual_target && state_.weapons[slot].manual)
+            state_.weapons[slot].manual->target = target->id;
         // FS-35: spend inside creation, so the next hardpoint can read ordinary state at zero.
         if (charged) --charged_blast_->shots_remaining;
         // MS-03: the scatter off the led point, taken into the target's frame for a homing
@@ -250,6 +300,12 @@ bool UnitCombat::attempt(const std::uint32_t slot, const EntityId target_id, Com
         }
         return true;
     }
+
+math::Fixed UnitCombat::fire_reach(const WeaponProfile& weapon) {
+    if (weapon.hardpoint == object_weapon) return unit_.ability_attack_range.value_or(weapon.range);
+    if (unit_.fire_range.raw() == one_raw) return weapon.range;
+    return take(math::multiply(weapon.range, unit_.fire_range), weapon.range);
+}
 
 math::Fixed UnitCombat::delay_factor(const WeaponProfile& weapon) const noexcept {
     if (!unit_.full_salvo || weapon.hardpoint == object_weapon || weapon.full_salvo_delay.raw() == one_raw) {
@@ -313,7 +369,7 @@ void UnitCombat::service_weapon(const std::uint32_t slot) {
             state.manual->assigned_frame = 0;
         }
         // MC-06: mechanical service is independent of the weapon's firing disable gates.
-        if (state.manual && weapon.manual_turret && !hardpoint_destroyed_on(unit_, weapon.hardpoint)) {
+        if (weapon.requires_manual_target && state.manual && weapon.manual_turret && !hardpoint_destroyed_on(unit_, weapon.hardpoint)) {
             manual_turret(weapon, *state.manual);
         }
         if (!weapon_up(weapon)) return;
@@ -329,7 +385,8 @@ void UnitCombat::service_weapon(const std::uint32_t slot) {
             if (target == nullptr) return;
             // WAD-39: state eligibility owns the timeout. Range, fog and cone are later
             // attempt gates and cannot manufacture timeout feedback.
-            const bool eligible = target->profile != nullptr && !restricted(weapon, *target)
+            const bool eligible = weapon.fires_in_mode(unit_.rocket_attack)
+                && target->profile != nullptr && !restricted(weapon, *target)
                 && (target->durability == nullptr || target->durability->hull.raw() > 0);
             if (!eligible) {
                 if (world_.frame > manual.assigned_frame && world_.frame - manual.assigned_frame > 300) {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/scene/hardpoint_state.hpp"
+
 #include "eawr/data/xml.hpp"
 #include "eawr/scene/idle_tags.hpp"
 #include "eawr/scene/scene.hpp"
@@ -43,7 +45,7 @@ struct HardpointAttachment final {
 
 // A hardpoint's presentation state. A spawned object has every hardpoint
 // intact; #72 decides when one is damaged or destroyed.
-enum class HardpointState : std::uint8_t { intact, damaged, destroyed };
+
 [[nodiscard]] std::string_view to_string(HardpointState state) noexcept;
 [[nodiscard]] std::optional<HardpointState> parse_hardpoint_state(std::string_view text) noexcept;
 

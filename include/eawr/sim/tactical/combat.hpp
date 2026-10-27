@@ -8,10 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 // Ship-level target choice, hardpoint opportunity targeting and weapon fire (P2-10, #73;
@@ -115,10 +117,14 @@ struct WeaponProfile {
     math::Vec3 fire_a{};                    // Fire_Bone_A
     math::Vec3 fire_b{};                    // Fire_Bone_B; equal to fire_a when there is none
     bool has_fire_b{};
+    bool randomize_between_fire_bones{true}; // WWP-22: sample the world-coordinate box
     // WWP-47: the object weapon's muzzle bones in firing order (the authored prefix, then _00 and
     // consecutive two-digit suffixes until the first absent bone). Empty: the shot leaves the unit's
     // own origin. Always empty for a hardpoint weapon.
     std::vector<math::Vec3> muzzles{};
+    // RFL-15: each muzzle bone's bind-frame x axis in the unit's frame, unit length, parallel to
+    // muzzles; zero for a bone without a usable frame. A ROCKET shot leaves along it.
+    std::vector<math::Vec3> muzzle_axes{};
     // Fire_Bone_A's bind-frame x, y and z axes in the unit's frame, orthonormal: a fixed
     // hardpoint's cone opens along x, its width about z and its height toward z (W-07). Without
     // them (no fire bone frame) the cone is measured in the unit's own frame.
@@ -145,6 +151,10 @@ struct WeaponProfile {
     // WAB-80: Full_Salvo_Weapon_Delay_Multiplier, applied to this hardpoint's delays while the unit's
     // FULL_SALVO is on; 1 when the hardpoint does not author it.
     math::Fixed full_salvo_delay{math::Fixed::from_raw(math::Fixed::scale)};
+    bool fire_in_rocket_mode{true}, fire_in_normal_mode{true}; // WRA-02
+    [[nodiscard]] bool fires_in_mode(const bool rocket) const noexcept {
+        return rocket ? fire_in_rocket_mode : fire_in_normal_mode;
+    }
     friend bool operator==(const WeaponProfile&, const WeaponProfile&) = default;
 };
 
@@ -181,12 +191,47 @@ struct CollisionNode {
     friend constexpr bool operator==(const CollisionNode&, const CollisionNode&) noexcept = default;
 };
 
+// Placed collision data is immutable after the tree is built. Content, live sessions and
+// campaign battle views can retain the same buffers without copying their triangles/nodes.
+// The small mesh metadata stays value-owned (including the admission cache).
+template <typename T>
+class CollisionBuffer final {
+public:
+    using value_type = T;
+    using const_iterator = typename std::vector<T>::const_iterator;
+
+    CollisionBuffer() = default;
+    CollisionBuffer(std::vector<T> values)
+        : values_(values.empty() ? nullptr : std::make_shared<const std::vector<T>>(std::move(values))) {}
+
+    [[nodiscard]] bool empty() const noexcept { return !values_ || values_->empty(); }
+    [[nodiscard]] std::size_t size() const noexcept { return values_ ? values_->size() : 0; }
+    [[nodiscard]] std::size_t capacity() const noexcept { return values_ ? values_->capacity() : 0; }
+    [[nodiscard]] const T* data() const noexcept { return values_ ? values_->data() : nullptr; }
+    [[nodiscard]] const T& operator[](const std::size_t index) const noexcept { return (*values_)[index]; }
+    [[nodiscard]] const_iterator begin() const noexcept { return values().begin(); }
+    [[nodiscard]] const_iterator end() const noexcept { return values().end(); }
+
+    friend bool operator==(const CollisionBuffer& left, const CollisionBuffer& right) {
+        return left.values_ == right.values_ || left.values() == right.values();
+    }
+
+private:
+    [[nodiscard]] const std::vector<T>& values() const noexcept {
+        static const std::vector<T> empty;
+        return values_ ? *values_ : empty;
+    }
+    std::shared_ptr<const std::vector<T>> values_;
+};
+
 struct CollisionMesh {
     std::uint32_t hardpoint{no_hardpoint};
     std::uint32_t source_hardpoint{no_hardpoint};
     bool shield{};
-    std::vector<CollisionTriangle> triangles{}; // in tree order
-    std::vector<CollisionNode> nodes{};         // nodes[0] is the root
+    std::uint8_t grid_exponent{}; // DG-36: derived from root bounds; never serialized or hashed
+    CollisionBuffer<CollisionTriangle> triangles{}; // in tree order
+    CollisionBuffer<CollisionNode> nodes{};         // nodes[0] is the root
+    // Equality includes the cache: admission makes it uniquely determined by the geometry.
     friend bool operator==(const CollisionMesh&, const CollisionMesh&) = default;
 };
 
@@ -196,9 +241,11 @@ struct CollisionMesh {
 [[nodiscard]] CollisionMesh collision_mesh(std::vector<CollisionTriangle> triangles, std::uint32_t hardpoint,
     std::uint32_t source_hardpoint, bool shield);
 
-// Mesh coordinates the segment test accepts: every vertex within this many units of its unit's
-// origin on each axis; a shot that may meet a mesh moves at most this far in a frame.
+// Base mesh grid extent; also the unchanged projectile step-speed guard.
 inline constexpr std::int64_t max_mesh_extent = 4096;
+
+// Smallest exponent whose grid covers the bounds. Values above 6 require admission refusal.
+[[nodiscard]] std::uint8_t collision_grid_exponent(const CollisionBox& bounds) noexcept;
 
 struct MeshHit {
     math::Fixed fraction{}; // where along the segment, in [0, 1], rounded down
@@ -214,7 +261,7 @@ struct MeshCollisionWork {
 // Optional caller-owned additive diagnostics, outside canonical state (DG-36a).
 // DG-36: the first triangle the segment from `from` to `to` meets among the meshes `enabled`
 // admits, each placed by `transform` (rotation and position). The test is exact on a grid of
-// 1/32 unit in the unit's frame; both faces of a triangle count.
+// 2^grid_exponent/32 units in the unit's frame; both faces of a triangle count.
 [[nodiscard]] core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const CollisionMesh> meshes,
     const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
     const math::Vec3& to, MeshCollisionWork* work = nullptr);
@@ -556,6 +603,10 @@ struct CombatEvent {
     EntityId selected_target{};
     // projectile_expired: target is the projectile ID, aim its terminal pose,
     // selected_target its original target, and outcome a ProjectileExpiryReason.
+    // RFL-15: a ROCKET shot's world launch direction (unit length): the firing bone's x axis, else the
+    // unit's facing; zero for other shots, which leave toward aim. Excluded from the event encoding;
+    // it reaches the hashed state through the projectile's step.
+    math::Vec3 launch{};
     friend constexpr bool operator==(const CombatEvent&, const CombatEvent&) noexcept = default;
 };
 

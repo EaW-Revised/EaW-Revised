@@ -4,6 +4,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/sim/seat.hpp"
 #include "eawr/data/ui/text_database.hpp"
+#include "eawr/scene/scene.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -30,6 +31,21 @@ std::string fallback_name(const std::string& path) {
 
 } // namespace
 
+std::vector<SetupFaction> setup_factions(const data::Catalog& catalog) {
+    std::vector<SetupFaction> result;
+    for (const std::string& name : scene::faction_order(catalog)) {
+        const auto resolved = catalog.resolve(name, data::Category::faction);
+        if (!resolved) continue;
+        const auto* playable = resolved.value().value("Is_Playable");
+        if (!playable || !detail::retail_flag(playable->value.raw_text, false)) continue;
+        SetupFaction faction;
+        faction.name = name;
+        if (const auto* id = resolved.value().value("Text_ID")) faction.text_id = detail::trim(id->value.raw_text);
+        result.push_back(std::move(faction));
+    }
+    return result;
+}
+
 bool setup_map_eligible(const assets::Map& map, const SetupMapQuery& query) {
     const auto& metadata = map.lobby;
     const auto folded = [](std::string value) {
@@ -53,8 +69,14 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
     using Result = core::Result<std::vector<SetupMap>>;
     auto records = filesystem.enumerate("data/art/maps/", ".ted");
     if (!records) return Result::failure(records.error());
+    auto custom_records = filesystem.enumerate("data/custommaps/", ".ted");
+    if (!custom_records) return Result::failure(custom_records.error());
+    // WSS-07: discovery does not classify a map; its authored header does.
+    // Both directories use the VFS's effective loose/archive winners.
+    records.value().insert(records.value().end(), custom_records.value().begin(), custom_records.value().end());
     std::vector<SetupMap> maps;
     const auto types = assets::object_type_catalog(catalog);
+    const auto playable_factions = setup_factions(catalog);
     auto texts = data::ui::load_language_text_database(filesystem, "ENGLISH");
     const auto checks = detail::inspect_setup_content(filesystem, catalog);
     const auto build_entry = [&](const vfs::AssetRecord& record, const assets::Map& map,
@@ -90,8 +112,8 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
         else {
             std::map<std::uint32_t, std::uint32_t> spawns;
             for (const auto& placement : placements.value()) {
-                if (!placement.marker || !placement.position || !placement.orientation_degrees
-                    || placement.orientation_degrees->x != Fixed{} || placement.orientation_degrees->y != Fixed{}) continue;
+                // A tilted marker still serves its team (SK-20, start.cpp pose).
+                if (!placement.marker || !placement.position || !placement.orientation_degrees) continue;
                 if (const auto team = marker_team(placement.type, "_Spawn_Point_Marker")) ++spawns[*team];
             }
             // SK-11: the first marker in reverse record order serves the first player on a team.
@@ -103,9 +125,13 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
                 SetupTeam side{*team, {}, spawns[*team]};
                 for (const auto& candidate : p->marker_for) {
                     for (const auto& faction : detail::tokens(candidate.affiliation)) {
-                        if (faction != "Rebel" && faction != "Empire" && faction != "Underworld") continue;
-                        if (std::find(side.factions.begin(), side.factions.end(), faction) == side.factions.end())
-                            side.factions.push_back(faction);
+                        // Both setup and LAN validate against this playable-only, canonical list.
+                        // Station support still never limits the dropdown itself (WSS-12/13).
+                        const auto playable = std::find_if(playable_factions.begin(), playable_factions.end(),
+                            [&](const auto& playable_entry) { return detail::iequals(playable_entry.name, faction); });
+                        if (playable != playable_factions.end()
+                            && std::find(side.factions.begin(), side.factions.end(), playable->name) == side.factions.end())
+                            side.factions.push_back(playable->name);
                     }
                 }
                 if (!side.factions.empty() && entry.metadata.start_positions
@@ -136,6 +162,9 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
             if (!bytes) return;
             auto header = assets::load_map_header(bytes.value(), assets::source_from(record));
             if (!header || !setup_map_eligible(header.value(), query)) return;
+            // Custom-directory discovery admits only authored custom maps.
+            // An official header here must not change the stock picker list.
+            if (record.canonical_path.starts_with("data/custommaps/") && header.value().lobby.custom != true) return;
             auto map = assets::load_map(bytes.value(), assets::source_from(record), types);
             // A header match still requires a completely valid body.
             if (map) candidates[index] = build_entry(record, map.value(), bytes.value());
@@ -154,6 +183,18 @@ core::Result<std::vector<SetupMap>> setup_maps(const vfs::Vfs& filesystem, const
     }
     // Worker scheduling never chooses list order or a marker's reverse-record priority.
     for (auto& candidate : candidates) if (candidate) maps.push_back(std::move(*candidate));
+    // Picker collision policy: original-directory custom maps win same-stem
+    // collisions within the custom tab. Official maps in the other tab must
+    // not hide a mod's custom map. VFS paths are already case-folded.
+    std::set<std::string> original_custom_names;
+    for (const auto& map : maps) {
+        if (map.metadata.custom == true && map.path.starts_with("data/art/maps/"))
+            original_custom_names.insert(map.path.substr(map.path.rfind('/') + 1));
+    }
+    std::erase_if(maps, [&](const auto& map) {
+        return map.path.starts_with("data/custommaps/")
+            && original_custom_names.contains(map.path.substr(map.path.rfind('/') + 1));
+    });
     std::sort(maps.begin(), maps.end(), [](const auto& a, const auto& b) {
         return a.name != b.name ? a.name < b.name : a.path < b.path;
     });
@@ -174,7 +215,8 @@ const std::vector<SetupMap>* SetupMapCache::find(const vfs::Vfs& filesystem,
 core::Result<void> SetupMapCache::load(std::shared_ptr<const vfs::Vfs> filesystem,
     std::shared_ptr<const data::Catalog> catalog, const SetupMapQuery& query) {
     if (find(*filesystem, *catalog, query)) return core::Result<void>::success();
-    auto maps = setup_maps(*filesystem, *catalog, query);
+    land_failure_.clear();
+    auto maps = setup_domain_maps(*filesystem, *catalog, query, land_skirmish_enabled, &land_failure_);
     if (!maps) return core::Result<void>::failure(maps.error());
     maps_ = std::move(maps).value();
     filesystem_ = std::move(filesystem);
@@ -283,18 +325,25 @@ core::Result<FixtureOptions> setup_options(const SetupSelection& selection, std:
         const auto team = std::find_if(map->teams.begin(), map->teams.end(), [&](const auto& entry) { return entry.team == slot.team; });
         if (team == map->teams.end()) return fail("The selected team has no start on this map.");
         // WSS-54: retail validates total capacity and teams, not per-team spawn counts.
-        if (std::find(team->factions.begin(), team->factions.end(), slot.faction) == team->factions.end())
-            return fail("This map has no starting station for " + slot.faction + " on the selected team.");
+        // Project limit, not retail parity: only a faction the map's station candidates name can start here.
+        if (std::none_of(team->factions.begin(), team->factions.end(),
+                [&](const auto& name) { return detail::iequals(name, slot.faction); }))
+            return fail("Project limit: this map has no starting station for " + slot.faction + " on the selected team.");
         if (!slot.fleet.empty()) return fail("Starting fleets are not configurable in this screen.");
     }
     FixtureOptions options;
     options.map = selection.map;
     options.slots = std::vector<LobbySlot>(selection.slots.begin(), selection.slots.end());
     options.match = selection.match;
+    options.domain = map->domain;
+    // Land has no AI seats yet (the land start admits human lobby slots only): every occupied row starts as an
+    // unattended human seat, so the opponent rows of the setup screen still start a battle.
+    if (options.domain == sim::tactical::BattleDomain::land)
+        for (auto& slot : *options.slots) { slot.human = true; slot.difficulty = sim::tactical::AiLevel{}; }
     // WSS-31: the copied record's space victory choice, when it names one of the two evidenced conditions;
     // any other text leaves the data's own default (the start reads it, WBF-08).
     if (selection.match) {
-        if (auto condition = sim::tactical::parse_victory_condition(selection.match->space_win_condition))
+        if (auto condition = sim::tactical::parse_victory_condition(selection.match->tactical_win_condition))
             options.victory_condition = condition.value();
     }
     return Result::success(std::move(options));

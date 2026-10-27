@@ -3,7 +3,7 @@
 
 #include "../../support/check.hpp"
 #include "eawr/presentation/space/shield_hits.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/particles/contact_frame.hpp"
 
 #include <array>
@@ -19,6 +19,7 @@
 namespace {
 
 namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 using space::Vec3d;
 
 eawr::testing::Checker local_checker;
@@ -429,7 +430,7 @@ void explosion_frame_rule() {
                     std::round(columns[column][row] * static_cast<double>(eawr::sim::math::Fixed::scale))));
             }
         }
-        const auto facing = space::instance_unit_facing(transform);
+        const auto facing = live::instance_unit_facing(transform);
         const auto sampled = space::live_unit_axes(facing[0], facing[2], facing[1]);
         const std::array<Vec3d, 3> result{sampled.x, sampled.y, sampled.z};
         for (std::size_t column = 0; column < 3; ++column) {

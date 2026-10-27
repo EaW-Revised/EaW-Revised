@@ -10,10 +10,15 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
 namespace eawr::platform {
+
+// PR-C1/C2: an authored scoring decimal (Build_Cost_Credits, Max_Squad_Size). An empty or TBD
+// value skips the key (nullopt: the caller keeps its default); other text must be a decimal.
+[[nodiscard]] core::Result<std::optional<sim::math::Fixed>> scoring_decimal(std::string_view raw);
 
 // FD-71/72: owned pre-mode scoring. A separate instance may consume snapshots
 // for derived results (WBF-45/46), without writing the authoritative AI gate.

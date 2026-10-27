@@ -20,6 +20,7 @@
 #include "blast_internal.hpp"
 #include "combat_internal.hpp"
 #include "staging.hpp"
+#include "session_land_internal.hpp"
 #include "../../../third_party/entt/single_include/entt/entt.hpp"
 
 #include <algorithm>
@@ -94,6 +95,13 @@ class TacticalSession::Impl final
       public session_detail::SessionStoreSpecialWeapons,
       public session_detail::SessionStorePublication {
 public:
+    bool publish_damage_changes{true}; // transient observer switch, never canonical
+    std::unique_ptr<session_detail::LandSession> land;
+    [[nodiscard]] core::Result<void> initialize_land(const TacticalContent& content);
+    [[nodiscard]] core::Result<TacticalTick> step_land(const PartitionExecutor& executor);
+    [[nodiscard]] std::vector<std::uint8_t> land_bytes(bool partitioned) const;
+    void encode_land_partition(std::size_t partition) const;
+    [[nodiscard]] core::Result<void> restore_land(std::span<const std::uint8_t> bytes);
     [[nodiscard]] RetreatGate retreat_gate(PlayerId player) const;
     [[nodiscard]] std::vector<RetreatView> retreat_views() const;
     [[nodiscard]] std::vector<RetreatActor> retreat_actors(const UnitStage* staged = nullptr) const;
@@ -145,7 +153,7 @@ public:
     [[nodiscard]] CombatBonuses command_bonuses_for(const LiveUnit& unit, const CommandLedger& ledger,
         const std::vector<PlayerEconomy>& accounts, const std::map<EntityId, TypeId>& containers,
         const std::span<CombatBonuses> categories, const UnitStage* effect_world = nullptr,
-        bool targeted_effects = true, std::optional<PlayerId> owner = std::nullopt) const;
+        bool targeted_effects = true, std::optional<PlayerId> owner = std::nullopt, bool retained_only = false) const;
     [[nodiscard]] core::Result<void> apply_command_bonuses(std::vector<LiveUnit>& live, const CommandLedger& ledger,
         const std::vector<PlayerEconomy>& accounts, const EntityId first, const PartitionExecutor& executor) const;
     [[nodiscard]] core::Result<void> service_income_modifiers(std::vector<PlayerEconomy>& accounts,
@@ -163,7 +171,7 @@ public:
 
     [[nodiscard]] CombatBonuses profile_bonuses(const OwnershipKey key, const std::vector<PlayerEconomy>& accounts,
         const std::map<EntityId, TypeId>& containers, const std::span<CombatBonuses> categories,
-        bool total = true) const;
+        bool total = true, bool retained_only = false) const;
 
     [[nodiscard]] core::Result<void> build_bonus_profiles(const std::vector<PlayerEconomy>& accounts,
         const std::map<EntityId, TypeId>& containers, const PartitionExecutor& executor);
@@ -239,6 +247,7 @@ public:
         const std::uint64_t tick) const;
 
     // AB-20: the unit's multiplier of one kind from its active abilities; 1 without any.
+    [[nodiscard]] std::optional<math::Fixed> attack_distance(const LiveUnit& unit) const noexcept;
     [[nodiscard]] math::Fixed ability_factor(const LiveUnit& unit, const AbilityModifier modifier) const;
 
     // AB-43: DEFEND switched on brings the unit's next shield and energy recharges forward to the
@@ -612,6 +621,11 @@ public:
 
     core::Result<void> service_healing(std::vector<LiveUnit>& units, const std::map<EntityId, ArrivalState>& arrivals,
         std::uint64_t tick, const PartitionExecutor& executor, std::vector<CombatEvent>& events);
+    // WSH-05: the inclusive planar centre test, then the rolled model box; shared by healing and WSH-09 damage.
+    [[nodiscard]] bool heal_in_range(const LiveUnit& source, const LiveUnit& target, math::Fixed reach) const;
+    // WSH-09: immutable selection of due negative-amount automatic handlers and their victims, in source order.
+    core::Result<void> select_passive_damage(const UnitStage& staged, const std::map<EntityId, ArrivalState>& arrivals,
+        std::uint64_t tick, const PartitionExecutor& executor, std::vector<PassiveDamagePulse>& pulses);
 };
 
 } // namespace eawr::sim::tactical

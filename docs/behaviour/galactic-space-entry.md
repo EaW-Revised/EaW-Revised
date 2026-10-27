@@ -67,8 +67,15 @@ an omitted order retains domain 3 bytes and the default ascending-ID pool.
 Station selection uses the conflict-keyed scene stream, separate from subsequent
 keyed child services (WGT-SE-U03 remains an original trace qualification). It consumes
 one draw only when multiple authored
-station markers exist, including level zero (WGT-09). Defender placement uses
-the first defender marker. Ordinary invader placement uses the closest
+station markers exist, including level zero (WGT-09).
+The created station keeps the selected marker's complete facing, including roll
+and pitch (WGT-09, R-ROT-01..03). Only the station type contributes its height
+adjustment; the marker type is not instantiated. Three-axis station poses are
+staged through the shared yaw placement builder and restored before form-up.
+Missing position or orientation still refuses a required station. Existing
+yaw-only station placement retains its original path.
+
+Defender placement uses the first defender marker. Ordinary invader placement uses the closest
 attacker marker, retaining the first exact tie (WGT-18). Missing station markers
 skip the station without a random draw. Missing force markers skip that side's
 initial objects and escorts, preserving their campaign identities. With no
@@ -278,9 +285,35 @@ transitive campaign production, squadron, spawner, ability and projectile closur
 Projectile and craft/spawner indices are remapped without altering their data.
 Restore, return, AI and presentation derive the same subset from the resolved
 record; no mutable cache or live filesystem read supplies their content.
-Capability gates run on that subset. A reachable unsupported rocket route
-under RFL-03/05 (legacy EAWR-1760) or oversized collision mesh (DG-36..38) refuses by
-name, while unrelated future/story prototypes stay outside the battle.
+Capability gates run on that subset. Seeded rocket offsets and post-aim
+extensions use the same RFL-03/05 flight consumer as other tactical entry.
+Nonpositive rocket curve distances refuse with every affected reachable
+projectile named; oversized collision meshes (DG-36..38) also refuse by name.
+Unrelated future/story prototypes stay outside the battle.
 The stock proof checks exclusion, transitive craft retention and exact rebinding.
 Neither test claims visual or unresolved retail
 qualification.
+
+## Explicit fleet pathfinder
+
+WGT-06/40 and GHUD-R43/44 supply the explicit fleet-slot selection. The owning
+active human seat sends `SetFleetPathfinder` for an idle orbital fleet and a
+direct member, or zero to clear it. The admission validates the whole request
+before changing flags; replacement clears the other flags in that fleet.
+Eligibility comes from the content provider's space-participation fact or
+transport representation. Nested passengers and foreign members cannot be
+assigned through this command. Pause admission uses the fleet-management policy.
+
+The flag belongs to the persistent member and survives movement, member transfer,
+replay and checkpoints. Preserving it across these operations is the project's
+explicit retention policy; GHUD-R44 only captured one refresh that cleared the
+visible retail slot. It did not establish a normal movement or save reset.
+Merged fleets may retain several selected identities; WGT-06 consumes the first
+qualifying flag in source order. An explicit assignment replaces them together.
+
+The space-entry provider copies current flags alongside roster order. Only the
+invader uses them: its selected member and every always-initial superweapon
+start, with other forces reserved. A missing flag retains WGT-07's population
+split. A preferred story type remains a separate input; no untouched fleet gains
+an automatic selection. `Preferred_Pathfinder_Types` and land entry remain with
+the land provider; this change adds no land-battle rule or viewer gesture.

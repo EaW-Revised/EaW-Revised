@@ -14,6 +14,8 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
+#include "eawr/sim/galactic/economy_corruption.hpp"
+#include "eawr/sim/galactic/corruption_actions.hpp"
 #include "eawr/sim/galactic/income.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 
@@ -97,6 +99,88 @@ void direct(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& 
     const auto cash = game.galaxy().snapshot()->player_economy()->players[0].credits;
     for (int i = 0; i < 5; ++i) (void)take(game.step(pool));
     expect(game.galaxy().snapshot()->player_economy()->players[0].credits == cash, "settled completion never rewards again");
+}
+void ai_invocation(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    // Each individual prerequisite can exclude the otherwise affordable piracy slot.
+    for (unsigned gate = 0; gate < 5; ++gate) {
+        auto config = setup(true); config.economy_corruption->players[1].human = false;
+        auto& choice = config.ability_host->corruption_planets[0].slots[0];
+        if (gate == 1) choice.price = f(1001);
+        if (gate == 2) { choice.required_mission_type = gc::corruption_fixture::Type::bribery; choice.mission_count = 1; }
+        if (gate == 3) {
+            choice.unit_types = {1000}; choice.unit_count = 2;
+            config.ability_host->corruption_prerequisites = {{1000, false, true}};
+        }
+        if (gate == 4) {
+            expect(config.planets[0].owner != 2, "required planet refusal fixture belongs to the actor's enemy");
+            config.census->types.push_back({3001, {}, 0});
+            config.control->planets[0].type = 3001;
+            config.ability_host->corruption_planets[0].type = 3001;
+            choice.planet_types = {3001}; // the only active instance belongs to the enemy
+        }
+        auto game = take(eawr::campaign::GameSession::create(config));
+        const auto before = game.galaxy().economy_corruption()->random_draws;
+        order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::corruption});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto* state = game.galaxy().ability_state();
+        if (gate == 0) {
+            expect(state->transitions[0].transition.active() && state->missions.empty()
+                && state->corruption_usage[1].uses[2] == 1 && game.return_state().heroes.size() == 1,
+                "AI preparation executes direct corruption despite authored tactical map, with usage and default return");
+            expect(game.galaxy().economy_corruption()->random_draws == before + 1,
+                "one eligible AI choice consumes one synchronized selection draw");
+            expect(state->preparations.size() == 1 && !state->preparations[0].open,
+                "AI settles its retained capability without leaving a human dialog open");
+        } else {
+            expect(state->preparations.empty() && state->missions.empty() && !state->transitions[0].transition.active()
+                && game.return_state().heroes.empty() && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000),
+                "AI no-choice refusal applies credit, mission, unit and planet prerequisites before any debit or consumption");
+            expect(game.galaxy().economy_corruption()->random_draws == before, "AI no-choice refusal consumes no selection draw");
+        }
+        const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto fresh = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+        expect(take(cp::save_game_checkpoint(fresh.session, ids)) == saved, "AI settled/refused state reconstructs exactly");
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(take(fresh.session.step(pool)).state_hash.get() == hashes.back(), "AI invocation restore continuation matches");
+    }
+    bool selected_racketeering = false;
+    for (std::uint64_t seed : {1ULL, 23ULL, 28ULL, 43ULL}) {
+        auto config = setup(); config.seed = seed; config.economy_corruption->players[1].human = false;
+        auto& slots = config.ability_host->corruption_planets[0].slots;
+        slots[0].price = slots[2].price = f(100);
+        slots[0].planet_types = {9999}; // absent active-galaxy types are omitted
+        auto game = take(eawr::campaign::GameSession::create(config));
+        auto stream = *game.galaxy().economy_corruption();
+        const auto draw = take(gc::economy_draw(stream, config.seed));
+        const auto piracy = gc::corruption_actions::ai_score(gc::corruption_fixture::Type::piracy, 0);
+        const auto racketeering = gc::corruption_actions::ai_score(gc::corruption_fixture::Type::racketeering, 0);
+        const auto threshold = take(eawr::sim::math::multiply(take(eawr::sim::math::add(piracy, racketeering)), draw));
+        const auto expected = threshold < piracy ? gc::corruption_fixture::Type::piracy : gc::corruption_fixture::Type::racketeering;
+        if (seed != 1) {
+            const auto uniform = draw < take(Fixed::from_ratio(1, 2)) ? gc::corruption_fixture::Type::piracy : gc::corruption_fixture::Type::racketeering;
+            expect(expected != uniform, "weighted selection fixture distinguishes WGCH-50 scores from a uniform pick");
+        }
+        selected_racketeering |= expected == gc::corruption_fixture::Type::racketeering;
+        order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::corruption});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->transitions[0].transition.target == expected,
+            "AI weighted selection uses authored slot order and synchronized seed");
+    }
+    expect(selected_racketeering, "weighted selection also exercises the later racketeering slot");
+}
+void human_refusal(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (unsigned gate = 0; gate < 3; ++gate) {
+        auto config = setup();
+        if (gate == 0) config.ability_host->tutorial_corruption_allowed = false;
+        if (gate == 1) config.ability_host->activated_corruption_abilities.clear();
+        if (gate == 2) config.economy_corruption->planets[0].destroyed = true;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        order(game, 1, gc::PrepareGalacticAbility{buyer(config), config.planets[0].id, gc::AbilityKind::corruption});
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->preparations.empty() && game.return_state().heroes.empty()
+            && game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000),
+            "illegal human corruption preparation refuses before debit or hero removal");
+    }
 }
 void missions(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
     const auto config = setup(true);
@@ -340,7 +424,7 @@ int case_galactic_ability_corruption_tests() {
     ability_fixture::arm_watchdog();
     try {
         using Phase = void (*)(const eawr::sim::PartitionExecutor&, std::vector<std::string>&);
-        const Phase phases[] = {direct, missions, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup};
+        const Phase phases[] = {direct, ai_invocation, human_refusal, missions, stale_units, representative, unsuccessful_missions, accepted_space_mission, startup};
         std::vector<std::string> baseline;
         for (std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter workers(count); std::vector<std::string> hashes;

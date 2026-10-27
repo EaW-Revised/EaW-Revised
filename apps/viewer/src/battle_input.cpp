@@ -72,13 +72,14 @@ double BattleInput::logical_frame(const LiveSessionView& live) const {
     return live.presented_tick();
 }
 
-void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& population, const SpaceEnvironment& space) {
+void BattleInput::refresh(LiveSessionView& live, const BattleScene& population, const BattleCamera& space) {
     frame_ = space.live_camera_frame();
     if (Viewport* viewport = host_ != nullptr ? host_->get_viewport() : nullptr) {
         const Vector2 size = viewport->get_visible_rect().size;
         viewport_ = {static_cast<float>(size.x), static_cast<float>(size.y)};
     }
     live_ = &live;
+    scene_ = &population;
     if (!pick_shapes_loaded_ && live.tables() != nullptr) {
         // #665 (WSU-11, WSU-12): the collidable meshes projectiles hit (DG-36), in model space
         // before Scale_Factor like the pick box, and the override sphere.
@@ -87,7 +88,7 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
             // OR-20: include attached hardpoint meshes in the unit pick; only a reticle names
             // a hardpoint in the order. Mesh contacts always identify the owning unit.
             for (const units::CollisionMesh& mesh : type.collision_meshes) {
-                for (const auto& triangle : mesh.triangles) {
+                for (const auto triangle : mesh.triangles) {
                     std::array<ui::Vec3f, 3> corners{};
                     for (std::size_t corner = 0; corner < 3; ++corner) {
                         corners[corner] = {to_float(triangle[corner].x), to_float(triangle[corner].y),
@@ -174,6 +175,8 @@ void BattleInput::refresh(LiveSessionView& live, const SpacePopulation& populati
                 && live.is_ally_of_local(visible.owner)) {
             unit.own = true; // WBP-08/09: allied pads enter the build UI before ordinary selection.
         }
+        // #4919: ownership/alliance only, never a type name; ships and decorations are not inspected.
+        unit.allied_inspectable = ui::allied_inspectable(unit, live.is_ally_of_local(visible.owner));
         if (unit.own && selection_.contains(unit.entity)) {
             own_selection_ = true;
             const auto shape = pick_shapes_.find(visible.type);
@@ -240,7 +243,7 @@ void BattleInput::observe_pointer(const Ref<InputEvent>& event) {
     }
 }
 
-void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population, SpaceEnvironment& space) {
+void BattleInput::frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space) {
     refresh(live, population, space);
     refresh_cards(live);
     // #848: the frame after a wheel or overview key gesture is sampled once it has drawn (below).
@@ -346,9 +349,8 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
                     } else {
                         const auto station = std::find_if(units_.begin(), units_.end(), [&](const auto& unit) {
                             const auto* instance = live.snapshot_index().instance(unit.entity);
-                            const auto faction = live.local_faction_id();
                             const auto* point = instance ? live.economy().pads.point(instance->type_id) : nullptr;
-                            const auto* menu = instance && faction ? live.economy().menu(instance->type_id, *faction) : nullptr;
+                            const auto* menu = instance ? live.producer_menu(*instance) : nullptr;
                             return instance && unit.own && unit.selectable && live.is_ally_of_local(instance->owner)
                                 && (!point || !point->build_pad) && menu && !menu->options.empty();
                         });
@@ -470,7 +472,7 @@ void BattleInput::frame(LiveSessionView& live, const SpacePopulation& population
     }
 }
 
-void BattleInput::cursor_frame(const LiveSessionView& live, const SpaceEnvironment& space,
+void BattleInput::cursor_frame(const LiveSessionView& live, const BattleCamera& space,
     const double delta, const bool capture) {
     beacon_remaining_ = std::max(0.0, beacon_remaining_ - std::max(delta, 0.0));
     ui::CursorInput input;
@@ -531,7 +533,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
     const std::array<float, 2> at, const LiveSessionView& live) const {
     if (!ability_target_) return std::nullopt;
     const auto aim_ray = ray(at[0], at[1]);
-    const auto plane = aim_ray ? ui::battle_plane_point(*aim_ray) : std::nullopt;
+    const auto plane = aim_ray ? ground_point(*aim_ray) : std::nullopt;
     if (!plane) return std::nullopt;
     const auto x = scene::fixed_from_binary32((*plane)[0]);
     const auto y = scene::fixed_from_binary32((*plane)[1]);
@@ -637,7 +639,7 @@ std::optional<sim::math::Vec3> BattleInput::ability_point(
     return std::nullopt;
 }
 
-void BattleInput::follow(const LiveSessionView& live, SpaceEnvironment& space) {
+void BattleInput::follow(const LiveSessionView& live, BattleCamera& space) {
     const auto& entries = live.options().follow_groups;
     const double tick = live.presented_tick();
     const LiveSessionView::Options::FollowGroup* active = nullptr;

@@ -1,6 +1,7 @@
 #include "eawr/core/load_profile.hpp"
 #include "renderer_upload_internal.hpp"
 #include "texture_budget.hpp"
+#include "texture_mip_tail.hpp"
 #include "mesh_rest_pose.hpp"
 #include "mesh_hidden_geometry.hpp"
 #include <godot_cpp/classes/engine.hpp>
@@ -130,14 +131,19 @@ namespace {
     }
     detail::TextureBudget& budget = detail::texture_budget();
     if (!budget.probed()) {
-        const detail::DeviceMemory memory = detail::probe_device_memory();
-        budget.set_device(memory.bytes, memory.source);
+        if (const auto memory = detail::probe_device_memory()) {
+            budget.set_device(memory->bytes, memory->source);
+        }
     }
     PooledTexture pooled{.rid = {}, .references = 1, .item = item, .dropped = 0,
                          .mip_edges = detail::TextureBudget::mip_edges(source), .mip_bytes = {}};
     for (const assets::MipLevel& mip : source.mips) {
         const std::uint64_t bytes = mip.bytes.size();
         pooled.mip_bytes.push_back(source.format == assets::PixelFormat::bgr8 ? bytes / 3U * 4U : bytes);
+    }
+    if (!pooled.mip_bytes.empty()) {
+        const auto tail_bytes = detail::texture_mip_tail_bytes(source);
+        pooled.mip_bytes.back() += source.format == assets::PixelFormat::bgr8 ? tail_bytes / 3U * 4U : tail_bytes;
     }
     pooled.dropped = detail::TextureBudget::usable_drop(pooled.mip_edges, budget.drop());
     target = create_texture(rendering, source, pooled.dropped);
@@ -155,6 +161,13 @@ namespace {
 }
 
 void GodotRenderer::Impl::enforce_texture_budget(RenderingServer& rendering) {
+    // Publish a queued sample even when there are no further texture uploads.
+    auto& budget = detail::texture_budget();
+    if (!budget.probed()) {
+        if (const auto memory = detail::probe_device_memory()) {
+            budget.set_device(memory->bytes, memory->source);
+        }
+    }
     if (texture_drop_.at_frame(detail::texture_budget(), drawn_frame(),
         [&] { return static_cast<std::uint64_t>(rendering.get_rendering_info(RenderingServer::RENDERING_INFO_VIDEO_MEM_USED)); },
         [&](const std::size_t limit) { return apply_texture_drop(rendering, limit); })) residency_.pressure();
@@ -168,7 +181,7 @@ std::uint64_t GodotRenderer::Impl::drawn_frame() {
 void GodotRenderer::Impl::release_texture(RenderingServer& rendering, const detail::GpuItem& item) {
     const auto found = texture_pool_.find({item.key, item.check});
     if (found == texture_pool_.end() || --found->second.references != 0) return;
-    rendering.free_rid(found->second.rid);
+    render_churn::free_rid(rendering, found->second.rid, render_churn::Owner::model_resource);
     detail::gpu_memory_ledger().remove(found->second.item);
     detail::texture_budget().remove(found->second.item.bytes, drawn_frame());
     texture_pool_.erase(found);
@@ -201,7 +214,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
         const PackedByteArray tail = resident->get_data().slice(offset);
         const auto& edge = pooled.mip_edges[drop];
         const Ref<Image> smaller = Image::create_from_data(static_cast<int32_t>(edge[0]),
-            static_cast<int32_t>(edge[1]), drop + 1 < pooled.mip_edges.size(), resident->get_format(), tail);
+            static_cast<int32_t>(edge[1]), (edge[0] > 1 || edge[1] > 1), resident->get_format(), tail);
         if (smaller.is_null() || smaller->is_empty()) {
             refused();
             continue;
@@ -229,6 +242,8 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     if (format == Image::FORMAT_MAX || source.mips.size() <= drop) return {};
     std::size_t byte_count{};
     for (std::size_t level = drop; level < source.mips.size(); ++level) byte_count += source.mips[level].bytes.size();
+    const auto tail = detail::texture_mip_tail(source);
+    byte_count += tail.size();
     PackedByteArray bytes;
     bytes.resize(static_cast<int64_t>(byte_count));
     std::size_t offset{};
@@ -239,18 +254,19 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
         }
         offset += mip.bytes.size();
     }
+    if (!tail.empty()) std::memcpy(bytes.ptrw() + offset, tail.data(), tail.size());
     const std::uint32_t width = drop == 0 ? source.width : source.mips[drop].width;
     const std::uint32_t height = drop == 0 ? source.height : source.mips[drop].height;
     const Ref<Image> image = Image::create_from_data(
         static_cast<int32_t>(width), static_cast<int32_t>(height),
-        source.mips.size() > drop + 1, format, bytes);
+        source.mips.size() > drop + 1 || !tail.empty(), format, bytes);
     if (image.is_null() || image->is_empty()) return {};
     return rendering.texture_2d_create(image);
 }
 
 
 [[nodiscard]] bool GodotRenderer::Impl::upload_mesh(
-    RenderingServer& rendering, const assets::Model& source, Resource& target, const bool authored_binormals,
+    RenderingServer& rendering, const ModelView& source, Resource& target, const bool authored_binormals,
     const bool resident) {
     core::load_profile::Scope scope(core::load_profile::Phase::mesh_upload);
     if (resident) target.mesh = rendering.mesh_create();
@@ -270,7 +286,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     }
     if (has_billboard) {
         billboard_pose_.prepare(source.bones.size());
-        auto player = animation::Player::create(source);
+        auto player = animation::Player::create(source.original);
         if (!player) return false;
         auto rest_pose = player.value().sample({});
         if (!rest_pose) return false;
@@ -290,7 +306,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
     detail::ContentDigest mesh_digest;
     mesh_digest.scalar(authored_binormals);
     std::uint64_t mesh_bytes{};
-    for (const assets::Mesh& mesh : source.meshes) {
+    for (const auto& mesh : source.meshes) {
         if (!mesh.visible) continue;
         for (const assets::Submesh& submesh : mesh.submeshes) {
             const bool palette_skinned = !submesh.skin_bones.empty();
@@ -299,7 +315,7 @@ bool GodotRenderer::Impl::apply_texture_drop(RenderingServer& rendering, const s
             if (rigid_skinned
                 && static_cast<std::size_t>(mesh.bone) >= source.bones.size()) return false;
             has_surface = true;
-            if (!detail::prepare_rigid_rest_pose(source, rigid_skinned, rest)) return false;
+            if (!detail::prepare_rigid_rest_pose(source.original, rigid_skinned, rest)) return false;
             if (!resident) {
                 target.skinned = target.skinned || palette_skinned || rigid_skinned;
                 for (const assets::Vertex& vertex : submesh.vertices) {

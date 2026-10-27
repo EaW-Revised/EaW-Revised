@@ -3,11 +3,13 @@
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/presentation/particles/particles.hpp"
+#include "eawr/presentation/presentation_budget.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <iosfwd>
 #include <memory>
 #include <optional>
 #include <span>
@@ -307,9 +309,49 @@ enum class EffectDetachState : std::uint8_t { draining, released };
 // never read by simulation or replay.
 class EffectRegistry final {
 public:
+    enum class Refusal : std::uint8_t { none, budget_pressure, allocation_failed, definition_failure, arithmetic_failure };
+    enum class AdmissionStage : std::uint8_t { none, cpu, backend, publication };
+    [[nodiscard]] static constexpr std::string_view refusal_name(Refusal reason) noexcept {
+        switch (reason) {
+        case Refusal::none: return "none";
+        case Refusal::budget_pressure: return "budget_pressure";
+        case Refusal::allocation_failed: return "allocation_failed";
+        case Refusal::definition_failure: return "definition_failure";
+        case Refusal::arithmetic_failure: return "arithmetic_failure";
+        }
+        return "unknown";
+    }
+    struct Admission final {
+        EffectHandle handle{};
+        Refusal refusal{Refusal::none};
+        bool reused{};
+        std::size_t requested_bytes{}, admitted_bytes{};
+        AdmissionStage failed_stage{AdmissionStage::none};
+        [[nodiscard]] explicit operator bool() const noexcept { return handle != 0; }
+    };
+    struct AdmissionStats final {
+        std::size_t eligible{}, admitted{}, refused{}, reused{}, evicted{}, allocations{};
+        std::size_t live_bytes{}, idle_bytes{}, high_water_bytes{};
+        std::array<std::size_t, 5> refusals{};
+        std::size_t requested_bytes{}, refused_bytes{};
+        std::array<std::size_t, 4> allocation_failure_stages{};
+    };
+    // Deterministic fault injection for admission contracts; consumed once.
+    void fail_next_admission(AdmissionStage stage) noexcept { fail_stage_ = stage; }
+    // The immutable shared definition is also the compatibility key. Mesh-bound
+    // effects receive full capacity but are not cached across binding changes.
+    [[nodiscard]] Admission spawn_authored(std::shared_ptr<const SystemDefinition> system,
+        std::uint32_t seed, std::optional<MeshBinding> mesh = std::nullopt);
+    // Configure before first admission; provider must outlive this registry.
+    void set_admission_budget(PresentationBudget& budget) noexcept { budget_ = &budget; }
+    [[nodiscard]] const AdmissionStats& admission_stats() const noexcept { return admission_; }
+    [[nodiscard]] std::span<const EmitterCapacity> emitter_capacities(EffectHandle handle) const;
+    void evict_idle() noexcept;
+    void write_admission_report(std::ostream& output) const;
     explicit EffectRegistry(RenderBackend& backend);
     // Developer comparison switch, configured before spawning systems. The
     // reference path retains the full-system stream input for paired profiling.
+    // Live and idle layouts retain their construction-time setting until evicted.
     static void set_stream_bucketing_default(bool on) noexcept;
     ~EffectRegistry();
     EffectRegistry(const EffectRegistry&) = delete;
@@ -393,6 +435,7 @@ private:
         SystemDefinition system, std::uint32_t seed, std::size_t max_particles,
         std::optional<MeshBinding> mesh_binding);
     struct Instance;
+    struct LayoutTelemetry;
     bool measure_{};
     RegistryTimings timings_;
     // Caller-owned dispatch scratch keeps worker callbacks within std::function's
@@ -425,6 +468,12 @@ private:
     std::vector<Instance*> batch_;
     std::vector<Instance*> sorted_;
     std::vector<std::unique_ptr<Instance>> instances_;
+    std::vector<std::unique_ptr<Instance>> idle_;
+    std::vector<std::unique_ptr<LayoutTelemetry>> layout_telemetry_;
+    PayloadBudget default_budget_;
+    PresentationBudget* budget_{&default_budget_};
+    AdmissionStats admission_;
+    AdmissionStage fail_stage_{AdmissionStage::none};
     std::vector<core::Diagnostic> diagnostics_;
     EffectHandle next_handle_{1};
     std::size_t live_resources_{};

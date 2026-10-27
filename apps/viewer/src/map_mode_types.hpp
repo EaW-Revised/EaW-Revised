@@ -1,6 +1,7 @@
 #pragma once
 
 #include "attract_camera.hpp"
+#include "land_battle_scene.hpp"
 #include "map_mode_assets.hpp"
 #include "options_screen.hpp"
 #include <chrono>
@@ -40,6 +41,12 @@ struct MapMode::State final {
     // #660: keep one capture target through impact; a later volley never steals the camera.
     std::optional<std::uint64_t> followed_projectile;
     std::unique_ptr<SpacePopulation> space_population;
+    std::unique_ptr<LandBattleScene> land_population;
+    std::vector<sim::RenderInstance> land_static_instances;
+    std::vector<std::string> land_pose_trace;
+    std::optional<std::uint64_t> land_trace_tick;
+    [[nodiscard]] bool ready_land_live(Node3D&, const assets::Map&, std::vector<sim::RenderInstance>&, sim::AssetId&, sim::EntityId&);
+    [[nodiscard]] std::optional<int> process_land_live(double delta);
     bool space_populate_reject_upload_test{};
     std::optional<SpacePopulation::Options::DebugShip> space_place_object;
     // --eawr-space-place-at, repeatable (#70 movement evidence).
@@ -470,6 +477,7 @@ struct MapMode::State final {
     [[nodiscard]] bool configure_ready_options(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error);
     [[nodiscard]] bool mount_ready_content(assets::ObjectTypeCatalog& placement_catalog, std::string& catalog_failure);
     [[nodiscard]] bool configure_ready_camera(Node3D& host, const assets::Map& map, const terrain::Mesh& mesh, const assets::Vec3f& minimum, const assets::Vec3f& maximum);
+    [[nodiscard]] bool activate_land_camera(Node3D& host, const assets::Map& map, eawr::viewer::MapCameraSource source);
     [[nodiscard]] bool prepare_ready_particles(Node3D& host, const assets::Map& map);
     [[nodiscard]] bool ready_space(Node3D& host, const assets::Map& map,
                                    const assets::ObjectTypeCatalog& catalog, const std::string& catalog_failure);

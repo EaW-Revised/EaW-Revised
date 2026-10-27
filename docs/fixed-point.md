@@ -49,7 +49,7 @@ single-storage suggestion while preserving integer-only authoritative arithmetic
 Use checked named operations returning the shared `core::Result<T>`. Comparisons
 are total and infallible. Do not introduce throwing/fatal arithmetic operators.
 Stable diagnostic categories distinguish overflow, division by zero, negative
-square root, malformed decimal, zero normalization and undefined angle. Debug and
+square root, malformed decimal and zero normalization. Debug and
 Release have identical semantics; failure produces no numeric replacement value.
 
 - Add, subtract and negation are exact, failing if the result cannot fit raw int64.
@@ -109,9 +109,10 @@ one turn before approximation. Cardinal values are exact: sin(0)=0, sin(1/4)=1,
 sin(1/2)=0, sin(3/4)=-1, with the analogous cosine values. Periodicity is exact.
 Angle wrapping produces [-1/2,1/2), so +1/2 wraps to -1/2.
 
-Atan2(y,x) produces turns in [-1/2,1/2). Axis results are exact; (0,0) is undefined
-and fails. atan2(0,negative) = -1/2. Negative-zero ambiguity does not exist.
-Sin/cos and atan2 error is at most four output quanta against the exact function
+Atan2(y,x) produces turns in [-1/2,1/2). Axis results are exact; (0,0) succeeds with
+zero, following the heading convention in FM-27 of [space fighters](behaviour/space-fighters.md).
+atan2(0,negative) = -1/2. Negative-zero ambiguity does not exist.
+Sin/cos and nonzero-input atan2 error is at most four output quanta against the exact function
 of already-quantized inputs. Normalized vector/quaternion components have the same
 four-quantum absolute budget. An integer CORDIC or equivalent bounded algorithm
 may use finer internal precision. Document fixed iteration bounds and commit

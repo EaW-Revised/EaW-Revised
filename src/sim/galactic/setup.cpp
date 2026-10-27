@@ -118,10 +118,11 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
         if (!setup.player_economy || setup.rules.fiscal_cycle_frames == 0
             || f.credit_cap_per_planet.raw() < 0 || f.players.size() != setup.players.size()
             || f.planets.size() != setup.planets.size()) return invalid("fiscal needs a ledger, window and complete source tables");
+        // CGS-19: base income is signed; only the account balance is floored at zero.
         // Bound all sums and cap products before a tick; hostile replay values cannot wrap.
         math::Fixed sum;
         for (std::size_t i = 0; i < f.planets.size(); ++i) {
-            if (f.planets[i].planet != setup.planets[i].id || f.planets[i].credits.raw() < 0
+            if (f.planets[i].planet != setup.planets[i].id
                 || !math::try_add(sum, f.planets[i].credits, sum)) return invalid("invalid or overflowing base income table");
         }
         math::Fixed largest_cap;
@@ -131,7 +132,7 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
             math::Fixed adjusted;
             if (f.players[i].player != setup.players[i].player_id || f.players[i].positive_credit_multiplier.raw() < 0
                 || setup.player_economy->players[i].credit_cap.raw() < 0
-                || !math::try_multiply(sum, f.players[i].positive_credit_multiplier, adjusted))
+                || (sum.raw() > 0 && !math::try_multiply(sum, f.players[i].positive_credit_multiplier, adjusted)))
                 return invalid("invalid fiscal player or overflowing difficulty income");
         }
     }
@@ -230,8 +231,8 @@ core::Result<void> validate_setup(const GalacticSetup& setup) {
         return found != setup.planets.end() && found->id == id;
     };
     if (setup.rules.maximum_fleet_movement_distance
-        && (setup.rules.maximum_fleet_movement_distance->raw() < 0 || setup.planets.size() > 4096))
-        return invalid("graph movement distance must be nonnegative and planet count at most 4096");
+        && setup.planets.size() > 4096)
+        return invalid("graph planet count must be at most 4096");
     for (const auto& route : setup.routes) {
         if (route.hs_speed_factor.raw() <= 0
             || (!setup.rules.maximum_fleet_movement_distance && route.hs_speed_factor.raw() != math::Fixed::scale))
@@ -391,6 +392,7 @@ std::string_view to_string(const GalacticRejectReason reason) noexcept {
     case GalacticRejectReason::not_paused: return "not_paused";
     case GalacticRejectReason::victory_unavailable: return "victory_unavailable";
     case GalacticRejectReason::observer_input: return "observer_input";
+    case GalacticRejectReason::insufficient_credits: return "insufficient_credits";
     case GalacticRejectReason::production_admission: return "production_admission";
     }
     return "unknown";

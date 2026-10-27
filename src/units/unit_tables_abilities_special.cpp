@@ -225,12 +225,10 @@ void Loader::load_special_laser_defense(UnitType& unit, sim::tactical::SpecialAb
         special.defence_min_travel = read_number("Projectile_Dist_Travelled");
         special.defence_beam_width = read_number("Laser_Beam_Width");
         const auto beam_frames = child_text("Laser_Beam_Frames");
-        if (!beam_frames.empty()) {
-            const auto parsed = number(beam_frames);
-            if (parsed && parsed->raw() > 0 && parsed->raw() % Fixed::scale == 0
-                && parsed->raw() / Fixed::scale <= sim::tactical::max_ability_frames)
-                special.defence_beam_frames = static_cast<std::uint32_t>(parsed->raw() / Fixed::scale);
-            else report_.missing(unit.id, "Laser_Beam_Frames", beam_frames, "expected a positive whole frame count");
+        if (const auto parsed = read_integer(beam_frames, report_, unit.id, "Laser_Beam_Frames")) {
+            if (*parsed <= 0 || *parsed > static_cast<std::int64_t>(sim::tactical::max_ability_frames))
+                report_.note(unit.id, "Laser_Beam_Frames", beam_frames, "PR-C4: frame count retained without a positive ability-duration restriction");
+            special.defence_beam_frames = static_cast<std::uint32_t>(*parsed);
         }
         bool every_category_known = true;
         for (const auto& category : tokens(child_text("Projectile_Types_Targeted"))) {

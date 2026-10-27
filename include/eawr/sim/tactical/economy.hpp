@@ -46,8 +46,9 @@ struct BuildRequirements {
     friend bool operator==(const BuildRequirements&, const BuildRequirements&) = default;
 };
 
-// WPR-51: percentages, in health, damage, energy, shield, defense, speed order.
-using CombatBonuses = std::array<math::Fixed, 6>;
+// WPR-51: percentages, in health, damage, energy, shield, defense, speed order, then the hardpoint
+// fire range (WFR-01: the debug build's fire-range modifier list, uncapped).
+using CombatBonuses = std::array<math::Fixed, 7>;
 struct UpgradeBonus {
     std::uint32_t stacking_category{};
     std::vector<TypeId> applicable;
@@ -280,6 +281,9 @@ struct EconomyRules {
     [[nodiscard]] const EconomyPlayer* player(PlayerId id) const noexcept;
     [[nodiscard]] std::optional<EconomyPlayer> player_at(PlayerId id, std::uint64_t tick) const noexcept;
     [[nodiscard]] const StationMenu* menu(TypeId station, FactionId faction) const noexcept;
+    // WPR-22/33: the menu a producer offers a buyer. An ordinary producer lists its owner's faction group
+    // (the purchase gate's rule, also for an allied buyer); a construction pad lists the builder's.
+    [[nodiscard]] const StationMenu* producer_menu(TypeId producer, FactionId owner_faction, FactionId buyer_faction) const noexcept;
     [[nodiscard]] const IncomeProfile* stream(TypeId source) const noexcept;
     [[nodiscard]] const PadSaleProfile* pad_sale(TypeId type) const noexcept;
     [[nodiscard]] const PreventionProfile* prevention_of(TypeId type) const noexcept;

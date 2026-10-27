@@ -396,6 +396,14 @@ E71-nn, private map) and the S-10 and S-14 recordings. They replace the open-spa
 of MV-12 to MV-17 and resolve U-01. A table without avoidance rules (the synthetic replay
 fixtures) still plans with MV-12 to MV-17.
 
+The destination search belongs to a mover's order/path (AV-19; movement walk WMV-01,
+WMV-10); static objects are collision-query inputs (AV-01), not search subjects. The
+motion-table ring-size safety check exempts only static-layer footprints without a locomotor
+or a motion profile. Such a footprint retains its authored geometry
+and emits one informational load diagnostic per type when session content is bound.
+The mover guard is unchanged: an exact-zero query radius gives one point per ring (AV-19),
+while a tiny positive radius can exceed the safety bound.
+
 ### How FoC avoids
 
 research E71-01 to E71-24. FoC has no steering. Every move of a ship with a space layer runs the

@@ -80,11 +80,18 @@ struct CombatUnit {
     math::Fixed weapon_delay{math::Fixed::from_raw(math::Fixed::scale)};
     // WAB-80: its FULL_SALVO is on, so each hardpoint also applies its own full-salvo delay multiplier.
     bool full_salvo{};
+    bool rocket_attack{}; // WRA-02: copied active modal flag
+    std::optional<math::Fixed> ability_attack_range{}; // WRA-03
+    [[nodiscard]] std::optional<math::Fixed> attack_distance() const noexcept {
+        return ability_attack_range ? ability_attack_range : profile ? profile->max_attack_distance : std::nullopt;
+    }
     std::optional<ChargedBlastState> charged_blast{};
     math::Fixed blast_damage_multiplier{math::Fixed::from_raw(math::Fixed::scale)};
     std::optional<math::Fixed> corrupt_inaccuracy{};
     // IS-06: its fire rate, 1 minus an ion stun's shot rate reduction (1 without a stun).
     math::Fixed fire_rate{math::Fixed::from_raw(math::Fixed::scale)};
+    // WFR-01: 1 + the fire-range bonus (Combat_Bonus_Ability); scales a hardpoint weapon's fire range.
+    math::Fixed fire_range{math::Fixed::from_raw(math::Fixed::scale)};
     math::Fixed scatter_radius{math::Fixed::from_raw(math::Fixed::scale)}; // WAD-10, current source mode
     // AB-66 (#561): a craft whose squadron's ION_CANNON_SHOT is on (`ion_held`) fires only its
     // override shot, only at `ion_target` (a unit or a squadron's team container) and its hardpoint,
@@ -255,6 +262,7 @@ struct FormationAttackContext {
 // One projectile's flight for one frame (docs/behaviour/space-damage.md DG-30 to DG-34): the
 // segment it flies this frame, the first eligible hostile unit in collection order,
 // and whether it runs out of travel. Reads only `world`.
+struct RocketPathPolicy;
 struct ProjectileStep {
     Projectile projectile;          // moved on by one frame
     std::optional<EntityId> hit;    // the unit it reached
@@ -266,6 +274,7 @@ struct ProjectileStep {
     math::Vec3 from{};              // its position at the start of the frame
     bool expired{};
     ProjectileExpiryReason expiry_reason{ProjectileExpiryReason::none};
+    std::optional<core::Diagnostic> path_diagnostic; // RFL-09, ordered and noncanonical
 };
 // #636: a worker's candidate buffers, reused from one projectile to the next.
 struct ProjectileScratch {
@@ -277,7 +286,7 @@ struct ProjectileScratch {
 };
 [[nodiscard]] core::Result<ProjectileStep> step_projectile(
     const CombatWorld& world, const Projectile& projectile, ProjectileScratch& scratch,
-    MeshCollisionWork* mesh_work = nullptr); // optional caller-owned diagnostics, never canonical state
+    MeshCollisionWork* mesh_work = nullptr, const RocketPathPolicy* path_policy = nullptr); // noncanonical diagnostics; deterministic injected policy
 
 // A new projectile for a weapon_fired event of a weapon with a shot profile (DG-21 to DG-25).
 // `allow_diminishing_firepower` is the shooter's DG-05 mode flag, snapshotted at the shot; a

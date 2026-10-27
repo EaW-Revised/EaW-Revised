@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <functional>
 #include <span>
+#include <string_view>
 #include <utility>
 
 namespace eawr::units {
@@ -77,6 +79,7 @@ constexpr Field<std::optional<Fixed>> numbers[] = {
     {"Hyperspace_Speed", &GalacticType::hyperspace_speed}, {"Population_Value", &GalacticType::population_value},
     {"Political_Control", &GalacticType::political_control}, {"Cheap_Bribe_Cost", &GalacticType::cheap_bribe_cost},
     {"Expensive_Bribe_Cost", &GalacticType::expensive_bribe_cost}, {"Build_Cost_Credits", &GalacticType::build_cost_credits},
+    {"Piracy_Value_Credits", &GalacticType::piracy_value_credits},
     {"Build_Time_Seconds", &GalacticType::build_time_seconds}, {"Maintenance_Cost", &GalacticType::maintenance_cost},
     {"AI_Combat_Power", &GalacticType::ai_combat_power}};
 constexpr Field<std::optional<std::int64_t>> counts[] = {
@@ -119,6 +122,11 @@ void issue(GalacticTypeTable& table, const GalacticType& type, const data::XmlNo
 }
 
 std::optional<Fixed> number(GalacticTypeTable& table, const GalacticType& type, const data::XmlNode& node) {
+    if (equal(node.name, "Hyperspace_Speed")) {
+        const auto value = data::retail::float_value(node.raw_text);
+        if (value && !value->exact) issue(table, type, node, IssueKind::trailing_text, "retail float conversion (LSA-P3)");
+        return value ? std::optional(value->value) : std::nullopt;
+    }
     const auto value = data::retail::leading_number(node.raw_text);
     if (!value) {
         issue(table, type, node, IssueKind::bad_value, "not a number in Q24 range");
@@ -182,10 +190,9 @@ core::Result<GalacticType> resolve_initial_galactic_type(const GalacticTypeTable
             || (!original->ai_combat_power && issue.tag == "AI_Combat_Power")))
         return fail("invalid authored " + issue.tag + " cannot use an omission default");
     auto type = *original;
-    if ((type.hyperspace_speed && type.hyperspace_speed->raw() < 0)
-        || (type.squadron_capacity && (*type.squadron_capacity < 0
-            || static_cast<std::uint64_t>(*type.squadron_capacity) > std::numeric_limits<std::uint32_t>::max())))
-        return fail("negative speed or unbounded squadron capacity");
+    if (type.squadron_capacity && (*type.squadron_capacity < 0
+            || static_cast<std::uint64_t>(*type.squadron_capacity) > std::numeric_limits<std::uint32_t>::max()))
+        return fail("unbounded squadron capacity");
     if (!type.hyperspace_speed) type.hyperspace_speed = Fixed{};
     if (!type.political_control) type.political_control = Fixed{};
     if (!type.squadron_capacity) type.squadron_capacity = 0;
@@ -199,8 +206,12 @@ core::Result<GalacticType> resolve_initial_galactic_type(const GalacticTypeTable
     return core::Result<GalacticType>::success(std::move(type));
 }
 
-GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool include_planets) {
+GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool include_planets,
+    const std::span<const std::string> always_include) {
     GalacticTypeTable table;
+    for (const auto& note : catalog.member_roster_notes())
+        table.issues.push_back({IssueKind::dangling_reference, note.logical_path, note.line, note.owner, note.tag, {},
+            note.tag + " slot " + std::to_string(note.slot) + " names " + note.name + ", which resolves to no object; the slot is skipped"});
     for (const auto& definition : catalog.definitions()) {
         if (definition.category != data::Category::game_object || !definition.active || !definition.namespace_winner
             || (!include_planets && equal(definition.type_name, "Planet"))) continue;
@@ -226,6 +237,9 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
         } else {
             table.issues.push_back({IssueKind::dangling_reference, definition.root.source.logical_path,
                 definition.root.source.line, type.name, "Variant_Of_Existing_Type", {}, resolved.error().message});
+            // CGS-13: the debug build overlays nothing when the base is absent, so the object holds only its own
+            // tags; the catalog cannot resolve such a chain, so the type stays out of the table (reported above).
+            continue;
         }
         if (layers.empty()) layers.push_back(&definition);
         bool relevant = type.ground_company_member == true || type.squadron_member == true;
@@ -234,7 +248,18 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
             relevant = relevant || found != nullptr;
             return found;
         };
-        for (const auto& field : numbers) if (const auto* at = node(field.tag)) type.*field.member = number(table, type, *at);
+        for (const auto& field : numbers) if (const auto* at = node(field.tag)) {
+            // LSA-15/16: these fields use integer parsing, despite their fixed-point consumers.
+            if (field.tag == "Build_Cost_Credits" || field.tag == "Build_Time_Seconds") {
+                const auto parsed = data::retail::integer_value(at->raw_text);
+                if (parsed) {
+                    const auto value = field.tag == "Build_Time_Seconds"
+                        ? static_cast<std::int64_t>(static_cast<std::uint32_t>(parsed->value))
+                        : static_cast<std::int64_t>(parsed->value);
+                    type.*field.member = Fixed::from_integer(value).value();
+                }
+            } else type.*field.member = number(table, type, *at);
+        }
         if (const auto* at = node("Space_Override_Population_Value"))
             type.space_override_population_value = number(table, type, *at);
         for (const auto& field : counts) {
@@ -338,7 +363,8 @@ GalacticTypeTable galactic_type_table(const data::Catalog& catalog, const bool i
                 type.strength_bonuses.push_back(std::move(bonus));
             }
         }
-        if (!relevant) continue;
+        if (!relevant && std::none_of(always_include.begin(), always_include.end(),
+                [&](const std::string& name) { return equal(name, definition.id); })) continue;
         for (const auto& child : definition.root.children) {
             if (child.schema_status == data::SchemaStatus::unknown) issue(table, type, child, IssueKind::unknown_tag, "the tag is not known for this class");
         }
@@ -473,8 +499,8 @@ GalacticEconomicTable galactic_economic_table(const data::Catalog& catalog) {
             if (const auto* at = catalog.find(name, data::Category::game_object)) layers.push_back(at);
         if (layers.empty()) layers.push_back(&definition);
         GalacticEconomicType type; type.name = definition.id; type.object_class = definition.type_name;
-        if (equal(definition.type_name, "Planet"))
-            type.system_spies = data::galactic::system_spy_definitions(catalog, definition, result.issues);
+        // WGUI-19/25: authored spies also belong to unit actors, including ground-activated scouts.
+        type.system_spies = data::galactic::system_spy_definitions(catalog, definition, result.issues);
         type.mining_colony = false; // WGS-90.
         GalacticType context; context.name = type.name;
         GalacticTypeTable diagnostics;
@@ -581,6 +607,27 @@ GalacticEconomicTable galactic_economic_table(const data::Catalog& catalog) {
                 }
             }
             if (price || time) type.reductions.push_back(std::move(reduction));
+            if (gamble) {
+                // WGEP-11 (debug build, ability data validation): an out-of-range value is reported
+                // and reset to 0 (Min_Income_Modifier outside [-1, 0], a negative maximum or
+                // interval, Chance_To_Win outside [0, 1]); the ability keeps its other values.
+                const auto one = Fixed::from_raw(Fixed::scale);
+                const auto reset = [&](std::string_view tag, std::optional<Fixed>& target, bool out_of_range) {
+                    if (!target || !out_of_range) return;
+                    for (const auto& child : ability.children) if (equal(child.name, tag)) {
+                        issue(diagnostics, context, child, IssueKind::bad_value, "out of the ability's range; reset to 0 as FoC does");
+                        break;
+                    }
+                    target = Fixed{};
+                };
+                const auto& minimum = type.gambling_minimum;
+                reset("Min_Income_Modifier", type.gambling_minimum,
+                    minimum && (minimum->raw() < -one.raw() || minimum->raw() > 0));
+                reset("Max_Income_Modifier", type.gambling_maximum, type.gambling_maximum && type.gambling_maximum->raw() < 0);
+                reset("Chance_To_Win", type.gambling_chance,
+                    type.gambling_chance && (type.gambling_chance->raw() < 0 || type.gambling_chance->raw() > one.raw()));
+                reset("Evaluation_Interval_In_Secs", type.gambling_interval, type.gambling_interval && type.gambling_interval->raw() < 0);
+            }
         }
         result.issues.insert(result.issues.end(), diagnostics.issues.begin(), diagnostics.issues.end());
         if (type.mining_colony || type.mining || type.gambling || !type.reductions.empty() || type.credit_halt.value_or(false)) result.types.push_back(std::move(type));

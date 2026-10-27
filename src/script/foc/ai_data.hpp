@@ -119,7 +119,7 @@ struct Constants {
     Real medium_threat_tolerance{};
     Real high_threat_tolerance{};
     Real health_low_threshold{};               // Health_Low_Percent_Threshold
-    Real land_region_size{real(2000)};         // AI_LandEvaluatorRegionSize (#3780; not part of galactic checkpoints)
+    Real land_region_size{region_size};        // AI_LandEvaluatorRegionSize: same sourced fallback as region_size (#3780; not part of galactic checkpoints)
 };
 
 struct AiData {

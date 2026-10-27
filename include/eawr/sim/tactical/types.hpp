@@ -262,6 +262,7 @@ enum class AbilityKind : std::uint8_t {
     cluster_bomb = 26, // coordinator-reserved, WCB-01..03
     fow_reveal_ping = 27, // coordinator-reserved, WFP-01/02/03
     blast = 28, // coordinator-reserved, WHE-35/36, FS-34/35
+    rocket_attack = 29, // WRA-01: modal weapon selection
 };
 
 // What an ability command asks (AB-10 to AB-13): switch the ability on or off, or set whether it
@@ -543,6 +544,8 @@ inline constexpr std::string_view invalid_command = "EAWR-SIM-0308";
 inline constexpr std::string_view command_rejected = "EAWR-SIM-0309";
 inline constexpr std::string_view worker_failure = "EAWR-SIM-0310";
 inline constexpr std::string_view land_provider_unavailable = "EAWR-SIM-0311";
+inline constexpr std::string_view invalid_land_terrain = "EAWR-SIM-0312";
+inline constexpr std::string_view invalid_land_path = "EAWR-SIM-0313";
 } // namespace diagnostic_codes
 
 } // namespace eawr::sim::tactical

@@ -45,6 +45,10 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                     data::tag_trace::used(child);
                     ability.effective_radius = number(value);
                     if (!ability.effective_radius) report_.missing(unit.id, "Effective_Radius", value, "not a decimal");
+                } else if (iequals(child.name, "Targeting_Max_Attack_Distance")) {
+                    data::tag_trace::used(child);
+                    ability.targeting_max_attack_distance = number(value);
+                    if (!ability.targeting_max_attack_distance) report_.missing(unit.id, child.name, value, "not a decimal");
                 } else if (iequals(child.name, "GUI_Activated_Ability_Name")) {
                     data::tag_trace::used(child);
                     ability.gui_activated_ability_name = value;
@@ -137,11 +141,10 @@ void Loader::load_unit_abilities(Object& object, UnitType& unit) {
                     if (!ability.pulse_frequency_seconds) report_.missing(unit.id, child.name, value, "not a decimal");
                 } else if (ability.type == "LURE" && iequals(child.name, "Max_Number_Of_Pulses")) {
                     data::tag_trace::used(child);
-                    const auto count = number(value);
-                    if (!count || count->raw() < 0 || count->raw() % Fixed::scale != 0) {
-                        report_.missing(unit.id, child.name, value, "not a whole number");
-                    } else {
-                        ability.max_pulses = static_cast<std::uint32_t>(std::min<std::int64_t>(count->raw() / Fixed::scale, 0xffffffffLL));
+                    if (const auto count = read_integer(child.raw_text, report_, unit.id, child.name)) {
+                        if (*count < 0) report_.note(unit.id, child.name, value,
+                            "PR-C4: signed pulse count retained in the unsigned table field");
+                        ability.max_pulses = static_cast<std::uint32_t>(*count);
                     }
                 } else if (ability.type == "LURE" && iequals(child.name, "Is_Pulsing")) {
                     // WLU-03: read for the registry; the lure service pulses whatever it says.
@@ -234,8 +237,8 @@ bool Loader::load_special_ability(UnitType& unit, const std::string& name, const
     const auto special_kind = sim::tactical::special_ability_kind(node.name);
     // WSH-01: only authored automatic space healers belong to this consumer.
     if (special_kind == sim::tactical::SpecialAbilityKind::force_healing
-        && std::none_of(node.children.begin(), node.children.end(), [](const auto& child) {
-            return iequals(child.name, "Activation_Style") && iequals(trim(child.raw_text), "Space_Automatic");
+        && std::none_of(node.children.begin(), node.children.end(), [this](const auto& child) {
+            return iequals(child.name, "Activation_Style") && iequals(trim(child.raw_text), automatic_activation_name(input_.domain));
         })) return false;
     if (special_kind != sim::tactical::SpecialAbilityKind::none) {
         sim::tactical::SpecialAbilityProfile special;

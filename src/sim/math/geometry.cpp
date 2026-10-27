@@ -265,6 +265,12 @@ core::Result<Fixed> matrix_rotation_component(
 
 } // namespace
 
+int compare_squared_lengths(Vec3 left, Vec3 right) noexcept {
+    const std::array a{left.x.raw(), left.y.raw(), left.z.raw()};
+    const std::array b{right.x.raw(), right.y.raw(), right.z.raw()};
+    return detail::compare(squared_sum(a.data(), a.size()), squared_sum(b.data(), b.size()));
+}
+
 core::Result<Fixed> dot(Vec2 left, Vec2 right) {
     if (std::int64_t raw = 0; dot_128(left.x.raw(), right.x.raw(), left.y.raw(), right.y.raw(), raw)) {
         return core::Result<Fixed>::success(Fixed::from_raw(raw));

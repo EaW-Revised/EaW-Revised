@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "eawr/core/json_text.hpp"
 #include "lan_lobby_mode.hpp"
 #include "settings_store.hpp"
@@ -76,6 +77,7 @@ constexpr double default_wait_seconds = 60.0;
            << ", \"host\": " << (shot.host ? "true" : "false") << ", \"map\": " << json(shot.map)
            << ", \"drawn_map\": " << json(shot.drawn_map) << ", \"settings\": " << strings_json(shot.settings)
            << ", \"disabled_maps\": " << strings_json(shot.disabled_maps)
+           << ", \"campaigns\": " << strings_json(shot.campaigns) << ", \"campaign_description\": " << json(shot.campaign_description)
            << ", \"preview_visible\": " << (shot.preview_visible ? "true" : "false")
            << ", \"settings_read_only\": " << (shot.settings_read_only ? "true" : "false")
            << ", \"status\": " << json(shot.status) << ", \"start\": {\"caption\": " << json(shot.start_caption)
@@ -95,6 +97,11 @@ constexpr double default_wait_seconds = 60.0;
            << ", \"room_private\": " << (shot.room_private ? "true" : "false")
            << ", \"connections\": " << strings_json(shot.connections)
            << ", \"connections_open\": " << (shot.connections_open ? "true" : "false")
+           << ", \"options_open\": " << (shot.options_open ? "true" : "false")
+           << ", \"credits\": " << shot.credits << ", \"credits_custom\": " << (shot.credits_custom ? "true" : "false")
+           << ", \"credits_min\": " << shot.credits_min << ", \"credits_max\": " << shot.credits_max
+           << ", \"credits_position\": " << shot.credits_position << ", \"credits_caption\": " << json(shot.credits_caption)
+           << ", \"credits_enabled\": " << (shot.credits_enabled ? "true" : "false")
            << ", \"chat_open\": " << (shot.chat_open ? "true" : "false") << ", \"locked\": " << strings_json(shot.locked)
            << ", \"rows\": [";
     for (std::size_t index = 0; index < shot.rows.size(); ++index) {
@@ -296,7 +303,7 @@ bool LanLobbyMode::requested() {
 
 LanLobbyMode::Options LanLobbyMode::from_command_line() {
     Options options;
-    const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    const PackedStringArray arguments = viewer_profile_arguments();
     const auto port = [](const std::string& value) -> std::optional<std::uint16_t> {
         unsigned parsed{};
         const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);

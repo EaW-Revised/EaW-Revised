@@ -11,6 +11,19 @@ from viewer_mode_sources import source_text  # noqa: E402
 
 
 class FieldCompletenessTests(unittest.TestCase):
+    def test_generic_team_runtime_fields_require_serialization(self):
+        path = "src/sim/tactical/land_checkpoint_fields_internal.hpp"
+        wire = source_text(path)
+        for owner, field in (("LandMovingMember", "next_node"), ("LandMovingMember", "temporary_next"), ("LandMovingMember", "detour_path"),
+                             ("LandMovingMember", "detour_next"),
+                             ("LandMovingSquad", "generic_team")):
+            with self.subTest(owner=owner, field=field):
+                block = re.search(r"template <> struct Fields<" + owner + r"> \{.*?\n\};", wire, re.S).group()
+                changed = block.replace("v." + field, "")
+                self.assertNotEqual(block, changed)
+                errors, _ = generate_fields.check({path: wire.replace(block, changed)})
+                self.assertTrue(any(owner + ": missing=['" + field + "']" in error for error in errors), errors)
+
     def test_inherited_store_nested_member_requires_serialization(self):
         path = "src/sim/tactical/session_store_projectiles.hpp"
         source = source_text(path).replace(

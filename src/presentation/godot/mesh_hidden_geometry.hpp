@@ -10,7 +10,8 @@ namespace eawr::presentation::godot_backend::detail {
 // Hidden skin palettes keep their bone origins. Different influence streams
 // can therefore leave a triangle between those origins even with zero bases.
 // Two identical streams guarantee coincident vertices and a degenerate face.
-[[nodiscard]] inline bool hidden_surface_collapses(const assets::Mesh& mesh,
+template <typename Mesh>
+[[nodiscard]] inline bool hidden_surface_collapses(const Mesh& mesh,
     const assets::Submesh& surface, const std::size_t bone_count) noexcept {
     const bool palette = !surface.skin_bones.empty();
     const bool rigid = !palette && mesh.bone >= 0;
@@ -55,7 +56,8 @@ namespace eawr::presentation::godot_backend::detail {
     return true;
 }
 
-[[nodiscard]] inline bool hidden_skin_geometry_collapses(const assets::Model& model) noexcept {
+template <typename Model>
+[[nodiscard]] inline bool hidden_skin_geometry_collapses(const Model& model) noexcept {
     // Billboard posing can replace a hidden palette's basis independently of
     // the clip. Keep unknown/unsupported modes conservative too.
     for (const auto& bone : model.bones)

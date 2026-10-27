@@ -1,4 +1,5 @@
 #include "particle_adapter.hpp"
+#include "eawr/presentation/render_categories.hpp"
 #include "particle_texture.hpp"
 #include "particle_prewarm.hpp"
 #include "particle_reuse.hpp"
@@ -15,6 +16,7 @@
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/color.hpp>
@@ -296,6 +298,7 @@ public:
         detail::GpuItem item{};
     };
     struct Emitter final {
+        std::uint64_t category_submit_frame{~std::uint64_t{0}};
         particles::EmitterRenderPlan plan;
         std::size_t active_index{inactive_index};
         bool requested_visible{};
@@ -334,6 +337,7 @@ public:
         bool changed_indices{};
         double preparation_ms{};
         AABB bounds;
+        detail::ParticleSubmissionCache<AABB> submission;
         Array arrays;
     };
 
@@ -342,6 +346,7 @@ public:
         trace_residency_ = residency_trace_requested();
         if (trace_residency_) census_backends_.push_back(this);
         if (host.get_world_3d().is_valid()) scenario_ = host.get_world_3d()->get_scenario();
+        if (render_categories::enabled && host.get_viewport()) category_viewport_ = host.get_viewport()->get_viewport_rid();
     }
 
     ~Impl() {
@@ -364,6 +369,11 @@ public:
         set_reuse(false);
         release_warm();
         while (!emitters_.empty()) destroy(emitters_.begin()->first);
+    }
+
+    render_churn::Owner churn_owner_{render_churn::Owner::particle};
+    void free_rid(RenderingServer& rendering, const RID& rid) {
+        render_churn::free_rid(rendering, rid, churn_owner_);
     }
 
     std::optional<Emitter> allocate(const particles::EmitterRenderPlan& plan, const std::uint64_t resource,
@@ -469,6 +479,8 @@ public:
                 // a create, or transferred from the dormant owner for a restore.
                 release_shader(*rendering, shader_key);
                 Emitter emitter = std::move(*retained);
+                render_churn::record(churn_owner_, render_churn::Event::restored, 3);
+                emitter.submission.reset(); // new owner/scenario attachment
                 emitter.owns_textures = true;
                 rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), *texture_rid);
                 if (normal_rid) rendering->material_set_param(emitter.material,
@@ -523,9 +535,9 @@ public:
         emitter.mesh = rendering->mesh_create();
         emitter.instance = rendering->instance_create();
         if (!emitter.mesh.is_valid() || !emitter.instance.is_valid()) {
-            if (emitter.instance.is_valid()) rendering->free_rid(emitter.instance);
-            if (emitter.mesh.is_valid()) rendering->free_rid(emitter.mesh);
-            rendering->free_rid(emitter.material);
+            if (emitter.instance.is_valid()) free_rid(*rendering, emitter.instance);
+            if (emitter.mesh.is_valid()) free_rid(*rendering, emitter.mesh);
+            free_rid(*rendering, emitter.material);
             release_new_shader();
             release_textures();
             failure_ = "Godot rejected a particle mesh or instance RID";
@@ -542,9 +554,9 @@ public:
                 failure_ = "emitter " + std::to_string(plan.emitter_index) + ": "
                     + (registered ? "fog callback returned an empty consumer handle"
                         : core::format_diagnostic(registered.error()));
-                rendering->free_rid(emitter.instance);
-                rendering->free_rid(emitter.mesh);
-                rendering->free_rid(emitter.material);
+                free_rid(*rendering, emitter.instance);
+                free_rid(*rendering, emitter.mesh);
+                free_rid(*rendering, emitter.material);
                 release_new_shader();
                 release_textures();
                 return std::nullopt;
@@ -567,6 +579,18 @@ public:
         auto& stored = emitters_.emplace(id, std::move(*emitter)).first->second;
         activate(stored);
         return id;
+    }
+
+    static void submit_visible(RenderingServer& rendering, Emitter& emitter, const bool visible) {
+        emitter.submission.visibility.apply(visible, [&](const bool value) {
+            rendering.instance_set_visible(emitter.instance, value);
+        }, measure_uploads ? &upload_work.visibility_calls : nullptr);
+    }
+
+    static void submit_bounds(RenderingServer& rendering, Emitter& emitter) {
+        emitter.submission.bounds.apply(emitter.bounds, [&](const AABB& value) {
+            rendering.mesh_set_custom_aabb(emitter.mesh, value);
+        }, measure_uploads ? &upload_work.bounds_calls : nullptr);
     }
 
     void activate(Emitter& emitter) {
@@ -609,6 +633,7 @@ public:
             dormant.mesh = emitter.mesh;
             dormant.instance = emitter.instance;
             ++retained_identities_;
+            render_churn::record(churn_owner_, render_churn::Event::retained, 3);
         } else {
             release_draw(emitter, rendering);
         }
@@ -662,7 +687,7 @@ public:
             suspend(emitter, rendering, true);
             return;
         }
-        if (rendering != nullptr) rendering->instance_set_visible(emitter.instance, false);
+        if (rendering != nullptr) submit_visible(*rendering, emitter, false);
         emitter.quads = 0;
         emitter.requested_visible = false;
         if (emitter.empty_pending) return;
@@ -707,8 +732,9 @@ public:
         const auto id=create(plan);
         if(id==0)return false;
         auto& emitter=emitters_.at(id);
-        RenderingServer::get_singleton()->instance_set_visible(emitter.instance,false);
+        submit_visible(*RenderingServer::get_singleton(), emitter, false);
         RenderingServer::get_singleton()->instance_set_scenario(emitter.instance,RID{});
+        emitter.submission.reset();
         // No surface is created: the retained instance can never submit a primitive.
         warm_ids_.push_back(id);
         warm_budget_.commit(policy,charges);
@@ -829,6 +855,7 @@ public:
         if (rendering == nullptr || found == emitters_.end()) return;
         Emitter& emitter = found->second;
         if (measure_uploads) ++upload_work.streams;
+        if (render_categories::enabled) emitter.category_submit_frame = current_frame();
         if (!emitter.prepared) {
             // Direct projectile/beam streams also use this backend, outside a registry batch.
             prepare(id, stream);
@@ -861,6 +888,7 @@ public:
             restored->bounds = emitter.bounds;
             restored->source_points = std::move(emitter.source_points);
             emitter = std::move(*restored);
+            emitter.submission.reset(); // restored resource identity
             emitter.replace_surface = true;
             activate(emitter);
             ++recreations_;
@@ -886,6 +914,8 @@ public:
             emitter.retry.succeeded();
             assert(retained_identities_ != 0);
             --retained_identities_;
+            emitter.submission.reset(); // restored dormant identity
+            render_churn::record(churn_owner_, render_churn::Event::restored, 3);
             activate(emitter);
             ++recreations_;
         }
@@ -899,6 +929,7 @@ public:
             if (emitter.changed_indices)
                 rendering->mesh_surface_update_index_region(emitter.mesh, 0, 0, emitter.index_bytes);
         } else {
+            emitter.submission.reset(); // replacement surface
             rendering->mesh_clear(emitter.mesh);
             rendering->mesh_add_surface_from_arrays(emitter.mesh, RenderingServer::PRIMITIVE_TRIANGLES, emitter.arrays,
                 Array(), Dictionary(), RenderingServer::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
@@ -919,10 +950,10 @@ public:
         }
         if (emitter.replace_surface || emitter.changed_indices) emitter.topology = stream.indices;
         // Bounds reflect live vertices only, never the retained surface's unused storage.
-        rendering->mesh_set_custom_aabb(emitter.mesh, emitter.bounds);
+        submit_bounds(*rendering, emitter);
         if (was_empty) {
             emitter.requested_visible = true;
-            rendering->instance_set_visible(emitter.instance, true);
+            submit_visible(*rendering, emitter, true);
         }
     }
 
@@ -946,8 +977,9 @@ public:
             Emitter& emitter = found->second;
             const auto bytes = detail::particle_reuse_charge(emitter.shape.vertices, emitter.vertex_stride,
                 emitter.attribute_stride, emitter.shape.indices, emitter.index_stride, 0, 0);
-            rendering->instance_set_visible(emitter.instance, false);
+            submit_visible(*rendering, emitter, false);
             rendering->instance_set_scenario(emitter.instance, RID{});
+            emitter.submission.reset();
             // Cached RIDs keep geometry, not texture residency. Unbind before
             // releasing refs so the adaptive texture budget follows live demand.
             rendering->material_set_param(emitter.material, StringName("eawr_particle_texture"), Variant{});
@@ -971,6 +1003,7 @@ public:
             if (reuse_.retain({emitter.texture_key, emitter.normal_key, emitter.shader_key, emitter.priority},
                 // Most recent caller-thread frame; cache age never affects CPU clocks.
                 bytes, emitter, reuse_frame_)) {
+                render_churn::record(churn_owner_, render_churn::Event::retained, 3);
                 emitters_.erase(found);
                 return;
             }
@@ -1027,9 +1060,9 @@ public:
         if (emitter.fog_handle && fog_.unregister_material)
             fog_.unregister_material(emitter.fog_handle);
         if (rendering != nullptr) {
-            if (emitter.instance.is_valid()) rendering->free_rid(emitter.instance);
-            if (emitter.mesh.is_valid()) rendering->free_rid(emitter.mesh);
-            if (emitter.material.is_valid()) rendering->free_rid(emitter.material);
+            if (emitter.instance.is_valid()) free_rid(*rendering, emitter.instance);
+            if (emitter.mesh.is_valid()) free_rid(*rendering, emitter.mesh);
+            if (emitter.material.is_valid()) free_rid(*rendering, emitter.material);
         }
     }
 
@@ -1124,7 +1157,7 @@ private:
     void release_texture(RenderingServer& rendering, const std::string& key) {
         const auto found = textures_.find(key);
         if (found == textures_.end() || --found->second.references != 0) return;
-        rendering.free_rid(found->second.rid);
+        free_rid(rendering, found->second.rid);
         detail::gpu_memory_ledger().remove(found->second.item);
         Engine* const engine=Engine::get_singleton();
         detail::texture_budget().remove(found->second.item.bytes,
@@ -1153,7 +1186,7 @@ private:
             if (static_cast<StringName>(parameter.get("name", StringName())) == marker) compiled = true;
         }
         if (!compiled) {
-            rendering.free_rid(shader);
+            free_rid(rendering, shader);
             return std::nullopt;
         }
         shaders_.emplace(program, Shared{shader, 1});
@@ -1163,7 +1196,7 @@ private:
     void release_shader(RenderingServer& rendering, const std::string& program) {
         const auto found = shaders_.find(program);
         if (found == shaders_.end() || --found->second.references != 0) return;
-        rendering.free_rid(found->second.rid);
+        free_rid(rendering, found->second.rid);
         shaders_.erase(found);
     }
 
@@ -1186,6 +1219,15 @@ private:
     GodotParticleBackend::FogCallbacks fog_;
     RID scenario_;
     std::map<std::uint64_t, Emitter> emitters_;
+    RID category_viewport_;
+    render_categories::Source category_source_{this, [](const void* owner, render_categories::Sample& sample) {
+        const auto& self = *static_cast<const Impl*>(owner);
+        for (const auto& [id, emitter] : self.emitters_) {
+            static_cast<void>(id);
+            if (emitter.instance.is_valid()) sample.record(render_categories::Role::particle,
+                emitter.category_submit_frame == sample.frame, false, emitter.shape.vertices != 0 ? 1U : 0U);
+        }
+    }, [](const void* owner) { return static_cast<std::uint64_t>(static_cast<const Impl*>(owner)->category_viewport_.get_id()); }};
     std::vector<Emitter*> active_;
     // Stable map-node pointers. destroy() cancels an entry before erasing its node.
     std::vector<std::pair<std::uint64_t, Emitter*>> pending_empty_;
@@ -1229,6 +1271,10 @@ GodotParticleBackend::FrameWork GodotParticleBackend::frame_work() { return uplo
 std::uint64_t GodotParticleBackend::create_emitter(const particles::EmitterRenderPlan& plan) {
     return impl_->create(plan);
 }
+void GodotParticleBackend::set_churn_owner(const render_churn::Owner owner) noexcept {
+    impl_->churn_owner_ = owner;
+}
+
 void GodotParticleBackend::set_spawn_context(const std::string_view effect, const std::uint64_t tick) noexcept {
     if (!impl_->spawn_journal_.enabled()) return;
     impl_->spawn_effect_ = effect;
@@ -1283,7 +1329,7 @@ void GodotParticleBackend::set_emitter_visible(const std::uint64_t resource, con
     const auto found = impl_->emitters_.find(resource);
     if (found != impl_->emitters_.end() && found->second.instance.is_valid()) {
         found->second.requested_visible = visible && found->second.quads != 0;
-        RenderingServer::get_singleton()->instance_set_visible(found->second.instance, visible && found->second.quads != 0);
+        Impl::submit_visible(*RenderingServer::get_singleton(), found->second, found->second.requested_visible);
     }
 }
 void GodotParticleBackend::record_group_work(const bool visible, const bool prepared, const bool stepped) {

@@ -323,6 +323,8 @@ void content_refusals() {
         {"map", [](Local& l) { l.data.planets[0].galactic_position = dg::Position{whole(5), whole(0), whole(0)}; }, {"gc-map"}, {}},
         {"story scripts", [](Local& l) { l.content.script_manifest_digest = std::string(64, 'c'); }, {}, {"gc-story"}},
         {"story names", [](Local& l) { l.data.campaigns[0].rebel_story_name = "Other_Story"; }, {"gc-story"}, {}},
+        {"faction story associations", [](Local& l) { l.data.campaigns[0].story_names.push_back({"Extra", "Extra.xml"}); },
+            {"gc-content", "gc-story"}, {}},
         {"ai data", [](Local& l) { l.content.xml_digest = std::string(64, 'd'); }, {}, {"gc-ai-data"}},
         {"resolver", [](Local& l) { l.data.constants.push_back({"AutoResolve_Test", "2", whole(2)}); }, {"gc-resolver"}, {}},
         {"ai controllers", [](Local& l) {

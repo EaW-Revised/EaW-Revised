@@ -2,6 +2,8 @@
 #include "galactic_lobby_backend.hpp"
 #include "eawr/net/galactic_adapter.hpp"
 #include "eawr/core/build_identity.hpp"
+#include "eawr/core/gc_load_trace.hpp"
+#include "eawr/core/text.hpp"
 #include <cctype>
 
 namespace eawr::presentation::godot_backend::lan_detail {
@@ -111,7 +113,7 @@ void TcpLanMatch::configure_galactic(std::shared_ptr<GalacticLobbyBackend> backe
         auto executor = std::make_shared<sim::InlineExecutor>();
         galactic_->set_adapter_factory([executor](const net::SetupOffer&, const campaign::MpAgreement& agreement)
             -> core::Result<std::unique_ptr<net::SessionAdapter>> {
-            net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::two_per_45_seconds;
+            net::GalacticAdapterOptions options; options.clock_policy = net::GalacticClockPolicy::limited;
             return core::Result<std::unique_ptr<net::SessionAdapter>>::success(
                 std::make_unique<net::GalacticSessionAdapter>(*agreement.session, *executor, options));
         });
@@ -256,8 +258,11 @@ core::Result<void> TcpLanMatch::validate_lobby(const net::LobbySnapshot& state, 
             if (human_rows.size() > sim::max_match_human_sides)
                 return lobby_fail<void>(net::LobbyReason::invalid_choice, "Too many human owner rows.");
             const auto team = std::find_if(map->teams.begin(), map->teams.end(), [&](const auto& value) { return value.team == seat.selection.team; });
-            if (team == map->teams.end() || std::find(team->factions.begin(), team->factions.end(), seat.selection.faction) == team->factions.end())
-                return lobby_fail<void>(net::LobbyReason::invalid_choice, "Faction is unavailable on this team.");
+            // Loaded station candidates contain only canonical playable catalog factions.
+            if (team == map->teams.end() || std::none_of(team->factions.begin(), team->factions.end(),
+                    [&](const auto& faction) { return core::iequals(faction, seat.selection.faction); }))
+                return lobby_fail<void>(net::LobbyReason::invalid_choice,
+                    "Project limit: this map has no starting station for " + seat.selection.faction + " on this team.");
             if (starting && seat.player != seat.selection.slot) return lobby_fail<void>(net::LobbyReason::invalid_choice, "Owner assignment is not committed.");
         }
         if (starting && view().host && (online_options_ || (io_->transport.tcp && io_->transport.tcp->staging_capacity()))) for (const auto& seat : state.seats) {
@@ -338,6 +343,9 @@ net::LobbyHooks TcpLanMatch::lobby_hooks() {
             return core::Result<net::SetupOffer>::success(std::move(offer));
         };
         hooks.setup = [this](net::MessageTransport& stream, const net::LobbySnapshot& staged) -> core::Result<net::LobbySetupContext> {
+            // Start before the frozen-offer derivation inside this pump, not after it returns to the UI.
+            if (!view().host && net::lobby_game_mode(staged.game) == net::LobbyGameMode::galactic)
+                core::gc_load::trace.begin("mp_guest", true);
             lobby_stream_ = &stream;
             net::LobbySetupContext context; context.options.auto_accept = false; context.options.auto_start = false;
             context.options.timeout_ms = 180'000; context.options.session.keep_admission_tick_open = true;
@@ -434,6 +442,7 @@ void TcpLanMatch::start_galactic_lobby() {
         if (!state || !state->start_enabled || handed_over_ || !galactic_) return;
         auto options = net::decode_galactic_lobby_game(state->snapshot.game);
         if (!options) { (void)lobby_feedback(core::Result<void>::failure(options.error())); return; }
+        core::gc_load::trace.begin("mp_host", true);
         // The frozen revision builds the galactic-campaign-v1 offer in the offer hook (GalacticLobbyBackend::offer).
         auto started = lobby_->start(state->snapshot.revision);
         if (!started) {

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iterator>
 #include <algorithm>
+#include <iostream>
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
@@ -41,7 +42,7 @@ bool BattleSourceState::prepare_native(const live_session::PreparedBattle& battl
         ship.object_id = name->second;
         ship.position = {to_float(unit.position.x), to_float(unit.position.y), to_float(unit.position.z)};
         auto transform = sim::math::to_matrix(unit.rotation, unit.position);
-        ship.yaw_degrees = transform ? static_cast<float>(space::instance_yaw_degrees(transform.value())) : 0.0F;
+        ship.yaw_degrees = transform ? static_cast<float>(live::instance_yaw_degrees(transform.value())) : 0.0F;
         ship.live_entity = unit.entity_id;
         if (battle.start) {
             const auto owner = std::find_if(battle.start->players.begin(), battle.start->players.end(),
@@ -130,9 +131,18 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         humans.clear();
         for (const auto& slot : setup.skirmish->slots) if (slot.human) humans.push_back(slot.player);
     }
-    auto content = skirmish::session_content(*tables, humans);
+    std::vector<core::Diagnostic> skipped; // #4589
+    auto content = skirmish::session_content(*tables, humans, {}, units::ContentErrors::skip_object, &skipped);
+    for (const auto& warning : skipped) {
+        std::cerr << "EAWR live session content: " << core::format_diagnostic(warning) << std::endl;
+    }
     if (!content) {
         failure = "live session content: " + core::format_diagnostic(content.error());
+        return false;
+    }
+    // #4589: a recording that places a skipped type would replay it unarmed; refuse it like a live start.
+    if (auto placed = skirmish::refuse_skipped_setup(setup, skipped); !placed) {
+        failure = "live session start: " + core::format_diagnostic(placed.error());
         return false;
     }
     std::map<tactical::TypeId, std::string> names;
@@ -284,7 +294,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
         ship.object_id = name->second;
         ship.position = {to_float(unit.position.x), to_float(unit.position.y), to_float(unit.position.z)};
         auto transform = sim::math::to_matrix(unit.rotation, unit.position);
-        ship.yaw_degrees = transform ? static_cast<float>(space::instance_yaw_degrees(transform.value())) : 0.0F;
+        ship.yaw_degrees = transform ? static_cast<float>(live::instance_yaw_degrees(transform.value())) : 0.0F;
         ship.live_entity = unit.entity_id;
         const auto owner = std::find_if(setup.players.begin(), setup.players.end(),
             [&](const tactical::Player& player) { return player.player_id == unit.owner; });
@@ -312,7 +322,7 @@ bool BattleSourceState::bind_replay(const vfs::Vfs& filesystem, const data::Cata
                 if (authored->role == battle::UnitRole::map_object) {
                     auto object = catalog.resolve(authored->type, data::Category::game_object);
                     if (!object) { failure = core::format_diagnostic(object.error()); return false; }
-                    if (!space::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
+                    if (!live::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
                                                    tag_text(object.value(), "SpaceBehavior"))) {
                         unfogged_map_props_.push_back(unit.entity_id);
                     }

@@ -8,7 +8,7 @@
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 
 #include <algorithm>
 #include <cctype>

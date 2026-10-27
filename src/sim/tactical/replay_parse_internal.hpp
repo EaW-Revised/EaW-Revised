@@ -15,7 +15,7 @@ using replay_detail::Reader;
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    const std::uint16_t length);
+    const std::uint32_t length);
 
 [[nodiscard]] core::Result<void> parse_extension_attract_pool(
     Reader& reader,
@@ -105,7 +105,7 @@ using replay_detail::Reader;
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    std::uint16_t& header_size,
+    std::uint32_t& header_size,
     std::uint32_t& header_reserved,
     std::uint32_t& player_count,
     std::uint64_t& unit_count,
@@ -118,7 +118,7 @@ using replay_detail::Reader;
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    const std::uint16_t header_size,
+    const std::uint32_t header_size,
     const bool extensions,
     std::vector<EntityId>& disabled_garrisons,
     std::vector<UnitState>& carriers,

@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "frame_timer.hpp"
 #include "startup_trace.hpp"
 #include "battle_content.hpp"
@@ -35,7 +36,7 @@ bool MapMode::State::fail_ready(std::string message) {
 void MapMode::State::parse_ready_arguments(std::string& lighting_argument, std::string& shadows_argument, std::string& environment_argument, std::string& bloom_argument, std::string& fog_argument_error) {
     State& state = *this;
     {
-        const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+        const PackedStringArray arguments = viewer_profile_arguments();
         for (int64_t index = 0; index < arguments.size(); ++index) {
             const String argument = arguments[index];
             if (argument == "--eawr-skirmish-setup" || argument == "--eawr-setup-test"
@@ -649,6 +650,60 @@ bool MapMode::State::mount_ready_content(assets::ObjectTypeCatalog& placement_ca
         }
     }
 
+    if (MemoryAttribution::enabled()) scene::VfsAssetCache::enable_owner_census(*state.filesystem, !state.options.content);
+    startup_trace.model_cache(state.filesystem);
+    return true;
+}
+
+bool MapMode::State::activate_land_camera(Node3D& host, const assets::Map& map, eawr::viewer::MapCameraSource source) {
+    State& state = *this;
+    state.map_camera_config_sha256 = source.config_sha256;
+    state.map_camera_bindings_sha256 = source.bindings_sha256;
+    state.map_camera_tactical_xml_sha256 = source.tactical_xml_sha256;
+    state.map_camera_gameconstants_xml_sha256 = source.gameconstants_xml_sha256;
+    state.map_camera_constant_sources = std::move(source.provenance);
+    state.map_camera_constant_overrides = std::move(source.overrides);
+    const auto viewport = host.get_viewport()->get_visible_rect().size;
+    const std::uint32_t width = state.options.capture_path.empty()
+        ? static_cast<std::uint32_t>(viewport.x) : state.camera.width;
+    const std::uint32_t height = state.options.capture_path.empty()
+        ? static_cast<std::uint32_t>(viewport.y) : state.camera.height;
+    auto* display = DisplayServer::get_singleton();
+    auto bridge = std::make_unique<eawr::viewer::MapCameraBridge>(
+        display && display->window_is_focused());
+    if (map.terrain) {
+        // Location_Follows_Terrain: the same samples terrain::build meshes.
+        eawr::viewer::TerrainGround ground{map.terrain->width, map.terrain->height,
+            map.terrain->cell_spacing, {}};
+        ground.heights.reserve(map.terrain->samples.size());
+        for (const auto& sample : map.terrain->samples) {
+            ground.heights.push_back(static_cast<float>(
+                static_cast<double>(sample.height_sample) * map.terrain->height_scale));
+        }
+        bridge->set_ground(std::move(ground));
+    }
+    const std::optional<camera::TacticalFrame> fixed = state.options.capture_path.empty()
+        ? std::nullopt : std::optional<camera::TacticalFrame>(camera_frame(state.camera));
+    if (auto active = bridge->activate(std::move(source.config),
+            std::move(source.constants), source.bindings_json, width, height, fixed);
+        !active) {
+        return state.fail_ready(core::format_diagnostic(active.error()));
+    }
+    state.camera = render_camera(bridge->frame());
+    state.map_camera_initial_frame = state.camera;
+    state.map_camera = std::move(bridge);
+    state.map_camera_host = &host;
+    if (fixed || !(state.options.interactive || state.map_camera_selftest || state.map_free_selftest)) {
+        // Keep the render target at the capture identity while the real
+        // host window is resized: by the locked graphical probe, or by a
+        // window manager (FancyZones snaps a new window into its zone)
+        // under an unlocked probe, which then never sees a resize. Only an
+        // interactive run and an unlocked self-test, whose subject is
+        // following real resizes, draw at the window size.
+        pin_capture_viewport(*host.get_window(), width, height);
+    }
+    host.set_process_input(true);
+    host.set_process_unhandled_input(true);
     return true;
 }
 
@@ -708,56 +763,10 @@ bool MapMode::State::configure_ready_camera(Node3D& host, const assets::Map& map
         std::string camera_failure;
         auto source = state.load_map_camera(camera::Mode::land, camera_failure);
         if (!source) return state.fail_ready(camera_failure);
-        state.map_camera_config_sha256 = source->config_sha256;
-        state.map_camera_bindings_sha256 = source->bindings_sha256;
-        state.map_camera_tactical_xml_sha256 = source->tactical_xml_sha256;
-        state.map_camera_gameconstants_xml_sha256 = source->gameconstants_xml_sha256;
-        state.map_camera_constant_sources = std::move(source->provenance);
-        state.map_camera_constant_overrides = std::move(source->overrides);
-        const auto viewport = host.get_viewport()->get_visible_rect().size;
-        const std::uint32_t width = state.options.capture_path.empty()
-            ? static_cast<std::uint32_t>(viewport.x) : state.camera.width;
-        const std::uint32_t height = state.options.capture_path.empty()
-            ? static_cast<std::uint32_t>(viewport.y) : state.camera.height;
-        auto* display = DisplayServer::get_singleton();
-        auto bridge = std::make_unique<eawr::viewer::MapCameraBridge>(
-            display && display->window_is_focused());
-        if (map.terrain) {
-            // Location_Follows_Terrain: the same samples terrain::build meshes.
-            eawr::viewer::TerrainGround ground{map.terrain->width, map.terrain->height,
-                map.terrain->cell_spacing, {}};
-            ground.heights.reserve(map.terrain->samples.size());
-            for (const auto& sample : map.terrain->samples) {
-                ground.heights.push_back(static_cast<float>(
-                    static_cast<double>(sample.height_sample) * map.terrain->height_scale));
-            }
-            bridge->set_ground(std::move(ground));
-        }
-        const std::optional<camera::TacticalFrame> fixed = state.options.capture_path.empty()
-            ? std::nullopt : std::optional<camera::TacticalFrame>(camera_frame(state.camera));
-        if (auto active = bridge->activate(std::move(source->config),
-                std::move(source->constants), source->bindings_json, width, height, fixed);
-            !active) {
-            return state.fail_ready(core::format_diagnostic(active.error()));
-        }
-        state.camera = render_camera(bridge->frame());
-        state.map_camera_initial_frame = state.camera;
-        state.map_camera = std::move(bridge);
-        state.map_camera_host = &host;
-        if (fixed || !(state.options.interactive || state.map_camera_selftest || state.map_free_selftest)) {
-            // Keep the render target at the capture identity while the real
-            // host window is resized: by the locked graphical probe, or by a
-            // window manager (FancyZones snaps a new window into its zone)
-            // under an unlocked probe, which then never sees a resize. Only an
-            // interactive run and an unlocked self-test, whose subject is
-            // following real resizes, draw at the window size.
-            pin_capture_viewport(*host.get_window(), width, height);
-        }
-        host.set_process_input(true);
-        host.set_process_unhandled_input(true);
-    } else {
-        // Without a map camera bridge every map run reads its fixed camera
-        // back, captured or not. Pin its render target before drawing begins.
+        if (!state.activate_land_camera(host, map, std::move(*source))) return false;
+    } else if (!state.options.interactive || state.live_options.fixture.empty()) {
+        // Fixed map probes retain their capture identity. An interactive land battle
+        // activates its camera after the local player's starting roster is prepared.
         pin_capture_viewport(*host.get_window(), state.camera.width, state.camera.height);
     }
 
@@ -870,7 +879,6 @@ bool MapMode::ready(Node3D& host) {
     if (state.space_place_object || !state.space_hardpoint_states.empty())
         return state.fail_ready("--eawr-space-place-object applies only to a kind-2 (space) map");
     if (!state.space_place_at.empty()) return state.fail_ready("--eawr-space-place-at applies only to a kind-2 (space) map");
-    if (!state.live_options.fixture.empty()) return state.fail_ready("--eawr-live-session applies only to a kind-2 (space) map");
     if (state.idle_offset && !state.populate) return state.fail_ready("--eawr-map-idle-offset requires --eawr-populate");
     if (!state.space_fog_admit.empty()) {
         return state.fail_ready("--eawr-space-fog-admit applies only to a kind-2 (space) map");
@@ -890,6 +898,17 @@ bool MapMode::ready(Node3D& host) {
     state.triangle_count = mesh.triangle_count;
 
     state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
+    state.renderer->set_texture_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
+        auto loaded = assets::load_texture(*filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    state.renderer->set_model_loader([filesystem = state.filesystem](const assets::Source& source) -> std::optional<assets::Model> {
+        auto loaded = assets::load_model(*filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    startup_trace.renderer_probe(state.renderer->recipe_memory_probe());
     state.renderer->set_scene_bloom(state.scene_bloom);
     state.scene_bloom_applied = state.renderer->scene_bloom_active();
     if (state.fog) {
@@ -982,12 +1001,13 @@ bool MapMode::ready(Node3D& host) {
     const assets::Vec3f maximum = terrain::asset_to_render(mesh.bounds_max);
     if (!state.configure_ready_camera(host, map, mesh, minimum, maximum)) return false;
     if (!state.prepare_ready_particles(host, map)) return false;
+    if (!state.live_options.fixture.empty() && !state.ready_land_live(host, map, instances, next_asset, next_entity)) return false;
     if (state.policy != lighting::Policy::off) {
         // The shadow range covers the farthest terrain corner seen by the
         // capture camera. Cascades split by view depth: the tactical and live
         // cameras keep the land splits, while a top-down overview sees the
         // whole map at nearly one depth and gets one orthogonal map instead.
-        const bool live_camera = !state.map_camera_config_path.empty() && state.options.capture_path.empty();
+        const bool live_camera = state.map_camera && !state.map_camera->controller().capture_locked();
         if (state.camera_view != "tactical" && !live_camera) {
             state.configured_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
             state.other_lighting.shadow_layout = GodotRenderer::ShadowLayout::orthogonal;
@@ -1034,7 +1054,9 @@ bool MapMode::ready(Node3D& host) {
             input(event);
         }
     }
-    if (!state.build_hud(host, map.context_name)) return state.fail_ready(state.failure);
+    if (!state.live_session && !state.build_hud(host, map.context_name)) return state.fail_ready(state.failure);
+    // This bounds cache ownership; renderer and simulation owners remain valid.
+    scene::VfsAssetCache(*state.filesystem).set_model_cache_budget(128ULL * 1024 * 1024);
     return true;
 }
 

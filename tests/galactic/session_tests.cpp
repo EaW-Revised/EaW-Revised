@@ -225,11 +225,11 @@ void execution_and_events() {
     expect(first.snapshot->planets()[0].owner == 2 && first.snapshot->fleets()[0].orbit == other,
         "the snapshot shows the committed state");
     // The owner change is a scoring event (WGP-101), so the campaign-scoring section exists from this tick.
-    expect(first.work.sections_encoded == 6 && first.work.sections_reused == 0, "the first tick encodes every section");
+    expect(first.work.sections_encoded == 7 && first.work.sections_reused == 0, "the first tick encodes every section");
     const auto second = session.step(executor).value();
     expect(second.snapshot->events().size() == 1 && second.snapshot->events()[0].kind == Kind::command_rejected,
         "a rejected command changes nothing");
-    expect(second.work.sections_encoded == 1 && second.work.sections_reused == 5,
+    expect(second.work.sections_encoded == 1 && second.work.sections_reused == 6,
         "a tick that changes nothing re-encodes only the session section");
     expect(second.state_sha256 == session.state_sha256(), "and still equals a from-scratch hash");
     expect(session.executed_commands().size() == 6, "every command is recorded as executed");
@@ -305,7 +305,9 @@ void gather_phase() {
         const auto stepped = session.step(probe);
         expect(static_cast<bool>(stepped), "probed step succeeds");
         const auto large = stepped && stepped.value().work.gathered_objects >= 256;
-        expect(probe.phases.size() == 1 && probe.phases[0].first == "galactic-gather"
+        // The History service adds its own named phase after the gather (e945747fd).
+        expect(probe.phases.size() == 2 && probe.phases[1].first == "galactic-history-objects"
+                && probe.phases[0].first == "galactic-gather"
                 && probe.phases[0].second == (large ? std::size_t{64} : std::size_t{1}),
             "galactic-gather reaches the executor by name, with 64 partitions from 256 objects and one below ("
                 + std::to_string(planets) + " planets)");

@@ -2,20 +2,21 @@
 // docs/behaviour/battle-presentation.md BP-60 to BP-65).
 
 #include "../../support/check.hpp"
-#include "eawr/presentation/space/projectiles.hpp"
+#include "eawr/presentation/live/projectiles.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <new>
 #include <set>
 #include <string>
 #include <vector>
 
 namespace {
 
-namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 namespace tactical = eawr::sim::tactical;
 using eawr::sim::math::Fixed;
 using eawr::sim::math::Vec3;
@@ -38,23 +39,23 @@ void expect(const bool condition, const std::string& message) {
 void test_facing() {
     tactical::Projectile straight;
     straight.step = vec(0.0, 5.0, 0.0);
-    auto facing = space::projectile_facing(straight);
+    auto facing = live::projectile_facing(straight);
     expect(facing && near((*facing)[0], 90.0) && near((*facing)[1], 0.0), "a shot along +Y faces yaw 90, pitch 0");
     straight.step = vec(-3.0, 0.0, -3.0);
-    facing = space::projectile_facing(straight);
+    facing = live::projectile_facing(straight);
     expect(facing && near((*facing)[0], 180.0) && near((*facing)[1], 45.0), "a descending shot pitches down (positive)");
     straight.step = vec(1.0, -1.0, 0.0);
-    facing = space::projectile_facing(straight);
+    facing = live::projectile_facing(straight);
     expect(facing && near((*facing)[0], 315.0), "the yaw lies in [0, 360)");
     straight.step = {};
-    expect(!space::projectile_facing(straight), "a shot with no step and no facing has none");
+    expect(!live::projectile_facing(straight), "a shot with no step and no facing has none");
 
     tactical::Projectile missile;
     missile.homing = true;
     missile.yaw = fixed(-30.0);
     missile.pitch = fixed(-12.5);
     missile.step = vec(1.0, 0.0, 0.0);
-    facing = space::projectile_facing(missile);
+    facing = live::projectile_facing(missile);
     expect(facing && near((*facing)[0], 330.0, 1.0e-4) && near((*facing)[1], -12.5, 1.0e-4),
            "a homing projectile keeps its own facing, whatever its step");
 }
@@ -83,7 +84,7 @@ void test_perspective_axis() {
                 for (const Point step : {Point{1, .8, 0}, Point{.3, 1, .3}, Point{.7, -.4, .2}, Point{1, 0, 0}}) {
                     Point centre{x + eye[0], depth + eye[1], z + eye[2]};
                     for (int frame = 0; frame < 12; ++frame) {
-                        const auto axis = space::projectile_screen_axis(eye, forward, centre, step);
+                        const auto axis = live::projectile_screen_axis(eye, forward, centre, step);
                         expect(axis.has_value(), "off-centre moving bolt has a projected axis");
                         if (!axis) continue;
                         Point moved = centre;
@@ -105,12 +106,12 @@ void test_perspective_axis() {
     }
     expect(samples == 2160 && old_misaligned > 500,
         "contract covers off-centre perspective cases that reject the global-plane projection");
-    expect(!space::projectile_screen_axis(eye, forward, Point{110, -100, 280}, Point{.1, 1, -.2}),
+    expect(!live::projectile_screen_axis(eye, forward, Point{110, -100, 280}, Point{.1, 1, -.2}),
         "radial motion has no projected flight tangent");
-    expect(!space::projectile_screen_axis(eye, forward, eye, Point{1, 0, 0}), "eye-plane axis is undefined");
-    expect(!space::projectile_screen_axis(eye, forward, Point{100, -300, 300}, Point{1, 0, 0}),
+    expect(!live::projectile_screen_axis(eye, forward, eye, Point{1, 0, 0}), "eye-plane axis is undefined");
+    expect(!live::projectile_screen_axis(eye, forward, Point{100, -300, 300}, Point{1, 0, 0}),
         "behind-eye motion is not admitted");
-    expect(!space::projectile_screen_axis(eye, forward, Point{100, 1000, 300}, Point{}),
+    expect(!live::projectile_screen_axis(eye, forward, Point{100, 1000, 300}, Point{}),
         "zero motion has no flight tangent");
 }
 
@@ -124,16 +125,16 @@ void test_interpolation() {
     after.position = vec(10.0, -4.0, 2.0);
     after.yaw = fixed(10.0);
     after.pitch = fixed(-4.0);
-    const auto half = space::interpolate_projectile(&before, after, 0.5);
+    const auto half = live::interpolate_projectile(&before, after, 0.5);
     expect(half && near(half->position[0], 5.0, 1.0e-4) && near(half->position[1], -2.0, 1.0e-4)
                && near(half->position[2], 1.0, 1.0e-4),
            "the position lies halfway");
     expect(half && near(half->yaw_degrees, 0.0, 1.0e-4), "the yaw turns the short way through 0");
     expect(half && near(half->pitch_degrees, -2.0, 1.0e-4), "the pitch lies halfway");
-    const auto fresh = space::interpolate_projectile(nullptr, after, 0.5);
+    const auto fresh = live::interpolate_projectile(nullptr, after, 0.5);
     expect(fresh && near(fresh->position[0], 10.0, 1.0e-4) && near(fresh->yaw_degrees, 10.0, 1.0e-4),
            "a new projectile stands at its latest pose");
-    const auto clamped = space::interpolate_projectile(&before, after, 3.0);
+    const auto clamped = live::interpolate_projectile(&before, after, 3.0);
     expect(clamped && near(clamped->position[0], 10.0, 1.0e-4), "alpha is clamped to 1");
 }
 
@@ -156,42 +157,42 @@ void test_hit_projectile() {
     event.shooter = 7;
     event.weapon = 2;
     event.origin = vec(5.0, 2.0, 3.0);
-    expect(space::hit_projectile(before, event) == 9U, "the shooter's shot that started from the origin");
+    expect(live::hit_projectile(before, event) == 9U, "the shooter's shot that started from the origin");
     event.shooter = 8;
-    expect(space::hit_projectile(before, event) == 11U, "another shooter's shot at the same point");
+    expect(live::hit_projectile(before, event) == 11U, "another shooter's shot at the same point");
     event.weapon = 3;
-    expect(!space::hit_projectile(before, event), "another weapon's shot is not it");
+    expect(!live::hit_projectile(before, event), "another weapon's shot is not it");
     event.weapon = 2;
     event.origin = vec(5.0, 2.0, 3.5);
-    expect(!space::hit_projectile(before, event), "a shot launched and spent within the tick has no match");
+    expect(!live::hit_projectile(before, event), "a shot launched and spent within the tick has no match");
     event.kind = tactical::CombatEventKind::weapon_fired;
     event.origin = vec(5.0, 2.0, 3.0);
-    expect(!space::hit_projectile(before, event), "only a projectile hit ends a projectile");
+    expect(!live::hit_projectile(before, event), "only a projectile hit ends a projectile");
 }
 
 void test_pick() {
     for (std::uint64_t key = 0; key < 64; ++key) {
-        expect(space::hit_particle_pick(key, space::HitParticleList::damage, 1) == 0U, "one entry is always the one");
-        expect(space::hit_particle_pick(key, space::HitParticleList::damage, 0) == 0U, "no entry picks 0");
-        const std::size_t first = space::hit_particle_pick(key, space::HitParticleList::damage, 3);
+        expect(live::hit_particle_pick(key, live::HitParticleList::damage, 1) == 0U, "one entry is always the one");
+        expect(live::hit_particle_pick(key, live::HitParticleList::damage, 0) == 0U, "no entry picks 0");
+        const std::size_t first = live::hit_particle_pick(key, live::HitParticleList::damage, 3);
         expect(first < 3U, "the pick lies among the entries");
-        expect(first == space::hit_particle_pick(key, space::HitParticleList::damage, 3),
+        expect(first == live::hit_particle_pick(key, live::HitParticleList::damage, 3),
                "the same projectile always picks the same entry");
     }
     std::set<std::size_t> seen;
     std::size_t differ = 0;
     for (std::uint64_t key = 1; key <= 400; ++key) {
-        seen.insert(space::hit_particle_pick(key, space::HitParticleList::damage, 4));
-        if (space::hit_particle_pick(key, space::HitParticleList::damage, 4)
-            != space::hit_particle_pick(key, space::HitParticleList::shield, 4)) {
+        seen.insert(live::hit_particle_pick(key, live::HitParticleList::damage, 4));
+        if (live::hit_particle_pick(key, live::HitParticleList::damage, 4)
+            != live::hit_particle_pick(key, live::HitParticleList::shield, 4)) {
             ++differ;
         }
     }
     expect(seen.size() == 4U, "consecutive projectile IDs reach every entry");
     expect(differ > 200U, "the damage and shield lists draw apart");
     // A fixed value pins the draw: a change to the mix changes what every run shows.
-    expect(space::hit_particle_pick(1, space::HitParticleList::damage, 1000)
-               == space::hit_particle_pick(1, space::HitParticleList::damage, 1000),
+    expect(live::hit_particle_pick(1, live::HitParticleList::damage, 1000)
+               == live::hit_particle_pick(1, live::HitParticleList::damage, 1000),
            "the draw is a pure function");
 
     tactical::CombatEvent event;
@@ -201,12 +202,12 @@ void test_pick() {
     event.origin = vec(1.0, 2.0, 3.0);
     tactical::CombatEvent other = event;
     other.tick = 41;
-    expect(space::hit_event_key(event) == space::hit_event_key(event), "an event's key is fixed");
-    expect(space::hit_event_key(event) != space::hit_event_key(other), "another tick gives another key");
+    expect(live::hit_event_key(event) == live::hit_event_key(event), "an event's key is fixed");
+    expect(live::hit_event_key(event) != live::hit_event_key(other), "another tick gives another key");
 }
 
 void test_slots() {
-    space::ProjectileModelSlots slots(2);
+    live::ProjectileModelSlots slots(2);
     auto bound = slots.bind(std::vector<std::uint64_t>{5, 8});
     expect(bound.size() == 2 && bound[0] == 0U && bound[1] == 1U, "two projectiles take the two slots in order");
     bound = slots.bind(std::vector<std::uint64_t>{8, 9});
@@ -227,7 +228,7 @@ void test_slots_catch_up_history() {
     // frame's bind() call started from, not the one it just computed - or a missile that ends
     // between two frames loses the last tick(s) of its trail to a slot the single per-frame
     // bind() call has already freed.
-    space::ProjectileModelSlots slots(2);
+    live::ProjectileModelSlots slots(2);
     expect(!slots.bound_before(0) && !slots.bound_before(1), "before the first bind() every slot held nothing");
     auto bound = slots.bind(std::vector<std::uint64_t>{5, 8});
     expect(bound[0] == 0U && bound[1] == 1U, "two projectiles take the two slots in order");
@@ -246,6 +247,105 @@ void test_slots_catch_up_history() {
     expect(!slots.bound_before(0), "a further frame with nothing new in slot 0 clears its remembered history too");
 }
 
+void test_slot_growth() {
+    using Slots = live::ProjectileModelSlots;
+    Slots slots(32);
+    std::vector<std::uint64_t> ids;
+    for (std::uint64_t id = 1; id <= 33; ++id) ids.push_back(id);
+    std::size_t calls = 0;
+    const Slots::Reserve reserve = [&](const Slots::GrowthRequest request) {
+        ++calls;
+        expect(request.minimum == 33 && request.preferred == 64, "33 missiles request geometric growth");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.preferred, 4096};
+    };
+    auto bound = slots.bind(ids, reserve);
+    expect(calls == 1 && slots.size() == 64 && slots.assigned() == 33 && slots.refused() == 0,
+           "all 33 eligible missiles receive valid slots");
+    for (std::size_t index = 0; index < ids.size(); ++index)
+        expect(bound[index] == index && slots.bound(index) == ids[index], "growth preserves ID order");
+    bound = slots.bind(ids, reserve);
+    expect(calls == 1 && slots.bindings() == 33, "steady demand makes no allocation requests or new bindings");
+    expect(slots.bound_before(32) == 33, "grown slots retain catch-up history");
+
+    Slots quarantine(2);
+    static_cast<void>(quarantine.bind(std::vector<std::uint64_t>{1, 2}));
+    bound = quarantine.bind(std::vector<std::uint64_t>{2, 3, 4}, [](const Slots::GrowthRequest request) {
+        expect(request.minimum == 4, "growth counts the newly quarantined slot");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.minimum, 256};
+    });
+    expect(bound[0] == 1 && bound[1] == 2 && bound[2] == 3, "old binding survives growth around quarantine");
+    expect(!quarantine.bound(0) && quarantine.bound_before(0) == 1,
+           "retired missile keeps historical identity without receiving a new trail");
+    static_cast<void>(quarantine.bind(std::vector<std::uint64_t>{2, 3, 4, 5}));
+    expect(quarantine.bound(0) == 5 && !quarantine.bound_before(0), "rested slot is reused on the following frame");
+    static_cast<void>(quarantine.bind(std::vector<std::uint64_t>{}, reserve));
+    expect(quarantine.size() == 4 && quarantine.requested() == 0 && calls == 1,
+           "no eligible IDs causes no growth and never shrinks during battle");
+
+    Slots all_resting(32);
+    std::vector<std::uint64_t> old_ids, next_ids;
+    for (std::uint64_t id = 1; id <= 32; ++id) old_ids.push_back(id);
+    for (std::uint64_t id = 101; id <= 133; ++id) next_ids.push_back(id);
+    static_cast<void>(all_resting.bind(old_ids));
+    bound = all_resting.bind(next_ids, [](const Slots::GrowthRequest request) {
+        expect(request.minimum == 65 && request.preferred >= request.minimum,
+               "33 new flights plus 32 quarantined histories exceed a doubled 32-slot pool");
+        return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.minimum, 8192};
+    });
+    expect(all_resting.assigned() == 33 && all_resting.refused() == 0 && all_resting.size() == 65,
+           "33 new flights draw while every old slot rests");
+    for (std::size_t index = 0; index < next_ids.size(); ++index)
+        expect(bound[index] == 32 + index, "new flights cannot reuse a quarantined trail");
+    expect(all_resting.bound_before(0) == 1 && all_resting.bound_before(31) == 32,
+           "all 32 retired flights retain their catch-up history");
+}
+
+void test_slot_growth_owner_allocation_failure() {
+    using Slots = live::ProjectileModelSlots;
+    Slots slots(1);
+    static_cast<void>(slots.bind(std::vector<std::uint64_t>{10}));
+    const auto bound = slots.bind(std::vector<std::uint64_t>{5, 10},
+        [](const Slots::GrowthRequest) -> Slots::GrowthResult { throw std::bad_alloc{}; });
+    expect(!bound[0] && bound[1] == 0 && slots.size() == 1,
+           "a staging allocation exception preserves the admitted proxy binding");
+    expect(slots.last_growth().status == Slots::GrowthStatus::allocation_failed && slots.growth_attempts() == 1,
+           "a staging allocation exception has a typed failure and bounded retry state");
+}
+
+void test_slot_growth_failures() {
+    using Slots = live::ProjectileModelSlots;
+    for (const auto status : {Slots::GrowthStatus::refused_budget, Slots::GrowthStatus::allocation_failed,
+                              Slots::GrowthStatus::invalid_recipe}) {
+        Slots slots(1);
+        static_cast<void>(slots.bind(std::vector<std::uint64_t>{10}));
+        const std::vector<std::uint64_t> ids{5, 10};
+        auto bound = slots.bind(ids, [&](const Slots::GrowthRequest) {
+            return Slots::GrowthResult{status, 1, 1024};
+        });
+        expect(!bound[0] && bound[1] == 0 && slots.bound_before(0) == 10,
+               "backend refusal preserves old visuals even when their ID sorts last");
+        expect(slots.size() == 1 && slots.last_growth().status == status && slots.last_growth().bytes == 1024,
+               "backend budget and allocation failures remain distinct with requested bytes");
+        expect(slots.requested() == 2 && slots.assigned() == 1 && slots.refused() == 1,
+               "requested demand is counted before allocation");
+        std::size_t retry_calls = 0;
+        const Slots::Reserve recovered = [&](const Slots::GrowthRequest request) {
+            ++retry_calls;
+            return Slots::GrowthResult{Slots::GrowthStatus::admitted, request.minimum, 1024};
+        };
+        for (std::size_t frame = 1; frame < Slots::growth_retry_interval; ++frame) {
+            bound = slots.bind(ids, recovered);
+            expect(retry_calls == 0 && slots.growth_attempts() == 1 && !bound[0] && bound[1] == 0,
+                   "refused growth performs no reserve or staging work during deterministic cooldown");
+            expect(slots.last_growth().status == status, "cooldown retains the typed refusal");
+        }
+        bound = slots.bind(ids, recovered);
+        expect(retry_calls == 1, "recovery retries on the sixteenth presented bind frame");
+        expect(bound[0] == 1 && bound[1] == 0 && slots.growth_attempts() == 2,
+               "pressure recovery retries admission and keeps the survivor's identity");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -256,6 +356,9 @@ int main() {
     test_pick();
     test_slots();
     test_slots_catch_up_history();
+    test_slot_growth();
+    test_slot_growth_failures();
+    test_slot_growth_owner_allocation_failure();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

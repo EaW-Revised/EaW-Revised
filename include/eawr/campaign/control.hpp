@@ -4,6 +4,9 @@
 #include "eawr/sim/galactic/control.hpp"
 
 namespace eawr::campaign {
+// CGS-16 / RGC-19: positive alignment effects produce raw transition time.
+[[nodiscard]] core::Result<sim::math::Fixed> prepare_control_alignment_multiplier(
+    sim::math::Fixed strength, bool like, sim::math::Fixed maximum);
 struct ControlTypeBinding {
     sim::galactic::TypeId id{};
     std::string original_type;

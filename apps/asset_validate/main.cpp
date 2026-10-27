@@ -51,6 +51,7 @@ std::optional<Arguments> arguments(const int argc, char** argv) {
         else if (key == "--game-root") result.game_root = value;
         else if (key == "--mod-root") result.mod_root = value;
         else if (key == "--report") result.report = value;
+        else if (key == "--texture-closure") { result.texture_closure = true; result.report = value; }
         else if (key == "--summary") result.summary = value;
         else if (key == "--failures") result.failures = value;
         else if (key == "--inspect-model") result.inspect_model = value.generic_string();
@@ -522,6 +523,7 @@ int main(const int argc, char** argv) {
     }
 
     if (!args->inspect_model.empty()) return inspect_model(mounted.value(), args->inspect_model);
+    if (args->texture_closure) return texture_closure(mounted.value(), *args);
     if (!args->inspect_texture.empty()) return inspect_texture(mounted.value(), args->inspect_texture);
     if (!args->inspect_map.empty()) return inspect_map(mounted.value(), *args);
     return validate_corpus(*args, layers, mounted.value());

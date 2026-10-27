@@ -3,6 +3,7 @@
 #include "launch_plan.hpp"
 #include "launcher_state.hpp"
 #include "text_formats.hpp"
+#include "../../../include/eawr/presentation/ui/render_thread_setting.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -141,6 +142,32 @@ Resolution resolve_game_root(const Context& context, const RegistryReader& regis
     }
 }
 
+// IPC files are deliberately small; bound the read before allocating/parsing.
+std::optional<JsonValue> read_loop_json(const fs::path& path, std::size_t limit = 64 * 1024) {
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return {};
+    std::string text(limit + 1, '\0');
+    stream.read(text.data(), static_cast<std::streamsize>(text.size()));
+    const auto size = stream.gcount();
+    if (static_cast<std::size_t>(size) > limit || stream.bad()) return {};
+    text.resize(static_cast<std::size_t>(size));
+    auto json = parse_json(text);
+    if (!json || json->kind != JsonValue::Kind::object) return {};
+    return json;
+}
+
+bool portable_profile_id(const std::string& id) {
+    if (id.empty() || id.size() > 128) return false;
+    for (char c : id) {
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+              || (c >= '0' && c <= '9') || c == '-' || c == '_')) return false;
+    }
+    const auto lower = lower_ascii(id);
+    if (lower == "con" || lower == "prn" || lower == "aux" || lower == "nul") return false;
+    return !(lower.size() == 4 && (lower.starts_with("com") || lower.starts_with("lpt"))
+             && lower[3] >= '0' && lower[3] <= '9');
+}
+
 std::string failure_from_report(const fs::path& report) {
     std::ifstream stream(report, std::ios::binary);
     if (!stream) return {};
@@ -190,6 +217,16 @@ Options parse_command_line(const std::vector<std::wstring>& args) {
             }
         } else if (argument == L"--allow-unknown-build") {
             options.allow_unknown_build = true;
+        } else if (argument == L"--render-thread") {
+            if (index + 1 >= args.size() || (args[index + 1] != L"safe" && args[index + 1] != L"separate")) {
+                options.error = "--render-thread needs safe or separate.";
+            } else {
+                options.safe_render_thread = args[++index] == L"safe";
+            }
+        } else if (argument == L"--safe-render-thread") {
+            options.safe_render_thread = true;
+        } else if (argument == L"--mods") {
+            options.mods = true;
         } else if (argument == L"--choose-game") {
             options.choose_game = true;
         } else if (argument == L"--no-dialogs") {
@@ -258,7 +295,7 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
     const fs::path game_root = *resolution.root;
     log.line("game folder " + path_to_utf8(game_root));
     if (resolution.remember) {
-        LauncherState state;
+        LauncherState state = load_state(options.user_data);
         state.game_root = game_root;
         std::string save_error;
         if (!save_state(options.user_data, state, save_error)) log.line("could not remember the game folder: " + save_error);
@@ -287,29 +324,116 @@ int run_launcher(const Options& options, const RegistryReader& registry, Ui& ui,
     inputs.game_root = game_root;
     inputs.allow_unknown_build = options.allow_unknown_build;
     inputs.report = options.user_data / "launcher" / "front-end-report.json";
+    inputs.safe_render_thread = options.safe_render_thread;
+    if (!inputs.safe_render_thread.has_value()) {
+        const fs::path viewer_data = options.viewer_user_data.value_or(default_user_data_dir());
+        const fs::path default_settings = viewer_data.empty() ? fs::path{} : viewer_data / "eawr-settings.cfg";
+        fs::path settings_file = default_settings;
+        for (std::size_t i = 0; i + 1 < options.extra.size(); ++i)
+            if (options.extra[i] == L"--eawr-settings-file") {
+                const fs::path forwarded = options.extra[++i];
+                settings_file = forwarded.empty() ? default_settings : forwarded;
+            }
+        // Godot starts in the launcher folder; relative overrides must name the
+        // same file here even when EAWR.exe was called from another directory.
+        if (!settings_file.empty() && settings_file.is_relative()) settings_file = options.launcher_dir / settings_file;
+        std::ifstream stream(settings_file, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+        if (const auto saved = presentation::ui::stored_render_thread(text))
+            inputs.render_thread = *saved == presentation::ui::RenderThreadSetting::safe ? L"safe" : L"separate";
+    }
     inputs.quit_after = options.quit_after;
     inputs.extra = options.extra;
-    fs::remove(inputs.report, error);   // never blame a new failure on an old report
-    const std::vector<std::wstring> args = godot_arguments(inputs);
-    log.line("starting " + path_to_utf8(godot));
-
-    const std::string godot_log = path_to_utf8(options.user_data / "logs" / "godot.log");
-    const ChildResult child = runner.run(godot, args, options.launcher_dir);
-    if (!child.started) {
-        return context.fail("EAWR could not start the Godot runtime " + path_to_utf8(godot) + ": " + child.error
-                            + ". Security software or Windows application control may have blocked it.", godot_log);
-    }
-    log.line("the game exited with code " + std::to_string(child.exit_code) + " after " + std::to_string(child.seconds) + " s");
-    if (child.exit_code != 0) {
-        // The viewer's report names a startup failure at any time (first-run provisioning can take minutes). Without one, only an
-        // exit right after starting is shown; a crash after a long session has nothing to explain and stays in the log.
-        std::string reason = failure_from_report(inputs.report);
-        if (reason.empty() && child.seconds < kEarlyExitSeconds) {
-            reason = "The game stopped right after starting (exit code " + std::to_string(child.exit_code) + ").";
+    const fs::path next_action = options.user_data / "launcher" / "next-action.json";
+    bool manager = options.mods;
+    // Bound immediate restart requests, but reset after a real game session.
+    unsigned rapid_restarts = 0;
+    for (;;) {
+        if (manager && (!is_file(options.launcher_dir / "launcher" / "project.godot")
+                       || !is_file(options.launcher_dir / "eawr_mods_service.exe"))) {
+            return context.fail("EAWR Mods is missing or incomplete. Extract the whole EAWR download and try again.");
         }
-        if (!reason.empty()) context.fail(reason, godot_log);
+        error.clear();
+        fs::remove(next_action, error);
+        if (error) return context.fail("EAWR cannot clear the launch request: " + error.message());
+        fs::remove(inputs.report, error);   // never blame a new failure on an old report
+        if (!manager) {
+            if (inputs.safe_render_thread.has_value()) {
+                log.line(std::string("render thread: ") + (*inputs.safe_render_thread ? "safe" : "separate") + " (command line)");
+            } else if (inputs.render_thread) {
+                log.line(std::string("render thread: ") + (*inputs.render_thread == L"safe" ? "safe" : "separate")
+                         + (inputs.mod_profile ? " (mod profile)" : " (saved setting)"));
+            } else {
+                log.line("render thread: project default");
+            }
+        }
+        const std::vector<std::wstring> args = manager
+            ? mods_arguments(options.launcher_dir, godot, project, game_root, next_action) : godot_arguments(inputs);
+        log.line("starting " + path_to_utf8(godot));
+
+        const std::string godot_log = path_to_utf8(options.user_data / "logs" / "godot.log");
+        const ChildResult child = runner.run(godot, args, options.launcher_dir);
+        if (!child.started) {
+            if (manager) return context.fail("EAWR could not start the mod manager: " + child.error);
+            return context.fail("EAWR could not start the Godot runtime " + path_to_utf8(godot) + ": " + child.error
+                                + ". Security software or Windows application control may have blocked it.", godot_log);
+        }
+        // Consume before interpreting the exit status, including requests left by a failed child.
+        const auto action = read_loop_json(next_action);
+        error.clear();
+        fs::remove(next_action, error);
+        if (error) return context.fail("EAWR cannot consume the launch request: " + error.message());
+        log.line(std::string(manager ? "the mod manager" : "the game") + " exited with code "
+                 + std::to_string(child.exit_code) + " after " + std::to_string(child.seconds) + " s");
+        if (manager && child.exit_code != 0) {
+            if (child.seconds < kEarlyExitSeconds) {
+                context.fail("The mod manager stopped right after starting (exit code " + std::to_string(child.exit_code) + ").");
+            }
+            return static_cast<int>(child.exit_code);
+        }
+        if (child.exit_code != 0) {
+            // The viewer's report names a startup failure at any time (first-run provisioning can take minutes). Without one, only an
+            // exit right after starting is shown; a crash after a long session has nothing to explain and stays in the log.
+            std::string reason = failure_from_report(inputs.report);
+            if (reason.empty() && child.seconds < kEarlyExitSeconds) {
+                reason = "The game stopped right after starting (exit code " + std::to_string(child.exit_code) + ").";
+            }
+            if (!reason.empty()) context.fail(reason, godot_log);
+        }
+        if (child.exit_code != 0 || !action) return static_cast<int>(child.exit_code);
+        const auto* kind = action->string_member("action");
+        if (!kind) return kExitOk;
+        if (!manager && child.seconds >= kEarlyExitSeconds) rapid_restarts = 0;
+        if (*kind == "open-manager") {
+            manager = true;
+        } else if (*kind == "launch-profile") {
+            const auto* id = action->string_member("profile");
+            if (!id || !portable_profile_id(*id)) return kExitOk;
+            const fs::path profile = options.user_data / "mods" / "profiles" / path_from_utf8(*id + ".json");
+            // Match the mod core's 4 MiB profile-file bound.
+            const auto json = read_loop_json(profile, 4u * 1024u * 1024u);
+            if (!json) return kExitOk;
+            const auto* format = json->string_member("format");
+            const auto* version = json->member("version");
+            const auto* profile_id = json->string_member("id");
+            const auto* launch = json->member("launch");
+            if (!format || *format != "eawr-mod-profile" || !version || version->kind != JsonValue::Kind::number
+                || version->number != 1 || !profile_id || *profile_id != *id
+                || !launch || launch->kind != JsonValue::Kind::object) return kExitOk;
+            const auto* render = launch->string_member("render_thread");
+            if (!render || (*render != "safe" && *render != "separate")) return kExitOk;
+            inputs.mod_profile = profile;
+            inputs.render_thread = widen_ascii(*render);
+            LauncherState state = load_state(options.user_data);
+            state.last_profile = *id;
+            std::string save_error;
+            if (!save_state(options.user_data, state, save_error)) log.line("could not remember the profile: " + save_error);
+            manager = false;
+        } else {
+            return kExitOk;
+        }
+        if (++rapid_restarts > 16) return context.fail("EAWR stopped repeated launch requests. Start EAWR Mods again to continue.");
     }
-    return static_cast<int>(child.exit_code);
 }
 
 } // namespace eawr::launcher

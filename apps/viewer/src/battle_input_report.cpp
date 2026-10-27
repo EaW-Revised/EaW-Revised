@@ -49,14 +49,8 @@ void BattleInput::draw() {
         view.camera = frame_;
         view.viewport = viewport_;
         view.project = [this](const ui::Vec3f& source) { return project(source); };
-        view.world_at_height = [this](const std::array<float, 2> screen, const float height) -> std::optional<ui::Vec3f> {
-            const auto pick = ray(screen[0], screen[1]);
-            if (!pick || std::abs(pick->direction[2]) < 1.0e-6F) return std::nullopt;
-            const float distance = (height - pick->origin[2]) / pick->direction[2];
-            if (distance < 0.0F) return std::nullopt;
-            return ui::Vec3f{pick->origin[0] + distance * pick->direction[0],
-                            pick->origin[1] + distance * pick->direction[1], height};
-        };
+        view.scene = scene_;
+        view.ray = [this](const std::array<float, 2> screen) { return ray(screen[0], screen[1]); };
         view.live = live_;
         view.abilities = ability_state_ != nullptr ? ability_state_ : &ready_abilities_;
         view.waypoints = (live_->order_input() && live_->order_input()->mode() == ui::OrderMode::waypoint)
@@ -84,7 +78,7 @@ void BattleInput::draw() {
     }
 }
 
-void BattleInput::write_report(std::ostream& output, const SpaceEnvironment& space) const {
+void BattleInput::write_report(std::ostream& output, const BattleCamera& space) const {
     output << "  \"battle_input\": {\"events\": " << events_ << ", \"pickable_units\": " << units_.size();
     output << ", \"special_weapon\": {\"fires\": " << special_fires_ << ", \"cancels\": " << special_cancels_
         << ", \"invalid\": " << special_invalid_ << ", \"targeting\": " << (special_target_source_ ? "true" : "false") << '}';

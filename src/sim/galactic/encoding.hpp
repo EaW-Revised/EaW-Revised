@@ -18,7 +18,7 @@ namespace eawr::sim::galactic::detail {
 
 inline constexpr std::array<std::uint8_t, 8> state_magic{'E', 'A', 'W', 'R', 'G', 'S', 'T', 0};
 inline constexpr std::array<std::uint8_t, 8> snapshot_magic{'E', 'A', 'W', 'R', 'G', 'S', 'N', 0};
-inline constexpr std::uint32_t state_encoding_version = 10;
+inline constexpr std::uint32_t state_encoding_version = 15;
 inline constexpr std::uint16_t section_version = 1;
 
 void put_u8(std::vector<std::uint8_t>& bytes, std::uint8_t value);
@@ -28,7 +28,6 @@ void put_u64(std::vector<std::uint8_t>& bytes, std::uint64_t value);
 void put_i64(std::vector<std::uint8_t>& bytes, std::int64_t value);
 void put_bytes(std::vector<std::uint8_t>& bytes, std::span<const std::uint8_t> value);
 void encode_history(std::vector<std::uint8_t>&, const HistoryArchive&);
-void encode_history_snapshot(std::vector<std::uint8_t>&, const HistorySnapshot&);
 
 void encode_players(std::vector<std::uint8_t>& bytes, std::span<const GalacticPlayer> players);
 void encode_player_economy(std::vector<std::uint8_t>& bytes, const PlayerEconomySetup& economy);

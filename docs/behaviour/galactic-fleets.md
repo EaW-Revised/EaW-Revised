@@ -22,6 +22,14 @@ story, production and autoresolve owners. Missing fleet control is an execution 
 Paused management is suppressed (WGM-07); in single-player, the replayable typed
 queued-campaign-conflict/active-speech inputs combine with the session's queued-local-conflict
 input to suppress management too. The `paused` reason denotes this management suppression.
+Project deviation from WGM-07 (legacy EAWR-2038): the fleet-control setup carries a replayed pause policy
+with one entry per command kind (fleet management, surface deployment, fleet movement). An `admit`
+entry lets that kind through during a player pause with no time advancing, so a movement order
+sets its transit at admission and the fleet starts moving on the resume; a `refuse` entry keeps the
+retail suppression. The sim default is refuse; the campaign setup chooses admit for single player and
+co-op and refuse for a versus lobby. A system hold (pending conflict, battle summary, child battle),
+a non-human issuer and invasion from orbit (it starts a battle) are refused while paused whatever
+the policy says. A paused departure cannot be cancelled in this wave (WGM-84 still applies).
 Later speech/conflict services own changes to the typed inputs. A battle keeps galactic commands
 queued under the existing GameSession contract.
 

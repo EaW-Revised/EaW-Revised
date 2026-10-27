@@ -1,5 +1,7 @@
+#include "eawr/scene/scene.hpp"
 #include "space_environment.hpp"
 #include "space_environment_internal.hpp"
+#include "startup_trace.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace {
@@ -570,7 +572,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
         }
         lookup.logical_path = *path;
         auto bytes = filesystem.open(*path);
-        auto model = assets::load_model(filesystem, *path);
+        auto model = scene::VfsAssetCache(filesystem).shared_model(*path);
         if (!bytes || !model) {
             lookup.status = space::ModelLookup::Status::failed_to_load;
             lookup.failure = !bytes ? core::format_diagnostic(bytes.error()) : core::format_diagnostic(model.error());
@@ -578,7 +580,7 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
         }
         lookup.sha256 = hash_bytes(bytes.value());
         lookup.status = space::ModelLookup::Status::resolved;
-        lookup.model = std::move(model.value());
+        lookup.model = *model.value();
         return lookup;
     };
     input.texture = [&](const std::string_view declared) {
@@ -622,6 +624,17 @@ bool SpaceEnvironment::ready(Node3D& host, const assets::Map& map, const vfs::Vf
     // One renderer on the host's own scenario; no second device and no
     // per-object scene nodes. The camera is live before any upload or frame.
     state.renderer = std::make_unique<GodotRenderer>(host, state.options.shaders);
+    state.renderer->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
+        auto loaded = assets::load_texture(filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    state.renderer->set_model_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Model> {
+        auto loaded = assets::load_model(filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    startup_trace.renderer_probe(state.renderer->recipe_memory_probe());
     if (state.options.map_camera && !state.activate_camera(host)) return false;
     state.renderer->set_camera(state.camera);
     if (state.options.fog) {

@@ -349,6 +349,15 @@ recorded hits on their collision meshes are torpedoes). The remake's bombers rea
 (BR 1537, FR 2313). The time-to-kill investigation put the remaining S-45 gap down to the bombers’ attack runs.
 The hardpoint-before-hull damage investigation found the actual cause, below.
 
+**S-45 shield, known gap (legacy EAWR-4946).** With `Randomize_Between_Fire_Bones` true by default (WWP-22), S-45's
+shield empties at tick 1309 (1252 before), outside the 15 % window 877..1290 of the recorded 1032..1122.
+The debug build draws the muzzle per shot in X, Y, Z order between the posed fire bones after the range
+test and before the lead, as the remake does, so the draws are not the cause: they only reshuffle the keyed
+stream (shots 459 -> 478, hits 404 -> 409; FR 56 -> 70 hits, FL 67 -> 63, BL 37 -> 32, BR and the bombers
+unchanged). The remake was already 130 ticks above the recorded maximum before; the cause is the far-side
+and battery hit gap above (legacy EAWR-536). `test_ttk_traces.py` records it as a strict known gap: the check fails
+if the shield falls back inside the window, so the marker gets removed then.
+
 <a id="hull-and-hardpoints-over-time-669"></a>
 
 ### Hull and hardpoints over time

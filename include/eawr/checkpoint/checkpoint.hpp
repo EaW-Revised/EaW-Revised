@@ -51,6 +51,7 @@ enum class SectionId : std::uint16_t {
     galactic_abilities = 15,
     campaign_scoring = 16, // coordinator-reserved, GHUD-S61 ledger bytes (empty when no counter exists)
     galactic_owner = 17, // complete direct owner/barrier state
+    land_state = 18, // coordinator-reserved, optional tactical land services
     presentation_hints = 0x8000,
     // 0x8001: the live transport's queued input (platform-owned).
     campaign_identity = 0x8002, // #3035: authored campaign/faction a player save belongs to

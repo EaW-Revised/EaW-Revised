@@ -55,6 +55,7 @@ public:
     // Rebind once the agreed owner transfers from setup to its live worker pool.
     void bind_executor(const sim::PartitionExecutor& executor) noexcept { executor_ = &executor; }
     std::uint64_t completed_tick() const override;
+    [[nodiscard]] std::optional<sim::SeatId> pause_actor() const { return pause_actor_; }
     std::string state_hash() const override;
     std::vector<std::uint8_t> canonical_state() const override;
     core::Result<void> validate(const SeatInput& input) const override;
@@ -90,6 +91,7 @@ private:
     [[nodiscard]] std::string clock_hash(std::string base) const;
     GalacticAdapterOptions options_;
     GalacticClockLimiter clock_limiter_;
+    std::optional<sim::SeatId> pause_actor_;
     std::vector<sim::SeatId> clock_refusals_;
     std::vector<sim::galactic::Seat> roster_; // tick-zero seats, ascending seat identity
     bool debug_commands_{};

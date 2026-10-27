@@ -160,6 +160,20 @@ ReplayWriteResult write_replay_store(const fs::path& store, const std::string_vi
     return result;
 }
 
+bool write_replay_session_companion(const fs::path& store, const std::string_view name,
+    const std::span<const std::uint8_t> bytes) {
+    const fs::path path = store / path_from_utf8(std::string(name) + std::string(replay_file_extension) + ".session");
+    std::error_code code;
+    const auto status = fs::symlink_status(path, code);
+    if ((!code && fs::exists(status) && !fs::is_regular_file(status))
+        || (code && code != std::errc::no_such_file_or_directory))
+        return false;
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    output.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    return static_cast<bool>(output);
+}
+
 std::vector<LoadGameEntry> scan_replay_store(const fs::path& store) {
     std::vector<LoadGameEntry> entries;
     std::error_code error;

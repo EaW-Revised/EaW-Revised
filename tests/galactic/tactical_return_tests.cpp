@@ -9,6 +9,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/tactical/admission.hpp"
 #include "eawr/sim/galactic/victory.hpp"
+#include "../../src/campaign/battle_return_internal.hpp"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -114,6 +116,94 @@ void hero(campaign::GameSession& game) {
         d.killer = result.final_blow_player; d.planet = c.planet; d.named = true; d.default_seconds = f(1);
         return eawr::core::Result<std::optional<gc::HeroDefeat>>::success(d);
     });
+}
+void retreat_destination_ties() {
+    for (const bool surface : {false, true}) for (unsigned tier = 0; tier < 4; ++tier) {
+        std::optional<std::string> reference;
+        for (const auto workers : eawr::platform::determinism_worker_counts()) for (const bool reverse : {false, true}) {
+            auto setup = galaxy(); setup.players.push_back({3, 3, 0});
+            setup.planets = {{1, {}, 2}, {2, {f(-3), f(4), {}}, tier == 2 ? 3U : 2U},
+                {3, {{}, {}, f(-5)}, tier == 2 ? 3U : 2U}};
+            setup.movement->planets.push_back({3, f(1), false});
+            for (const auto& player : setup.players) for (const auto& planet : setup.planets)
+                if (player.player_id == 3 || planet.id == 3) setup.movement->access.push_back({player.player_id, planet.id, true, false});
+            setup.movement->players.push_back({3, f(1), f(3), false});
+            std::erase_if(setup.fleets, [](const auto& fleet) { return fleet.id == 11; });
+            if (tier == (surface ? 1U : 0U)) {
+                setup.fleets.push_back({11, 1, 2, {{30, 1}}});
+                setup.fleets.push_back({13, 1, 3, {{31, 1}}});
+            }
+            std::sort(setup.fleets.begin(), setup.fleets.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+            std::sort(setup.movement->access.begin(), setup.movement->access.end(), [](const auto& a, const auto& b) {
+                return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+            });
+            setup.control.emplace(); auto& control = *setup.control;
+            control.change_seconds = f(1); control.max_ground_forces = 10;
+            control.routes = {{4, f(1)}};
+            control.players = {{1, false, true, 1}, {2, false, true, 2}, {3, true, false, 3}};
+            for (const auto& a : control.players) for (const auto& b : control.players)
+                control.relations.push_back({a.player, b.player, a.player == b.player});
+            control.types = {{1, 0, false, false}, {2, 0, false, true}, {3, 0, false, false}};
+            for (const auto& planet : setup.planets) {
+                gc::ControlPlanet row; row.planet = planet.id; row.type = 100 + planet.id; row.surface_accessible = true;
+                if (planet.id != 1 && tier == (surface ? 0U : 1U)) row.ground_base = {1, 1};
+                control.planets.push_back(row);
+            }
+            // Source qualifies too, at zero distance, and must still be excluded.
+            control.planets[0].ground_base = {1, 1};
+            if (surface) {
+                setup.movement->types[1].hyperspace_speed = f(2);
+                setup.movement->types[1].hyperspace_eligible = true;
+                setup.movement->types[1].squadron = false;
+                setup.movement->types[1].transport = true;
+                setup.movement->contents.push_back({50, {}});
+                control.planets[0].landed = {{50, 2, 1}};
+            }
+            auto world = checked(gc::GalacticSession::create(setup));
+            if (reverse) world.scramble_storage_for_testing();
+            for (unsigned restore = 0; restore < 3; ++restore) {
+                expect(checked(campaign::retreat_destination(*world.snapshot(), 1, 1, surface)) == 3,
+                    "WGM-211/212 every tier keeps the last-created equal-distance planet, including after restore");
+                okay(world.load_checkpoint_state(checked(world.save_checkpoint_state())));
+            }
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            campaign::ConflictRecord conflict; conflict.planet = 1;
+            conflict.layer = surface ? campaign::BattleLayer::land : campaign::BattleLayer::space;
+            campaign::TacticalReturnPlan plan; plan.result.retreat_player = 1;
+            if (!surface) plan.retreat_fleets = {10};
+            campaign::TacticalReturnState state;
+            okay(campaign::apply_tactical_return(world, conflict, plan, state, executor));
+            const auto snapshot = world.snapshot(); const auto fleets = snapshot->fleets();
+            const auto departed = std::find_if(fleets.begin(), fleets.end(), [&](const auto& fleet) {
+                return surface ? std::any_of(fleet.members.begin(), fleet.members.end(), [](const auto& member) { return member.id == 50; }) : fleet.id == 10;
+            });
+            expect(departed != fleets.end() && departed->motion.transit && departed->motion.transit->path.back() == 3,
+                "WGM-212 tactical return actually departs to the selected tie winner");
+            if (reference) expect(*reference == world.state_sha256(), "retreat ties equal on 1/2/4/8 workers and scrambled storage");
+            else reference = world.state_sha256();
+        }
+    }
+    // Unequal squared distances that round to the same Fixed length must not tie.
+    auto setup = galaxy(); setup.planets.push_back({3, {f(12), Fixed::from_raw(1), {}}, 1});
+    setup.movement->planets.push_back({3, f(1), false});
+    for (const auto& player : setup.players) setup.movement->access.push_back({player.player_id, 3, true, false});
+    std::sort(setup.movement->access.begin(), setup.movement->access.end(), [](const auto& a, const auto& b) {
+        return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+    });
+    auto world = checked(gc::GalacticSession::create(setup));
+    expect(checked(eawr::sim::math::length(setup.planets[1].position))
+        == checked(eawr::sim::math::length(setup.planets[2].position)),
+        "rounded tie fixture has identical Q24 lengths for (12,0,0) and (12,one-raw-quantum,0)");
+    expect(eawr::sim::math::compare_squared_lengths(setup.planets[1].position, setup.planets[2].position) < 0,
+        "squared raw distances are (12*scale)^2 and (12*scale)^2+1 respectively");
+    expect(checked(campaign::retreat_destination(*world.snapshot(), 1, 2, false)) == 2,
+        "WGM-211 a genuinely closer candidate replaces the newer rounded-length tie");
+    expect(eawr::sim::math::compare_squared_lengths({f(3), f(4), {}}, {{}, {}, f(-5)}) == 0,
+        "equal 3D magnitudes compare equal");
+    const auto low = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
+    const auto high = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    expect(eawr::sim::math::compare_squared_lengths({low, low, low}, {high, high, high}) > 0,
+        "squared distance comparison retains full signed-raw range without overflow");
 }
 void pure_policy() {
     tactical::RetreatRules rules; rules.campaign = true; rules.players = {{1, 2, true}, {2, 2, true}};
@@ -861,6 +951,98 @@ void land_return_keeps_orbit() {
         }
     }
 }
+void stock_faction_retreat() {
+    namespace dg = eawr::data::galactic;
+    struct XmlTree {
+        std::filesystem::path root = std::filesystem::temp_directory_path() /
+            ("eawr-retreat-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        ~XmlTree() { eawr::testing::remove_temp_directory(root); }
+    } tree;
+    std::filesystem::create_directories(tree.root / "XML");
+    const auto write = [&](const std::string& file, const std::string_view text) {
+        std::ofstream out(tree.root / "XML" / file); out << text;
+    };
+    for (const auto* registry : {"GameObjectFiles", "HardpointDataFiles", "CampaignFiles", "SFXEventFiles"})
+        write(std::string(registry) + ".xml", "<Files/>");
+    write("FactionFiles.xml", "<Faction_Files><File>Factions.xml</File></Faction_Files>");
+    // Two differently named factions exercise overrides, omission and request eligibility.
+    const auto factions = [&](const std::string_view second_tags) {
+        write("Factions.xml", std::string(R"xml(<Factions>
+            <Faction Name="First"><Is_Playable>Yes</Is_Playable><Space_Retreat_Countdown_Seconds>1.125</Space_Retreat_Countdown_Seconds></Faction>
+            <Faction Name="Second">)xml") + std::string(second_tags) + "</Faction></Factions>");
+    };
+    write("GameConstants.xml", R"xml(<GameConstants><Default_Hero_Respawn_Time>1</Default_Hero_Respawn_Time>
+        <Space_Retreat_Attrition_Factor>0</Space_Retreat_Attrition_Factor>
+        <Space_Retreat_Allowed_Countdown_Seconds>0</Space_Retreat_Allowed_Countdown_Seconds></GameConstants>)xml");
+    const std::vector<eawr::vfs::MountSpec> mounts{{"synthetic", tree.root, "data", {}}};
+    dg::GalacticData data;
+    for (const auto* name : {"First", "Second", "Neutral"}) {
+        dg::Faction faction; faction.name = name; faction.is_neutral = std::string_view(name) == "Neutral";
+        data.factions.push_back(faction);
+    }
+    dg::Planet planet; planet.name = "Place"; planet.galactic_position = dg::Position{};
+    planet.behaviors = {"PLANET"}; data.planets.push_back(planet);
+    dg::Campaign authored; authored.name = "Synthetic"; authored.locations = {"Place"}; authored.planets = authored.locations;
+    data.campaigns.push_back(authored);
+    data.constants = {{"MaximumFleetMovementDistance", "10", f(10)}, {"Fiscal_Cycle_Time_In_Secs", "1", f(1)}};
+    eawr::units::GalacticType ship; ship.name = "RenamedWell"; ship.object_class = "SpaceUnit"; ship.hyperspace_capable = true;
+    auto other = ship; other.name = "RenamedOther";
+    eawr::units::GalacticTypeTable types; types.types = {ship, other};
+    campaign::CampaignSetupOptions options;
+    options.players = {{{1, 1, 0}, "First", true}, {{2, 2, 0}, "Second", true}, {{3, 3, 0}, "Neutral", true}};
+    options.types = {{1, "RenamedWell"}, {3, "RenamedOther"}};
+    const auto plan = checked(campaign::plan_campaign_setup(data, types, authored.name, options));
+    for (const auto second_tags : {"<Is_Playable>Yes</Is_Playable>", "<Is_Playable>No</Is_Playable>", ""}) {
+        factions(second_tags);
+        const auto files = checked(eawr::vfs::Vfs::mount(mounts));
+        const bool playable = std::string_view(second_tags) == "<Is_Playable>Yes</Is_Playable>";
+        const auto catalog = checked(eawr::data::load_catalog(files, eawr::data::Profile::foc));
+        const auto services = checked(campaign::prepare_stock_tactical_return(files, catalog.catalog, plan));
+        const auto c = conflict(galaxy());
+        auto binding = content(c);
+        okay(services.bind(c, binding));
+        const auto& rules = binding.retreat->rules;
+        expect(rules.players[0].countdown_frames == 33, "WR-86 XML override truncates fractional seconds times FPS");
+        expect(rules.players[1].countdown_frames == 479, "WR-86 omitted countdown uses 15.99 seconds times 30 FPS, truncated");
+        expect(rules.players[1].playable == playable, "WR-87 omitted or false playability remains retreat ineligible");
+        std::vector<std::string> reference;
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto session = checked(tactical::TacticalSession::create(c.tactical, binding));
+            tactical::RetreatState request;
+            expect(tactical::request_retreat(rules, request, 2, tactical::RetreatAction::start, 0, {}, binding.retreat->actors)
+                == (playable ? tactical::RetreatRefusal::none : tactical::RetreatRefusal::faction),
+                "WR-87 faction eligibility is checked at the retreat request");
+            okay(session.submit({{0, 2, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+            std::vector<std::string> hashes{checked(session.step(executor)).state_sha256};
+            expect(session.completed_tick() == 1 && !session.outcome(),
+                "WR-87 battle advances with a participant that omits retreat tags");
+            expect(session.retreat_state().phase == (playable ? tactical::RetreatPhase::countdown : tactical::RetreatPhase::idle),
+                "WR-86/87 defaulted playable countdown starts; non-playable request leaves battle idle");
+            if (playable) expect(session.retreat_state().deadline == 479, "WR-86 native request uses the defaulted countdown");
+            else {
+                okay(session.submit({{1, 1, 1}, {}, tactical::RetreatPayload{tactical::RetreatAction::start}}));
+                hashes.push_back(checked(session.step(executor)).state_sha256);
+                expect(session.retreat_state().player == 1 && session.retreat_state().deadline == 34,
+                    "WR-87 rejected faction does not block the playable opponent's authored countdown");
+            }
+            const auto log = checked(tactical::parse_replay(checked(tactical::write_replay(session.record()))));
+            auto replayed = checked(tactical::TacticalSession::from_replay(log, binding));
+            for (const auto& hash : hashes) expect(checked(replayed.step(executor)).state_sha256 == hash,
+                "WR-86/87 parsed replay reproduces defaulted countdown and faction refusal");
+            auto restored = checked(tactical::TacticalSession::from_replay(log, binding));
+            okay(restored.load_checkpoint_state(checked(session.save_checkpoint_state())));
+            expect(restored.state_sha256() == session.state_sha256(), "WR-86/87 checkpoint restores the current countdown");
+            for (unsigned tick = 0; tick < 4; ++tick) {
+                session.scramble_storage_for_testing();
+                hashes.push_back(checked(session.step(executor)).state_sha256);
+                expect(checked(restored.step(executor)).state_sha256 == hashes.back(), "WR-86/87 checkpoint continuation matches");
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WR-86/87 every tick agrees on 1/2/4/8 workers");
+        }
+    }
+}
 void stock_interdiction() {
     namespace dg = eawr::data::galactic;
     struct XmlTree {
@@ -1028,7 +1210,7 @@ void installed() {
 }
 }
 int case_galactic_tactical_return_tests(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_interdiction(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--nonadjacent-retreat") parent_return(true); else if (argc > 1) installed(); else { retreat_destination_ties(); pure_policy(); hero_fallback(); cinematic_authority(); station_explosion(); parent_return(); parent_return(true); selected_recording(); squadron_return(); deployed_reserve(); land_return_keeps_orbit(); stock_faction_retreat(); stock_interdiction(); } }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

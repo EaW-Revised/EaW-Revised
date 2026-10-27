@@ -246,6 +246,7 @@ core::Result<void> GalacticWorld::prepare_economy_tokens(const sim::PartitionExe
             auto selected = account->tech_level;
             while (selected > 0 && force->starting_spawns[selected].empty()) --selected;
             for (const auto& spawn : force->starting_spawns[selected]) {
+                if (!spawn.type) continue; // RGC-24: a null entry contributes nothing and does not make the total unavailable
                 const auto* spawned = find(setup_.force_types, spawn.type, [](const auto& row) { return row.type; });
                 const auto first = std::find_if(force->starting_spawns[selected].begin(), force->starting_spawns[selected].end(),
                     [&](const auto& row) { return row.type == spawn.type; });

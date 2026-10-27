@@ -60,6 +60,10 @@ every `*.meg`. In the current Remake manifest, `RemakeDisabled.meg` is explicitl
 despite its name it is therefore active. Changing that requires changed manifest evidence,
 not a filename heuristic.
 
+A mod layer without `Data/MegaFiles.xml` mounts loose files only and logs
+`EAWR-VFS-0012` once per resolution (ML-09). Base and expansion layers still require
+a manifest. A present mod manifest follows the archive ordering and validation below.
+
 `MegaFiles.xml` is parsed as XML, not searched as raw text. The document must be
 well-formed, contain exactly one document element, and have a `Mega_Files` root; only its
 direct, case-sensitive `File` children are declarations. Comments, processing instructions,
@@ -102,6 +106,7 @@ Stable codes:
 | `EAWR-VFS-0009` | duplicate case-insensitive path inside one MEG |
 | `EAWR-VFS-0010` | missing or invalid active manifest |
 | `EAWR-VFS-0011` | invalid mount contract |
+| `EAWR-VFS-0012` | informational: mod layer has no manifest; mounting loose files only |
 
 ## Scanner
 

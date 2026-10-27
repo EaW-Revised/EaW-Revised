@@ -135,6 +135,7 @@ class CampaignSpaceCycle(unittest.TestCase):
         if mode != "loss":
             self.assertGreater(proof["survivors"], 0)
         self.assertTrue(proof["survivors_preserved"])
+        self.assertTrue(data["handoff"]["requested"], "ordinary handoff remains reported after child teardown")
         self.assertEqual(len(data["handoff_cycles"]), 1)
         cycle = data["handoff_cycles"][0]
         self.assertTrue(cycle["child_expired"] and cycle["feed_expired"] and cycle["scene_expired"])

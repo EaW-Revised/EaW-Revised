@@ -464,6 +464,146 @@ void production_lifecycle() {
     namespace t = eawr::sim::tactical;
     namespace m = eawr::sim::math;
     const auto q = [](std::int64_t value) { return m::Fixed::from_integer(value).value(); };
+    // WAS-27 / #4717: authoritative admission already accepted ordinary allied
+    // factories on BASE; the AI census alone omitted them. Exercise real menu
+    // metadata without giving these factories the starbase behavior.
+    std::vector<std::string> ordinary_baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+      std::vector<std::string> hashes;
+      for (const int scenario : {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}) {
+        const std::string label = "WAS-27 ordinary producer case " + std::to_string(scenario);
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        t::TacticalSetup setup;
+        setup.players = {{1, 1, 100, 1}, {2, 1, scenario >= 2 ? 200U : 100U, 1},
+            {3, 3, 300, 1}, {4, 1, 400, 0}};
+        const t::PlayerId owner = scenario == 1 ? 1U : scenario == 12 ? 3U : scenario == 13 ? 4U : 2U;
+        setup.units = {{1, 10, owner}};
+        if (scenario == 0) for (eawr::sim::EntityId id = 1000; id < 1260; ++id)
+            setup.units.push_back({id, 10, 3}); // force partitioned preparation; hostile rows never merge
+        t::EconomyRules economy;
+        economy.players = {{1, q(1000), 20, true}, {2, q(1000), 20}, {3, q(1000), 20}, {4, {}, 20}};
+        const t::BuildOption ship{50, t::BuildKind::unit, t::BuildQueue::units, q(100), 1, 1, 1, true};
+        economy.menus = {{10, 100, {ship}}, {10, 200, {ship}}, {10, 300, {ship}}, {10, 400, {ship}}};
+        if (scenario == 2) economy.menus[0].options[0].type = 51; // visibility need not contain the purchased type
+        if (scenario == 3) economy.menus.erase(economy.menus.begin()); // no buyer-faction menu
+        if (scenario == 4) economy.menus[0].options.clear();
+        if (scenario == 5) economy.menus[1].options.clear();
+        if (scenario == 6) economy.disabled_types = {50};
+        if (scenario == 7) economy.menus[1].options[0].available = false;
+        if (scenario == 8) economy.menus[1].station_producer = false;
+        if (scenario == 9) {
+            economy.pads.neutral = 4;
+            economy.pads.capture = {{10, q(100), q(1), {100, 200}, false, true, true}};
+        }
+        if (scenario == 10) economy.pads.construction = {{10, 40, q(100), 1, 1}};
+        if (scenario == 11) economy.menus[1].options[0].requirements.prerequisites = {99};
+        if (scenario == 14) economy.menus[1].options[0].requirements.current_player = 0;
+        if (scenario == 15) economy.menus.erase(economy.menus.begin() + 1); // no owner-faction menu
+        if (scenario == 16) economy.menus[1].options[0].kind = t::BuildKind::structure;
+        t::CombatTable combat; combat.pad_neutral_factions = {400};
+        auto session = t::TacticalSession::create(setup, {}, {}, {}, {}, combat, {}, {}, economy);
+        expect(session.has_value(), label + ": fixture starts");
+        if (!session) continue;
+        auto& world = session.value();
+        auto ordinary_host = ai::make_tactical_host();
+        foc::AiType factory; factory.type_id = 10;
+        ordinary_host->types.emplace(10, &factory);
+        ordinary_host->world = &world;
+        const auto refresh = [&] {
+            ordinary_host->snapshot = world.snapshot();
+            ordinary_host->view = foc::detail::build_view(world, *ordinary_host->snapshot, &pool);
+        };
+        refresh();
+        ai::Engine ordinary(ordinary_host, {}, {ai::PlanDef{}});
+        ai::EngineContractAccess::prepare_inputs(ordinary, pool);
+        const bool allowed = scenario <= 2;
+        const bool admitted = allowed || scenario == 3 || scenario == 4;
+        expect(world.build_allowed(1, 1, 50) == admitted, label + ": queue admission is distinct from registration");
+        expect(ordinary.producer(1, 50) == (allowed ? 1U : 0U), label + ": menu-driven census agrees with registration and admission");
+        for (int repeat = 0; repeat < 10; ++repeat) {
+            static_cast<void>(ordinary.producer(1, 50));
+            expect(ordinary.producer(1, 999) == 0, label + ": absent type has no candidate");
+        }
+        expect(ordinary.producer_work().entities == world.pads().size() + setup.units.size()
+            && ordinary.input_counts().producer_prepasses == 1,
+            label + ": repeated lookups reuse one completed-input census");
+        if (!allowed) continue;
+
+        // A tiny plan uses the production Lua binding and the ordinary command
+        // translator, preserving the AI buyer all the way into its pool.
+        ordinary_host->engine = &ordinary;
+        auto& buyer = ai::EngineContractAccess::add_player(ordinary, 1);
+        ai::Goal purchase; purchase.id = 1;
+        ai::EngineContractAccess::purchase(ordinary, buyer, purchase, 50, 1);
+        buyer.tasks.clear(); buyer.plan_of_instance[1] = 1;
+        auto& selected_force = buyer.taskforces.at(1);
+        selected_force.types = {50}; selected_force.sources = {2};
+        selected_force.producers = {0}; // execution must use the census
+        ai::EngineContractAccess::reindex(ordinary);
+        expect(ordinary.plan_of_instance(1) != nullptr, label + ": retained plan instance is indexed before Lua");
+        auth::ModuleManifest modules;
+        expect(modules.add("FACTORY.LUA", "function Request(tf) result = tf.Produce_Force() end\n").has_value(), label + ": plan loads");
+        auth::SessionConfig config; config.tick_duration = {1, 30};
+        auto scripts = auth::ScriptScheduler::create(config, std::move(modules));
+        expect(scripts.has_value(), label + ": scheduler starts");
+        if (!scripts) continue;
+        std::uint64_t sequence = 0;
+        ai::EngineContractAccess::bind_scripts(ordinary, scripts.value(), sequence);
+        std::vector<eawr::core::Diagnostic> errors;
+        foc::detail::register_plan_bindings(scripts.value(), ordinary_host, errors);
+        expect(errors.empty() && scripts.value().create_instance(1, "FACTORY.LUA").has_value(), label + ": plan registers");
+        auth::ScriptEvent request;
+        request.key = {1, auth::first_simulation_producer, 1, 0};
+        request.target = 1; request.kind = auth::ScriptEvent::Kind::call; request.name = "Request";
+        request.arguments = {auth::Value{auth::Handle{ai::handle_taskforce, 1}}};
+        expect(scripts.value().submit_event(std::move(request)).has_value(), label + ": request submits");
+        auto report = scripts.value().service(pool);
+        expect(report && report.value().diagnostics.empty(), label + ": Produce_Force runs");
+        if (!report) continue;
+        expect(ordinary.after_service(report.value()).has_value(), label + ": request becomes a task");
+        expect(buyer.tasks.size() == 1 && buyer.tasks.front().source == 2 && buyer.tasks.front().producer == 0,
+            label + ": Lua stages one new-production task for census resolution");
+        ai::EngineContractAccess::service(ordinary, buyer, 1);
+        const auto orders = ai::EngineContractAccess::take_orders(ordinary);
+        expect(orders.size() == 1, label + ": AI emits one purchase");
+        for (const auto& command : orders) {
+            const auto order = foc::tactical_ai_detail::translate_order(command);
+            expect(order && order.value().issuer == 1 && order.value().units == std::vector<eawr::sim::EntityId>{1}
+                && std::holds_alternative<t::BuyPayload>(order.value().payload), label + ": buyer and chosen factory reach BuyPayload");
+            if (order) expect(world.submit({{world.completed_tick(), order.value().issuer, sequence++},
+                order.value().units, order.value().payload}).has_value(), label + ": ordinary purchase submits");
+        }
+        for (int tick = 0; tick < 3; ++tick) {
+            const auto stepped = world.step(pool);
+            expect(stepped.has_value(), label + ": purchase advances");
+            if (stepped) hashes.push_back(stepped.value().state_sha256);
+        }
+        refresh();
+        ai::EngineContractAccess::service(ordinary, buyer, 4);
+        expect(buyer.tasks.empty() && world.ledgers()[0].pool.size() == 1
+            && world.ledgers()[0].credits == q(900) && world.ledgers()[1].credits == q(1000)
+            && world.ledgers()[1].pool.empty(), label + ": completion belongs to the AI buyer and only its wallet pays");
+        expect(world.stage_remove(1).has_value(), label + ": producer removal stages");
+        expect(world.step(pool).has_value(), label + ": producer removal commits");
+        refresh();
+        ai::EngineContractAccess::pause_planning(ordinary);
+        expect(ordinary.before_service(*ordinary_host->ai_world, scripts.value(), sequence, &pool).has_value(), label + ": new input refreshes the index");
+        expect(ordinary.producer(1, 50) == 0, label + ": deleted factory is no longer discovered");
+        setup.units.front().owner = 3;
+        auto changed_owner = t::TacticalSession::create(setup, {}, {}, {}, {}, combat, {}, {}, economy);
+        expect(changed_owner.has_value(), label + ": changed-owner input starts");
+        if (changed_owner) {
+            ordinary_host->world = &changed_owner.value();
+            ordinary_host->snapshot = changed_owner.value().snapshot();
+            ordinary_host->view = foc::detail::build_view(changed_owner.value(), *ordinary_host->snapshot, &pool);
+            expect(ordinary.before_service(*ordinary_host->ai_world, scripts.value(), sequence, &pool).has_value()
+                && ordinary.producer(1, 50) == 0, label + ": refreshed hostile ownership cannot retain a registered factory");
+            ordinary_host->world = &world;
+        }
+      }
+      if (workers == 1) ordinary_baseline = hashes;
+      else expect(hashes == ordinary_baseline, "WAS-27: ordinary production hashes agree on 1/2/4/8 workers");
+    }
     // Stations use the owner's faction even when an allied buyer has another menu.
     t::TacticalSetup start;
     start.players = {{1, 1, 100, 1}, {2, 1, 200, 1}};

@@ -64,7 +64,7 @@ ai::GalacticPerceptionSetup setup() {
         ai::GalacticForceType force; force.type = id; force.categories = 1;
         force.power = real(id == 500 ? 10 : id == 700 ? 8 : id == 800 ? 9 : id == 900 ? 11 : id == 200 ? 3 : id == 1000 ? 5 : 0);
         if (type.space_structure) force.space_structure_categories = 4;
-        if (id == 500) force.starting_spawns[3] = {{900, 2}};
+        if (id == 500) force.starting_spawns[3] = {{0, 4}, {900, 2}}; // the leading null entry is skipped (RGC-24)
         out.force_types.push_back(force); out.economy_types.push_back(type);
     }
     out.economy_types_complete = true; out.faction_maintenance = {{1, ai::parse_real("0.25").value()}, {2, real(1)}};

@@ -6,6 +6,8 @@
 #include "match_transport.hpp"
 #include "skirmish_prepare.hpp"
 #include "eawr/net/desync_monitor.hpp"
+#include "eawr/net/match_pause.hpp"
+#include "eawr/net/match_pause_replay.hpp"
 #include "eawr/net/setup.hpp"
 #include "eawr/net/lan_credentials.hpp"
 #include "eawr/net/tactical_input.hpp"
@@ -305,8 +307,8 @@ private:
 };
 class LiveAdapter final : public net::SessionAdapter {
 public:
-    explicit LiveAdapter(tactical::TacticalSetup setup, std::vector<net::SetupSeat> seats, std::shared_ptr<LanTrace> trace)
-        : setup_(std::move(setup)), trace_(std::move(trace)) {
+    explicit LiveAdapter(tactical::TacticalSetup, std::vector<net::SetupSeat> seats, std::shared_ptr<LanTrace> trace)
+        : trace_(std::move(trace)) {
         for (const auto& seat : seats) bindings_.push_back({seat.seat, seat.player, true, false});
     }
     platform::LiveStepContext* context{};
@@ -314,20 +316,58 @@ public:
     std::function<core::Result<void>(LiveAdapter&)> activate_if_current;
     std::function<core::Result<void>()> service_io;
     bool advanced{};
+    bool record_journal{true};
     std::function<void(net::MatchOptions, std::uint64_t)> options_applied;
     void bind_live_context(platform::LiveStepContext& live, const std::shared_ptr<LanTrace>& trace) {
         context = &live; trace_ = trace;
     }
-    std::uint64_t completed_tick() const override { return context ? context->completed_tick() : 0; }
-    std::string state_hash() const override { return context->state_hash(); }
-    Bytes canonical_state() const override { return context->canonical_state(); }
+    std::uint64_t completed_tick() const override { return clock.completed; }
+    std::uint64_t session_epoch(std::uint64_t world_epoch) const {
+        // A drained input keeps its producer's completed frame as the anchor: a later drain steps back by the world frames since.
+        const auto world = context->completed_tick();
+        if (clock.paused || world_epoch >= world) return clock.completed + (world_epoch > world && !clock.paused ? world_epoch - world : 0);
+        const auto behind = world - world_epoch;
+        return clock.completed > behind ? clock.completed - behind : 0;
+    }
+    std::uint64_t world_boundary(std::uint64_t session_boundary) const {
+        if (session_boundary == 0) return 0;
+        if (session_boundary <= world_boundaries_.size()) return world_boundaries_[static_cast<std::size_t>(session_boundary - 1)];
+        return context->completed_tick() + (clock.paused || session_boundary <= clock.completed ? 0 : session_boundary - clock.completed);
+    }
+    net::MatchPauseClock clock;
+    net::MatchPauseReplay recording;
+    std::optional<sim::SeatId> clock_refused;
+    // The last installed tick answered a pause request of this seat: it carried one of its pause inputs, or the hold flipped.
+    bool pause_answered(sim::SeatId own) const {
+        return clock.paused != pause_before_ || std::any_of(tick_inputs_.begin(), tick_inputs_.end(), [&](const auto& input) {
+            return input.key.seat == own && net::is_match_pause(input.bytes);
+        });
+    }
+    std::uint64_t next_control_ms{};
+    bool control_due(std::uint64_t now) const { return !clock.paused || now >= next_control_ms; }
+    void completed_at(std::uint64_t now) { if (clock.paused) next_control_ms = now + 33; }
+    std::string combined_hash(std::string_view world) const {
+        auto bytes = control_state();
+        bytes.insert(bytes.end(), world.begin(), world.end());
+        return core::sha256_hex(bytes);
+    }
+    std::string state_hash() const override { return combined_hash(context->state_hash()); }
+    Bytes canonical_state() const override {
+        auto bytes = context->canonical_state();
+        const auto control = control_state(); bytes.insert(bytes.end(), control.begin(), control.end());
+        return bytes;
+    }
     const tactical::SeatBinding* binding(sim::SeatId seat) const {
         const auto found = std::find_if(bindings_.begin(), bindings_.end(), [&](const auto& bound) { return bound.seat == seat; });
         return found == bindings_.end() ? nullptr : &*found;
     }
     core::Result<void> validate(const net::SeatInput& input) const override {
         const auto* bound = binding(input.key.seat);
-        if (!bound) return fail<void>("Unknown player seat.");
+        if (!bound || !bound->active || bound->observer || departed_.contains(bound->seat)) return fail<void>("Inactive human seat.");
+        if (net::is_match_pause(input.bytes)) {
+            const auto pause = net::decode_match_pause(input.bytes);
+            return pause ? core::Result<void>::success() : core::Result<void>::failure(pause.error());
+        }
         if (context->departures) for (const auto& control : context->departures())
             if (control.player == bound->player) return fail<void>("This human seat has departed.");
         if (net::is_match_options(input.bytes)) {
@@ -341,71 +381,111 @@ public:
         if (staging && activate_if_current) {
             auto activated = activate_if_current(*this); if (!activated) return activated;
         }
-        std::vector<tactical::PlayerCommand> commands;
-        trace_commands_.clear();
-        options_input_.clear();
-        pending_options_.reset();
+        pause_before_ = clock.paused;
+        trace_commands_.clear(); clock_refused.reset();
+        tick_inputs_.assign(canonical.begin(), canonical.end());
+        clock.limiter.expire(clock.completed);
         for (const auto& input : canonical) {
+            if (input.key.tick != clock.completed) return fail<void>("Input is not stamped for this session tick.");
             const auto* bound = binding(input.key.seat);
-            if (!bound) return fail<void>("Unknown player seat.");
+            if (!bound || !bound->active || bound->observer) return fail<void>("Inactive human seat.");
+            if (departed_.contains(bound->seat)) continue;
+            if (net::is_match_pause(input.bytes)) {
+                auto pause = net::decode_match_pause(input.bytes);
+                if (!pause) return core::Result<void>::failure(pause.error());
+                const auto changed = clock.apply(pause.value(), input.key);
+                if (changed == net::MatchPauseClock::Change::throttled) clock_refused = input.key.seat;
+                continue;
+            }
             if (net::is_match_options(input.bytes)) {
                 auto decoded = net::decode_match_options(input.bytes);
                 if (!decoded) return core::Result<void>::failure(decoded.error());
                 pending_options_ = decoded.value();
-                options_input_.insert(options_input_.end(), input.bytes.begin(), input.bytes.end());
                 continue;
             }
             auto decoded = net::decode_tactical_input(input, *bound);
             if (!decoded) return core::Result<void>::failure(decoded.error());
-            auto command = tactical::admit_human_command(*bound, decoded.value());
-            if (!command) return core::Result<void>::failure(command.error());
-            if (trace_) {
-                trace_commands_.emplace_back(input.key, command_kind(command.value().command.payload));
-                trace_->stage("admit", input.key, command_kind(command.value().command.payload), context->completed_tick());
-            }
-            if (std::holds_alternative<tactical::QuitPayload>(command.value().command.payload)) {
-                departed_.insert(bound->seat);
-                if (std::any_of(bindings_.begin(), bindings_.end(), [&](const auto& seat) {
-                    return seat.player == bound->player && seat.active && !seat.observer && !departed_.contains(seat.seat);
-                })) continue;
-            }
-            command.value().command.key.sequence = sequences_[bound->player]++;
-            commands.push_back(std::move(command).value().command);
+            // The network retires the voter immediately. Its world departure waits
+            // with other world inputs until an actual tactical frame is admitted.
+            if (std::holds_alternative<tactical::QuitPayload>(decoded.value().payload)) departed_.insert(bound->seat);
+            if (pending_bytes_ > net::max_batch_bytes - input.bytes.size()) return fail<void>("Paused order queue exceeded its byte budget.");
+            pending_bytes_ += input.bytes.size(); pending_.push_back(input);
         }
-        std::sort(commands.begin(), commands.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
-        inputs_ = commands;
-        return context->install(commands);
+        // Once no humans remain the obsolete human hold cannot block AI fallback.
+        if (clock.paused && std::none_of(bindings_.begin(), bindings_.end(), [&](const auto& seat) {
+            return seat.active && !seat.observer && !departed_.contains(seat.seat);
+        })) clock.paused = false;
+        return core::Result<void>::success();
     }
     core::Result<Bytes> canonical_input() const override {
-        if (!options_input_.empty()) {
-            auto tactical_input = context->canonical_input ? context->canonical_input()
-                : inputs_.empty() ? core::Result<Bytes>::success({}) : tactical::write_replay({setup_, completed_tick() + 1, inputs_});
-            if (!tactical_input) return tactical_input;
-            auto bytes = options_input_;
-            bytes.insert(bytes.end(), tactical_input.value().begin(), tactical_input.value().end());
-            return core::Result<Bytes>::success(std::move(bytes));
+        Bytes bytes(net::match_pause_domain.begin(), net::match_pause_domain.end());
+        const auto put = [&](std::uint64_t value, unsigned count) {
+            for (unsigned i = 0; i < count; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (i * 8U)));
+        };
+        put(tick_inputs_.size(), 4);
+        for (const auto& input : tick_inputs_) {
+            put(input.key.tick, 8); put(input.key.seat.value, 4); put(input.key.sequence, 8); put(input.bytes.size(), 4);
+            bytes.insert(bytes.end(), input.bytes.begin(), input.bytes.end());
         }
-        if (context->canonical_input) return context->canonical_input();
-        if (inputs_.empty()) return core::Result<Bytes>::success({});
-        return tactical::write_replay({setup_, completed_tick() + 1, inputs_});
+        if (advanced && context->canonical_input) {
+            auto world = context->canonical_input(); if (!world) return world;
+            bytes.insert(bytes.end(), world.value().begin(), world.value().end());
+        }
+        return core::Result<Bytes>::success(std::move(bytes));
     }
     core::Result<net::CompletedTick> step() override {
         if (staging && activate_if_current) { auto activated = activate_if_current(*this); if (!activated) return core::Result<net::CompletedTick>::failure(activated.error()); }
         if (staging && service_io) { auto serviced = service_io(); if (!serviced) return core::Result<net::CompletedTick>::failure(serviced.error()); }
         if (!context->advance_allowed) return fail<net::CompletedTick>("Loading barrier attempted to advance.");
-        auto result = context->step();
-        if (!result) return core::Result<net::CompletedTick>::failure(result.error());
+        advanced = false;
+        if (pause_before_ != clock.paused && context->rebase_pacing) context->rebase_pacing();
+        if (!clock.paused) {
+            std::vector<tactical::PlayerCommand> commands;
+            for (const auto& input : pending_) {
+                const auto* bound = binding(input.key.seat);
+                auto decoded = net::decode_tactical_input(input, *bound);
+                if (!decoded) return core::Result<net::CompletedTick>::failure(decoded.error());
+                if (std::holds_alternative<tactical::QuitPayload>(decoded.value().payload)
+                    && std::any_of(bindings_.begin(), bindings_.end(), [&](const auto& seat) {
+                        return seat.player == bound->player && seat.active && !seat.observer && !departed_.contains(seat.seat);
+                    })) continue;
+                auto admitted = tactical::admit_human_command(*bound, decoded.value());
+                if (!admitted) return core::Result<net::CompletedTick>::failure(admitted.error());
+                auto command = std::move(admitted).value().command;
+                command.key.tick = context->completed_tick();
+                command.key.sequence = sequences_[bound->player]++;
+                if (trace_) trace_commands_.emplace_back(input.key, command_kind(command.payload));
+                commands.push_back(std::move(command));
+            }
+            std::sort(commands.begin(), commands.end(), [](const auto& a, const auto& b) { return a.key < b.key; });
+            auto installed = context->install(commands);
+            if (!installed) return core::Result<net::CompletedTick>::failure(installed.error());
+            pending_.clear(); pending_bytes_ = 0;
+            auto result = context->step();
+            if (!result) return core::Result<net::CompletedTick>::failure(result.error());
+            advanced = !staging;
+        }
         if (pending_options_) {
             if (context->set_target_rate) context->set_target_rate(presentation::ui::speed_step_rates[pending_options_->tactical_speed]);
-            if (!staging && options_applied) options_applied(*pending_options_, context->completed_tick() - 1);
+            if (!staging && options_applied) options_applied(*pending_options_, clock.completed);
             pending_options_.reset();
         }
         for (const auto& [key, kind] : trace_commands_) trace_->executed(key, kind, context->completed_tick());
-        advanced = !staging;
-        // Exchange rows carry the full hash (world + scripts, asked by the session); non-exchange rows are
-        // world-only and still enter their window digest.
-        if (context->world_hash) return core::Result<net::CompletedTick>::success({context->completed_tick(), context->world_hash(), true});
-        return core::Result<net::CompletedTick>::success({context->completed_tick(), context->state_hash()});
+        ++clock.completed;
+        world_boundaries_.push_back(context->completed_tick());
+        const auto hash = combined_hash(context->world_hash ? context->world_hash() : context->state_hash());
+        if (record_journal && recording_bytes_ <= net::match_pause_replay_limit) {
+            std::size_t size = 76;
+            for (const auto& input : tick_inputs_) size += 16 + input.bytes.size();
+            recording_bytes_ += size;
+            if (recording_bytes_ <= net::match_pause_replay_limit) recording.rows.push_back({context->completed_tick(), tick_inputs_, hash});
+            else recording.rows.clear();
+        }
+        return core::Result<net::CompletedTick>::success({clock.completed, hash, static_cast<bool>(context->world_hash)});
+    }
+    core::Result<Bytes> record_controls() const {
+        if (recording_bytes_ > net::match_pause_replay_limit) return fail<Bytes>("Session recording exceeded its 64 MiB budget.");
+        return net::write_match_pause_replay(recording);
     }
     bool is_departure(const net::SeatInput& input) const override {
         const auto* bound = binding(input.key.seat);
@@ -414,22 +494,81 @@ public:
         return decoded && std::holds_alternative<tactical::QuitPayload>(decoded.value().payload);
     }
 private:
-    tactical::TacticalSetup setup_;
+    Bytes control_state() const {
+        auto bytes = clock.canonical();
+        const auto put = [&](std::uint64_t value, unsigned count) {
+            for (unsigned i = 0; i < count; ++i) bytes.push_back(static_cast<std::uint8_t>(value >> (8U * i)));
+        };
+        put(sequences_.size(), 4);
+        for (const auto& [player, sequence] : sequences_) { put(player, 4); put(sequence, 8); }
+        put(departed_.size(), 4); for (const auto seat : departed_) put(seat.value, 4);
+        put(pending_.size(), 4);
+        for (const auto& input : pending_) {
+            put(input.key.tick, 8); put(input.key.seat.value, 4); put(input.key.sequence, 8); put(input.bytes.size(), 4);
+            bytes.insert(bytes.end(), input.bytes.begin(), input.bytes.end());
+        }
+        return bytes;
+    }
+    std::vector<std::uint64_t> world_boundaries_;
+    bool pause_before_{};
+    std::vector<net::SeatInput> pending_, tick_inputs_;
+    std::size_t pending_bytes_{}, recording_bytes_{};
     std::vector<tactical::SeatBinding> bindings_;
     std::set<sim::SeatId> departed_;
     std::map<tactical::PlayerId, std::uint64_t> sequences_;
-    std::vector<tactical::PlayerCommand> inputs_;
-    Bytes options_input_;
     std::optional<net::MatchOptions> pending_options_;
     std::shared_ptr<LanTrace> trace_;
     std::vector<std::pair<sim::SeatCommandKey, std::string_view>> trace_commands_;
 };
+// Playback consumes control-only boundaries without wall waits. The world
+// replay remains the sole source of actual player/engine commands; the same
+// adapter reconstructs and checks the network clock, queue and limiter state.
+class LivePauseReplay final {
+public:
+    LivePauseReplay(tactical::TacticalSetup setup, std::vector<net::SetupSeat> seats, net::MatchPauseReplay journal)
+        : adapter_(std::move(setup), std::move(seats), nullptr), journal_(std::move(journal)) { adapter_.record_journal = false; }
+    DriverResult step(platform::LiveStepContext& context, std::span<const tactical::PlayerCommand> recorded) {
+        if (!context.advance_allowed) return DriverResult::success(false);
+        recorded_.insert(recorded_.end(), recorded.begin(), recorded.end());
+        const auto before = context.completed_tick();
+        auto playback = context;
+        playback.install = [](std::span<const tactical::PlayerCommand>) { return core::Result<void>::success(); };
+        playback.step = [&] {
+            auto installed = context.install(recorded_); if (!installed) return installed;
+            recorded_.clear(); return context.step();
+        };
+        adapter_.context = &playback;
+        struct Unbind { LiveAdapter& adapter; ~Unbind() { adapter.context = nullptr; } } unbind{adapter_};
+        while (cursor_ < journal_.rows.size()) {
+            const auto& row = journal_.rows[cursor_];
+            // One actual world step per live call; trailing paused boundaries
+            // are still checked before a caller may stop at the last world tick.
+            if (context.completed_tick() != before && row.world_tick > context.completed_tick()) break;
+            for (const auto& input : row.inputs) { auto valid = adapter_.validate(input); if (!valid) return DriverResult::failure(valid.error()); }
+            auto installed = adapter_.install(row.inputs); if (!installed) return DriverResult::failure(installed.error());
+            auto stepped = adapter_.step(); if (!stepped) return DriverResult::failure(stepped.error());
+            if (context.completed_tick() != row.world_tick || stepped.value().state_sha256 != row.state_sha256)
+                return fail<bool>("Multiplayer replay session/world boundary or digest differs from its journal.");
+            ++cursor_;
+        }
+        return DriverResult::success(context.completed_tick() != before);
+    }
+    [[nodiscard]] bool complete() const { return cursor_ == journal_.rows.size(); }
+private:
+    LiveAdapter adapter_;
+    net::MatchPauseReplay journal_;
+    std::size_t cursor_{};
+    std::vector<tactical::PlayerCommand> recorded_;
+};
+
 class TcpLanMatch final : public LanMatch, public std::enable_shared_from_this<TcpLanMatch> {
 public:
     void set_diagnostic_logger(std::function<void(std::string_view)> logger) override;
     void set_recovery_policy(net::SetupRecoveryPolicy policy, LanCredentialProvider credentials = {}) override;
     bool rejoin() override;
     bool request_speed(std::uint32_t step) override;
+    bool request_pause(bool paused) override;
+    core::Result<Bytes> record_pause_replay() const override { return adapter_ ? adapter_->record_controls() : fail<Bytes>("No session recording."); }
     explicit TcpLanMatch(std::filesystem::path root, std::uint64_t delay, bool smoke_progress, std::filesystem::path trace);
     bool lobby_enabled() const override;
     void configure_lobby(std::string name, std::uint32_t colour, std::vector<skirmish::SetupMap> maps, LanLobbyBuilder builder) override;
@@ -638,6 +777,7 @@ private:
     std::deque<net::Received> early_;
     std::size_t early_bytes_{};
     std::vector<net::MatchOptions> speed_requests_;
+    std::vector<bool> pause_requests_;
     net::MatchSpeedWindow speed_window_;
     std::shared_ptr<LanTrace> trace_;
     std::shared_ptr<LanDiagnostics> diagnostics_{std::make_shared<LanDiagnostics>()};

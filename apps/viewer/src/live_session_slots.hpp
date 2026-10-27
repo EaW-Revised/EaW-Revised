@@ -2,7 +2,7 @@
 
 // Draw-slot and clone state, including death playback and S-foil clips.
 
-#include "space_populate.hpp"
+#include "battle_scene.hpp"
 #include "eawr/battle/arrival_plan.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
 #include "eawr/sim/commands.hpp"
@@ -26,9 +26,15 @@ struct ArrivalSlotState final {
     battle::ArrivalPlan plan;
     const vfs::Vfs* filesystem{};
     const data::Catalog* catalog{};
-    SpacePopulation* population{};
+    BattleScene* population{};
     GodotRenderer* renderer{};
     std::size_t remaining{}, grown{};
+    std::size_t frame_grown{};
+    double growth_ms{};
+    double warm_ms{};
+    std::size_t warm_requested{}, warm_admitted{};
+    std::uint64_t warm_estimated_bytes{}, warm_available_bytes{};
+    bool warm_complete{true}, warm_probe_available{}, warm_budget_off{};
     std::vector<sim::EntityId> undrawn;
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> purchases;
     std::set<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>> failed;
@@ -36,7 +42,7 @@ struct ArrivalSlotState final {
 };
 
 struct CloneFrame final {
-    SpacePopulation::LivePose pose;
+    BattleScene::LivePose pose;
     std::optional<animation::DeathFrame> death;
 };
 
@@ -77,7 +83,7 @@ struct DeathClone final {
 struct ActiveClone final {
     sim::EntityId unit{};
     std::uint64_t death_tick{};  // the first completed tick without the unit
-    SpacePopulation::LivePose pose;
+    BattleScene::LivePose pose;
     // Elapsed clone tick after emitter catch-up approved terminal retirement.
     std::optional<std::uint64_t> hidden_since;
 };

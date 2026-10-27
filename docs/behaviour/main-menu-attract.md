@@ -59,6 +59,20 @@ stock, and the camera, forces and AI of every map come from the map file itself 
 
 ## Stock map content (census)
 
+MAT-08 player admission: the observed debug-build attract load path (MAT-E04) creates default
+players from the authored factions before loading map objects. Its neutral player therefore
+exists even when it owns only scenery or markers, and capture resolves that player when
+neutralizing a point. The
+remake retains its owning-faction player set and also declares the faction whose `Is_Neutral`
+flag is true, preserving editor-index-derived player IDs. This endpoint has no AI control or
+pool account. Starts that already declare neutral retain their player table; stock or mod starts
+whose neutral faction owns no kept placement gain one non-commandable player. Markers and
+ordinary scenery remain outside the simulation. Capture content with no authored neutral
+faction still fails the economy endpoint check. Evidence: debug build
+MAT-E04 load-to-start/default-player path and capture initialization/service; synthetic placed
+start contracts cover no neutral placements, scenery/markers only, existing neutral objects,
+and a renamed/reordered neutral faction.
+
 TED placements by owner index (0 Rebel, 1 Empire, 3 Neutral, 6 Underworld). Counts are
 objects in the map, squadrons count one object.
 

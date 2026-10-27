@@ -58,12 +58,19 @@ namespace auth = eawr::script::authoritative;
 
 using namespace foc_ai_test_support;
 
+namespace foc_ai_test_support {
+int ordinary_producer_acceptance(const std::filesystem::path& root, const std::string& mods,
+    const std::string& map, const std::string& factory_name);
+}
+
 int main(int argc, char** argv) {
     const auto root = environment("EAWR_EAW_GAME_ROOT");
     if (!root) {
         std::cout << "SKIPPED: set EAWR_EAW_GAME_ROOT for the FoC AI battle\n";
         return 0;
     }
+    if (argc == 5 && std::string_view(argv[1]) == "--ordinary-producer")
+        return ordinary_producer_acceptance(*root, argv[2], argv[3], argv[4]);
     if (argc > 1 && std::string_view(argv[1]) == "--capital-avoidance") return capital_avoidance_probe(*root);
     foc::ai::Engine::observe_effects(count_effects);
     struct EffectReport {

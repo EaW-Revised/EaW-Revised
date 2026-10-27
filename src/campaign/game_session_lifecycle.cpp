@@ -50,7 +50,7 @@ template <class A, class T> void checkpoint_game_owner(A& a, T& v) {
         v.admissions, v.replay_admissions, v.votes, v.multiplayer_vote_timeout, v.vote_started, v.withdrawing_player, v.conflict_pause,
         v.conflicts, v.load_fixups, v.replay_fixups, v.replay_conflicts, v.replay_selected, v.history,
         v.timelines->galaxy, v.timelines->child, v.timelines->historical,
-        v.interactive_seat.value, v.summary_conflict);
+        v.interactive_seat.value, v.summary_conflict, v.story_call_sequence);
 }
 } // namespace
 
@@ -262,6 +262,7 @@ core::Result<void> GameSession::select_pending_battle(bool fight, const sim::Par
         impl.conflict_pause = false;
     }
     impl.admission.reset(); impl.votes.clear(); impl.vote_started.reset(); impl.withdrawing_player = 0;
+    impl.refresh_system_hold();
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::submit(const galactic::GameCommand& command) {
@@ -349,6 +350,7 @@ core::Result<void> GameSession::execute_invasion_accept(galactic::SeatId seat, s
     // The recorded acceptance also closes its own seat's summary, as the ordinary Continue does.
     if (restore_pause.held && seat == impl.interactive_seat) {
         restore_pause.held = false; impl.summary_conflict = 0; summary_closed = true;
+        impl.refresh_system_hold();
     }
     return core::Result<void>::success();
 }
@@ -393,7 +395,7 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
             if (std::holds_alternative<galactic::ResumeGalaxy>(command.payload) && impl.world().clock().pause_depth <= 1)
                 out.diagnostics.push_back(fail<void>("summary pause requires its matching acknowledgement").error());
             else {
-                auto controlled = impl.world().apply_session_controls(std::span(&command, 1), false, controls_applied);
+                auto controlled = impl.world().apply_session_controls(std::span(&command, 1), tick_context.agreed_child_pacing, controls_applied);
                 controls_applied = true;
                 if (!controlled) return controlled;
             }
@@ -502,7 +504,8 @@ core::Result<void> GameSession::process_session_commands(StepContext& tick_conte
                 || std::holds_alternative<galactic::SeatRejoin>(command.payload)
                 || std::holds_alternative<galactic::AssignBattleTeamRole>(command.payload)) {
                 // Canonical seat order: a departure/choice takes effect before later inputs.
-                auto controlled = impl.world().apply_session_controls(std::span(&command, 1), true, controls_applied);
+                auto controlled = impl.world().apply_session_controls(std::span(&command, 1),
+                    !tick_context.agreed_child_pacing || impl.child->owns_pause, controls_applied);
                 controls_applied = true;
                 if (!controlled) { impl.failure = controlled.error(); return core::Result<void>::failure(*impl.failure); }
                 if (auto refreshed = impl.refresh_battle_seats(); !refreshed) { impl.failure = refreshed.error(); return core::Result<void>::failure(*impl.failure); }
@@ -574,6 +577,7 @@ core::Result<void> GameSession::step_child(StepContext& tick_context, const sim:
     if (!stepped) { impl.failure = stepped.error(); return core::Result<void>::failure(*impl.failure); }
     out.battle = stepped.value().world.snapshot;
     out.asteroid_impacts = stepped.value().world.asteroid_impacts;
+    out.damage_changes = std::move(stepped.value().world.damage_changes);
     world_hash = stepped.value().world.state_hash;
     impl.child->world_hash = world_hash;
     impl.child->script_hash = std::move(stepped.value().script_sha256);
@@ -694,6 +698,7 @@ core::Result<void> GameSession::reconcile_child_return(StepContext& tick_context
         impl.conflict_pause = false;
     }
     if (auto held = impl.hold_summary(context.id, context.invader, context.defender); !held) return held;
+    impl.refresh_system_hold();
     return core::Result<void>::success();
 }
 core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim::PartitionExecutor& executor) {
@@ -814,6 +819,7 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
             auto paused = impl.world().adjust_conflict_pause(true);
             if (!paused) { impl.failure = paused.error(); return core::Result<void>::failure(*impl.failure); }
             impl.conflict_pause = true;
+            impl.refresh_system_hold();
             if (impl.multiplayer_vote_timeout) impl.vote_started = impl.tick;
             const auto& conflict = impl.admission->conflict;
             out.pending_alerts.emplace(conflict.id, PendingConflictAlert{
@@ -873,6 +879,8 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
     // WGS-99/142: the pending prompt (conflict pause held, nothing staged yet) is the only state that
     // admits the prebattle autosave; the live owner requests it one tick before the Begin choice runs.
     impl.world().set_prebattle_autosave_window(impl.admission.has_value() && impl.conflict_pause && !impl.staged && !impl.child);
+    // WGM-07 deviation: the battle-summary (and any child) hold is a system hold, never a player pause.
+    impl.refresh_system_hold();
     auto stepped = [&]() -> core::Result<galactic::GalacticTick> {
         if (!impl.scripts) return impl.world().step(executor, impl.staged.has_value() || impl.admission.has_value());
         auto hosted = impl.scripts->step(executor, galaxy_inputs, impl.staged.has_value() || impl.admission.has_value());
@@ -886,6 +894,18 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
             impl.executed.push_back(recorded);
             auto& last = impl.last[recorded.key.seat];
             last = std::max(last, std::pair(recorded.key.tick, recorded.key.sequence));
+        }
+        // WST-53: what a sub-plot script ran into (an unbound engine function, a refusal, a script error) is published
+        // with the step, named by its sub-plot.
+        for (const auto& row : hosted.value().story.diagnostics) {
+            std::string owner = "instance " + std::to_string(row.instance);
+            if (impl.story_scripts) {
+                const auto& entries = impl.story_scripts->entries();
+                const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.instance == row.instance; });
+                if (found != entries.end()) owner = found->subplot;
+            }
+            core::Diagnostic note; note.code = row.code; note.message = "story script " + owner + " at tick " + std::to_string(row.tick) + ": " + row.message;
+            out.diagnostics.push_back(std::move(note));
         }
         hosted.value().world.state_hash = hosted.value().state_hash;
         hosted.value().world.state_sha256 = impl.hasher ? std::string{} : hosted.value().state_hash.get();
@@ -901,6 +921,7 @@ core::Result<void> GameSession::step_galaxy(StepContext& tick_context, const sim
     if (impl.staged) {
         impl.conflicts.push_back({impl.tick, impl.staged->conflict});
         impl.child = std::move(impl.staged); impl.staged.reset();
+        impl.refresh_system_hold();
         impl.timelines->child = ModeTimelineSnapshot{{SessionMode::battle, impl.child->conflict.id}, impl.tick + 1, 0};
         impl.timelines->child_slot = std::make_shared<Impl::ChildTimelinePublication>(Impl::ChildTimelinePublication{*impl.timelines->child, false});
         impl.child->owns_pause = impl.conflict_pause;
@@ -1223,7 +1244,7 @@ core::Result<std::vector<std::uint8_t>> GameSession::save_checkpoint_state() con
             return ChildOwner{owner->conflict, std::move(state).value(), std::move(scripts).value(),
                 owner->session.record(), owner->sequences, owner->killers, owner->owns_pause};
         };
-        Writer out; out(std::uint32_t{4}, world.value()); checkpoint_game_owner(out, *impl_);
+        Writer out; out(std::uint32_t{5}, world.value()); checkpoint_game_owner(out, *impl_);
         out(child(impl_->child), child(impl_->staged));
         std::optional<std::vector<std::uint8_t>> resolver;
         if (auto_resolve_needs_service() && impl_->auto_state_writer) {
@@ -1249,12 +1270,13 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
             throw Invalid("direct restore requires a fresh private game");
         Reader in(bytes); std::vector<std::uint8_t> world;
         std::uint32_t version{}; in(version);
-        if (version != 4) throw Invalid("unsupported campaign owner format");
+        if (version != 5) throw Invalid("unsupported campaign owner format");
         in(world);
         if (auto restored = impl_->world().load_checkpoint_state(world); !restored) return restored;
         const auto recorded_base = impl_->history;
         const auto recorded_vote_timeout = impl_->multiplayer_vote_timeout;
         checkpoint_game_owner(in, *impl_);
+        impl_->refresh_system_hold();
         if (impl_->multiplayer_vote_timeout != recorded_vote_timeout)
             throw Invalid("owner vote timeout differs from its recording");
         if (impl_->multiplayer_vote_timeout && (!impl_->world().multiplayer() || !impl_->vote_progress
@@ -1352,6 +1374,7 @@ core::Result<void> GameSession::load_checkpoint_state(std::span<const std::uint8
         };
         if (auto restored = restore_child(child, impl_->child); !restored) return restored;
         if (auto restored = restore_child(staged, impl_->staged); !restored) return restored;
+        impl_->refresh_system_hold();
         if (resolver) {
             if (!impl_->auto_state_reader || !auto_resolve_needs_service()) throw Invalid("missing saved auto-resolve owner");
             if (auto restored = impl_->auto_state_reader(*resolver, impl_->admission->conflict, *impl_->world().snapshot()); !restored) return restored;

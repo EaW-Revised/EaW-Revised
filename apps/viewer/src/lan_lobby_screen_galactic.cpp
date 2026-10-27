@@ -2,6 +2,7 @@
 
 #include "galactic_lobby_backend.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <random>
 
@@ -22,6 +23,22 @@ constexpr int galactic_row_ai_id = 20001;
 std::string row_label(const model::StagingRow& row) {
     if (!row.name.empty()) return row.name;
     return row.kind == model::RowKind::open ? "TEXT_OPEN_PLAYER" : "TEXT_MEDIUM_AI_PLAYER";
+}
+
+// The campaign's localized name and description (#4553), through the same text table the campaign menu uses. A campaign
+// whose Text_ID or Description_Text the table lacks (a mod) shows its ID and names the missing keys once in the log.
+eawr::campaign::MpLobbyCampaignLabels campaign_labels(std::optional<data::TextLookup>& lookup, const sim::galactic::MpLobbyCampaign& campaign,
+                                                std::set<std::string>& logged) {
+    auto labels = eawr::campaign::label_mp_lobby_campaign(campaign, [&](const std::string_view key) -> std::optional<std::string> {
+        if (!lookup || !lookup->contains(key)) return std::nullopt;
+        return data::to_utf8(lookup->text(key));
+    });
+    if (!labels.missing.empty() && logged.insert(campaign.name).second) {
+        std::string line = "lan-lobby: campaign " + campaign.name + " has no text for";
+        for (const auto& key : labels.missing) line += " " + key;
+        UtilityFunctions::print(String::utf8(line.data(), static_cast<std::int64_t>(line.size())));
+    }
+    return labels;
 }
 } // namespace
 
@@ -78,13 +95,68 @@ void EawrLanLobby::refresh_galactic_staging() {
     }
 }
 
+// Retail's campaign staging draws the galaxy backdrop with a dot at each planet of the selected campaign where a
+// skirmish room draws its map preview (captured on the FoC LAN host setup, #4553).
+void EawrLanLobby::refresh_galactic_preview(Impl& impl, PageState& state, Resources& resources,
+                                            const sim::galactic::MpLobbyCampaign* campaign) {
+    if (state.preview == nullptr) return;
+    const std::string wanted = campaign != nullptr ? campaign->name : std::string{};
+    const std::string key = "campaign:" + wanted;
+    state.preview->set_visible(true);
+    if (impl.preview_path == key) return;
+    impl.preview_path = key;
+    Ref<Image> image;
+    std::string failure;
+    for (const char* extension : {".tga", ".dds"}) {
+        auto texture = assets::load_texture(*resources.content->filesystem, std::string("data/art/textures/galactic_back") + extension);
+        if (!texture) continue;
+        image = texture_image(texture.value(), failure);
+        if (image.is_valid()) break;
+    }
+    state.preview->set_texture(image.is_valid() ? ImageTexture::create_from_image(image) : Ref<ImageTexture>());
+    constexpr const char* blips_key = "EAWR_CAMPAIGN_BLIPS";
+    Control* blips = state.controls.count(blips_key) != 0 ? state.controls.at(blips_key) : nullptr;
+    if (blips == nullptr) {
+        blips = memnew(Control);
+        blips->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        state.preview->add_child(blips);
+        state.controls[blips_key] = blips;
+    }
+    blips->set_position(Vector2(0, 0));
+    blips->set_size(state.preview->get_size());
+    while (blips->get_child_count() > 0) {
+        Node* child = blips->get_child(0);
+        blips->remove_child(child);
+        memdelete(child);
+    }
+    if (campaign == nullptr) return;
+    // The radar's world window the points are normalised against (x by 440, y by 520), as the campaign menu's preview.
+    constexpr double x_origin = 220.0, x_span = 440.0, y_origin = 260.0, y_span = 520.0;
+    constexpr float blip_size = 4.0F;
+    const Vector2 size = blips->get_size();
+    const auto number = [](const sim::math::Fixed value) {
+        return static_cast<double>(value.raw()) / static_cast<double>(sim::math::Fixed::scale);
+    };
+    for (const auto& [fixed_x, fixed_y] : campaign->planet_points) {
+        const double x = number(fixed_x), y = number(fixed_y);
+        const double nx = std::clamp((x + x_origin) / x_span, 0.0, 1.0);
+        const double ny = std::clamp((y + y_origin) / y_span, 0.0, 1.0);
+        auto* blip = memnew(ColorRect);
+        blip->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        blip->set_color(Color(0.7F, 0.7F, 0.7F, 1.0F));
+        blip->set_size(Vector2(blip_size, blip_size));
+        blip->set_position(Vector2(static_cast<float>(nx) * size.x - blip_size * 0.5F,
+                                   static_cast<float>(1.0 - ny) * size.y - blip_size * 0.5F));
+        blips->add_child(blip);
+    }
+}
+
 void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resources& resources, const LanView& view,
                                            const std::optional<LanLobbyState>& room, std::vector<model::StagingRow>& rows,
                                            const std::size_t dialog_rows) {
     // Controls that only mean something for a skirmish map.
     for (const char* hidden : {"IDC_SELECT_OFFICIAL_MAPS", "IDC_SELECT_CUSTOM_MAPS", "IDC_SELECT_OPTIONS"})
         if (auto* control = EAWR_CONTROL(Control, hidden)) control->set_visible(false);
-    if (state.preview != nullptr) state.preview->set_visible(false);
 
     std::optional<net::GalacticLobbyOptions> options;
     if (room) {
@@ -97,6 +169,7 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         for (const auto& candidate : impl.galactic_backend->campaigns())
             if (candidate.name == options->campaign) campaign = &candidate;
     }
+    refresh_galactic_preview(impl, state, resources, campaign);
     const bool staging = room && room->snapshot.phase == net::LobbyPhase::staging;
     const std::size_t shown_rows = options ? std::min(dialog_rows, options->rows.size()) : 0U;
     for (std::size_t index = 0; index < shown_rows; ++index) {
@@ -231,14 +304,16 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
             for (const auto& entry : impl.galactic_backend->campaigns()) {
                 if (entry.name == impl.galactic_campaign) selected = static_cast<int>(impl.campaign_list.size());
                 impl.campaign_list.push_back(entry.name);
-                list->add_item(text(entry.name));
-                list->set_item_tooltip(list->get_item_count() - 1, text(entry.name));
+                const String title = text(campaign_labels(resources.text, entry, impl.campaign_text_logged).title);
+                list->add_item(title);
+                list->set_item_tooltip(list->get_item_count() - 1, title);
             }
             if (!impl.campaign_list.empty()) list->select(selected);
             for (int item = 0; item < list->get_item_count(); ++item) list->set_item_disabled(item, !staging);
         } else if (options) {
             std::vector<String> lines;
-            lines.push_back(text("Campaign: " + options->campaign));
+            lines.push_back(String("Campaign: ") + (campaign != nullptr
+                ? text(campaign_labels(resources.text, *campaign, impl.campaign_text_logged).title) : text(options->campaign)));
             lines.push_back(text("Difficulty: " + options->difficulty));
             if (options->custom) {
                 lines.push_back(resolved(resources.text, "TEXT_SKIRMISH_CREDITS") + ": " + text(std::to_string(options->credits)));
@@ -255,7 +330,13 @@ void EawrLanLobby::refresh_galactic_roster(Impl& impl, PageState& state, Resourc
         }
     }
     if (auto* heading = EAWR_CONTROL(EawrUiLabel, "IDC_GAME_OPTIONS_CLIENT_DISPLAY_LEFT")) heading->set_text(impl.host ? "Campaign" : "Game settings");
-    if (auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) name->set_text(text(impl.galactic_campaign));
+    const auto labels = campaign != nullptr ? campaign_labels(resources.text, *campaign, impl.campaign_text_logged)
+                                            : eawr::campaign::MpLobbyCampaignLabels{impl.galactic_campaign, {}, {}};
+    if (auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) name->set_text(text(labels.title));
+    if (auto* description = EAWR_CONTROL(EawrUiLabel, "EAWR_CAMPAIGN_DESCRIPTION")) {
+        description->set_text(text(labels.description));
+        description->set_visible(true);
+    }
     state.loading = false;
 }
 

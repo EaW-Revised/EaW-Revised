@@ -1,4 +1,5 @@
 #include "galactic/map_input.hpp"
+#include "galactic/space_proof_route.hpp"
 #include "galactic/fleet_panels.hpp"
 #include "galactic/fleet_traits.hpp"
 #include "galactic/hero_map_bar.hpp"
@@ -318,7 +319,7 @@ void hero_fleet_drop_offers_authored_ability() {
     };
     auto drop = ability_drop_candidate(*snapshot(), 1, 10, host);
     assert(drop && drop->actor == 30 && drop->planet == 2 && drop->kind == AbilityKind::structure_sabotage);
-    assert(std::get<gc::PrepareGalacticAbility>(ability_drop_order(*drop)) == (gc::PrepareGalacticAbility{30, 2, AbilityKind::structure_sabotage}));
+    assert(std::get<gc::DeployGroundAbility>(ability_drop_order(*drop)) == (gc::DeployGroundAbility{30, 2}));
     assert(!ability_drop_candidate(*snapshot(), 1, 11, host));
     assert(!ability_drop_candidate(*snapshot(), 2, 10, host));
     assert(!ability_drop_candidate(*snapshot(), 1, 99, host));
@@ -339,7 +340,7 @@ void hero_fleet_drop_offers_authored_ability() {
 
     // Every supported kind uses its live service gate, authored routing and target rule.
     const std::array kinds{AbilityKind::planet_destruction, AbilityKind::technology_theft, AbilityKind::black_market,
-        AbilityKind::structure_sabotage, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
+        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
     for (const auto kind : kinds) {
         auto& p = host.profiles[0]; p = {}; p.type = 8; p.has_market = false;
         service = {}; service.actor = 30; service.type = 8;
@@ -347,6 +348,7 @@ void hero_fleet_drop_offers_authored_ability() {
         if (kind == AbilityKind::technology_theft) { p.theft.emplace(); service.theft_enabled = true; }
         if (kind == AbilityKind::black_market) { p.has_market = true; service.enabled = true; }
         if (kind == AbilityKind::structure_sabotage) { p.sabotage = gc::SabotageAbilityProfile{"S"}; service.sabotage_enabled = true; }
+        if (kind == AbilityKind::system_spy) { p.spy.emplace(); p.spy->name = "SPY"; service.spy_enabled = true; host.activated_spy_abilities = {"SPY"}; }
         if (kind == AbilityKind::hero_neutralization) { p.neutralize.emplace(); p.neutralize->name = "N"; service.neutralize_enabled = true; }
         if (kind == AbilityKind::corruption) { p.corruption = gc::CorruptionAbilityProfile{"C"}; service.corruption_enabled = true; }
         if (kind == AbilityKind::superweapon_hack) { p.hack = gc::HackAbilityProfile{"H"}; service.hack_enabled = true; }
@@ -392,7 +394,7 @@ void hero_fleet_drop_offers_authored_ability() {
     assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); // Multiple supplied entries suppress non-destruction.
     fleets[0].members.pop_back();
 
-    // Stored transport order is resolved from current identities. The typed menu uses the live bearer.
+    // Stored transport order previews a live bearer; deployment retains the supplied transport.
     auto contents = std::make_shared<gc::MovementSetup>();
     gc::MovementType transport; transport.type = 7; transport.transport = true; contents->types = {transport};
     contents->contents = {{30, {{31, 8}}}}; movement = contents;
@@ -400,6 +402,7 @@ void hero_fleet_drop_offers_authored_ability() {
     service.actor = 31; service.type = 8;
     drop = ability_drop_candidate(*snapshot(), 1, 10, host);
     assert(drop && drop->actor == 31 && drop->supplied == 30);
+    assert(std::get<gc::DeployGroundAbility>(ability_drop_order(*drop)) == (gc::DeployGroundAbility{30, 2}));
     actors[1].container = 99; assert(!ability_drop_candidate(*snapshot(), 1, 10, host)); actors[1].container = 30;
     // Presentation services are not canonical GC state, including flattened native overlays.
     const auto before = snapshot();
@@ -451,6 +454,59 @@ void typed_ability_intents_preserve_capabilities() {
     intent.ability = gc::CancelGalacticAbility{50, 0}; assert(!input.command(intent, planets));
     intent.ability.reset(); assert(!input.command(intent, planets));
 }
+// WGM-83/101 and WGUI-25: movement retains its destination actor, while an escort permits ordinary travel.
+void probe_move_and_ground_admission() {
+    namespace gc = eawr::sim::galactic;
+    using eawr::sim::math::Fixed;
+    gc::FleetControlSetup fleet_control;
+    fleet_control.types = {{8, false, false, false}, {9, false, true, false}, {10, true, true, false}};
+    gc::PoliticalControlSetup control;
+    control.ground_capability_types = {{8, Fixed::from_integer(1).value(), false, true},
+        {9, Fixed::from_integer(1).value(), false, false}, {10, {}, true, false}};
+    auto movement = std::make_shared<gc::MovementSetup>();
+    movement->types = {{8}, {9}, {10}}; movement->types[2].transport = true;
+    movement->contents = {{30, {{31, 8}}}};
+    std::vector<gc::Fleet> fleets{{10, 1, 1, {{30, 10}}}};
+    const auto snapshot = [&] {
+        return gc::GalacticSnapshot(0, {}, {}, {{1, {}, 1}, {2, {}, 2}}, {}, fleets, {},
+            std::nullopt, fleet_control, movement, std::nullopt, {}, std::nullopt, std::nullopt, control);
+    };
+    const gc::MoveFleet move{10, {1, 2}};
+    const AbilityDrop spy{31, 2, gc::AbilityKind::system_spy, 30};
+    const auto prepared = ability_move_order(snapshot(), 1, move, spy);
+    assert(prepared && prepared->destination_actor == 30 && prepared->path == move.path);
+    assert(!ability_move_order(snapshot(), 1, move, std::nullopt));
+    auto raid = move; raid.raid = true;
+    assert(ability_move_order(snapshot(), 1, raid, std::nullopt) == raid);
+    assert(!ability_move_order(snapshot(), 2, move, spy));
+    auto wrong = spy; wrong.planet = 1;
+    assert(!ability_move_order(snapshot(), 1, move, wrong));
+    assert(!fleet_can_land(snapshot(), 1, 10));
+    movement->contents[0].children.push_back({32, 9});
+    const auto escorted = ability_move_order(snapshot(), 1, move, spy);
+    assert(escorted && escorted->destination_actor == 0);
+    assert(fleet_can_land(snapshot(), 1, 10));
+    assert(!fleet_can_land(snapshot(), 2, 10));
+    movement->contents[0].children.clear();
+    assert(!fleet_can_land(snapshot(), 1, 10));
+    movement->contents[0].children = {{31, 8}};
+    movement->contents.push_back({40, {{41, 9}}});
+    fleets.push_back({11, 1, 1, {{40, 10}}});
+    const std::array<ObjectId, 2> stack{10, 11};
+    const auto stacked = ability_move_order(snapshot(), 1, move, spy, stack);
+    assert(stacked && stacked->destination_actor == 0);
+    assert(fleet_can_land(snapshot(), 1, 10, stack));
+    const DropIntent intent{DropKind::move, 10, 0, 2, {1, 2}};
+    const auto orders = fleet_stack_orders(snapshot(), 1, intent, stack, move,
+        [&](ObjectId, ObjectId) { return std::optional{spy}; });
+    assert(orders && orders->size() == 2 && std::get<gc::MergeFleets>((*orders)[0]) == (gc::MergeFleets{11, 10}));
+    assert(std::get<gc::MoveFleet>((*orders)[1]).destination_actor == 0);
+    const auto own_orders = fleet_stack_orders(snapshot(), 1, intent, stack, move, {});
+    assert(own_orders && std::get<gc::MoveFleet>(own_orders->back()).destination_actor == 0);
+    fleets.back().owner = 2;
+    assert(!ability_move_order(snapshot(), 1, move, spy, stack));
+    assert(!fleet_can_land(snapshot(), 1, 10, stack));
+}
 void fleet_destination_uses_live_routes() {
     namespace gc = eawr::sim::galactic;
     const auto fixed = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
@@ -472,17 +528,17 @@ void fleet_destination_uses_live_routes() {
     auto created = gc::GalacticSession::create(setup); assert(created);
     auto snapshot = created.value().snapshot();
     std::vector<InputPlanet> visible{{1, {}, 1, true}, {2, {}, 1, true}, {3, {}, 2, true}};
-    auto intent = fleet_destination_intent(*snapshot, 1, 10, 3, visible);
+    auto intent = fleet_destination_intent(*snapshot, 1, 10, 3, visible, {});
     assert(intent && intent->kind == DropKind::move && (intent->path == std::vector<ObjectId>{1, 2, 3}));
     MapInput input; const auto command = input.command(*intent, visible);
     assert(command && std::get<gc::MoveFleet>(*command).fleet == 10);
-    assert(!fleet_destination_intent(*snapshot, 1, 11, 1, visible)); // Enemy selection cannot command.
-    assert(!fleet_destination_intent(*snapshot, 1, 999, 3, visible)); // Stale selection.
+    assert(!fleet_destination_intent(*snapshot, 1, 11, 1, visible, {})); // Enemy selection cannot command.
+    assert(!fleet_destination_intent(*snapshot, 1, 999, 3, visible, {})); // Stale selection.
     visible[1].discovered = false;
-    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible));
+    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible, {}));
     visible[1].discovered = true;
     visible[2].discovered = false;
-    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible));
+    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible, {}));
     visible[2].discovered = true;
     {
         // WGM-18/GCMP-24: the saved multiplayer flag omits the reveal gate, so a hidden hop no longer stops the route.
@@ -498,23 +554,74 @@ void fleet_destination_uses_live_routes() {
         const auto mp_created = gc::GalacticSession::create(multiplayer); assert(mp_created);
         const auto mp_snapshot = mp_created.value().snapshot();
         visible[1].discovered = false;
-        assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible)); // solo: hidden hop stops the route
-        const auto through = fleet_destination_intent(*mp_snapshot, 1, 10, 3, visible);
+        assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible, {})); // solo: hidden hop stops the route
+        const auto through = fleet_destination_intent(*mp_snapshot, 1, 10, 3, visible, {});
         assert(through && (through->path == std::vector<ObjectId>{1, 2, 3}));
         visible[1].discovered = true;
     }
     setup.movement->access[1].potential_conflict = true;
     created = gc::GalacticSession::create(setup); assert(created); snapshot = created.value().snapshot();
-    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible)); // Hostile intermediate stops route.
-    intent = fleet_destination_intent(*snapshot, 1, 10, 2, visible);
+    assert(!fleet_destination_intent(*snapshot, 1, 10, 3, visible, {})); // Hostile intermediate stops route.
+    intent = fleet_destination_intent(*snapshot, 1, 10, 2, visible, {});
     assert(intent && (intent->path == std::vector<ObjectId>{1, 2})); // Hostile destination is admitted.
-    intent = fleet_destination_intent(*snapshot, 1, 10, 1, visible);
+    intent = fleet_destination_intent(*snapshot, 1, 10, 1, visible, {});
     assert(intent && intent->kind == DropKind::land && std::holds_alternative<gc::LandFleet>(*input.command(*intent, visible)));
     setup.fleets.front().motion.transit.emplace();
     // Transit state is inspected through a published value; no command can
     // redirect an already travelling fleet through this preview binding.
     gc::GalacticSnapshot travelling(0, {}, setup.players, setup.planets, setup.routes, setup.fleets, {});
-    assert(!fleet_destination_intent(travelling, 1, 10, 3, visible));
+    assert(!fleet_destination_intent(travelling, 1, 10, 3, visible, {}));
+
+    // #5093 / WGM-23: arrival at a defended planet must not strand a
+    // combat-skipping fleet in the viewer's next route search.
+    gc::NativeSnapshotChanges changes;
+    changes.fleets = setup.fleets;
+    changes.fleets->front().motion.transit.reset();
+    changes.fleets->front().orbit = 3;
+    gc::CensusObject hero;
+    hero.id = 20; hero.current_type = hero.original_type = 1;
+    hero.owner = 1; hero.planet = 3; hero.container = 10;
+    hero.combat_role = gc::ActorCombatRole::ordinary;
+    hero.abilities.present = hero.abilities.combat_skip = true;
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero});
+    const auto arrived = gc::GalacticSnapshot::native_view(snapshot, changes);
+    intent = fleet_destination_intent(*arrived, 1, 10, 1, visible, {});
+    assert(intent && (intent->path == std::vector<ObjectId>{3, 2, 1}));
+    const auto second_move = input.command(*intent, visible);
+    assert(second_move && std::get<gc::MoveFleet>(*second_move).path == intent->path);
+    auto sibling = hero; sibling.id = 40; sibling.container = 12;
+    changes.fleets->push_back({12, 1, 3, {{40, 1}}});
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero, sibling});
+    const auto together = gc::GalacticSnapshot::native_view(snapshot, changes);
+    // Click-to-move selects the entire slot card, just like a card drag. Resolve
+    // its native fleet identities before admission, never after the path search.
+    const std::array<std::uint8_t, 1> slots{changes.fleets->front().orbit_slot};
+    const auto stack = stack_fleets(*together, 1, 3, slots);
+    assert((stack == std::vector<ObjectId>{10, 12}));
+    assert(fleet_destination_intent(*together, 1, 10, 1, visible, stack));
+    sibling.abilities.combat_skip = false;
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero, sibling});
+    const auto mixed_card = gc::GalacticSnapshot::native_view(snapshot, changes);
+    assert(fleet_destination_intent(*mixed_card, 1, 10, 1, visible, {})); // Individually selected Boba can leave.
+    assert(!fleet_destination_intent(*mixed_card, 1, 10, 1, visible, stack)); // Whole card, preview and drop cannot.
+    changes.fleets->pop_back();
+    hero.abilities.combat_skip = false;
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero});
+    assert(!fleet_destination_intent(*gc::GalacticSnapshot::native_view(snapshot, changes), 1, 10, 1, visible, {}));
+    // A transport's own flag cannot grant skipping: its live cargo owns it.
+    hero.combat_role = gc::ActorCombatRole::transport;
+    auto cargo = hero; cargo.id = 30; cargo.container = 20;
+    cargo.combat_role = gc::ActorCombatRole::ordinary;
+    cargo.abilities.combat_skip = true;
+    auto nested = std::make_shared<gc::MovementSetup>(*snapshot->movement());
+    nested->contents = {{20, {{30, 1}}}};
+    changes.movement = nested;
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero, cargo});
+    assert(fleet_destination_intent(*gc::GalacticSnapshot::native_view(snapshot, changes), 1, 10, 1, visible, {}));
+    auto companion = cargo; companion.id = 31; companion.abilities.combat_skip = false;
+    nested->contents.front().children.push_back({31, 1});
+    changes.actors = std::make_shared<const std::vector<gc::CensusObject>>(std::vector{hero, cargo, companion});
+    assert(!fleet_destination_intent(*gc::GalacticSnapshot::native_view(snapshot, changes), 1, 10, 1, visible, {}));
 }
 // #3072: a dragged card's fleets merge into the dragged fleet, then one stack moves.
 void dragged_card_moves_as_one_stack() {
@@ -546,7 +653,7 @@ void dragged_card_moves_as_one_stack() {
     assert((stack_fleets(*snapshot, 1, 2, slot0).empty()));
     assert((stack_fleets(*snapshot, 2, 1, slot0).empty())); // Only the local owner's fleets.
     const std::vector<InputPlanet> visible{{1, {}, 1, true}, {2, {}, 1, true}};
-    auto intent = fleet_destination_intent(*snapshot, 1, 12, 2, visible);
+    auto intent = fleet_destination_intent(*snapshot, 1, 12, 2, visible, {});
     assert(intent && intent->kind == DropKind::move);
     intent->destination_slot = std::uint8_t{2};
     MapInput input;
@@ -821,7 +928,107 @@ void scheduled_hero_map_uses_published_frames() {
     assert(collect(9)[0].completion == 0.0 && collect(40)[0].completion == 0.75);
     assert(collect(50)[0].completion == 1.0 && collect(51)[0].completion == 0.0);
 }
+void space_proof_selects_reachable_authored_defenders() {
+    namespace gc = eawr::sim::galactic;
+    const auto fixed = [](std::int64_t value) { return eawr::sim::math::Fixed::from_integer(value).value(); };
+    std::vector<gc::Planet> worlds{{1, {}, 1}, {2, {fixed(100), {}, {}}, 1},
+        {3, {fixed(200), {}, {}}, 2}, {4, {fixed(100), fixed(100), {}}, 2},
+        {5, {fixed(1000), {}, {}}, 2}};
+    std::vector<gc::Route> routes{{101, 1, 2, fixed(1)}, {102, 2, 3, fixed(1)}, {103, 2, 4, fixed(1)}};
+    std::vector<gc::Fleet> fleets{{11, 1, 1, {{21, 1}}}, {10, 1, 1, {{20, 1}}},
+        {12, 2, 3, {{22, 1}}}, {13, 2, 5, {{23, 1}}}};
+    gc::MovementSetup movement;
+    for (const auto& world : worlds) movement.access.push_back({1, world.id, true, world.owner == 2});
+    gc::ProductionSetup production;
+    gc::PoliticalControlSetup control;
+    gc::PlanetProduction station; station.planet = 4; station.starbase_owner = 2; station.starbase_type = 9;
+    production.planets.push_back(station);
+    const auto select = [&] {
+        const gc::GalacticSnapshot snapshot(0, {}, {}, worlds, routes, fleets, {}, fixed(1), std::nullopt,
+            std::make_shared<const gc::MovementSetup>(movement), std::nullopt, {}, std::nullopt, production, control);
+        return space_proof_route(snapshot, 1, 3);
+    };
+    auto chosen = select();
+    // Equal path costs: lowest destination, then fleet identity, independent of input fleet order.
+    assert(chosen && chosen->fleet == 10 && (chosen->path == std::vector<gc::PlanetId>{1, 2, 3}));
+    routes[2].hs_speed_factor = fixed(2);
+    chosen = select();
+    assert(chosen && chosen->path.back() == 4); // Cost beats the lower destination identity.
+    routes[2].hs_speed_factor = fixed(1);
+    fleets.erase(fleets.begin() + 2);
+    chosen = select();
+    assert(chosen && (chosen->path == std::vector<gc::PlanetId>{1, 2, 4})); // Station, no hostile fleet.
+    production.planets[0].starbase_type = 0;
+    gc::ProductionObject object; object.id = 30; object.owner = 2;
+    object.domain = gc::ProductionDomain::space; object.kind = gc::ProductionKind::structure;
+    production.planets[0].objects.push_back(object);
+    assert(select()); // Authored orbital defender is also sufficient.
+    production.planets[0].objects[0].domain = gc::ProductionDomain::ground;
+    assert(!select()); // Ground defenders and the disconnected fleet do not yield space battles.
+    production.planets[0].objects[0].domain = gc::ProductionDomain::space;
+    production.planets[0].objects[0].kind = gc::ProductionKind::technology;
+    assert(!select());
+    production.planets[0].objects[0].kind = gc::ProductionKind::structure;
+    movement.access[1].accessible = false;
+    assert(!select());
+    movement.access[1].accessible = true;
+    movement.access[1].potential_conflict = true;
+    assert(!select()); // The ordinary pathfinder cannot pass through a defended intermediate world.
+    movement.access[1].potential_conflict = false;
+    worlds[3].owner = 3; production.planets[0].objects[0].owner = 3;
+    assert(!select()); // Neutral is not an attack target.
+    worlds[3].owner = 2; production.planets[0].objects[0].owner = 2;
+    fleets[0].motion.transit.emplace(); fleets[1].members.clear();
+    assert(!select()); // Only parked, populated local fleets may be selected.
+    fleets[0].motion.transit.reset(); fleets[1].members.push_back({20, 1});
+    worlds[1].owner = 2; fleets.push_back({14, 2, 2, {{24, 1}}});
+    chosen = select();
+    assert(chosen && chosen->fleet == 11 && (chosen->path == std::vector<gc::PlanetId>{1, 2}));
+    // The established adjacent-fleet case retains its original fleet/route ordering.
+    control.relations.push_back({1, 2, true});
+    chosen = select();
+    assert(chosen && chosen->fleet == 11 && chosen->path.back() == 2); // Legacy predicate includes allies.
+    worlds[1].owner = 0; fleets.back().owner = 0;
+    chosen = select();
+    assert(chosen && chosen->fleet == 11 && chosen->path.back() == 2); // And an owner-zero opposing fleet.
+    fleets.pop_back(); worlds[1].owner = 1;
+    assert(!select()); // Fallback still excludes allied destinations.
+    control.relations.clear();
+    movement.access.clear();
+    assert(!select()); // Missing published access never invents presence or admits a route.
+}
+void surface_world_orbit_targets() {
+    namespace gc = eawr::sim::galactic;
+    std::vector<gc::Fleet> fleets{{10, 1, 1, {}}, {11, 2, 1, {}}, {12, 1, 3, {}}, {13, 1, 1, {}}};
+    fleets.back().motion.transit.emplace();
+    const gc::GalacticSnapshot snapshot(0, {}, {}, {}, {}, fleets, {});
+    MapInput input;
+    const auto target = surface_orbit_target(snapshot, 1, 1, 1, 1, 10, std::uint8_t{2});
+    assert(target && target->fleet == 10 && target->slot == 0);
+    const auto command = input.command({DropKind::launch, 50, target->fleet, 1, {}, target->slot}, planets);
+    assert(command && std::get<gc::LaunchFromSurface>(*command).target == 10);
+    for (std::uint8_t slot = 0; slot < 3; ++slot) {
+        const auto empty = surface_orbit_target(snapshot, 1, 1, 1, 1, 0, slot);
+        assert(empty && !empty->fleet && empty->slot == slot);
+    }
+    for (const auto fleet : {11U, 12U, 13U, 99U})
+        assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, fleet, std::uint8_t{0}));
+    // WGM-199: another planet's badges/empty slots defer to world routing,
+    // even when their fleet is foreign or stale. They never become source-orbit targets.
+    for (const auto fleet : {0U, 11U, 12U, 99U}) {
+        const auto neighbour = surface_orbit_target(snapshot, 1, 1, 3, 2, fleet, std::uint8_t{2});
+        assert(neighbour && !neighbour->fleet && neighbour->slot == 0);
+        const auto move = input.command({DropKind::launch, 50, neighbour->fleet, 1, {1, 3}, 2}, planets);
+        assert(move && std::holds_alternative<gc::LaunchFleet>(*move));
+        assert((std::get<gc::LaunchFleet>(*move).path == std::vector<ObjectId>{1, 3}));
+    }
+    assert(!surface_orbit_target(snapshot, 1, 1, 1, 2, 10, std::uint8_t{0}));
+    assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::nullopt));
+    assert(!surface_orbit_target(snapshot, 1, 1, 1, 1, 0, std::uint8_t{3}));
+}
 int main() {
+    surface_world_orbit_targets();
+    space_proof_selects_reachable_authored_defenders();
     scheduled_hero_map_uses_published_frames();
     hero_map_collection_is_local_stable_and_live();
     selection_and_caller_gates(); deferred_revalidation(); navigation_and_heroes();
@@ -836,6 +1043,7 @@ int main() {
     queued_ability_drop_is_scoped_to_preparation_and_owner();
     typed_ability_intents_preserve_capabilities();
     hero_fleet_drop_offers_authored_ability();
+    probe_move_and_ground_admission();
     fleet_destination_uses_live_routes();
     dragged_card_moves_as_one_stack();
 }

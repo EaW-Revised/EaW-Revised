@@ -206,6 +206,7 @@ class BattleLoadGpu(unittest.TestCase):
                                 "--log-file", str(report.with_suffix(".engine.log")),
                                 "--resolution", "1280x720",
                                 "--path", str(ROOT / "apps/viewer/project"), "--", *options,
+                                "--eawr-log-file=" + str(report.with_suffix(".engine.log")),
                                 "--eawr-load-bench-cache", group,
                                 "--eawr-content-cache", "on" if cache_content else "off",
                                 "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],

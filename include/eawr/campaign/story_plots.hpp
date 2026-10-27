@@ -30,6 +30,7 @@ core::Result<void> load_story_plot(const vfs::Vfs&, sim::galactic::story::Player
 
 // WGS-07: for each active player, the campaign's `*_Story_Name` that matches the player's side
 // (GameConstants Good/Evil/Corrupt_Side_Name -> Rebel/Empire/Underworld plot), in that order.
+// WST-87/88: then ordered Story_Name pairs; an absent/inactive player ends that traversal.
 [[nodiscard]] core::Result<StoryPlots> load_story_plots(const vfs::Vfs&, const data::galactic::GalacticData&,
     const CampaignSetupPlan&);
 

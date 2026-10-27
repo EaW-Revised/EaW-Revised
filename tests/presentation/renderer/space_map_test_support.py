@@ -158,7 +158,7 @@ class SpaceMapRunner:
         report = directory / f"{name}.json"
         capture = directory / f"{name}.png" if capture is None else capture
         completed = subprocess.run(
-            [executable, *engine, "--path", str(ROOT / "apps/viewer/project"), "--",
+            [executable, "--render-thread", "safe", *engine, "--path", str(ROOT / "apps/viewer/project"), "--",
              "--eawr-map", logical_path, "--eawr-game-root", str(root),
              "--eawr-report", str(report), "--eawr-capture", str(capture), *extra],
             cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)

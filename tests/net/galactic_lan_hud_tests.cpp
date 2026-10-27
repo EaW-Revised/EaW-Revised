@@ -66,20 +66,35 @@ void waiting_threshold() {
 }
 void clock_policy() {
     using namespace eawr::net;
-    GalacticClockLimiter clock(GalacticClockPolicy::two_per_45_seconds);
-    expect(clock.admit({2}, 10), "first change admitted");
-    expect(clock.admit({2}, 20), "second change admitted");
-    expect(!clock.admit({2}, 20), "third same-tick change refused");
-    expect(clock.admit({7}, 20), "budget is per seat");
-    expect(!clock.admit({2}, 1359), "45 seconds have not elapsed");
-    expect(clock.admit({2}, 1360), "oldest slot expires exactly at 45 seconds");
-    expect(!clock.admit({2}, 1360), "rolling window retains second slot");
-    expect(clock.admit({2}, 1370), "second slot expires independently");
+    GalacticClockLimiter clock(GalacticClockPolicy::limited);
+    expect(ClockThrottle::speed_changes_per_window == 6 && ClockThrottle::window_ticks == 1350, "one named policy constant");
+    expect(clock.admit_speed({2}, 10), "first speed change admitted");
+    for (std::uint64_t tick = 11; tick <= 15; ++tick) expect(clock.admit_speed({2}, tick), "speed changes up to six admitted");
+    expect(!clock.admit_speed({2}, 15), "seventh same-window speed change refused");
+    expect(clock.speed_wait_seconds({2}, 15) == 45, "the refusal names the wait until the oldest slot expires");
+    expect(clock.admit_speed({7}, 15), "budget is per seat");
+    expect(!clock.admit_speed({2}, 1359), "45 session seconds have not elapsed");
+    expect(clock.speed_wait_seconds({2}, 1359) == 1, "a partial second rounds up");
+    expect(clock.admit_speed({2}, 1360), "oldest slot expires exactly at 45 session seconds");
+    expect(!clock.admit_speed({2}, 1360), "rolling window retains the other slots");
+    // Pause and resume never spend the speed budget; only a debounce against double clicks applies.
+    GalacticClockLimiter toggles(GalacticClockPolicy::limited);
+    for (std::uint64_t tick = 0; tick < 100 * 40; tick += 40) {
+        expect(toggles.admit_pause({2}, tick), "spaced pauses are never refused");
+        toggles.note_resume({2}, tick + 5);
+    }
+    expect(toggles.history().empty(), "pause and resume leave no speed history");
+    expect(toggles.admit_pause({2}, 5000), "pause admitted");
+    expect(!toggles.admit_pause({2}, 5000 + ClockThrottle::pause_debounce_ticks - 1), "a double click is debounced");
+    expect(toggles.admit_pause({2}, 5000 + ClockThrottle::pause_debounce_ticks), "the debounce lasts one session second");
+    toggles.note_resume({2}, 6000);
+    expect(!toggles.admit_pause({2}, 6010), "a pause right after a resume is debounced too");
     clock.expire(3000);
-    expect(clock.history().empty(), "expired state is bounded and canonical");
+    expect(clock.history().empty() && clock.toggles().empty(), "expired state is bounded and canonical");
     GalacticClockLimiter unrestricted;
-    for (int i = 0; i < 100; ++i) expect(unrestricted.admit({2}, 0), "named policy is reversible");
-    expect(unrestricted.history().empty(), "unrestricted policy has no hidden history");
+    for (int i = 0; i < 100; ++i)
+        expect(unrestricted.admit_speed({2}, 0) && unrestricted.admit_pause({2}, 0), "named policy is reversible");
+    expect(unrestricted.history().empty() && unrestricted.toggles().empty(), "unrestricted policy has no hidden history");
 }
 void transient_clock_notices() {
     namespace hud = eawr::viewer::galactic;
@@ -91,25 +106,25 @@ void transient_clock_notices() {
     view.phase = lan::GalacticLanPhase::running;
     view.clock_actor = {2}; view.clock_action = "paused"; view.clock_change_tick = 10; view.clock_paused = true;
     hud::LanNoticeModel model;
-    expect(model.notice(view, players, 100) == "Leia paused", "pause receipt appears when presented");
-    expect(model.notice(view, players, 5099) == "Leia paused", "pause receipt lasts under five presentation seconds");
-    expect(model.notice(view, players, 5100).empty(), "pause receipt expires at five presentation seconds even with no sim progress");
-    expect(model.notice(view, players, 5200).empty(), "unchanged receipt does not restart its lifetime every frame");
+    expect(model.notice(view, players, 100) == "Paused by Leia", "pause receipt appears when presented");
+    expect(model.notice(view, players, 5099) == "Paused by Leia", "pause receipt lasts under five presentation seconds");
+    expect(model.notice(view, players, 600100) == "Paused by Leia", "pause actor remains visible after ten presentation minutes");
+    expect(model.notice(view, players, 600200) == "Paused by Leia", "paused actor stays until an agreed resume");
     view.clock_action = "resumed"; view.clock_change_tick = 11; view.clock_paused = false;
-    const auto resumed = model.notice(view, players, 5300);
+    const auto resumed = model.notice(view, players, 600300);
     expect(resumed == "Leia resumed" && resumed.find("paused") == std::string::npos, "agreed resume immediately replaces the paused line");
-    expect(model.notice(view, players, 10300).empty(), "resume receipt also expires");
+    expect(model.notice(view, players, 605300).empty(), "resume receipt also expires");
     view.clock_action = "paused"; view.clock_change_tick = 12; view.clock_paused = true;
-    expect(model.notice(view, players, 11000) == "Leia paused", "a new pause gets its own lifetime");
+    expect(model.notice(view, players, 606000) == "Paused by Leia", "a new pause gets its own lifetime");
     view.clock_paused = false;
-    expect(model.notice(view, players, 11100).empty(), "agreed unpaused state clears stale pause text even without a new action event");
+    expect(model.notice(view, players, 606100).empty(), "agreed unpaused state clears stale pause text even without a new action event");
     view.clock_paused = true;
-    expect(model.notice(view, players, 11200).empty(), "a later hold cannot resurrect a superseded paused receipt");
+    expect(model.notice(view, players, 606200).empty(), "a later hold cannot resurrect a superseded paused receipt");
     view.clock_paused = false;
     view.clock_action.clear(); view.clock_refusals = {{{7}, 20}};
-    expect(model.notice(view, players, 12000).find("Piett clock change refused") != std::string::npos, "refusal names its seat");
-    expect(!model.notice(view, players, 16999).empty(), "refusal remains visible under five presentation seconds");
-    expect(model.notice(view, players, 17000).empty(), "refusal expires with a stopped lockstep frontier");
+    expect(model.notice(view, players, 607000).find("Piett speed change refused") != std::string::npos, "refusal names its seat");
+    expect(!model.notice(view, players, 611999).empty(), "refusal remains visible under five presentation seconds");
+    expect(model.notice(view, players, 612000).empty(), "refusal expires with a stopped lockstep frontier");
     expect(model.notice(view, players, 18000).empty(), "retained refusal receipt does not reappear after expiry");
     view.clock_refusals.front().completed_tick = 21;
     expect(!model.notice(view, players, 18001).empty(), "a new refusal gets a new lifetime");
@@ -151,7 +166,7 @@ void notices() {
     view.clock_action = "paused";
     view.clock_paused = true;
     hud::LanNoticeModel clock_notice;
-    expect(clock_notice.notice(view, players, 0).find("Leia paused") != std::string::npos, "agreed pause actor is named");
+    expect(clock_notice.notice(view, players, 0).find("Paused by Leia") != std::string::npos, "agreed pause actor is named");
     view.phase = lan::GalacticLanPhase::ended;
     view.reason = lan::GalacticLanReason::desync;
     view.message = "hash disagreement at tick 30";

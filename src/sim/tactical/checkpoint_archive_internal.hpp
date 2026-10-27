@@ -30,6 +30,7 @@ template <class T> struct Fields;
 class Writer {
 public:
     static constexpr bool reading = false;
+    bool fire_range_bonuses = false;
     std::vector<std::uint8_t> bytes;
     template <class... T> void operator()(const T&... values) { (value(values), ...); }
     template <std::integral T> void value(T input) {
@@ -37,8 +38,10 @@ public:
         if constexpr (std::same_as<T, bool>) bytes.push_back(input ? 1U : 0U);
         else {
             auto bits = static_cast<std::uint64_t>(static_cast<std::make_unsigned_t<T>>(input));
+            const auto at = bytes.size();
+            bytes.resize(at + sizeof(T));
             for (std::size_t i = 0; i < sizeof(T); ++i) {
-                bytes.push_back(static_cast<std::uint8_t>(bits & 255U));
+                bytes[at + i] = static_cast<std::uint8_t>(bits & 255U);
                 bits >>= 8U;
             }
         }
@@ -64,6 +67,7 @@ public:
 class Reader {
 public:
     static constexpr bool reading = true;
+    bool fire_range_bonuses = false;
     explicit Reader(std::span<const std::uint8_t> bytes) : bytes_(bytes) { if (bytes.size() > byte_limit) throw Invalid("state exceeds byte budget"); }
     template <class... T> void operator()(T&... values) { (value(values), ...); }
     [[nodiscard]] std::size_t remaining() const { return bytes_.size() - cursor_; }

@@ -12,6 +12,7 @@ Loader::Loader(const LoadInput& input, UnitTables& tables, Report& report)
 void Loader::run(const std::vector<std::string>& types, const std::vector<std::string>& obstacles) {
         obstacle_ids_ = obstacles;
         load_enums(*input_.filesystem, tables_, report_);
+        if (input_.domain == sim::tactical::BattleDomain::land) load_land_movement_classes();
         for (const auto& id : types) enqueue(id, UnitKind::ship);
         std::size_t loaded = 0;
         for (; loaded < queue_.size(); ++loaded) {
@@ -223,7 +224,7 @@ constexpr std::string_view pinned_obstacles[] = {
 
 std::optional<Fixed> sensor_range(const UnitType& type) noexcept {
     if (type.kind == UnitKind::squadron) return type.team_reveal_range;
-    return type.reveal ? type.space_fow_reveal_range : std::nullopt;
+    return type.reveal ? type.fow_reveal_range : std::nullopt;
 }
 
 std::span<const std::string_view> pinned_m2_types() noexcept {
@@ -257,6 +258,7 @@ core::Result<UnitTables> load_unit_tables(const LoadInput& input) {
         }
     }
     UnitTables tables;
+    tables.domain = input.domain;
     tables.campaign_scene = input.campaign_scene;
     if (input.campaign_scene) tables.campaign_ability_locks = input.campaign_ability_locks;
     Report report;

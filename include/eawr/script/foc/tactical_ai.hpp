@@ -22,6 +22,7 @@
 #include "eawr/sim/tactical/ai_level.hpp"
 #include "eawr/sim/tactical/session.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <array>
@@ -137,6 +138,8 @@ struct AiContent {
     std::map<sim::tactical::TypeId, std::uint32_t> projectile_categories; // projectile object type -> ai_projectile_* bits
     std::map<std::string, std::uint64_t, std::less<>> categories; // upper-case name -> bit
     std::map<std::string, std::uint64_t, std::less<>> properties; // upper-case name -> bit
+    // RGC-112: canonical name -> existing TypeId, sorted and shared across fresh sessions.
+    std::shared_ptr<const std::vector<std::pair<std::string, sim::tactical::TypeId>>> catalog_types{};
 };
 
 // WTA-45..47: the multipliers one AI player's difficulty adjustment sets. 1 (and sleep 0) is Normal.
@@ -180,6 +183,7 @@ struct AiPlayer {
     std::string player_type; // AIPlayerType name (AI-11), e.g. BasicEmpire; empty: no goal system
     bool human{}; // active human lobby player; non-playable faction players are not humans
     sim::tactical::AiLevel difficulty{}; // WTA-47: a lobby AI's level (#735)
+    std::string name{}; // RGC-126: stored player display name, independent of faction
 };
 
 // The tactical map's extent as the AI's perception grid covers it (#449, PG-01).
@@ -251,15 +255,58 @@ struct AiServiceEvent {
     bool execution{};
 };
 
+// #1702: what the proposal pass decided about (goal, outcome, reason), folded when AiSetup::trace_proposals
+// is set. One row per (player, goal, event, reason); the first tick, the last tick, a few targets and the
+// first full trace (the equation lookups with their values or why one was unavailable) are kept.
+inline constexpr std::string_view proposal_trace_plan = "proposal";
+struct AiProposalSummary {
+    sim::tactical::PlayerId player{};
+    std::string goal, event, reason;
+    std::uint64_t count{}, first_tick{}, last_tick{};
+    std::vector<std::string> targets; // the first few distinct targets
+    std::string example_detail;       // the trace of the first occurrence
+};
+
+// #1702: the Script_* evaluator host's counters (observer output; not part of any decision or save).
+struct AiEvaluatorStats {
+    std::uint64_t calls{}, memo_hits{}, failures{}, modules_loaded{}, instructions{};
+};
+
 struct AiJournal {
     std::vector<PlanEvent> plans;
+    AiEvaluatorStats evaluators;
+    std::map<std::string, AiProposalSummary> proposals;
     std::vector<AiTickCost> costs;
     std::vector<AiServiceEvent> services;
     // Lifetime overflow counts; diagnostic clearing/restoring does not save them.
     std::uint64_t plans_dropped{};
     std::uint64_t costs_dropped{};
     std::uint64_t services_dropped{};
-    void append_plan(PlanEvent row) { append_ai_diagnostic(plans, plans_dropped, std::move(row)); }
+    void append_plan(PlanEvent row) {
+        if (row.plan == proposal_trace_plan) { fold_proposal(std::move(row)); return; }
+        append_ai_diagnostic(plans, plans_dropped, std::move(row));
+    }
+    void fold_proposal(PlanEvent row) {
+        // The reason is "<reason>" or "<reason> | <blocker>": the part before the trace detail.
+        const std::string key = std::to_string(row.player) + '|' + row.goal + '|' + row.event + '|' + row.detail.substr(0, row.detail.find('\n'));
+        constexpr std::size_t kept_rows = 4096;
+        if (proposals.size() >= kept_rows && !proposals.contains(key)) return;
+        auto [found, inserted] = proposals.try_emplace(key);
+        auto& summary = found->second;
+        if (inserted) {
+            summary.player = row.player; summary.goal = row.goal; summary.event = row.event;
+            summary.reason = row.detail.substr(0, row.detail.find('\n'));
+            const auto trace = row.detail.find('\n');
+            summary.example_detail = trace == std::string::npos ? std::string() : row.detail.substr(trace + 1);
+            summary.first_tick = row.tick;
+        }
+        summary.last_tick = row.tick;
+        ++summary.count;
+        constexpr std::size_t kept_targets = 6;
+        if (summary.targets.size() < kept_targets
+            && std::find(summary.targets.begin(), summary.targets.end(), row.target) == summary.targets.end())
+            summary.targets.push_back(row.target);
+    }
     void append_cost(AiTickCost row) { append_ai_diagnostic(costs, costs_dropped, std::move(row)); }
     void append_service(AiServiceEvent row) { append_ai_diagnostic(services, services_dropped, std::move(row)); }
 };
@@ -281,6 +328,9 @@ struct AiSetup {
     std::map<std::string, std::string, std::less<>> xml;
     // Where the goal system writes its journal; none when null.
     std::shared_ptr<AiJournal> journal;
+    // #1702: with a journal, fold every goal's proposal decisions (made, rejected and why) into
+    // AiJournal::proposals. Observer output only; no decision reads it.
+    bool trace_proposals{false};
     // WGT-33: the return/retreat owner supplies eligibility from this completed
     // snapshot and constructs the ordinary admitted retreat order. Both required.
     std::function<bool(const sim::tactical::TacticalSnapshot&, sim::tactical::PlayerId)> campaign_can_retreat;

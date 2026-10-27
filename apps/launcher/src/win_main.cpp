@@ -55,6 +55,9 @@ const char* const kUsage =
     "  --project <folder>      use this game project folder instead of the bundled one\n"
     "  --user-data <folder>    keep the launcher's files here instead of %APPDATA%\\Godot\\app_userdata\\EAWR Viewer\n"
     "  --allow-unknown-build   let the game start on a Forces of Corruption build EAWR has not verified\n"
+    "  --render-thread MODE    safe or separate; overrides the saved Performance setting\n"
+    "  --mods                  open EAWR Mods\n"
+    "  --safe-render-thread    start the game with the Safe render thread instead of the default Separate one\n"
     "  --no-dialogs            never open a window; errors go to stderr and the log\n"
     "  --godot-quit-after <n>  close the game after n frames (smoke tests)\n"
     "  -- <args>               passed on to the game\n";

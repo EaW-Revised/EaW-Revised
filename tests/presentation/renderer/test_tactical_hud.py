@@ -43,6 +43,49 @@ FACEPLATES = {
 
 
 class TacticalHudStructure(unittest.TestCase):
+    def test_tooltip_draws_above_every_tactical_panel_within_the_host_hud(self):
+        view = (UI / "unit_cards_view.cpp").read_text(encoding="utf-8")
+        setup = view[view.index("void EawrUnitCards::setup("):view.index("void EawrUnitCards::show(")]
+        self.assertIn('tooltip_layer_->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);', setup)
+        self.assertIn('tooltip_layer_->set_z_as_relative(true);', setup)
+        self.assertIn('tooltip_layer_->set_z_index(setup_.tooltip_z_index);', setup)
+        build = (UI / "tactical_hud_build.cpp").read_text(encoding="utf-8")
+        tooltip_z = int(re.search(r'cards.tooltip_z_index = (\d+);', build)[1])
+        # The reinforcement pane is part of production; all panels share the
+        # tactical canvas and currently have the default relative depth zero.
+        self.assertIn('production.reinforce = state.shell.reinforcement;', build)
+        for panel in ('cards', 'production', 'abilities', 'heroes', 'minimap'):
+            self.assertIn(f'state.hud->add_child(state.{panel});', build)
+        self.assertNotIn('set_z_index(', build)
+        self.assertGreater(tooltip_z, 0)
+        for path in UI.glob("*.cpp"):
+            for value in re.findall(r'set_z_index\((\d+)\)', path.read_text(encoding="utf-8")):
+                self.assertGreater(tooltip_z, int(value), path.name)
+        self.assertIn('popup_.initialize(*tooltip_layer_);', setup)
+        self.assertIn('tooltip_.draw(*tooltip_layer_,', view)
+        draw = view[view.index('void EawrUnitCards::_draw()'):view.index('void EncyclopediaPopupRenderer::draw(')]
+        cards, tooltip = draw.split('void EawrUnitCards::draw_tooltip()')
+        self.assertNotIn('popup_.draw(', cards)
+        self.assertIn('popup_.draw(*tooltip_layer_,', tooltip)
+        self.assertIn('tooltip_layer_->draw_rect(tooltip_rect_', tooltip)
+        redraw = view[view.index('void EawrUnitCards::redraw()'):view.index('void EawrUnitCards::draw_tooltip()')]
+        self.assertIn('queue_redraw();', redraw)
+        self.assertIn('tooltip_layer_->queue_redraw();', redraw)
+
+    def test_shared_galactic_fleet_tooltip_stays_below_modal_dialogs(self):
+        header = (UI / "unit_cards_view.hpp").read_text(encoding="utf-8")
+        self.assertIn('std::int32_t tooltip_z_index{};', header)
+        fleet = (SRC / "galactic/galactic_fleet_hud.cpp").read_text(encoding="utf-8")
+        self.assertNotIn('tooltip_z_index', fleet)  # Keep the default relative zero.
+        fleet_z = int(re.search(r'fleet_popup->set_z_index\((\d+)\)', fleet)[1])
+        # The tooltip is a child drawn after the fleet popup at its depth.
+        for name in ('battle_dialog.cpp', 'campaign_score_dialog.cpp', 'black_market_hud.cpp',
+                     'corruption_hud.cpp', 'hero_action_hud.cpp', 'weapon_action_hud.cpp'):
+            modal = (SRC / "galactic" / name).read_text(encoding="utf-8")
+            modal_z = [int(z) for z in re.findall(r'(?:root_|[\w.]+blocker)->set_z_index\((\d+)\)', modal)]
+            self.assertTrue(modal_z, name)
+            self.assertLess(fleet_z, min(modal_z), name)
+
     def test_resume_rollover_uses_token_art_and_leaves_absent_art_silent(self):
         # TM-14: present art resolves normally (including missing-file diagnostics);
         # no authored hover art leaves the base and caption without an extra quad.

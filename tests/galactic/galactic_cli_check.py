@@ -108,6 +108,17 @@ def failures_write_nothing(program: str, fixtures: pathlib.Path, work: pathlib.P
         (2, ("--galactic", str(fixtures / "synthetic-small.json"), "--hash-out", str(out), "--workers", "0"), "zero workers"),
         (2, ("--galactic", str(fixtures / "synthetic-small.json"), "--hash-out", str(out), "--hash-out", str(out)),
          "a repeated option"),
+        (2, ("--galactic", str(fixtures / "synthetic-small.json"), "--hash-out", str(out), "--live-perception", "Example"),
+         "--live-perception on a synthetic campaign"),
+        (2, ("--galactic", "Campaign_Equal_Footing", "--game-root", str(bad), "--live", "60", "--live-perception", "Example"),
+         "--live-perception without --live-ai on"),
+        # --live-goals reads the native AI of a live run: a synthetic campaign, a run without --live-ai on and a zero interval are refused.
+        (2, ("--galactic", str(fixtures / "synthetic-small.json"), "--hash-out", str(out), "--live-goals", "600"),
+         "--live-goals on a synthetic campaign"),
+        (2, ("--galactic", "Campaign_Equal_Footing", "--game-root", str(bad), "--live", "60", "--live-goals", "600"),
+         "--live-goals without --live-ai on"),
+        (2, ("--galactic", "Campaign_Equal_Footing", "--game-root", str(bad), "--live", "60", "--live-ai", "on", "--live-goals", "0"),
+         "--live-goals 0"),
     ]
     for code, arguments, label in cases:
         before = files(bad)

@@ -16,14 +16,23 @@ enum class Phase : std::size_t {
     vfs, catalog, unit_tables, map, session, lua, fog, model, texture,
     material, audio, hud, particles, scene, texture_upload,
     shader_compile, shader_reflection, material_binding,
-    mesh_upload, scene_build, scene_population, scene_environment, count
+    mesh_upload, scene_build, scene_population, scene_environment,
+    // Inside scene_population (compose_range): where the compose stage's own time goes.
+    compose_classify, compose_bind_pose, compose_hull, compose_shell, compose_animation, compose_hardpoints,
+    compose_commit, compose_finish,
+    // Inside one surface upload (upload_surface): texture lookup/copy, material description, the renderer call,
+    // and the bind-pose bounds loop.
+    surface_texture_prepare, surface_material_build, surface_renderer_upload, surface_pose_bounds, count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(Phase::count)> names{
     "vfs_mount_index", "xml_catalog", "unit_tables", "map_decode", "session_setup_first_frame",
     "lua_start", "fog_visibility", "model_decode", "texture_decode", "material_shader_creation",
     "audio_banks", "hud_fonts", "particles", "scene_composition", "texture_gpu_upload",
     "shader_compile", "shader_reflection", "material_binding",
-    "mesh_gpu_upload", "scene_build", "scene_population", "scene_environment"};
+    "mesh_gpu_upload", "scene_build", "scene_population", "scene_environment",
+    "compose_classify", "compose_bind_pose", "compose_hull", "compose_shell", "compose_animation", "compose_hardpoints",
+    "compose_commit", "compose_finish",
+    "surface_texture_prepare", "surface_material_build", "surface_renderer_upload", "surface_pose_bounds"};
 struct Cost final { double exclusive_ms{}, inclusive_ms{}; std::uint64_t calls{}; };
 struct Recording final {
     std::array<Cost, names.size()> costs{};

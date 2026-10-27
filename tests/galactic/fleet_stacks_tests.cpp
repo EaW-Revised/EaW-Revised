@@ -155,6 +155,30 @@ int case_galactic_fleet_stacks_tests() {
         assert(icons[2].icon == 2 && icons[2].count == 1 && icons[2].best == eawr::sim::galactic::TypeId{1000});
     }
     {
+        // WGUI-92: an icon shows the stealth overlay only when every fleet it merges is all-stealth.
+        std::vector<ObservedFleet> cards;
+        cards.push_back(local_card(601, 0, {group(1, 1000, 601)}));
+        cards.push_back(local_card(602, 1, {group(1, 1002, 602)}));
+        cards.push_back(local_card(603, 2, {group(1, 1003, 603)}));
+        cards[0].all_stealth = true; cards[2].all_stealth = true;
+        auto icons = fleet_stack_icons(view(cards), health, textures);
+        assert(icons.size() == 3 && icons[0].stealth && !icons[1].stealth && icons[2].stealth);
+        // A second fleet at slot 0 that is not all-stealth (a merged card) clears the overlay.
+        cards[0].all_stealth = false;
+        icons = fleet_stack_icons(view(cards), health, textures);
+        assert(!icons[0].stealth);
+        // Another owner present: the right icon merges local slots 0 and 2, so one mixed card clears it.
+        cards[0].all_stealth = true;
+        ObservedFleet enemy;
+        enemy.planet = 101; enemy.owner = 2; enemy.count = 3;
+        cards.push_back(enemy);
+        icons = fleet_stack_icons(view(cards), health, textures);
+        assert(icons.size() == 3 && !icons[0].stealth && icons[2].stealth);
+        cards[2].all_stealth = false;
+        icons = fleet_stack_icons(view(cards), health, textures);
+        assert(!icons[2].stealth);
+    }
+    {
         // Another owner present: foreign fleets merge into the left icon, local
         // slots 0 and 2 merge into the right one, slot 1 stays the centre.
         std::vector<ObservedFleet> cards;

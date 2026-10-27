@@ -147,7 +147,7 @@ struct Pair {
         const LiveGameSession::Pacing pacing = LiveGameSession::Pacing::driven,
         const std::uint64_t notice_ms = 3000, const std::size_t started = 2,
         const std::uint64_t final_tick_count = net::max_session_ticks,
-        const net::GalacticClockPolicy clock_policy = net::GalacticClockPolicy::two_per_45_seconds,
+        const net::GalacticClockPolicy clock_policy = net::GalacticClockPolicy::limited,
         const std::function<void(viewer::GalacticLanOptions&, net::PeerIndex)>& configure = {})
         : setup(std::move(initial)), humans(human_seats(setup)), pipes(2), worker_counts(workers), pacing_(pacing) {
         if (humans.size() != 2) throw std::runtime_error("the fixture needs exactly two human seats");
@@ -213,7 +213,7 @@ std::vector<std::string> reference(const galactic::GalacticSetup& setup, std::ve
     auto game = require(eawr::campaign::GameSession::create(setup));
     const eawr::platform::ThreadWorkerAdapter executor(1);
     net::GalacticAdapterOptions options;
-    options.clock_policy = net::GalacticClockPolicy::two_per_45_seconds;
+    options.clock_policy = net::GalacticClockPolicy::limited;
     net::GalacticSessionAdapter adapter(game, executor, options);
     std::vector<std::string> hashes;
     for (std::uint64_t tick = 0; tick < ticks; ++tick) {
@@ -1415,38 +1415,47 @@ void child_and_strategic_clock_share_one_limit(const std::array<std::size_t, 2> 
     std::array<std::shared_ptr<eawr::platform::TacticalFeed>, 2> feeds;
     for (net::PeerIndex peer = 0; peer < 2; ++peer) feeds[peer] = pair.lives[peer]->battle_feed(conflict, pair.humans[peer]);
     if (!feeds[0] || !feeds[1]) throw std::runtime_error("missing child feed in shared clock budget fixture");
-    feeds[0]->set_paused(true);
-    expect(pair.run_to(35) && feeds[0]->paused() && feeds[1]->paused(), "child pause uses the second shared budget slot");
-    const auto child_tick = pair.lives[0]->frame().battle->completed_tick();
-    feeds[0]->set_target_rate(60); // Third clock request from this seat, across the layer boundary.
-    expect(pair.run_to(45), "rate refusal keeps the shared session running while paused");
+    // #4574: pause and resume never spend the speed budget; only the 1 s debounce applies, so spaced toggles are never refused.
+    std::uint64_t at = 25;
+    for (int round = 0; round < 4; ++round) {
+        feeds[round % 2]->set_paused(true);
+        at += 40;
+        expect(pair.run_to(at) && feeds[0]->paused() && feeds[1]->paused(), "a spaced child pause is never refused");
+        feeds[(round + 1) % 2]->set_paused(false);
+        at += 40;
+        expect(pair.run_to(at) && !feeds[0]->paused() && !feeds[1]->paused(), "another human may always resume");
+    }
+    // The strategic speed above is the first of the six speed changes; five tactical rate changes spend the rest.
+    const std::array<std::uint32_t, 5> rates{60, 20, 60, 20, 60};
+    for (const auto rate : rates) {
+        feeds[0]->set_target_rate(rate);
+        at += 10;
+        expect(pair.run_to(at), "a speed change within the budget keeps the session running");
+    }
+    for (net::PeerIndex peer = 0; peer < 2; ++peer)
+        expect(pair.lives[peer]->frame().latest->clock().tactical_speed == double_speed,
+            "all six speed changes applied on both peers");
+    feeds[0]->set_target_rate(20); // Seventh speed change from this seat inside 45 session seconds.
+    at += 10;
+    expect(pair.run_to(at), "rate refusal keeps the shared session running");
     for (net::PeerIndex peer = 0; peer < 2; ++peer) {
         const auto frame = pair.lives[peer]->frame();
-        expect(frame.latest->clock().tactical_speed.raw() == math::Fixed::scale,
-            "third clock request cannot change tactical speed on either peer");
-        expect(frame.battle->completed_tick() == child_tick, "a refused clock change cannot advance the paused child");
+        expect(frame.latest->clock().tactical_speed == double_speed, "the seventh speed change cannot change tactical speed on either peer");
         const auto errors = pair.lives[peer]->rejected_orders();
         expect(std::count_if(errors.begin(), errors.end(), [](const auto& error) {
-            return error.message.find("Shared clock limit") != std::string::npos;
-        }) == 1, "both peers publish exactly one identical clock refusal");
+            return error.message.find("Shared clock limit: speed changes") != std::string::npos
+                && error.message.find("the next is allowed in") != std::string::npos;
+        }) == 1, "both peers publish exactly one identical speed refusal naming the limit and the wait");
         const auto view = pair.matches[peer]->view();
         expect(view.clock_refusals.size() == 1 && view.clock_refusals.front().seat == pair.humans[0],
             "HUD keeps a per-seat clock refusal receipt across skipped frames");
     }
-    feeds[0]->set_paused(false);
-    expect(pair.run_to(55) && !feeds[0]->paused() && !feeds[1]->paused(), "resume is always allowed despite an exhausted budget");
-    feeds[0]->set_paused(true); // Refused pause leaves no permanent local pending request.
-    expect(pair.run_to(65) && !feeds[0]->paused() && !feeds[1]->paused(), "an over-budget pause is refused");
     expect(pair.run_to(1400), "the shared clock window expires while session ticks continue");
-    feeds[0]->set_paused(true); // Exactly the same desired value as the earlier refused request.
-    expect(pair.run_to(1410) && feeds[0]->paused() && feeds[1]->paused(), "a refused child pause can be retried after expiry");
-    feeds[1]->set_paused(false);
-    expect(pair.run_to(1420) && !feeds[0]->paused() && !feeds[1]->paused(), "another human may always resume");
-    feeds[0]->set_target_rate(60);
-    expect(pair.run_to(1430), "the expired window admits another speed change");
+    feeds[0]->set_target_rate(20);
+    expect(pair.run_to(1410), "the expired window admits another speed change");
     for (auto& live : pair.lives) live->stop();
-    expect(pair.lives[0]->frame().latest->clock().tactical_speed == double_speed
-        && pair.lives[1]->frame().latest->clock().tactical_speed == double_speed,
+    expect(pair.lives[0]->frame().latest->clock().tactical_speed != double_speed
+        && pair.lives[0]->frame().latest->clock().tactical_speed == pair.lives[1]->frame().latest->clock().tactical_speed,
         "a permitted tactical speed applies equally to both peers");
     expect(pair.lives[0]->tick_hashes() == pair.lives[1]->tick_hashes(),
         "strategic/child clock budget acceptance and refusal keep equal digests at every worker count");
@@ -1581,7 +1590,7 @@ void completed_match_waits_for_final_output() {
     std::array<std::atomic<bool>, 2> drained{};
     std::array<std::atomic<bool>, 2> queried{};
     Pair pair(versus_setup(), {1, 4}, LiveGameSession::Pacing::driven, 3000, 2, final_tick,
-        net::GalacticClockPolicy::two_per_45_seconds, [&](auto& options, auto peer) {
+        net::GalacticClockPolicy::limited, [&](auto& options, auto peer) {
             options.final_output_drained = [&, peer] {
                 queried[peer].store(true);
                 return drained[peer].load();
@@ -1607,7 +1616,7 @@ void completed_match_waits_for_final_output() {
 void final_output_drain_has_a_deadline() {
     constexpr std::uint64_t final_tick = 20;
     Pair pair(versus_setup(), {1, 4}, LiveGameSession::Pacing::driven, 3000, 2, final_tick,
-        net::GalacticClockPolicy::two_per_45_seconds, [](auto& options, auto) {
+        net::GalacticClockPolicy::limited, [](auto& options, auto) {
             options.completeness_timeout_ms = 5000;
             options.final_output_drained = [] { return false; };
         });

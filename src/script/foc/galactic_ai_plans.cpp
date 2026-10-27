@@ -2,6 +2,8 @@
 #include "tactical_ai_internal.hpp"
 
 #include <algorithm>
+#include <array>
+#include <set>
 
 namespace eawr::script::foc::ai::galactic_goals {
 std::vector<PlanDef> goal_plan_registrations(const PlanCatalog& catalog) {
@@ -26,12 +28,28 @@ using CatalogResult = core::Result<PlanCatalog>;
 core::Diagnostic error(std::string message) {
     return {"galactic-ai.plan-catalog", core::Severity::error, std::move(message), {}, {}, {}, {}};
 }
-bool top_level_plan(std::string_view path) {
-    const auto canonical = upper_case(path);
-    constexpr std::string_view prefix = "DATA/SCRIPTS/AI/";
-    return canonical.starts_with(prefix) && canonical.ends_with(".LUA")
-        && canonical.substr(prefix.size()).find('/') == std::string::npos;
+// A plan file the debug build does not take up: its script does not load, or it names no task force or no goal type.
+// The definition manager logs it and goes on with the next file, so the catalog skips it and lists it.
+constexpr std::string_view unloadable_code = "galactic-ai.plan-unloadable";
+core::Diagnostic unloadable(std::string message) {
+    auto result = error(std::move(message));
+    result.code = std::string(unloadable_code);
+    return result;
 }
+// RGC-163: the debug build reads `*.lua` from these five directories, in this order, none of them recursively. The
+// directory does not decide which mode a plan serves; its Category goal types do.
+constexpr std::array<std::string_view, 5> plan_directories{"DATA/SCRIPTS/AI/", "DATA/SCRIPTS/AI/SPACEMODE/", "DATA/SCRIPTS/AI/LANDMODE/",
+    "DATA/SCRIPTS/AI/STORYARC/", "DATA/SCRIPTS/INTERVENTIONS/"};
+}
+std::optional<std::size_t> plan_directory_index(std::string_view path) {
+    const auto canonical = upper_case(path);
+    if (!canonical.ends_with(".LUA")) return {};
+    for (std::size_t index = 0; index < plan_directories.size(); ++index)
+        if (canonical.starts_with(plan_directories[index]) && canonical.substr(plan_directories[index].size()).find('/') == std::string::npos)
+            return index;
+    return {};
+}
+namespace {
 std::string stem(std::string_view path) {
     const auto start = path.find_last_of('/') + 1;
     return upper_case(path.substr(start, path.size() - start - 4));
@@ -53,41 +71,57 @@ template<class T> std::optional<T> field(const auth::ValueList& values, std::siz
     if (index < values.size()) if (const auto* value = std::get_if<T>(&values[index].data)) return *value;
     return {};
 }
-core::Result<PlanDefinitionData> definition(std::string module, const auth::ValueList& values) {
+template<class T> bool index_is(const auth::ValueList& values, std::size_t index) {
+    return index < values.size() && std::holds_alternative<T>(values[index].data);
+}
+// RGC-162: the plan reader skips what it cannot use and keeps the plan. A file is refused only when no task force, no goal
+// type or no usable task force is left (gates 1, 4, 6); every other malformed item is dropped and noted once in `notes`.
+core::Result<PlanDefinitionData> definition(std::string module, const auth::ValueList& values, std::vector<std::string>& notes) {
     using Result = core::Result<PlanDefinitionData>;
     const auto categories = field<std::string>(values, 0);
     const auto teams = field<std::vector<auth::Value>>(values, 1);
-    if (!categories || !teams || teams->empty()) return Result::failure(error(module + ": missing Category/TaskForce"));
-    for (const auto index : {2u, 3u, 4u, 5u, 10u, 14u}) {
-        if (index < values.size() && !std::holds_alternative<std::monostate>(values[index].data)
-            && !std::holds_alternative<bool>(values[index].data))
-            return Result::failure(error(module + ": invalid Boolean override"));
-    }
-    for (const auto index : {6u, 7u, 8u, 11u, 12u, 13u}) {
-        if (index < values.size() && !std::holds_alternative<std::monostate>(values[index].data)
-            && !std::holds_alternative<Real>(values[index].data))
-            return Result::failure(error(module + ": invalid numeric override"));
-    }
-    if (values.size() > 9 && !std::holds_alternative<std::monostate>(values[9].data)
-        && !std::holds_alternative<std::vector<auth::Value>>(values[9].data))
-        return Result::failure(error(module + ": invalid required categories"));
+    if (!categories || !teams || teams->empty()) return Result::failure(unloadable(module + ": missing Category/TaskForce"));
     PlanDefinitionData out;
     out.name = stem(module); out.module = std::move(module);
+    const auto note = [&](const std::string& message) { notes.push_back(out.module + ": " + message); };
+    const auto wrong_type = [&](std::size_t index, std::string_view name, bool right) {
+        if (index < values.size() && !std::holds_alternative<std::monostate>(values[index].data) && !right)
+            note("wrong-typed " + std::string(name) + " override ignored (RGC-162)");
+    };
+    wrong_type(2, "IgnoreTarget", index_is<bool>(values, 2)); wrong_type(3, "MagicPlan", index_is<bool>(values, 3));
+    wrong_type(4, "AllowFreeStoreUnits", index_is<bool>(values, 4)); wrong_type(5, "AllowEngagedUnits", index_is<bool>(values, 5));
+    wrong_type(6, "PerFailureContrastAdjust", index_is<Real>(values, 6)); wrong_type(7, "MinContrastScale", index_is<Real>(values, 7));
+    wrong_type(8, "MaxContrastScale", index_is<Real>(values, 8)); wrong_type(9, "RequiredCategories", index_is<std::vector<auth::Value>>(values, 9));
+    wrong_type(10, "MagicPlanStealing", index_is<bool>(values, 10)); wrong_type(11, "MinimumCost", index_is<Real>(values, 11));
+    wrong_type(12, "AdditionalCost", index_is<Real>(values, 12)); wrong_type(13, "ScriptPoolCount", index_is<Real>(values, 13));
+    wrong_type(14, "AllowSpecialWeapons", index_is<bool>(values, 14));
     for (const auto& goal : split_names(*categories, "|")) out.goals.push_back(upper_case(goal));
-    if (out.goals.empty()) return Result::failure(error(out.module + ": empty Category"));
+    if (out.goals.empty()) return Result::failure(unloadable(out.module + ": empty Category"));
+    std::size_t entry_number{};
     for (const auto& value : *teams) {
+        ++entry_number;
         const auto* entries = std::get_if<std::vector<auth::Value>>(&value.data);
-        if (!entries || entries->empty()) return Result::failure(error(out.module + ": malformed TaskForce"));
+        if (!entries || entries->empty()) {
+            note("TaskForce entry " + std::to_string(entry_number) + " is not a table; skipped (RGC-162)");
+            continue;
+        }
         const auto name = field<std::string>(*entries, 0);
-        if (!name || name->empty()) return Result::failure(error(out.module + ": unnamed TaskForce"));
+        if (!name || name->empty()) {
+            note("TaskForce entry " + std::to_string(entry_number) + " has no name; skipped");
+            continue;
+        }
         PlanTeamData team; team.name = *name;
         for (std::size_t index = 1; index < entries->size(); ++index) {
             const auto declaration = field<std::string>(*entries, index);
-            if (!declaration) return Result::failure(error(out.module + ": non-text team declaration"));
+            if (!declaration) {
+                note("TaskForce " + *name + " declaration " + std::to_string(index) + " is not text; skipped");
+                continue;
+            }
             team.declarations.push_back(*declaration);
         }
         out.teams.push_back(std::move(team));
     }
+    if (out.teams.empty()) return Result::failure(unloadable(out.module + ": no usable TaskForce entry"));
     out.ignore_target = field<bool>(values, 2); out.magic = field<bool>(values, 3);
     out.allow_freestore = field<bool>(values, 4); out.allow_engaged = field<bool>(values, 5);
     out.failure_adjust = field<Real>(values, 6); out.minimum_contrast = field<Real>(values, 7);
@@ -95,7 +129,10 @@ core::Result<PlanDefinitionData> definition(std::string module, const auth::Valu
     if (const auto required = field<std::vector<auth::Value>>(values, 9)) {
         for (const auto& entry : *required) {
             const auto* name = std::get_if<std::string>(&entry.data);
-            if (!name) return Result::failure(error(out.module + ": non-text required category"));
+            if (!name) {
+                note("a RequiredCategories entry is not text; skipped (RGC-162)");
+                continue;
+            }
             out.required_categories.push_back(*name);
         }
     }
@@ -106,7 +143,7 @@ core::Result<PlanDefinitionData> definition(std::string module, const auth::Valu
 }
 }
 
-CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string, std::string>& modules) {
+CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string, std::string>& modules, const PlanAdmission& admits) {
     auto host = std::make_shared<detail::Host>();
     host->setup = setup;
     host->view = std::make_shared<detail::WorldView>();
@@ -118,10 +155,20 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
     std::vector<std::string> paths;
     for (const auto& [path, bytes] : modules) {
         if (const auto added = manifest.add(path, bytes); !added) return CatalogResult::failure(added.error());
-        if (top_level_plan(path)) paths.push_back(path);
+        if (plan_directory_index(path)) paths.push_back(path);
     }
-    std::sort(paths.begin(), paths.end(), [](const auto& a, const auto& b) { return upper_case(a) < upper_case(b); });
-    if (paths.empty()) return CatalogResult::failure(error("No top-level galactic plan modules"));
+    // Directory order first, as the debug build enumerates, then name within each directory.
+    std::sort(paths.begin(), paths.end(), [](const auto& a, const auto& b) {
+        const auto left = *plan_directory_index(a), right = *plan_directory_index(b);
+        return left != right ? left < right : upper_case(a) < upper_case(b);
+    });
+    // The definition scripts are chunks named by plan name; a repeated name in a later directory gets a distinct chunk.
+    std::map<std::string, unsigned> stem_uses;
+    std::vector<std::string> chunks;
+    for (const auto& path : paths) {
+        const auto uses = stem_uses[stem(path)]++;
+        chunks.push_back("EAWR/GALACTIC_PLAN/" + stem(path) + (uses ? "~" + std::to_string(uses) : std::string{}) + ".LUA");
+    }
     for (const auto& path : paths) {
         // Host glue only. Run stock definition and pause functions; never copy
         // their bodies or hardcode a retail difficulty table into production.
@@ -133,7 +180,7 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
             "if EnemyContrastTypes then\n for index, enemy in pairs(EnemyContrastTypes) do\n"
             " _EAWR_GalacticContrast(enemy, FriendlyContrastTypes[index])\n end\nend\n"
             "_EAWR_GalacticPacing(DifficultyBasedMinPause(\"Easy\"), DifficultyBasedMinPause(\"Normal\"), DifficultyBasedMinPause(\"Hard\"))\n";
-        if (const auto added = manifest.add("EAWR/GALACTIC_PLAN/" + stem(path) + ".LUA", loader); !added)
+        if (const auto added = manifest.add(chunks[static_cast<std::size_t>(&path - paths.data())], loader); !added)
             return CatalogResult::failure(added.error());
     }
     auth::SessionConfig config;
@@ -191,14 +238,33 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
     if (!errors.empty()) return CatalogResult::failure(errors.front());
     PlanCatalog out;
     std::uint64_t instance{};
+    std::set<std::string> registered;
     for (const auto& path : paths) {
         ++instance;
-        if (const auto loaded = scripts.create_instance(instance, "EAWR/GALACTIC_PLAN/" + stem(path) + ".LUA"); !loaded)
-            return CatalogResult::failure(loaded.error());
+        const auto skip = [&](const core::Diagnostic& why) { out.skipped_plans.push_back(path + ": " + core::format_diagnostic(why)); };
+        if (const auto loaded = scripts.create_instance(instance, chunks[instance - 1]); !loaded) {
+            skip(loaded.error());
+            continue;
+        }
         const auto found = definitions->find(instance);
-        if (found == definitions->end()) return CatalogResult::failure(error(path + ": no definition output"));
-        auto plan = definition(path, found->second);
-        if (!plan) return CatalogResult::failure(plan.error());
+        if (found == definitions->end()) {
+            skip(unloadable("no definition output"));
+            continue;
+        }
+        auto plan = definition(path, found->second, out.item_diagnostics);
+        if (!plan) {
+            skip(plan.error());
+            continue;
+        }
+        // RGC-162 gate 2: the earlier definition of a name is kept and the later file is refused.
+        if (!registered.insert(plan.value().name).second) {
+            out.item_diagnostics.push_back(path + ": plan " + plan.value().name + " is already defined by an earlier directory entry; the earlier definition is kept (RGC-162)");
+            continue;
+        }
+        if (admits && *plan_directory_index(path) != 0 && !admits(plan.value())) {
+            ++out.unused_plans;
+            continue;
+        }
         if (const auto rows = contrast->find(instance); rows != contrast->end()) plan.value().contrast = rows->second;
         out.plans.push_back(std::move(plan).value());
         const auto pause = pacing->find(instance);
@@ -208,9 +274,17 @@ CatalogResult load_plan_catalog(const AiSetup& setup, const std::map<std::string
             const auto value = field<Real>(pause->second, index);
             if (!value) return CatalogResult::failure(error(path + ": nonnumeric difficulty pause"));
             const auto [existing, inserted] = out.minimum_pause_seconds.try_emplace(levels[index], *value);
-            if (!inserted && existing->second != *value) return CatalogResult::failure(error(path + ": inconsistent pause library"));
+            if (!inserted && existing->second != *value) {
+                out.pause_differences.push_back(path + ": " + levels[index] + " pause differs from the first plan's library");
+                break;
+            }
         }
     }
+    // RGC-164: a plan stage with nothing loaded is a logged failure, not a refused startup. The catalog is empty, so no goal
+    // finds a plan: the AI runs, proposes no goals and builds, moves and attacks nothing.
+    if (out.plans.empty()) out.item_diagnostics.push_back("no galactic plan loads (" + std::to_string(paths.size()) + " file(s) read, "
+        + std::to_string(out.skipped_plans.size()) + " skipped); the AI starts with no plans and proposes no goals (RGC-164)"
+        + (out.skipped_plans.empty() ? std::string{} : "; first skipped: " + out.skipped_plans.front()));
     return CatalogResult::success(std::move(out));
 }
 

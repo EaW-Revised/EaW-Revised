@@ -117,6 +117,11 @@ const StationMenu* EconomyRules::menu(const TypeId station, const FactionId fact
     return found != menus.end() && found->station == station && found->faction == faction ? &*found : nullptr;
 }
 
+const StationMenu* EconomyRules::producer_menu(const TypeId producer, const FactionId owner_faction, const FactionId buyer_faction) const noexcept {
+    const auto* point = pads.point(producer);
+    return menu(producer, point != nullptr && point->build_pad ? buyer_faction : owner_faction);
+}
+
 const IncomeProfile* EconomyRules::stream(const TypeId source) const noexcept {
     const auto found = std::lower_bound(income.begin(), income.end(), source,
         [](const IncomeProfile& entry, const TypeId value) { return entry.source < value; });
@@ -317,7 +322,10 @@ core::Result<void> validate_economy(const EconomyRules& rules, const std::span<c
                 return invalid("upgrade targets are not strictly increasing");
             }
             for (const auto value : bonus.percentages) {
-                if (value.raw() < 0 || value.raw() > 8 * math::Fixed::scale) return invalid("upgrade bonus outside supported bounds");
+                // WPR-51/WHE-55: signed contributions are bounded by stat consumers after reduction.
+                // Content beyond the project's positive limit is retained on unavailable upgrades.
+                if (value.raw() > 8 * math::Fixed::scale && !rules.disabled_types.contains(upgrade.type))
+                    return invalid("upgrade bonus above project support limit requires an unavailable upgrade");
             }
         }
     }

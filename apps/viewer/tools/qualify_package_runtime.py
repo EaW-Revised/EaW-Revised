@@ -50,7 +50,8 @@ export_package = _load_export_package()
 
 ROOT = export_package.ROOT
 PLATFORMS: Dict[str, Dict[str, str]] = export_package.PLATFORMS
-PINNED_GODOT_IDENTITY: str = export_package.PINNED_GODOT_IDENTITY
+# The Windows export template (what a packaged probe runs) stays the stock official build; the exporting editor exe may be the fork.
+PINNED_GODOT_IDENTITY: str = export_package.OFFICIAL_GODOT_IDENTITY
 PINNED_GODOT_VERSION: str = export_package.PINNED_GODOT_VERSION
 PINNED_GODOT_BUILD: str = export_package.PINNED_GODOT_BUILD
 sha256_file = export_package.sha256
@@ -552,9 +553,9 @@ def verify_package_receipt(receipt_path: Path, platform_name: str,
     validation = receipt.get("validation") if isinstance(receipt, dict) else None
     if not isinstance(validation, dict) or receipt.get("platform") != platform_name:
         raise QualificationError(f"package receipt {receipt_path} is not a {platform_name} export receipt")
-    if receipt.get("godot_identity") != PINNED_GODOT_IDENTITY:
+    if receipt.get("godot_identity") not in export_package.ACCEPTED_GODOT_IDENTITIES:
         raise QualificationError(
-            f"package receipt engine {receipt.get('godot_identity')!r} is not {PINNED_GODOT_IDENTITY!r}")
+            f"package receipt engine {receipt.get('godot_identity')!r} is not one of {export_package.ACCEPTED_GODOT_IDENTITIES!r}")
     for name in ("executable", "extension", "pck"):
         if validation.get(f"{name}_sha256") != hashes[name]:
             raise QualificationError(

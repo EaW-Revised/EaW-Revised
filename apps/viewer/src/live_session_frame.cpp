@@ -7,8 +7,8 @@
 #include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -23,6 +23,7 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <cctype>
 #include <charconv>
@@ -54,6 +55,12 @@ constexpr std::size_t fading_log_limit = 8192;
 
 void LiveSessionView::apply_time() {
     if (!session_) return;
+    if (options_.lan) {
+        // Only local loading/results gate admission; the agreed player hold is
+        // serviced by the network adapter while its world remains frozen.
+        session_->set_paused(phase_ != Phase::running && phase_ != Phase::quitting);
+        return;
+    }
     if (session_->agreed_pacing()) return; // loading, Begin and results are local presentation only
     session_->set_paused((phase_ != Phase::running && phase_ != Phase::quitting) || !time_.running());
     session_->set_target_rate(time_.target_rate());
@@ -79,7 +86,10 @@ void LiveSessionView::begin() {
 }
 
 void LiveSessionView::press_pause() {
-    if (options_.lan) return;
+    if (options_.lan) {
+        if (phase_ == Phase::running) (void)options_.lan->request_pause(!options_.lan->view().clock_paused);
+        return;
+    }
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
     if (session_ && session_->agreed_pacing()) {
@@ -109,7 +119,10 @@ void LiveSessionView::press_fast_forward() {
 }
 
 void LiveSessionView::resume() {
-    if (options_.lan) return;
+    if (options_.lan) {
+        if (phase_ == Phase::running) (void)options_.lan->request_pause(false);
+        return;
+    }
     if (phase_ == Phase::ready) { begin(); return; }
     if (phase_ != Phase::running) return;
     if (session_ && session_->agreed_pacing()) {
@@ -158,20 +171,23 @@ bool LiveSessionView::leave() {
     return true;
 }
 
-core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population, GodotRenderer& renderer,
+core::Result<BattleScene::Update> LiveSessionView::frame(BattleScene& population, GodotRenderer& renderer,
                                                      const double delta) {
     FrameTimer frame_timer(trace_frames_ ? &live_frame_ms_ : nullptr);
     arrival_slots_.population = &population;
     arrival_slots_.renderer = &renderer;
-    arrival_slots_.remaining = 8; // render-thread work bound: at most eight new hull/clone pairs per frame
+    // Render-thread work bound: at most options_.arrival_slot_budget (default 8) new hull/clone pairs per frame.
+    arrival_slots_.remaining = options_.arrival_slot_budget;
+    arrival_slots_.frame_grown = 0;
+    arrival_slots_.growth_ms = 0.0;
     arrival_slots_.undrawn.clear();
     struct GrowthScope final {
-        SpacePopulation*& population;
+        BattleScene*& population;
         GodotRenderer*& renderer;
         ~GrowthScope() { population = nullptr; renderer = nullptr; }
     } growth_scope{arrival_slots_.population, arrival_slots_.renderer};
     tick_wait_ms_ = session_tail_ms_ = clip_pose_ms_ = 0.0;
-    using UpdateResult = core::Result<SpaceLiveUpdate>;
+    using UpdateResult = core::Result<BattleScene::Update>;
     const auto fail = [this](std::string message) {
         return UpdateResult::failure(frame_failure(std::move(message)));
     };
@@ -183,7 +199,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
         simulation_error_ = options_.lan && lan_connection_loss(failure.code)
             ? lan_message(options_.lan->view()) : core::format_diagnostic(failure);
         save_failure_replay();
-        SpaceLiveUpdate update;
+        BattleScene::Update update;
         update.quit = quit_;
         update.error = simulation_error_ + "\n"
             + (failure_replay_.empty() ? "No replay saved: " + failure_replay_error_ : "Replay saved: " + failure_replay_);
@@ -277,7 +293,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     // FW-24: draw unfogged environment props while retaining the raw sensor
     // list for selection, orders, minimap and simulation consumers.
     if (!unfogged_map_props_.empty()) {
-        space::map_prop_draw_visibility(visible_now, alive_now, unfogged_map_props_, draw_visibility_);
+        live::map_prop_draw_visibility(visible_now, alive_now, unfogged_map_props_, draw_visibility_);
     }
     const auto& drawn_now = unfogged_map_props_.empty() ? visible_now : draw_visibility_;
     auto& immediate = fog_immediate_;
@@ -285,17 +301,17 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     if (auto failure = remember_frame_fog(latest, population, renderer, visible_now, drawn_now, immediate, observations)) return UpdateResult::failure(std::move(*failure));
     render_clock_.observe(latest->completed_tick());
     if (options_.fixture != "attract") population.defer_unit_sample(render_clock_.sample());
-    population.pose_pending_units(renderer);
+    population.pose_pending_units(renderer, pose_workers_);
     advance_frame_visibility(latest, alive_now, drawn_now, immediate);
     std::vector<sim::EntityId> fading_entities;
     collect_frame_fades(latest, drawn_now, fading_entities);
-    if (!space::interpolate_visible_units(*previous, *latest, alpha, drawn_now, options_.reveal,
+    if (!live::interpolate_visible_units(*previous, *latest, alpha, drawn_now, options_.reveal,
                                          fading_entities, poses_, pose_workers_)) {
         return fail("live unit interpolation failed");
     }
     const auto& poses = poses_;
     // #447: the killed craft spinning away that the local player sees.
-    const auto spinning = space::interpolate_spinning(*previous, *latest, alpha, player_, options_.reveal);
+    const auto spinning = live::interpolate_spinning(*previous, *latest, alpha, player_, options_.reveal);
     bind_frame_units(latest, poses, spinning, visible_now);
     auto& live = live_poses_;
     live.clear();
@@ -317,7 +333,7 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     FrameTimer pose_timer(trace_frames_ ? &pose_ms_ : nullptr);
     compose_frame_beacons(latest, live);
     // Growth can follow the normal idle pass. Refresh its new palettes once before live posing.
-    population.pose_pending_units(renderer);
+    population.pose_pending_units(renderer, pose_workers_);
     record_draw_digest(live, clip_poses, latest->completed_tick());
     // Later opacity/turret consumers read this frame's stable composition.
     arrival_slots_.population = nullptr;
@@ -331,10 +347,10 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
     FrameTimer tail_timer(trace_frames_ ? &session_tail_ms_ : nullptr);
     FrameTimer clip_timer(trace_frames_ ? &clip_pose_ms_ : nullptr);
     if (!population.pose_live_clips(renderer, clip_poses, pose_workers_)) return fail(population.failure());
-    if (!population.pose_live_turrets(renderer, live, clip_poses)) return fail(population.failure());
+    if (!population.pose_live_turrets(renderer, live, clip_poses, pose_workers_)) return fail(population.failure());
     clip_timer.finish();
     apply_frame_shield_flashes(population, renderer, visual_scales);
-    SpaceLiveUpdate update;
+    BattleScene::Update update;
     publish_frame_instances(latest, population, renderer, observations, update);
     if (auto failure = schedule_frame_capture(update)) return UpdateResult::failure(std::move(*failure));
     if (options_.lan && options_.lan_quit_tick) {
@@ -344,6 +360,8 @@ core::Result<SpaceLiveUpdate> LiveSessionView::frame(SpacePopulation& population
             if (frames_ >= *lan_timing_.end_frame + 30) quit();
         }
     }
+    capture_memory_capacity_600(population);
+    capture_memory_capacity(population);
     update.quit = quit_;
     return UpdateResult::success(std::move(update));
 }
@@ -372,6 +390,8 @@ void LiveSessionView::synchronize_frame_lan() {
         const auto view = options_.lan->view();
         if (lan_gameplay_enabled(view)) recovery_input_feedback_.clear();
         static_cast<void>(time_.set_speed_step(view.options.tactical_speed, view.options_tick));
+        if (view.clock_paused && !time_.paused()) static_cast<void>(time_.press_pause(view.world_tick));
+        if (!view.clock_paused && time_.paused()) static_cast<void>(time_.resume(view.world_tick));
     }
     if (options_.lan && options_.lan_quit_tick) {
         const auto now = std::chrono::steady_clock::now();
@@ -403,10 +423,15 @@ void LiveSessionView::collect_frame_events(const std::shared_ptr<const sim::tact
         if (reached.lost_through) {
             event_gap_rows_.push_back("{\"after\": " + std::to_string(reached_tick_) + ", \"through\": "
                                       + std::to_string(*reached.lost_through) + "}");
-            const std::string message = "live session: the events of ticks " + std::to_string(reached_tick_ + 1U)
-                + " to " + std::to_string(*reached.lost_through)
-                + " left the event log before a frame reached them; their hits and deaths are not shown";
-            godot::UtilityFunctions::printerr(godot::String(message.c_str()));
+            const auto gap_count = event_gap_rows_.size();
+            // Keep every gap in the report, but bound diagnostics during sustained frame stalls.
+            if (gap_count == 1U || gap_count % 300U == 0U) {
+                const std::string message = "live session: event log gaps=" + std::to_string(gap_count)
+                    + "; latest ticks " + std::to_string(reached_tick_ + 1U)
+                    + " to " + std::to_string(*reached.lost_through)
+                    + " left the event log before a frame reached them; their hits and deaths are not shown";
+                godot::UtilityFunctions::printerr(godot::String(message.c_str()));
+            }
         }
         battle_frame_.reached = std::move(reached.ticks);
     }
@@ -657,7 +682,7 @@ void LiveSessionView::publish_frame_snapshot(const std::shared_ptr<const sim::ta
             row.first_tick = latest->completed_tick();
             row.owner = instance.owner;
             row.type = instance.type_id;
-            row.facing_yaw = space::instance_yaw_degrees(instance.fixed_transform);
+            row.facing_yaw = live::instance_yaw_degrees(instance.fixed_transform);
         }
         row.last_frame = *instance.arrival;
         if (row.visible_tick == 0 && *instance.arrival >= tactical::arrival_visible_frame) row.visible_tick = latest->completed_tick();
@@ -692,12 +717,12 @@ void LiveSessionView::index_frame_construction(const std::shared_ptr<const sim::
 }
 
 std::optional<core::Diagnostic> LiveSessionView::remember_frame_fog(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
         const std::vector<sim::EntityId>& visible_now,
         const std::vector<sim::EntityId>& drawn_now,
         std::vector<sim::EntityId>& immediate,
-        std::vector<space::FogGhosts::Observation>& observations) {
+        std::vector<live::FogGhosts::Observation>& observations) {
     if (fog_memory_types_.empty() && tables_) {
         for (const auto& type : tables_->units) {
             fog_memory_types_.emplace(battle::type_id(type.id),
@@ -757,7 +782,7 @@ std::optional<core::Diagnostic> LiveSessionView::remember_frame_fog(const std::s
                                       to_float(initial->position.z)};
                     radar.yaw = 0.0;
                     if (const auto transform = sim::math::to_matrix(initial->rotation, initial->position)) {
-                        radar.yaw = space::instance_yaw_degrees(transform.value());
+                        radar.yaw = live::instance_yaw_degrees(transform.value());
                     }
                     radar.retained_model = true;
                     radar.world_half_size = {};
@@ -860,19 +885,19 @@ void LiveSessionView::collect_frame_fades(const std::shared_ptr<const sim::tacti
 }
 
 void LiveSessionView::bind_frame_units(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        const std::vector<space::LiveUnitPose>& poses,
-        const std::vector<space::LiveUnitPose>& spinning,
+        const std::vector<live::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& spinning,
         const std::vector<sim::EntityId>& visible_now) {
     unit_frames_.clear();
     for (const auto* drawn : {&poses, &spinning}) {
-        for (const space::LiveUnitPose& pose : *drawn) {
+        for (const live::LiveUnitPose& pose : *drawn) {
             unit_frames_.emplace(pose.entity, BattleEffects::UnitFrame{pose.position, pose.yaw_degrees, pose.type,
                                                                        pose.roll_degrees, pose.pitch_degrees});
         }
     }
     spinning_drawn_max_ = std::max(spinning_drawn_max_, spinning.size());
     const auto with_ship = std::count_if(spinning.begin(), spinning.end(),
-        [this](const space::LiveUnitPose& pose) {
+        [this](const live::LiveUnitPose& pose) {
             return ship_of_entity_.contains(pose.entity) || launched_ship_of_entity_.contains(pose.entity);
         });
     spinning_ships_max_ = std::max(spinning_ships_max_, static_cast<std::size_t>(with_ship));
@@ -880,7 +905,7 @@ void LiveSessionView::bind_frame_units(const std::shared_ptr<const sim::tactical
     // ghosts are drawn (below) but never selectable or orderable: they are not in visible_now.
     release_dead_slots(*latest);
     visible_.clear();
-    for (const space::LiveUnitPose& pose : poses) {
+    for (const live::LiveUnitPose& pose : poses) {
         if (!pad_visible(pose.entity)) continue;
         if (!options_.reveal && !std::binary_search(visible_now.begin(), visible_now.end(), pose.entity)) continue;
         const auto ship = ship_of(pose.entity, pose.type, pose.owner);
@@ -894,18 +919,18 @@ void LiveSessionView::bind_frame_units(const std::shared_ptr<const sim::tactical
     }
 }
 
-std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(SpacePopulation& population,
-        const std::vector<space::LiveUnitPose>& poses,
-        const std::vector<space::LiveUnitPose>& spinning,
-        std::vector<SpacePopulation::LivePose>& live,
-        std::vector<SpacePopulation::LiveClipPose>& clip_poses) {
+std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(BattleScene& population,
+        const std::vector<live::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& spinning,
+        std::vector<BattleScene::LivePose>& live,
+        std::vector<BattleScene::LiveClipPose>& clip_poses) {
     for (const auto* drawn : {&poses, &spinning}) {
-        for (const space::LiveUnitPose& pose : *drawn) {
+        for (const live::LiveUnitPose& pose : *drawn) {
             // Spawned after tick zero without a launch slot (a squadron's container): nothing composed.
             if (!pad_visible(pose.entity)) continue;
             const auto ship = ship_of(pose.entity, pose.type, pose.owner);
             if (!ship) continue;
-            SpacePopulation::LivePose placed;
+            BattleScene::LivePose placed;
             placed.ship = *ship;
             placed.entity = pose.entity;
             // #506: a squadron craft's pitch too, so it flies nose first (space-fighters FM-02, FM-05).
@@ -957,14 +982,18 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(SpacePopula
             if (pose.instance != nullptr) {
                 if (pose.instance->object_turret) {
                     const auto& turret = *pose.instance->object_turret;
-                    placed.turret = SpacePopulation::LivePose::TurretPose{turret.yaw, turret.pitch,
+                    placed.turret = BattleScene::LivePose::TurretPose{turret.yaw, turret.pitch,
                         pose.instance->object_turret_xy_only, pose.instance->object_turret_barrel};
                 }
-                // WAD-40: draw the mechanical pose that already gates the manual shot.
-                for (const auto& weapon : pose.instance->manual_weapons) {
+                // HPT-07 / WAD-40: draw committed mechanical angles from both HP services.
+                // Manual barrel-less guns retain pitch on the yaw bone; ordinary HPs do not.
+                for (const auto& views : {std::cref(pose.instance->manual_weapons),
+                         std::cref(pose.instance->hardpoint_turrets)}) for (const auto& weapon : views.get()) {
                     if (!weapon.admission_profile || !weapon.admission_profile->manual_turret) continue;
                     placed.hardpoint_turrets.push_back({weapon.hardpoint,
-                        {weapon.yaw, weapon.pitch, false, weapon.admission_profile->manual_turret->barrel}});
+                        {weapon.yaw, weapon.pitch, !weapon.admission_profile->requires_manual_target
+                            && !weapon.admission_profile->manual_turret->barrel,
+                            weapon.admission_profile->manual_turret->barrel}});
                 }
                 for (const tactical::AbilityStatus& ability : pose.instance->abilities) {
                     if (ability.kind == tactical::AbilityKind::defend && ability.active) placed.defend_active = true;
@@ -1026,10 +1055,10 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_units(SpacePopula
     return std::nullopt;
 }
 
-void LiveSessionView::compose_frame_wrecks(SpacePopulation& population,
+void LiveSessionView::compose_frame_wrecks(BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live,
-        std::vector<SpacePopulation::LiveClipPose>& clip_poses) {
+        std::vector<BattleScene::LivePose>& live,
+        std::vector<BattleScene::LiveClipPose>& clip_poses) {
     // A clone shows from the first frame past its unit's last drawn tick, its clip clock
     // counting whole ticks of the presentation clock from there.
     // A clone whose clip did not start (no clip of its type, or it did not bind) is removed at
@@ -1065,9 +1094,9 @@ void LiveSessionView::compose_frame_wrecks(SpacePopulation& population,
 
 void LiveSessionView::compose_frame_projectiles(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& previous,
         const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live) {
+        std::vector<BattleScene::LivePose>& live) {
     // #391: the breakoff props of the hardpoints destroyed so far.
     if (debris_) {
         debris_->pose(battle_frame_.reached, [this](const std::uint64_t tick) { return session_->snapshot_at(tick); },
@@ -1105,7 +1134,7 @@ void LiveSessionView::compose_frame_projectiles(const std::shared_ptr<const sim:
         }
         projectile_models_->observe_projectiles(*previous, *latest, presented_tick_, observer);
         projectile_models_->pose_projectile_models(*previous, *latest, battle_frame_.alpha,
-            [this](const sim::EntityId entity) { return unit_frame(entity); }, live);
+            [this](const sim::EntityId entity) { return unit_frame(entity); }, live, &population, &renderer);
         for (const auto& pose : live) {
             if (projectile_models_->is_projectile_model(pose.ship))
                 population.set_live_opacity(renderer, pose.ship, projectile_models_->projectile_model_opacity(pose.ship));
@@ -1114,9 +1143,9 @@ void LiveSessionView::compose_frame_projectiles(const std::shared_ptr<const sim:
 }
 
 std::optional<core::Diagnostic> LiveSessionView::compose_frame_preview(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live) {
+        std::vector<BattleScene::LivePose>& live) {
     // WR-12..14: cursor-following clones use the same composed model, scale and idle reader
     // as ordinary ships. Emitters were removed from their private placements at composition.
     if (preview_type_ && preview_point_ && reinforcement_allowed()) {
@@ -1136,7 +1165,7 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_preview(const std
                 const auto xy = sim::math::multiply(clone.offset.x, direction.value().y);
                 const auto yx = sim::math::multiply(clone.offset.y, direction.value().x);
                 if (!xx || !yy || !xy || !yx) return frame_failure("reinforcement preview offset overflow");
-                SpacePopulation::LivePose placed;
+                BattleScene::LivePose placed;
                 placed.ship = clone.ship;
                 placed.position = {sim::math::Fixed::from_raw(preview_point_->x.raw() + xx.value().raw() - yy.value().raw()),
                     sim::math::Fixed::from_raw(preview_point_->y.raw() + xy.value().raw() + yx.value().raw()),
@@ -1159,11 +1188,11 @@ std::optional<core::Diagnostic> LiveSessionView::compose_frame_preview(const std
 }
 
 void LiveSessionView::compose_frame_beacons(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        std::vector<SpacePopulation::LivePose>& live) {
+        std::vector<BattleScene::LivePose>& live) {
     for (const auto& beacon : latest->visible_beacons(player_)) {
         const auto slot = beacon_ships_.find(beacon.player);
         if (slot == beacon_ships_.end()) continue;
-        SpacePopulation::LivePose pose;
+        BattleScene::LivePose pose;
         pose.ship = slot->second;
         pose.entity = placed_ships_[pose.ship].live_entity;
         pose.position = beacon.position;
@@ -1172,14 +1201,14 @@ void LiveSessionView::compose_frame_beacons(const std::shared_ptr<const sim::tac
 }
 
 void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        const std::vector<space::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& poses,
         std::map<sim::EntityId, std::array<float, 3>>& visual_scales) {
     // #535: the fog fade's opacity (FW-16 to FW-19) goes to every piece of the ship; the pieces
     // whose adapters carry the unit's opacity uniform (the hull surfaces, as BP-21's shield flash
     // reaches) dither with it, the others ignore it (G-FW14).
-    for (const space::LiveUnitPose& pose : poses) {
+    for (const live::LiveUnitPose& pose : poses) {
         const auto ship = composed_ship(pose.entity);
         if (!ship) continue;
         const auto blend = nebula_blends_.find(pose.entity);
@@ -1234,7 +1263,7 @@ void LiveSessionView::apply_frame_opacity(const std::shared_ptr<const sim::tacti
     }
 }
 
-void LiveSessionView::apply_frame_shield_flashes(SpacePopulation& population,
+void LiveSessionView::apply_frame_shield_flashes(BattleScene& population,
         GodotRenderer& renderer,
         const std::map<sim::EntityId, std::array<float, 3>>& visual_scales) {
     // #427: the shield shells' clock is the presentation clock (seconds).
@@ -1286,10 +1315,10 @@ void LiveSessionView::apply_frame_shield_flashes(SpacePopulation& population,
 }
 
 void LiveSessionView::publish_frame_instances(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        const std::vector<space::FogGhosts::Observation>& observations,
-        SpaceLiveUpdate& update) {
+        const std::vector<live::FogGhosts::Observation>& observations,
+        BattleScene::Update& update) {
     for (const auto& visible : visible_) {
         const auto entry = radar_memories_.find(visible.entity);
         if (entry == radar_memories_.end()) continue;
@@ -1333,7 +1362,7 @@ void LiveSessionView::publish_frame_instances(const std::shared_ptr<const sim::t
     update.instances->insert(update.instances->end(), fog_ghost_instances_.begin(), fog_ghost_instances_.end());
 }
 
-std::optional<core::Diagnostic> LiveSessionView::schedule_frame_capture(SpaceLiveUpdate& update) {
+std::optional<core::Diagnostic> LiveSessionView::schedule_frame_capture(BattleScene::Update& update) {
     if (!options_.real_time) {
         // The clock holds at tick 0 through the warm-up frames; nothing is captured before
         // they have drawn. prepare() admits only capture ticks a frame shows, so the frame that
@@ -1367,7 +1396,8 @@ std::optional<core::Diagnostic> LiveSessionView::schedule_frame_capture(SpaceLiv
         }
         const std::uint64_t end = std::max<std::uint64_t>(options_.end_tick.value_or(0U),
             options_.capture_ticks.empty() ? 0U : options_.capture_ticks.back());
-        update.hold = presented_tick_ + 1.0e-9 < static_cast<double>(end);
+        // An agreed LAN hold freezes the presented tick, so a driven run must not wait for it.
+        update.hold = presented_tick_ + 1.0e-9 < static_cast<double>(end) && !(options_.lan && time_.paused());
         if (battle_end_ && battle_end_->ended_frame) {
             // BEP-02: the battle halted; the run keeps drawing the frames it would have taken to
             // reach its last tick, so the end panel can be looked at and clicked, then stops.
@@ -1395,7 +1425,8 @@ void LiveSessionView::finish() {
     finish_status_ = "stopped";
     if (verify) {
         // The viewer-attached run against a headless run of the same command stream.
-        auto headless = platform::headless_tick_hashes(replay, content_->sensors, content_->durability, content_->motion,
+        auto headless = land_content_ ? platform::headless_tick_hashes(replay, *land_content_)
+            : platform::headless_tick_hashes(replay, content_->sensors, content_->durability, content_->motion,
                                                        content_->combat, victory_, content_->fog, content_->abilities,
                                                        economy_, content_->map_box);
         shutdown_trace::mark("finish: headless replay done");
@@ -1419,6 +1450,13 @@ void LiveSessionView::finish() {
         if (bytes) output.write(reinterpret_cast<const char*>(bytes.value().data()), static_cast<std::streamsize>(bytes.value().size()));
         if (!bytes || !output) finish_status_ = "could not write " + ViewerPath::utf8(options_.replay_path);
         // #459 TP-04: the time track beside the replay; the replay itself is unchanged.
+        if (options_.lan) {
+            auto journal = options_.lan->record_pause_replay();
+            std::filesystem::path journal_path = options_.replay_path; journal_path += ".session";
+            std::ofstream control_output(journal_path, std::ios::binary | std::ios::trunc);
+            if (journal && control_output) control_output.write(reinterpret_cast<const char*>(journal.value().data()), static_cast<std::streamsize>(journal.value().size()));
+            if (!journal || !control_output) finish_status_ = "could not write multiplayer session recording";
+        }
         std::filesystem::path time_path = options_.replay_path;
         time_path += ".time.csv";
         std::ofstream time(time_path, std::ios::binary | std::ios::trunc);

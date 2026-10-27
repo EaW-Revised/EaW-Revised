@@ -39,6 +39,22 @@
 
 namespace eawr::sim::tactical {
 
+void session_detail::Tick::record_damage_change(const LiveUnit& target, const math::Fixed before,
+    const EntityId source, const UnitStage* const staged) {
+    if (!impl_->publish_damage_changes || !target.durability || target.durability->hull <= math::Fixed{}
+        || target.durability->hull >= before) return;
+    const auto* profile = impl_->health_profile(target);
+    if (!profile || profile->max_hull <= math::Fixed{}) return;
+    DamageChange change{{target.state.entity_id, target.state.type_id, target.state.owner}, {},
+        before, target.durability->hull, profile->max_hull};
+    if (staged && source != invalid_entity_id) {
+        const auto found = staged->find(source);
+        if (found != staged->end()) change.source = DamageIdentity{found->second.state.entity_id,
+            found->second.state.type_id, found->second.state.owner};
+    }
+    damage_changes_.push_back(std::move(change));
+}
+
 core::Result<void> session_detail::Tick::special_weapons() {
     if (special_weapons_.empty()) return core::Result<void>::success();
     const auto& staged = tracked_->staged.value();
@@ -424,8 +440,16 @@ core::Result<void> session_detail::Tick::launch_shots() {
                 const auto* target = view.find(event.target);
                 const auto target_radius = detail::projectile_target_radius(view, *shooter, target);
                 if (!target_radius) { errors[index] = target_radius.error(); continue; }
+                // WRA-03 / WWP-48: an object weapon takes its travel limit from
+                // the current targeting range at launch; hardpoint ranges stay independent.
+                std::optional<ShotProfile> ranged_shot;
+                if (event.weapon == object_weapon && shooter->ability_attack_range) {
+                    ranged_shot = *input.shot;
+                    ranged_shot->max_travel = *shooter->ability_attack_range;
+                }
                 auto projectile = detail::launch_projectile(
-                    event, *input.shot, shooter->owner, allow_diminishing_firepower, input.id, input.offset, target_radius.value());
+                    event, ranged_shot ? *ranged_shot : *input.shot, shooter->owner, allow_diminishing_firepower,
+                    input.id, input.offset, target_radius.value());
                 if (!projectile) {
                     errors[index] = detail::diagnostic(diagnostic_codes::worker_failure,
                         "tick " + std::to_string(tick) + " unit " + std::to_string(event.shooter) + ": "
@@ -687,6 +711,7 @@ core::Result<void> session_detail::Tick::deliver_redirected_impact(const EntityI
     auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
     if (!taken) return core::Result<void>::failure(taken.error());
     impl_->track_damage(unit, hull, shields);
+    record_damage_change(unit, hull, attacker, &staged);
     if (!taken.value().cancelled) notify_retaliation(unit, attacker, hit.amount);
     impl_->end_depleted_defend(unit, tick, taken.value().storm_shield_branch);
     if (taken.value().damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
@@ -738,6 +763,7 @@ core::Result<void> session_detail::Tick::deliver_area_impact(const Projectile& p
     auto taken = apply_hit(*profile, *damage_rules, *target->second.durability, hit.value(), tick);
     if (!taken) return core::Result<void>::failure(taken.error());
     impl_->track_damage(target->second, hull, shields);
+    record_damage_change(target->second, hull, projectile.shooter, &staged);
     if (!taken.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.value().amount);
     impl_->end_depleted_defend(target->second, tick, taken.value().storm_shield_branch);
     const auto& damage = taken.value().damage;
@@ -811,6 +837,7 @@ core::Result<void> session_detail::Tick::apply_direct_impact(const UnitStage::it
                 + outcome.error().message));
     }
     impl_->track_damage(target->second, hull_before, shields_before);
+    record_damage_change(target->second, hull_before, projectile.shooter, &staged);
     if (!outcome.value().cancelled) notify_retaliation(target->second, projectile.shooter, hit.amount);
     impl_->end_depleted_defend(target->second, tick, outcome.value().storm_shield_branch);
     // EN-08: only a positive energy drain disables engines; no locomotor means no effect.
@@ -1170,6 +1197,7 @@ core::Result<void> session_detail::Tick::late_impacts() {
         auto taken = apply_hit(*impl_->health_profile(unit), *damage_rules, *unit.durability, hit, tick);
         if (!taken) return core::Result<void>::failure(taken.error());
         impl_->track_damage(unit, hull, shields);
+        record_damage_change(unit, hull, attacker, &staged);
         if (!taken.value().cancelled) notify_retaliation(unit, attacker, hit.amount);
         impl_->end_depleted_defend(unit, tick, taken.value().storm_shield_branch);
         if (taken.value().damage.destroyed_hardpoint) events.push_back(destruction_event(tick,
@@ -1251,6 +1279,7 @@ core::Result<void> session_detail::Tick::late_impacts() {
         const auto taken = apply_hit(*impl_->health_profile(target->second), *damage_rules, *target->second.durability, hit, tick);
         if (!taken) return core::Result<void>::failure(taken.error());
         impl_->track_damage(target->second, hull_before, shields_before);
+        record_damage_change(target->second, hull_before, service.source, &staged);
         if (!taken.value().cancelled) notify_retaliation(target->second, service.source, hit.amount);
         impl_->end_depleted_defend(target->second, tick, taken.value().storm_shield_branch);
         if (taken.value().damage.destroyed_hardpoint)
@@ -1263,6 +1292,48 @@ core::Result<void> session_detail::Tick::late_impacts() {
             impl_->release_beam(source->second, AbilityKind::energy_weapon, tick);
         }
     }
+    }
+    // WSH-09: a negative automatic Heal_Amount is passive damage. Victims are selected from immutable inputs in
+    // workers; deadlines and damage commit serially in source then victim order, through the scripted-damage hit
+    // route, so death credit, redirection and take-damage modes follow the beam rules.
+    // Without damage rules nothing is delivered and no deadline moves, so a later rules table starts clean.
+    if (damage_rules != nullptr) {
+        std::vector<TacticalSession::Impl::PassiveDamagePulse> pulses;
+        if (auto selected = impl_->select_passive_damage(staged, arrivals, tick, executor, pulses); !selected) return selected;
+        auto& pulse_events = targets_->combat_events.value();
+        for (const auto& pulse : pulses) {
+            const auto source = staged.find(pulse.source);
+            // A source or victim killed earlier in this tick (an earlier pulse included) takes part no further.
+            if (source == staged.end() || !source->second.abilities || !source->second.durability
+                || source->second.durability->hull.raw() <= 0) continue;
+            const auto& source_profile = *impl_->abilities.find(source->second.state.type_id);
+            const auto& handler = source_profile.special[pulse.slot];
+            if (pulse.target == invalid_entity_id) {
+                // WSH-06: a due service moves its deadline before the scan, even with no victim.
+                source->second.abilities->special.slots[pulse.slot].next_service_frame = tick + handler.heal_interval_frames;
+                continue;
+            }
+            // Two auras on one single target: a lethal first pulse takes the kill, later pulses this tick are dropped
+            // (accepted, pinned by the shared-victim test); the next due tick picks the next enemy.
+            const auto target = staged.find(pulse.target);
+            if (target == staged.end() || !target->second.durability
+                || target->second.durability->hull.raw() <= 0) continue;
+            Hit hit{math::Fixed::from_raw(-handler.heal_amount.raw()), impl_->abilities.passive_damage_type, false, true, true,
+                hull_target, false, true};
+            const auto caused = impl_->caused_damage(source->second.cause_damage_mode, source->second.state.owner);
+            if (!caused) return core::Result<void>::failure(caused.error());
+            hit.cause_damage_multiplier = caused.value();
+            pulse_events.push_back({tick, CombatEventKind::heal_pulse, source->second.state.entity_id,
+                static_cast<std::uint32_t>(pulse.slot), target->second.state.entity_id, hull_target,
+                source->second.state.position, target->second.state.position});
+            const auto owner = source->second.state.owner;
+            auto redirected = redirect_damage(pulse.target, hit, [&](const EntityId id, Hit share) {
+                return deliver_redirected(id, share, owner, pulse.source);
+            });
+            if (!redirected) return core::Result<void>::failure(redirected.error());
+            if (redirected.value()) continue;
+            if (auto delivered = deliver_redirected(pulse.target, hit, owner, pulse.source); !delivered) return delivered;
+        }
     }
     // WLS-02: immutable per-owner checks, followed by shield-only drain in source order.
     if (std::any_of(impl_->abilities.profiles.begin(), impl_->abilities.profiles.end(), [](const auto& profile) {
@@ -1348,24 +1419,27 @@ core::Result<void> session_detail::Tick::service_self_destruct(UnitStage& staged
         auto& unit = found->second;
         const auto* profile = impl_->abilities.find(unit.state.type_id);
         const auto slot = profile != nullptr ? ability_slot(*profile, AbilityKind::self_destruct) : std::nullopt;
-        if (!slot || !profile->abilities[*slot].spawned || !unit.abilities->slots[*slot].active) continue;
-        const auto& spawn = *profile->abilities[*slot].spawned;
-        Projectile blast;
-        blast.id = next_projectile++;
-        blast.shooter = id;
-        blast.owner = unit.state.owner;
-        blast.weapon = object_weapon;
-        blast.target_hardpoint = no_hardpoint;
-        blast.position = unit.state.position;
-        blast.damage = spawn.damage;
-        blast.damage_type = spawn.damage_type;
-        blast.shield_damage = spawn.shield_damage;
-        blast.hitpoint_damage = spawn.hitpoint_damage;
-        blast.blast = spawn.blast;
-        blast.source_damage_factor = math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[1].raw());
-        impl_->ability_spawns.push_back({blast.id, spawn.type, AbilityKind::self_destruct, unit.state.owner, id,
-            unit.state.position, unit.state.rotation, tick + 1, false, {}});
-        projectiles.push_back(blast);
+        if (!slot || !unit.abilities->slots[*slot].active) continue;
+        // WHE-61/WSD-01: a missing blast skips creation, never the owner's death.
+        if (profile->abilities[*slot].spawned) {
+            const auto& spawn = *profile->abilities[*slot].spawned;
+            Projectile blast;
+            blast.id = next_projectile++;
+            blast.shooter = id;
+            blast.owner = unit.state.owner;
+            blast.weapon = object_weapon;
+            blast.target_hardpoint = no_hardpoint;
+            blast.position = unit.state.position;
+            blast.damage = spawn.damage;
+            blast.damage_type = spawn.damage_type;
+            blast.shield_damage = spawn.shield_damage;
+            blast.hitpoint_damage = spawn.hitpoint_damage;
+            blast.blast = spawn.blast;
+            blast.source_damage_factor = math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[1].raw());
+            impl_->ability_spawns.push_back({blast.id, spawn.type, AbilityKind::self_destruct, unit.state.owner, id,
+                unit.state.position, unit.state.rotation, tick + 1, false, {}});
+            projectiles.push_back(blast);
+        }
         events.push_back(destruction_event(tick, EventKind::unit_destroyed, unit.state, 0, unit.state.owner));
         killed.push_back(unit.state);
         impl_->adjust_owned(unit.state, false);
@@ -1488,6 +1562,7 @@ core::Result<void> session_detail::Tick::service_buzz_droids(UnitStage& staged, 
         const auto taken = apply_hit(*impl_->health_profile(target->second), *damage_rules, *target->second.durability, hit, tick);
         if (!taken) return core::Result<void>::failure(taken.error());
         impl_->track_damage(target->second, hull_before, shields_before);
+        record_damage_change(target->second, hull_before, attacker, &staged);
         if (!taken.value().cancelled) notify_retaliation(target->second, attacker, hit.amount);
         impl_->end_depleted_defend(target->second, tick, taken.value().storm_shield_branch);
         if (taken.value().damage.destroyed_hardpoint)

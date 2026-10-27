@@ -33,6 +33,32 @@ struct LeadingNumber {
 // outside Q24: the caller reports it, it never becomes a default.
 [[nodiscard]] std::optional<LeadingNumber> leading_number(std::string_view text);
 
+// How FoC reads an integer-typed game constant (#4992): the C `atoi` of the text, kept as 32 bits with
+// no range or sign check. Leading whitespace and one sign are skipped, the leading digits are read and
+// anything after them ignored (`2.5` reads 2, `-0.5` reads 0, text with no digits reads 0). A value
+// beyond 32 bits saturates. An unsigned consumer reads the negative result as its 32-bit wrap (`-1`
+// is 4294967295).
+[[nodiscard]] std::int32_t integer_constant(std::string_view text) noexcept;
+// LSL-P1: a float field as the retail parser reads it (the C runtime's decimal float parse). The
+// leading number counts and trailing text is ignored; a value with no leading number (`abc`, `-`)
+// reads 0; a magnitude beyond the fixed range (also `inf`) saturates at the largest fixed value of
+// its sign, where retail stores an infinity. Never fails: nullopt only for a placeholder (AU-80/81).
+struct FloatValue {
+    sim::math::Fixed value;
+    bool exact{true}; // false when trailing text was ignored, no number was found or the value saturated
+};
+[[nodiscard]] std::optional<FloatValue> float_value(std::string_view text);
+
+// LSL-P2: a signed integer field as the retail parser reads it (the C runtime's integer parse):
+// leading whitespace, one optional sign, the leading decimal digits; anything else ends the number
+// (`2.9` reads 2, `-0.5` reads 0, `abc` reads 0); beyond the 32-bit range it saturates. Never fails:
+// nullopt only for a placeholder.
+struct IntegerValue {
+    std::int32_t value{};
+    bool exact{true}; // false when trailing text was ignored, no digits were found or the value saturated
+};
+[[nodiscard]] std::optional<IntegerValue> integer_value(std::string_view text);
+
 // AU-82 / ML-26: list tags take every occurrence, but differ in how a variant's occurrences meet the list
 // it inherits.
 enum class ListRule : std::uint8_t {

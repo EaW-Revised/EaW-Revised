@@ -124,7 +124,7 @@ file is excluded and contains no hardpoint-response tag.
 | SND-30 | Weapon-fire, impact, ordinary death, spin death and hardpoint-explosion audio retain BA-14..17. Hardpoint fire uses `Fire_SFXEvent`, else parent `SFXEvent_Fire`; immediate route requires appearance delay <1. Armor multiplier <=0.75 selects authored reduced-by-armor detonation, otherwise ordinary detonation; a fully absorbed shield hit is ordinary detonation. | AU-14..18; BA-14..17 same; [weapons](weapons.md) and [capital combat](capital-combat.md) own shot/damage rules. | **Same** covered event routes, prepare/events; delayed fire audio is an existing audit gap. |
 | SND-31 | Hardpoint loss warns the local owner only while parent lives and loss is not self-destruct. If no weapon hardpoint stands, use `SFXEvent_Hardpoint_All_Weapons_Destroyed`; otherwise if none of the destroyed type stands, use its `SFXEvent_Hardpoint_Destroyed` entry. Explosion audio is a separate spatial cue. | WCC-63, debug build WC-06; BA-17 misses warning. | **Missing**, events hardpoint destruction plays explosion only; combat-warning gap. |
 | SND-32 | Killing a unit plays `SFXEvent_Unit_Lost` for its local owner after the kill/death sequence; it does not require selection. | WCC-70, debug build WC-09; BA-16 misses warning. | **Missing**, events death branch plays death effects only. |
-| SND-33 | A hit crossing displayed health thresholds plays local owner's `SFXEvent_Health_Low_Warning`/`Critical_Warning`, or local attacker's type's enemy-damaged equivalents. Stock `Health_Low_Percent_Threshold=0.33`, `Health_Critical_Percent_Threshold=0.10`; displayed health is WCC-16, including combined destroyable-hardpoint health where applicable. | WCC-16, WCC-54; WC-04/WC-18; XML SND-X01. | **Missing**, events has no warning consumer; thresholds and repeat crossing must use the combat contract, not hull-only guesses. |
+| SND-33 | After ordinary damage, a surviving unit crossing an authored hull-health threshold requests its local owner's low/critical type cue, otherwise its current local source's enemy-damaged type cue. Critical takes precedence; healing above a threshold re-arms a later crossing. This uses ordinary health, **not** WCC-16 displayed hardpoint health. | Debug build HW-E01..05, by roles below; XML SND-X01. | **Partial**: standalone and campaign-hosted durable tactical-object hull warnings use ordered transient receipts, a pure selector and un-fogged 2D requests. Environmental identities are published, but ordinary obstacle cue preparation remains absent (legacy EAWR-4909) (legacy EAWR-4902). Removed shooters are intentionally silent for enemy cues; land and team-container aggregate (legacy EAWR-4887) remain gaps. No audible capture acceptance. |
 | SND-34 | Frame-35 hyperspace arrival starts the arriving object's **owner faction** `SFXEvent_Arrive_From_Hyperspace` on the object when authored, including AI-owned objects. Visibility/attached silence follows arrival reveal and SND-11; placement/en-route acknowledgements are separate. | WR-37, WR-E17/E18; WPR-40 same. | **Missing** at base; production/arrival implementation owns immutable frame-35 notifications. |
 | SND-35 | Accepted buy and completion use type `Build_Speech_Underway`/`Build_Speech_Completed` first, then tactical SFX, then generic build SFX, for local owner only. Upgrade objects follow the same completion contract. | WPR-22, WPR-30; WP-09/WP-11/WP-20; same earlier walk. | **Partial**, BA-60/73/74: local ordinary space production uses retained accepted-type/completion notifications and queues authored English speech before tactical/generic SFX; campaign/land callers remain separate. |
 | SND-36 | Station replacement chooses local faction starbase-upgraded, ally-upgraded or enemy-upgraded event from relationship to upgraded owner. Reinforcement-cap refusal chooses faction tactical-unit-cap cue; pane opening, placement and en-route use their own events. | WPR-52; WR-07, WR-11, WR-16; sourced earlier walks. | **Differs**, events has upgraded cue but reinforcement UI/cap routes remain separate gaps. |
@@ -132,6 +132,85 @@ file is excluded and contains no hardpoint-response tag.
 | SND-70 | In simple-space and fighter hyperspace-away service, when remaining movement delay equals **90 frames**, try the type-specific retreat engine-jump cue, else owner faction `SFXEvent_Exit_Into_Hyperspace`. Request it at the current fixed position, before that call moves the craft and decrements delay. The type getter resolves a distinct event reference (SND-E75); no literal corresponding type tag is authored in the effective XML inventory. No local-owner or explicit fog-test object is supplied, so SND-11's attached-object fog multiplier does not apply. This is not arrival frame 35 or the retreat countdown start. | Debug build SND-E64/E65; WR-44 supplies retreat orchestration; missing from BA. | **Missing** fixed-position exit notification in events; retreat/arrival sound interface. |
 | SND-38 | Tactical build-queue cancellation for the local owner tries type `Build_Speech_Stopped`, then `SFXEvent_Tactical_Build_Cancelled`, then generic `SFXEvent_Build_Cancelled`. The separate generic production front-cancel route queues authored stopped speech before its local-owner check; its tactical SFX branch has no generic fallback. These caller contracts must not be collapsed. | Debug build SND-E15/E16; extends WPR cancellation interface. | **Partial**, BA-61/73/74: local tactical queue cancellation queues authored English stopped speech before tactical/generic SFX. The separate generic campaign production caller remains outside M2. |
 | SND-39 | Local-player service in tactical mode asks whether any reinforcement room remains, with no particular unit type. If its retained full flag is false and room is unavailable, try faction `SFXEvent_Tactical_Pop_Cap_Reached`, then retain the new full/not-full state. This differs from `SFXEvent_Tactical_Unit_Cap_Reached` on a rejected particular reinforcement request (SND-36); neither is a periodic ambient warning. | Debug build SND-E17/E18; XML SND-X01. | **Missing**, events has no tactical population transition consumer at base; production/cap sound gap. |
+
+
+### Health warning delivery contract (SND-33 / WCC-54)
+
+A fresh debug-build walk corrects the earlier displayed-health claim. HW-E01 is the
+ordinary damage-delivery role and warning tail; HW-E02 is the distinct displayed-health
+getter and its callers; HW-E03 is ordinary hull/team-health selection; HW-E04 is the
+nonpositional event-pointer dispatch overload; HW-E05 is the team average and direct-damage
+bypass. The displayed-health targeting/UI rule WCC-16 remains unchanged.
+
+For one ordinary delivery, let before and after be hull divided by current maximum hull.
+Require `0 < after < before`. Request critical when `before > critical && after <= critical`;
+otherwise request low when `before > low && after <= low`. A single hit crossing both
+requests only critical. Starting exactly at the threshold does not cross it again.
+No warning flag or health-specific timer is retained: healing above the threshold permits
+another down-crossing. Healing itself, shield-only loss, hardpoint-only loss and a lethal
+hit do not request a cue. Later hull-cap service is not itself this damage-delivery caller.
+
+`Health_Low_Percent_Threshold` and `Health_Critical_Percent_Threshold` come from authored
+GameConstants (stock 0.33 and 0.10). Missing/invalid values disable the consumer with a
+reported diagnostic; there are no literal fallback thresholds or invented cooldowns.
+The local target's type supplies `SFXEvent_Health_Low_Warning` or
+`SFXEvent_Health_Critical_Warning`, even when the source is also local. Otherwise a
+currently existing local source supplies its own `SFXEvent_Enemy_Damaged_Health_Low_Warning`
+or `SFXEvent_Enemy_Damaged_Health_Critical_Warning`. There is no alliance/enemy, selection,
+hero, capital or fog predicate here. A projectile resolves its current shooter; an absent
+shooter cannot supply an enemy-damaged cue. Delayed deliveries likewise have no source
+object (WAD-26/EUS-15), so retained kill ownership alone cannot supply a source-type cue.
+A missing target cue does not fall back to the source. Missing events stay silent.
+
+**Campaign-hosted battles:** `campaign::GameTick` forwards each child step's transient
+damage changes through the campaign lifecycle to the galactic live session's bounded battle
+journal. The same presentation selector consumes standalone and campaign-hosted space facts;
+campaign state, hashes and replay/checkpoint encoding do not include this notification span.
+
+**Removed-shooter intentional silence (HW-E01):** the warning tail requires a currently
+resolved source object to read its owner and source-type cue. A projectile whose shooter has
+been removed cannot provide an enemy-damaged cue. Its retained `owner` still serves difficulty
+and kill attribution (WHE-51), but does not substitute for that source object in audio.
+Target-local own warnings still take precedence and work. The earlier gap disclosure was
+incorrect; synthetic coverage preserves this sourced silence without a canonical change.
+
+**Environmental source and retained obstacle binding gap (WHZ-14)** (legacy EAWR-4909) (legacy EAWR-4902):
+ordinary asteroid deliveries retain the field's current identity/type/owner alongside the target's
+hull change. The existing ordered commit resolves that source in its sorted service inputs only
+when a receipt was appended. This is a preparatory identity seam, not complete obstacle audio.
+
+Ordinary fields live in `UnitTables.obstacles`, whose footprints are built separately from
+`tables.units`. `BattleAudio::prepare` currently enumerates only `tables.units` for health cues;
+it does not bind ordinary obstacle types. Consequently `types_.find(field.type_id)` has no entry,
+so a locally owned mod obstacle with an authored enemy-damaged warning cannot request that cue,
+despite its correct source identity. Stock fields have no local owner or authored enemy cue.
+The coordinator retained this binding gap while the build pool brake is on. The environmental
+identity change alone does not enable ordinary-obstacle warnings; it remains in the validated
+C++ head as preparation for the missing binding. Synthetic field tests check receipt identity and
+manually supplied cue policy, not actual obstacle preparation. Target-local own warnings on
+supported durable units retain precedence; no audible capture acceptance is claimed.
+
+Dispatch is ordinary unforced **2D WAV SFX**, with no attachment or explicit fog-test
+object, through the normal SFX registry and queue. Authored priority, overlap, instances,
+probability and category admission remain authoritative; these are not MP3 speech streams.
+Request success is not audible playback. The warning path hardcodes no threshold or cooldown.
+
+The remake records immutable hull/identity facts at existing ordered damage commits, retains
+them in TacticalTick and the bounded LiveEventLog, and selects/plays cues only in presentation.
+Published receipts retain their captured values independently of snapshot retention and later
+object destruction; a source already removed before damage delivery has the intentional silence above. Facts never enter
+canonical snapshots, replay or checkpoints. No new serial whole-world pass or sim-to-audio
+dependency is introduced. The diagnostic publication switch changes only transient output.
+Synthetic tests compare receipt order on 1/2/4/8 workers and canonical bytes with publication
+on/off, and cover crossing/re-arm, precedence, mod thresholds and unauthored cues.
+
+HW-E03/E05 also establish that a team-container ordinary-health getter averages current
+members' ordinary health fractions (empty team gives zero). Therefore the generic warning
+tail can read an aggregate when damage enters on a team container. This project does not
+model durable damage to its squadron containers, so that caller remains a sourced follow-up (legacy EAWR-4887);
+no synthetic aggregate warning is invented for damage to an individual craft. The separate
+direct-damage bypass has no warning dispatch of its own. This contract is debug-build evidence
+and synthetic testing only; audible timing/mix acceptance still requires a capture.
 
 ## Advisor, announcer and ambience
 

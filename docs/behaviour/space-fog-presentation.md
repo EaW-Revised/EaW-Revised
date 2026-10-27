@@ -19,7 +19,7 @@
   the engine-free rules) and the viewer's `LiveFogView` (the plane). Presentation only: nothing is
   read back into the simulation and the headless hashes are unchanged.
 - fog visibility fades: how a unit itself fades as the fog reveals or hides it (not the plane) is
-  `presentation::space::UnitFade` (`include/eawr/presentation/space/unit_fade.hpp`), driven by
+  `presentation::live::UnitFade` (`include/eawr/presentation/live/unit_fade.hpp`), driven by
   `LiveSessionView::frame()` and applied through `GodotRenderer::set_unit_opacity`. Also
   presentation only.
 

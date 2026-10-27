@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/net/galactic_clock_policy.hpp"
 #include "eawr/net/lockstep_session.hpp"
 
 #include <algorithm>
@@ -13,15 +14,16 @@ namespace eawr::net {
 // not a transport message kind; the enclosing batch authenticates its seat/key.
 inline constexpr std::string_view match_options_domain = "EAWR-MATCH-OPTIONS-1";
 inline constexpr std::uint32_t match_speed_choices = 5; // MP-06
-// MP-06 / MP-U1: local requests are limited to two per 45-second window.
-// Accepted timestamps expire only once their age exceeds 45000 ms.
+// MP-06 / MP-U1: local speed requests share ClockThrottle's budget (#4574).
+// Ticks are session ticks (30 per session second), as in ClockThrottle. An accepted tick expires once its age
+// exceeds the window.
 class MatchSpeedWindow {
 public:
-    bool accept(std::uint64_t now_ms) {
-        while (!accepted_.empty() && now_ms >= accepted_.front() && now_ms - accepted_.front() > 45'000)
+    bool accept(std::uint64_t session_tick) {
+        while (!accepted_.empty() && session_tick >= accepted_.front() && session_tick - accepted_.front() > ClockThrottle::window_ticks)
             accepted_.pop_front();
-        if (accepted_.size() >= 2) return false;
-        accepted_.push_back(now_ms);
+        if (accepted_.size() >= ClockThrottle::speed_changes_per_window) return false;
+        accepted_.push_back(session_tick);
         return true;
     }
 private:

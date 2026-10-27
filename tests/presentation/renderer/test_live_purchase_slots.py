@@ -11,6 +11,77 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_live_launch_slot_roster as fixture
 
 
+def interleaved_projectile_harness(harness):
+    harness = harness.split('\nnamespace {\nLiveSessionView session', 1)[0]
+    harness = harness.replace('bool launch_slot = false,', 'bool death_clone = false, projectile_slot = false; bool launch_slot = false,')
+    harness = harness.replace('''    std::optional<DeathClone> prepare_death_clone(const vfs::Vfs&, const data::Catalog&, std::size_t, sim::EntityId) {
+        return std::nullopt;
+    }''', '''    std::optional<DeathClone> prepare_death_clone(const vfs::Vfs&, const data::Catalog&, std::size_t source, sim::EntityId) {
+        if (placed_ships_[source].object_id != "Acclamator_Assault_Ship") return std::nullopt;
+        SpacePopulation::PlacedUnit clone;
+        clone.object_id = "Acclamator_Death_Clone";
+        clone.death_clone = true;
+        const auto ship = placed_ships_.size();
+        placed_ships_.push_back(clone);
+        return DeathClone{ship};
+    }''')
+    return harness + r'''
+int main() {
+    for (const bool campaign : {false, true}) {
+        LiveSessionView view;
+        view.tables_.emplace(); view.start_.emplace(); view.setup_.emplace();
+        view.tables_->units = {{"Acclamator_Assault_Ship"}, {"TIE_Fighter"}, {"TIE_Bomber"}};
+        if (campaign) view.setup_->campaign.emplace();
+        view.start_->players.push_back({{1, 0, 7}, true, std::nullopt});
+        // One initial hull: the population and arrival owner begin with matching indices.
+        SpacePopulation::PlacedUnit initial;
+        initial.object_id = "Existing_Hull";
+        view.placed_ships_.push_back(initial);
+        SpacePopulation population; GodotRenderer renderer;
+        population.composed = view.placed_ships_;
+        const vfs::Vfs filesystem; const data::Catalog catalog;
+        view.arrival_slots_.population = &population; view.arrival_slots_.renderer = &renderer;
+        view.arrival_slots_.filesystem = &filesystem; view.arrival_slots_.catalog = &catalog;
+        view.arrival_slots_.remaining = 20;
+        const auto proxies = [&] {
+            // The projectile owner appends directly to the population, just like append_model_proxies.
+            SpacePopulation::PlacedUnit proxy;
+            proxy.object_id = "Missile_Proxy"; proxy.projectile_slot = true;
+            for (int i = 0; i < 4; ++i) population.composed.push_back(proxy);
+        };
+        proxies();
+        sim::EntityId entity = 100;
+        for (const std::string type : {"Acclamator_Assault_Ship", "TIE_Fighter", "TIE_Bomber", "Acclamator_Assault_Ship"}) {
+            const auto expected = population.composed.size();
+            const auto id = entity++;
+            view.arrivals_.emplace(id, 1);
+            view.arrival_slots_.purchases.emplace(1, skirmish::type_id(type));
+            const auto slot = view.ship_of(id, skirmish::type_id(type), 1);
+            std::cout << "campaign=" << campaign << " type=" << type << " expected=" << expected
+                      << " actual=" << (slot ? std::to_string(*slot) : "missing") << "\n";
+            if (!slot || *slot != expected) return 1;
+            if (population.composed[*slot].object_id != type || population.composed[*slot].death_clone
+                || population.composed[*slot].projectile_slot || view.placed_ships_[*slot].object_id != type) return 2;
+            if (type == "Acclamator_Assault_Ship") {
+                const auto& clone = view.death_clones_.at(id);
+                if (clone.ship != *slot + 1 || population.composed[clone.ship].object_id != "Acclamator_Death_Clone"
+                    || !population.composed[clone.ship].death_clone) return 3;
+            }
+            // Another independent projectile expansion between every pair of arrivals.
+            proxies();
+        }
+        for (const auto& [id, slot] : view.launched_ship_of_entity_) {
+            if (population.composed[slot].object_id != view.placed_ships_[slot].object_id) return 4;
+            const auto type = skirmish::type_id(view.placed_ships_[slot].object_id);
+            if (view.ship_of(id, type, 1) != slot) return 5;
+        }
+        if (view.arrival_slots_.grown != 4 || view.slotless_units() != 0) return 6;
+    }
+    return 0;
+}
+'''
+
+
 def purchase_harness(harness, empty_owner=0, empty_start=False):
     harness = harness.split('\nnamespace {\nLiveSessionView session', 1)[0]
     # Keep the compile helper's storage contract independently covered by its original test.
@@ -413,7 +484,119 @@ def installed_harness(harness, profiles):
     return harness + '\n'.join(rows)
 
 
+def large_launch_harness(harness):
+    harness = retained_clone_harness(harness).split('int main() {', 1)[0]
+    return harness + r'''
+int main() {
+    const vfs::Vfs filesystem; const data::Catalog catalog;
+    {
+        LiveSessionView legacy;
+        legacy.tables_.emplace(); legacy.setup_.emplace(); legacy.start_.emplace();
+        legacy.tables_->units = {{"Carrier"}, {"CraftA"}, {"CraftB"}, {"Team"}};
+        legacy.tables_->units.back().kind = units::UnitKind::squadron;
+        legacy.tables_->units.back().members = {{"CraftB"}, {"CraftA"}, {"CraftB"}};
+        legacy.start_->units = {{{100, skirmish::type_id("Carrier"), 1, {}}, {}, "Carrier"}};
+        legacy.start_->launches = {{100, 1, "Team", 64}};
+        const auto plan = battle::plan_start_arrivals(*legacy.start_, *legacy.tables_);
+        if (plan.rows.size() != 192) return 16;
+        legacy.prepare_launch_slots(filesystem, catalog, plan);
+        SpacePopulation population; GodotRenderer renderer;
+        legacy.arrival_slots_.population = &population; legacy.arrival_slots_.renderer = &renderer;
+        legacy.arrival_slots_.remaining = 8;
+        for (std::size_t index = 0; index < 192; ++index) {
+            const auto type = skirmish::type_id(index % 3 == 1 ? "CraftA" : "CraftB");
+            if (plan.rows[index].simultaneous_maximum != 1 || plan.rows[index].type != (index % 3 == 1 ? "CraftA" : "CraftB")
+                || legacy.launch_slots_[index].type != type || legacy.ship_of(1000 + index, type, 1) != index) return 17;
+        }
+        if (legacy.arrival_slots_.grown || legacy.arrival_slots_.remaining != 8 || population.appended) return 18;
+    }
+    // Distinct launch count and member count: 65 launches, then one mixed 186-craft team.
+    for (const int launches : {64, 65, 186, 1}) {
+        const bool mixed = launches == 1;
+        LiveSessionView view;
+        view.tables_.emplace(); view.setup_.emplace(); view.start_.emplace();
+        view.tables_->units = {{"Carrier"}, {"CraftA"}, {"CraftB"}, {"Team"}};
+        auto& team = view.tables_->units.back();
+        team.kind = units::UnitKind::squadron;
+        for (int index = 0; index < (mixed ? 186 : 1); ++index)
+            team.members.push_back({mixed && index % 3 == 0 ? "CraftB" : "CraftA"});
+        view.start_->players = {{{1, 0, 7}, false, std::nullopt}, {{2, 1, 8}, false, std::nullopt}};
+        view.start_->units = {{{100, skirmish::type_id("Carrier"), 1, {}}, {}, "Carrier"}};
+        view.start_->launches = {{100, 1, "Team", launches}};
+        for (const auto& type : view.tables_->units) view.presentation_types_.emplace(skirmish::type_id(type.id), &type);
+        view.prepare_launch_slots(filesystem, catalog, selected_arrivals(view));
+        const auto count = mixed ? std::size_t{186} : static_cast<std::size_t>(launches);
+        const auto warm = mixed ? count : std::min(count, std::size_t{64});
+        if (view.launch_slots_.size() != warm || !view.arrival_slots_.purchases.empty()) return 1;
+        SpacePopulation population; GodotRenderer renderer;
+        view.arrival_slots_.population = &population; view.arrival_slots_.renderer = &renderer;
+        const auto type = [&](std::size_t index) { return skirmish::type_id(mixed && index % 3 == 0 ? "CraftB" : "CraftA"); };
+        std::set<std::size_t> drawn;
+        // Launches never wait for the per-frame arrival budget: every craft is drawn in its launch frame, the budget stays unspent.
+        for (std::size_t frame = 0; frame < 2; ++frame) {
+            view.arrival_slots_.remaining = 8;
+            for (std::size_t index = 0; index < count; ++index)
+                if (const auto ship = view.ship_of(1000 + index, type(index), 1)) drawn.insert(*ship);
+            if (population.appended != view.arrival_slots_.grown || view.arrival_slots_.remaining != 8) return 2;
+            if (drawn.size() != count) return 3;
+            if (!view.arrival_slots_.undrawn.empty()) return 4;
+            if (view.slotless_units() != 0) return 15;
+        }
+        if (drawn.size() != count || view.arrival_slots_.grown != count - warm || view.slotless_units()) return 5;
+        const auto bindings = view.launched_ship_of_entity_;
+        const auto storage = view.placed_ships_.data();
+        view.arrival_slots_.remaining = 0;
+        for (std::size_t index = 0; index < count; ++index)
+            if (view.ship_of(1000 + index, type(index), 1) != bindings.at(1000 + index)) return 6;
+        if (storage != view.placed_ships_.data()) return 7;
+        // An active death clone keeps its slot; after finite expiry all slots return.
+        view.active_clones_.push_back({1000});
+        const tactical::TacticalSnapshot empty;
+        view.release_dead_slots(empty);
+        if (view.launched_ship_of_entity_.size() != 1 || view.slots_released_ != count - 1) return 8;
+        view.active_clones_.clear();
+        view.release_dead_slots(empty);
+        for (std::size_t index = 0; index < count; ++index) {
+            const auto ship = view.ship_of(2000 + index, type(index), 1);
+            if (!ship || !drawn.contains(*ship)) return 9;
+        }
+        if (view.arrival_slots_.grown != count - warm || view.slots_released_ != count) return 10;
+        // A different owner cannot consume this launch pool, even with the same type.
+        view.arrival_slots_.remaining = 8;
+        if (view.ship_of(3000, type(0), 2) || view.arrival_slots_.remaining != 8) return 11;
+        // Renderer exhaustion is diagnosed once; retrying never grows broken slots.
+        population.drawn = false;
+        const auto size = view.placed_ships_.size();
+        for (int retry = 0; retry < 3; ++retry)
+            if (view.ship_of(4000, type(0), 1)) return 12;
+        if (view.placed_ships_.size() != size + 1 || view.arrival_slots_.failure != "model unavailable"
+            || view.arrival_slots_.remaining != 8 || !view.arrival_slots_.failed.contains({1, type(0)})) return 13;
+    }
+    // The planner must not allocate one row per launch, even at the count representation's limit.
+    LiveSessionView view;
+    view.tables_.emplace(); view.tables_->units = {{"Craft"}};
+    view.start_.emplace();
+    view.start_->launches = {{100, 1, "Craft", std::numeric_limits<std::int32_t>::max()}};
+    const auto plan = battle::plan_start_arrivals(*view.start_, *view.tables_);
+    if (plan.rows.size() != 1 || plan.rows.front().simultaneous_maximum != 2147483647U) return 14;
+    std::cout << "65 launches and 186 mixed craft: eight growth attempts/frame, deferred births recovered, death/reuse, exhaustion diagnosed\n";
+    return 0;
+}
+'''
+
+
 class PurchaseSlots(unittest.TestCase):
+    def test_projectile_growth_keeps_hull_clone_and_fighter_arrival_indices(self):
+        with patch.object(fixture, 'HARNESS', interleaved_projectile_harness(fixture.HARNESS)):
+            fixture.LiveLaunchSlotRoster().test_campaign_reserves_all_get_a_launch_slot()
+
+    def test_campaign_and_skirmish_capacity_plans(self):
+        fixture.LiveLaunchSlotRoster().test_campaign_reserves_all_get_a_launch_slot()
+
+    def test_large_skirmish_launches_grow_with_bounded_work_and_reuse(self):
+        with patch.object(fixture, 'HARNESS', large_launch_harness(fixture.HARNESS)):
+            fixture.LiveLaunchSlotRoster().test_campaign_reserves_all_get_a_launch_slot()
+
     def test_unlisted_mid_battle_campaign_type_gets_a_draw_slot(self):
         with patch.object(fixture, 'HARNESS', unlisted_arrival_harness(fixture.HARNESS)):
             fixture.LiveLaunchSlotRoster().test_campaign_reserves_all_get_a_launch_slot()

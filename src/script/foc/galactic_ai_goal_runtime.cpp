@@ -1,6 +1,8 @@
 #include "ai_engine_internal.hpp"
 #include "galactic_ai_goals.hpp"
 #include "galactic_ai_actions.hpp"
+#include "eawr/script/numeric/backend.hpp"
+#include "eawr/script/numeric/decimal.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -111,6 +113,21 @@ std::vector<GalacticGoalIdentity> Engine::galactic_goals(tactical::PlayerId id) 
     const auto* player = player_ai(id); if (!player || !player->galactic) return result;
     for (const auto* goals : {&player->active, &player->proposed}) for (const auto& goal : *goals)
         if (!goal.finished) result.push_back(identity(*player, goal, *this));
+    return result;
+}
+std::vector<Engine::GalacticGoalObservation> Engine::galactic_goal_observations(tactical::PlayerId id) const {
+    std::vector<GalacticGoalObservation> result;
+    const auto* player = player_ai(id); if (!player || !player->galactic) return result;
+    for (const auto* goals : {&player->active, &player->proposed}) for (const auto& goal : *goals) {
+        if (goal.finished) continue;
+        GalacticGoalObservation row;
+        row.goal = goal.id; row.target = goal.target; row.running_plan = goal.plan; row.active = goal.active;
+        if (goal.function < player->functions.size()) row.function = player->functions[goal.function].goal_name;
+        row.desire = numeric::decimal::format_shortest(numeric::ActiveBackend::to_binary64(goal.desire.repr));
+        if (goal.potential) { row.planned = true; row.plan = plans().at(goal.potential->plan).name; }
+        if (const auto* plan = this->plan(goal.plan)) { row.planned = true; row.plan = plans().at(plan->definition).name; }
+        result.push_back(std::move(row));
+    }
     return result;
 }
 std::optional<std::uint64_t> Engine::galactic_goal_for_plan(tactical::PlayerId id, std::uint64_t plan) const {

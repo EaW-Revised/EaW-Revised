@@ -5,6 +5,7 @@ endif()
 
 set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/register_types.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/crash_handler.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_ready.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/viewer_host_config.cpp"
@@ -30,6 +31,8 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready_terrain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_ready_population.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/map_mode_land_live.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/land_battle_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_live.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_camera_probe.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/map_mode_particles.cpp"
@@ -110,6 +113,7 @@ set(EAWR_VIEWER_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/live_session_frame.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_config.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/live_session_prepare.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live_session_land.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/battle_source.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/battle_source_local.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/battle_source_replay.cpp"

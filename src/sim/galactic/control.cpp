@@ -3,6 +3,7 @@
 #include "encoding.hpp"
 #include "session_impl.hpp"
 #include "native_control_admission.hpp"
+#include "observer_internal.hpp"
 #include "../replay_internal.hpp"
 
 #include <algorithm>
@@ -18,6 +19,8 @@ namespace {
 using math::Fixed;
 constexpr Fixed one = Fixed::from_raw(Fixed::scale);
 constexpr Fixed five = Fixed::from_raw(5 * Fixed::scale);
+// CGS-17: the real planet duration consumer enables this hard-coded aggregate minimum.
+const Fixed minimum_transition_multiplier = Fixed::from_decimal("0.01").value();
 template<class T> core::Result<T> invalid(const std::string& message) {
     return core::Result<T>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, message));
 }
@@ -153,6 +156,12 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
     const auto known = [&](PlayerId id) {
         return find_row(setup.players, id, [](const auto& r) { return r.player_id; }) != nullptr;
     };
+    if (s.alignment_modifiers.size() > galactic_max_objects
+        || !ordered(s.alignment_modifiers, [](const auto& r) { return std::pair{r.planet, r.player}; }))
+        return invalid<void>("invalid alignment transition table");
+    for (const auto& row : s.alignment_modifiers)
+        if (!known(row.player) || !find_row(setup.planets, row.planet, [](const auto& r) { return r.id; }))
+            return invalid<void>("unbound alignment transition input");
     if (s.ability_types.size() > galactic_max_objects || s.ability_sources.size() > galactic_max_objects
         || !ordered(s.ability_types, [](const auto& r) { return r.type; })
         || !ordered(s.ability_sources, [](const auto& r) { return std::tuple{r.planet, r.actor, r.ability}; })
@@ -195,8 +204,11 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
         if (s.ground_capability_types.size() != s.types.size()) return invalid<void>("ground capability facts must cover every control type");
         for (std::size_t i = 0; i < s.types.size(); ++i) {
             const auto& fact = s.ground_capability_types[i];
-            if (fact.type != s.types[i].type || fact.combat_power.raw() < -(std::int64_t{1} << 40)
-                || fact.combat_power.raw() > (std::int64_t{1} << 40)) return invalid<void>("invalid ground capability current-type facts");
+            // A validation bound on the raw Fixed value (24 fractional bits) (2^26 in value, far above any stock power), not a limit taken from
+            // authored values: mods author combat power well above the stock range.
+            constexpr std::int64_t power_headroom = std::int64_t{1} << 50;
+            if (fact.type != s.types[i].type || fact.combat_power.raw() < -power_headroom
+                || fact.combat_power.raw() > power_headroom) return invalid<void>("invalid ground capability current-type facts");
         }
     }
     std::set<EntityId> identities;
@@ -221,7 +233,7 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
         return invalid<void>("political transition duration is outside fixed-point service range");
     for (std::size_t i = 0; i < s.planets.size(); ++i) {
         const auto& p = s.planets[i];
-        if (p.planet != setup.planets[i].id || p.type == 0 || p.leaning.raw() < 0 || p.capture_reward.raw() < 0
+        if (p.planet != setup.planets[i].id || p.type == 0 || p.leaning.raw() < 0
             || p.special_control.size() > 3
             || (p.leaning.raw() > 0 && !known(p.leaning_player))
             || (p.ground_base.level && !known(p.ground_base.owner))
@@ -256,7 +268,7 @@ core::Result<void> validate_control_setup(const GalacticSetup& setup) {
             const auto& state = s.state[i];
             if (state.planet != p.planet || !known(state.current_player) || (state.target_player && !known(state.target_player))
                 || (state.controller && !known(state.controller)) || (state.orbital_player && !known(state.orbital_player))
-                || state.current < Fixed{} || state.current > five || state.target < Fixed{} || state.target > five
+                || state.target < Fixed{} || state.target > five
                 || (state.initialized && state.current_player != setup.planets[i].owner))
                 return invalid<void>("invalid current or target political state");
         }
@@ -361,6 +373,15 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     const auto before = state;
     const bool degrading = controller != state.current_player || target < state.current;
     if (state.target_player != controller || state.target != target) {
+        // CGS-17: only a changed, nondegrading target edits this retained source.
+        if (!degrading) {
+            const auto at = std::lower_bound(s.alignment_modifiers.begin(), s.alignment_modifiers.end(),
+                std::pair{p.planet, controller},
+                [](const auto& row, const auto& key) { return std::pair{row.planet, row.player} < key; });
+            state.alignment_multiplier.reset();
+            if (at != s.alignment_modifiers.end() && at->planet == p.planet && at->player == controller)
+                state.alignment_multiplier = at->multiplier;
+        }
         const auto prior_target = state.target_player;
         state.target_player = controller; state.target = target;
         // WGM-72: a changed target player resets CURRENT player and amount before protection/service.
@@ -382,6 +403,8 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
     const bool protected_control = std::any_of(automatic.begin(), automatic.end(), [](const auto* ability) { return ability->protection; });
     if (!degrading || !protected_control) {
         std::map<std::int32_t, Fixed> modifiers;
+        // RGC-130..134: alignment shares signed category -1 with ability sources.
+        if (state.alignment_multiplier) modifiers.emplace(-1, *state.alignment_multiplier);
         for (const auto& row : p.transition_modifiers) {
             // WGM-C06: a deadline remains active at equality; expiry is strict.
             if (row.expires_frame && frame > row.expires_frame) continue;
@@ -399,18 +422,29 @@ core::Result<ControlStep> calculate_planet_control(const PoliticalControlSetup& 
             (void)category;
             if (!math::try_multiply(multiplier, value, multiplier)) return invalid<ControlStep>("transition multiplier overflow");
         }
-        if (multiplier == Fixed{}) {
-            // WGM-197: zero authored time completes this service without dividing by zero.
-            delta = five;
-        } else if (!math::try_multiply(s.change_seconds, multiplier, denominator)
+        // CGS-17: real planet instances enable this hard-coded aggregate floor after category combination.
+        multiplier = std::max(multiplier, minimum_transition_multiplier);
+        if (!math::try_multiply(s.change_seconds, multiplier, denominator)
             || !math::try_multiply(denominator, Fixed::from_raw(30 * Fixed::scale), denominator)
             || !math::try_divide(one, denominator, delta) || delta.raw() <= 0)
             return invalid<ControlStep>("invalid political transition service rate");
+        Fixed distance{}, amount{};
         if (state.current_player == state.target_player) {
-            if (state.current < target) state.current = Fixed::from_raw(state.current.raw() + std::min(delta.raw(), target.raw() - state.current.raw()));
-            else state.current = Fixed::from_raw(state.current.raw() - std::min(delta.raw(), state.current.raw() - target.raw()));
+            if (state.current < target) {
+                if (!math::try_subtract(target, state.current, distance)
+                    || !math::try_add(state.current, std::min(delta, distance), amount))
+                    return invalid<ControlStep>("political transition amount overflow");
+                state.current = amount;
+            } else if (state.current > target) {
+                if (!math::try_subtract(state.current, target, distance)
+                    || !math::try_subtract(state.current, std::min(delta, distance), amount))
+                    return invalid<ControlStep>("political transition amount overflow");
+                state.current = amount;
+            }
         } else {
-            state.current = Fixed::from_raw(state.current.raw() - std::min(delta.raw(), state.current.raw()));
+            if (!math::try_subtract(state.current, std::min(delta, state.current), amount))
+                return invalid<ControlStep>("political transition amount overflow");
+            state.current = amount;
             if (state.current == Fixed{}) state.current_player = state.target_player;
         }
     }
@@ -458,6 +492,34 @@ void GalacticSession::Impl::clear_control_structures(const std::size_t index, co
     invalidate_observer_projection(); // also invalidates economic source gathers
 }
 
+void GalacticSession::Impl::refresh_ground_base_level(const std::size_t index) {
+    if (!production) return;
+    auto& row = production->planets[index];
+    // WGS-93: the same classification start placement uses (ground-domain structures), capped at 5. The base is
+    // owned by the planet's target player; level 0 clears it.
+    const auto count = std::count_if(row.objects.begin(), row.objects.end(), [](const auto& object) {
+        return object.domain == ProductionDomain::ground && object.kind == ProductionKind::structure;
+    });
+    const auto level = static_cast<std::uint32_t>(std::min<std::int64_t>(count, 5));
+    const ControlBase base = level ? ControlBase{row.target_owner, level} : ControlBase{};
+    bool changed = row.ground_level != static_cast<std::int64_t>(level);
+    row.ground_level = static_cast<std::int64_t>(level);
+    if (control) {
+        auto& presence = control->planets[index];
+        if (presence.ground_base != base) { presence.ground_base = base; changed = true; }
+        if (level) {
+            // Persistent tactical-built records survive only for the base owner at or below the new level.
+            changed |= std::erase_if(presence.built_structures, [&](const auto& record) {
+                return record.owner != base.owner || record.enable_level > level;
+            }) != 0;
+        }
+        if (changed) dirty[static_cast<std::size_t>(StateSection::control)] = true;
+    }
+    if (!changed) return;
+    dirty[static_cast<std::size_t>(StateSection::production)] = true;
+    invalidate_observer_projection();
+}
+
 void GalacticSession::Impl::update_production_control(const std::size_t index, const std::uint64_t tick,
     std::vector<GalacticEvent>& events, const bool stop) {
     if (!production) return;
@@ -494,6 +556,31 @@ void GalacticSession::Impl::update_production_control(const std::size_t index, c
 core::Result<void> GalacticSession::Impl::service_control(const PartitionExecutor& executor,
     const std::uint64_t tick, std::vector<GalacticEvent>& events, GalacticTick::Work& work) {
     if (!control) return core::Result<void>::success();
+    // GFS-07 / GFC-06/07: admitted planet service expires visibility before
+    // political progression. WGUI-23 retains a source at exact equality.
+    if (observer) {
+        std::vector<std::uint8_t> expired(observer->records.size());
+        const auto expiry = executor.execute_phase("galactic-planet-intelligence-expiry", tick_partition_count,
+            [&](std::size_t partition) {
+                const auto range = partition_range(partition, expired.size());
+                for (auto i = range.begin; i < range.end; ++i)
+                    expired[i] = static_cast<std::uint8_t>(std::any_of(observer->records[i].sources.begin(),
+                        observer->records[i].sources.end(), [&](const auto& source) {
+                            return source.final_frame < clock.galactic_frame;
+                        }));
+            });
+        if (!expiry) return core::Result<void>::failure(expiry.error());
+        if (std::any_of(expired.begin(), expired.end(), [](auto value) { return value != 0; })) {
+            const auto table = observer_detail::presence(*observer, sorted_fleets(), movement_inputs.get(), actor_inputs());
+            // Partitioned detection, canonical ordered commit; refresh rebuilds
+            // the mask from remaining independent sources, never clears them all.
+            for (std::size_t i = 0; i < expired.size(); ++i) if (expired[i])
+                observer_detail::refresh(observer->records[i], observer->players[i / observer->planets.size()],
+                    observer->planets[i % observer->planets.size()], table, clock.galactic_frame, false);
+            dirty[static_cast<std::size_t>(StateSection::observer)] = true;
+            invalidate_observer_projection(false);
+        }
+    }
     const auto inputs = *control; // immutable same-frame control/trade inputs
     const auto route_rows = sorted_routes();
     const auto fleet_rows = sorted_fleets();
@@ -610,7 +697,7 @@ core::Result<void> GalacticSession::Impl::initialize_control() {
 }
 
 GalacticRejectReason GalacticSession::Impl::validate_landing(PlayerId player, FleetId id, PlanetId planet, bool pending_local_conflict) const {
-    return session_detail::validate_native_landing(*this, player, id, planet, pending_local_conflict);
+    return session_detail::validate_native_landing(*this, player, id, planet, pending_local_conflict, session_detail::PausedKind::surface_deploy);
 }
 void GalacticSession::Impl::execute_landing(const GameCommand& command, const std::uint64_t tick,
     std::vector<GalacticEvent>& events, const bool pending_local_conflict) {
@@ -665,7 +752,8 @@ void GalacticSession::Impl::execute_landing(const GameCommand& command, const st
         if (trait && trait->transport && input && landing.size() < available) {
             auto qualified = has_ground_capability(*control, member, movement_inputs ? movement_inputs.get() : nullptr);
             if (!qualified) return reject(GalacticRejectReason::unknown_value);
-            if (!hostile || qualified.value()) landing.push_back(member);
+            // WGM-38 / WGUI-25: friendly ownership does not waive a payload's stay-in-transport refusal.
+            if (qualified.value()) landing.push_back(member);
         }
     }
     if (landing.empty()) return reject(available ? GalacticRejectReason::invalid_membership : GalacticRejectReason::resource_limit);
@@ -676,7 +764,13 @@ void GalacticSession::Impl::execute_landing(const GameCommand& command, const st
         if (planet.starbase.level && !allied(*control, fleet.owner, planet.starbase.owner)) planet.starbase = {};
         planet.special_control.clear(); planet.production_owner = {};
         fix_built_structures(planet.built_structures, fleet.owner);
-        clear_control_structures(static_cast<std::size_t>(supplied - control->planets.data()));
+        const auto planet_index = static_cast<std::size_t>(supplied - control->planets.data());
+        const bool had_ground_special = production && std::any_of(production->planets[planet_index].objects.begin(),
+            production->planets[planet_index].objects.end(), [](const auto& object) {
+                return object.domain == ProductionDomain::ground && object.kind == ProductionKind::structure;
+            });
+        clear_control_structures(planet_index);
+        if (had_ground_special) refresh_ground_base_level(planet_index); // WGM-188: clearing the ground specials refreshes the level
         PoliticalControlEffect effect; effect.planet = order.planet; effect.stop_production = true;
         effect.old_owner = current.owner; effect.new_owner = current.owner; control_effects.push_back(effect);
     }
@@ -1002,7 +1096,7 @@ void GalacticSession::Impl::execute_launch(const GameCommand& command, const std
     const auto launched = launch_surface_units(issuer->player, order.units, order.target, order.slot,
         [&](const CommandPayload& payload) {
             // The ordinary fleet owner publishes this command's own executed/rejected event.
-            execute_fleet(GameCommand{command.key, payload}, tick, events, pending_local_conflict);
+            execute_fleet(GameCommand{command.key, payload}, tick, events, pending_local_conflict, false, session_detail::PausedKind::surface_deploy);
             NativeFleetReceipt receipt;
             for (auto i = first; i < events.size(); ++i) {
                 if (events[i].kind == GalacticEventKind::command_rejected) receipt.reason = events[i].reason;
@@ -1016,9 +1110,18 @@ void GalacticSession::Impl::execute_launch(const GameCommand& command, const std
 }
 
 void GalacticSession::Impl::execute_launch_fleet(const GameCommand& command, const std::uint64_t tick,
-    std::vector<GalacticEvent>& events, const bool pending_local_conflict) {
+    std::vector<GalacticEvent>& events, const bool pending_local_conflict, const bool land_on_arrival) {
     const auto& order = std::get<LaunchFleet>(command.payload);
     const auto* issuer = seat(command.key.seat);
+    // WGM-07 deviation: a launch is launch leg plus move leg. While paused, both kinds must admit up front,
+    // so a refused move leg never leaves a launched fleet that cannot depart.
+    if (issuer && issuer->active && control && setup.fleet_control
+        && session_detail::owner_paused_refusal(*this, session_detail::PausedKind::fleet_move, pending_local_conflict,
+            issuer->kind == SeatKind::human)) {
+        events.push_back({tick, GalacticEventKind::command_rejected, command.key.seat, order.units.front(),
+            command.key.sequence, order.path.back(), GalacticRejectReason::paused});
+        return;
+    }
     PlanetId source{};
     if (issuer && issuer->active && control) {
         for (const auto& planet : control->planets) {
@@ -1061,6 +1164,12 @@ void GalacticSession::Impl::execute_launch_fleet(const GameCommand& command, con
     // WGM-199: source-orbit conflict consumes the launch's movement continuation.
     if (std::any_of(events.begin() + static_cast<std::ptrdiff_t>(linked), events.end(),
         [](const auto& event) { return event.kind == GalacticEventKind::movement_conflict; })) return;
+    // GGS-06: retain the landing request before travel admission. Ordinary travel
+    // refusal retains the launched fleet and this request; entry denial re-lands it.
+    if (land_on_arrival) {
+        registry.get<session_detail::FleetData>(fleets.at(id)).motion.land_on_arrival = true;
+        dirty[static_cast<std::size_t>(StateSection::movement)] = true;
+    }
     // An absent destination is not a qualified entry result. Keep the committed
     // launch but cancel travel for every issuer, including nonhuman owners.
     if (!planets.contains(order.path.back())) return cancel(GalacticRejectReason::unknown_value);
@@ -1074,7 +1183,7 @@ void GalacticSession::Impl::execute_launch_fleet(const GameCommand& command, con
     // restriction/story exceptions. It is not the planet's raw restriction flag.
     if (human && !entry->accessible) {
         std::vector<GalacticEvent> removal;
-        execute_fleet({command.key, RemoveFleetMembers{id, order.units}}, tick, removal, pending_local_conflict);
+        execute_fleet({command.key, RemoveFleetMembers{id, order.units}}, tick, removal, pending_local_conflict, false, session_detail::PausedKind::surface_deploy);
         const auto refused = std::find_if(removal.begin(), removal.end(), [](const auto& event) {
             return event.kind == GalacticEventKind::command_rejected;
         });
@@ -1127,9 +1236,9 @@ core::Result<GalacticSession::NativeFleetReceipt> GalacticSession::launch_native
         // The logical launch owns its temporary detached link; nested fleet
         // admission must not record an effect lacking that link on replay.
         const auto previous_applying = impl.native_applying;
-        impl.native_applying = true;
+        impl.native_applying = true; impl.launch_leg = true;
         auto accepted = admit_native_fleet(player, payload, pending_local_conflict);
-        impl.native_applying = previous_applying;
+        impl.native_applying = previous_applying; impl.launch_leg = false;
         return accepted;
     }, admission_ran);
     if (!launched) { if (admission_ran) restore_view(); return launched; }
@@ -1229,7 +1338,7 @@ core::Result<void> GalacticSession::apply_control_battle(const ControlBattleRetu
         for (const auto& [id, handle] : impl.fleets) {
             (void)id; const auto& fleet = impl.registry.get<session_detail::FleetData>(handle);
             if (fleet.owner == force.owner && fleet.orbit == returned.planet
-                && std::find(fleet.members.begin(), fleet.members.end(), FleetMember{force.id, force.type}) != fleet.members.end()) live = true;
+                && std::any_of(fleet.members.begin(), fleet.members.end(), [&](const auto& member) { return member.id == force.id && member.type == force.type; })) live = true;
         }
         if (!live) return invalid<void>("invasion survivor is not a live source identity at the conflict planet");
     }
@@ -1363,6 +1472,18 @@ void encode_control(std::vector<std::uint8_t>& bytes, const PoliticalControlSetu
         put_u64(bytes, row.planet); put_u64(bytes, row.actor); put_u64(bytes, row.type);
         put_u32(bytes, row.ability); put_u32(bytes, row.owner);
     }
+    // Sparse extension: absent producer and retained source keep the stock control identity.
+    const auto retained = std::count_if(s.state.begin(), s.state.end(), [](const auto& row) { return row.alignment_multiplier.has_value(); });
+    if (!s.alignment_modifiers.empty() || retained) {
+        count(s.alignment_modifiers.size());
+        for (const auto& row : s.alignment_modifiers) {
+            put_u64(bytes, row.planet); put_u32(bytes, row.player); fixed(row.multiplier);
+        }
+        count(static_cast<std::size_t>(retained));
+        for (const auto& row : s.state) if (row.alignment_multiplier) {
+            put_u64(bytes, row.planet); fixed(*row.alignment_multiplier);
+        }
+    }
 }
 
 core::Result<PoliticalControlSetup> decode_control(const std::span<const std::uint8_t> bytes) {
@@ -1456,6 +1577,25 @@ core::Result<PoliticalControlSetup> decode_control(const std::span<const std::ui
         if (!in.read_u64(row.planet) || !in.read_u64(row.actor) || !in.read_u64(row.type)
             || !in.read_u32(row.ability) || !in.read_u32(row.owner)) return fail();
         s.ability_sources.push_back(row);
+    }
+    if (in.remaining()) {
+        if (!count(n, 20)) return fail();
+        for (std::uint32_t i = 0; i < n; ++i) {
+            ControlAlignmentModifier row;
+            if (!in.read_u64(row.planet) || !in.read_u32(row.player) || !fixed(row.multiplier)) return fail();
+            s.alignment_modifiers.push_back(row);
+        }
+        if (!count(n, 16, s.state.size())) return fail();
+        PlanetId previous{};
+        for (std::uint32_t i = 0; i < n; ++i) {
+            PlanetId planet{}; Fixed value;
+            if (!in.read_u64(planet) || planet <= previous || !fixed(value)) return fail();
+            previous = planet;
+            auto at = std::lower_bound(s.state.begin(), s.state.end(), planet,
+                [](const auto& row, auto id) { return row.planet < id; });
+            if (at == s.state.end() || at->planet != planet) return fail();
+            at->alignment_multiplier = value;
+        }
     }
     if (in.remaining()) return fail();
     return core::Result<PoliticalControlSetup>::success(std::move(s));

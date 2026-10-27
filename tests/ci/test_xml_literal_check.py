@@ -12,7 +12,7 @@ sys.path.insert(0, str(ROOT / "tools" / "inventory"))
 
 import xml_literal_check as gate  # noqa: E402
 
-# Merge-base size of the allowlist: fallback pin when git or origin/Thom-Ernst/Skirmish is missing (the gate compares against the base).
+# Merge-base size of the allowlist: fallback pin when git or origin/main is missing (the gate compares against the base).
 # Raising it takes a reviewed growth_override in the allowlist plus an edit here.
 ALLOWLIST_PIN = 28
 _DIRS = []

@@ -3,6 +3,7 @@
 #include "eawr/sim/galactic/session.hpp"
 
 #include "eawr/sim/galactic/fleets.hpp"
+#include "paused_admission.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -15,7 +16,8 @@ struct FleetData;
 // One admission kernel serves the live owner and sparse native player layers.
 template<class Owner>
 void execute_native_fleet(Owner& owner, const GameCommand& command, const std::uint64_t tick,
-    std::vector<GalacticEvent>& events, const bool pending_local_conflict, const bool production_placement) {
+    std::vector<GalacticEvent>& events, const bool pending_local_conflict, const bool production_placement,
+    const PausedKind kind = PausedKind::fleet_management) {
     GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, 0,
         command.key.sequence, 0, GalacticRejectReason::none};
     const auto reject = [&](const GalacticRejectReason reason) {
@@ -30,8 +32,9 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
     if (!owner.setup.fleet_control) return reject(GalacticRejectReason::unknown_value);
     const auto& gates = owner.setup.fleet_control->gates;
     const auto humans = std::count_if(owner.seats.begin(), owner.seats.end(), [](const auto& row) { return row.kind == SeatKind::human; });
-    if (!production_placement && (owner.clock.pause_depth != 0 || (humans <= 1 && pending_local_conflict
-            && (gates.queued_campaign_conflict || gates.active_speech)))) return reject(GalacticRejectReason::paused);
+    if (!production_placement && (owner_paused_refusal(owner, kind, pending_local_conflict, issuer->kind == SeatKind::human)
+            || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech))))
+        return reject(GalacticRejectReason::paused);
     const auto changed = [&] {
         owner.population_stale = true;
         owner.dirty[static_cast<std::size_t>(StateSection::fleets)] = true;
@@ -163,11 +166,27 @@ void execute_native_fleet(Owner& owner, const GameCommand& command, const std::u
     if (const auto* add = std::get_if<AddFleetMembers>(&command.payload)) id = add->fleet;
     if (const auto* remove = std::get_if<RemoveFleetMembers>(&command.payload)) id = remove->fleet;
     if (const auto* slot = std::get_if<SetFleetOrbitSlot>(&command.payload)) id = slot->fleet;
+    if (const auto* slot = std::get_if<SetFleetPathfinder>(&command.payload)) id = slot->fleet;
     event.subject = id;
     if (!owner.fleets.contains(id)) return reject(GalacticRejectReason::unknown_subject);
     auto& fleet = owner.registry.template get<FleetData>(owner.fleets.at(id));
     if (fleet.owner != issuer->player) return reject(GalacticRejectReason::not_authorized);
     if (fleet.orbit == 0 || fleet.motion.transit) return reject(GalacticRejectReason::incompatible_location);
+    if (const auto* slot = std::get_if<SetFleetPathfinder>(&command.payload)) {
+        if (issuer->kind != SeatKind::human || production_placement) return reject(GalacticRejectReason::not_authorized);
+        if (slot->member) {
+            const auto member = std::find_if(fleet.members.begin(), fleet.members.end(), [&](const auto& row) { return row.id == slot->member; });
+            if (member == fleet.members.end()) return reject(GalacticRejectReason::invalid_membership);
+            const auto& types = owner.setup.fleet_control->types;
+            const auto type = std::lower_bound(types.begin(), types.end(), member->type, [](const auto& row, auto value) { return row.type < value; });
+            if (type == types.end() || type->type != member->type || !type->space_pathfinder)
+                return reject(GalacticRejectReason::invalid_membership);
+        }
+        // WGT-40 / GHUD-R44: replacing the slot clears its previous occupant.
+        // One ordered command commit validates before changing any member.
+        for (auto& member : fleet.members) member.pathfinder = member.id == slot->member;
+        changed(); event.value = slot->member; events.push_back(event); return;
+    }
     if (const auto* add = std::get_if<AddFleetMembers>(&command.payload)) {
         const auto reason = check_detached(add->members, fleet.orbit);
         if (reason != GalacticRejectReason::none) return reject(reason);

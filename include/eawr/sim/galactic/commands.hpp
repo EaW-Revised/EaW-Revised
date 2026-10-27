@@ -69,7 +69,10 @@ inline constexpr std::uint16_t sell_object = 19; // GHUD-S84: coordinator-reserv
 inline constexpr std::uint16_t transfer_fleet_members = 20; // GHUD-S86
 inline constexpr std::uint16_t recheck_orbit = 21; // WGM-154, script request at an existing orbit
 inline constexpr std::uint16_t launch_fleet = 22; // WGM-199
-inline constexpr std::uint16_t first_reserved = 23;
+inline constexpr std::uint16_t set_pathfinder = 23; // WGT-06/40, GHUD-R43/44
+inline constexpr std::uint16_t ground_deploy = 24; // WGCH-155/156: supplied identity + planet
+inline constexpr std::uint16_t transfer_surface = 25; // GGS-05/06: coordinator-reserved
+inline constexpr std::uint16_t first_reserved = 26;
 inline constexpr std::uint16_t last_reserved = 127;
 } // namespace galactic_opcodes
 
@@ -175,6 +178,12 @@ struct MergeFleets {
     FleetId source{}, target{};
     friend bool operator==(const MergeFleets&, const MergeFleets&) = default;
 };
+// WGT-40: one direct orbital member, or zero to clear the fleet slot.
+struct SetFleetPathfinder {
+    FleetId fleet{};
+    EntityId member{};
+    friend bool operator==(const SetFleetPathfinder&, const SetFleetPathfinder&) = default;
+};
 struct SetFleetOrbitSlot {
     FleetId fleet{};
     std::uint8_t slot{};
@@ -260,6 +269,12 @@ struct BuyBlackMarket {
     std::uint32_t index{};
     friend bool operator==(const BuyBlackMarket&, const BuyBlackMarket&) = default;
 };
+// WGCH-155/156: resolve the live bearer at execution, never retain an inner actor.
+struct DeployGroundAbility {
+    EntityId actor{};
+    PlanetId planet{};
+    friend bool operator==(const DeployGroundAbility&, const DeployGroundAbility&) = default;
+};
 struct PrepareGalacticAbility {
     EntityId actor{};
     PlanetId planet{};
@@ -296,12 +311,19 @@ struct LaunchFleet {
     EntityId destination_actor{};
     friend bool operator==(const LaunchFleet&, const LaunchFleet&) = default;
 };
+// GGS-05/06: launch the listed surface identities, travel, then request landing.
+// The source is path.front(); the destination surface is path.back().
+struct TransferSurface {
+    std::vector<EntityId> units;
+    std::vector<PlanetId> path;
+    friend bool operator==(const TransferSurface&, const TransferSurface&) = default;
+};
 using CommandPayload =
     std::variant<PauseGalaxy, ResumeGalaxy, SetSpeed, DebugSetPlanetOwner, DebugSetFleetOrbit, TacticalLayerCommand,
         SaveRequest, PostLoadFixup, CreateFleet, AddFleetMembers, RemoveFleetMembers, MergeFleets, SetFleetOrbitSlot,
         ProductionCommand, SellObject, SeatLeave, SeatRejoin, AssignBattleTeamRole, RecheckOrbit, MoveFleet, LandFleet, BattleChoice, AutoResolveWithdraw, ObserverCommand,
         PrepareBlackMarket, BuyBlackMarket, PrepareGalacticAbility, ExecutePreparedAbility, CancelGalacticAbility,
-        LaunchFromSurface, LaunchFleet, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept>;
+        LaunchFromSurface, LaunchFleet, TransferSurface, SetFleetPathfinder, TransferFleetMembers, BattleSummaryAcknowledge, InvasionAccept, DeployGroundAbility>;
 
 struct CommandOrderKey {
     std::uint64_t tick{};

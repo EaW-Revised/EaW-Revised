@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <functional>
 #include <map>
 #include <set>
 #include <span>
@@ -48,11 +49,11 @@ namespace {
 
 } // namespace
 
-void SpacePopulation::pose_pending_units(GodotRenderer& renderer) {
+void SpacePopulation::pose_pending_units(GodotRenderer& renderer, const particles::StepExecutor* workers) {
     if (!pending_unit_sample_) return;
     const auto sample = *pending_unit_sample_;
     pending_unit_sample_.reset();
-    pose_units(renderer, sample);
+    pose_units(renderer, sample, workers);
 }
 
 void SpacePopulation::schedule_arrival_sample() noexcept {
@@ -63,7 +64,8 @@ void SpacePopulation::schedule_arrival_sample() noexcept {
     effect_sample_.reset();
 }
 
-void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample) {
+void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sample,
+    const particles::StepExecutor* workers) {
     last_unit_sample_ = sample;
     idle_frame_ms_ = idle_sample_ms_ = idle_upload_ms_ = 0.0;
     idle_skin_work_ = {};
@@ -81,30 +83,86 @@ void SpacePopulation::pose_units(GodotRenderer& renderer, const std::uint32_t sa
     if (idle_placements_.empty() || animation_sample_ == held_sample) return;
     animation_sample_ = held_sample;
     const std::uint64_t tick = static_cast<std::uint64_t>(held_sample) + options_.idle_offset;
-    std::vector<std::optional<animation::Pose>> poses(idle_placements_.size());
+    // One participant retains the baseline serial path and allocations.
+    if (!workers) {
+        std::vector<std::optional<animation::Pose>> poses(idle_placements_.size());
+        FrameTimer sample_timer(trace_frames_ ? &idle_sample_ms_ : nullptr);
+        for (std::size_t index = 0; index < idle_placements_.size(); ++index) {
+            const auto live = idle_live_ships_.find(index);
+            if (live != idle_live_ships_.end() && live_retired_[live->second]) continue;
+            const IdlePlacement& idle = idle_placements_[index];
+            auto pose = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame, tick,
+                                               particles::map_owner_ticks_per_second);
+            if (pose) poses[index] = std::move(pose.value());
+            else ++idle_sample_failures_;
+        }
+        sample_timer.finish();
+        for (const auto& [idle, ship] : idle_live_ships_) {
+            if (poses[idle]) contact_bones_[ship] = poses[idle]->bones;
+        }
+        FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
+        renderer.begin_skin_batch(trace_frames_ && PerfTrace::fine_particle_timings());
+        for (const AnimatedInstance& instance : animated_instances_) {
+            if (!poses[instance.idle]) continue;
+            const auto posed = renderer.set_skin_pose(instance.entity, instance.asset, poses[instance.idle]->bones);
+            if (!posed) upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
+                                                   + core::format_diagnostic(posed.error()));
+        }
+        idle_skin_work_ = renderer.end_skin_batch();
+        return;
+    }
+    prepared_idle_.resize(idle_placements_.size());
+    auto& prepared = prepared_idle_;
+    for (auto& row : prepared) row = PreparedIdle{};
+    idle_consumed_.assign(prepared.size(), 0);
+    auto& consumed = idle_consumed_;
+    for (const auto& instance : animated_instances_) consumed[instance.idle] = 1;
+    const bool profile = trace_frames_ && PerfTrace::fine_particle_timings();
     FrameTimer sample_timer(trace_frames_ ? &idle_sample_ms_ : nullptr);
-    for (std::size_t index = 0; index < idle_placements_.size(); ++index) {
+    const auto prepare = [&](const std::size_t index) {
         const auto live = idle_live_ships_.find(index);
-        if (live != idle_live_ships_.end() && live_retired_[live->second]) continue;
+        if (live != idle_live_ships_.end() && live_retired_[live->second]) return;
         const IdlePlacement& idle = idle_placements_[index];
         auto pose = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame, tick,
                                            particles::map_owner_ticks_per_second);
-        if (pose) poses[index] = std::move(pose.value());
-        else ++idle_sample_failures_;
+        auto& row = prepared[index];
+        if (!pose) { row.failed = true; return; }
+        row.pose = std::move(pose.value());
+        if (consumed[index])
+            row.palette = GodotRenderer::prepare_skin_pose(row.pose->bones, profile ? &row.work : nullptr);
+    };
+    // Each placement owns its sampled bones and palette; no engine call crosses dispatch.
+    if (workers) {
+        // A single borrowed reference keeps the executor callback small.
+        const auto task = [&prepare](const std::size_t index) { prepare(index); };
+        if (!workers->run(prepared.size(), task)) {
+            // The executor has joined even on failure. Rebuild every row before publication.
+            for (auto& row : prepared) row = PreparedIdle{};
+            for (std::size_t index = 0; index < prepared.size(); ++index) prepare(index);
+        }
+    } else {
+        for (std::size_t index = 0; index < prepared.size(); ++index) prepare(index);
     }
     sample_timer.finish();
     for (const auto& [idle, ship] : idle_live_ships_) {
-        if (poses[idle]) contact_bones_[ship] = poses[idle]->bones;
+        if (prepared[idle].pose) contact_bones_[ship] = prepared[idle].pose->bones;
     }
     FrameTimer upload_timer(trace_frames_ ? &idle_upload_ms_ : nullptr);
-    renderer.begin_skin_batch(trace_frames_ && PerfTrace::fine_particle_timings());
+    for (const auto& row : prepared) if (row.failed) ++idle_sample_failures_;
+    renderer.begin_skin_batch(profile);
     for (const AnimatedInstance& instance : animated_instances_) {
-        if (!poses[instance.idle]) continue;
-        const auto posed = renderer.set_skin_pose(instance.entity, instance.asset, poses[instance.idle]->bones);
+        if (!prepared[instance.idle].pose) continue;
+        const auto posed = renderer.set_prepared_skin_pose(instance.entity, instance.asset, prepared[instance.idle].palette);
         if (!posed) upload_failures_.push_back("entity " + std::to_string(instance.entity) + " idle pose: "
                                                + core::format_diagnostic(posed.error()));
     }
     idle_skin_work_ = renderer.end_skin_batch();
+    for (const auto& row : prepared) {
+        idle_skin_work_.validations += row.work.validations;
+        idle_skin_work_.builds += row.work.builds;
+        idle_skin_work_.validation_ms += row.work.validation_ms;
+        idle_skin_work_.build_ms += row.work.build_ms;
+    }
 }
 
 bool SpacePopulation::live_ship_drawn(const std::size_t ship) const noexcept {
@@ -118,7 +176,7 @@ bool SpacePopulation::live_ship_emitter_visit(const std::size_t ship) const noex
 }
 
 bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span<const LivePose> poses,
-    const std::span<const LiveClipPose> clips) {
+    const std::span<const LiveClipPose> clips, const particles::StepExecutor* workers) {
     const auto rotation = [](const sim::math::Fixed degrees, const bool pitch) {
         auto matrix = animation::Player::identity_matrix();
         const auto radians = static_cast<float>(degrees.raw()) / static_cast<float>(sim::math::Fixed::scale)
@@ -128,10 +186,160 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
         else { matrix[0] = c; matrix[1] = s; matrix[4] = -s; matrix[5] = c; }
         return matrix;
     };
-    const auto apply_angles = [&](TurretBinding& binding, const LivePose::TurretPose& angles) {
+    if (!workers) {
+        const auto apply_angles = [&](TurretBinding& binding, const LivePose::TurretPose& angles) {
+            const bool barrel = angles.barrel && binding.barrel.has_value();
+            if (angles.barrel && !binding.barrel) {
+                failure_ = "turret profile requires a missing barrel bone";
+                return false;
+            }
+            auto turret = rotation(angles.yaw, false);
+            if (!barrel && !angles.xy_only)
+                turret = animation::Player::multiply(turret, rotation(angles.pitch, true));
+            if (!binding.player->apply_bone_transform(binding.pose, binding.turret, turret)) return false;
+            if (barrel && !angles.xy_only
+                && !binding.player->apply_bone_transform(binding.pose, *binding.barrel, rotation(angles.pitch, true))) return false;
+            return true;
+        };
+        for (const auto& request : poses) {
+            if (!request.turret || request.ship >= turret_bindings_.size() || !turret_bindings_[request.ship]) continue;
+            auto& binding = *turret_bindings_[request.ship];
+            if (request.ship >= contact_bones_.size() || contact_bones_[request.ship].size() != binding.pose.bones.size()) {
+                failure_ = "ordinary turret pose storage does not match the bound skeleton";
+                return false;
+            }
+            // UA-05: the validated sim profile owns XY-only and usable-barrel admission.
+            const bool active_clip = std::any_of(clips.begin(), clips.end(),
+                [&](const LiveClipPose& clip) { return clip.ship == request.ship; });
+            if (active_clip) {
+                // The live clip already sampled this same model skeleton; preserve its local transforms.
+                std::copy(contact_bones_[request.ship].begin(), contact_bones_[request.ship].end(), binding.pose.bones.begin());
+            } else if (binding.idle) {
+                const auto& idle = idle_placements_[*binding.idle];
+                auto sampled = animation::sample_idle(*binding.player, idle.playback, idle.start_frame,
+                    static_cast<std::uint64_t>(animation_sample_.value_or(0U)) + options_.idle_offset,
+                    particles::map_owner_ticks_per_second, binding.pose);
+                if (!sampled) { failure_ = core::format_diagnostic(sampled.error()); return false; }
+            } else {
+                std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
+            }
+            if (!apply_angles(binding, *request.turret)) return false;
+            // UA-05: storage and bone bindings are prepared once at composition, then reused each frame.
+            std::copy(binding.pose.bones.begin(), binding.pose.bones.end(), contact_bones_[request.ship].begin());
+            for (auto& bone : binding.pose.bones) {
+                if (bone.visible) continue;
+                for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                    for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+            }
+            for (const auto index : piece_index_.pieces(request.ship)) {
+                const auto& piece = pieces_[index];
+                if (piece.gate || piece.shield || piece.cloak) continue;
+                if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
+                    failure_ = core::format_diagnostic(posed.error()); return false;
+                }
+            }
+        }
+        for (const auto& request : poses) {
+            if (request.ship >= hardpoint_turret_bindings_.size()) continue;
+            auto& bindings = hardpoint_turret_bindings_[request.ship];
+            TurretBinding* parent = nullptr;
+            for (const auto& turret : request.hardpoint_turrets) {
+                const auto found = bindings.find(turret.hardpoint);
+                if (found == bindings.end()) continue;
+                auto& binding = found->second;
+                if (binding.parent_model) {
+                    if (!parent) {
+                        if (request.ship >= parent_hardpoint_turret_bindings_.size()
+                            || !parent_hardpoint_turret_bindings_[request.ship]) continue;
+                        parent = &*parent_hardpoint_turret_bindings_[request.ship];
+                        const bool active_clip = std::any_of(clips.begin(), clips.end(),
+                            [&](const LiveClipPose& clip) { return clip.ship == request.ship; });
+                        if (active_clip || request.turret) {
+                            if (contact_bones_[request.ship].size() != parent->pose.bones.size()) return false;
+                            std::copy(contact_bones_[request.ship].begin(), contact_bones_[request.ship].end(), parent->pose.bones.begin());
+                        } else if (parent->idle) {
+                            const auto& idle = idle_placements_[*parent->idle];
+                            auto sampled = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame,
+                                static_cast<std::uint64_t>(animation_sample_.value_or(0U)) + options_.idle_offset,
+                                particles::map_owner_ticks_per_second, parent->pose);
+                            if (!sampled) { failure_ = core::format_diagnostic(sampled.error()); return false; }
+                        } else {
+                            std::copy(parent->bind_bones.begin(), parent->bind_bones.end(), parent->pose.bones.begin());
+                        }
+                    }
+                    parent->turret = binding.turret;
+                    parent->barrel = binding.barrel;
+                    if (!apply_angles(*parent, turret.angles)) return false;
+                    binding.applied = turret.angles;
+                    continue;
+                }
+                std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
+                if (!apply_angles(binding, turret.angles)) return false;
+                for (auto& bone : binding.pose.bones) {
+                    if (bone.visible) continue;
+                    for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                        for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+                }
+                for (const auto index : piece_index_.pieces(request.ship)) {
+                    const auto& piece = pieces_[index];
+                    if (!piece.gate || piece.gate->hardpoint != turret.hardpoint
+                        || piece.gate->art != HardpointGate::Art::attached_model) continue;
+                    if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
+                        failure_ = core::format_diagnostic(posed.error());
+                        return false;
+                    }
+                    binding.applied = turret.angles;
+                }
+            }
+            if (parent) {
+                // HPT-07: compose all inline HP rotations, then publish/upload one palette per hull.
+                std::copy(parent->pose.bones.begin(), parent->pose.bones.end(), contact_bones_[request.ship].begin());
+                for (auto& bone : parent->pose.bones) {
+                    if (bone.visible) continue;
+                    for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                        for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+                }
+                for (const auto index : piece_index_.pieces(request.ship)) {
+                    const auto& piece = pieces_[index];
+                    if (piece.gate || piece.shield || piece.cloak) continue;
+                    if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, parent->pose.bones); !posed) {
+                        failure_ = core::format_diagnostic(posed.error()); return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+    // Keep row capacity even when a later frame has fewer requests.
+    if (turret_staged_.size() < poses.size()) turret_staged_.resize(poses.size());
+    auto& staged = turret_staged_;
+    for (auto& row : staged) row.clear();
+    // PopulationIndex queries update diagnostic counters even through const access.
+    // Snapshot the borrowed ranges on the caller before any worker visits them.
+    turret_piece_rows_.clear();
+    turret_piece_rows_.reserve(poses.size());
+    auto& piece_rows = turret_piece_rows_;
+    // Borrowed index storage is valid only until this joined call returns.
+    struct ClearPieceRows {
+        std::vector<std::span<const std::size_t>>& rows;
+        ~ClearPieceRows() { rows.clear(); }
+    } clear_piece_rows{piece_rows};
+    for (const auto& request : poses) piece_rows.push_back(piece_index_.pieces(request.ship));
+    turret_errors_.resize(poses.size());
+    auto& errors = turret_errors_;
+    for (auto& error : errors) error.clear();
+    turret_succeeded_.assign(poses.size(), 1);
+    auto& succeeded = turret_succeeded_;
+    const auto stage = [&](const std::size_t index, const sim::RenderInstance& instance,
+        const GodotRenderer::PreparedSkinPose& palette) {
+        if (!palette) { errors[index] = "skin pose contains a non-finite palette matrix"; return false; }
+        staged[index].push_back({instance.entity_id, instance.asset_id, palette});
+        return true;
+    };
+    const auto apply_angles = [&](TurretBinding& binding, const LivePose::TurretPose& angles, std::string& error) {
         const bool barrel = angles.barrel && binding.barrel.has_value();
         if (angles.barrel && !binding.barrel) {
-            failure_ = "turret profile requires a missing barrel bone";
+            error = "turret profile requires a missing barrel bone";
             return false;
         }
         auto turret = rotation(angles.yaw, false);
@@ -142,11 +350,12 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
             && !binding.player->apply_bone_transform(binding.pose, *binding.barrel, rotation(angles.pitch, true))) return false;
         return true;
     };
-    for (const auto& request : poses) {
-        if (!request.turret || request.ship >= turret_bindings_.size() || !turret_bindings_[request.ship]) continue;
+    const auto ordinary = [&](const std::size_t index) {
+        const auto& request = poses[index];
+        if (!request.turret || request.ship >= turret_bindings_.size() || !turret_bindings_[request.ship]) return true;
         auto& binding = *turret_bindings_[request.ship];
         if (request.ship >= contact_bones_.size() || contact_bones_[request.ship].size() != binding.pose.bones.size()) {
-            failure_ = "ordinary turret pose storage does not match the bound skeleton";
+            errors[index] = "ordinary turret pose storage does not match the bound skeleton";
             return false;
         }
         // UA-05: the validated sim profile owns XY-only and usable-barrel admission.
@@ -160,53 +369,133 @@ bool SpacePopulation::pose_live_turrets(GodotRenderer& renderer, const std::span
             auto sampled = animation::sample_idle(*binding.player, idle.playback, idle.start_frame,
                 static_cast<std::uint64_t>(animation_sample_.value_or(0U)) + options_.idle_offset,
                 particles::map_owner_ticks_per_second, binding.pose);
-            if (!sampled) { failure_ = core::format_diagnostic(sampled.error()); return false; }
+            if (!sampled) { errors[index] = core::format_diagnostic(sampled.error()); return false; }
         } else {
             std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
         }
-        if (!apply_angles(binding, *request.turret)) return false;
+        if (!apply_angles(binding, *request.turret, errors[index])) return false;
         // UA-05: storage and bone bindings are prepared once at composition, then reused each frame.
         std::copy(binding.pose.bones.begin(), binding.pose.bones.end(), contact_bones_[request.ship].begin());
         for (auto& bone : binding.pose.bones) {
             if (bone.visible) continue;
             for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
-                for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+                for (std::size_t entry = 0; entry < 12; ++entry) (*matrix)[entry] = 0.0F;
         }
-        for (const auto index : piece_index_.pieces(request.ship)) {
-            const auto& piece = pieces_[index];
+        GodotRenderer::PreparedSkinPose palette;
+        for (const auto piece_index : piece_rows[index]) {
+            const auto& piece = pieces_[piece_index];
             if (piece.gate || piece.shield || piece.cloak) continue;
-            if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
-                failure_ = core::format_diagnostic(posed.error()); return false;
+            if (!palette) palette = GodotRenderer::prepare_skin_pose(binding.pose.bones);
+            if (auto posed = stage(index, piece.instance, palette); !posed) {
+                return false;
             }
         }
-    }
-    for (const auto& request : poses) {
-        if (request.ship >= hardpoint_turret_bindings_.size()) continue;
+        return true;
+    };
+    const auto hardpoints = [&](const std::size_t index) {
+        const auto& request = poses[index];
+        if (request.ship >= hardpoint_turret_bindings_.size()) return true;
         auto& bindings = hardpoint_turret_bindings_[request.ship];
+        TurretBinding* parent = nullptr;
         for (const auto& turret : request.hardpoint_turrets) {
             const auto found = bindings.find(turret.hardpoint);
             if (found == bindings.end()) continue;
             auto& binding = found->second;
+            if (binding.parent_model) {
+                if (!parent) {
+                    if (request.ship >= parent_hardpoint_turret_bindings_.size()
+                        || !parent_hardpoint_turret_bindings_[request.ship]) continue;
+                    parent = &*parent_hardpoint_turret_bindings_[request.ship];
+                    const bool active_clip = std::any_of(clips.begin(), clips.end(),
+                        [&](const LiveClipPose& clip) { return clip.ship == request.ship; });
+                    if (active_clip || request.turret) {
+                        if (contact_bones_[request.ship].size() != parent->pose.bones.size()) return false;
+                        std::copy(contact_bones_[request.ship].begin(), contact_bones_[request.ship].end(), parent->pose.bones.begin());
+                    } else if (parent->idle) {
+                        const auto& idle = idle_placements_[*parent->idle];
+                        auto sampled = animation::sample_idle(*clips_[idle.clip], idle.playback, idle.start_frame,
+                            static_cast<std::uint64_t>(animation_sample_.value_or(0U)) + options_.idle_offset,
+                            particles::map_owner_ticks_per_second, parent->pose);
+                        if (!sampled) { errors[index] = core::format_diagnostic(sampled.error()); return false; }
+                    } else {
+                        std::copy(parent->bind_bones.begin(), parent->bind_bones.end(), parent->pose.bones.begin());
+                    }
+                }
+                parent->turret = binding.turret;
+                parent->barrel = binding.barrel;
+                if (!apply_angles(*parent, turret.angles, errors[index])) return false;
+                binding.applied = turret.angles;
+                continue;
+            }
             std::copy(binding.bind_bones.begin(), binding.bind_bones.end(), binding.pose.bones.begin());
-            if (!apply_angles(binding, turret.angles)) return false;
+            if (!apply_angles(binding, turret.angles, errors[index])) return false;
             for (auto& bone : binding.pose.bones) {
                 if (bone.visible) continue;
                 for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
-                    for (std::size_t index = 0; index < 12; ++index) (*matrix)[index] = 0.0F;
+                    for (std::size_t entry = 0; entry < 12; ++entry) (*matrix)[entry] = 0.0F;
             }
-            for (const auto index : piece_index_.pieces(request.ship)) {
-                const auto& piece = pieces_[index];
+            GodotRenderer::PreparedSkinPose palette;
+            for (const auto piece_index : piece_rows[index]) {
+                const auto& piece = pieces_[piece_index];
                 if (!piece.gate || piece.gate->hardpoint != turret.hardpoint
                     || piece.gate->art != HardpointGate::Art::attached_model) continue;
-                if (auto posed = renderer.set_skin_pose(piece.instance.entity_id, piece.instance.asset_id, binding.pose.bones); !posed) {
-                    failure_ = core::format_diagnostic(posed.error());
+                if (!palette) palette = GodotRenderer::prepare_skin_pose(binding.pose.bones);
+                if (auto posed = stage(index, piece.instance, palette); !posed) {
+                    if (errors[index].empty()) errors[index] = "skin palette preparation failed";
                     return false;
                 }
                 binding.applied = turret.angles;
             }
         }
+        if (parent) {
+            // HPT-07: compose all inline HP rotations, then publish/upload one palette per hull.
+            std::copy(parent->pose.bones.begin(), parent->pose.bones.end(), contact_bones_[request.ship].begin());
+            for (auto& bone : parent->pose.bones) {
+                if (bone.visible) continue;
+                for (animation::Matrix* matrix : {&bone.skin_asset, &bone.model_asset})
+                    for (std::size_t entry = 0; entry < 12; ++entry) (*matrix)[entry] = 0.0F;
+            }
+            GodotRenderer::PreparedSkinPose palette;
+            for (const auto piece_index : piece_rows[index]) {
+                const auto& piece = pieces_[piece_index];
+                if (piece.gate || piece.shield || piece.cloak) continue;
+                if (!palette) palette = GodotRenderer::prepare_skin_pose(parent->pose.bones);
+                if (auto posed = stage(index, piece.instance, palette); !posed) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+    turret_ships_.assign(std::max(turret_bindings_.size(), hardpoint_turret_bindings_.size()), 0);
+    auto& ships = turret_ships_;
+    bool disjoint = true;
+    for (const auto& request : poses) {
+        if (request.ship >= ships.size()) continue; // neither phase can touch this slot
+        if (ships[request.ship]) disjoint = false;
+        ships[request.ship] = 1;
     }
-    return true;
+    const auto run_phase = [&](const auto& prepare) {
+        const auto task = [&](const std::size_t index) { succeeded[index] = prepare(index); };
+        if (workers && disjoint) {
+            // std::function's reference_wrapper conversion is guaranteed not to allocate.
+            // StepExecutor joins before task (and its borrowed captures) leaves scope.
+            if (!workers->run(poses.size(), std::cref(task))) { failure_ = "turret pose workers failed"; return false; }
+        } else {
+            for (std::size_t index = 0; index < poses.size(); ++index) task(index);
+        }
+        // Only this ordered publication touches renderer state or the engine.
+        for (std::size_t index = 0; index < poses.size(); ++index) {
+            if (!succeeded[index]) { if (!errors[index].empty()) failure_ = errors[index]; return false; }
+            for (const auto& binding : staged[index]) {
+                auto posed = renderer.set_prepared_skin_pose(binding.entity, binding.asset, binding.palette);
+                if (!posed) { failure_ = core::format_diagnostic(posed.error()); return false; }
+            }
+            staged[index].clear();
+        }
+        return true;
+    };
+    return run_phase(ordinary) && run_phase(hardpoints);
 }
 
 const animation::Player* SpacePopulation::live_clip(const std::size_t ship, const bool alternate) const noexcept {
@@ -235,34 +524,62 @@ void SpacePopulation::prepare_live_clip(const std::size_t index) {
     const auto& request = pending_clip_poses_[index];
     auto& row = prepared_clips_[index];
     if (!row.player || row.cached || request.ship >= live_retired_.size() || live_retired_[request.ship]) return;
-    auto pose = animation::sample_death_frame(*row.player, {request.position, request.blend_from});
-    if (!pose) { row.failure = core::format_diagnostic(pose.error()); return; }
-    row.pose = std::move(pose.value());
+    if (request.blend_from > 0.0F) {
+        // Keep the existing bind-blend fallback exactly as authored.
+        auto pose = animation::sample_death_frame(*row.player, {request.position, request.blend_from});
+        if (!pose) { row.failure = core::format_diagnostic(pose.error()); return; }
+        row.sample = std::move(pose.value());
+    } else {
+        const auto sampled = row.player->sample_position(request.position.position,
+            request.position.subdivisions, row.sample);
+        if (!sampled) { row.failure = core::format_diagnostic(sampled.error()); return; }
+    }
+    row.pose = true;
     // A visible unused root does not keep a wreck alive. Every piece must
     // instead prove all of its actually weighted geometry bones hidden.
     row.hidden = row.terminal && !row.geometry.empty();
     for (const auto& used : row.geometry) {
-        if (used.size() != row.pose->bones.size()
+        if (used.size() != row.sample.bones.size()
             || std::none_of(used.begin(), used.end(), [](const auto value) { return value != 0; })) {
             row.hidden = false;
             break;
         }
         for (std::size_t bone = 0; bone < used.size(); ++bone)
-            if (used[bone] && row.pose->bones[bone].visible) row.hidden = false;
+            if (used[bone] && row.sample.bones[bone].visible) row.hidden = false;
     }
+    if (row.consumed)
+        row.palette = GodotRenderer::prepare_skin_pose(row.sample.bones);
 }
 
 bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<const LiveClipPose> poses,
     const particles::StepExecutor* workers) {
-    if (poses.empty()) return true;
-    prepared_clips_.resize(poses.size());
+    // Keep high-water row capacity, including bone buffers for temporarily absent requests.
+    if (prepared_clips_.size() < poses.size()) prepared_clips_.resize(poses.size());
     auto& prepared = prepared_clips_;
+    const auto clear = [&] {
+        pending_clip_poses_ = {};
+        active_clips_.clear();
+        for (auto& row : prepared) {
+            row.player = nullptr;
+            row.terminal = row.cached = row.hidden = row.consumed = row.pose = false;
+            row.geometry.clear();
+            row.sample.bones.clear();
+            row.palette = {};
+            row.failure.clear();
+        }
+    };
+    clear();
+    // Renderer metadata and request spans are borrowed only until this joined call returns.
+    struct ClearScratch {
+        const decltype(clear)& reset;
+        ~ClearScratch() { reset(); }
+    } clear_scratch{clear};
+    if (poses.empty()) return true;
     pending_clip_poses_ = poses;
     // Snapshot immutable upload metadata before dispatch. Workers never call Godot.
     for (std::size_t index = 0; index < poses.size(); ++index) {
         const auto& request = poses[index];
         auto& row = prepared[index];
-        row = PreparedLiveClip{};
         row.player = live_clip(request.ship, request.alternate);
         if (!row.player || request.ship >= live_retired_.size() || live_retired_[request.ship]) continue;
         row.terminal = live_death_clone_[request.ship] && !request.alternate && request.blend_from == 0.0F
@@ -270,6 +587,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
                 >= static_cast<std::uint64_t>(row.player->playable_frames()) * request.position.subdivisions;
         const auto held = held_clips_.find(request.ship);
         row.cached = row.terminal && held != held_clips_.end() && held->second.position == request.position;
+        row.consumed = workers && !row.cached && !piece_index_.clips(request.ship).empty();
         if (!row.terminal || row.cached) continue;
         for (const auto piece : piece_index_.pieces(request.ship)) {
             const auto& geometry = pieces_[piece];
@@ -277,21 +595,32 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
             const bool posed = std::any_of(clips.begin(), clips.end(), [&](const auto clip) {
                 return live_clip_instances_[clip].entity == geometry.instance.entity_id;
             });
-            row.geometry.push_back(posed ? renderer.skin_geometry_bones(geometry.instance.asset_id)
-                                          : std::vector<std::uint8_t>{});
+            row.geometry.push_back(posed ? renderer.skin_geometry_bones_view(geometry.instance.asset_id)
+                                          : std::span<const std::uint8_t>{});
         }
     }
-    constexpr std::size_t parallel_threshold = 256;
-    if (workers && poses.size() >= parallel_threshold) {
-        if (!workers->run(poses.size(), live_clip_task_)) {
-            pending_clip_poses_ = {};
-            failure_ = "live clip workers failed";
-            return false;
+    if (workers) {
+        active_clips_.clear();
+        auto& active = active_clips_;
+        active.reserve(poses.size());
+        for (std::size_t index = 0; index < poses.size(); ++index) {
+            const auto& row = prepared[index];
+            if (row.player && !row.cached && poses[index].ship < live_retired_.size()
+                && !live_retired_[poses[index].ship]) active.push_back(index);
+        }
+        if (!active.empty()) {
+            const auto task = [&](const std::size_t index) { prepare_live_clip(active[index]); };
+            if (!workers->run(active.size(), std::cref(task))) {
+                pending_clip_poses_ = {};
+                failure_ = "live clip workers failed";
+                return false;
+            }
         }
     } else {
         for (std::size_t index = 0; index < poses.size(); ++index) prepare_live_clip(index);
     }
     pending_clip_poses_ = {};
+    for (auto& row : prepared) row.geometry.clear();
     // Stable request order controls diagnostics, palette commits and retire requests.
     for (std::size_t index = 0; index < poses.size(); ++index) {
         const auto& request = poses[index];
@@ -301,7 +630,7 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
             return false;
         }
         if (row.cached || !row.pose) continue;
-        auto bones = std::move(row.pose->bones);
+        auto& bones = row.sample.bones;
         contact_bones_[request.ship] = bones;
         if (row.terminal) held_clips_.insert_or_assign(request.ship,
             HeldClip{request.position, bones, row.hidden});
@@ -314,7 +643,9 @@ bool SpacePopulation::pose_live_clips(GodotRenderer& renderer, const std::span<c
         }
         for (const auto clip : piece_index_.clips(request.ship)) {
             const auto& instance = live_clip_instances_[clip];
-            const auto posed = renderer.set_skin_pose(instance.entity, instance.asset, bones);
+            const auto posed = workers
+                ? renderer.set_prepared_skin_pose(instance.entity, instance.asset, row.palette)
+                : renderer.set_skin_pose(instance.entity, instance.asset, bones);
             if (!posed) {
                 failure_ = "entity " + std::to_string(instance.entity) + " live clip pose: "
                     + core::format_diagnostic(posed.error());
@@ -426,13 +757,26 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
     std::fill(live_blast_charging_.begin(), live_blast_charging_.end(), false);
     std::fill(live_blast_charged_.begin(), live_blast_charged_.end(), false);
     std::fill(live_transforms_.begin(), live_transforms_.end(), std::nullopt);
-    for (const LivePose& pose : poses) {
+    auto& prepared_transforms = prepared_transforms_;
+    if (workers) prepared_transforms.resize(poses.size());
+    const auto prepare_transform = [&](const std::size_t index) {
+        prepared_transforms[index] = live_transform(poses[index]);
+    };
+    if (workers) {
+        const auto task = [&prepare_transform](const std::size_t index) { prepare_transform(index); };
+        if (!workers->run(poses.size(), task)) {
+            failure_ = "live transform workers failed";
+            return false;
+        }
+    }
+    for (std::size_t pose_index = 0; pose_index < poses.size(); ++pose_index) {
+        const LivePose& pose = poses[pose_index];
         if (!live_ship_drawn(pose.ship) || live_retired_[pose.ship]) continue;
         // BP-43/IS-09: emitter state and fog opacity belong to the occupying unit,
         // rather than the placeholder identity used when the model slot was composed.
         if (pose.entity != sim::invalid_entity_id) options_.placed_ships[pose.ship].live_entity = pose.entity;
         const std::size_t decision = *live_decisions_[pose.ship];
-        const auto transform = live_transform(pose);
+        const auto transform = workers ? prepared_transforms[pose_index] : live_transform(pose);
         if (!transform) {
             failure_ = "live unit " + std::to_string(options_.placed_ships[pose.ship].live_entity)
                 + ": its transform leaves the Q24 range";
@@ -467,7 +811,7 @@ bool SpacePopulation::pose_live(const std::span<const LivePose> poses, const par
         return false;
     }
     compose_timer.finish();
-    refresh_instances();
+    refresh_instances(workers);
     return true;
 }
 
@@ -578,7 +922,7 @@ bool SpacePopulation::remember_fog_model(GodotRenderer& renderer, const sim::Ent
     return true;
 }
 
-void SpacePopulation::draw_fog_models(GodotRenderer& renderer, const space::FogGhosts& memory,
+void SpacePopulation::draw_fog_models(GodotRenderer& renderer, const live::FogGhosts& memory,
                                       std::vector<sim::RenderInstance>& output) {
     bool released = false;
     for (auto entry = fog_models_.begin(); entry != fog_models_.end();) {

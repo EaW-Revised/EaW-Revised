@@ -85,20 +85,22 @@ namespace eawr::presentation::godot_backend {
 std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
     GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
     std::map<std::string, assets::Texture>& textures, sim::AssetId& next_asset,
-    const assets::Model& model, const std::uint32_t mesh_index, const std::uint32_t submesh_index,
+    const std::string_view model_path, const std::uint32_t mesh_index, const std::uint32_t submesh_index,
     const scene::LegacySelector& selector, const std::string& texture_path,
     const std::optional<std::array<std::uint8_t, 3>>& colour, const std::string& identity) {
+        const auto loaded = cache.shared_model(model_path);
+        if (!loaded) {
+            upload_failures_.push_back(identity + ": " + core::format_diagnostic(loaded.error()));
+            return std::nullopt;
+        }
+        const auto& model = *loaded.value();
         const assets::Mesh& source_mesh = model.meshes[mesh_index];
-        assets::Model single;
-        single.source = model.source;
-        single.bones = model.bones;
-        assets::Mesh mesh = source_mesh;
-        // BP-74: charge-state meshes are uploaded hidden and selected by the live phase gate.
-        if (ieq(mesh.name, "buildup") || ieq(mesh.name, "charged")) mesh.visible = true;
-        mesh.submeshes = {source_mesh.submeshes[submesh_index]};
-        single.meshes.push_back(std::move(mesh));
-        const assets::Submesh& submesh = single.meshes.front().submeshes.front();
+        // BP-74: phase-gated meshes must be drawable when their live phase selects them.
+        const bool force_visible = ieq(source_mesh.name, "buildup") || ieq(source_mesh.name, "charged");
+        const assets::Submesh& submesh = source_mesh.submeshes[submesh_index];
         const bool effect_missing = selector.program == scene::missing_effect_selector().program;
+        std::optional<core::load_profile::Scope> profile;  // one phase at a time through this function
+        profile.emplace(core::load_profile::Phase::surface_texture_prepare);
         assets::Texture texture = placeholder_texture();
         if (!effect_missing && !texture_path.empty()) {
             auto found = textures.find(texture_path);
@@ -108,6 +110,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             }
             texture = found->second;
         }
+        profile.emplace(core::load_profile::Phase::surface_material_build);
         MaterialDescription material{
             .schema_version = MaterialDescription::current_schema_version,
             .route = MaterialRoute::legacy_effect,
@@ -127,6 +130,7 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
             std::erase_if(material.bindings, [](const MaterialBinding& binding) { return ieq(binding.name, "Colorization"); });
             material.bindings.push_back({"Colorization", scene::colorization_binding(material.program, *colour)});
         }
+        profile.emplace(core::load_profile::Phase::surface_texture_prepare);
         const std::vector<GodotRenderer::BindingTexture> family_textures = family_binding_textures(material,
             [&](const std::string_view declared) -> std::optional<assets::Texture> {
                 const std::string path = probe(cache, "data/art/textures/", declared, texture_suffixes);
@@ -139,10 +143,14 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
                 }
                 return found->second;
             });
+        profile.emplace(core::load_profile::Phase::surface_renderer_upload);
         const auto uploaded = options_.reject_upload_for_test && upload_failures_.empty()
             ? core::Result<void>::failure({.code = "EAWR-SPACE-POPULATE-TEST",
                                            .message = "injected supported surface upload failure"})
-            : renderer.upload(next_asset, single, texture, material, family_textures);
+            : renderer.upload(next_asset,
+                ModelUpload{loaded.value(),
+                    ModelSurface{mesh_index, submesh_index, force_visible}},
+                texture, material, family_textures);
         if (!uploaded) {
             upload_failures_.push_back(identity + " shader " + submesh.shader + ": "
                                        + core::format_diagnostic(uploaded.error()));
@@ -154,10 +162,11 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
         if (legacy::reads_effect_time(material)) effect_clock_assets_.push_back(upload.renderer_asset);
         passes_.emplace(upload.renderer_asset, material.pass);
         ++surfaces_uploaded_;
-        const std::int32_t bone = single.meshes.front().bone;
-        if (!single.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
+        profile.emplace(core::load_profile::Phase::surface_pose_bounds);
+        const std::int32_t bone = model.meshes[mesh_index].bone;
+        if (!model.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
             // Draw the bind pose until this placement's idle clip is sampled.
-            if (auto player = animation::Player::create(single)) {
+            if (auto player = animation::Player::create(model)) {
                 if (auto pose = player.value().sample({})) upload.pose = std::move(pose.value().bones);
             }
         }
@@ -180,16 +189,15 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_surface(
 
 std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
     GodotRenderer& renderer, const vfs::Vfs& filesystem, scene::VfsAssetCache& cache,
-    sim::AssetId& next_asset, const assets::Model& model, const std::uint32_t mesh_index,
+    sim::AssetId& next_asset, const std::string_view model_path, const std::uint32_t mesh_index,
     const std::uint32_t submesh_index, std::string& status, const bool neutral_distortion) {
-        assets::Model single;
-        single.source = model.source;
-        single.bones = model.bones;
-        assets::Mesh mesh = model.meshes[mesh_index];
-        mesh.submeshes = {model.meshes[mesh_index].submeshes[submesh_index]};
-        mesh.visible = true;
-        single.meshes.push_back(std::move(mesh));
-        const assets::Submesh& submesh = single.meshes.front().submeshes.front();
+        const auto loaded = cache.shared_model(model_path);
+        if (!loaded) {
+            status = "model decode failed: " + core::format_diagnostic(loaded.error());
+            return std::nullopt;
+        }
+        const auto& model = *loaded.value();
+        const assets::Submesh& submesh = model.meshes[mesh_index].submeshes[submesh_index];
         const bool effect_missing = scene::missing_material_effect(cache.access(), submesh.shader);
         const bool texture_free = effect_missing
             || shield_name_equal(submesh.shader, legacy::mesh_shield::farseer_family.program);
@@ -240,7 +248,9 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
             if (binding == "BaseTexture") base = std::move(decoded.value());
             else extra.push_back({std::string(binding), std::move(decoded.value())});
         }
-        const auto uploaded = renderer.upload(next_asset, single, *base, material, extra);
+        const auto uploaded = renderer.upload(next_asset,
+            ModelUpload{loaded.value(),
+                ModelSurface{mesh_index, submesh_index, true}}, *base, material, extra);
         if (!uploaded) {
             status = "upload_failed: " + core::format_diagnostic(uploaded.error());
             return std::nullopt;
@@ -250,9 +260,9 @@ std::optional<SpacePopulation::SurfaceUpload> SpacePopulation::upload_shell(
         uploaded_.push_back(upload.renderer_asset);
         passes_.emplace(upload.renderer_asset, material.pass);
         if (!texture_free) shield_assets_.push_back(upload.renderer_asset);
-        const std::int32_t bone = single.meshes.front().bone;
-        if (!single.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
-            if (auto player = animation::Player::create(single)) {
+        const std::int32_t bone = model.meshes[mesh_index].bone;
+        if (!model.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
+            if (auto player = animation::Player::create(model)) {
                 if (auto pose = player.value().sample({})) upload.pose = std::move(pose.value().bones);
             }
         }

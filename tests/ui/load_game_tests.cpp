@@ -42,9 +42,15 @@ Bytes header(const std::uint16_t version, const std::uint64_t ticks, const std::
         put(extension, body.size(), 2);
         extension.insert(extension.end(), body.begin(), body.end());
     }
+    if (version >= 6 && !extension.empty()) {
+        extension[0] = 2;
+        put(extension, 15, 2);
+        put(extension, 70000, 4);
+        extension.resize(extension.size() + 70000, 0);
+    }
     Bytes out{'E', 'A', 'W', 'R', 'P', 'L', 'Y', 0};
     put(out, version, 2);
-    put(out, 104 + extension.size(), 2);
+    put(out, 104 + (version >= 6 ? 2 : 0) + extension.size(), version >= 6 ? 4 : 2);
     put(out, 1, 4);            // rules version
     put(out, 1, 4);            // math version
     put(out, 24, 4);           // fractional bits
@@ -53,7 +59,7 @@ Bytes header(const std::uint16_t version, const std::uint64_t ticks, const std::
     put(out, 7, 8);            // seed
     put(out, ticks, 8);
     put(out, 0, 8);
-    out.resize(104, 0);        // the rest of the 104 fixed bytes
+    out.resize(version >= 6 ? 106 : 104, 0);        // the rest of the 104 fixed bytes
     out.insert(out.end(), extension.begin(), extension.end());
     return out;
 }
@@ -68,6 +74,11 @@ void header_summary() {
     expect(mapped.valid && mapped.map == "data/art/maps/_mp_space_coruscant.ted", "the SKSU record names the map");
     expect(mapped.duration_seconds() == 15, "450 ticks run fifteen seconds");
 
+    for (const auto version : {6U, 7U}) {
+        const auto native = ui::read_replay_header(header(static_cast<std::uint16_t>(version), 450, "data/art/maps/native.ted"));
+        expect(native.valid && native.map == "data/art/maps/native.ted" && native.duration_seconds() == 15,
+            "wide native header keeps map and duration offsets");
+    }
     Bytes bad = header(2, 10);
     bad[0] = 'X';
     expect(!ui::read_replay_header(bad).valid, "another magic is refused");

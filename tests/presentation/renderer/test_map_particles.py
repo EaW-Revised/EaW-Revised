@@ -103,6 +103,21 @@ def changed_pixels(first, second) -> int:
 
 
 class MapParticlesStructure(unittest.TestCase):
+    def test_particle_state_commands_have_one_counted_submission_path(self):
+        adapter = (ROOT / "src/presentation/godot/particle_adapter.cpp").read_text(encoding="utf-8")
+        # A bypass would preserve the helper's unit tests while losing counts/dedup in production.
+        self.assertEqual(adapter.count(".instance_set_visible("), 1)
+        self.assertNotIn("->instance_set_visible(", adapter)
+        self.assertEqual(adapter.count(".mesh_set_custom_aabb("), 1)
+        self.assertNotIn("->mesh_set_custom_aabb(", adapter)
+        self.assertIn("emitter.submission.visibility.apply(visible", adapter)
+        self.assertIn("emitter.submission.bounds.apply(emitter.bounds", adapter)
+        trace = (ROOT / "apps/viewer/src/perf_trace.cpp").read_text(encoding="utf-8")
+        for state in ("bounds", "visibility"):
+            for metric in ("attempted", "sent", "skipped"):
+                self.assertIn(f"particle_{state}_{metric}", trace)
+        self.assertIn("calls.attempted << ',' << calls.sent << ',' << calls.skipped", trace)
+
     def test_fixture_has_distinct_original_effects_and_checked_inputs(self):
         self.assertEqual(len(fixture.PLACEMENTS), 3)
         self.assertNotEqual(fixture.particle_bytes("red", (1.0, 0.2, 0.1)),

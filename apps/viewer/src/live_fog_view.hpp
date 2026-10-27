@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "live_session_view.hpp"
 
 #include "eawr/presentation/camera/controller.hpp"
@@ -51,6 +53,7 @@ public:
         bool pane_open = false, bool dragging = false);
     void release();
     // The report's "live_fog" member, followed by ",\n".
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     void write_report(std::ostream& output) const;
 
 private:

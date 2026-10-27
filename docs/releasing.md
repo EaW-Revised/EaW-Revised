@@ -4,11 +4,55 @@ Release assets are built on the pool from the exact public tag. The public repos
 `.github/workflows/release.yml` only verifies native Linux ARM64 and Apple Silicon after publication. Nothing is published automatically: a maintainer
 reviews and publishes the **draft** release.
 
-## Current candidate: v0.2.7.1
+## Private crash symbols
 
-The last published release is v0.1.6 (2026-10-07). The next candidate is v0.2.7.1: the portable player
-download with its double-click launcher, a debug download, playable space skirmish, LAN and
-online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
+Windows builds compile with embedded debug information to preserve compiler-cache
+hits. `EAWR_DEBUG_SYMBOLS` defaults OFF in all configurations, including Debug:
+ordinary development and pool builds link with `/DEBUG:NONE` and write no PDBs.
+For local debugging, configure with `-DEAWR_DEBUG_SYMBOLS=ON` as well.
+Configure both the root and viewer with `-DEAWR_DEBUG_SYMBOLS=ON` for a release
+or crash-symbol package. Only the viewer, player launcher and eleven headless
+tools in the release packager's `TOOLS` list then link PDBs with `/DEBUG:FULL`;
+tests and other development binaries still use `/DEBUG:NONE`.
+The pool's `--require-symbols` enables this flag explicitly for root and viewer
+builds and requires retention/import to pass. The profiling marker enables the
+same flag; the melee benchmark also configures it ON explicitly.
+Release optimization stays enabled. Existing test PDBs in warm
+build trees remain until explicitly removed; Ninja does not delete stale outputs.
+Pool jobs retain compressed private symbol bundles for ten recent jobs, plus any
+job named by an active build-slot owner. They never enter the player artifact.
+The offload client verifies and imports available bundles into the coordinator's
+private store (`EAWR_SYMBOL_STORE` overrides the coordinator's configured location).
+CI retains matching compressed bundles on the persistent runner before workspace
+cleanup, with the same ten-job limit and protection for active runner slots.
+Ordinary pool builds and CI cleanup report retention failures as `EAWR-SYMBOLS ...
+skipped: <reason>` without changing the build result. Pass `--require-symbols` to
+the Windows offload client when retention and import must pass; release packaging
+always requires its private symbols.
+
+The store indexes PDBs by GUID and age and binaries by timestamp and image size.
+Portable manifests under `builds/<build identity>/` record exact hashes; they carry
+no build-machine paths. The coordinator store has no automatic expiry. Release
+packaging requires matching Windows PDBs and writes a private symbols archive there,
+outside the player downloads and public checksums. `--symbol-store` selects a
+different private release store. Retain released build identities indefinitely.
+
+To inspect a player-provided dump, run
+`python tools/symbolize.py <dump> --store <private store>` with 64-bit Windows Python.
+It uses the built-in Windows DbgHelp library to read the exception context and walk
+dump memory, with matching private images/PDBs. Matching local system images provide
+OS unwind metadata; missing metadata can truncate the stack. It never follows image
+paths from the player's dump or uses a network symbol server. Optional
+`--llvm-symbolizer <path>` uses the LLVM executable beside the provisioned clang-cl
+for name lookup; `--debugger <cdb.exe>` selects an existing CDB installation instead.
+No debugger installation is required. Dumps stay on the player's computer until
+they choose to share one; neither the viewer nor the symbol tools upload them.
+
+## Release status
+
+The last published release is v0.2.7.1 (2026-10-22); the current candidate is v0.3.0.
+The published release includes the portable player download with its double-click launcher,
+a debug download, playable space skirmish, LAN and online multiplayer and a partially working Galactic Conquest. The galactic AI is on by default
 in live campaigns; `--eawr-galactic-ai off` switches it off. Keep a candidate local until the
 owner approves the public sync.
 
@@ -83,8 +127,8 @@ The maintainer tags and pushes the reviewed public commit explicitly (never thro
 NO-PUSH remote):
 
 ```text
-git -C <public-clone> tag -s v0.2.7.1 <reviewed-public-commit> -m "EaW Revised v0.2.7.1"
-git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.2.7.1
+git -C <public-clone> tag -s v0.3.0 <reviewed-public-commit> -m "EaW Revised v0.3.0"
+git -C <public-clone> push https://github.com/EaW-Revised/EaW-Revised.git refs/tags/v0.3.0
 ```
 
 The Windows publish scan must see the reviewed LF bytes of pinned text fixtures after
@@ -111,17 +155,27 @@ macOS support remains experimental; these release archives do not provide a macO
 
 ### The player folder
 
-`package_release.py --godot <Godot_v4.7.2-stable_win64.exe> --launcher <EAWR.exe>` (or `--allow-missing-launcher`) also writes the player zip
-(Windows x64). Layout: `EAWR.exe` (the native launcher) (legacy EAWR-3962) at the root; `godot/` with the pinned standard
-GUI runtime (its SHA-256 must equal the pin in `tools/remote_godot/payload_lib.py` and its `--version` must
-report `4.7.2.stable.official.ed1daf0bf`; the console companion is not
+`package_release.py --godot <Godot_v4.7.2-stable_win64.exe> --launcher <EAWR.exe>` also writes the player zip
+(Windows x64). These existing commands keep the normal layout and never fetch a manager pin.
+Opt in to the manager with `--with-mods-manager --mods-service <eawr_mods_service.exe>`; this mode requires
+both pool-built executables and validates them and the pinned artifact before packaging. Use
+`--launcher-artifact <manager.zip>` for a local zip matching `config/launcher-pin.json`, or omit it to
+download and verify the pinned GitHub release with GitHub CLI. Manager mode adds `eawr_mods_service.exe`,
+`launcher/`, `launcher-pin.json` and `EAWR Mods.vbs` (which starts `EAWR.exe --mods` without a console).
+The native launcher is required by the player CLI; the former option to omit it has been removed.
+The normal layout is `EAWR.exe` (the native launcher) (legacy EAWR-3962) at the root; `godot/` with the pinned patched
+GUI runtime (the patched EAWR fork build, see `third_party/godot/README.md`: its SHA-256 must equal
+`PINNED_GODOT_SHA256` in `tools/release/package_release.py` and its `--version` must
+report `4.7.2.stable.eawr.fad06b579`; the console companion is not
 shipped, so no console window opens); `project/` with the viewer project and its GDExtension; `licenses/`
 with the project, Godot and godot-cpp licence texts, plus `LICENSE` and `THIRD_PARTY_NOTICES.md`;
 `README.md` (this repository's `docs/player-guide.md`); and `runtime.json` (Godot identity and SHA-256, launcher
 and extension SHA-256); and `SHA256SUMS` (the SHA-256 of every other file in the folder). The release is
 not code-signed (owner decision) (legacy EAWR-3966): the player guide tells players about the SmartScreen warning and that
 Smart App Control or a managed-PC policy may block it. The packager refuses to write the zip if it would carry a font, `.meg`, `StarWarsG.exe`
-or other game file. The launcher starts `godot/Godot_v4.7.2-stable_win64.exe --path project -- <viewer args>`.
+or other game file. The launcher starts `godot/Godot_v4.7.2-stable_win64.exe --path project -- <viewer args>`; the project selects the Separate render thread
+(`rendering/driver/threads/thread_model=2`). `EAWR (Safe render thread).cmd` at the root is the opt-out start file: it runs `EAWR.exe --safe-render-thread`,
+which adds Godot's `--render-thread safe`. The packager writes it (no other batch file ships in the player zip) and `SHA256SUMS` covers it.
 
 Nothing is written beside the program or the game (legacy EAWR-3963). The packager runs the pinned Godot once, headless,
 to generate the project's `.godot` metadata (`extension_list.cfg`, `global_script_class_cache.cfg`,
@@ -134,6 +188,10 @@ replays, LAN desync bundles, logs and the font cache are all in Godot user data;
 where a flag names them (the launcher passes `--eawr-report` into user data). `--eawr-font-cache` and
 `EAWR_FONT_CACHE` still override the cache for tests. An unpinned build is refused with a readable message
 unless the viewer is started with `--eawr-allow-unknown-build`.
+
+The packager deletes the patched Godot's `project/bin/~*` import copies and refuses any player or Debug payload with a `~*` file or a PDB the Debug build does not own.
+
+It also refuses a shipped binary whose build identity is not the packaged commit (`--expect-identity <commit>`, default git HEAD); builds re-run CMake configure when HEAD moves, so a warm pool tree cannot keep an old identity.
 
 The acceptance checklist for a candidate (clean machine plus a normal user) is at the end of
 [the player guide](player-guide.md).
@@ -163,7 +221,7 @@ carry a source/build/hash receipt; do not claim a hosted attestation for these b
   original game are ever included.
 - **No Godot in the tools and viewer zips.** The player and debug zips bundle the pinned runtime
   (`tools/release/fetch_pinned_godot.ps1` downloads and checks it). With the viewer zip, download the
-  pinned standard Godot 4.7.2 binary and install Python
+  pinned patched Godot 4.7.2 binary (or the stock official 4.7.2 for the viewer alone) and install Python
   3.8 or newer, then run `play-demo.cmd` (Windows) or `sh ./play-demo.sh` (Linux)
   from the extracted viewer archive. The launcher discovers or asks for the game
   and Godot paths and extracts validated fonts into its local `out/fonts/` before

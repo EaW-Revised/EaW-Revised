@@ -51,16 +51,20 @@ current type, independently of behavior names, runtime parents and original-type
 resolution. Work runs only during catalog loading or a perturbation overlay.
 
 `Catalog::member_flags` returns the completed pair. Duplicate/empty game-object
-identities, an unresolved roster reference or an incomplete ten-pass load refuse
-with `EAWR-XML-0013` and the named `member-parse-timeline` seam. Such a catalog's
-galactic fields remain absent, so consumers cannot turn a failed parse timeline
-into ordinary false bits. Bare referenced member types receive galactic rows.
+identities or an incomplete ten-pass load refuse with `EAWR-XML-0013` and the
+named `member-parse-timeline` seam. Such a catalog's galactic fields remain
+absent, so consumers cannot turn a failed parse timeline into ordinary false
+bits. An unresolved roster reference does not refuse: the pass skips that slot,
+keeps marking the others and reports one `Catalog::member_roster_notes()` entry
+(owner, roster, slot, name), which the type table lists as a `dangling_reference`
+issue. That skip is an EAWR recovery policy (CGS-14, RGC-154); the debug build's
+behaviour there is undefined. Bare referenced member types receive galactic rows.
 Perturbation overlays replay the timeline independently of the shared catalog.
 
 The stock contract compares both flags for all 3,345 stock game-object types
 against an independent XML audit fingerprint: 186 ground-company members and
 40 squadron members. It includes early-copy variant chains that stay unmarked
 when their final bases are marked. Synthetic contracts cover later-pass copies,
-complete sibling replays, repeated fix-ups, unresolved members and the pass cap.
+complete sibling replays, repeated fix-ups, skipped unresolved members and the pass cap.
 The content identity contracts also cover sensitivity to both flags and their
 availability, along with deterministic repeated loads.

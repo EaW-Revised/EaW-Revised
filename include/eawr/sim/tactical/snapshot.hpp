@@ -129,6 +129,7 @@ struct TacticalInstance {
     bool in_nebula{}; // WHZ-25: cached service, member union, or hard-box fallback
     bool in_ion_storm{}; // WHZ-31: shield service's cached contact, never a zeroed pool
     std::vector<ManualWeaponView> manual_weapons{}; // WAD-39: existing snapshot/command consumer hook
+    std::vector<ManualWeaponView> hardpoint_turrets{}; // HPT-07: ordinary poses, never commandable manual guns.
     std::optional<WeaponState::TurretState> object_turret{}; // UA-05: target and procedural angles
     // Derived from the validated combat profile; identity already covers these static inputs.
     bool object_turret_xy_only{}, object_turret_barrel{};
@@ -163,6 +164,8 @@ struct TacticalInstance {
     // WGT-21 / WHE-45: hidden riders keep an identity on their visible carrier.
     // Presentation only; excluded from snapshot canonical bytes.
     std::vector<CarriedObject> contained{};
+    // WRA-02: frozen admission input; the ability slot already carries the hashed state.
+    bool rocket_attack{};
     friend bool operator==(const TacticalInstance&, const TacticalInstance&) = default;
 };
 

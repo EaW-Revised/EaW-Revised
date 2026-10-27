@@ -1,6 +1,7 @@
 #include "eawr/sim/galactic/ability_host.hpp"
 #include "session_impl.hpp"
 #include "encoding.hpp"
+#include "eawr/sim/galactic/observer.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -23,6 +24,7 @@ bool ground_ability_enabled(const GalacticAbilityProfile& p, const AbilityActorS
     if (p.lifecycle_only || p.type != s.type
         || std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) == p.ground_activated.end()) return false;
     switch (kind) {
+    case AbilityKind::system_spy: return p.spy && s.spy_enabled && !s.spy_cancelled;
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
     case AbilityKind::technology_theft: return p.theft && s.theft_enabled && !s.theft_cancelled;
     case AbilityKind::corruption: return p.corruption && s.corruption_enabled && !s.corruption_cancelled;
@@ -61,10 +63,42 @@ void GalacticSession::Impl::dispatch_ground_ability(EntityId supplied, PlanetId 
         bool qualified = false;
         for (const auto kind : profile->ground_activated) {
             if (!ground_ability_enabled(*profile, *service, kind)) continue;
+            if (kind == AbilityKind::technology_theft || kind == AbilityKind::system_spy) {
+                const auto* planet = control ? find(control->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
+                if (!planet) continue;
+                const auto index = static_cast<std::size_t>(planet - control->planets.data());
+                const auto& state = control->state[index];
+                if (state.target_player == at->second.owner || std::any_of(control->relations.begin(), control->relations.end(), [&](const auto& relation) {
+                    return relation.player == at->second.owner && relation.other == state.target_player && relation.allied;
+                })) continue;
+                if (kind == AbilityKind::technology_theft) {
+                    const auto* current = economy_corruption ? find(economy_corruption->players, state.current_player, [](const auto& row) { return row.player; }) : nullptr;
+                    if (!current || !current->playable || !production || !economy) continue;
+                    const auto* purchaser = find(production->players, at->second.owner, [](const auto& row) { return row.player; });
+                    const auto* account = find(economy->players, at->second.owner, [](const auto& row) { return row.player; });
+                    // WGCH-55/155: an empty theft list is not an appropriate bearer.
+                    // This admission reads no price, random draw or prepared absence.
+                    if (!purchaser || !account) continue;
+                    bool available = false;
+                    for (const auto& choice : setup.ability_host->technologies) {
+                        ++ability_work.registered_types;
+                        const auto* type = find(production->technology_types, choice.type, [](const auto& row) { return row.type; });
+                        if (type && type->initially_locked && type->slicer_unlockable && type->tech <= account->current_tech
+                            && std::binary_search(type->affiliated_players.begin(), type->affiliated_players.end(), at->second.owner)
+                            && !std::binary_search(purchaser->locked.begin(), purchaser->locked.end(), choice.type)
+                            && !std::binary_search(purchaser->unlocked.begin(), purchaser->unlocked.end(), choice.type)) {
+                            available = true; break;
+                        }
+                    }
+                    if (!available) continue;
+                }
+            }
             qualified = true;
             const CommandOrderKey key{tick, producer, sequence};
             const auto begin = events.size();
-            if (kind == AbilityKind::planet_destruction) {
+            if (kind == AbilityKind::system_spy) {
+                execute_spy({key, DeployGroundAbility{supplied, target}}, at->second, *profile, target, tick, events);
+            } else if (kind == AbilityKind::planet_destruction) {
                 // Bind the qualified live bearer; re-scanning the transport could select another child.
                 PreparedAbility request; request.actor = id; request.planet = target; request.kind = kind;
                 execute_ability({key, ExecutePreparedAbility{request}}, tick, events);
@@ -82,7 +116,7 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         diagnostic_codes::invalid_setup, "live ability host requires canonical actor/content/economy inputs")); };
     const auto& host = *setup.ability_host;
     if (!setup.census || !setup.economy_corruption || !setup.player_economy
-        || host.default_hero_absence.raw() <= 0 || host.profiles.size() > galactic_max_objects) return bad();
+        || host.profiles.size() > galactic_max_objects) return bad(); // CGS-12: the default respawn time keeps any authored sign
     TypeId previous{};
     bool theft_enabled = false;
     for (const auto& profile : host.profiles) {
@@ -90,15 +124,19 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (market.buyer || market.owner || !market.present || market.opposing_planet
             || market.despawn_requested || market.prepared_absence.raw()
             || (!profile.has_market && !profile.theft && !profile.corruption && !profile.lifecycle_only && !profile.hack && !profile.destruction
-            && !profile.sabotage && !profile.neutralize) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
+            && !profile.sabotage && !profile.neutralize && !profile.spy) || !profile.type || profile.type <= previous || market.price_modifier.raw() < 0
             || market.absence_min.size() != market.absence_max.size()
             || (!market.absence_min.empty() && market.absence_min.size() != 5)
             || std::none_of(setup.census->types.begin(), setup.census->types.end(),
                 [&](const auto& row) { return row.type == profile.type; })) return bad();
-        if (profile.ground_activated.size() > 7) return bad();
+        if (profile.ground_activated.size() > 8) return bad();
         std::set<AbilityKind> group;
         for (const auto kind : profile.ground_activated)
-            if (static_cast<unsigned>(kind) < 1 || static_cast<unsigned>(kind) > 7 || !group.insert(kind).second) return bad();
+            if (static_cast<unsigned>(kind) < 1 || static_cast<unsigned>(kind) > 8 || !group.insert(kind).second) return bad();
+        if (profile.spy && (!setup.observer || !setup.control || !profile.spy->identity
+            || profile.spy->name.empty() || profile.spy->name.size() > 4096 || profile.spy->name.find('\0') != std::string::npos
+            || profile.spy->text_identity.size() > 1024 || profile.spy->text_identity.find('\0') != std::string::npos
+            || (profile.spy->mask & ~all_intelligence) || profile.spy->duration <= math::Fixed{})) return bad();
         previous = profile.type;
         for (std::size_t i = 0; i < market.absence_min.size(); ++i)
             if (market.absence_min[i].raw() < 0 || market.absence_min[i] > market.absence_max[i]) return bad();
@@ -173,6 +211,9 @@ core::Result<void> validate_ability_host(const GalacticSetup& setup) {
         if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
     for (const auto& p : host.profiles) if (p.hack && (p.hack->name.empty() || p.hack->name.size() > 4096
         || p.hack->name.find('\0') != std::string::npos || !setup.control || !setup.production)) return bad();
+    if (host.activated_spy_abilities.size() > galactic_max_objects) return bad();
+    for (const auto& name : host.activated_spy_abilities)
+        if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
     if (host.activated_destruction_abilities.size() > galactic_max_objects) return bad();
     for (const auto& name : host.activated_destruction_abilities)
         if (name.empty() || name.size() > 4096 || name.find('\0') != std::string::npos) return bad();
@@ -269,7 +310,8 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
             profile->hack && profile->hack->initially_enabled, false,
             profile->destruction && profile->destruction->initially_enabled, false,
             profile->sabotage && profile->sabotage->initially_enabled, false,
-            profile->neutralize && profile->neutralize->initially_enabled, false, false}, [](const auto& a) { return a.actor; });
+            profile->neutralize && profile->neutralize->initially_enabled, false,
+            profile->spy && profile->spy->initially_enabled, false, {}, false}, [](const auto& a) { return a.actor; });
         touch_abilities();
     }
     const auto* before = find(economy_corruption->buyers, row.id, [](const auto& p) { return p.buyer; });
@@ -293,6 +335,10 @@ void GalacticSession::Impl::refresh_ability_actor(const CensusObject& row) {
 }
 void GalacticSession::Impl::lose_ability_actor(EntityId id) {
     if (!ability_host || !economy_corruption) return;
+    if (id != consuming_spy) {
+        const auto* state = find(ability_host->actors, id, [](const auto& row) { return row.actor; });
+        if (state && !state->spy_targets.empty()) { const std::array gone{id}; detach_observer_sources(gone); }
+    }
     if (auto* state = find(ability_host->actors, id, [](const auto& a) { return a.actor; })) {
         const auto index = static_cast<std::size_t>(state - ability_host->actors.data());
         ability_host->actors.erase(ability_host->actors.begin() + static_cast<std::ptrdiff_t>(index));
@@ -547,6 +593,7 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
     const auto* profile = state ? find(impl.setup.ability_host->profiles, state->type, [](const auto& p) { return p.type; }) : nullptr;
     if (!profile || (kind == AbilityKind::black_market ? !profile->has_market : kind == AbilityKind::technology_theft ? !profile->theft
         : kind == AbilityKind::superweapon_hack ? !profile->hack : kind == AbilityKind::planet_destruction ? !profile->destruction
+        : kind == AbilityKind::system_spy ? !profile->spy
         : kind == AbilityKind::structure_sabotage ? !profile->sabotage : kind == AbilityKind::hero_neutralization ? !profile->neutralize
         : kind != AbilityKind::corruption || !profile->corruption))
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command, "ability lifecycle requires a live bound kind"));
@@ -556,6 +603,7 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
         if (!recorded) return recorded;
     }
     if (kind == AbilityKind::black_market) { state->enabled = enabled; state->cancelled = cancelled; }
+    else if (kind == AbilityKind::system_spy) { state->spy_enabled = enabled; state->spy_cancelled = cancelled; }
     else if (kind == AbilityKind::technology_theft) { state->theft_enabled = enabled; state->theft_cancelled = cancelled; }
     else if (kind == AbilityKind::superweapon_hack) { state->hack_enabled = enabled; state->hack_cancelled = cancelled; }
     else if (kind == AbilityKind::planet_destruction) { state->destruction_enabled = enabled; state->destruction_cancelled = cancelled; }
@@ -567,5 +615,6 @@ core::Result<void> GalacticSession::set_ability_lifecycle(EntityId actor, bool e
 }
 GalacticSession::AbilityWork GalacticSession::ability_work() const noexcept { return impl_->ability_work; }
 const GalacticAbilityState* GalacticSession::ability_state() const noexcept { return impl_->ability_host ? &*impl_->ability_host : nullptr; }
+void GalacticSession::set_ground_ability_story_handler(GroundAbilityStoryHandler handler) { impl_->ground_ability_story_handler = std::move(handler); }
 void GalacticSession::set_ability_consumption_handler(AbilityConsumptionHandler handler) { impl_->ability_consumption_handler = std::move(handler); }
 } // namespace eawr::sim::galactic

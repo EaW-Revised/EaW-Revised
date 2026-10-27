@@ -608,12 +608,12 @@ core::Result<void> session_detail::Tick::bonuses() {
                 return before.id == after.id && before.profile == after.profile;
             }));
     if (!impl_->bonus_categories.empty() && (sources_changed || next_id != impl_->next_id || command_events || campaign_birth)) {
+        std::map<EntityId, TypeId> containers;
+        if (sources_changed) for (const auto& account : ledgers) for (const auto& object : account.completed) {
+            if (const auto* station = survivor(object.station)) containers.emplace(object.station, station->state.type_id);
+        }
         // Rebuild once per source change, by player/type; births only read the cached result.
         if (sources_changed) {
-            std::map<EntityId, TypeId> containers;
-            for (const auto& account : ledgers) for (const auto& object : account.completed) {
-                if (const auto* station = survivor(object.station)) containers.emplace(object.station, station->state.type_id);
-            }
             const auto profiles = impl_->build_bonus_profiles(ledgers, containers, executor);
             if (!profiles) return core::Result<void>::failure(profiles.error());
             bonus_profile_evaluations = impl_->ownership_keys.size();
@@ -631,13 +631,19 @@ core::Result<void> session_detail::Tick::bonuses() {
         }
         const auto applied = executor.execute_phase("upgrade-bonuses", tick_partition_count, [&](const std::size_t partition) {
             const auto range = partition_range(partition, survivors.size() - first_bonus_unit);
+            const auto categories = std::span(impl_->bonus_parts).subspan(partition * impl_->bonus_categories.size(), impl_->bonus_categories.size());
             for (auto offset = range.begin; offset < range.end; ++offset) {
                 const auto index = first_bonus_unit + offset;
                 auto& unit = survivors[index];
                 if (!shared_modifiers) {
                     const auto bonuses = impl_->bonuses_for(unit, !sources_changed);
-                    if (unit.upgrade_bonuses == bonuses) continue;
-                    const auto changed = impl_->apply_bonuses(unit, bonuses);
+                    if (unit.upgrade_bonuses == bonuses && !sources_changed) continue;
+                    const auto retained = impl_->handles.contains(unit.state.entity_id)
+                        ? impl_->profile_bonuses({unit.state.owner, unit.state.type_id}, ledgers, containers, categories, true, true)
+                        : CombatBonuses{};
+                    const auto removed = impl_->apply_bonuses(unit, retained, Impl::BonusAdjustment::loss);
+                    if (!removed) { bonus_errors[partition] = removed.error(); break; }
+                    const auto changed = impl_->apply_bonuses(unit, bonuses, Impl::BonusAdjustment::gain);
                     if (!changed) { bonus_errors[partition] = changed.error(); break; }
                 }
                 // WWP-73: modifier publication retains the banked frame already used by weapons.

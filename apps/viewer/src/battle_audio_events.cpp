@@ -178,7 +178,7 @@ audio::Start BattleAudio::start_sample(const audio::EventQueue::Sample& cue) {
     if (gain < start.volume) ++ducked_starts_;
     if ((reason == "authored_chain" || reason.starts_with("ability_") || reason.starts_with("battle_") || reason.starts_with("economy_")
          || reason == "hyperspace_arrival" || reason == "response_attack_hardpoint" || reason == "lifetime_detonation"
-         || reason == "response_stop" || reason == "response_guard" || reason == "ambient_moving" || reason == "base_under_attack"
+         || reason == "health_warning" || reason == "response_stop" || reason == "response_guard" || reason == "ambient_moving" || reason == "base_under_attack"
          || reason.starts_with("reinforcement_") || reason.starts_with("engine_") || reason.starts_with("sighting_") || reason.starts_with("command_") || reason.starts_with("response_") || reason == "negative_feedback") && start_rows_.size() < log_limit) {
         start_rows_.push_back({reason, sfx->name, start.sample, presented_tick_, gain, start.pitch, position, attached, sfx->localized});
     }
@@ -730,11 +730,18 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
     if (!selected) return;
     const TypeSounds& speaker = *selected;
     const bool group = acknowledgement.units.size() > 1;
+    // SND-77: the speaking unit has any ability switched on.
+    bool ability_enabled = false;
+    if (const auto latest = live.battle_frame().latest) {
+        if (const auto* speaker_instance = space::find_instance(*latest, chosen)) {
+            for (const tactical::AbilityStatus& status : speaker_instance->abilities) ability_enabled = ability_enabled || status.active;
+        }
+    }
     const audio::SfxEvent* line = nullptr;
     const char* kind = "select";
     switch (acknowledgement.kind) {
     case BattleInput::Acknowledgement::Kind::select:
-        line = speaker.select;
+        line = audio::ability_variant(ability_enabled, speaker.select_ability, speaker.select);
         break;
     case BattleInput::Acknowledgement::Kind::move:
         {
@@ -763,14 +770,16 @@ void BattleAudio::respond(const BattleInput::Acknowledgement& acknowledgement, c
             }
         }
         line = audio::move_response(asteroid, nebula, group, speaker.move_asteroid,
-                                   speaker.move_nebula, speaker.group_move, speaker.move);
+                                   speaker.move_nebula, speaker.group_move,
+                                   audio::ability_variant(ability_enabled, speaker.move_ability, speaker.move));
         kind = "move";
         if (line && line == speaker.move_asteroid && asteroid) kind = "move_asteroid";
         else if (line && line == speaker.move_nebula && !asteroid && nebula) kind = "move_nebula";
         }
         break;
     case BattleInput::Acknowledgement::Kind::attack:
-        line = group && speaker.group_attack != nullptr ? speaker.group_attack : speaker.attack;
+        line = group && speaker.group_attack != nullptr ? speaker.group_attack
+            : audio::ability_variant(ability_enabled, speaker.attack_ability, speaker.attack);
         kind = "attack";
         if (const auto target = entity_types_.find(acknowledgement.target); target != entity_types_.end()) {
             const auto type = types_.find(target->second);
@@ -1445,6 +1454,21 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
         }
     }
     for (const platform::LiveTickEvents& record : battle.reached) {
+        // SND-33 / WCC-54: one immutable delivery at a time, independent of fog,
+        // snapshot-history eviction and later source/target destruction.
+        if (health_low_threshold_ && health_critical_threshold_) for (const auto& change : record.damage_changes) {
+            const auto target = types_.find(change.target.type_id);
+            const auto source = change.source ? types_.find(change.source->type_id) : types_.end();
+            const audio::HealthWarningCues empty;
+            const double maximum = to_double(change.max_hull);
+            if (maximum <= 0.0) continue;
+            play(audio::health_warning_cue(to_double(change.hull_before) / maximum,
+                to_double(change.hull_after) / maximum, *health_low_threshold_, *health_critical_threshold_,
+                change.target.owner == local, change.source && change.source->owner == local,
+                target == types_.end() ? empty : target->second.health_warning,
+                source == types_.end() ? empty : source->second.health_warning),
+                std::nullopt, false, "health_warning");
+        }
         // BA-85: one request at the countdown transition, independent of the
         // number of units hit by its blast and the presentation frame's step.
         const auto before_spawn = record.tick > 0 ? live.snapshot_at(record.tick - 1) : nullptr;
@@ -1503,7 +1527,7 @@ void BattleAudio::present_combat_audio(const LiveSessionView& live, const LiveSe
             std::uint32_t weapon_slot = event.weapon;
             tactical::ProjectileProfileKind kind = tactical::ProjectileProfileKind::ordinary;
             if (const auto before = live.snapshot_at(event.tick)) {
-                if (const auto hit = space::hit_projectile(before->projectiles(), event)) {
+                if (const auto hit = live::hit_projectile(before->projectiles(), event)) {
                     for (const auto& projectile : before->projectiles()) {
                         // WRB-08: hit audio follows the original projectile, including ability and barrage overrides.
                         if (projectile.id == *hit && projectile.profile_key) {

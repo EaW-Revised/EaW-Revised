@@ -9,5 +9,6 @@ target_include_directories(
         "$<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>"
 )
 target_link_libraries(eawr_assets PUBLIC eawr::core eawr::vfs eawr::data)
+target_include_directories(eawr_assets SYSTEM PRIVATE "${PROJECT_SOURCE_DIR}/third_party/stb")
 target_compile_features(eawr_assets PUBLIC cxx_std_20)
 eawr_target_project_warnings(eawr_assets)

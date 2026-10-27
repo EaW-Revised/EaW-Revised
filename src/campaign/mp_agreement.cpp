@@ -1,6 +1,7 @@
 #include "eawr/campaign/mp_agreement.hpp"
 
 #include "eawr/campaign/live_setup.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/numeric/backend.hpp"
@@ -76,6 +77,7 @@ struct Derived {
 // Controller kind a faction has at tick zero: the roster's human sides hold their factions, everyone else is AI.
 core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms) {
     using Result = core::Result<Derived>;
+    const core::gc_load::Scope derive_scope("mp.derive_local");
     if (!local.data || !local.types) return refuse<Derived>("local content is not loaded");
     if (local.command_quota == 0 || local.byte_quota == 0
         || terms.command_quota != local.command_quota || terms.byte_quota != local.byte_quota)
@@ -111,6 +113,7 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
         controller.kind = human ? (active_humans.contains(player.player) ? gc::FactionControl::human : player.dropout)
                                 : default_nonhuman_controller;
         if (!human) {
+            const core::gc_load::Scope scope("mp.derive_local.ai_config");
             auto configuration = ai_configuration_for(local, player.faction, player.player, roster.difficulty);
             if (!configuration) return Result::failure(configuration.error());
             controller.configuration = configuration.value();
@@ -121,18 +124,23 @@ core::Result<Derived> derive_local(const MpLocalContent& local, const gc::MpRost
     options.seat_control = std::move(control);
     if (auto playable = validate_live_campaign_seats(data, options.players, options.seats); !playable)
         return Result::failure(playable.error());
+    std::optional<core::gc_load::Scope> plan_scope(std::in_place, "mp.derive_local.plan");
     auto planned = local.planner ? local.planner(options, roster.campaign, roster.difficulty)
                                  : plan_campaign_setup(data, *local.types, roster.campaign, options);
+    plan_scope.reset();
     if (!planned) return Result::failure(planned.error());
     out.plan = std::make_shared<const CampaignSetupPlan>(std::move(planned).value());
     std::string hex;
     if (local.prepare_session) {
+        std::optional<core::gc_load::Scope> prepare_scope(std::in_place, "mp.derive_local.prepare_session");
         auto prepared = local.prepare_session(*out.plan, roster.difficulty);
+        prepare_scope.reset();
         if (!prepared) return Result::failure(prepared.error());
         out.session = std::move(prepared.value().session);
         out.runtime_services = std::move(prepared.value().runtime_services);
         if (!out.session || out.session->completed_tick() != 0)
             return refuse<Derived>("campaign preparation did not return a tick-zero session");
+        const core::gc_load::Scope hash_scope("mp.derive_local.tick_zero_hash");
         hex = out.session->state_sha256();
     } else if (local.services) {
         auto services = local.services(*out.plan);
@@ -174,8 +182,10 @@ Digest map_digest(const gc::GalacticSetup& setup) {
     return out.digest();
 }
 Digest story_digest(const MpLocalContent& local, const data::galactic::Campaign& campaign) {
-    Writer out("eawr-gc-story-v1");
+    Writer out("eawr-gc-story-v2");
     out.text(campaign.rebel_story_name); out.text(campaign.empire_story_name); out.text(campaign.underworld_story_name);
+    out.integer(campaign.story_names.size());
+    for (const auto& route : campaign.story_names) { out.text(route.faction); out.text(route.name); }
     out.text(local.script_manifest_digest);
     return out.digest();
 }
@@ -214,11 +224,8 @@ Digest content_digest(std::string_view tag, std::string_view text) {
     out.text(text);
     return out.digest();
 }
-} // namespace
-
-core::Result<gc::MpRoster> seal_mp_roster(const MpLocalContent& local, gc::MpRoster draft, const MpSessionTerms& terms) {
-    using Result = core::Result<gc::MpRoster>;
-    if (auto valid = gc::validate_mp_roster(draft, false); !valid) return Result::failure(valid.error());
+core::Result<void> fill_ai_claims(const MpLocalContent& local, gc::MpRoster& draft) {
+    using Result = core::Result<void>;
     std::set<gc::PlayerId> human_players;
     for (const auto& seat : draft.seats) if (seat.kind == sim::SeatKind::human) human_players.insert(seat.player);
     for (auto& player : draft.players) {
@@ -228,18 +235,10 @@ core::Result<gc::MpRoster> seal_mp_roster(const MpLocalContent& local, gc::MpRos
         if (!configuration) return Result::failure(configuration.error());
         player.ai_configuration = std::move(configuration).value();
     }
-    auto derived = derive_local(local, draft, terms);
-    if (!derived) return Result::failure(derived.error());
-    draft.tick_zero = derived.value().tick_zero;
-    return Result::success(std::move(draft));
+    return Result::success();
 }
 
-core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms) {
-    using Result = core::Result<MpAgreement>;
-    if (auto valid = gc::validate_mp_roster(roster); !valid) return Result::failure(valid.error());
-    auto derived = derive_local(local, roster, terms);
-    if (!derived) return Result::failure(derived.error());
-    auto& value = derived.value();
+MpAgreement agreement_from_derived(const MpLocalContent& local, const gc::MpRoster& roster, Derived value) {
     const auto& setup = value.plan->galaxy();
     const auto* campaign = local.data->campaign(roster.campaign);
     // Claims never replace the local value. A differing claim enters beside it, so the digest differs.
@@ -278,7 +277,43 @@ core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const
     out.plan = std::move(value.plan);
     out.session = std::move(value.session);
     out.runtime_services = std::move(value.runtime_services);
-    return Result::success(std::move(out));
+    return out;
+}
+} // namespace
+
+core::Result<gc::MpRoster> seal_mp_roster(const MpLocalContent& local, gc::MpRoster draft, const MpSessionTerms& terms) {
+    using Result = core::Result<gc::MpRoster>;
+    const core::gc_load::Scope scope("mp.seal_roster");
+    if (auto valid = gc::validate_mp_roster(draft, false); !valid) return Result::failure(valid.error());
+    if (auto filled = fill_ai_claims(local, draft); !filled) return Result::failure(filled.error());
+    auto derived = derive_local(local, draft, terms);
+    if (!derived) return Result::failure(derived.error());
+    draft.tick_zero = derived.value().tick_zero;
+    return Result::success(std::move(draft));
+}
+
+core::Result<MpAgreement> seal_mp_agreement(const MpLocalContent& local, gc::MpRoster& draft, const MpSessionTerms& terms) {
+    using Result = core::Result<MpAgreement>;
+    const core::gc_load::Scope scope("mp.seal_agreement");
+    auto sealed = draft;
+    if (auto valid = gc::validate_mp_roster(sealed, false); !valid) return Result::failure(valid.error());
+    if (auto filled = fill_ai_claims(local, sealed); !filled) return Result::failure(filled.error());
+    auto derived = derive_local(local, sealed, terms);
+    if (!derived) return Result::failure(derived.error());
+    sealed.tick_zero = derived.value().tick_zero;
+    if (auto valid = gc::validate_mp_roster(sealed); !valid) return Result::failure(valid.error());
+    auto agreement = agreement_from_derived(local, sealed, std::move(derived).value());
+    draft = std::move(sealed);
+    return Result::success(std::move(agreement));
+}
+
+core::Result<MpAgreement> derive_mp_agreement(const MpLocalContent& local, const gc::MpRoster& roster, const MpSessionTerms& terms) {
+    using Result = core::Result<MpAgreement>;
+    const core::gc_load::Scope scope("mp.derive_agreement");
+    if (auto valid = gc::validate_mp_roster(roster); !valid) return Result::failure(valid.error());
+    auto derived = derive_local(local, roster, terms);
+    if (!derived) return Result::failure(derived.error());
+    return Result::success(agreement_from_derived(local, roster, std::move(derived).value()));
 }
 
 } // namespace eawr::campaign

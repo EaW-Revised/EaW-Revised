@@ -1,7 +1,12 @@
 #pragma once
+#include "eawr/assets/memory.hpp"
 
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/model_upload.hpp"
 #include "eawr/presentation/skin_pose_profile.hpp"
+#include "eawr/presentation/render_categories.hpp"
+#include "eawr/presentation/presentation_budget.hpp"
+#include "eawr/presentation/proxy_reservation.hpp"
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/fog/fog.hpp"
 #include "eawr/presentation/lighting/scene_bloom.hpp"
@@ -9,6 +14,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -23,6 +29,8 @@ class RID;
 }
 
 namespace eawr::presentation::godot_backend {
+
+namespace detail { struct ModelRecipeProbe; struct RecipeMemoryProbe; }
 
 // Mode/setup-owned immutable shader acceptance. Exact backend source is the key;
 // materials, bindings, textures and all mutable renderer state remain local.
@@ -51,6 +59,38 @@ inline constexpr std::string_view unsupported_consumer = "EAWR-FOG-0006";
 // the host node's viewport/scenario; one node bootstraps any number of entities.
 class GodotRenderer final : public Renderer {
 public:
+    using ProxyOutcome = presentation::ProxyOutcome;
+    using ProxyResult = presentation::ProxyResult;
+    struct ProxyInstance { sim::EntityId entity{}, source{}; sim::AssetId asset{}; };
+    // Creates only instance/skeleton RIDs, sharing uploaded mesh/material recipes.
+    // Atomic: refusal/failure releases every partial instance and byte reservation.
+    // allocation_gate is an optional test-only failure injection seam.
+    [[nodiscard]] ProxyResult reserve_proxy_instances(std::span<const ProxyInstance> instances,
+        const std::function<bool()>& allocation_gate = {});
+    // The provider must outlive the renderer; replacement requires no live reservations.
+    [[nodiscard]] bool set_proxy_budget(PresentationBudget* budget);
+    [[nodiscard]] ResourceBudgetSnapshot proxy_budget() const;
+    // Load-time estimate for another ordinary composed copy. Counts retained
+    // mesh and instance/skeleton payload; resident shared textures are excluded.
+    // Driver allocation overhead is unknown. Reads cached recipes only.
+    [[nodiscard]] std::optional<std::uint64_t> model_copy_bytes(std::span<const sim::AssetId> assets) const;
+    // Explicit main-thread diagnostic probe; deduplicates retained CPU owners.
+    // GPU eviction keeps recipes alive. VFS and renderer model bytes overlap.
+    [[nodiscard]] assets::RetainedPayload recipe_memory() const;
+    void owner_census(diagnostics::OwnerCensus& output) const;
+    // The main-thread callback returns empty after this renderer is destroyed.
+    [[nodiscard]] std::function<assets::RetainedPayload()> recipe_memory_probe() const;
+    // Install before uploading. Captured mounted content must outlive renderer
+    // recipes; each recipe freezes its loader, including across later changes.
+    // Only a byte-identical reload permits releasing the CPU texture snapshot.
+    void set_texture_loader(std::function<std::optional<assets::Texture>(const assets::Source&)> loader);
+    // Same contract for model geometry: after admission the recipe keeps only the source and a
+    // content digest; re-admission reloads and fails (counted) if the digest differs.
+    void set_model_loader(std::function<std::optional<assets::Model>(const assets::Source&)> loader);
+    // Cumulative (never decremented): recipes ever released / recipes that could never release (derived, no loader or path).
+    [[nodiscard]] std::pair<std::size_t, std::size_t> model_recipe_counts() const;
+    // Cumulative re-admissions refused because the reloaded model no longer matched its digest.
+    [[nodiscard]] std::size_t model_reload_failures() const;
     // A presentation overlay shares the scene without replacing its camera/environment.
     explicit GodotRenderer(godot::Node3D& host, std::shared_ptr<GodotShaderCache> shaders = {},
         bool attach_scene = true);
@@ -108,6 +148,12 @@ public:
         const assets::Texture& texture,
         const MaterialDescription& material,
         std::span<const BindingTexture> binding_textures);
+    // Retains the immutable cache owner and its optional surface selection for
+    // eviction/re-admission; no decoded geometry is copied into the recipe.
+    [[nodiscard]] core::Result<void> upload(
+        sim::AssetId asset_id, const ModelUpload& model,
+        const assets::Texture& texture, const MaterialDescription& material,
+        std::span<const BindingTexture> binding_textures = {});
     // Shared material textures (P1-06 terrain layers, sky clouds). A binding
     // whose string value is "shared:<name>" binds the named shared texture
     // instead of the asset's own texture; an upload naming an unregistered
@@ -177,6 +223,22 @@ public:
         sim::EntityId entity_id,
         sim::AssetId asset_id,
         std::span<const animation::BonePose> bones);
+    // Value-only preparation can run on workers. The opaque immutable result owns
+    // its Godot matrix values; it has no renderer/resource references or engine handles.
+    class PreparedSkinPose final {
+    public:
+        PreparedSkinPose() = default;
+        [[nodiscard]] explicit operator bool() const noexcept { return data_ != nullptr; }
+    private:
+        friend class GodotRenderer;
+        struct Data;
+        std::shared_ptr<const Data> data_;
+    };
+    [[nodiscard]] static PreparedSkinPose prepare_skin_pose(std::span<const animation::BonePose> bones,
+        SkinPoseWork* work = nullptr);
+    // Main-thread publication; preserves request order and retains ordinary diff uploads.
+    [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id,
+        sim::AssetId asset_id, const PreparedSkinPose& pose);
     // Serial idle pose batch: each source span stays immutable until end.
     // End forgets source addresses; surface-owned immutable palettes survive.
     // Attribution is optional and never controls whether preparation is shared.
@@ -193,10 +255,16 @@ public:
     // Geometry and authored team colour remain on the retained mesh asset.
     void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
     void forget_instance_pose(sim::EntityId entity_id);
+    // Diagnostic provenance comes from the producer, never from a mesh/type name.
+    void set_render_category(sim::EntityId entity_id, render_categories::Role role);
+    // Opt-in render-counter diagnostic; census allocation occurs only at report phases.
+    void write_churn_census(std::ostream& output) const;
     // Immutable upload metadata, copied before worker visibility preparation.
     // Empty if missing, unskinned, independently deformed, or the uploaded
     // triangles cannot be proved degenerate when their weighted bones hide.
     [[nodiscard]] std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId asset_id) const;
+    // Borrowed until the next renderer mutation on this thread; join workers before mutation.
+    [[nodiscard]] std::span<const std::uint8_t> skin_geometry_bones_view(sim::AssetId asset_id) const;
     // Presentation scale for an individual billboard surface. Environment
     // glows may enlarge their authored quad to clear the opaque planet rim.
     // World-space direction toward light 0 for a mode-6 sunlight glow bone.
@@ -535,8 +603,11 @@ public:
     [[nodiscard]] std::span<const core::Diagnostic> diagnostics() const override;
 
 private:
+    friend struct detail::ModelRecipeProbe;
+    friend struct detail::RecipeMemoryProbe;
     class Impl;
     std::unique_ptr<Impl> impl_;
+    std::shared_ptr<const bool> memory_probe_lifetime_{std::make_shared<const bool>(true)};
 };
 
 [[nodiscard]] constexpr std::string_view to_string(const GodotRenderer::ShadowFilter filter) noexcept {

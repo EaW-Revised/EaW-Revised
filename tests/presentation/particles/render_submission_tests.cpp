@@ -1,4 +1,6 @@
 #include "render_test_support.hpp"
+#include "eawr/presentation/particles/prewarmed_capacity.hpp"
+#include <sstream>
 
 namespace particle_render_contracts {
 
@@ -434,6 +436,220 @@ void test_heat_pixel_change_bound() {
     expect(bound(0.07F) >= threshold, "the reviewed 0.07 case is checked");
     expect(bound(6.0F / 255.0F, 3840, 2160) >= threshold, "a larger viewport checks fainter heat");
     expect(bound(0.5F) > bound(0.1F) && close(bound(1.0F), 3.0F), "a full-alpha swap can change every channel fully");
+}
+
+
+// #4722: authored admission owns CPU payload independently of backend reuse.
+void test_authored_effect_admission() {
+    using Registry = particles::EffectRegistry;
+    using eawr::presentation::ResourceKind;
+    RecordingBackend backend;
+    eawr::presentation::PayloadBudget budget;
+    Registry registry(backend);
+    registry.set_admission_budget(budget);
+    auto definition = std::make_shared<particles::SystemDefinition>();
+    definition->emitters.push_back(drawable_emitter());
+    definition->leave_particles = true;
+    std::vector<particles::EffectHandle> handles;
+    for (std::uint32_t index = 0; index < 257; ++index) {
+        const auto admitted = registry.spawn_authored(definition, index);
+        expect(bool(admitted) && admitted.refusal == Registry::Refusal::none, "257 overlapping effects all admitted");
+        handles.push_back(admitted.handle);
+    }
+    expect(registry.live_effects() == 257 && backend.live.size() == 257, "257 handles each own a drawable emitter");
+    auto sorted = handles; std::sort(sorted.begin(), sorted.end());
+    expect(std::adjacent_find(sorted.begin(), sorted.end()) == sorted.end(), "admitted handles are distinct");
+    const auto first_bytes = registry.admission_stats().live_bytes / 257;
+    expect(first_bytes > 0 && budget.snapshot(ResourceKind::cpu_effect).reserved_bytes == first_bytes * 257,
+        "CPU payload charged before publication");
+    expect(bool(registry.advance(handles[0], 1.0F / 30.0F, test_camera())), "admitted visual runs before pressure");
+    expect(bool(registry.detach(handles[0])), "draining ownership retained");
+    budget.set_limit(ResourceKind::cpu_effect, first_bytes * 257);
+    const auto refused = registry.spawn_authored(definition, 700);
+    expect(!refused && refused.refusal == Registry::Refusal::budget_pressure, "pressure refusal is typed");
+    const auto pressure_diagnostics = registry.diagnostics().size();
+    for (std::uint32_t attempt = 0; attempt < 512; ++attempt) {
+        expect(registry.spawn_authored(definition, attempt).refusal == Registry::Refusal::budget_pressure,
+            "repeated pressure remains refused");
+        expect(registry.spawn_authored({}, attempt).refusal == Registry::Refusal::definition_failure,
+            "repeated missing definitions remain refused");
+    }
+    expect(registry.diagnostics().size() == pressure_diagnostics + 1
+        && registry.admission_stats().refusals[1] == 513 && registry.admission_stats().refusals[3] == 512,
+        "refusal diagnostics coalesce per reason while counters retain every request");
+    expect(registry.live_effects() == 257 && backend.live.size() == 257, "pressure preserves all active and draining visuals");
+    for (const auto handle : handles) expect(bool(registry.release(handle)), "each generation released exactly once");
+    expect(registry.admission_stats().idle_bytes == first_bytes * 257 && backend.live.empty(), "CPU storage idles while backend resources return to existing cache");
+    const auto reused = registry.spawn_authored(definition, 0);
+    expect(bool(reused) && reused.reused && reused.handle > handles.back(), "reuse publishes a fresh generation");
+    expect(!registry.set_frame(handles.front(), {}), "stale generation cannot mutate reused storage");
+    expect(registry.admission_stats().allocations == 257, "reuse does not allocate a new CPU instance");
+    expect(bool(registry.release(reused.handle)), "reused instance releases");
+    registry.evict_idle();
+    expect(budget.snapshot(ResourceKind::cpu_effect).reserved_bytes == 0, "idle eviction releases every CPU reservation");
+
+    // Every partial allocation stage rolls back, including already-created emitters.
+    budget.set_limit(ResourceKind::cpu_effect, std::nullopt);
+    auto pair = std::make_shared<particles::SystemDefinition>(*definition);
+    pair->emitters.push_back(drawable_emitter());
+    const auto old = registry.spawn_authored(definition, 23);
+    const auto old_bytes = registry.admission_stats().live_bytes;
+    for (const auto stage : {Registry::AdmissionStage::cpu, Registry::AdmissionStage::backend, Registry::AdmissionStage::publication}) {
+        registry.fail_next_admission(stage);
+        const auto failure = registry.spawn_authored(pair, 42);
+        expect(!failure && failure.refusal == Registry::Refusal::allocation_failed && failure.failed_stage == stage,
+            "injected allocation failure records its exact stage and stays distinct from pressure");
+        expect(registry.live_effects() == 1 && backend.live.size() == 1 && registry.admission_stats().live_bytes == old_bytes,
+            "partial admission preserves old visual and cleans partial ownership");
+        expect(budget.snapshot(ResourceKind::cpu_effect).reserved_bytes == old_bytes, "failed reservation rolled back");
+    }
+    backend.refuse_emitter = 1;
+    expect(registry.spawn_authored(pair, 42).refusal == Registry::Refusal::allocation_failed,
+        "real backend refusal rolls back earlier emitters");
+    backend.refuse_emitter.reset();
+    expect(backend.live.size() == 1 && backend.invalid_destroys == 0, "no leaked or twice-destroyed backend resource");
+    expect(bool(registry.release(old.handle)), "old visual remains valid after failures");
+    registry.evict_idle();
+
+    // Oldest idle definitions are evicted first; active generations are never stolen.
+    const auto a = registry.spawn_authored(definition, 1);
+    const auto b = registry.spawn_authored(pair, 2);
+    const auto held = budget.snapshot(ResourceKind::cpu_effect).reserved_bytes;
+    expect(bool(a) && bool(b) && bool(registry.release(a.handle)) && bool(registry.release(b.handle)), "two layouts become idle in order");
+    budget.set_limit(ResourceKind::cpu_effect, held);
+    auto other = std::make_shared<particles::SystemDefinition>(*definition);
+    const auto c = registry.spawn_authored(other, 3);
+    expect(bool(c) && registry.admission_stats().evicted >= 1, "new layout evicts oldest idle payload under pressure");
+    const auto b_again = registry.spawn_authored(pair, 4);
+    expect(bool(b_again) && b_again.reused, "newer idle compatible layout remains reusable");
+    expect(bool(registry.release(c.handle)) && bool(registry.release(b_again.handle)), "pressure recovery releases normally");
+    registry.evict_idle();
+    std::ostringstream report; registry.write_admission_report(report);
+    expect(report.str().find("\"gpu_reserved_bytes\":null") != std::string::npos,
+        "missing GPU probe is unavailable, never a zero usage claim");
+
+    // If live payload plus the request exceeds the limit, idle eviction cannot help.
+    budget.set_limit(ResourceKind::cpu_effect, std::nullopt);
+    const auto live_pair = registry.spawn_authored(pair, 51);
+    const auto idle_single = registry.spawn_authored(definition, 52);
+    const auto all_bytes = budget.snapshot(ResourceKind::cpu_effect).reserved_bytes;
+    expect(bool(live_pair) && bool(idle_single) && bool(registry.release(idle_single.handle)), "one live and one idle layout prepared");
+    budget.set_limit(ResourceKind::cpu_effect, all_bytes);
+    const auto idle_before = registry.admission_stats().idle_bytes;
+    const auto evicted_before = registry.admission_stats().evicted;
+    auto different_pair = std::make_shared<particles::SystemDefinition>(*pair);
+    expect(registry.spawn_authored(different_pair, 53).refusal == Registry::Refusal::budget_pressure,
+        "request cannot fit even after reclaiming all idle bytes");
+    expect(registry.admission_stats().idle_bytes == idle_before && registry.admission_stats().evicted == evicted_before,
+        "impossible request preserves compatible idle payload without pointless eviction");
+    const auto retained = registry.spawn_authored(definition, 54);
+    expect(bool(retained) && retained.reused, "preserved idle layout remains available for compatible reuse");
+    expect(bool(registry.release(retained.handle)) && bool(registry.release(live_pair.handle)), "impossible pressure leaves owners valid");
+}
+
+void test_authored_effect_capacity_and_reset() {
+    using Registry = particles::EffectRegistry;
+    auto definition = std::make_shared<particles::SystemDefinition>();
+    auto dense = drawable_emitter(); dense.bursting = true; dense.particles_per_interval = 4500;
+    definition->emitters = {dense, dense};
+    RecordingBackend backend; Registry registry(backend);
+    auto zero_definition = std::make_shared<particles::SystemDefinition>();
+    auto zero_burst = drawable_emitter(); zero_burst.bursting = true; zero_burst.particles_per_interval = 0.5F;
+    zero_definition->emitters.push_back(zero_burst);
+    const auto zero_plan = particles::authored_capacity(*zero_definition);
+    expect(bool(zero_plan) && zero_plan.value().total == 0, "valid truncated-zero burst has zero authored reserve");
+    const auto zero = registry.spawn_authored(zero_definition, 1);
+    expect(bool(zero) && registry.reserved_particles(zero.handle) == 0, "zero-demand effect is admitted");
+    const auto zero_frame = registry.advance(zero.handle, 1.0F / 30.0F, test_camera());
+    expect(bool(zero_frame) && zero_frame.value().particles == 0, "zero burst advances without emission");
+    expect(bool(registry.release(zero.handle)), "zero-demand effect releases normally");
+    const auto zero_reused = registry.spawn_authored(zero_definition, 2);
+    expect(bool(zero_reused) && zero_reused.reused && bool(registry.release(zero_reused.handle)),
+        "zero-payload authored layouts still reuse safely");
+    auto mixed_zero = *zero_definition; mixed_zero.emitters.push_back(drawable_emitter());
+    const auto mixed_zero_plan = particles::authored_capacity(mixed_zero);
+    expect(bool(mixed_zero_plan) && mixed_zero_plan.value().emitters[0].reserved == 0 && mixed_zero_plan.value().total == 1,
+        "zero-demand emitter does not refuse its nonzero sibling");
+    const auto admitted = registry.spawn_authored(definition, 1);
+    expect(bool(admitted) && registry.reserved_particles(admitted.handle) == 9000,
+        "two valid emitters exceed 4096 without hidden clipping");
+    expect(registry.emitter_capacities(admitted.handle)[0].native_requested == 4500,
+        "native request remains independent of host capacity");
+    auto mixed = *definition; mixed.emitters.push_back(drawable_emitter());
+    const auto mixed_capacity = particles::authored_capacity(mixed);
+    expect(bool(mixed_capacity) && mixed_capacity.value().total == 9001
+        && mixed_capacity.value().emitters.back().reserved == 1, "mixed sparse roots keep full independent reserves");
+    auto scheduled = drawable_emitter(); scheduled.bursting = true;
+    scheduled.lifetime = scheduled.spawn_interval = 0.2F;
+    particles::SystemDefinition scheduling; scheduling.emitters.push_back(scheduled);
+    const auto scheduling_capacity = particles::authored_capacity(scheduling);
+    expect(bool(scheduling_capacity) && scheduling_capacity.value().emitters[0].requested
+        > scheduling_capacity.value().emitters[0].native_requested, "burst scheduling allowance remains separately observable");
+    auto links = *definition;
+    links.emitters[0].creator_id = 39; links.emitters[0].parent_emitter = 1;
+    links.emitters[0].particles_per_interval = 2;
+    const auto forward = particles::authored_capacity(links);
+    expect(bool(forward) && forward.value().emitters[0].requested == 9000, "forward parent demand multiplies after native clamp");
+    links.emitters[0].creator_id = 35; links.emitters[0].mesh_mode = particles::MeshSpawnMode::every_vertex;
+    const auto vertices = particles::authored_capacity(links, 3);
+    expect(bool(vertices) && vertices.value().emitters[0].requested == 27000, "every-vertex demand includes actual parent multiplicity");
+    auto mesh = std::make_shared<particles::SystemDefinition>(mesh_system(particles::MeshSpawnMode::every_vertex));
+    mesh->emitters[0].bursting = true; mesh->emitters[0].particles_per_interval = 6000;
+    const auto mesh_effect = registry.spawn_authored(mesh, 17, test_mesh_binding());
+    expect(bool(mesh_effect) && registry.reserved_particles(mesh_effect.handle) == 10006,
+        "real every-vertex binding multiplies the per-emitter 5003 bound without aggregate clipping");
+    if (mesh_effect) {
+        expect(bool(registry.advance(mesh_effect.handle, 1.0F / 30.0F, test_camera())), "full-capacity mesh effect advances");
+        expect(bool(registry.release(mesh_effect.handle)), "mesh ownership releases without reuse across bindings");
+    }
+    registry.evict_idle();
+    std::ostringstream retired_report; registry.write_admission_report(retired_report);
+    expect(retired_report.str().find("\"reserved_per_instance\":10006") != std::string::npos
+        && retired_report.str().find("\"dropped\":1994") != std::string::npos,
+        "per-emitter layout and exhaustion telemetry survive release and idle eviction");
+    auto overflow = links;
+    for (std::size_t index = 2; index < 12; ++index) {
+        auto child = dense; child.creator_id = 39; child.parent_emitter = static_cast<std::uint32_t>(index - 1);
+        overflow.emitters.push_back(child);
+    }
+    expect(!particles::authored_capacity(overflow, std::numeric_limits<std::size_t>::max()), "checked products refuse overflow");
+    auto cycle = std::make_shared<particles::SystemDefinition>(*definition);
+    cycle->emitters[0].parent_emitter = 1; cycle->emitters[1].parent_emitter = 0;
+    expect(registry.spawn_authored(cycle, 1).refusal == Registry::Refusal::definition_failure, "cyclic definition refused explicitly");
+    auto unsupported = std::make_shared<particles::SystemDefinition>(*definition);
+    unsupported->emitters[0].cpu_ready = false;
+    expect(registry.spawn_authored(unsupported, 1).refusal == Registry::Refusal::definition_failure, "unsupported emitter never becomes successful partial effect");
+    expect(bool(registry.release(admitted.handle)), "dense ownership released");
+
+    auto spray = std::make_shared<particles::SystemDefinition>(); spray->emitters.push_back(spray_emitter());
+    const auto first = registry.spawn_authored(spray, 77);
+    expect(bool(first), "reusable seeded effect admits");
+    expect(bool(registry.set_frame(first.handle, {{100,200,300}, {}})), "first contact frame applied");
+    expect(bool(registry.set_brightness(first.handle, 0.1F)), "first brightness applied");
+    expect(bool(registry.advance(first.handle, 0.1F, test_camera())), "first effect has live particles");
+    expect(bool(registry.set_dynamic(first.handle, 0.2F, 0.0F)), "old dynamic controls applied before reuse");
+    expect(bool(registry.stop_emission(first.handle)) && bool(registry.release(first.handle)), "detached effect returns CPU storage");
+    const auto second = registry.spawn_authored(spray, 0);
+    RecordingBackend fresh_backend; Registry fresh(fresh_backend);
+    const auto reference = fresh.spawn_authored(spray, 0);
+    expect(bool(second) && second.reused && bool(reference), "different seed reuses compatible immutable layout");
+    const auto reused_stats = registry.advance(second.handle, 0.1F, test_camera());
+    const auto fresh_stats = fresh.advance(reference.handle, 0.1F, test_camera());
+    expect(bool(reused_stats) && bool(fresh_stats) && reused_stats.value().hash == fresh_stats.value().hash
+        && reused_stats.value().particles == fresh_stats.value().particles, "reset clears seed zero, origin, brightness, clock, particles and drain state");
+    const auto allocations = registry.admission_stats().allocations;
+    auto current = second.handle;
+    for (std::uint32_t seed = 0; seed < 32; ++seed) {
+        expect(bool(registry.release(current)), "bounded reuse releases generation");
+        const auto next = registry.spawn_authored(spray, seed);
+        expect(bool(next) && next.reused, "bounded reuse retains layout");
+        current = next.handle;
+    }
+    expect(registry.admission_stats().allocations == allocations, "reuse work counter remains bounded");
+    const auto irrelevant_binding = registry.spawn_authored(definition, 9, test_mesh_binding());
+    expect(bool(irrelevant_binding) && irrelevant_binding.reused,
+        "a binding without mesh emitters is cleared before compatible reuse");
+    expect(bool(registry.release(irrelevant_binding.handle)), "irrelevant binding ownership releases normally");
 }
 
 } // namespace particle_render_contracts

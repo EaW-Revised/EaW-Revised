@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -115,6 +116,9 @@ struct FixtureOptions final {
     std::optional<MatchOptions> match{};
     // Editable network staging only. Vacancies never become simulation players.
     std::vector<std::uint32_t> open_slots{};
+    // #3776 L3: the battle domain the setup selected (a land map under the land skirmish build option).
+    // Space is the default and the only domain fixture_from_options starts.
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
 };
 
 // Reads and validates the selected space map and binds its actual SHA-256.
@@ -184,6 +188,8 @@ struct StartInputs final {
     // WTA-46 (#735): the mounted AI player types' level -> difficulty entry table; absent for synthetic inputs and
     // data without difficulty entries. Read it through skirmish::player_difficulty().
     std::shared_ptr<const script::foc::AiDifficultyTable> difficulty{};
+    // RGC-112: registered names beyond the battle/render/production type closure.
+    std::shared_ptr<const std::vector<std::pair<std::string, sim::tactical::TypeId>>> catalog_types{};
 };
 
 // Rebuild lobby/faction bindings from recorded players; human ownership remains
@@ -205,7 +211,9 @@ struct StartInputs final {
     const data::Catalog& catalog,
     const units::UnitTables& tables);
 
-[[nodiscard]] sim::MatchIdentity match_identity(const StartInputs& inputs);
+// `skipped_types` (skipped_type_ids): a start whose content skipped unit types (#4589) names them in the
+// "skipped-types" domain, so peers and replays with another skip set refuse each other; none adds nothing.
+[[nodiscard]] sim::MatchIdentity match_identity(const StartInputs& inputs, std::span<const std::string> skipped_types = {});
 
 struct DataIdentity {
     std::string script_manifest_digest, ai_data_digest;
@@ -284,7 +292,27 @@ struct SessionContent final {
 };
 [[nodiscard]] core::Result<SessionContent> session_content(
     const units::UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {},
-    const units::SpawnPolicy& spawn_policy = {});
+    const units::SpawnPolicy& spawn_policy = {},
+    // #4589: skip_object leaves out a unit type whose combat rows fail and reports it in `skipped`.
+    units::ContentErrors errors = units::ContentErrors::strict, std::vector<core::Diagnostic>* skipped = nullptr);
+
+// #4589: the unit type IDs a lenient load skipped (the "skipped unit type '<id>'" diagnostics), sorted, unique.
+[[nodiscard]] std::vector<std::string> skipped_type_ids(std::span<const core::Diagnostic> skipped);
+// The same for tables loaded leniently here (a replay checks its recorded "skipped-types" identity domain).
+[[nodiscard]] std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables);
+// A start that places a skipped type (a starting unit, a squadron's craft or a launch) fails with a
+// diagnostic naming the type and why it was skipped; `skipped` are the load's diagnostics.
+[[nodiscard]] core::Result<void> refuse_skipped_starts(
+    const SkirmishStart& start, std::span<const core::Diagnostic> skipped);
+// The same check for a recorded setup (a replay): every unit of the setup must be a type that was not skipped.
+[[nodiscard]] core::Result<void> refuse_skipped_setup(
+    const sim::tactical::TacticalSetup& setup, std::span<const core::Diagnostic> skipped);
+// Removes the menu entries of skipped types from the build menus; one line per removal goes to `log`.
+// Returns the number removed.
+std::size_t drop_skipped_menu_options(
+    sim::tactical::EconomyRules& rules, std::span<const std::string> skipped, std::vector<std::string>* log);
+// Binds the skip set into the start's match identity (and a setup that already carries it); none changes nothing.
+void bind_skipped_types(SkirmishStart& start, std::span<const std::string> skipped);
 
 // WTA-46 (#735): bind each non-Normal AI slot's health, shield and damage scales into `content.durability.difficulty`
 // (sorted by player). Humans, Normal slots and neutral adjustments add nothing, so Normal sessions are unchanged.
@@ -318,7 +346,8 @@ struct SessionContent final {
 [[nodiscard]] sim::tactical::VictoryRules victory_rules(const SkirmishStart& start, const units::UnitTables& tables);
 
 // The economy of a skirmish (#530, docs/behaviour/space-purchasing.md): every lobby player starts
-// with MP_Default_Credits (PU-01) and its faction's Space_Tactical_Unit_Cap (PU-21), and its
+// with the selected match credits (WSS-52; MP_Default_Credits supplies the default) and its
+// faction's Space_Tactical_Unit_Cap (PU-21), and its
 // reinforcements arrive facing its SK-11 spawn marker (PU-34); the non-lobby players have none.
 // Each table station's Tactical_Buildable_Objects_Multiplayer becomes one menu per faction group
 // (PU-10): a table type is a unit with its multiplayer price, build time in frames (times

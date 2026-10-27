@@ -5,8 +5,10 @@
 #include "../../src/campaign/galactic_ai_runtime.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/core/sha256.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 #include "ai_campaign_gate_access.hpp"
+#include "ai_unattended_input.hpp"
 
 #include <algorithm>
 #include <array>
@@ -18,6 +20,7 @@
 #include <fstream>
 #include <functional>
 #include <ios>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -43,47 +46,14 @@ template<class T> inline T required(eawr::core::Result<T> result) {
 inline void check(bool value, std::string_view message) {
     if (!value) eawr::testing::require(value, message);
 }
-// Test-input policy only: retain Human perception while answering ordinary prompts.
-// Read accepted pending AND executed commands so a repeated boundary or a restored
-// queued answer cannot claim another sequence or enqueue the same answer twice.
-inline std::optional<gc::GameCommand> unattended_human_input(cp::GameSession& game) {
-    const auto hold = game.battle_summary_hold();
-    const auto pending = game.pending_conflict_view();
-    if (!hold && (!pending || !pending->choice_ready)) return {};
-    const auto recording = required(game.checkpoint_recording());
-    const auto interactive = recording.commands.setup.interactive_seat;
-    check(interactive.value || !hold, "noninteractive campaign harness acquired a summary hold");
-    std::optional<eawr::platform::LiveGameOrder> order;
-    if (hold) order = eawr::platform::LiveGameOrder{interactive, gc::BattleSummaryAcknowledge{hold}, {}};
-    else {
-        eawr::platform::LiveGameFrame frame;
-        frame.latest = game.galaxy().snapshot(); frame.session_tick = game.completed_tick();
-        frame.pending_conflict = std::make_shared<cp::PendingConflictView>(*pending);
-        for (const auto& seat : frame.latest->seats()) {
-            order = eawr::platform::battle_choice_order(frame, seat.seat_id, pending->conflict.id, false);
-            if (order) break;
-        }
-    }
-    if (!order) return {}; // Forced or unavailable choices remain honest refusals.
-    std::uint64_t sequence{};
-    for (const auto& accepted : recording.commands.commands) {
-        if (accepted.key.seat != order->seat) continue;
-        sequence = std::max(sequence, accepted.key.sequence);
-        if (accepted.payload == order->payload) return {};
-    }
-    check(sequence < UINT64_MAX, "unattended human command sequence exhausted");
-    gc::GameCommand command{{game.completed_tick(), order->seat, sequence + 1}, order->payload};
-    const auto submitted = game.submit(command);
-    check(static_cast<bool>(submitted), "unattended human command submission refused");
-    return command;
-}
+using galactic_campaign_input::unattended_human_input;
 inline void write_human_input(std::ostream& output, const gc::GameCommand& command) {
     const auto* choice = std::get_if<gc::BattleChoice>(&command.payload);
     const auto conflict = choice ? choice->conflict : std::get<gc::BattleSummaryAcknowledge>(command.payload).conflict;
     output << "{\"tick\":" << command.key.tick << ",\"seat\":" << command.key.seat.value
         << ",\"sequence\":" << command.key.sequence << ",\"conflict\":" << conflict
         << ",\"opcode\":" << gc::opcode_of(command.payload)
-        << ",\"command\":\"" << (choice ? "AutoResolve" : "BattleSummaryAcknowledge") << "\"}" << std::endl;
+        << ",\"command\":\"" << (choice ? (choice->tactical ? "BeginTactical" : "AutoResolve") : "BattleSummaryAcknowledge") << "\"}" << std::endl;
 }
 struct PlayerProgress {
     std::uint64_t builds_started{}, builds_completed{}, expansions{}, attacks{}, defences{}, heroes{};
@@ -150,6 +120,13 @@ inline void sample_targeted_plans(const cp::GalacticAiRuntimeView& view,
             output << "]}" << std::endl; witnessed.insert(selected.player); break;
         }
     }
+}
+// A retained pending invasion that waits behind another conflict: either a live child battle or a
+// pending/staged admission. Shared by the installed gate and its deterministic overlap contract.
+inline bool invasion_blocked_by_conflict(const cp::GameSession& game) {
+    const auto* invasion = game.galaxy().pending_native_invasion();
+    return invasion && invasion->state == gc::GalacticSession::NativeInvasion::State::pending
+        && (game.mode() == cp::SessionMode::battle || game.has_pending_conflict_for_admission());
 }
 struct Observations {
     std::vector<cp::GalacticAiRuntimeView> runtimes;
@@ -394,7 +371,8 @@ struct Report {
 };
 inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup,
     const eawr::platform::CampaignServiceConfiguration& configuration, const std::shared_ptr<Observations>& observed,
-    const std::filesystem::path& directory, const LearningProbe& probe = {}, bool human_encounter_only = false) {
+    const std::filesystem::path& directory, const LearningProbe& probe = {}, bool human_encounter_only = false,
+    bool hash_baseline = false) {
     const auto interactive = game.record().setup.interactive_seat;
     Report report;
     std::optional<std::uint64_t> answered_frame;
@@ -413,6 +391,11 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
     const auto started = std::chrono::steady_clock::now();
     check(!observed->runtimes.empty(), "campaign factory did not publish real native runtime owners");
     const auto view = observed->runtimes.front();
+    if (hash_baseline) {
+        check(static_cast<bool>(view.state.lock()), "hash baseline requires composed state");
+        view.state.lock()->measure_sync_owners(true);
+        std::cout << "HASH-BASELINE diagnostic_only=true disk_continuations=false sample_limit=512\n";
+    }
     std::vector<DiskBranch> branches;
     // A branch that met its frame minimum and its evidence is retired: stepping it to the end of
     // the run only repeated comparisons the live run's canonical hash already covers.
@@ -439,6 +422,31 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
                 const auto resumed_input = unattended_human_input(branch.restore.session);
                 check(input == resumed_input, "restored unattended human command differs");
                 const auto resumed = required(branch.restore.session.step(*branch.executor));
+                if (tick.state_hash.get() != resumed.state_hash.get()) {
+                    std::cerr << "continuation mismatch boundary=" << branch.boundary << " workers=" << branch.workers
+                        << " tick=" << tick.completed_tick << " control=" << tick.state_hash.get()
+                        << " resumed=" << resumed.state_hash.get() << '\n';
+                    const auto left = required(ck::parse_checkpoint(required(ck::save_game_checkpoint(game, identities))));
+                    const auto right = required(ck::parse_checkpoint(required(ck::save_game_checkpoint(branch.restore.session, identities))));
+                    for (const auto& section : left.sections) {
+                        const auto other = std::find_if(right.sections.begin(), right.sections.end(),
+                            [&](const auto& row) { return row.id == section.id; });
+                        const auto equal = other != right.sections.end() && section.bytes == other->bytes;
+                        std::cerr << "continuation section=" << ck::section_name(section.id) << " equal=" << equal;
+                        if (!equal && other != right.sections.end()) {
+                            const auto mismatch = std::mismatch(section.bytes.begin(), section.bytes.end(), other->bytes.begin(), other->bytes.end());
+                            std::cerr << " control_size=" << section.bytes.size() << " resumed_size=" << other->bytes.size()
+                                << " first_offset=" << std::distance(section.bytes.begin(), mismatch.first);
+                        }
+                        std::cerr << '\n';
+                    }
+                    for (const auto& [label, owner] : {std::pair{"control", &game}, std::pair{"resumed", &branch.restore.session}}) {
+                        const auto native = required(owner->save_galactic_ai());
+                        if (native.state) for (const auto& [name, bytes] : native.state->components)
+                            std::cerr << "continuation native=" << label << '/' << name << " bytes=" << bytes.size()
+                                << " hash=" << eawr::core::sha256_hex(bytes) << '\n';
+                    }
+                }
                 compare(tick, resumed); ++branch.compared_frames;
                 if (probe.compare) probe.compare(branch.boundary, branch.workers, tick, resumed, view, branch.runtime);
             }
@@ -552,6 +560,19 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             report.maximum_goals = std::max(report.maximum_goals, goals);
             report.maximum_originals = std::max(report.maximum_originals, static_cast<std::uint64_t>(snapshot->commissioned_originals().size()));
             if (report.galactic_frames >= 600U * gc::galactic_frames_per_second && view.digest_work) {
+                if (hash_baseline) {
+                    std::cout << "HASH-SAMPLE {\"frame\":" << report.galactic_frames
+                        << ",\"nanoseconds\":" << view.digest_work->last_nanoseconds
+                        << ",\"changed\":" << (view.digest_work->last_changed ? "true" : "false")
+                        << ",\"encoded\":" << (view.digest_work->last_encoded ? "true" : "false")
+                        << ",\"owners\":{";
+                    bool first_owner = true;
+                    for (const auto& [name, ns] : view.state.lock()->last_sync_owner_nanoseconds()) {
+                        if (!first_owner) std::cout << ',';
+                        first_owner = false; json_string(std::cout, name); std::cout << ':' << ns;
+                    }
+                    std::cout << "}}\n";
+                }
                 ++report.mature_samples; report.maximum_digest_ns = std::max(report.maximum_digest_ns, view.digest_work->last_nanoseconds);
                 report.mature_native_bytes = std::max(report.mature_native_bytes, view.digest_work->native_bytes);
                 report.mature_goals = std::max(report.mature_goals, goals);
@@ -562,9 +583,10 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
                 else { ++report.unchanged_samples; report.unchanged_ns += view.digest_work->last_nanoseconds; }
                 if (!view.digest_work->last_encoded) { ++report.encoder_free_samples; report.encoder_free_ns += view.digest_work->last_nanoseconds; }
                 else if (!view.digest_work->last_changed) ++report.same_payload_encoded_samples;
+                if (hash_baseline && report.mature_samples >= 512) { report.stop_reason = "diagnostic_hash_sample_limit"; break; }
             }
             const auto capture = [&](std::string name, bool ready) {
-                if (!human_encounter_only && ready && captured.insert(name).second) disk_capture(name, directory, game, identities, configuration.restore, branches, *observed, view, probe);
+                if (!hash_baseline && !human_encounter_only && ready && captured.insert(name).second) disk_capture(name, directory, game, identities, configuration.restore, branches, *observed, view, probe);
             };
             // The checkpoint contains a naturally selected positive paid
             // proposal, rather than an arbitrary empty/free reservation.
@@ -572,8 +594,7 @@ inline Report run(cp::GameSession& game, const cp::GalacticAiRuntimeSetup& setup
             capture("transit", std::any_of(snapshot->fleets().begin(), snapshot->fleets().end(), [](const auto& fleet) { return fleet.motion.transit.has_value(); }));
             const auto* invasion = game.galaxy().pending_native_invasion();
             const bool child = game.mode() == cp::SessionMode::battle;
-            const bool blocked = invasion && invasion->state == gc::GalacticSession::NativeInvasion::State::pending
-                && (child || game.has_pending_conflict_for_admission());
+            const bool blocked = invasion_blocked_by_conflict(game);
             if (blocked && !captured.contains("blocked-invasion")) {
                 const auto* other = child ? game.conflict() : game.pending_conflict();
                 report.blocked_invasion = BlockedInvasionWitness{game.completed_tick(), invasion->request, invasion->fleet,

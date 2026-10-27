@@ -8,6 +8,28 @@
 namespace eawr::data::galactic::detail {
 namespace {
 
+// WST-86: Story_Name occurrences append to one token stream, then adjacent tokens form pairs.
+[[nodiscard]] std::vector<FactionName> story_names(const Record& record) {
+    std::vector<std::string> names;
+    for (const auto* at : record.records("Story_Name")) {
+        const auto text = trimmed(at->raw_text);
+        if (text.size() >= 65536) {
+            record.issue(IssueKind::bad_value, at, "Story_Name", {}, "story association text exceeds the WST-86 parser limit");
+            continue;
+        }
+        for (auto begin = text.find_first_not_of(" ,\t\n\r"); begin != std::string::npos;) {
+            const auto end = text.find_first_of(" ,\t\n\r", begin);
+            names.push_back(text.substr(begin, end == std::string::npos ? end : end - begin));
+            begin = text.find_first_not_of(" ,\t\n\r", end);
+        }
+    }
+    std::vector<FactionName> result;
+    for (std::size_t i = 0; i + 1 < names.size(); i += 2) result.push_back({names[i], names[i + 1]});
+    if (names.size() % 2 != 0)
+        record.issue(IssueKind::bad_value, nullptr, "Story_Name", names.back(), "expected a plot path after the final faction (WST-86)");
+    return result;
+}
+
 [[nodiscard]] std::vector<LocationLevel> location_levels(const Record& record, const std::string_view tag) {
     std::vector<LocationLevel> result;
     for (const auto& value : record.faction_numbers(tag)) result.push_back({value.faction, value.value});
@@ -77,6 +99,7 @@ void load_campaigns(const Catalog& catalog, GalacticData& data) {
         campaign.rebel_story_name = record.text("Rebel_Story_Name");
         campaign.empire_story_name = record.text("Empire_Story_Name");
         campaign.underworld_story_name = record.text("Underworld_Story_Name");
+        campaign.story_names = story_names(record);
         campaign.is_story_campaign = record.boolean("Is_Story_Campaign");
         campaign.planet_auto_reveal = record.boolean("Planet_Auto_Reveal");
         campaign.is_autoresolve_allowed = record.boolean("Is_Autoresolve_Allowed");

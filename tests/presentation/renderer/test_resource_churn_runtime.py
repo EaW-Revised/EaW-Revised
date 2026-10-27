@@ -71,6 +71,8 @@ def verify_report(report):
         for stage in ("after_shutdown", "after_restart"):
             if memory.get(stage, {}).get(key) != baseline[key]:
                 failures.append("%s %s memory differs from the baseline" % (stage, key))
+    if report.get("model_recipe_lifecycle") is not True:
+        failures.append("production model recipe lifecycle not proven")
     if report.get("shared_references") != 2:
         failures.append("identical re-upload did not share one bundle")
     for flag in ("conflicting_upload_refused", "failed_upload_memory_restored",
@@ -126,6 +128,7 @@ def sample_report():
             "after_shutdown": {"texture": 100, "buffer": 200},
             "after_restart": {"texture": 100, "buffer": 200},
         },
+        "model_recipe_lifecycle": True,
         "shared_references": 2,
         "conflicting_upload_refused": True,
         "failed_upload_memory_restored": True,
@@ -198,6 +201,8 @@ class ResourceChurnReport(unittest.TestCase):
             "flooded history": lambda r: r["steady_missing"].update(history_tail_unchanged=False),
             "evicted sentinel": lambda r: r["steady_missing"].update(sentinel_retained=False),
             "idle shutdown": lambda r: r["shutdown_live"].update(instances=0),
+            "missing model recipes": lambda r: r.pop("model_recipe_lifecycle"),
+            "failed model recipes": lambda r: r.update(model_recipe_lifecycle=False),
             "unshared": lambda r: r.update(shared_references=1),
             "probe failure": lambda r: r["failures"].append("x"),
             "skipped steps": lambda r: r.update(steps_completed=470),
@@ -252,9 +257,35 @@ class GodotResourceChurnProbe(unittest.TestCase):
             (target / ("%s.log" % name)).write_text(output, encoding="utf-8")
             if report_path.is_file():
                 shutil.copy2(report_path, target / ("%s.json" % name))
+            for capture in report_path.parent.glob(report_path.name + ".*.png"):
+                shutil.copy2(capture, target / capture.name)
         self.assertIsNotNone(HARNESS.engine_banner(completed.stdout, HARNESS.PINNED_GODOT_IDENTITY), output)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         return completed, output, report
+
+    def test_model_recipe_lifecycle(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-model-recipes-") as temporary:
+            self.stage_project(temporary)
+            completed, output, report = self.run_probe(
+                temporary, "model-recipes", ["--eawr-churn-model-recipes-only"])
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertIn(PASSED_MARKER, completed.stdout)
+            self.assertEqual(unexpected_engine_lines(output), [], output)
+            self.assertTrue(report.get("model_recipe_lifecycle"), json.dumps(report, indent=1))
+            self.assertEqual(report.get("failures"), [])
+            self.assertEqual(report.get("steps_completed"), report.get("steps_total"))
+
+    def test_texture_recipe_lifecycle(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-texture-recipes-") as temporary:
+            self.stage_project(temporary)
+            completed, output, report = self.run_probe(
+                temporary, "texture-recipes", ["--eawr-churn-model-recipes-only"])
+            self.assertEqual(completed.returncode, 0, output)
+            self.assertIn(PASSED_MARKER, completed.stdout)
+            self.assertEqual(unexpected_engine_lines(output), [], output)
+            self.assertTrue(report.get("texture_recipe_lifecycle"), json.dumps(report, indent=1))
+            self.assertEqual(report.get("failures"), [])
+            self.assertEqual(report.get("steps_completed"), report.get("steps_total"))
 
     def test_churn_lifecycle_without_leaks(self):
         with tempfile.TemporaryDirectory(prefix="eawr-resource-churn-") as temporary:

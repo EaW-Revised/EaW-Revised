@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -53,6 +54,7 @@ struct GalacticType {
     std::optional<sim::math::Fixed> cheap_bribe_cost; // WGM-85
     std::optional<sim::math::Fixed> expensive_bribe_cost;
     std::optional<sim::math::Fixed> build_cost_credits; // WGEP-29
+    std::optional<sim::math::Fixed> piracy_value_credits; // WGM-150
     std::optional<sim::math::Fixed> build_time_seconds; // WGEP-32
     std::optional<sim::math::Fixed> maintenance_cost; // WGA-291: perception only, not a fiscal debit
     std::optional<std::int64_t> tech_level; // WGEP-22
@@ -148,7 +150,11 @@ struct GalacticEconomicTable {
 [[nodiscard]] GalacticEconomicTable galactic_economic_table(const data::Catalog&);
 
 // No tactical table construction, models, game constants or simulation side effects.
-[[nodiscard]] GalacticTypeTable galactic_type_table(const data::Catalog& catalog, bool include_planets = false);
+// A type with none of the galactic tags the table tracks is left out. `always_include` names types a campaign
+// refers to (starting forces, special production): they resolve by name in FoC whatever tags they carry,
+// so they enter the table with the omission defaults.
+[[nodiscard]] GalacticTypeTable galactic_type_table(const data::Catalog& catalog, bool include_planets = false,
+    std::span<const std::string> always_include = {});
 [[nodiscard]] std::array<std::uint8_t, 32> galactic_content_identity(const GalacticTypeTable& table);
 
 } // namespace eawr::units

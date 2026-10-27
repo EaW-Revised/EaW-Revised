@@ -1,15 +1,130 @@
 #include "renderer_test_support.hpp"
+#include "eawr/presentation/render_churn.hpp"
 #include "upload_identity_pool.hpp"
 #include "gpu_memory_ledger.hpp"
 #include "texture_budget.hpp"
+#include "device_memory_probe.hpp"
 #include "resource_residency.hpp"
 #include "mesh_rest_pose.hpp"
+#include <sstream>
+
+#include <chrono>
+#include <functional>
 
 namespace eawr_renderer_test {
+
+void churn_contracts() {
+    namespace churn = eawr::presentation::render_churn;
+    namespace categories = eawr::presentation::render_categories;
+    churn::frame = {}; churn::total = {};
+    categories::enabled = false;
+    struct Rid final { bool valid; bool is_valid() const { return valid; } };
+    struct Server final { unsigned calls{}; void free_rid(const Rid&) { ++calls; } } server;
+    churn::free_rid(server, Rid{true}, churn::Owner::particle);
+    check(server.calls == 1 && churn::total[0].freed == 0,
+        "disabled diagnostics preserve the actual server release");
+    churn::record(churn::Owner::particle, churn::Event::freed, 3);
+    check(churn::total[0].freed == 0, "disabled churn diagnostics do not record events");
+    categories::enabled = true;
+    churn::free_rid(server, Rid{false}, churn::Owner::particle);
+    check(server.calls == 2 && churn::total[0].freed == 0,
+        "invalid handles cannot inflate physical RID release counts");
+    churn::free_rid(server, Rid{true}, churn::Owner::particle);
+    check(server.calls == 3 && churn::total[0].freed == 1 && churn::frame[0].freed == 1,
+        "one physical free records one owner event without changing the server call");
+    churn::frame = {}; churn::total = {};
+    churn::record(churn::Owner::particle, churn::Event::freed, 3);
+    churn::record(churn::Owner::particle, churn::Event::retained, 6);
+    churn::record(churn::Owner::particle, churn::Event::restored, 3);
+    check(churn::frame[0].freed == 3 && churn::frame[0].retained == 6 && churn::frame[0].restored == 3,
+        "RID events count physical resources independently");
+    std::ostringstream header, values;
+    churn::write_csv_header(header); churn::write_csv_row(values, churn::frame);
+    const auto header_text = header.str();
+    check(header_text.starts_with(",rid_particle_freed,rid_particle_retained,rid_particle_restored,rid_instance_freed")
+        && header_text.ends_with(",rid_scene_resource_freed,rid_scene_resource_retained,rid_scene_resource_restored"),
+        "production CSV has explicit owner/physical event column names");
+    check(values.str().starts_with(",3,6,3,0,0,0")
+        && std::count(header_text.begin(), header_text.end(), ',') == 30,
+        "production CSV schema and event values preserve all ten owners");
+    churn::frame = {};
+    check(churn::total[0].freed == 3 && churn::frame[0].freed == 0, "frame reset preserves lifetime totals");
+    check(churn::owner(categories::Role::debris, true) == churn::Owner::debris_skeleton
+        && churn::owner(categories::Role::wreck) == churn::Owner::wreck,
+        "wreck and debris provenance does not collapse into ordinary model ownership");
+    const churn::CohortKey key{1, 2, 3, 4, 5, false, false, true,
+        {churn::bits(1), churn::bits(1), churn::bits(1), churn::bits(1), churn::bits(1), churn::bits(1), churn::bits(1)}};
+    check(key.rigid(), "ordinary unskinned geometry is a rigid census candidate");
+    const auto different = [&key](const auto change) { auto next = key; change(next); check(next != key, "cohort key preserves every draw policy"); };
+    different([](auto& x) { ++x.asset; }); different([](auto& x) { ++x.material; });
+    different([](auto& x) { ++x.fog; }); different([](auto& x) { ++x.pass; });
+    different([](auto& x) { ++x.priority; }); different([](auto& x) { x.casts = false; });
+    different([](auto& x) { x.skinned = true; check(!x.rigid(), "skins are not rigid"); });
+    different([](auto& x) { x.billboard = true; check(!x.rigid(), "billboards are not rigid"); });
+    for (std::size_t i = 0; i < key.colour_opacity_light.size(); ++i)
+        different([i](auto& x) { ++x.colour_opacity_light[i]; });
+    check(churn::bits(0.0F) != churn::bits(-0.0F), "census float identity is conservative");
+    churn::Census census;
+    census.add(key); census.add(key);
+    auto changed = key; ++changed.colour_opacity_light[0]; census.add(changed);
+    auto skinned = key; skinned.skinned = true; census.add(skinned);
+    auto billboard = key; billboard.billboard = true; census.add(billboard);
+    auto both = skinned; both.billboard = true; census.add(both);
+    check(census.active == 6 && census.rigid == 3 && census.cohorts.size() == 5 && census.cohorts.at(key) == 2,
+        "production census groups repeated exact state and separates incompatible instances");
+    check(census.excluded_any == 3 && census.excluded_skin == 2 && census.excluded_billboard == 2,
+        "overlapping skin/billboard exclusions count each rejected instance once in the union");
+    categories::enabled = false;
+}
 
 void particle_texture_contracts() {
     using namespace eawr;
     using presentation::godot_backend::detail::prepare_particle_texture;
+    // MT-01: complete the upload copy, retain every authored mip byte.
+    for (const auto format : {assets::PixelFormat::bc1, assets::PixelFormat::bc2,
+                             assets::PixelFormat::bc3, assets::PixelFormat::rgba8}) {
+        assets::Texture partial;
+        partial.width = partial.height = 1024;
+        partial.format = format;
+        auto edge = 1024U;
+        const auto block = presentation::godot_backend::detail::texture_block_bytes(format);
+        for (unsigned level = 0; level < 7; ++level) {
+            const auto pitch = block ? ((edge + 3) / 4) * block : edge * 4;
+            const auto rows = block ? (edge + 3) / 4 : edge;
+            partial.mips.push_back({edge, edge, pitch,
+                std::vector<std::byte>(static_cast<std::size_t>(pitch) * rows, std::byte{42})});
+            edge /= 2;
+        }
+        std::vector<std::byte> authored;
+        for (const auto& mip : partial.mips) authored.insert(authored.end(), mip.bytes.begin(), mip.bytes.end());
+        const auto upload = prepare_particle_texture(partial);
+        const auto expected_tail = block ? 7U * block : 340U;
+        check(upload && upload.bytes.size() == authored.size() + expected_tail,
+            "1024 seven-level partial chain must get exactly four missing levels");
+        check(std::equal(authored.begin(), authored.end(), upload.bytes.begin()),
+            "partial upload must preserve all authored mip bytes");
+        check(std::all_of(upload.bytes.begin(), upload.bytes.end(),
+            [](const auto byte) { return byte == std::byte{42}; }),
+            "constant compressed blocks and RGBA pixels must replicate through 1x1");
+        check(presentation::godot_backend::detail::texture_item(partial).bytes == upload.bytes.size(),
+            "GPU ledger must count generated tail bytes");
+        check(partial.mips.size() == 7 && partial.mips.back().width == 16,
+            "upload must leave the asset decoder's partial chain untouched");
+    }
+    assets::Texture odd;
+    odd.format = assets::PixelFormat::l8;
+    odd.width = 6; odd.height = 2;
+    odd.mips = {{6, 2, 6, std::vector<std::byte>(12)},
+                {3, 1, 3, {std::byte{0}, std::byte{30}, std::byte{60}}}};
+    const auto odd_upload = prepare_particle_texture(odd);
+    check(odd_upload && odd_upload.bytes.back() == std::byte{30},
+        "tail box filter must include odd edges and handle 1-pixel axes");
+    odd.source_origin = assets::ImageOrigin::bottom_left;
+    odd.width = 2; odd.height = 6;
+    odd.mips = {{2, 6, 2, std::vector<std::byte>(12)},
+                {1, 3, 1, {std::byte{0}, std::byte{30}, std::byte{60}}}};
+    check(prepare_particle_texture(odd).bytes.back() == std::byte{30},
+        "tail completion must consume normalized particle pixels");
     assets::Texture top;
     top.width = 5;
     top.height = 3;
@@ -464,10 +579,97 @@ void gpu_memory_ledger_contracts() {
         "texture array layers are RGBA8 at the array edge with a full mip chain");
 }
 
+namespace {
+void device_memory_route_contracts() {
+    namespace detail = eawr::presentation::godot_backend::detail;
+    // Exercise the production request route with both engine dispatcher contracts.
+    for (const bool separate : {false, true}) {
+        detail::DeviceMemoryProbe routed;
+        unsigned dispatches = 0, warnings = 0;
+        auto now = detail::DeviceMemoryProbe::Clock::time_point{};
+        std::function<void()> queued;
+        const auto sample = [&] { routed.publish({8192, "routed sample"}); };
+        const auto dispatch = [&] {
+            ++dispatches;
+            if (separate) queued = sample;
+            else sample();
+        };
+        const auto request = [&] {
+            return detail::request_device_memory(routed, dispatch, [&] { ++warnings; }, now);
+        };
+        auto result = request();
+        check(dispatches == 1 && warnings == 0,
+            "the first request dispatches once without a pending warning");
+        check(bool(result) == !separate && bool(queued) == separate,
+            "Safe publishes immediately while Separate queues the same sample");
+        if (separate) {
+            for (unsigned upload = 0; upload < 100; ++upload)
+                check(!request() && warnings == 0 && dispatches == 1,
+                    "normal upload bursts do not warn before the render queue is serviced");
+            now += std::chrono::milliseconds{999};
+            check(!request() && warnings == 0, "pending for less than a second is not stalled");
+            queued();
+        }
+        now += std::chrono::seconds{2};
+        result = request();
+        check(result && result->bytes == 8192 && result->source == "routed sample"
+                && dispatches == 1 && warnings == 0,
+            "both routes return the published sample and completed probes never warn");
+    }
+    detail::DeviceMemoryProbe stalled;
+    unsigned dispatches = 0, warnings = 0;
+    auto now = detail::DeviceMemoryProbe::Clock::time_point{};
+    const auto request = [&] {
+        return detail::request_device_memory(stalled, [&] { ++dispatches; }, [&] { ++warnings; }, now);
+    };
+    check(!request() && warnings == 0, "dispatch itself never warns");
+    now += std::chrono::milliseconds{999};
+    check(!request() && warnings == 0, "a pending sample below the stall threshold stays quiet");
+    now += std::chrono::milliseconds{1};
+    check(!request() && warnings == 1 && dispatches == 1, "a sample stuck for one second warns once");
+    now += std::chrono::seconds{3};
+    check(!request() && warnings == 1 && dispatches == 1, "a stalled sample neither spams nor redispatches");
+    stalled.publish({8192, "late sample"});
+    const auto late = request();
+    check(late && late->bytes == 8192 && late->source == "late sample" && warnings == 1,
+        "a late completion still publishes normally after the diagnostic");
+}
+} // namespace
+
 // #3027 GM-04: the texture budget drops mips only when the device's memory is known and full.
 void texture_budget_contracts() {
     using namespace eawr;
     namespace detail = presentation::godot_backend::detail;
+    {
+        detail::DeviceMemoryProbe probe;
+        detail::TextureBudget budget;
+        check(!probe.memory() && !budget.probed(), "a pending VRAM probe leaves the budget unprobed");
+        check(probe.begin() && !probe.begin(), "only one render-thread sample is dispatched");
+        check(!probe.memory(), "dispatch does not publish a zero-byte fallback while pending");
+        probe.publish({4096, "device sample"});
+        const auto memory = probe.memory();
+        check(memory && memory->bytes == 4096 && memory->source == "device sample",
+            "render-thread completion publishes bytes and source together");
+        budget.set_device(memory->bytes, memory->source);
+        check(budget.probed() && budget.constrained() && !probe.begin(),
+            "the cached render-thread sample enables the budget without another dispatch");
+        budget.set_override(2048);
+        budget.set_device(memory->bytes, memory->source);
+        check(budget.state().device_bytes == 2048, "an explicit budget still wins over the cached sample");
+        detail::DeviceMemoryProbe unsupported;
+        check(unsupported.begin(), "unsupported probes also dispatch once");
+        unsupported.publish({0, "unsupported driver"});
+        const auto fallback = unsupported.memory();
+        check(fallback && fallback->bytes == 0 && fallback->source == "unsupported driver"
+                && !unsupported.begin(), "completed unsupported probes preserve the explicit fallback");
+        device_memory_route_contracts();
+        check(!unsupported.warn_pending_once(), "an unsupported completed probe is never pending");
+        detail::TextureBudget disabled;
+        disabled.disable();
+        disabled.set_device(memory->bytes, memory->source);
+        check(disabled.state().source == "off" && !disabled.constrained(),
+            "a late probe result cannot enable an explicitly disabled budget");
+    }
     {
         detail::ResourceResidency residency;
         residency.pressure();

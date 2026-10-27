@@ -709,6 +709,11 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
     const auto& production_census_visits = tracked_.value().production_census_visits.value();
     auto& events = impacts_.value().events.value();
     auto& diagnostics = commands_.value().diagnostics.value();
+    // RFL-09: command diagnostics are initialized after projectile preparation.
+    // Reduce only noncanonical staged messages here, in stable projectile order.
+    for (auto& flight : flights_->flights.value()) {
+        if (flight->path_diagnostic) diagnostics.push_back(std::move(*flight->path_diagnostic));
+    }
     const auto& capture_index_bodies = systems_.value().capture_index_bodies.value();
     const auto& capture_prepare_bodies = systems_.value().capture_prepare_bodies.value();
     auto& instances = systems_.value().instances.value();
@@ -787,6 +792,7 @@ core::Result<TacticalTick> session_detail::Tick::finish() {
         asteroid_candidates,
         std::move(deaths),
         std::move(object_turn_outcomes_),
+        std::move(damage_changes_),
     });
 }
 

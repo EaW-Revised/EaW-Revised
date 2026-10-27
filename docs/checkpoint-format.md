@@ -78,6 +78,7 @@ skipped. IDs from 0x8000 are never part of a state hash.
 | 15 | galactic-abilities | live ability preparations and lifecycle | galaxy sections |
 | 16 | campaign-scoring | ordered build, death and ownership counters | galaxy sections |
 | 17 | galactic-owner | full world/session barrier, consumed and future command/native cursors, admission queues, child owners and the story plot state | galaxy v35 |
+| 18 | land-state | terrain identity, occupancy, squad paths, movement and retained contacts | optional v4, absent for space |
 | 0x8000 | presentation-hints | camera and selection per seat; never hashed | player saves |
 | 0x8001 | live-input | deferred local orders and future command envelopes outside the completed simulation frontier | live player saves, v3 |
 | 0x8002 | campaign-identity | authored campaign/set/difficulty, saving seat/faction and optional custom startup economy/hero values (WGP-190) | player saves of authored campaigns, v2 |
@@ -153,6 +154,32 @@ ones, or the load fails (`EAWR-CKP-0110`). The load costs one tick of simulation
 tick of the battle; `RestoreWork` counts the ticks re-simulated and the bytes read. The
 child-state section replaces this once a battle's full state can be restored; a reader then
 accepts both.
+
+### Land state (ID 18, version 5)
+
+Land tactical checkpoints add an optional `land-state` section; space checkpoints
+omit it entirely. A land reader requires it alongside child-state and never
+reconstructs a missing land section by replaying. The section begins with its
+u16 ID/version, the terrain identity and the content-supplied Clear bit, followed
+by occupancy sources/revision/changed cells, movement and retained contacts,
+the per-squad request ledger and in-flight search checkpoints. The explicit
+field lists in `src/sim/tactical/land_checkpoint_fields_internal.hpp` use the
+same archive primitives and bounds as child-state. Restore checks terrain,
+content bindings, object poses and canonical re-encoding before publication.
+This payload is also the land-only canonical-state tail. Child-state's format
+and all space checkpoint bytes are unchanged.
+
+Versions 2 to 4 retain the LC-83 generic-team dispatch flag and each member's ordinary
+and temporary path-node trackers. Shared path nodes remain on the team; trackers
+cannot be reconstructed from positions after a turn or collision. The wrapper's
+reported position, facing and speed follow the first member in ascending object-ID
+order; temporary-route release waits for every member tracker. Version 4 appends each
+squad's walk-turning flag (WLPA-80). Version 3 adds the authored collision class (one byte, the
+engine-fixed UnitCollisionClass enum) to each member's locomotion profile (WLPA-73).
+
+Version 5 adds each member's own terrain detour (WLPA-69): a short temporary path and its tracker,
+owned by the member's locomotor while a terrain contact is installed. The squad route is unchanged.
+Versions 1 to 4 are refused.
 
 ### Child state (ID 11, version 4)
 
@@ -329,16 +356,18 @@ so those entries stay until then.
 
 ### Story plot state (galaxy v35)
 
-The campaign owner blob is format 3. After the auto-resolve resolver bytes it ends with an optional story state
+The campaign owner blob is format 5. After the auto-resolve resolver bytes it ends with an optional story state
 (presence byte, then): the started flag, the story clock (Q24), the trigger sequence (u64), the sub-plots in table order
 (name, owning player, active flag, then every event by name with its triggered, active and disabled flags, start time,
 elapsed accumulator and last-seen time, tech-level primed flag and inactivity stamp) and the flag table (name to i64, names
 upper-case, ascending). The plot definitions are never saved: a load installs the same plots from the campaign data first and
 the saved state must match them name for name (a renamed sub-plot or event, or a save with plots loaded into a session without
-them, is refused). WST-60..62.
+them, is refused). WST-60..62. The owner scalar fields end with the story callback sequence (u64), after the
+summary conflict. It travels with the story scheduler's pending calls so subsequent callbacks cannot reuse their keys.
+The immutable story script content is rebound from campaign setup on load, alongside the plot definitions.
 
 GCMP-06 uses galaxy section version **41**, state encoding **9**, and campaign owner format **4**.
-GREF-24..26 History archives add authoritative state section 22 and use galaxy section version **42**, state encoding **10** and galactic snapshot schema **7**; older data is refused.
+GREF-24..26 History archives add authoritative state section 22 and use galaxy section version **42** and state encoding **10**; older data is refused. The per-viewer History a view snapshot publishes stays out of the canonical snapshot bytes (schema 6), like observations: the archive reaches the state hash through section 22.
 Immediately after the session history base, a u8 presence flag carries the optional multiplayer
 battle-vote timeout (u64 session ticks). The owner archives that timeout and the optional vote-start
 tick next to its ordered side-vote map. The pending-state digest includes the timeout, start and
@@ -608,6 +637,10 @@ Goal payload version 7 also retains the Potential target-contrast-disabled choic
 unstaged GC Produce_Force (WGA-341); it is independent of the authored IgnoreTarget flag.
 
 The combined campaign and tactical field inventory uses raw child-state domain 9.
+WFR-01 selects raw domain 10 when any live unit has a nonzero fire-range bonus:
+each unit then archives seven combat bonus values rather than six. Zero fire-range
+state retains domain 9 and its exact six-slot bytes; domain 10 with all range
+values zero is noncanonical and refused. Both domains preserve checkpoint continuation.
 It includes the retained hardpoint of each squadron's formation attack destination,
 independent of its team's explicitly ordered hardpoint. It retains waypoint/retry state, ordinary turret
 pointing, charged-shot and MC30 state, garrison birth marks, named ability locks,

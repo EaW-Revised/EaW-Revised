@@ -32,6 +32,10 @@ inline constexpr std::uint64_t object_phase_random_domain = std::uint64_t{1} << 
 static_assert((turn_random_domain & object_phase_random_domain) == 0);
 static_assert(turn_random_domain > max_script_tick && object_phase_random_domain > max_script_tick);
 
+// The fixed seed of the free stream (RGC-197): retail's free generator is built once with a constant seed and never
+// reseeded, so its words do not depend on the game seed. A free draw is the same counter-keyed word under this seed.
+inline constexpr std::uint64_t free_stream_seed = 0xF4EE5EEDC0FFEE11ULL;
+
 [[nodiscard]] bool valid_tick_duration(TickDuration duration) noexcept;
 
 // GetCurrentTime: tick x duration, rounded once to binary64 (nearest, ties to
@@ -60,6 +64,9 @@ public:
         : seed_(seed), tick_(tick), instance_(instance), draws_(draws) {}
 
     [[nodiscard]] std::uint64_t next_word() noexcept;
+    // The next word of the free stream (RGC-195/197): keyed by free_stream_seed instead of the session seed, on a draw
+    // counter of its own, so a free draw never moves the game stream's position and never repeats one of its words.
+    [[nodiscard]] std::uint64_t next_free_word() noexcept;
     // Uniform in [0, bound); bound 0 means the full 64-bit range.
     [[nodiscard]] std::uint64_t next_below(std::uint64_t bound) noexcept;
     // Uniform integer in [low, high]; low <= high.
@@ -68,6 +75,8 @@ public:
     // 2^-53 in [0, 1), exact.
     [[nodiscard]] numeric::LuaNumber next_unit() noexcept;
 
+    // Both counters in one value, the form that is saved, hashed and restored: the game stream's in the low 32 bits,
+    // the free stream's in the high 32 bits (zero until a free draw is taken, so streams without one are unchanged).
     [[nodiscard]] std::uint64_t draws() const noexcept { return draws_; }
 
 private:

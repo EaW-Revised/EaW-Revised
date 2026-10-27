@@ -16,6 +16,7 @@
 #include "eawr/sim/galactic/snapshot.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
 #include "eawr/sim/galactic/story_rewards.hpp"
+#include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/story_notices.hpp"
 #include "eawr/sim/state_hash.hpp"
 #include "eawr/sim/world.hpp"
@@ -93,6 +94,7 @@ struct GameTick {
     std::vector<BattleSeat> battle_seats; // current conflict-scoped bindings, including observers
     sim::StateHash battle_state_hash;
     std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
+    std::vector<sim::tactical::DamageChange> damage_changes; // transient child presentation facts, not campaign state
     std::optional<BattleResult> result;
     std::vector<core::Diagnostic> diagnostics;
     std::vector<BattleChoiceResponse> battle_choice_responses;
@@ -243,6 +245,9 @@ public:
         script::authoritative::ScriptScheduler story,
         const std::optional<script::authoritative::GalacticScriptSave>& saved = {});
     [[nodiscard]] script::authoritative::ScriptedGalacticSession* galactic_scripts() noexcept;
+    // The Lua side of the plot engine (WST-53/55): the plot engine's per-event callbacks are forwarded to the
+    // sub-plot scripts of the installed story scheduler. Absent: the callbacks are dropped, as before.
+    void bind_story_scripts(std::shared_ptr<const GalacticStoryScripts>) noexcept;
     [[nodiscard]] core::Result<std::optional<script::authoritative::GalacticScriptSave>> save_galactic_scripts() const;
 
     // Every player, AI, script and test input enters here (ADR-015). Session and galactic layers

@@ -9,6 +9,7 @@ eawr_add_galactic_area_case(
 add_test(NAME galactic_timeline_contracts COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --timeline)
 add_test(NAME galactic_pending_conflict_barrier COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --pending-conflict)
 add_test(NAME galactic_prebattle_autosave_admission COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --prebattle-autosave)
+add_test(NAME galactic_summary_hold_barrier COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests --summary-hold)
 add_test(NAME galactic_game_checkpoint_contracts COMMAND galactic_area_checkpoint galactic_game_checkpoint_tests
     "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/corpus")
 

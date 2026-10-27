@@ -92,6 +92,9 @@ std::optional<DriverResult> TcpLanMatch::drive_prepare(const tactical::TacticalS
                 if (agreed.input_delay != monitor_delay_) return fail<std::unique_ptr<net::SessionAdapter>>("Monitor delay differs from the agreed input delay.");
                 if (agreed.setup != bytes) return fail<std::unique_ptr<net::SessionAdapter>>("The locally built match differs from the host setup.");
                 auto adapter = std::make_unique<LiveAdapter>(setup, agreed.seats, trace_);
+                auto journal_setup = net::encode_setup_offer(agreed);
+                if (!journal_setup) return core::Result<std::unique_ptr<net::SessionAdapter>>::failure(journal_setup.error());
+                adapter->recording.setup = std::move(journal_setup).value();
                 adapter->options_applied = [this](net::MatchOptions options, std::uint64_t tick) {
                     const std::lock_guard lock(mutex_); view_.options = options; view_.options_tick = tick;
                 };
@@ -118,13 +121,14 @@ std::optional<DriverResult> TcpLanMatch::drive_prepare(const tactical::TacticalS
                 policy.reconnect = std::move(retention);
                 if (agreed.recovery.resync || agreed.recovery.reconnect) {
                     net::ResyncOptions recovery; recovery.timeout_ms = agreed.recovery.resync_timeout_ms;
-                    recovery.rebuild = [this, setup, seats = agreed.seats, expected = agreed.setup](std::span<const std::uint8_t> bytes)
+                    recovery.rebuild = [this, setup, seats = agreed.seats, expected = agreed.setup, journal_setup = net::encode_setup_offer(agreed).value()](std::span<const std::uint8_t> bytes)
                         -> core::Result<std::unique_ptr<net::SessionAdapter>> {
                         using Result = core::Result<std::unique_ptr<net::SessionAdapter>>;
                         if (!std::equal(bytes.begin(), bytes.end(), expected.begin(), expected.end()) || !current_context_->rebuild)
                             return Result::failure(diagnostic("EAWR-NET-1214", "Verified recovery setup or local factory differs."));
                         auto rebuilt = current_context_->rebuild(); if (!rebuilt) return Result::failure(rebuilt.error());
                         auto fresh = std::make_unique<LiveAdapter>(setup, seats, nullptr);
+                        fresh->recording.setup = journal_setup;
                         fresh->staging = std::move(rebuilt).value(); fresh->context = fresh->staging.get();
                         fresh->activate_if_current = [this](LiveAdapter& value) { return activate_adapter(value); };
                         fresh->service_io = [this, staged = fresh.get()] {

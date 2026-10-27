@@ -115,11 +115,11 @@ std::vector<SelfDestructHardpoint> self_destruct_hardpoints(const sim::tactical:
     return hardpoints;
 }
 
-std::optional<LiveUnitPose> debris_ship_at(const sim::tactical::TacticalSnapshot* const snapshot,
+std::optional<live::LiveUnitPose> debris_ship_at(const sim::tactical::TacticalSnapshot* const snapshot,
                                            const sim::EntityId unit, const sim::tactical::PlayerId viewer,
                                            const bool reveal) {
     if (snapshot == nullptr) return std::nullopt;
-    for (const LiveUnitPose& pose : interpolate_units(*snapshot, *snapshot, 1.0, viewer, reveal)) {
+    for (const live::LiveUnitPose& pose : live::interpolate_units(*snapshot, *snapshot, 1.0, viewer, reveal)) {
         if (pose.entity == unit) return pose;
     }
     return std::nullopt;

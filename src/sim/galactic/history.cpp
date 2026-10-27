@@ -125,12 +125,4 @@ void encode_history(std::vector<std::uint8_t>& bytes, const HistoryArchive& arch
     put_u64(bytes, archive.size());
     for (const auto& [player, rows] : archive) { put_u32(bytes, player); samples(bytes, rows); }
 }
-void encode_history_snapshot(std::vector<std::uint8_t>& bytes, const HistorySnapshot& view) {
-    put_u64(bytes, view.first_frame); put_u64(bytes, view.last_frame);
-    put_u64(bytes, view.maximum_planets); put_u64(bytes, view.planetary_objects); put_u64(bytes, view.fiscal_frames);
-    put_u32(bytes, view.maximum_economy.bits);
-    put_u32(bytes, view.maximum_military.bits); put_u8(bytes, view.available ? 1 : 0);
-    put_u64(bytes, view.lines.size());
-    for (const auto& line : view.lines) { put_u32(bytes, line.player); samples(bytes, line.samples); }
-}
 } // namespace eawr::sim::galactic::detail

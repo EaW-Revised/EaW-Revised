@@ -32,6 +32,13 @@ std::vector<sim::galactic::MpLobbyCampaign> list_mp_lobby_campaigns(const data::
         name_all(named, campaign.starting_forces); name_all(named, campaign.ai_player_control);
         sim::galactic::MpLobbyCampaign row;
         row.name = campaign.name;
+        row.text_id = campaign.text_id;
+        row.description_text = campaign.description_text;
+        for (const auto& planet_name : campaign.planets) {
+            const auto* planet = data.planet(planet_name);
+            if (planet == nullptr || !planet->galactic_position) continue;
+            row.planet_points.emplace_back(planet->galactic_position->x, planet->galactic_position->y);
+        }
         row.supports_custom_settings = campaign.supports_custom_settings.value_or(false);
         row.minimum_custom_tech = campaign.minimum_custom_tech;
         row.maximum_custom_tech = campaign.maximum_custom_tech;
@@ -52,6 +59,24 @@ const sim::galactic::MpLobbyCampaign* find_mp_lobby_campaign(const std::vector<s
     const auto wanted = upper(name);
     for (const auto& campaign : campaigns) if (upper(campaign.name) == wanted) return &campaign;
     return nullptr;
+}
+
+MpLobbyCampaignLabels label_mp_lobby_campaign(const sim::galactic::MpLobbyCampaign& campaign, const MpLobbyTextResolver& resolve) {
+    MpLobbyCampaignLabels out;
+    out.title = campaign.name;
+    const auto lookup = [&](const std::string& key) -> std::optional<std::string> {
+        if (key.empty()) return std::nullopt;
+        auto value = resolve(key);
+        if (!value || value->empty()) out.missing.push_back(key);
+        return value && !value->empty() ? value : std::nullopt;
+    };
+    if (auto title = lookup(campaign.text_id)) out.title = std::move(*title);
+    if (auto description = lookup(campaign.description_text)) {
+        // The text database writes a line break inside a description as the two characters backslash and n.
+        for (std::size_t at = 0; (at = description->find("\\n", at)) != std::string::npos; ++at) description->replace(at, 2, "\n");
+        out.description = std::move(*description);
+    }
+    return out;
 }
 
 } // namespace eawr::campaign

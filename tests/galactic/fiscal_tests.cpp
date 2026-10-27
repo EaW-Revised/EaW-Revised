@@ -134,6 +134,23 @@ void contribution_math() {
     expect(!galactic::planet_income_contribution(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()), f(2), {}, {}, {}, {}, {}, {}, {}),
         "overflow is typed failure");
 }
+void unclamped_alignment() {
+    for (const auto strength : {f(-1), f(2), f(4)}) {
+        auto config = setup();
+        config.fiscal->contributions = rules(config);
+        auto& inputs = *config.fiscal->contributions;
+        inputs.factions[0].alignment = galactic::IncomeAlignment::light;
+        inputs.planets[0].alignment = galactic::IncomeAlignment::light;
+        inputs.planets[0].strength = strength;
+        expect(bool(galactic::validate_setup(config)), "CGS-16 signed unclamped strength admitted");
+        auto game = take(galactic::GalacticSession::create(config));
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        for (int i = 0; i < 4; ++i) (void)take(game.step(pool));
+        const auto effect = strength.raw() > 0 ? take(eawr::sim::math::multiply(f(5), strength)) : f(0);
+        expect(balance(game, 0) == take(eawr::sim::math::add(f(30), effect)),
+            "CGS-16 income keeps strength magnitude and ignores nonpositive products");
+    }
+}
 void trade_and_alignment() {
     auto config = setup();
     config.fiscal->credit_cap_per_planet = f(10000);
@@ -331,7 +348,11 @@ void preview(bool trade = false) {
             std::nullopt, corruption ? std::optional(*corruption) : std::nullopt,
             access ? std::make_shared<const galactic::PlanetAccessState>(*access) : nullptr, 0, {},
             std::make_shared<const std::vector<galactic::CensusObject>>(
-                snapshot->actor_records().begin(), snapshot->actor_records().end()));
+                snapshot->actor_records().begin(), snapshot->actor_records().end()),
+            {}, {}, {}, {}, {}, {}, {}, {},
+            // The History publication is canonical (snapshot format 7), so the rebuild must carry it too.
+            galactic::SharedSnapshotSections{.history = snapshot->history() ? std::make_shared<const galactic::HistorySnapshot>(*snapshot->history()) : nullptr},
+            snapshot->view_player());
         expect(without_preview.canonical_bytes() == snapshot->canonical_bytes(), "preview excluded from canonical bytes");
         expect(bool(game.submit(owner(game.completed_tick(), {1}, 1, config.planets[0].id, 2))), "cached forecast owner transfer admitted");
         const auto changed = take(game.step(pool));
@@ -371,6 +392,47 @@ void accounts() {
     expect(take(galactic::adjusted_credits(f(10), f(-20), f(2), f(100))) == f(0), "debit clamps at zero");
     expect(take(galactic::adjusted_credits(f(95), f(10), f(2), f(100))) == f(100), "addition clamps at cap");
     expect(!galactic::adjusted_credits(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()), f(1), f(1), f(100)), "addition overflow diagnosed");
+}
+void signed_planet_income() {
+    auto config = setup();
+    config.fiscal->players[0].positive_credit_multiplier = f(2);
+    config.fiscal->players[1].positive_credit_multiplier = f(2);
+    std::vector<unsigned> seen(config.players.size());
+    for (std::size_t i = 0; i < config.planets.size(); ++i) {
+        const auto owner = config.planets[i].owner;
+        const bool first = seen[owner - 1]++ == 0;
+        config.fiscal->planets[i].credits = owner == 1 ? f(first ? 2 : -10) : f(first ? 3 : -15);
+    }
+    // CGS-19: retain each signed contribution before the owner reduction, then
+    // debit the aggregate without the positive-income multiplier.
+    expect(take(galactic::planet_income_contribution(f(-10), f(1), {}, {}, {}, {}, {}, {}, {})).total == f(-10),
+        "negative planet income is not floored before fiscal aggregation");
+    const galactic::GalacticReplay replay{config, 7, {}};
+    expect(take(galactic::parse_replay(take(galactic::write_replay(replay)))) == replay,
+        "signed base income replay round trip");
+    std::optional<std::string> reference;
+    for (const auto count : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(count);
+        auto game = take(galactic::GalacticSession::create(config));
+        std::vector<galactic::GalacticSession::CreditNotification> notices;
+        game.set_credit_notification_handler([&](const auto& notice) {
+            notices.push_back(notice);
+            return eawr::core::Result<void>::success();
+        });
+        for (int i = 0; i < 4; ++i) (void)take(game.step(pool));
+        expect(balance(game, 0) == f(2) && balance(game, 1) == f(8), "signed fiscal total debits human and AI equally");
+        expect(notices.size() == 2 && notices[0].amount == f(-8) && notices[0].credits == f(2)
+            && notices[1].amount == f(-12) && notices[1].credits == f(8),
+            "fiscal notification retains signed aggregate after account debit");
+        for (int i = 0; i < 3; ++i) (void)take(game.step(pool));
+        expect(balance(game, 0) == f(0) && balance(game, 1) == f(0) && balance(game, 2) == f(30),
+            "negative fiscal payment floors eligible balances at zero and leaves ineligible account unchanged");
+        if (!reference) reference = game.state_sha256();
+        expect(game.state_sha256() == *reference, "signed fiscal payment worker parity");
+    }
+    auto bad = config;
+    for (auto& planet : bad.fiscal->planets) planet.credits = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
+    expect(!galactic::validate_setup(bad), "signed base income underflow still rejects");
 }
 void boundaries() {
     const auto config = setup(); eawr::sim::InlineExecutor serial;
@@ -513,7 +575,7 @@ void replay_and_checkpoint() {
     auto bad = config; bad.fiscal->players[0].player = 2; expect(!galactic::validate_setup(bad), "mismatched fiscal players rejected");
     bad = config; bad.fiscal->planets.pop_back(); expect(!galactic::validate_setup(bad), "incomplete planet table rejected");
     bad = config; bad.player_economy.reset(); expect(!galactic::validate_setup(bad), "missing ledger rejected");
-    bad = config; bad.fiscal->planets[0].credits = f(-1); expect(!galactic::validate_setup(bad), "negative base income rejected");
+    bad = config; bad.fiscal->planets[0].credits = f(-1); expect(bool(galactic::validate_setup(bad)), "signed base income admitted (CGS-19)");
     bad = config; bad.fiscal->credit_cap_per_planet = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
     expect(!galactic::validate_setup(bad), "cap multiplication overflow rejected");
     eawr::sim::InlineExecutor serial;
@@ -539,7 +601,7 @@ void replay_and_checkpoint() {
 }
 }
 int case_galactic_fiscal_tests() {
-    try { retail_c01(); contribution_math(); trade_and_alignment(); malformed_static_tail(); preview(); preview(true); accounts(); boundaries(); ownership_at_deadline(); combined_extensions(); replay_and_checkpoint(); }
+    try { retail_c01(); contribution_math(); unclamped_alignment(); trade_and_alignment(); malformed_static_tail(); preview(); preview(true); accounts(); signed_planet_income(); boundaries(); ownership_at_deadline(); combined_extensions(); replay_and_checkpoint(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return failures == 0 ? 0 : 1;
 }

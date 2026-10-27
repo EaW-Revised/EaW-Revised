@@ -24,7 +24,14 @@ void Engine::prepare_producers(const sim::PartitionExecutor* executor) const {
     }
     for (const auto& unit : host_->view->units) {
         const auto* info = host_->type(unit.type);
-        if (info && info->star_base && !world.pads().contains(unit.id)) inputs.push_back(&unit);
+        if (world.pads().contains(unit.id)) continue;
+        // WAS-27: ordinary tactical factories are authored by their menus, not
+        // by the starbase behavior. The galactic provider keeps its own census.
+        const auto& menus = world.economy().menus;
+        const auto menu = std::lower_bound(menus.begin(), menus.end(), unit.type,
+            [](const auto& entry, const auto type) { return entry.station < type; });
+        if ((info && info->star_base)
+            || (host_->world && menu != menus.end() && menu->station == unit.type)) inputs.push_back(&unit);
     }
     std::vector<std::vector<Key>> rows(inputs.size());
     const auto prepare = [&](const std::size_t index) {
@@ -36,6 +43,13 @@ void Engine::prepare_producers(const sim::PartitionExecutor* executor) const {
             [&](const auto& player) { return player.player_id == unit->owner; });
         if (owner == players.end()) return;
         for (const auto& player : players) {
+            // Registration sees the AI faction's menu; queue admission below
+            // still uses the producer owner's faction (WAS-27, WPR-30/33).
+            const auto* info = host_->type(unit->type);
+            if (!pad && host_->world && !(info && info->star_base)) {
+                const auto* visible = world.economy().menu(unit->type, player.faction_id);
+                if (!visible || visible->options.empty()) continue;
+            }
             const auto* menu = world.economy().menu(unit->type, pad ? player.faction_id : owner->faction_id);
             if (!menu) continue;
             for (const auto& option : menu->options) {

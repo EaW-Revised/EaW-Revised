@@ -65,6 +65,15 @@ The registry covers those 8,202 stock-authored pairs plus six reviewed `engine_d
 `Turret_XY_Only` and `Turret_Rotate_To_Rest_Delay_Sec` defaults. Other catalog entries
 do not add rows automatically. Recognition alone never implies `applied` or `foc-ignores`.
 
+Reviewed mod-only pairs can name `inventory_profile` (for example, `remake`) on
+their registry row. The gate admits only that row's exact class/tag pairs from
+the named committed inventory profile; a missing profile, class or tag fails.
+Other mod tags do not enter the stock coverage requirement automatically. These
+rows still need ordinary status evidence and consumers; profile recognition does
+not establish application. The galactic shard additionally registers
+`Campaign/AI_Victory_Planet_Names`, `Campaign/Story_Name` and
+`Planet/Idle_Anim_00_Rate_Mod` this way.
+
 `docs/tag-coverage/statuses.json` holds the schema version, shared evidence and shard list, with no rows.
 Its `statuses-<area>.json` shards use `schema_version` 2, one row per line, sorted by tag then first class.
 A row covers every class it lists:
@@ -206,7 +215,7 @@ repeat `--statuses path` to supply a list of roots. Report and census readers us
   that missing tags trigger the diagnostic and stock data triggers none. Optional per-object tags with sourced FoC
   defaults stay silent and retain reasoned allowlist entries (legacy EAWR-2540). Existing findings sit in
   `config/xml-literal-allowlist.json`, each with its issue number (or `false-positive` and a reason); the list may only
-  shrink: an entry whose finding is gone fails the gate until it is deleted, and more than `max_entries` fails too. The gate compares the list with the one at the merge base with `origin/Thom-Ernst/Skirmish`: a
+  shrink: an entry whose finding is gone fails the gate until it is deleted, and more than `max_entries` fails too. The gate compares the list with the one at the merge base with `origin/main`: a
   new entry fails unless the list carries a reviewed `growth_override` (`ticket` + `reason`); an unused override fails.
   Known limits: a tag on a continuation line of a multi-line declaration is missed, and an identical line elsewhere in the
   same file is covered by the same entry (the key is file + line text).

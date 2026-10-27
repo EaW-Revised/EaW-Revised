@@ -1,8 +1,8 @@
 // #535: the per-unit fade as the local player's space fog reveals or hides a unit
-// (presentation::space::UnitFade, docs/behaviour/space-fog-presentation.md FW-16 to FW-18).
+// (presentation::live::UnitFade, docs/behaviour/space-fog-presentation.md FW-16 to FW-18).
 
 #include "../../support/check.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 
 #include <array>
 #include <cmath>
@@ -13,7 +13,7 @@
 
 namespace {
 
-namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 using eawr::sim::EntityId;
 
 eawr::testing::Checker local_checker;
@@ -25,7 +25,7 @@ void expect(const bool condition, const std::string& message) {
 
 // FW-17: an entity `alive` has not held before starts at full opacity at once when it is shown.
 void test_spawn_is_instant() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({{1, 2}}, {{1, 2, 3}}, 0.0);
     expect(fade.opacity(1) == std::optional<float>(1.0F), "a unit visible at its first sight starts at full opacity");
     expect(fade.opacity(2) == std::optional<float>(1.0F), "a second unit visible at its first sight also starts full");
@@ -35,7 +35,7 @@ void test_spawn_is_instant() {
 }
 
 void test_projectile_observer_hide() {
-    space::ProjectileHide shot;
+    live::ProjectileHide shot;
     bool fog_clear = false;
     int queries = 0;
     const auto query = [&] { ++queries; return fog_clear; };
@@ -55,7 +55,7 @@ void test_projectile_observer_hide() {
     for (int tick = 33; tick < 100; ++tick) shot.advance(tick, false, false, query);
     expect(!shot.drawn(), "hidden flight stops drawing after its transition");
     fog_clear = true;
-    space::ProjectileHide immediate;
+    live::ProjectileHide immediate;
     immediate.advance(0, false, true, query);
     expect(immediate.opacity() == 1.0F && immediate.drawn(), "visible initialization is immediate");
     fog_clear = false;
@@ -66,10 +66,10 @@ void test_projectile_observer_hide() {
     fog_clear = true;
     immediate.advance(60, false, true, query);
     expect(immediate.opacity() == 1.0F && immediate.drawn(), "immediate mode reveals immediately when serviced");
-    expect(space::ProjectileHide::model_visible(0.025), "WPJ-39: equality at 0.025 remains drawn");
-    expect(!space::ProjectileHide::model_visible(std::nextafter(0.025, 0.0)),
+    expect(live::ProjectileHide::model_visible(0.025), "WPJ-39: equality at 0.025 remains drawn");
+    expect(!live::ProjectileHide::model_visible(std::nextafter(0.025, 0.0)),
            "WPJ-39: values strictly below 0.025 hide");
-    space::ProjectileHide delayed;
+    live::ProjectileHide delayed;
     delayed.advance(0, true, false, query);
     fog_clear = true;
     delayed.advance(30, true, false, query);
@@ -84,7 +84,7 @@ void test_projectile_observer_hide() {
 // FW-16, FW-17: a unit already held before that is revealed later eases up from zero instead of
 // popping, and a unit that loses visibility eases down instead of vanishing.
 void test_reveal_and_hide_ease() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({}, {{1}}, 0.0); // tick 0: entity 1 exists but is fogged
     expect(!fade.opacity(1).has_value(), "fogged from the start is not drawn");
     fade.advance({{1}}, {{1}}, 1.0); // revealed one logical frame later
@@ -107,7 +107,7 @@ void test_reveal_and_hide_ease() {
 // rate of change too, so it can still dip a little further before turning around), never from a
 // reset to zero.
 void test_flip_before_settling_does_not_restart() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({{1}}, {{1}}, 0.0);
     fade.advance({}, {{1}}, 2.0);   // starts fading out, nowhere near the hide threshold yet
     const auto partway = fade.opacity(1);
@@ -123,7 +123,7 @@ void test_flip_before_settling_does_not_restart() {
 // FW-21 (this fidelity's fade never sees a death event itself; the tracker only reads `alive`):
 // a unit the session no longer holds is forgotten at once, whatever its opacity.
 void test_destroyed_unit_is_forgotten_at_once() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({{1}}, {{1}}, 0.0);
     fade.advance({}, {{1}}, 1.0); // mid fade-out, well above the hide threshold
     expect(fade.opacity(1).has_value(), "still mid fade-out");
@@ -133,7 +133,7 @@ void test_destroyed_unit_is_forgotten_at_once() {
 
 // FW-16: fading is counted in logical frames, so a paused battle (0 frames) holds it exactly.
 void test_paused_battle_holds() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({}, {{1}}, 0.0);
     fade.advance({{1}}, {{1}}, 3.0);
     const auto before_pause = fade.opacity(1);
@@ -146,7 +146,7 @@ void test_catch_up_matches_small_steps() {
         for (const double frames : {2.0, 20.25, 90.5, 300.75}) {
             // Isolate easing from retirement: with a slow curve the first reveal is below
             // the normal hide cutoff, so a reversal would retire both before their rates compare.
-            space::UnitFade batched({smooth, 0.0}), stepped({smooth, 0.0});
+            live::UnitFade batched({smooth, 0.0}), stepped({smooth, 0.0});
             batched.advance({}, {{1}}, 0.0);
             stepped.advance({}, {{1}}, 0.0);
             batched.advance({{1}}, {{1}}, frames);
@@ -167,7 +167,7 @@ void test_catch_up_matches_small_steps() {
 }
 
 void test_extreme_elapsed_frames() {
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance({}, {{1}}, 0.0);
     fade.advance({{1}}, {{1}}, 1.0e12);
     expect(fade.opacity(1) == std::optional<float>(1.0F), "a huge elapsed interval settles in bounded work");
@@ -186,7 +186,7 @@ void test_extreme_elapsed_frames() {
 
 int main() {
     {
-        space::FogGhosts memory;
+        live::FogGhosts memory;
         const std::array<double, 3> first{100, 200, 0}, changed{900, 800, 0};
         memory.advance({{{1, first, false, false}}}, {});
         expect(!memory.states().at(1).ghost, "FW-26: never seen and initially false leaves no ghost");
@@ -206,7 +206,7 @@ int main() {
         expect(memory.states().contains(1), "seeing another cell does not reveal a hidden destruction");
         memory.advance({}, [&](const auto& point) { return point == changed; });
         expect(!memory.states().contains(1), "seeing the saved cell removes the destroyed ghost");
-        space::FogGhosts other_player;
+        live::FogGhosts other_player;
         other_player.advance({{{1, first, false, false}}}, {});
         expect(!other_player.states().at(1).known, "FW-29: one observer's memory does not reveal to another");
         memory.advance({{{2, first, false, true}}}, {});
@@ -214,7 +214,7 @@ int main() {
         memory.advance({{{3, first, true, false}}}, {});
         memory.advance({}, [](const auto&) { return true; });
         expect(!memory.states().contains(3), "visible destruction leaves no ghost");
-        space::UnitFade instant;
+        live::UnitFade instant;
         instant.advance({}, {{1, 2}}, 0, {{1}});
         instant.advance({{1, 2}}, {{1, 2}}, 1, {{1}});
         expect(instant.opacity(1) == std::optional<float>(1.0F), "WSU-05: a tagged reveal jumps to full opacity");
@@ -223,7 +223,7 @@ int main() {
         expect(!instant.opacity(1), "WSU-05: a tagged hide jumps to hidden");
         expect(instant.opacity(2).has_value(), "ordinary units retain their moving fade");
     }
-    space::NebulaBlend nebula;
+    live::NebulaBlend nebula;
     nebula.service(true);
     expect(nebula.value() == 0.0F, "WHZ-71: first contact changes the target after the visual service");
     nebula.service(true);
@@ -234,7 +234,7 @@ int main() {
     expect(nebula.value() > 0.9F && nebula.value() < 1.0F, "WHZ-71: exit uses the independent 0.15-second ease");
     for (int frame = 0; frame < 30; ++frame) nebula.service(false);
     expect(nebula.value() < 0.01F, "WHZ-71: exit converges below the material threshold");
-    eawr::presentation::space::StealthBlend cloak;
+    eawr::presentation::live::StealthBlend cloak;
     cloak.service(true, 0.5);
     expect(cloak.value() > 0 && cloak.value() < 0.02F, "WST-12: cloak starts a damped fade toward colour");
     for (int frame = 1; frame < 15; ++frame) cloak.service(true, 0.5);

@@ -3,6 +3,7 @@
 #include "galactic_ai_actions.hpp"
 #include "galactic_ai_world.hpp"
 #include "ai_learning.hpp"
+#include "ai_script_evaluators.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -36,7 +37,7 @@ core::Result<void> Engine::begin_galactic_barrier(const World& world, galactic_a
     work_ = {};
     producers_prepared_ = false;
     producer_work_ = {};
-    host_->credit_changes.clear();
+    host_->clear_barrier_state();
     for (auto& event : events_) { event.key.tick = event_tick_; event.key.sequence = sequence_++; }
     if (!initialized_) {
         native_records_replaced();
@@ -63,11 +64,17 @@ core::Result<void> Engine::begin_galactic_barrier(const World& world, galactic_a
             for (const auto& set : type->second.function_sets) {
                 const auto functions = data_.function_sets.find(set);
                 if (functions == data_.function_sets.end()) continue; // other-mode closure
+                // Retail logs an error for an entry that names no equation and does not register the function set. The same
+                // here, without aborting startup: galactic_ai::unresolved_goal_equations names it in the setup diagnostics (#4937).
+                const auto unresolved = std::any_of(functions->second.begin(), functions->second.end(), [&](const auto& function) {
+                    const auto goal = data_.goals.find(function.goal);
+                    return goal != data_.goals.end() && goal->second.mode == "GALACTIC" && !data_.equations.find(function.function);
+                });
+                if (unresolved) continue;
                 for (const auto& function : functions->second) {
                     const auto goal = data_.goals.find(function.goal);
                     if (goal == data_.goals.end() || goal->second.mode != "GALACTIC") continue;
                     const auto* equation = data_.equations.find(function.function);
-                    if (!equation) return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "galactic AI selected goal equation is missing"));
                     GoalFunctionEntry entry;
                     entry.goal = &goal->second; entry.goal_name = function.goal;
                     entry.equation = equation; entry.equation_name = function.function;
@@ -242,7 +249,7 @@ core::Result<void> Engine::before_service(const World& world,
     input_counts_.view_rows = host_->view->units.size();
     const auto preparation = grid_.prepare(executor, *host_, *host_->view);
     perception_executor_ = executor;
-    host_->credit_changes.clear(); // preceding commands are now in the authoritative snapshot
+    host_->clear_barrier_state(); // preceding commands are now in the authoritative snapshot
     frame_ = static_cast<std::int64_t>(world.completed_tick());
     event_tick_ = scripts.completed_tick() + 1;
     sequence_ = sequence;
@@ -460,6 +467,10 @@ core::Result<void> Engine::after_service(authoritative::ServiceReport& report) {
         host_->setup.journal->append_cost(AiTickCost{cost.tick, cost.freestore, cost.plans, cost.plan_instances,
             cost.goals_evaluated, cost.maintenances, cost.plans_attached, cost.plans_deferred, cost.plans_pumped,
             cost.freestore_runs, cost.reinforcement_candidates, cost.reinforcement_search_ns});
+        if (script_evaluators_) {
+            const auto& stats = script_evaluators_->stats();
+            host_->setup.journal->evaluators = AiEvaluatorStats{stats.calls, stats.memo_hits, stats.failures, stats.loaded, stats.instructions};
+        }
         for (const auto& diagnostic : report.diagnostics) {
             const Plan* source = plan_of_instance(diagnostic.instance);
             host_->setup.journal->append_plan(PlanEvent{diagnostic.tick, source ? source->player : 0U,

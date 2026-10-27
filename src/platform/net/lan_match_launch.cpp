@@ -85,7 +85,7 @@ void TcpLanMatch::pump_setup_impl(const skirmish::FixtureOptions& selected) {
                 + " | Victory " + (*offered_->victory_condition == tactical::VictoryCondition::enemy_starbase_destroyed ? std::string("Destroy enemy starbase") : *offered_->victory_condition == tactical::VictoryCondition::all_enemy_units_destroyed ? std::string("Destroy all enemy units") : std::string("None"));
             if (offered_->match) {
                 const auto& match = *offered_->match;
-                summary += " | " + match.space_win_condition + " | Credits " + std::to_string(match.credits.trunc_to_integer())
+                summary += " | " + match.tactical_win_condition + " | Credits " + std::to_string(match.credits.trunc_to_integer())
                     + " | Tech " + std::to_string(match.start_tech) + "/" + std::to_string(match.max_tech)
                     + " | Timer " + std::to_string(match.game_timer) + " | Win limit " + std::to_string(match.win_integer)
                     + " | Win value " + std::to_string(match.win_float.trunc_to_integer()) + " | Auto resolve " + std::to_string(match.auto_resolve)

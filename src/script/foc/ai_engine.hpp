@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/diagnostics/gc_memory.hpp"
 #include "eawr/core/record_digest.hpp"
 
 // The FoC tactical AI engine side (#449, docs/behaviour/foc-tactical-ai.md "Goal system",
@@ -31,6 +32,7 @@
 #include <vector>
 
 namespace eawr::script::foc::galactic_ai { class NativeActions; }
+namespace eawr::script::foc::tactical_ai_detail { class ScriptEvaluators; }
 namespace eawr::script::foc::ai {
 class GalacticFunding;
 struct GalacticBudgetBuild;
@@ -924,6 +926,14 @@ public:
     }
     [[nodiscard]] std::optional<std::uint64_t> galactic_potential_for_goal(tactical::PlayerId, std::uint64_t goal) const;
     [[nodiscard]] std::vector<GalacticGoalIdentity> galactic_goals(tactical::PlayerId) const;
+    // Observer output only: the player's live goals with the goal function name, current desire (shortest decimal text),
+    // whether the goal is active, and the potential or running plan's definition. Read between ticks; never saved or hashed.
+    struct GalacticGoalObservation {
+        std::string function, desire, plan;
+        std::uint64_t goal{}, target{}, running_plan{};
+        bool active{}, planned{};
+    };
+    [[nodiscard]] std::vector<GalacticGoalObservation> galactic_goal_observations(tactical::PlayerId) const;
     [[nodiscard]] core::Result<void> service_galactic_system(tactical::PlayerId, galactic_ai::Service,
         authoritative::ScriptScheduler&, std::uint64_t& sequence);
     [[nodiscard]] core::Result<void> commit_galactic_events(authoritative::ScriptScheduler&, std::uint64_t& sequence);
@@ -964,6 +974,11 @@ public:
     [[nodiscard]] core::Result<void> after_service(authoritative::ServiceReport& report);
 
     // ---- Reads for the bindings (const; no engine step runs during the script service) ----
+    // #1702: the Script_* evaluator modules of the mounted corpus; null until attached.
+    void attach_script_evaluators(std::shared_ptr<tactical_ai_detail::ScriptEvaluators> evaluators) noexcept {
+        script_evaluators_ = std::move(evaluators);
+    }
+    [[nodiscard]] tactical_ai_detail::ScriptEvaluators* script_evaluators() const noexcept { return script_evaluators_.get(); }
     [[nodiscard]] std::optional<Real> evaluate(std::string_view equation, tactical::PlayerId player,
         const Target* target) const;
     // FT-05/06: selected manager owns object liveness and positions.
@@ -1038,6 +1053,19 @@ public:
     static void observe_effects(EffectObserver) noexcept;
     // The wallet change of turns that have not committed yet (raw fixed units); stacked onto Host::credits.
     [[nodiscard]] std::int64_t uncommitted_credits(tactical::PlayerId) const noexcept;
+
+    void memory_inventory(diagnostics::GcMemory& m) const {
+        m.row("gc.ai.engine", players_, plans_, records_, costs_, targets_, threats_, producers_, native_configuration_, native_record_rows_);
+        for (const auto& p : players_) {
+            const auto prefix = "gc.ai.player" + std::to_string(p.player);
+            m.row(prefix + ".goals", p.proposed, p.active, p.targets, p.functions);
+            m.row(prefix + ".execution", p.running, p.taskforces, p.blocks, p.plan_of_instance, p.positioning, p.tasks,
+                p.reserved, p.assigned, p.reserved_pool, p.reserved_pool_tokens, p.reserved_credits);
+            m.row(prefix + ".learning", p.activations, p.goal_outcomes, p.plan_outcomes, p.plan_success,
+                p.goal_success, p.unit_survival, p.target_goal_success, p.target_plan_success);
+        }
+        if (scripts_) m.rows["lua.ai_vm_lower_bound"] += scripts_->diagnostic_lua_bytes();
+    }
 
 private:
     friend struct EngineContractAccess;
@@ -1276,6 +1304,7 @@ private:
     mutable std::array<std::uint64_t, 3> galactic_build_cache_key_{};
     mutable tactical::PlayerId galactic_build_cache_reader_{};
     std::shared_ptr<Host> host_;
+    std::shared_ptr<tactical_ai_detail::ScriptEvaluators> script_evaluators_;
     mutable bool producers_prepared_{};
     mutable std::map<std::pair<tactical::PlayerId, tactical::TypeId>, std::vector<sim::EntityId>> producers_;
     mutable ProducerWork producer_work_{};
@@ -1409,7 +1438,9 @@ private:
 // IgnoreTarget, MagicPlan, AllowFreeStoreUnits, AllowEngagedUnits, PerFailureContrastAdjust,
 // MinContrastScale, MaxContrastScale and RequiredCategories, in that order. `notes` collects
 // what the host leaves out.
+// `drop_unresolved_rows`: a roster row whose names all resolve to no type is removed at parse time, as the debug build does
+// (RGC-62); the tactical host loads only part of the type set, so it keeps such rows.
 [[nodiscard]] core::Result<PlanDef> build_plan(const Host& host, std::string name, std::string module,
-    const authoritative::ValueList& globals, std::vector<std::string>& notes);
+    const authoritative::ValueList& globals, std::vector<std::string>& notes, bool drop_unresolved_rows = false);
 
 } // namespace eawr::script::foc::ai

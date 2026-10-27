@@ -104,6 +104,30 @@ void test_destroyed_bay() {
 
 void test_validation() {
     expect(static_cast<bool>(tactical::validate_squadron_table(motion().squadrons)), "the synthetic table is valid");
+    for (const std::size_t count : {65U, 186U, 257U}) {
+        auto large = motion().squadrons;
+        large.squadrons[0].members.assign(count, craft_type);
+        large.squadrons[0].offsets.assign(count, at(0, 0));
+        expect(static_cast<bool>(tactical::validate_squadron_table(large)),
+            "FL-02: authored rosters above 64 are admitted");
+    }
+    {
+        auto large = motion().squadrons;
+        auto& profile = large.spawners.front();
+        profile.entries.assign(65, {squadron_a, 0, 0});
+        profile.entries.back().starting = 1;
+        profile.bays.assign(256, profile.bays.front());
+        expect(static_cast<bool>(tactical::validate_squadron_table(large)),
+            "FL-02: more than 64 spawn entries and 255 bays are admitted");
+        std::vector<bool> intact(256, false);
+        intact.back() = true;
+        auto state = tactical::initial_spawner(seed, 1, 1);
+        const auto decision = tactical::service_spawner(profile, state, seed, state.next_service_frame, 1, intact);
+        expect(decision && decision->entry == 64 && decision->bay == 255,
+            "FL-02: the last large-list entry and bay actually launch");
+        expect(tactical::free_garrison_bay(profile, seed, 1, 1, intact) == 255U,
+            "FL-02: free garrisons use bays beyond the old bound too");
+    }
     auto unordered = motion().squadrons;
     std::swap(unordered.squadrons[0], unordered.squadrons[1]);
     expect(!tactical::validate_squadron_table(unordered), "squadron types must strictly increase");
@@ -526,6 +550,43 @@ void test_installed_attack_segment() {
 
 // FL-06 facing: a launch along (1, 0, -1) yaws 0, pitches 45 (nose down) at full speed.
 void test_launch_state() {
+    // FM-27: direct ships use the bay's planar heading, including authored vertical vectors.
+    // The full-zero bay vector still takes the existing forward-vector fallback.
+    for (const std::int64_t vertical : {-1, 0, 1}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = seed;
+            setup.players = players();
+            setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+            auto table = motion();
+            auto& hangar = table.squadrons.spawners.front();
+            hangar.entries = {{frigate_type, 1, 0, true}};
+            hangar.bays.front().spawn_vector = at(0, 0, vertical);
+            auto made = tactical::TacticalSession::create(setup, sensors(), durability(), table);
+            expect(static_cast<bool>(made), "FM-27: vertical/zero direct-ship bay fixture creates");
+            if (!made) return;
+            auto session = std::move(made).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            bool launched = false;
+            for (int tick = 0; tick < 40 && !launched; ++tick) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "FM-27: vertical/zero bay launches without a heading failure");
+                if (!step) return;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& ship : session.units()) {
+                    if (ship.type_id != frigate_type) continue;
+                    launched = true;
+                    const auto yaw = tactical::yaw_degrees(ship.rotation);
+                    expect(yaw && yaw.value() == Fixed{}, "FM-27: vertical/zero direct-ship bay uses zero yaw");
+                }
+            }
+            expect(launched, "FM-27: direct ship actually launches within its first service");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FM-27: vertical/zero bay launch agrees on 1/2/4/8 workers");
+        }
+    }
     const auto state = tactical::launch_state(at(1, 0, -1), units(5));
     expect(static_cast<bool>(state), "launch facing builds");
     if (!state) return;
@@ -828,6 +889,128 @@ void test_launch_idle() {
 
 // C-06: launch, attack, losses and a replacement hash the same with 1, 2, 4 and 8 workers.
 void test_worker_equality() {
+    // Large garrisons still use the ordinary partitioned flight phases and ordered births.
+    for (const std::size_t count : {65U, 186U}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup large_setup;
+            large_setup.seed = seed;
+            large_setup.players = players();
+            large_setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+            auto table = motion();
+            auto alternate = table.squadrons.craft.front();
+            alternate.type_id = craft_type + 1;
+            alternate.max_speed = units(4);
+            table.squadrons.craft.push_back(alternate);
+            auto& profile = table.squadrons.squadrons.front();
+            profile.max_squad_size = 200;
+            profile.members.assign(count, craft_type);
+            for (std::size_t index = 1; index < count; index += 2) profile.members[index] = alternate.type_id;
+            profile.offsets.assign(count, at(0, 0));
+            table.squadrons.spawners.front().entries = {{squadron_a, 1, 0}};
+            auto health = durability();
+            auto alternate_health = health.profiles[1];
+            alternate_health.type_id = alternate.type_id;
+            health.profiles.insert(health.profiles.begin() + 2, alternate_health);
+            auto created = tactical::TacticalSession::create(large_setup, {}, health, table);
+            expect(static_cast<bool>(created), "FL-02: a large garrison session creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (int tick = 0; tick < 40; ++tick) {
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "FL-02: large-garrison flight advances");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+            }
+            const auto groups = world.squadrons();
+            expect(groups.size() == 1 && groups.front().members.size() == count,
+                "FL-02: every authored member launches in one garrison");
+            if (groups.size() == 1) {
+                for (std::size_t index = 0; index < groups.front().members.size(); ++index)
+                    expect(groups.front().members[index] == index + 2,
+                        "FL-02: launch preserves stable member order above 64");
+            }
+            expect(hashes.size() == 40, "FL-02: large garrison completes all flight ticks");
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FL-02: large garrisons agree on 1/2/4/8 workers");
+        }
+    }
+    // FL-06/PG-08: N-1, N, N+1 and an uneven tail; mixed craft keep input order.
+    for (const std::size_t count : {2U, 3U, 4U, 8U}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto table = motion();
+            auto alternate = table.squadrons.craft.front();
+            alternate.type_id = craft_type + 1;
+            table.squadrons.craft.push_back(alternate);
+            auto& profile = table.squadrons.squadrons.front();
+            profile.max_squad_size = 3;
+            profile.members.assign(count, craft_type);
+            for (std::size_t i = 1; i < count; i += 2) profile.members[i] = alternate.type_id;
+            profile.offsets.assign(count, {});
+            table.squadrons.spawners.front().entries = {{squadron_a, 1, 1}};
+            table.squadrons.spawners.front().mobile = true;
+            auto health = durability();
+            auto alternate_health = health.profiles[1];
+            alternate_health.type_id = alternate.type_id;
+            health.profiles.insert(health.profiles.begin() + 2, alternate_health);
+            tactical::TacticalSetup setup;
+            setup.seed = seed; setup.players = players();
+            setup.units = {unit(1, carrier_type, empire, at(0, 0))};
+            auto created = tactical::TacticalSession::create(setup, {}, health, table);
+            expect(static_cast<bool>(created), "FL-06: split-team session builds");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (int tick = 0; tick < 40; ++tick) {
+                if (workers != 1) world.scramble_storage_for_testing();
+                const auto stepped = world.step(executor);
+                expect(static_cast<bool>(stepped), "FL-06: split teams advance");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+            }
+            const std::vector<tactical::Squadron> groups(world.squadrons().begin(), world.squadrons().end());
+            expect(groups.size() == (count + 2) / 3, "FL-06: chunk count includes uneven tail");
+            for (std::size_t i = 0; i < groups.size(); ++i) {
+                expect(groups[i].container == count + 2 + i, "FL-06: all craft IDs precede ordered team IDs");
+                expect(groups[i].members.size() == std::min<std::size_t>(3, count - i * 3), "FL-06: chunk has bounded size");
+                for (std::size_t j = 0; j < groups[i].members.size(); ++j)
+                    expect(groups[i].members[j] == 2 + i * 3 + j, "FL-06: mixed authored member order survives grouping");
+                const auto mind = world.squadron_state(groups[i].container);
+                expect(mind && mind->spawner == (i == 0 ? 1U : 0U), "FL-06: only first team notifies its bay");
+                expect(mind && mind->garrison_unit == (i == 0), "FL-06: only returned first team is marked as a garrison");
+                expect(mind && (i == 0 ? mind->mode == tactical::SquadronMode::escort
+                    : mind->mode == tactical::SquadronMode::idle), "FL-07: only first team receives the bay escort");
+            }
+            // Depleting a tail does not release the first team's launch slot.
+            if (groups.size() > 1) {
+                expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 1}, groups.back().members,
+                    tactical::DamagePayload{units(1000)}})), "FL-06: tail depletion submits");
+                for (int tick = 0; tick < 200; ++tick) {
+                    const auto stepped = world.step(executor);
+                    expect(static_cast<bool>(stepped), "FL-06: depleted teams advance");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                }
+                expect(world.squadrons().size() == groups.size() - 1, "FL-06: a lost tail is not replenished");
+                expect(static_cast<bool>(world.submit({{world.completed_tick(), empire, 2}, groups.front().members,
+                    tactical::DamagePayload{units(1000)}})), "FL-06: first-team depletion submits");
+                for (int tick = 0; tick < 200; ++tick) {
+                    const auto stepped = world.step(executor);
+                    expect(static_cast<bool>(stepped), "FL-06: replacement teams advance");
+                    if (!stepped) break;
+                    hashes.push_back(stepped.value().state_sha256);
+                }
+                expect(world.squadrons().size() == 2 * groups.size() - 2, "FL-06: losing first team releases exactly one whole roster");
+            }
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FL-06: split births, depletion and replacement agree on 1/2/4/8 workers");
+        }
+    }
     tactical::TacticalSetup setup;
     setup.seed = seed;
     setup.players = players();

@@ -185,6 +185,9 @@ void fiscal_and_templates() {
     const auto before = l;
     l = must(f::windfall(l, n(20)));
     expect(l.categories.at(2).cash == n(160) && l.categories.at(2).available_cash == before.categories.at(2).available_cash, "WGA-85 windfall changes only totals");
+    const auto drained = must(f::windfall(l, n(-200)));
+    expect(drained.categories.at(2).cash == n(-40) && drained.categories.at(1).cash == n(0),
+        "RGC-203 negative windfall lowers category totals with no sign test and no floor");
     l = must(f::flush_category(l, 2));
     expect(l.categories.at(2).available_cash == n(0) && l.categories.at(2).cash == n(160), "WGA-24 flush is no cash grant");
     expect(must(f::fiscal(l, n(999), n(999), n(0))) == l, "WGA-13 nonpositive cycle ignored");

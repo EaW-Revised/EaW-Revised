@@ -61,7 +61,7 @@ struct Fixture {
         add(9, "Carrier", "TRANSPORT"); add(10, "Company", "DUMMY_GROUND_COMPANY");
         add(11, "Squadron", "DUMMY_SPACE_FIGHTER_SQUADRON");
         add(12, "GroundStructure", "DUMMY_GROUND_STRUCTURE"); add(13, "Starbase", "DUMMY_STAR_BASE");
-        add(14, "SpaceStructure", "DUMMY_SPACE_STRUCTURE"); add(15, "GroundBase", "DUMMY_GROUND_BASE");
+        add(14, "SpaceStructure", "DUMMY_ORBITAL_STRUCTURE"); add(15, "GroundBase", "DUMMY_GROUND_BASE");
         add(16, "GalacticFleet", "FLEET"); add(17, "GalacticSquadron", "SQUADRON");
         source(10).company_transport = "Carrier"; source(10).company_units = {"Troop", "Troop"};
         source(11).squadron_units = {"Ship", "Ship"}; source(12).political_control = f(2);
@@ -109,13 +109,14 @@ void reconciled_placement_contracts() {
         && accepted.value()->structures == old.value().structures && accepted.value()->originals == old.value().originals,
         "typed reconciliation placement preserves successful constructor output");
     fixture.context.production.planets[0].ground_slots = 0;
-    const auto refused_before = legacy(view(), 100);
+    const auto excess_before = legacy(view(), 100);
     const auto ordinary = reconcile(view(), 100);
-    const auto refused_after = legacy(view(), 100);
-    expect(!refused_before && !refused_after && ordinary && !ordinary.value()
-        && refused_before.error().code == std::string(gc::diagnostic_codes::invalid_setup)
-        && refused_after.error().code == refused_before.error().code && refused_after.error().message == refused_before.error().message,
-        "ordinary slot refusal is typed only in reconciliation and leaves public error bytes unchanged");
+    const auto excess_after = legacy(view(), 100);
+    expect(excess_before && excess_after && ordinary && ordinary.value()
+        && ordinary.value()->next_id == 101
+        && ordinary.value()->structures == excess_before.value().structures
+        && excess_after.value().structures == excess_before.value().structures,
+        "CGS-20: direct and reconciled creation retain the same excess structure without mutating inputs");
     const auto missing = cp::stock_native_force_reconciliation_builder(inputs, {1, 1, 99999, {}})(view(), 100);
     expect(!missing && missing.error().code == std::string(gc::diagnostic_codes::invalid_setup),
         "unbound constructor content remains an error rather than an ordinary refusal");
@@ -212,6 +213,51 @@ void duplicate_authored_starbases() {
     invalid.source(13).base_level = 0; expect(!invalid.place(13), "zero station level refuses");
     invalid.source(13).base_level = 6; expect(!invalid.place(13), "out-of-range station level refuses");
 }
+void level_one_starbase_clears_space_structures() {
+    // CGS-10: a base below level two clears the planet's space special structures; ground structures stay.
+    Fixture fixture;
+    fixture.source(13).base_level = 1;
+    const auto commit = [&](const gc::TypeId type, const eawr::sim::EntityId next) {
+        auto placed = fixture.place(type, next);
+        expect(bool(placed), "authored structure or base places");
+        if (!placed) return placed;
+        expect(bool(cp::apply_starting_force_placement(fixture.inputs, fixture.request(type), placed.value(), fixture.galaxy,
+            fixture.context)), "authored structure or base commits");
+        return placed;
+    };
+    commit(12, 100);
+    const auto space = commit(14, 101);
+    auto& production = fixture.context.production.planets.front();
+    expect(production.objects.size() == 2, "a ground and a space structure are installed before the base");
+    const auto base = commit(13, 102);
+    expect(base && base.value().clear_space_structures && base.value().special_control == std::vector<Fixed>{f(2)},
+        "a level-one base clears space structures and keeps the ground structure's control");
+    expect(production.objects.size() == 1 && production.objects.front().domain == gc::ProductionDomain::ground,
+        "only the ground structure remains in production");
+    expect(std::none_of(fixture.context.census.objects.begin(), fixture.context.census.objects.end(),
+        [&](const auto& object) { return space && object.id == space.value().primary; }), "the cleared structure leaves the census");
+    expect(fixture.context.control.planets.front().special_control == std::vector<Fixed>{f(2)},
+        "planet special control is recomputed from the remaining structures");
+    // A chain whose space structure is followed by a level-one base clears the structure it placed itself: the combined
+    // result is applied once, so the placement must not carry the cleared structure.
+    Fixture chained;
+    chained.source(13).base_level = 1; chained.source(14).additional_creation_type = "Starbase";
+    auto together = chained.place(14);
+    expect(together && together.value().clear_space_structures && together.value().structures.empty()
+        && together.value().starbase == gc::ControlBase{1, 1}, "a chained level-one base clears the space structure placed before it");
+    if (together) {
+        expect(together.value().cleared_structures == std::vector<eawr::sim::EntityId>{100}
+            && together.value().originals.size() == 1, "the cleared chain structure keeps its allocation row but is listed as cleared");
+        expect(bool(cp::apply_starting_force_placement(chained.inputs, chained.request(14), together.value(), chained.galaxy,
+            chained.context)), "the chained placement commits");
+        expect(chained.context.production.planets.front().objects.empty() && chained.context.census.objects.empty(),
+            "the real planet keeps no cleared structure and no census row for it");
+    }
+    Fixture raised;
+    raised.source(13).base_level = 2;
+    const auto kept = raised.place(13);
+    expect(kept && !kept.value().clear_space_structures, "a level-two base clears nothing");
+}
 void bases_structures_and_chains() {
     Fixture fixture;
     auto base = fixture.place(13);
@@ -227,7 +273,7 @@ void bases_structures_and_chains() {
     expect(space && space.value().special_control == std::vector<Fixed>{f(2), f(1)},
         "special control retains ground then space category order");
     fixture.context.production.planets[0].ground_slots = 1;
-    expect(!fixture.place(12, 101), "exhausted special slots refuse debug overflow");
+    expect(bool(fixture.place(12, 102)), "CGS-20: exhausted special slots retain direct creation");
     fixture.context.control.planets[0].surface_accessible = false;
     auto skipped = fixture.place(12, 101);
     expect(skipped && !skipped.value().created && skipped.value().next_id == 101, "inaccessible ground structure creates nothing");
@@ -246,6 +292,67 @@ void bases_structures_and_chains() {
     expect(!unknown.place(10), "missing nested runtime predicate refuses");
     unknown.source(10).company_transport = "Absent";
     expect(!unknown.place(10), "unbound company carrier refuses");
+}
+void excess_special_structures() {
+    // CGS-20: use renamed types, repeated records, both domains and supplied
+    // owners unrelated to the existing controller. Capacity is not placement admission.
+    for (const bool ground : {false, true}) for (const std::int64_t slots : {0, 1}) {
+        Fixture fixture;
+        const gc::TypeId type = ground ? 12U : 14U;
+        fixture.source(type).name = "AuthoredFacility";
+        fixture.source(type).political_control = Fixed{};
+        fixture.inputs.bindings[type - 7].original_type = "AuthoredFacility";
+        auto& production = fixture.context.production.planets.front();
+        production.ground_slots = slots; production.space_slots = slots;
+        fixture.context.control.planets.front().ground_base = gc::ControlBase{3, 0};
+        fixture.galaxy.control = fixture.context.control;
+        for (eawr::sim::EntityId i = 0; i < 7; ++i) {
+            auto request = fixture.request(type); request.owner = static_cast<gc::PlayerId>(i % 3 + 1);
+            request.human = i % 2 == 0;
+            const auto placed = cp::place_starting_force(fixture.inputs, request, 100 + i, fixture.galaxy, fixture.context);
+            expect(placed && placed.value().created && placed.value().next_id == 101 + i
+                && placed.value().primary == 100 + i && placed.value().structures.size() == 1,
+                "CGS-20: every excess authored record allocates exactly one retained structure");
+            if (!placed) break;
+            expect(bool(cp::apply_starting_force_placement(fixture.inputs, request, placed.value(), fixture.galaxy,
+                fixture.context)), "CGS-20: excess structure commits to the ordered planet list");
+            expect(production.objects.size() == i + 1 && fixture.context.census.objects.size() == i + 1,
+                "CGS-20: no earlier structure is displaced or skipped");
+            if (production.objects.size() != i + 1 || fixture.context.census.objects.size() != i + 1) break;
+            const auto& object = production.objects.back();
+            const auto& actor = fixture.context.census.objects.back();
+            expect(object.id == 100 + i && object.owner == request.owner && object.type == type
+                && object.domain == (ground ? gc::ProductionDomain::ground : gc::ProductionDomain::space)
+                && actor.id == object.id && actor.owner == request.owner && actor.original_type == type && actor.container == 1,
+                "CGS-20: ordered duplicates retain supplied faction and literal census identity");
+        }
+        expect(production.ground_slots == slots && production.space_slots == slots,
+            "CGS-20: retaining excess structures never inflates the authored purchase capacities");
+        expect(!ground || fixture.context.control.planets.front().ground_base == gc::ControlBase{1, 5},
+            "CGS-20: ground base level remains bounded while all seven structures remain present");
+        const auto inputs = std::make_shared<const cp::StartingForceInputs>(fixture.inputs);
+        const auto creation = cp::prepare_nested_creation(*inputs);
+        expect(bool(creation), "excess native constructor inputs prepare");
+        if (!creation) continue;
+        const gc::Planet planet{1, {}, 3};
+        const gc::GalacticSession::NativeForceView view{planet, fixture.context.control.planets.front(), production,
+            creation.value(), fixture.context.control.max_ground_forces, fixture.galaxy.fleets, fixture.context.movement.contents, {}};
+        const gc::GalacticSession::NativeProductionRequest request{2, 1, type, {}};
+        const auto legacy = cp::stock_native_force_shadow_builder(inputs, request)(view, 107);
+        const auto reconciled = cp::stock_native_force_reconciliation_builder(inputs, request)(view, 107);
+        expect(legacy && reconciled && reconciled.value() && legacy.value().next_id == 108
+            && reconciled.value()->structures == legacy.value().structures && legacy.value().structures.front().owner == 2,
+            "CGS-20: both native direct-creation adapters retain over-capacity objects too");
+    }
+    Fixture chain;
+    chain.context.production.planets.front().ground_slots = 0;
+    chain.context.production.planets.front().space_slots = 0;
+    chain.source(12).additional_creation_type = "SpaceStructure";
+    const auto placed = chain.place(12);
+    expect(placed && placed.value().primary == 100 && placed.value().next_id == 102
+        && placed.value().structures.size() == 2 && placed.value().structures[0].domain == gc::ProductionDomain::ground
+        && placed.value().structures[1].domain == gc::ProductionDomain::space,
+        "CGS-20: additional creation continues across both full domains and retains the primary identity");
 }
 std::vector<std::uint8_t> census_section(const gc::GalacticSession& world) {
     const auto bytes = world.canonical_state_bytes();
@@ -1018,6 +1125,8 @@ int case_galactic_starting_forces_tests() {
     native_actor_change_rollback();
     reconciled_placement_contracts();
     duplicate_authored_starbases();
+    level_one_starbase_clears_space_structures();
+    excess_special_structures();
     allocation_and_identity(); nested_live_stealth(); guards_and_hostility(); bases_structures_and_chains(); root_checkpoint_and_parity(); root_checkpoint_and_parity(true); root_checkpoint_and_parity(false, true); initial_ability_predicates(); initial_relations(); initial_geometry(); initial_movement_roles();
     return galactic_test::failures ? 1 : 0;
 }

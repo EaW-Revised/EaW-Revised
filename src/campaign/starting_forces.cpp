@@ -9,7 +9,6 @@
 namespace eawr::campaign {
 namespace {
 namespace gc = sim::galactic;
-enum class PlacementRefusal { none, structure_slots };
 template<class T> core::Result<T> refuse(const std::string& message) {
     core::Diagnostic error; error.code = std::string(gc::diagnostic_codes::invalid_setup);
     error.message = "WGS-80 starting placement: " + message;
@@ -148,8 +147,7 @@ core::Result<MovementInputs> prepare_initial_movement_inputs(const StartingForce
 
 static core::Result<StartingForcePlacement> place_starting_force_once(const StartingForceInputs& inputs,
     const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
-    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip,
-    PlacementRefusal* refusal) {
+    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
     const auto* type = original(inputs, request.type);
     const auto planet = std::find_if(context.control.planets.begin(), context.control.planets.end(),
         [&](const auto& row) { return row.planet == request.planet; });
@@ -175,9 +173,18 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
     if (behaves(*type, "DUMMY_STAR_BASE")) {
         if (!type->base_level || *type->base_level < 1 || *type->base_level > 5)
             return refuse<StartingForcePlacement>("missing or invalid authored starbase level");
-        if (*type->base_level < 2 && std::any_of(production->objects.begin(), production->objects.end(),
-            [](const auto& object) { return object.domain == gc::ProductionDomain::space; }))
-            return refuse<StartingForcePlacement>("space-structure removal needs its owning lifecycle service");
+        if (*type->base_level < 2) {
+            // CGS-10: Init of a base below level two clears the planet's space special structures.
+            out.clear_space_structures = true;
+            for (const auto& object : production->objects) if (object.domain == gc::ProductionDomain::ground && object.kind == gc::ProductionKind::structure) {
+                const auto* source = original(inputs, object.type);
+                if (!source) return refuse<StartingForcePlacement>("missing special-structure Political_Control");
+                auto resolved = units::resolve_initial_galactic_type(inputs.types, source->name);
+                if (!resolved) return core::Result<StartingForcePlacement>::failure(resolved.error());
+                if (resolved.value().political_control->raw() != 0) out.special_control.push_back(*resolved.value().political_control);
+            }
+            if (out.special_control.size() > 3) return refuse<StartingForcePlacement>("special-control category overflow");
+        }
         // WGS-180: every admitted record overwrites the base, including equal or
         // lower levels and a different supplied owner. Authored order wins.
         out.starbase = gc::ControlBase{request.owner, static_cast<std::uint32_t>(*type->base_level)};
@@ -185,17 +192,15 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
         return core::Result<StartingForcePlacement>::success(std::move(out));
     }
     const bool ground_structure = behaves(*type, "DUMMY_GROUND_STRUCTURE");
-    const bool space_structure = behaves(*type, "DUMMY_SPACE_STRUCTURE");
+    const bool space_structure = behaves(*type, "DUMMY_ORBITAL_STRUCTURE"); // the debug build's token for an orbital special structure
     if (ground_structure || space_structure) {
         if (ground_structure && !planet->surface_accessible)
             return core::Result<StartingForcePlacement>::success(std::move(out));
         const auto domain = ground_structure ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
         const auto count = std::count_if(production->objects.begin(), production->objects.end(),
             [&](const auto& object) { return object.domain == domain && object.kind == gc::ProductionKind::structure; });
-        if (count >= (ground_structure ? production->ground_slots : production->space_slots)) {
-            if (refusal) *refusal = PlacementRefusal::structure_slots;
-            return refuse<StartingForcePlacement>("authored special-structure capacity exceeded");
-        }
+        // CGS-20: direct creation retains excess structures. The debug build's
+        // capacity diagnostic follows insertion and does not undo it.
         const auto id = allocate();
         if (!id) return refuse<StartingForcePlacement>("allocation frontier exhausted");
         out.structures.push_back({id, request.type, request.owner, {}, domain, gc::ProductionKind::structure});
@@ -255,7 +260,7 @@ static core::Result<StartingForcePlacement> place_starting_force_once(const Star
 
 static core::Result<StartingForcePlacement> place_starting_force_checked(const StartingForceInputs&,
     const StartingForceRequest&, sim::EntityId, const gc::GalacticSetup&, const CampaignPlacementContext&,
-    const std::function<core::Result<bool>(const gc::Fleet&)>&, PlacementRefusal*);
+    const std::function<core::Result<bool>(const gc::Fleet&)>&);
 
 sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(
     std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
@@ -284,7 +289,7 @@ sim::galactic::GalacticSession::NativeForceBuilder stock_native_force_builder(
 
 static core::Result<gc::GalacticSession::NativeForcePlacement> stock_native_shadow_placement(
     const std::shared_ptr<const StartingForceInputs>& inputs, const gc::GalacticSession::NativeProductionRequest& request,
-    const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier, PlacementRefusal* refusal) {
+    const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier) {
     using Result = core::Result<gc::GalacticSession::NativeForcePlacement>;
     if (!inputs || view.planet.id != request.planet)
         return refuse<gc::GalacticSession::NativeForcePlacement>("native shadow placement requires its original inputs and staging planet");
@@ -302,7 +307,7 @@ static core::Result<gc::GalacticSession::NativeForcePlacement> stock_native_shad
     context.production.nested_creation = view.creation;
     setup.control = context.control; setup.movement = context.movement;
     auto placed = place_starting_force_checked(*inputs, {request.planet, request.player, request.type, binding->original_type, false, {}},
-        frontier, setup, context, view.combat_skip, refusal);
+        frontier, setup, context, view.combat_skip);
     if (!placed) return Result::failure(placed.error());
     const auto& row = placed.value();
     if (!row.detached_units.empty()) return refuse<gc::GalacticSession::NativeForcePlacement>("native detached placement requires its owning service");
@@ -312,27 +317,21 @@ static core::Result<gc::GalacticSession::NativeForcePlacement> stock_native_shad
 gc::GalacticSession::NativeShadowForceBuilder stock_native_force_shadow_builder(
     std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
     return [inputs = std::move(inputs), request](const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier) {
-        return stock_native_shadow_placement(inputs, request, view, frontier, nullptr);
+        return stock_native_shadow_placement(inputs, request, view, frontier);
     };
 }
 gc::GalacticSession::NativeReconciledForceBuilder stock_native_force_reconciliation_builder(
     std::shared_ptr<const StartingForceInputs> inputs, gc::GalacticSession::NativeProductionRequest request) {
     return [inputs = std::move(inputs), request](const gc::GalacticSession::NativeForceView& view, sim::EntityId frontier) {
         using Result = core::Result<std::optional<gc::GalacticSession::NativeForcePlacement>>;
-        PlacementRefusal refusal{};
-        auto placed = stock_native_shadow_placement(inputs, request, view, frontier, &refusal);
-        if (!placed) {
-            if (refusal == PlacementRefusal::structure_slots) return Result::success({});
-            return Result::failure(placed.error());
-        }
+        auto placed = stock_native_shadow_placement(inputs, request, view, frontier);
+        if (!placed) return Result::failure(placed.error());
         return Result::success(std::move(placed).value());
     };
 }
 static core::Result<StartingForcePlacement> place_starting_force_checked(const StartingForceInputs& inputs,
     const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
-    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip,
-    PlacementRefusal* refusal) {
-    if (refusal) *refusal = PlacementRefusal::none;
+    const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
     auto staged = setup; auto presence = context;
     staged.control = presence.control; staged.movement = presence.movement;
     StartingForcePlacement result; result.next_id = first_free;
@@ -350,7 +349,7 @@ static core::Result<StartingForcePlacement> place_starting_force_checked(const S
             return combat_skip(fleet);
         };
         auto placed = place_starting_force_once(inputs, current, result.next_id, staged, presence,
-            combat_skip ? std::function<core::Result<bool>(const gc::Fleet&)>(reader) : std::function<core::Result<bool>(const gc::Fleet&)>{}, refusal);
+            combat_skip ? std::function<core::Result<bool>(const gc::Fleet&)>(reader) : std::function<core::Result<bool>(const gc::Fleet&)>{});
         if (!placed) return placed;
         const auto& part = placed.value();
         staged.fleets.insert(staged.fleets.end(), part.fleets.begin(), part.fleets.end());
@@ -361,11 +360,21 @@ static core::Result<StartingForcePlacement> place_starting_force_checked(const S
         result.fleets.insert(result.fleets.end(), part.fleets.begin(), part.fleets.end());
         result.contents.insert(result.contents.end(), part.contents.begin(), part.contents.end());
         result.landed.insert(result.landed.end(), part.landed.begin(), part.landed.end());
+        if (part.clear_space_structures) {
+            // CGS-10: the per-part apply above cleared them from the staged copy; the combined result is applied once, so
+            // drop the ones an earlier chain part placed here too.
+            const auto is_space = [](const auto& object) {
+                return object.domain == gc::ProductionDomain::space && object.kind == gc::ProductionKind::structure;
+            };
+            for (const auto& object : result.structures) if (is_space(object)) result.cleared_structures.push_back(object.id);
+            result.structures.erase(std::remove_if(result.structures.begin(), result.structures.end(), is_space), result.structures.end());
+        }
         result.structures.insert(result.structures.end(), part.structures.begin(), part.structures.end());
         result.originals.insert(result.originals.end(), part.originals.begin(), part.originals.end());
         if (part.starbase) { result.starbase = part.starbase; result.starbase_type = part.starbase_type; }
         if (part.ground_base) result.ground_base = part.ground_base;
-        if (!part.structures.empty()) result.special_control = part.special_control;
+        if (!part.structures.empty() || part.clear_space_structures) result.special_control = part.special_control;
+        result.clear_space_structures |= part.clear_space_structures;
         const auto* source = original(inputs, current.type);
         // WGEP-84 / ET-T053: Create_Additional_Object is an engine tag with
         // no stock XML use; direct creation retains the supplied owner.
@@ -379,7 +388,7 @@ static core::Result<StartingForcePlacement> place_starting_force_checked(const S
 core::Result<StartingForcePlacement> place_starting_force(const StartingForceInputs& inputs,
     const StartingForceRequest& request, sim::EntityId first_free, const gc::GalacticSetup& setup,
     const CampaignPlacementContext& context, const std::function<core::Result<bool>(const gc::Fleet&)>& combat_skip) {
-    return place_starting_force_checked(inputs, request, first_free, setup, context, combat_skip, nullptr);
+    return place_starting_force_checked(inputs, request, first_free, setup, context, combat_skip);
 }
 
 core::Result<void> apply_starting_force_placement(const StartingForceInputs&,
@@ -397,10 +406,23 @@ core::Result<void> apply_starting_force_placement(const StartingForceInputs&,
         production->space_level = placed.starbase->level; production->starbase_owner = placed.starbase->owner;
     }
     if (placed.ground_base) { planet->ground_base = *placed.ground_base; production->ground_level = placed.ground_base->level; }
-    if (!placed.structures.empty()) planet->special_control = placed.special_control;
+    if (placed.clear_space_structures) {
+        // CGS-10: the cleared objects leave the production list and the census.
+        std::set<sim::EntityId> cleared;
+        for (const auto& object : production->objects)
+            if (object.domain == gc::ProductionDomain::space && object.kind == gc::ProductionKind::structure) cleared.insert(object.id);
+        production->objects.erase(std::remove_if(production->objects.begin(), production->objects.end(),
+            [&](const auto& object) { return cleared.contains(object.id); }), production->objects.end());
+        context.census.objects.erase(std::remove_if(context.census.objects.begin(), context.census.objects.end(),
+            [&](const auto& object) { return cleared.contains(object.id); }), context.census.objects.end());
+    }
+    if (!placed.structures.empty() || placed.clear_space_structures) planet->special_control = placed.special_control;
     planet->landed.insert(planet->landed.end(), placed.landed.begin(), placed.landed.end());
     production->objects.insert(production->objects.end(), placed.structures.begin(), placed.structures.end());
     context.census.objects.insert(context.census.objects.end(), placed.originals.begin(), placed.originals.end());
+    context.census.objects.erase(std::remove_if(context.census.objects.begin(), context.census.objects.end(),
+        [&](const auto& object) { return std::find(placed.cleared_structures.begin(), placed.cleared_structures.end(), object.id)
+            != placed.cleared_structures.end(); }), context.census.objects.end());
     setup.movement->contents.insert(setup.movement->contents.end(), placed.contents.begin(), placed.contents.end());
     std::sort(setup.movement->contents.begin(), setup.movement->contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
     std::sort(context.census.objects.begin(), context.census.objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });

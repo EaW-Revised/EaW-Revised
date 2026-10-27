@@ -50,7 +50,7 @@ struct GalacticLanView {
 }
 
 struct GalacticLanOptions {
-    net::GalacticClockPolicy clock_policy{net::GalacticClockPolicy::two_per_45_seconds};
+    net::GalacticClockPolicy clock_policy{net::GalacticClockPolicy::limited};
     // One entry per transport peer, in peer-index order; may_submit false makes a peer an observer.
     std::vector<net::PeerSeat> seats;
     std::uint64_t input_delay{3};

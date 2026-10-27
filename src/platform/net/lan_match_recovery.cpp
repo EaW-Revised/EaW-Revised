@@ -95,7 +95,9 @@ tactical::PlayerId TcpLanMatch::local_player_unlocked() const { return view_.pla
 std::optional<std::uint64_t> TcpLanMatch::pending_input_epoch() {
         std::function<std::optional<std::uint64_t>()> provider;
         { const std::lock_guard lock(input_epoch_mutex_); provider = input_epoch_provider_; }
-        return provider ? provider() : std::nullopt;
+        auto epoch = provider ? provider() : std::nullopt;
+        if (epoch && adapter_ && adapter_->context) epoch = adapter_->session_epoch(*epoch);
+        return epoch;
     }
 
 } // namespace eawr::presentation::godot_backend::lan_detail

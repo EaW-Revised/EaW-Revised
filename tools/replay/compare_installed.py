@@ -100,17 +100,28 @@ def carries_identity(data):
     if len(data) < 12 or data[:8] != b'EAWRPLY\0':
         raise ValueError('invalid replay header')
     version, size = struct.unpack_from('<HH', data, 8)
-    if version not in (4, 5):
+    if version not in (4, 5, 6, 7):
         return False
-    if not 108 <= size <= len(data):
+    wide = version in (6, 7)
+    shift = 2 if wide else 0
+    if wide:
+        if len(data) < 14:
+            raise ValueError('invalid replay header')
+        size = struct.unpack_from('<I', data, 10)[0]
+    if not 108 + shift <= size <= len(data):
         raise ValueError('invalid replay extension header')
-    count = struct.unpack_from('<I', data, 104)[0]
-    offset, found = 108, False
+    count = struct.unpack_from('<I', data, 104 + shift)[0]
+    offset, found = 108 + shift, False
     for _ in range(count):
         if offset + 4 > size:
             raise ValueError('truncated replay extension')
         tag, length = struct.unpack_from('<HH', data, offset)
         offset += 4
+        if wide and tag == 15:
+            if offset + 2 > size:
+                raise ValueError('truncated replay extension')
+            length = struct.unpack_from('<I', data, offset - 2)[0]
+            offset += 2
         if offset + length > size:
             raise ValueError('truncated replay extension payload')
         found |= tag == 7

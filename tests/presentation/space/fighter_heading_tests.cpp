@@ -1,13 +1,13 @@
 // #506: squadron craft are drawn nose first. FoC's fighter locomotor moves a craft along its
 // facing, pitch included (docs/behaviour/space-fighters.md FM-02, FM-05), so the direction the
-// viewer draws a craft's nose in (presentation::space::interpolate_units) must follow the
+// viewer draws a craft's nose in (presentation::live::interpolate_units) must follow the
 // direction the craft travels. A synthetic carrier launches a squadron nose down (FL-06) at a
 // frigate above it, so the craft dive, climb and turn; over 300 ticks every drawn craft keeps its
 // nose on its travel.
 
 #include "../../support/check.hpp"
 #include "eawr/platform/sim_workers.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/motion.hpp"
 #include "eawr/sim/tactical/replay.hpp"
@@ -28,7 +28,7 @@
 
 namespace {
 
-namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 using math::Fixed;
@@ -107,7 +107,7 @@ using Vec = std::array<double, 3>;
 }
 
 // The nose of Rz(yaw) Ry(pitch) Rx(roll): its +X axis.
-[[nodiscard]] Vec nose(const space::LiveUnitPose& pose) {
+[[nodiscard]] Vec nose(const live::LiveUnitPose& pose) {
     const double yaw = pose.yaw_degrees / degrees_per_radian;
     const double pitch = pose.pitch_degrees / degrees_per_radian;
     return {std::cos(yaw) * std::cos(pitch), std::sin(yaw) * std::cos(pitch), -std::sin(pitch)};
@@ -120,7 +120,7 @@ using Vec = std::array<double, 3>;
     return std::acos(std::clamp(dot / lengths, -1.0, 1.0)) * degrees_per_radian;
 }
 
-[[nodiscard]] const space::LiveUnitPose* find(const std::vector<space::LiveUnitPose>& poses, const eawr::sim::EntityId id) {
+[[nodiscard]] const live::LiveUnitPose* find(const std::vector<live::LiveUnitPose>& poses, const eawr::sim::EntityId id) {
     const auto found = std::find_if(poses.begin(), poses.end(), [id](const auto& pose) { return pose.entity == id; });
     return found == poses.end() ? nullptr : &*found;
 }
@@ -153,9 +153,9 @@ void test_nose_follows_travel() {
             return;
         }
         const auto latest = stepped.value().snapshot;
-        const auto end = space::interpolate_units(*previous, *latest, 1.0, empire);
-        const auto half = space::interpolate_units(*previous, *latest, 0.5, empire);
-        const auto begin = space::interpolate_units(*previous, *latest, 0.0, empire);
+        const auto end = live::interpolate_units(*previous, *latest, 1.0, empire);
+        const auto half = live::interpolate_units(*previous, *latest, 0.5, empire);
+        const auto begin = live::interpolate_units(*previous, *latest, 0.0, empire);
         for (const auto& squadron : session.squadrons()) {
             for (const auto craft : squadron.members) {
                 const auto* before = find(begin, craft);
@@ -210,13 +210,13 @@ void test_nose_follows_travel() {
 // FM-02, FM-06: the pitch is read from the transform, and a craft looping over the vertical
 // (pitch 80 to 95, which reads as yaw 180, pitch 85, roll 180) keeps its nose on the loop.
 void test_pitch_and_loop() {
-    expect(std::abs(space::instance_pitch_degrees(rotation(30.0, -40.0, 10.0)) + 40.0) < 1.0e-3,
+    expect(std::abs(live::instance_pitch_degrees(rotation(30.0, -40.0, 10.0)) + 40.0) < 1.0e-3,
            "the pitch is read from the forward column");
-    expect(space::instance_pitch_degrees(rotation(30.0, 0.0, 10.0)) == 0.0, "a level unit has no pitch");
+    expect(live::instance_pitch_degrees(rotation(30.0, 0.0, 10.0)) == 0.0, "a level unit has no pitch");
     const tactical::TacticalSnapshot previous{10, {{1, 1}}, {{1, craft_type, 1, 1, rotation(0.0, 80.0, 0.0), 0b01, {}, {}}}, {}};
     const tactical::TacticalSnapshot latest{11, {{1, 1}}, {{1, craft_type, 1, 1, rotation(0.0, 95.0, 0.0), 0b01, {}, {}}}, {}};
-    const auto end = space::interpolate_units(previous, latest, 1.0, 1);
-    const auto half = space::interpolate_units(previous, latest, 0.5, 1);
+    const auto end = live::interpolate_units(previous, latest, 1.0, 1);
+    const auto half = live::interpolate_units(previous, latest, 0.5, 1);
     expect(end.size() == 1 && half.size() == 1, "the craft is drawn");
     if (end.size() != 1 || half.size() != 1) return;
     expect(std::abs(end[0].pitch_degrees - 85.0) < 1.0e-3 && std::abs(std::abs(end[0].yaw_degrees) - 180.0) < 1.0e-3,
@@ -227,14 +227,14 @@ void test_pitch_and_loop() {
     // A level ship keeps the #351 per-angle easing.
     const tactical::TacticalSnapshot ship_before{10, {{1, 1}}, {{1, craft_type, 1, 1, rotation(40.0, 0.0, -4.0), 0b01, {}, {}}}, {}};
     const tactical::TacticalSnapshot ship_after{11, {{1, 1}}, {{1, craft_type, 1, 1, rotation(41.0, 0.0, -6.0), 0b01, {}, {}}}, {}};
-    const auto ship = space::interpolate_units(ship_before, ship_after, 0.25, 1);
+    const auto ship = live::interpolate_units(ship_before, ship_after, 0.25, 1);
     expect(ship.size() == 1 && ship[0].pitch_degrees == 0.0 && std::abs(ship[0].roll_degrees + 4.5) < 1.0e-3,
            "a level unit draws no pitch");
     // #479 (FM-06): a level craft rolling upright out of a loop crosses +-180 between two ticks;
     // half way it is drawn upside down, not rolled a whole turn the long way through level.
     const tactical::TacticalSnapshot inverted_before{10, {{1, 1}}, {{1, craft_type, 1, 1, rotation(180.0, 0.0, 177.0), 0b01, {}, {}}}, {}};
     const tactical::TacticalSnapshot inverted_after{11, {{1, 1}}, {{1, craft_type, 1, 1, rotation(180.0, 0.0, -177.0), 0b01, {}, {}}}, {}};
-    const auto rolling = space::interpolate_units(inverted_before, inverted_after, 0.5, 1);
+    const auto rolling = live::interpolate_units(inverted_before, inverted_after, 0.5, 1);
     expect(rolling.size() == 1 && std::abs(std::abs(rolling[0].roll_degrees) - 180.0) < 1.0e-3,
            "a roll across +-180 turns the short way (drawn " + std::to_string(rolling.empty() ? 0.0 : rolling[0].roll_degrees) + ")");
 }

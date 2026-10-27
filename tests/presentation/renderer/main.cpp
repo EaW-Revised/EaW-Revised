@@ -34,6 +34,8 @@
 
 namespace eawr_renderer_test {
 
+void churn_contracts();
+
 eawr::testing::Checker local_checker;
 int& failures = local_checker.failures;
 
@@ -208,6 +210,7 @@ void particle_prewarm_contracts(){
 
 int main() {
     using namespace eawr_renderer_test;
+    churn_contracts();
     particle_texture_contracts();
     particle_prewarm_contracts();
     particle_program_prewarm_contracts();

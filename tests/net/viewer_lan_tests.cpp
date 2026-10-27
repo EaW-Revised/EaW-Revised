@@ -1,5 +1,7 @@
 #include "viewer_lan_fixtures.hpp"
 #include "lan_match.hpp"
+#include "lan_match_internal.hpp"
+#include "eawr/platform/sim_workers.hpp"
 #include "lan_diagnostics.hpp"
 #include "../../src/net/platform_socket.hpp"
 #include "eawr/core/build_identity.hpp"
@@ -7,6 +9,7 @@
 #include "eawr/net/lan_credentials.hpp"
 #include "eawr/presentation/ui/command_sink.hpp"
 #include "eawr/platform/live_session.hpp"
+#include "eawr/sim/tactical/session.hpp"
 #include "fake_transport.hpp"
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/net/match_options.hpp"
@@ -52,6 +55,179 @@ std::shared_ptr<viewer::LanMatch> make_match(std::filesystem::path root, std::ui
     auto match = viewer::make_lan_match(std::move(root), delay, progress, std::move(trace));
     match->configure_factions({"Rebel", "Empire", "Underworld", "Mod_Fleet_C"});
     return match;
+}
+
+// A human quitting while the match is held: the hold survives while another human stays, and clears with the last one.
+void pause_departure_contracts() {
+    stage = "multiplayer pause with departing humans";
+    using Adapter = viewer::lan_detail::LiveAdapter;
+    const auto initial = human_setup(2);
+    const std::vector<net::SetupSeat> roster{{0, {1}, 1}, {1, {2}, 2}};
+    Adapter adapter(initial, roster, nullptr);
+    const auto pause_input = [](std::uint32_t seat, std::uint64_t sequence, bool paused) {
+        return net::SeatInput{{0, {seat}, sequence}, require(net::encode_match_pause(paused))};
+    };
+    const auto quit_input = [](std::uint32_t seat, std::uint64_t sequence) {
+        return net::SeatInput{{0, {seat}, sequence},
+            require(net::encode_tactical_input({0, {seat}, sequence}, {{seat}, seat, true, false}, {{}, tactical::QuitPayload{}}))};
+    };
+    expect(static_cast<bool>(adapter.install(std::vector{pause_input(1, 0, true)})) && adapter.clock.paused, "seat 1 holds the match");
+    expect(static_cast<bool>(adapter.install(std::vector{quit_input(2, 1)})), "the other human quits while held");
+    expect(adapter.clock.paused, "one human still present: the hold stays and can be resumed by that human");
+    expect(static_cast<bool>(adapter.install(std::vector{quit_input(1, 2)})), "the last human quits while held");
+    expect(!adapter.clock.paused, "no human left: the hold is cleared so AI fallback can run");
+}
+
+void multiplayer_pause_contracts() {
+    stage = "multiplayer pause, journal and liveness";
+    pause_departure_contracts();
+    using Adapter = viewer::lan_detail::LiveAdapter;
+    using Change = net::MatchPauseClock::Change;
+    net::MatchPauseClock limiter;
+    expect(limiter.apply(true, {10, {1}, 0}) == Change::applied, "first pause admitted");
+    expect(limiter.apply(true, {10, {2}, 0}) == Change::unchanged && limiter.actor == sim::SeatId{1}, "concurrent pause is a no-op and preserves actor");
+    expect(limiter.apply(false, {11, {2}, 1}) == Change::applied, "another human can resume");
+    expect(limiter.apply(true, {50, {1}, 1}) == Change::applied, "a spaced second pause admitted");
+    expect(limiter.apply(false, {51, {1}, 2}) == Change::applied, "resume is never refused");
+    expect(limiter.apply(true, {60, {1}, 3}) == Change::throttled, "a pause right after this seat's resume is debounced");
+    expect(limiter.apply(true, {81, {1}, 4}) == Change::applied, "the debounce is one session second");
+    for (std::uint64_t round = 0; round < 20; ++round) {
+        expect(limiter.apply(false, {100 + round * 40, {2}, 10 + round * 2}) == Change::applied, "repeated resume is never refused");
+        expect(limiter.apply(true, {120 + round * 40, {1}, 11 + round * 2}) == Change::applied, "repeated spaced pauses are never refused");
+    }
+    auto malformed = require(net::encode_match_pause(true)); malformed.push_back(0);
+    expect(!net::decode_match_pause(malformed), "control refuses trailing bytes");
+    expect(!net::parse_match_pause_replay({}), "older or missing session journal refused by named version");
+    for (const unsigned count : {2U, 3U}) for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        const auto initial = human_setup(count);
+        const auto tables = content();
+        eawr::platform::ThreadWorkerAdapter executor(workers, eawr::platform::ThreadWorkerAdapter::Dispatch::always_pool);
+        eawr::testing::FakeNetwork network(count);
+        std::vector<net::SetupSeat> roster;
+        std::vector<net::PeerSeat> seats;
+        for (unsigned peer = 0; peer < count; ++peer) {
+            roster.push_back({peer, {peer + 1}, peer + 1}); seats.push_back({{peer + 1}, true});
+        }
+        std::vector<tactical::TacticalSession> worlds;
+        worlds.reserve(count);
+        std::vector<eawr::platform::LiveStepContext> contexts(count);
+        std::vector<std::unique_ptr<Adapter>> adapters;
+        std::vector<std::unique_ptr<eawr::testing::FakeTransport>> transports;
+        std::vector<net::LockstepSession> sessions;
+        sessions.reserve(count);
+        std::vector<std::vector<std::string>> hashes(count);
+        for (unsigned peer = 0; peer < count; ++peer) worlds.push_back(require(tactical::TacticalSession::create(initial, tables)));
+        const auto bind = [&](eawr::platform::LiveStepContext& context, tactical::TacticalSession& world) {
+            auto* target = &world;
+            context.completed_tick = [target] { return target->completed_tick(); };
+            context.state_hash = [target] { return target->state_sha256(); };
+            context.world_hash = context.state_hash;
+            context.canonical_state = [target] { return target->canonical_state_bytes(); };
+            context.snapshot = [target] { return target->snapshot(); };
+            context.install = [target](std::span<const tactical::PlayerCommand> commands) {
+                for (const auto& command : commands) { auto accepted = target->submit(command); if (!accepted) return accepted; }
+                return eawr::core::Result<void>::success();
+            };
+            context.step = [target, &executor] {
+                auto stepped = target->step(executor);
+                return stepped ? eawr::core::Result<void>::success() : eawr::core::Result<void>::failure(stepped.error());
+            };
+        };
+        for (unsigned peer = 0; peer < count; ++peer) {
+            bind(contexts[peer], worlds[peer]);
+            adapters.push_back(std::make_unique<Adapter>(initial, roster, nullptr)); adapters.back()->context = &contexts[peer];
+            adapters.back()->recording.setup = require(net::encode_skirmish_setup(initial));
+            transports.push_back(std::make_unique<eawr::testing::FakeTransport>(network, peer));
+            net::SessionOptions options; options.final_tick_count = 25'000;
+            sessions.push_back(require(net::LockstepSession::create(*adapters.back(), *transports.back(), seats, options)));
+        }
+        std::uint64_t now = 0;
+        const auto advance = [&](std::uint64_t boundary) {
+            for (unsigned attempt = 0; attempt < 100'000; ++attempt) {
+                bool complete = true;
+                now += 34; network.round = now;
+                for (unsigned peer = 0; peer < count; ++peer) {
+                    if (adapters[peer]->completed_tick() >= boundary) continue;
+                    complete = false;
+                    auto result = require(sessions[peer].pump(now));
+                    if (result.completed) hashes[peer].push_back(result.completed->state_sha256);
+                }
+                if (complete) return;
+            }
+            expect(false, "pause fixture reached its agreed boundary");
+        };
+        advance(10);
+        const auto pause = require(sessions[0].submit([](sim::SeatCommandKey) { return net::encode_match_pause(true); }));
+        // Two seats racing to pause must still need only one Resume.
+        require(sessions[1].submit([](sim::SeatCommandKey) { return net::encode_match_pause(true); }));
+        advance(pause.tick + 1);
+        const auto held_tick = worlds[0].completed_tick();
+        const auto held_state = worlds[0].canonical_state_bytes();
+        for (unsigned peer = 0; peer < count; ++peer)
+            expect(adapters[peer]->clock.paused && worlds[peer].completed_tick() == held_tick, "peers pause on the same world boundary");
+        const auto unit = std::find_if(initial.units.begin(), initial.units.end(), [](const auto& row) { return row.owner == 1; });
+        expect(unit != initial.units.end(), "fixture has a controllable unit");
+        require(sessions[0].submit([&](sim::SeatCommandKey key) {
+            return net::encode_tactical_input(key, {{1}, 1, true, false}, {{unit->entity_id}, tactical::MovePayload{{units(100), units(100), {}}}});
+        }));
+        advance(pause.tick + 18'001); // ten nominal minutes of healthy control-only session steps
+        for (unsigned peer = 0; peer < count; ++peer) {
+            expect(worlds[peer].completed_tick() == held_tick && worlds[peer].canonical_state_bytes() == held_state,
+                "ten-minute pause freezes all tactical world state and timers, including queued orders");
+            expect(!sessions[peer].waiting_for(), "healthy paused peers are not stalled");
+            expect(hashes[peer] == hashes[0], "pause produces equal per-session digests across peers");
+        }
+        {
+            auto restored = require(tactical::TacticalSession::create(initial, tables));
+            eawr::platform::LiveStepContext restored_context; bind(restored_context, restored);
+            Adapter staged(initial, roster, nullptr); staged.context = &restored_context;
+            const auto paused_journal = require(net::parse_match_pause_replay(require(adapters[0]->record_controls())));
+            require(net::replay_match_pause(paused_journal, staged, [&] { return restored.completed_tick(); }));
+            expect(staged.clock.paused && staged.state_hash() == adapters[0]->state_hash(),
+                "a paused recovery prefix restores the hold, actor, limiter and deferred orders");
+        }
+        const auto resume = require(sessions[1].submit([](sim::SeatCommandKey) { return net::encode_match_pause(false); }));
+        advance(resume.tick + 5);
+        for (unsigned peer = 0; peer < count; ++peer)
+            expect(!adapters[peer]->clock.paused && worlds[peer].completed_tick() > held_tick && hashes[peer] == hashes[0],
+                "another active human resumes once with equal world and session digests");
+        const auto encoded = require(adapters[0]->record_controls());
+        const auto journal = require(net::parse_match_pause_replay(encoded));
+        auto replay_world = require(tactical::TacticalSession::create(initial, tables));
+        eawr::platform::LiveStepContext replay_context; bind(replay_context, replay_world);
+        Adapter replay_adapter(initial, roster, nullptr); replay_adapter.context = &replay_context;
+        require(net::replay_match_pause(journal, replay_adapter, [&] { return replay_world.completed_tick(); }));
+        expect(replay_world.canonical_state_bytes() == worlds[0].canonical_state_bytes()
+            && replay_adapter.state_hash() == adapters[0]->state_hash(), "outer journal reconstructs control and world state without wall waits");
+        {
+            auto playback = std::make_shared<viewer::lan_detail::LivePauseReplay>(initial, roster, journal);
+            eawr::platform::LiveSession::Options playback_options;
+            playback_options.workers = workers;
+            playback_options.pacing = eawr::platform::LiveSession::Pacing::driven;
+            playback_options.recorded_step_driver = [playback](eawr::platform::LiveStepContext& context,
+                std::span<const tactical::PlayerCommand> recorded, std::uint64_t) { return playback->step(context, recorded); };
+            const auto world_recording = worlds[0].record();
+            auto live = require(eawr::platform::LiveSession::start(world_recording, tables, playback_options));
+            live->advance_to(world_recording.final_tick_count);
+            expect(live->wait_for(world_recording.final_tick_count, std::chrono::seconds(30)), "normal replay source consumes the session journal without wall waits");
+            live->stop();
+            expect(!live->failure() && playback->complete() && live->record() == world_recording,
+                "viewer playback reconstructs every control boundary using the unchanged world recording");
+        }
+        auto truncated = encoded; truncated.pop_back();
+        expect(!net::parse_match_pause_replay(truncated), "truncated journal refused");
+        // Physical loss still terminates a paused session; no pause exemption hides it.
+        require(sessions[0].submit([](sim::SeatCommandKey) { return net::encode_match_pause(true); }));
+        advance(adapters[0]->completed_tick() + 10);
+        network.open[count - 1] = false;
+        bool lost = false;
+        for (unsigned attempt = 0; attempt < 100 && !lost; ++attempt) {
+            now += 34; network.round = now;
+            const auto result = sessions[0].pump(now);
+            if (!result) lost = result.error().code == net::session_errors::link_closed;
+        }
+        expect(lost && adapters[0]->clock.paused, "real drop while paused is still detected");
+    }
 }
 
 void diagnostic_contract() {
@@ -642,6 +818,9 @@ using namespace viewer_lan_test;
 
 int main(int argc, char** argv) {
     try {
+        if (argc == 2 && std::string_view(argv[1]) == "--pause") {
+            multiplayer_pause_contracts(); viewer::shutdown_lan_drains(); return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--pending-inputs") {
             for (const auto workers : {1U, 2U, 4U, 8U}) {
                 separate_mesh(2, false, true, workers);
@@ -674,9 +853,10 @@ int main(int argc, char** argv) {
         viewer::apply_lan_lobby_ping(games, measured);
         expect(games[0].ping_ms == 0, "disconnected snapshot does not apply stale ping");
         eawr::net::MatchSpeedWindow window;
-        expect(window.accept(100) && window.accept(200) && !window.accept(300), "MP-U1 two requests per local window");
-        expect(!window.accept(45'100) && window.accept(45'101), "oldest expires strictly after 45 seconds");
-        expect(!window.accept(45'200) && window.accept(45'201), "expiry retains the younger accepted request");
+        for (std::uint64_t request = 0; request < 6; ++request) expect(window.accept(3 + request * 3), "MP-U1 six requests per session window");
+        expect(!window.accept(21), "the seventh request is refused");
+        expect(!window.accept(1'353) && window.accept(1'354), "oldest expires strictly after 45 session seconds");
+        expect(!window.accept(1'354) && window.accept(1'357), "expiry retains the younger accepted requests");
         for (std::uint32_t tactical_speed = 0; tactical_speed < 5; ++tactical_speed)
             for (std::uint32_t strategic_speed = 0; strategic_speed < 5; ++strategic_speed) {
                 const eawr::net::MatchOptions options{tactical_speed, strategic_speed};
@@ -710,6 +890,7 @@ int main(int argc, char** argv) {
         nine_seat_staging({1, 2, 3, 4, 5, 6, 7, 8, 9});
         nine_seat_staging({1, 2});
         staging_ingress_bounds();
+        multiplayer_pause_contracts();
         diagnostic_contract(); player_row_parser(); refused_rosters();
         for (const auto count : {3U, 4U, 9U}) separate_mesh(count, false);
         for (const auto workers : {1U, 2U, 4U, 8U}) separate_mesh(8, false, false, workers);

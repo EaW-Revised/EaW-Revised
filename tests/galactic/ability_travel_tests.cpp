@@ -170,6 +170,97 @@ void destruction_uses_qualified_bearer(const eawr::sim::PartitionExecutor& pool)
         expect(game.galaxy().ability_state()->preparations.empty(), "arrival destruction retains no priced preparation");
     }
 }
+void consumed_spy_arrival() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto config = setup();
+        auto& profile = config.ability_host->profiles[0];
+        profile.corruption.reset(); profile.named = false;
+        // Short synthetic duration exercises the stock finite-source contract
+        // without making the equality/save/worker regression run for 1800 frames.
+        profile.spy = gc::SpyAbilityProfile{"MOD_SPY", "mod scout", 7, whole(2),
+            gc::bit(gc::Intelligence::fleet_contents) | gc::bit(gc::Intelligence::structures)
+                | gc::bit(gc::Intelligence::ownership), true, true, true};
+        profile.ground_activated = {gc::AbilityKind::system_spy};
+        config.ability_host->activated_spy_abilities = {"MOD_SPY"};
+        config.movement->contents[0].children.resize(1);
+        std::erase_if(config.census->objects, [](const auto& actor) { return actor.id == second; });
+        ability_fixture::add_observer(config, 2, {1000, 2000});
+        auto game = take(Game::create(config));
+        submit(game, move(config));
+        std::vector<std::string> actual{take(game.step(pool)).state_hash.get()};
+        expect(game.galaxy().ability_state()->results.empty(), "ground-activated spy waits for final arrival");
+        const auto ids = cp::game_identities(config);
+        const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto loaded = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+        galactic_test::mark_saved(game);
+        for (unsigned tick = 0; tick < 30; ++tick) {
+            actual.push_back(take(game.step(pool)).state_hash.get());
+            expect(take(loaded.session.step(pool)).state_hash.get() == actual.back(),
+                "contained spy arrival continues identically after an in-flight save");
+        }
+        const auto& results = game.galaxy().ability_state()->results;
+        expect(results.size() == 1 && results[0].actor == first && results[0].kind == gc::AbilityKind::system_spy
+            && results[0].outcome == gc::AbilityOutcome::purchased,
+            "final arrival invokes the live contained spy exactly once");
+        const auto snapshot = game.galaxy().snapshot();
+        expect(std::none_of(snapshot->actor_records().begin(), snapshot->actor_records().end(),
+            [](const auto& actor) { return actor.id == first; }), "arrival consumes the generic spy bearer");
+        expect(std::none_of(snapshot->actor_records().begin(), snapshot->actor_records().end(),
+            [](const auto& actor) { return actor.id == transport; }) && !moving(game, config.fleets[1].id),
+            "last-passenger spy consumption removes its empty transport and fleet");
+        expect(!game.pending_conflict() && game.galaxy().clock().pause_depth == 0,
+            "consumed lone spy leaves no phantom battle or campaign pause");
+        const auto& observer = snapshot->observer();
+        expect(observer && std::any_of(observer->records.begin(), observer->records.end(), [](const auto& row) {
+            return row.player == 2 && row.planet == 1 && std::any_of(row.sources.begin(), row.sources.end(),
+                [](const auto& source) { return source.source == first; });
+        }), "consumed arrival spy leaves its finite intelligence source at the destination");
+        if (!observer) { expect(false, "spy arrival retains its observer owner"); continue; }
+        const auto record = std::find_if(observer->records.begin(), observer->records.end(), [](const auto& row) {
+            return row.player == 2 && row.planet == 1;
+        });
+        if (record == observer->records.end()) { expect(false, "spy recipient record exists"); continue; }
+        const auto source = std::find_if(record->sources.begin(), record->sources.end(), [](const auto& row) {
+            return row.source == first;
+        });
+        if (source == record->sources.end()) { expect(false, "finite spy source exists before expiry"); continue; }
+        const auto end = source->final_frame;
+        const auto advance = [&] {
+            actual.push_back(take(game.step(pool)).state_hash.get());
+            expect(take(loaded.session.step(pool)).state_hash.get() == actual.back(),
+                "saved consumed spy expiry matches uninterrupted planet service");
+        };
+        while (game.galaxy().clock().galactic_frame < end) advance();
+        // Service reads this frame before the tail increments the published
+        // clock. Observe the service at end, then at end+1 independently.
+        advance();
+        const auto at_end = game.galaxy().snapshot();
+        const auto knows = [](const auto& state) {
+            const auto rows = state->observations();
+            const auto found = std::find_if(rows.begin(), rows.end(), [](const auto& row) {
+                return row.player == 2 && row.planet == 1;
+            });
+            return found != rows.end() && found->knowledge.fleet_contents && found->knowledge.structures;
+        };
+        expect(knows(at_end), "finite consumed spy knowledge remains at the exact expiry frame");
+        advance();
+        const auto after = game.galaxy().snapshot();
+        expect(after->clock().galactic_frame == end + 2, "expiry witness services exactly end+1 before the timer tail");
+        const auto& after_records = after->observer()->records;
+        const auto expired = std::find_if(after_records.begin(), after_records.end(), [](const auto& row) {
+            return row.player == 2 && row.planet == 1;
+        });
+        expect(expired != after_records.end() && expired->refresh_frame == end + 1 && expired->sources.empty(),
+            "planet service removes consumed finite source strictly after expiry without an explicit refresh command");
+        expect(expired != after_records.end() && expired->apparent_owner == config.planets[0].owner,
+            "direct expiry recomputation caches actual controller on ownership-bit loss (WGUI-99)");
+        expect(!knows(after), "expiry republishes observer knowledge instead of retaining the old HUD mask");
+        if (workers == 1) reference = actual;
+        else expect(actual == reference, "spy arrival has canonical equality on 1/2/4/8 workers");
+    }
+}
 void codecs() {
     const auto config = setup();
     for (const gc::CommandPayload payload : {gc::CommandPayload{move(config)}, gc::CommandPayload{gc::LaunchFleet{{transport}, {2, 1}, {}, transport}}}) {
@@ -185,6 +276,7 @@ int case_galactic_ability_travel_tests() {
         ability_fixture::arm_watchdog(); codecs();
         eawr::platform::ThreadWorkerAdapter pool(1);
         final_and_save(pool); clear_and_stale(pool); paths_launch_merge(pool); destruction_uses_qualified_bearer(pool);
+        consumed_spy_arrival();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

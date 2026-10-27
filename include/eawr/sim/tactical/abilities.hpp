@@ -33,6 +33,13 @@ enum class SpecialActivationStyle : std::uint8_t {
     skirmish_automatic = 6,
 };
 enum class SpecialAbilityMode : std::uint8_t { space, ground, galactic };
+// BF-2 (#3779): the ability mode and the always-on activation style a battle domain uses.
+[[nodiscard]] constexpr SpecialAbilityMode special_ability_mode(const BattleDomain domain) noexcept {
+    return domain == BattleDomain::land ? SpecialAbilityMode::ground : SpecialAbilityMode::space;
+}
+[[nodiscard]] constexpr SpecialActivationStyle automatic_special_style(const BattleDomain domain) noexcept {
+    return domain == BattleDomain::land ? SpecialActivationStyle::ground_automatic : SpecialActivationStyle::space_automatic;
+}
 inline constexpr std::uint32_t healing_initial_poll_slot = 0xfffe000eU; // coordinator-reserved, WSH-06
 
 struct SpecialAbilityFilter {
@@ -310,6 +317,10 @@ struct AbilityProfile {
     // WHD-01: typed dependency resolved from content, independent of visual bones.
     std::vector<std::uint32_t> required_hardpoints{};
     bool requires_hardpoint{}; // true with an empty list means unavailable
+    // WHE-61: engaged on failed object resolution; empty means an omitted tag.
+    // Session content, bound by content identity rather than replay/checkpoint slots.
+    std::optional<std::string> unresolved_spawn{};
+    std::optional<math::Fixed> targeting_max_attack_distance{}; // WRA-03: positive active override
     friend bool operator==(const AbilityProfile&, const AbilityProfile&) = default;
 };
 
@@ -349,6 +360,9 @@ struct AbilityTable {
     // supplies each local player's profile preference; existing units keep their toggles.
     std::vector<PlayerId> autofire_defaults{}; // strictly increasing, a subset of humans
     std::uint32_t beam_damage_type{0xffffffffU}; // shared Damage_Default armor index, bound from content
+    // WSH-09: the Damage_Force_Corruption row a negative automatic Heal_Amount delivers; no_type_index when the
+    // content's damage-type list lacks the name (no armor row then applies, the hit still lands).
+    std::uint32_t passive_damage_type{0xffffffffU};
     // WSD-10: the AI combat rating (AI_Combat_Power metric) of every type that has one, for the
     // Krayt script's threat sum; a squadron type holds the sum over its craft. Strictly increasing
     // type IDs, session content like the profiles.
@@ -360,16 +374,17 @@ struct AbilityTable {
     friend bool operator==(const AbilityTable&, const AbilityTable&) = default;
 };
 
-inline constexpr std::size_t max_abilities_per_type = 2;
 inline constexpr std::uint32_t max_ability_frames = 30U * 3600U;
 // Every multiplier is in [-64, 64]; delay, interval and speed multipliers are positive.
 inline constexpr std::int64_t max_ability_multiplier = 64;
 
 // Fails with EAWR-SIM-0305 unless type IDs, humans and creation owners strictly increase,
-// creation owners are human, a type has one or two
-// abilities of distinct modelled kinds, frames are at most max_ability_frames and every
-// multiplier is in bounds.
+// creation owners are human, every profile passes validate_ability_profile.
 [[nodiscard]] core::Result<void> validate_abilities(const AbilityTable& table);
+// One type's profile (#4666): any number of abilities (the table and session slots are vectors), all
+// of distinct modelled kinds, frames at most max_ability_frames and every multiplier in bounds.
+// The loader checks each type with it so a tolerant load can skip just that type.
+[[nodiscard]] core::Result<void> validate_ability_profile(const UnitAbilityProfile& profile);
 
 // One ability of a unit. `expires_tick` is the tick its time limit ends it (zero: none), and
 // `ready_tick` the first tick it may be switched on again after a recharge (AB-11, AB-12).
@@ -467,6 +482,10 @@ void service_charged_blast(std::optional<ChargedBlastState>&, std::uint32_t elig
     const auto low = scaled * (multiplier & ((std::uint64_t{1} << split) - 1U));
     return (high + (low >> split)) >> (2 * math::Fixed::fractional_bits - split);
 }
+
+// WRA-03: first authored active positive range; absent/nonpositive leaves ordinary reach.
+[[nodiscard]] std::optional<math::Fixed> ability_attack_distance(const UnitAbilityProfile& profile,
+    const AbilityState& state) noexcept;
 
 [[nodiscard]] AbilityState initial_abilities(const UnitAbilityProfile& profile, bool autofire_default = false);
 

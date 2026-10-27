@@ -57,6 +57,8 @@ void ViewerHost::open_skirmish_loading() {
     EawrLoadingScreen::Options screen_options;
     screen_options.content = skirmish_setup_->content();
     screen_options.map_path = *pending_start_->map;
+    if (pending_start_->domain == sim::tactical::BattleDomain::land)
+        screen_options.battle = presentation::ui::LoadingBattle::land;
     if (map != nullptr) {
         screen_options.context_name = map->context_name;
         screen_options.map_name = map->display_name.empty() ? map->name : map->display_name;
@@ -86,6 +88,7 @@ void ViewerHost::leave_campaign_to_menu() {
 void ViewerHost::start_skirmish_battle() {
     auto selected = std::exchange(pending_start_, std::nullopt);
     const std::string map_path = *selected->map;
+    const bool land = selected->domain == sim::tactical::BattleDomain::land;
     gpu_memory_trace.sample("battle_start_from_setup");
     gpu_memory_trace.battle_started();
     map_mode_ = std::make_unique<MapMode>(MapMode::Options{
@@ -101,12 +104,15 @@ void ViewerHost::start_skirmish_battle() {
         .shaders = skirmish_setup_->shaders(),
         .loading = skirmish_loading_, .lan = skirmish_setup_->lan_match()});
     if (!map_mode_->ready(*skirmish_battle_host_)) {
+        // A land battle names why it refused (for example a company or locomotion the authored tables lack).
+        const std::string reason = land ? std::string(map_mode_->failure()) : std::string{};
         map_mode_.reset();
         remove_child(skirmish_battle_host_);
         memdelete(skirmish_battle_host_);
         skirmish_battle_host_ = nullptr;
         skirmish_loading_ = nullptr;
-        skirmish_setup_->show("This battle could not start. Check the map and factions or the run report.");
+        skirmish_setup_->show(reason.empty() ? "This battle could not start. Check the map and factions or the run report."
+                                             : "The land battle could not start: " + reason);
         if (options_->skirmish_setup_test) stop(2);
     }
 }

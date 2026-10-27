@@ -107,32 +107,34 @@ void payload_ground_capability() {
     expect(prepared && prepared.value()[0].transport && prepared.value()[0].combat_power == Fixed{}
         && !prepared.value()[0].stays_in_transport && prepared.value()[1].stays_in_transport,
         "current-type authoring precedes fresh power/stay omission defaults");
-    std::vector<std::string> reference;
-    for (const auto workers : {1U, 2U, 4U, 8U}) {
-        auto initial = setup(); initial.fleets[0].orbit = 2; initial.fleets[0].members = {{21, 2}, {31, 2}};
-        initial.movement->types[1].transport = true;
-        initial.control->ground_capability_types = {{1, f(7), false, false}, {2, {}, true, false}, {3, f(9), false, true}};
-        initial.movement->contents = {{21, {{30, 1}}}, {31, {{32, 3}}}};
-        const eawr::platform::ThreadWorkerAdapter pool(workers);
-        auto created = eawr::campaign::GameSession::create(initial);
-        if (!created) throw std::runtime_error(created.error().message);
-        auto game = std::move(created).value();
-        const auto identities = cp::game_identities(initial);
-        const auto saved = cp::save_game_checkpoint(game, identities).value();
-        auto loaded = cp::load_game_checkpoint(saved, identities, {}, pool).value();
-        expect(cp::save_game_checkpoint(loaded.session, identities).value() == saved, "ground payload facts retain canonical tick-zero checkpoint");
-        const gc::GameCommand command{{0, gc::SeatId{1}, 1}, gc::LandFleet{10, 2}};
-        game.submit(command).value(); loaded.session.submit(command).value();
-        std::vector<std::string> actual;
-        for (int tick = 0; tick < 3; ++tick) {
-            const auto stepped = game.step(pool).value(); actual.push_back(stepped.state_hash.get());
-            expect(loaded.session.step(pool).value().state_hash.get() == actual.back(), "restored payload capability continuation agrees");
+    for (const bool friendly : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup(); const gc::PlanetId destination = friendly ? 1 : 2; initial.fleets[0].orbit = destination; initial.fleets[0].members = {{21, 2}, {31, 2}};
+            initial.movement->types[1].transport = true;
+            initial.control->ground_capability_types = {{1, f(7), false, false}, {2, {}, true, false}, {3, f(9), false, true}};
+            initial.movement->contents = {{21, {{30, 1}}}, {31, {{32, 3}}}};
+            const eawr::platform::ThreadWorkerAdapter pool(workers);
+            auto created = eawr::campaign::GameSession::create(initial);
+            if (!created) throw std::runtime_error(created.error().message);
+            auto game = std::move(created).value();
+            const auto identities = cp::game_identities(initial);
+            const auto saved = cp::save_game_checkpoint(game, identities).value();
+            auto loaded = cp::load_game_checkpoint(saved, identities, {}, pool).value();
+            expect(cp::save_game_checkpoint(loaded.session, identities).value() == saved, "ground payload facts retain canonical tick-zero checkpoint");
+            const gc::GameCommand command{{0, gc::SeatId{1}, 1}, gc::LandFleet{10, destination}};
+            game.submit(command).value(); loaded.session.submit(command).value();
+            std::vector<std::string> actual;
+            for (int tick = 0; tick < 3; ++tick) {
+                const auto stepped = game.step(pool).value(); actual.push_back(stepped.state_hash.get());
+                expect(loaded.session.step(pool).value().state_hash.get() == actual.back(), "restored payload capability continuation agrees");
+            }
+            const auto snapshot = game.galaxy().snapshot();
+            const auto& landed = snapshot->control()->planets[friendly ? 0 : 1].landed;
+            expect(landed.size() == 1 && landed[0].id == 21 && snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{31, 2}},
+                "friendly and hostile landings admit capable cargo and keep a stays-in-transport payload in orbit");
+            if (workers == 1) reference = actual; else expect(actual == reference, "direct payload landing has 1/2/4/8 canonical equality");
         }
-        const auto snapshot = game.galaxy().snapshot();
-        const auto& landed = snapshot->control()->planets[1].landed;
-        expect(landed.size() == 1 && landed[0].id == 21 && snapshot->fleets()[0].members == std::vector<gc::FleetMember>{{31, 2}},
-            "hostile uncontested landing admits capable company and keeps same-carrier incapable company in orbit");
-        if (workers == 1) reference = actual; else expect(actual == reference, "direct payload landing has 1/2/4/8 canonical equality");
     }
 }
 void authored_mixed_surface_owners() {
@@ -441,6 +443,89 @@ void categories() {
     c.state[1].current = Fixed::from_ratio(1, 2).value();
     expect(calculate(c, p, prior, {}, s.routes).state.target == f(2), "trade needs BOTH endpoints at allegiance at least one");
 }
+void alignment_strength() {
+    const auto half = Fixed::from_ratio(1, 2).value();
+    {
+        auto config = setup(); auto control = *config.control; auto p = control.planets[0];
+        p.ground_base = {1, 5};
+        control.alignment_modifiers = {{1, 1, half}};
+        control.ability_types = {{1, {{false, true, static_cast<std::uint32_t>(-1), Fixed::from_ratio(1, 4).value()}}}};
+        control.ability_sources = {{1, 20, 1, 0, 1}};
+        const auto result = calculate(control, p, state(1, 1, 1)).state;
+        expect(result.alignment_multiplier == half
+            && result.current == eawr::sim::math::add(f(1), Fixed::from_ratio(2, 105).value()).value(),
+            "RGC-130 alignment and ability share category minus one minimum");
+        control.alignment_modifiers[0].multiplier = Fixed::from_raw(4000003);
+        control.ability_types = {{1, {{false, true, static_cast<std::uint32_t>(-3), Fixed::from_raw(8000003)},
+            {false, true, static_cast<std::uint32_t>(-2), Fixed::from_raw(9600006)}}}};
+        control.ability_sources.push_back({1, 20, 1, 1, 1});
+        expect(calculate(control, p, state(1, 1, 1)).state.current
+            == eawr::sim::math::add(f(1), Fixed::from_raw(1228114)).value(),
+            "RGC-131 categories below minus one precede alignment in fixed product order");
+    }
+    for (const auto strength : {f(2), f(4)}) {
+        const auto like = eawr::campaign::prepare_control_alignment_multiplier(strength, true, half).value();
+        const auto opposing = eawr::campaign::prepare_control_alignment_multiplier(strength, false, half).value();
+        expect(like == (strength == f(2) ? f(0) : f(-1)) && opposing == (strength == f(2) ? f(2) : f(3)),
+            "CGS-16 control producer preserves strengths two and four without clamping");
+        auto config = setup(); auto& control = *config.control;
+        control.alignment_modifiers = {{1, 1, like}};
+        auto p = control.planets[0]; p.ground_base = {1, 5};
+        auto prior = state(1, 1, 1);
+        const auto first = calculate(control, p, prior).state;
+        expect(first.alignment_multiplier == like && first.current > f(1) && first.current < f(2),
+            "CGS-17 raw zero/negative source is retained and consumed through the positive aggregate floor");
+        std::size_t services{};
+        while (prior.current != f(5) && services < 20) { prior = calculate(control, p, prior).state; ++services; }
+        expect(services == 9 && prior.current == f(5), "CGS-17 seven-second base with floor0.01 gains four points in nine services");
+        expect(calculate(control, p, prior).state.current == f(5), "CGS-17 exact target does not write even with a negative source");
+        p.ground_base.level = 1;
+        auto degrading = calculate(control, p, prior).state;
+        expect(degrading.alignment_multiplier == like && degrading.current > f(4) && degrading.current < f(5),
+            "CGS-17 degrading changed target keeps the installed alignment source");
+        control.alignment_modifiers[0].multiplier = opposing;
+        expect(calculate(control, p, degrading).state.alignment_multiplier == like,
+            "CGS-17 unchanged target does not replace a retained source");
+        p.ground_base.level = 5; control.alignment_modifiers.clear();
+        const auto removed = calculate(control, p, degrading).state;
+        expect(!removed.alignment_multiplier && removed.current < eawr::sim::math::add(degrading.current, Fixed::from_ratio(1, 100).value()).value(),
+            "CGS-17 changed nondegrading target removes an absent alignment effect");
+        control.alignment_modifiers = {{1, 1, like}};
+        expect(!calculate(control, p, gc::PlanetControl{1}).state.alignment_multiplier,
+            "CGS-17 fresh complete placement does not install an alignment source");
+        control.planets[0] = p;
+        for (const auto& planet : config.planets) control.state.push_back(state(planet.id, planet.owner, 0));
+        control.state[0] = first;
+        auto signed_config = config;
+        signed_config.control->state[0].current = f(-1);
+        expect(bool(gc::validate_setup(signed_config)), "CGS-17 signed current control remains admitted");
+        signed_config.control->state[0].current = f(6);
+        expect(bool(gc::validate_setup(signed_config)), "CGS-17 current control above five remains admitted");
+        auto extreme = first; extreme.current = Fixed::from_raw(std::numeric_limits<std::int64_t>::min());
+        expect(!gc::calculate_planet_control(control, p, extreme, {}, nullptr, {}, 0),
+            "CGS-17 signed current arithmetic overflow is a typed refusal");
+        auto session = eawr::campaign::GameSession::create(config).value();
+        const auto identities = cp::game_identities(config);
+        const auto saved = cp::save_game_checkpoint(session, identities).value();
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        auto restored = cp::load_game_checkpoint(saved, identities, {}, pool);
+        expect(restored && restored.value().session.galaxy().snapshot()->control()->state[0].alignment_multiplier == like,
+            "alignment retained source survives owner checkpoint roundtrip");
+        if (restored) for (int tick = 0; tick < 10; ++tick) {
+            static_cast<void>(session.step(pool).value());
+            static_cast<void>(restored.value().session.step(pool).value());
+            expect(session.state_sha256() == restored.value().session.state_sha256(),
+                "retained alignment source checkpoint continues identically");
+        }
+        const auto bytes = gc::write_replay({config, 1, {}});
+        expect(bool(bytes), "alignment replay encodes");
+        if (bytes) {
+            const auto decoded = gc::parse_replay(bytes.value());
+            expect(decoded && decoded.value().setup.control == config.control,
+                "alignment producer and retained source survive replay roundtrip");
+        }
+    }
+}
 void transitions() {
     const auto s = setup(); auto c = *s.control; auto p = c.planets[0]; auto prior = state(1, 1, 2);
     c.ability_types = {{1, {{true, true, 0, {}}}}}; c.ability_sources = {{1, 20, 1, 0, 2}};
@@ -630,13 +715,14 @@ void protection_lifecycle() {
     expect(calculate(inputs, planet, prior).state.current == Fixed::from_raw(f(5).raw() - Fixed::from_ratio(4, 105).value().raw()),
         "automatic time bonuses use category minimum then product, without subtracting from one");
     inputs.ability_types[0].abilities[0].multiplier = {};
-    expect(calculate(inputs, planet, prior).state.current == f(1), "zero authored time completes in one service");
+    expect(calculate(inputs, planet, prior).state.current > f(4)
+        && calculate(inputs, planet, prior).state.current < f(5), "CGS-17 zero authored time uses the aggregate floor");
     // Integer categories are signed in the sourced modifier service. Three
     // inexact Q24 multipliers expose an unsigned-order rounding difference.
-    inputs.ability_types[0].abilities = {{false, true, std::numeric_limits<std::uint32_t>::max(), Fixed::from_raw(1000001)},
-        {false, true, 0, Fixed::from_raw(2000003)}, {false, true, 1, Fixed::from_raw(9600006)}};
-    // Signed-order product rounds to raw 68213 (unsigned order: 68212), so the service rate is 1/(7 s * 30 * product).
-    const auto signed_delta = Fixed::from_raw(19649583);
+    inputs.ability_types[0].abilities = {{false, true, std::numeric_limits<std::uint32_t>::max(), Fixed::from_raw(4000003)},
+        {false, true, 0, Fixed::from_raw(8000003)}, {false, true, 1, Fixed::from_raw(9600006)}};
+    // Signed-order product rounds to raw 1091396 (unsigned order: 1091395), above the CGS-17 floor, so the service rate is 1/(7 s * 30 * product).
+    const auto signed_delta = Fixed::from_raw(1228112);
     expect(calculate(inputs, planet, prior).state.current == eawr::sim::math::subtract(f(5), signed_delta).value(),
         "negative mod stacking categories multiply in signed order before positive categories");
 }
@@ -1031,6 +1117,179 @@ void capture_structure_cleanup() {
         if (reference.empty()) reference = hashes; else expect(hashes == reference, "special removal is equal on 1/2/4/8 workers");
     }
 }
+// WGS-93 / WGM-188: a ground special that completes, sells or dies refreshes the planet's ground base level
+// from its live special count (capped at 5); production offers follow the level.
+void ground_structure_base_level() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto s = setup(); s.control->planets[0].ground_base = {}; // a freshly captured planet: capture zeroed the base
+        s.control->planets[0].starbase = {1, 1}; // the station keeps the owner's political presence and production enabled
+        s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+        for (const auto& player : s.players) {
+            s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+            s.fiscal->players.push_back({player.player_id, true, f(1)});
+        }
+        for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+        enable_production(s);
+        auto& producer = s.production->planets[0];
+        producer.ground_slots = 6;
+        gc::ProductionOffer company; company.type = 2; company.domain = gc::ProductionDomain::ground;
+        company.price = company.authored_price = f(3); company.seconds = f(1000); company.required_ground_level = 1;
+        company.affiliated = true; company.direct_build_allowed = true;
+        auto structure = company; structure.type = 3; structure.kind = gc::ProductionKind::structure;
+        structure.required_ground_level = 0; structure.seconds = Fixed::from_ratio(1, 10).value();
+        producer.offers = {company, structure};
+        s.census = gc::PopulationCensus{{{1, f(1), 0}, {2, {}, 0}, {3, {}, 0}},
+            {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+            {{20, 1, 1, 1, 10, false, false}, {21, 2, 1, 1, 10, false, false}, {22, 1, 2, 3, 11, false, false}}};
+        qualify_census_roles(*s.census);
+        auto world = eawr::testing::result_diagnostic::take(gc::GalacticSession::create(s));
+        std::cout << "ground-base-level workers=" << workers << " created" << std::endl;
+        std::uint64_t sequence = 0;
+        const auto order = [&](gc::CommandPayload payload) {
+            expect(bool(world.submit({{world.completed_tick(), gc::SeatId{1}, ++sequence}, std::move(payload)})), "ground level command submits");
+        };
+        const auto buy = [&](gc::TypeId type) {
+            order(gc::ProductionCommand{1, type, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0});
+        };
+        const auto run = [&](std::vector<std::string>& hashes) { std::cout << "ground-base-level step " << world.completed_tick() << std::endl; hashes.push_back(eawr::testing::result_diagnostic::take(world.step(executor)).state_hash.get());
+            for (const auto& event : world.snapshot()->events()) std::cout << "  event kind=" << static_cast<int>(event.kind)
+                << " reason=" << static_cast<int>(event.reason) << " value=" << event.value << std::endl; };
+        const auto level = [&] {
+            const auto snapshot = world.snapshot();
+            expect(snapshot->production()->planets[0].ground_level == static_cast<std::int64_t>(snapshot->control()->planets[0].ground_base.level),
+                "production row and control row agree on the ground base level");
+            return snapshot->control()->planets[0].ground_base;
+        };
+        const auto first_object = [&]() -> eawr::sim::EntityId {
+            const auto& objects = world.snapshot()->production()->planets[0].objects;
+            return objects.empty() ? eawr::sim::EntityId{} : objects.front().id;
+        };
+        const auto rejected = [&](gc::ProductionAdmission why) {
+            const auto events = world.snapshot()->events();
+            return std::any_of(events.begin(), events.end(), [&](const auto& event) {
+                return event.kind == gc::GalacticEventKind::command_rejected && event.value == static_cast<std::uint64_t>(why);
+            });
+        };
+        std::vector<std::string> hashes;
+        expect(level() == gc::ControlBase{}, "captured planet starts at ground level 0");
+        buy(2); run(hashes);
+        expect(rejected(gc::ProductionAdmission::prerequisites) && world.snapshot()->production()->planets[0].queues[0].empty(),
+            "level 0 does not offer a company that needs ground base level 1");
+        buy(3);
+        for (int i = 0; i < 12 && world.snapshot()->production()->planets[0].objects.empty(); ++i) run(hashes);
+        expect(world.snapshot()->production()->planets[0].objects.size() == 1, "ground special completes");
+        expect(level() == gc::ControlBase{1, 1}, "completed ground special raises the base to level 1 for the planet owner");
+        buy(2); run(hashes);
+        expect(!rejected(gc::ProductionAdmission::prerequisites) && world.snapshot()->production()->planets[0].queues[0].size() == 1,
+            "the level-1 company is offered and queues");
+        order(gc::ProductionCommand{1, 2, gc::ProductionAction::cancel_index, gc::ProductionDomain::ground, 0}); run(hashes);
+        expect(world.snapshot()->production()->planets[0].queues[0].empty(), "the test company leaves the queue before the next special");
+        buy(3);
+        for (int i = 0; i < 12 && world.snapshot()->production()->planets[0].objects.size() < 2; ++i) run(hashes);
+        expect(level() == gc::ControlBase{1, 2}, "second ground special makes level 2");
+        buy(2); run(hashes);
+        expect(world.snapshot()->production()->planets[0].queues[0].size() == 1, "a long company build waits in the ground queue");
+        order(gc::SellObject{1, first_object()}); run(hashes);
+        expect(world.snapshot()->production()->planets[0].objects.size() == 1 && level() == gc::ControlBase{1, 1},
+            "selling a ground special lowers the level by one");
+        expect(world.snapshot()->production()->planets[0].queues[0].size() == 1, "level 1 still satisfies the queued company");
+        const auto last = first_object();
+        const std::array<eawr::sim::EntityId, 1> destroyed{last};
+        expect(bool(world.apply_battle_losses(destroyed, {})), "a destroyed ground special applies");
+        expect(world.snapshot()->production()->planets[0].objects.empty() && level() == gc::ControlBase{},
+            "losing the last ground special returns the base to level 0");
+        run(hashes);
+        expect(world.snapshot()->production()->planets[0].queues[0].empty(), "the queued company is cancelled once its level requirement is lost");
+        buy(2); run(hashes);
+        expect(rejected(gc::ProductionAdmission::prerequisites), "level 0 again withholds the company");
+        if (reference.empty()) reference = hashes; else expect(hashes == reference, "ground base level changes are equal on 1/2/4/8 workers");
+    }
+    {
+        // The count rule stops at 5, as start placement does.
+        auto s = setup(); s.control->planets[0].ground_base = {1, 5};
+        s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+        for (const auto& player : s.players) {
+            s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+            s.fiscal->players.push_back({player.player_id, true, f(1)});
+        }
+        for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+        enable_production(s);
+        auto& producer = s.production->planets[0];
+        producer.ground_slots = 6;
+        gc::ProductionOffer structure; structure.type = 3; structure.domain = gc::ProductionDomain::ground;
+        structure.kind = gc::ProductionKind::structure; structure.price = structure.authored_price = f(3); structure.seconds = Fixed::from_ratio(1, 10).value();
+        structure.affiliated = true; structure.direct_build_allowed = true;
+        producer.offers = {structure};
+        s.census = gc::PopulationCensus{{{1, f(1), 0}, {2, {}, 0}, {3, {}, 0}},
+            {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+            {{20, 1, 1, 1, 10, false, false}, {21, 2, 1, 1, 10, false, false}, {22, 1, 2, 3, 11, false, false}}};
+        for (eawr::sim::EntityId id = 50; id < 55; ++id) {
+            producer.objects.push_back({id, 3, 1, f(3), gc::ProductionDomain::ground, gc::ProductionKind::structure});
+            s.census->objects.push_back({id, 3, 1, 1, 1, false, false});
+        }
+        qualify_census_roles(*s.census);
+        auto world = eawr::testing::result_diagnostic::take(gc::GalacticSession::create(s));
+        expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::ProductionCommand{1, 3, gc::ProductionAction::buy, gc::ProductionDomain::ground, 0}})),
+            "sixth special submits");
+        eawr::platform::ThreadWorkerAdapter executor(1);
+        for (int i = 0; i < 12 && world.snapshot()->production()->planets[0].objects.size() < 6; ++i) (void)eawr::testing::result_diagnostic::take(world.step(executor));
+        expect(world.snapshot()->production()->planets[0].objects.size() == 6
+            && world.snapshot()->control()->planets[0].ground_base == gc::ControlBase{1, 5}
+            && world.snapshot()->production()->planets[0].ground_level == 5, "the level caps at 5");
+    }
+}
+// WGM-188: a hostile uncontested landing clears the ground specials of an allied base owner; the base level follows.
+void hostile_landing_refreshes_ground_base_level() {
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto s = setup(); s.fleets[0].orbit = 2; // planet 2 is owned by player 3, hostile to the invader (player 1)
+        for (auto& relation : s.control->relations)
+            if ((relation.player == 1 && relation.other == 2) || (relation.player == 2 && relation.other == 1)) relation.allied = true;
+        s.control->planets[1].ground_base = {2, 2}; // an allied player's base with two live ground specials
+        // An explicit political state keeps the planet with its hostile owner at the landing: the tick-zero derivation would
+        // hand it to the allied base owner first.
+        for (const auto& planet : s.planets) s.control->state.push_back(state(planet.id, planet.owner, 1));
+        s.movement->types[1].transport = true;
+        s.movement->contents = {{21, {{30, 1}}}}; // the hostile landing needs a company the transport can land
+        s.player_economy.emplace(); s.fiscal.emplace(); s.fiscal->credit_cap_per_planet = f(1000);
+        for (const auto& player : s.players) {
+            s.player_economy->players.push_back({player.player_id, f(100), f(1000), 0, 5});
+            s.fiscal->players.push_back({player.player_id, true, f(1)});
+        }
+        for (const auto& planet : s.planets) s.fiscal->planets.push_back({planet.id, f(1)});
+        enable_production(s);
+        auto& producer = s.production->planets[1];
+        producer.ground_level = 2;
+        producer.objects = {{40, 3, 2, f(20), gc::ProductionDomain::ground, gc::ProductionKind::structure},
+            {41, 3, 2, f(20), gc::ProductionDomain::ground, gc::ProductionKind::structure},
+            {42, 1, 1, f(10), gc::ProductionDomain::ground, gc::ProductionKind::unit}};
+        s.census = gc::PopulationCensus{{{1, f(1), 0}, {2, {}, 0}, {3, f(1), 0}},
+            {{1, 100, false, {}}, {2, 100, false, {}}, {3, 100, false, {}}},
+            {{20, 1, 1, 2, 10, false, false}, {21, 2, 1, 2, 10, false, false}, {22, 1, 2, 3, 11, false, false},
+             {30, 1, 1, 2, 21, false, false}, {40, 3, 2, 2, 2, false, false}, {41, 3, 2, 2, 2, false, false}, {42, 1, 1, 2, 2, false, false}}};
+        qualify_census_roles(*s.census);
+        auto world = eawr::testing::result_diagnostic::take(gc::GalacticSession::create(s));
+        expect(world.snapshot()->control()->planets[1].ground_base == gc::ControlBase{2, 2}, "the allied base starts at level 2");
+        expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::LandFleet{10, 2}})), "hostile uncontested landing submits");
+        const auto stepped = eawr::testing::result_diagnostic::take(world.step(executor));
+        for (const auto& event : world.snapshot()->events()) std::cout << "  hostile-landing event kind=" << static_cast<int>(event.kind)
+            << " reason=" << static_cast<int>(event.reason) << " value=" << event.value << std::endl;
+        { const auto probe = world.snapshot(); std::cout << "  hostile-landing state objects=" << probe->production()->planets[1].objects.size()
+            << " base_owner=" << probe->control()->planets[1].ground_base.owner << " base_level=" << probe->control()->planets[1].ground_base.level
+            << " row_level=" << probe->production()->planets[1].ground_level << " landed=" << probe->control()->planets[1].landed.size() << std::endl; }
+        const auto snapshot = world.snapshot();
+        expect(snapshot->production()->planets[1].objects == std::vector<gc::ProductionObject>{producer.objects[2]},
+            "the landing cleared both ground specials and kept the unit");
+        expect(snapshot->control()->planets[1].ground_base == gc::ControlBase{}
+            && snapshot->production()->planets[1].ground_level == 0,
+            "clearing the ground specials returns the ground base level to 0 on the control and production rows");
+        std::vector<std::string> hashes{stepped.state_hash.get()};
+        if (reference.empty()) reference = hashes; else expect(hashes == reference, "hostile landing level refresh is equal on 1/2/4/8 workers");
+    }
+}
 void first_capture_rewards() {
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -1073,6 +1332,60 @@ void first_capture_rewards() {
         }
         expect(windfalls == 1, "control continuation does not pay again");
         if (reference.empty()) reference = hashes; else expect(hashes == reference, "reward balances/history equal on 1/2/4/8 workers");
+    }
+}
+void signed_capture_rewards() {
+    struct Case { std::int64_t reward; std::int64_t credits; std::int64_t multiplier; std::int64_t expected; std::int64_t delta; const char* label; };
+    // RGC-202: the account floors at 0, a negative amount skips the positive-only multiplier, the add never skips.
+    const std::vector<Case> cases{
+        {-100, 300, 1, 200, -100, "RGC-202 reward -100 on balance 300"},
+        {-800, 300, 1, 0, -300, "RGC-202 reward -800 on balance 300 floors at zero"},
+        {-800, 300, 2, 0, -300, "RGC-202 AI difficulty multiplier never scales a debit"},
+        {-100, 300, 2, 200, -100, "RGC-202 reward -100 with multiplier 2 stays -100"},
+        {-800, 0, 1, 0, 0, "RGC-202 reward -800 on balance 0 changes nothing but is still paid out"},
+        {-1, 300, 1, 299, -1, "RGC-202 reward -1 removes one credit"},
+        {0, 300, 1, 300, 0, "RGC-200 absent or zero reward"},
+    };
+    for (const auto& test : cases) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            auto s = setup(); s.rules.fiscal_cycle_frames = 1000;
+            s.fleets[0].orbit = 2; s.fleets[1].owner = 1; s.fleets[1].members = {{22, 2}};
+            s.control->planets[2].type = s.control->planets[1].type;
+            for (const auto planet : {1U, 2U}) s.control->planets[planet].capture_reward = f(test.reward);
+            s.player_economy = gc::PlayerEconomySetup{{{1, f(test.credits), f(400), 0, 5}, {2, {}, f(400), 0, 5}, {3, {}, f(400), 0, 5}}};
+            s.fiscal = gc::FiscalSetup{f(400), {{1, true, f(test.multiplier)}, {2, true, f(1)}, {3, false, f(1)}}, {{1, {}}, {2, {}}, {3, {}}}};
+            auto created = gc::GalacticSession::create(s);
+            expect(bool(created), std::string("RGC-200 negative reward is accepted by create: ") + test.label);
+            if (!created) return;
+            auto world = std::move(created).value();
+            std::size_t windfalls = 0; Fixed delta{}, credits{};
+            world.set_credit_notification_handler([&](const auto& notice) {
+                ++windfalls; delta = notice.amount; credits = notice.credits;
+                return eawr::core::Result<void>::success();
+            });
+            expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::LandFleet{10, 2}}))
+                && bool(world.submit({{0, gc::SeatId{1}, 2}, gc::LandFleet{11, 3}})), "same-type signed captures submit");
+            const auto captured = world.step(executor).value();
+            expect(windfalls == 1, std::string("RGC-201 one history entry is consumed and paid once: ") + test.label);
+            expect(delta == f(test.delta) && credits == f(test.expected)
+                && captured.snapshot->player_economy()->players[0].credits == f(test.expected), test.label);
+            std::vector<std::string> hashes{captured.state_hash.get()};
+            // Checkpoint restore accepts the signed reward and the consumed history stops a second payout.
+            const auto identities = cp::game_identities(s);
+            auto game = eawr::campaign::GameSession::from_replay(world.record()).value();
+            (void)game.step(executor).value();
+            auto restored = cp::load_game_checkpoint(cp::save_game_checkpoint(game, identities).value(), identities, {}, executor).value();
+            for (int i = 0; i < 2; ++i) {
+                const auto tick = world.step(executor).value(); hashes.push_back(tick.state_hash.get());
+                (void)restored.session.step(executor).value();
+                expect(restored.session.galaxy().state_sha256() == tick.state_hash.get(),
+                    std::string("RGC-200/201 restored signed reward state matches live: ") + test.label);
+            }
+            expect(windfalls == 1, "RGC-201 later ticks never pay the consumed type again");
+            if (reference.empty()) reference = hashes; else expect(hashes == reference, "signed reward balances/history equal on 1/2/4/8 workers");
+        }
     }
 }
 void native_capture_notices() {
@@ -2411,6 +2724,7 @@ void adapter() {
     eawr::data::galactic::GalacticData data;
     data.constants = {{"Political_Control_Change_Time_Seconds", "", f(9)}, {"Max_Ground_Forces_On_Planet", "", f(12)}};
     for (const auto name : {"A", "B", "C"}) { eawr::data::galactic::Planet p; p.name = name; p.political_control = f(2); p.planet_capture_bonus_reward = 333; data.planets.push_back(p); }
+    data.planets[0].planet_capture_bonus_reward = -800; data.planets[2].planet_capture_bonus_reward.reset();
     data.planets[1].planet_retains_residual_influence = false;
     data.planets[2].planet_retains_residual_influence = true;
     eawr::data::galactic::TradeRoute route; route.name = "Route"; route.political_control_gain = f(2); data.trade_routes = {route};
@@ -2424,6 +2738,8 @@ void adapter() {
     auto bound = eawr::campaign::bind_control_data(data, types, presence, objects, planets, routes);
     expect(bound && bound.value().change_seconds == f(9) && bound.value().max_ground_forces == 12 && bound.value().planets[1].capture_reward == f(333)
         && bound.value().routes[0].political_gain == f(2), "control rules and rewards follow authored values, never stock literals");
+    expect(bound && bound.value().planets[0].capture_reward == f(-800) && bound.value().planets[2].capture_reward == Fixed{},
+        "RGC-200 negative capture reward binds as authored and an absent tag binds as 0");
     expect(bound && bound.value().planets[0].retains_residual && !bound.value().planets[1].retains_residual
         && bound.value().planets[2].retains_residual, "residual influence uses sourced true default and explicit authored overrides");
     expect(bound && bound.value().ability_types.size() == 1 && bound.value().ability_types[0].abilities.size() == 2
@@ -2489,7 +2805,7 @@ int main(int argc, const char* const argv[]) {
             capture_build_and_ground_views(); return galactic_test::failures == 0 ? 0 : 1;
         }
         authored_mixed_surface_owners(); native_invasion_cash_reconciliation(); native_finish_orbit_reconciliation(); native_production_reconciliation(); native_force_reconciliation(); wide_galactic_lua_handles(); independent_native_barrier();
-        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); capture_structure_cleanup(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
+        native_control_reconciliation(); native_action_barrier_control(); capture_build_and_ground_views(); surface_roster_paths(); landfleet_observer_roster(); captured_planet_observer_facts(); payload_ground_capability(); initial_control_provider(); control_and_outcome_extensions(); landed_census_checkpoint(); categories(); alignment_strength(); transitions(); replay_checkpoint_and_hooks(); political_fiscal_deadline(); station_production_presence(); first_capture_rewards(); signed_capture_rewards(); capture_structure_cleanup(); ground_structure_base_level(); hostile_landing_refreshes_ground_base_level(); tactical_built_persistence(); native_capture_notices(); landing_admission_and_result(); child_battle_control(); adapter();
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures == 0 ? 0 : 1;
 }

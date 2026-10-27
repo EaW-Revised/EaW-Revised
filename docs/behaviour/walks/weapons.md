@@ -159,6 +159,18 @@ ordinary ions. Their temporary engine disable follows EN-08 and EN-09.
 - **WWP-22** (debug build, EWW-03) The muzzle: with `Randomize_Between_Fire_Bones`, a uniform point
   in the box between the two fire bones (three synchronized draws); else `Fire_Bone_A` when there
   is no second bone; else a synchronized 50 % draw between the two (space-weapon-fire W-06).
+  The hardpoint type initializer defaults the tag to **true**, including when XML omits it
+  (debug build, hardpoint type initialization role, rechecked 2026-10-24). The three inclusive
+  15-bit fractions are drawn in X/Y/Z order, independently between the coordinate minima and
+  maxima of the current world bone transforms. Equal bounds still consume a draw. This is a
+  world-coordinate box, so both endpoint poses and the parent's world transform precede sampling.
+  Each pulse's attempt samples afresh after the midpoint range gate and before lead/pointability;
+  a later rejection still consumes its draws. Turret readiness is an earlier gate; admitted
+  turret and fixed hardpoints share this selection. Object-weapon muzzle lists remain WWP-47.
+  The randomized retail branch asserts both bone indices exist. *Project:* an unavailable second
+  endpoint uses A with no draw, retaining the loader's existing missing-bone fallback. The remake
+  uses P-02's existing per-weapon key and fixed-point fraction arithmetic; the explicit-false
+  endpoint branch keeps its existing draw order.
 - **WWP-23** (debug build, EWW-03; space-weapon-fire W-10) The aim point is led from the muzzle at
   the projectile's `Max_Speed`.
 - **WWP-24** (debug build, EWW-03; W-07, W-11, W-12) A led point of zero length, or one the fixed
@@ -417,7 +429,7 @@ Ours: `src/sim/tactical/combat_fire.cpp` and `src/sim/tactical/combat_aim.cpp` (
 | WWP-19 | a squadron resolves to a random live craft per hardpoint attempt (`random_member`, a draw keyed by seed, frame, unit and slot), then the R-10 search on it | **same** (G-04 resolved) |
 | WWP-20 | planar range plus the target radius | same for M2; minimum range missing (not in M2; G-08) |
 | WWP-21 | shared type-footprint conversion (AV-05), including no-layer types and ordinary space squadron containers | same for M2; specialized formation-team geometry has no ordinary space consumer |
-| WWP-22 | 50 % draw | same for M2 (no `Randomize_Between_Fire_Bones`; G-08) |
+| WWP-22 | true-default world box, X/Y/Z draws; explicit false keeps the 50 % endpoint draw | applied; unavailable B uses A without a draw (project fallback) |
 | WWP-23 to WWP-25 | `lead`, `pointable`, `scatter` | same |
 | WWP-26 | the projectile's damage only | **differs (G-02)** |
 | WWP-27 | range plus target radius, non-melee craft target's container radius, and height | same |
@@ -461,7 +473,9 @@ Counts, by rule (62 simulation rules; WWP-40 is presentation): **same 47**, **di
 | G-05 fighter targeting-state fire gate (legacy EAWR-712) | WWP-43 | The unit's own weapon fires only in the "okay to attack" targeting state and tests no range; ours tests the planar attack distance. The state's inside (walk 1/2) decides when a fighter may fire; the retail dogfight outcome comparison shot log shows retail fighters never firing beyond 424 units. | M (after walk 1/2) |
 | G-06 height-adjusted target positions (legacy EAWR-713) | WWP-16, WWP-19, WWP-64, WWP-72 | **Implemented** for `SpaceUnit` and `SpaceStructure`: launch fallbacks, nearest-hardpoint reference and missile steering use `Ranged_Target_Z_Adjust` (Nebulon-B +35; resource container +30). | S |
 | G-07 ion weapons, energy drain and stun (legacy EAWR-561) | WWP-02 | A stunned, disabled or in-limbo parent's hardpoints freeze their recharge (ion energy drain and hardpoint damage (legacy EAWR-561)). | XS in ion weapons, energy drain and stun (legacy EAWR-561) |
-| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 22 (random box), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
+| G-08 unused M2 weapon-rule coverage (legacy EAWR-714) | WWP-04, 09, 14, 17, 20 (minimum), 28, 53 (`Fires_Forward` yes), 60, 61, 68 (lifetime) | Rules FoC reads that no M2 object authors. | M (nice-to-have) |
+
+WWP-22 is no longer part of G-08: omitted tags enable the random box by default in stock space weapons.
 
 ### XML tags this subsystem reads
 

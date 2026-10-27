@@ -1,5 +1,6 @@
 #pragma once
 #include "encoding.hpp"
+#include "paused_admission.hpp"
 #include "native_income_projection.hpp"
 #include "native_population_projection.hpp"
 
@@ -99,6 +100,8 @@ public:
     mutable AbilityWork ability_work;
     void touch_abilities() { dirty[static_cast<std::size_t>(StateSection::ability_host)] = true; ++ability_input_generation; }
     AbilityConsumptionHandler ability_consumption_handler;
+    GroundAbilityStoryHandler ground_ability_story_handler;
+    EntityId consuming_spy{}; // synchronous consumption guard; never survives a command barrier
     CorruptionMissionHandler corruption_mission_handler;
     CorruptionCompletionHandler corruption_completion_handler;
     CorruptionResultHandler corruption_result_handler;
@@ -160,6 +163,8 @@ public:
     void prepare_neutralization(const GameCommand&, const CensusObject&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_neutralization(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     void prepare_theft(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, std::uint64_t, std::vector<GalacticEvent>&);
+    void execute_spy(const GameCommand&, const CensusObject&, const GalacticAbilityProfile&, PlanetId, std::uint64_t, std::vector<GalacticEvent>&);
+    void apply_observer(const GameCommand&, std::uint64_t, std::vector<GalacticEvent>&);
     void execute_theft(const GameCommand&, const CensusObject&, const PreparedAbility&, std::uint64_t, std::vector<GalacticEvent>&);
     // Sparse expiry calendar; reconstructed from the saved ledger at creation.
     std::set<std::tuple<std::uint64_t, PlayerId, EntityId>> technology_price_expiry;
@@ -240,6 +245,11 @@ public:
     [[nodiscard]] bool raid_qualified(FleetId, PlanetId) const;
     void refresh_fleet_combat_skip(FleetId);
     void notify_fleet_approach(FleetId, PlanetId, bool notify, std::size_t preceding_events);
+    // WGM-150: departure accounting only; adds to the left planet's accrued piracy income.
+    void accrue_departure_piracy(FleetId, PlayerId owner, PlanetId source, const std::vector<FleetMember>& departing);
+    // WGM-84/85: (planet owner, orbital occupant) of a path planet, and the atomic debit/credit of a paid path.
+    [[nodiscard]] std::pair<PlayerId, PlayerId> bribe_planet_state(PlanetId) const;
+    [[nodiscard]] GalacticRejectReason settle_movement_bribe(PlayerId payer, const std::vector<std::pair<PlayerId, math::Fixed>>& recipients, math::Fixed total);
     void refresh_containing_fleet_combat_skip(EntityId);
     std::vector<PopulationTotal> population;
     bool population_stale{true};
@@ -293,6 +303,8 @@ public:
     void refresh_credit_caps();
     // `only` restricts removal to one domain; `removed` receives the removed identities in stored order.
     void clear_control_structures(std::size_t planet_index, std::optional<ProductionDomain> only = {}, std::vector<EntityId>* removed = nullptr);
+    // WGS-93 / WGM-188: the ground base level follows the live ground special count (capped at 5) whenever a special joins or leaves.
+    void refresh_ground_base_level(std::size_t planet_index);
     std::shared_ptr<const MovementSetup> movement_inputs; // shared by immutable snapshots
     std::optional<PlanetGraph> graph;
     std::size_t applied_outcomes{};
@@ -370,6 +382,8 @@ public:
         FailureFlag& operator=(bool value_to_store) noexcept { value.store(value_to_store, std::memory_order_relaxed); return *this; }
     } failed;
     bool prebattle_autosave_window{}; // WGS-99/142: owner-derived per step, never saved
+    bool launch_leg{}; // a native surface launch is running its fleet-admission leg: policy kind surface_deploy
+    bool system_hold{}; // WGM-07: derived from campaign conflict/summary ownership; native journals retain the effective gate
 
     // The seat table as state: whether each seat is active (ascending seat ID).
     std::vector<Seat> seats;
@@ -446,7 +460,8 @@ public:
         std::vector<GalacticEvent>& events, const bool pending_local_conflict);
 
     void execute_fleet(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
-        bool pending_local_conflict, bool production_placement = false);
+        bool pending_local_conflict, bool production_placement = false,
+        session_detail::PausedKind kind = session_detail::PausedKind::fleet_management);
     [[nodiscard]] core::Result<void> service_control(const PartitionExecutor& executor,
         std::uint64_t tick, std::vector<GalacticEvent>& events, GalacticTick::Work& work);
     [[nodiscard]] core::Result<void> initialize_control();
@@ -467,7 +482,7 @@ public:
     void execute_launch(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
         bool pending_local_conflict);
     void execute_launch_fleet(const GameCommand& command, std::uint64_t tick, std::vector<GalacticEvent>& events,
-        bool pending_local_conflict);
+        bool pending_local_conflict, bool land_on_arrival = false);
     MovementAccessProvider movement_access_provider;
     std::uint64_t movement_access_generation{std::numeric_limits<std::uint64_t>::max()};
     [[nodiscard]] core::Result<void> service_movement(std::span<const session_detail::GatheredObject> gathered,

@@ -433,7 +433,7 @@ struct TacticalHud::State final {
     EawrHudButton* fast_forward_button{};
     EawrBattleOverlay* overlay{};
     TacticalHud::TimeHandlers time_handlers;
-    TacticalHud::ReplayWriter replay_writer;
+    TacticalHud::ReplayWriter replay_writer, session_replay_writer;
     std::function<void(std::string_view)> order_handler;
     std::map<std::string, EawrHudButton*, std::less<>> order_buttons;
     EawrHudButton* special_button{};

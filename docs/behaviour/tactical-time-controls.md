@@ -20,8 +20,8 @@
   player against network multiplayer).
 - Output: how many logical frames run per wall-clock second, or none while paused. One logical
   frame is always 1/30 s of game time (TR-01): nothing here changes what a tick does.
-- Retained state: the time state (play, paused or fast forward) and the speed setting. Neither
-  is simulation state; neither enters a command, a replay or a state hash.
+- Retained state in single player: the time state (play, paused or fast forward) and the speed setting. Neither
+  is simulation state; neither enters a command, a replay or a state hash. Multiplayer uses the agreed project controls below.
 
 ## Rules
 
@@ -79,7 +79,7 @@
 - Audio pause and resume (TM-13) waits for the battle audio (battle audio foundation).
 - The camera's smoothing snap while paused (TM-11): the remake's camera keeps easing its distance
   while paused.
-- Multiplayer refusal (TM-04) is modelled only for the galactic fast-forward factor (see below); the tactical clock has no network refusal.
+- Multiplayer pause deliberately extends TM-04 as described by TP-MP01..04 below; fast forward remains unavailable.
 
 ## Galactic fast forward
 
@@ -99,3 +99,23 @@ and drops the missed wall time beyond five overdue ticks instead of spiralling.
 - With more than one active human seat the clock controls stay disabled in the HUD (TM-04), and the sim
   refuses the fast-forward factor from any seat (`not_authorized`), so a hand-made command cannot bypass
   the button. Other speed values are not refused in multiplayer.
+
+
+## Multiplayer pause: owner-requested project extension
+
+Retail MP-33 and TM-04 remain evidence of network pause refusal. The owner requested a working pause in
+multiplayer skirmish and Galactic Conquest on 2026-10-21. These project rules intentionally extend that behaviour.
+
+| Rule | Project behaviour |
+|---|---|
+| TP-MP01 | Explicit pause/resume is a canonical sealed human-seat input at an agreed session boundary. Session ticks continue; actual tactical world ticks and galactic frames stop. Rendering, camera/input, transport polling, keepalives, relay renewal, hash votes and real loss detection continue. No pause flag disables NET-1507 or peer-loss deadlines. Resume rebases pacing, without making up frozen world time. |
+| TP-MP02 | One boolean player hold is shared by all active humans; AI, script, spectator and departed seats cannot request it. Redundant pause preserves the original actor. Any active human may resume once, without a quota. GC single-player nesting is unchanged, and a child/summary-owned galaxy hold survives player resume. During a GC child the tactical hold affects that child; the galaxy is already frozen. A disconnected actor's hold remains until another active human resumes; the last human's agreed departure clears the obsolete player hold for AI continuation. |
+| TP-MP03 | At most two effective pause starts per human seat in a rolling 1,350 session-tick window, expiring at age >=1,350. This is 45 nominal session seconds even while world time is frozen; a network admission stall does not advance the budget. Resume and redundant pause cost no slot. Existing GC shared speed changes continue to use this same budget. The authoritative limiter runs in canonical execution order and is hashed/reconstructed with the player hold. This deterministic project budget differs from MP-06's retail local wall-clock throttle. |
+| TP-MP04 | Tactical orders admitted during pause wait in canonical order for the next actual world tick, and acquire that world tick when installed. The named `eawr-match-pause-v1` sealed input and `eawr-match-session-replay-v1` journal preserve control-only session boundaries, actor, refused attempts, queued orders and world-tick mapping. The ordinary tactical replay records world commands; its `.session` companion is saved beside it by CLI output and Save Replay. Playback/recovery through the adapter reconstructs the session without wall waits. Missing/older journal versions are explicitly refused; the world replay alone remains a world-only recording. Journal size is bounded to 64 MiB and an exhausted recording is reported as unavailable. |
+| TP-MP05 | The existing tactical pause shell shows persistent `Paused by <display name>` and Resume Game. The GC galaxy has the same persistent actor notice. The caption changes only from agreed state; pending requests have feedback. Recovery/loading/desync notices take precedence. Quit remains available. Fast forward is not enabled by this change. |
+
+The two/three-peer production-adapter contracts cover equal session digests, a ten-minute hold with frozen world
+state, queued orders, another human's resume, replay reconstruction while paused and after resume, quota edges,
+and true link loss while paused on 1/2/4/8 workers. The watchdog contract models ten minutes of healthy reliable
+traffic followed by real silence. The GC contract covers concurrent human pauses and a retained child; the GPU
+case checks the actor caption and the authored Resume control.

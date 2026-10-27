@@ -1,3 +1,6 @@
+import configparser
+import fnmatch
+import json
 import importlib.util
 import pathlib
 import subprocess
@@ -15,6 +18,48 @@ SPEC.loader.exec_module(MODULE)
 
 
 class ExportPackageGuardTests(unittest.TestCase):
+    def test_pck_allowlist_covers_the_presets_public_config_filters(self):
+        presets = configparser.ConfigParser(interpolation=None)
+        presets.read(ROOT / "apps/viewer/project/export_presets.cfg")
+        tracked = subprocess.check_output(
+            ["git", "ls-files", "--", "apps/viewer/project/config"], cwd=ROOT, text=True
+        ).splitlines()
+        config_entries = {path.removeprefix("apps/viewer/project/") for path in tracked}
+        for section in presets.sections():
+            if not presets.has_option(section, "include_filter"):
+                continue
+            filters = json.loads(presets[section]["include_filter"]).split(",")
+            included = {name for name in config_entries
+                        if any(fnmatch.fnmatchcase(name, pattern) for pattern in filters)}
+            self.assertEqual(included, {name for name in MODULE.REQUIRED_PCK_ENTRIES
+                                        if name.startswith("config/")})
+
+    def valid_pck_entries(self):
+        return sorted(MODULE.REQUIRED_PCK_ENTRIES) + [".godot/exported/test-main.scn"]
+
+    def test_public_config_package_passes_the_exact_allowlist(self):
+        MODULE.validate_pck_entries(self.valid_pck_entries())
+
+    def test_pck_rejects_missing_extra_and_duplicate_entries(self):
+        entries = self.valid_pck_entries()
+        for invalid in (entries[1:], entries + ["config/private.json"], entries + [entries[0]]):
+            with self.subTest(entries=invalid), self.assertRaises(ValueError):
+                MODULE.validate_pck_entries(invalid)
+
+    def test_forbidden_content_stays_rejected_even_if_allowlisted(self):
+        for suffix in MODULE.FORBIDDEN_PCK_SUFFIXES:
+            forbidden = "config/private" + suffix
+            with self.subTest(suffix=suffix), patch.object(
+                MODULE, "REQUIRED_PCK_ENTRIES", MODULE.REQUIRED_PCK_ENTRIES | {forbidden}
+            ), self.assertRaisesRegex(ValueError, "forbidden generated/private"):
+                MODULE.validate_pck_entries(self.valid_pck_entries())
+
+    def test_pck_requires_exactly_one_exported_main_scene(self):
+        entries = self.valid_pck_entries()
+        for invalid in (entries[:-1], entries + [".godot/exported/other-main.scn"]):
+            with self.assertRaisesRegex(ValueError, "expected one exported main scene"):
+                MODULE.validate_pck_entries(invalid)
+
     def test_pinned_engine_identity_is_returned_from_probe(self):
         completed = subprocess.CompletedProcess(
             [str(MODULE_PATH), "--version"],

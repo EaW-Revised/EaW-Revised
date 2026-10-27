@@ -75,7 +75,7 @@ class SpaceSourceCases:
         self.assertIn(".live_clock = state.options.interactive", mode)
         self.assertIn(".real_time_clock = state.options.interactive", mode)
         self.assertIn('--eawr-map-idle-offset requires --eawr-populate', mode)
-        self.assertIn("declared_idle(scene::space_object_tags(*object).idle)", population)
+        self.assertIn("scene::space_object_tags(*object).idle)", population)
         self.assertIn("placement_start_frame(placement, clips_[clip]->playable_frames())", population)
         self.assertIn("animation::sample_idle(*clips_[idle.clip], idle.playback", population)
         self.assertIn("animation::idle_start_frame(", glue)

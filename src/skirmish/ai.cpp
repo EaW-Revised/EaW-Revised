@@ -3,6 +3,7 @@
 #include "eawr/skirmish/roster_gate.hpp"
 
 #include "eawr/script/numeric/q24_boundary.hpp"
+#include "../script/foc/ai_equations.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -37,6 +38,7 @@ numeric_value lua_float(std::uint32_t bits) {
 script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inputs, const units::UnitTables& tables) {
     script::foc::AiSetup setup;
     setup.seed = start.setup.seed;
+    setup.content.catalog_types = inputs.catalog_types;
     setup.allow_special_weapons = start.match.allow_superweapons;
     setup.perception.campaign_game = false; // SAE-01
     for (const auto& category : tables.categories) setup.content.categories.emplace(upper(category.name), category.value);
@@ -119,7 +121,7 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         }
         if (unit.movement.max_speed) type.max_speed = lua(*unit.movement.max_speed);
         if (unit.footprint.custom_soft_radius) type.soft_radius = lua(*unit.footprint.custom_soft_radius);
-        if (unit.space_fow_reveal_range) type.reveal_range = lua(*unit.space_fow_reveal_range);
+        if (unit.fow_reveal_range) type.reveal_range = lua(*unit.fow_reveal_range);
         if (const auto box = placement_box(unit)) {
             // WTA-28: the planar half extents of the type's bounds (the PL-02 placement box).
             type.bounds_half_x = lua(sim::math::Fixed::from_raw((box->max_x.raw() - box->min_x.raw()) / 2));
@@ -131,8 +133,7 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
         if (!unit.members.empty()) type.squadron_unit = type_id(unit.members.front().craft);
         // PL-13: a type with squadron units takes the union of its craft's categories and
         // properties and the sum of their combat power at load, in place of its own tags.
-        // PG-08's squad-size scale is 1 for every FoC squadron (at most 7 craft, squad size
-        // 10 unless set, and 6 or 8 where set), so it is not applied.
+        // PG-08: the tactical metric scales only when the first authored craft creates teams.
         if (!unit.members.empty()) {
             type.category_bits = 0;
             type.property_bits = 0;
@@ -143,6 +144,13 @@ script::foc::AiSetup ai_setup(const SkirmishStart& start, const StartInputs& inp
                 type.category_bits |= craft.category_bits;
                 type.property_bits |= craft.property_bits;
                 if (craft.ai_combat_power) type.combat_power = type.combat_power + lua(*craft.ai_combat_power);
+            }
+            const auto first = unit.members.front().craft_index;
+            if (first < tables.units.size() && tables.units[first].creates_team
+                && unit.max_squad_size < unit.members.size()) {
+                const auto team_power_scale = script::foc::ai::to_single(numeric_value(unit.max_squad_size)
+                    / numeric_value(unit.members.size()));
+                type.combat_power = script::foc::ai::to_single(type.combat_power * team_power_scale);
             }
         }
         // PG-02: each weapon hardpoint carries its projectile's share of the type's power (A-06).

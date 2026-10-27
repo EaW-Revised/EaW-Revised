@@ -22,7 +22,7 @@ namespace {
         sim::detail::append_i64(bytes, value);
     sim::detail::append_i64(bytes, match.win_float.raw());
     text(match.win_condition);
-    text(match.space_win_condition);
+    text(match.tactical_win_condition);
     sim::detail::append_u32(bytes, setup.victory_condition);
     sim::detail::append_u32(bytes, static_cast<std::uint32_t>(setup.slots.size()));
     for (const auto& slot : setup.slots) {
@@ -162,6 +162,25 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     for (const auto& unit : replay.setup.units) {
         if (!unit.garrison_enabled) disabled_garrisons.push_back(unit.entity_id);
     }
+    // The total native header is wide; every other variable-size body still has a u16 length.
+    const std::array narrow_bodies{
+        std::pair{replay_extension_skirmish_setup, metadata.size()},
+        std::pair{replay_extension_garrison_disabled, 8U * disabled_garrisons.size()},
+        std::pair{replay_extension_free_garrison, garrison_size},
+        std::pair{replay_extension_match_identity, identity.size()},
+        std::pair{replay_extension_multiplayer_departure,
+            replay.setup.departure_policy ? 8U + 4U * replay.setup.departure_policy->humans.size() : std::size_t{}},
+        std::pair{replay_extension_beacon_rules, 8U + 16U * replay.setup.beacon_rules.size()},
+        std::pair{replay_extension_campaign, campaign.size()},
+        std::pair{replay_extension_carriers, carriers.size()},
+        std::pair{replay_extension_cinematic_seats, 8U + 8U * replay.setup.cinematic_seats.size()},
+        std::pair{replay_extension_attract_pool,
+            replay.setup.attract_pool ? 8U + 8U * replay.setup.attract_pool->types.size() : std::size_t{}}};
+    for (const auto& [tag, body_size] : narrow_bodies) {
+        if (body_size > std::numeric_limits<std::uint16_t>::max())
+            return fail<Bytes>(diagnostic_codes::resource_limit, "replay extension " + std::to_string(tag)
+                + " body size " + std::to_string(body_size) + " exceeds the 65535-byte limit", {});
+    }
     const bool extensions = replay.setup.match_policy.has_value() || replay.setup.skirmish.has_value()
         || !disabled_garrisons.empty() || replay.setup.queue_identities || garrison_size != 0
         || replay.setup.first_free_entity_id.has_value() || replay.setup.campaign.has_value() || !carriers.empty()
@@ -169,7 +188,8 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         || replay.setup.departure_policy.has_value() || !replay.setup.beacon_rules.empty()
         || replay.setup.attract_pool.has_value() || replay.setup.native_scene.has_value()
         || !replay.object_turns.empty() || replay.setup.domain != BattleDomain::space;
-    const auto header_size = replay_header_size + (extensions ? 4U : 0U)
+    const bool wide_header = replay.setup.native_scene.has_value();
+    const auto header_size = replay_header_size + (wide_header ? 2U : 0U) + (extensions ? 4U : 0U)
         + (replay.setup.match_policy ? 8U : 0U) + (replay.setup.skirmish ? 4U + metadata.size() : 0U)
         + (disabled_garrisons.empty() ? 0U : 4U + 8U * disabled_garrisons.size())
         + (replay.setup.queue_identities ? 8U : 0U) + (garrison_size == 0 ? 0U : 4U + garrison_size)
@@ -180,11 +200,12 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
         + (replay.setup.departure_policy ? 12U + 4U * replay.setup.departure_policy->humans.size() : 0U)
         + (replay.setup.beacon_rules.empty() ? 0U : 12U + 16U * replay.setup.beacon_rules.size())
         + (replay.setup.attract_pool ? 12U + 8U * replay.setup.attract_pool->types.size() : 0U)
-        + (native.empty() ? 0U : 4U + native.size())
+        + (native.empty() ? 0U : 6U + native.size())
         + (replay.object_turns.empty() ? 0U : 12U)
         + (replay.setup.domain == BattleDomain::space ? 0U : 12U);
-    if (header_size > std::numeric_limits<std::uint16_t>::max()) {
-        return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header exceeds the 65535-byte limit", {});
+    if (header_size > (wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max())) {
+        return fail<Bytes>(diagnostic_codes::resource_limit, "encoded replay header size " + std::to_string(header_size) + " exceeds the "
+            + std::to_string(wide_header ? replay_max_bytes : std::numeric_limits<std::uint16_t>::max()) + "-byte limit", {});
     }
     std::size_t size = header_size + replay.setup.players.size() * detail::player_record_size
         + replay.setup.units.size() * detail::unit_record_size;
@@ -211,11 +232,14 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     Bytes bytes;
     bytes.reserve(size);
     bytes.insert(bytes.end(), replay_magic.begin(), replay_magic.end());
-    const auto format = extensions
+    const auto format = wide_header
+        ? (squadrons.empty() ? replay_format_version_native : replay_format_version_squadron_native)
+        : extensions
         ? (squadrons.empty() ? replay_format_version_extensions : replay_format_version_squadron_extensions)
         : (squadrons.empty() ? replay_format_version : replay_format_version_squadrons);
     sim::detail::append_u16(bytes, format);
-    sim::detail::append_u16(bytes, static_cast<std::uint16_t>(header_size));
+    if (wide_header) sim::detail::append_u32(bytes, static_cast<std::uint32_t>(header_size));
+    else sim::detail::append_u16(bytes, static_cast<std::uint16_t>(header_size));
     sim::detail::append_u32(bytes, tactical_rules_version);
     sim::detail::append_u32(bytes, math_version);
     sim::detail::append_u32(bytes, fractional_bits);
@@ -330,7 +354,7 @@ core::Result<std::vector<std::uint8_t>> write_replay(const TacticalReplay& repla
     }
     if (!native.empty()) {
         sim::detail::append_u16(bytes, replay_extension_native_scene);
-        sim::detail::append_u16(bytes, static_cast<std::uint16_t>(native.size()));
+        sim::detail::append_u32(bytes, static_cast<std::uint32_t>(native.size()));
         bytes.insert(bytes.end(), native.begin(), native.end());
     }
     if (!replay.object_turns.empty()) {

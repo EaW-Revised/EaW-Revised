@@ -3,6 +3,7 @@
 // and PE-xx): the threat grid, the goal targets and the evaluation of perceptual equations.
 
 #include "ai_engine.hpp"
+#include "ai_script_evaluators.hpp"
 #include "tactical_ai_world.hpp"
 #include "eawr/script/numeric/decimal.hpp"
 
@@ -22,7 +23,7 @@ std::atomic<Engine::InputObserver> input_observer{};
 template <typename T> T clamp_to(T value, T low, T high) { return value < low ? low : (high < value ? high : value); }
 
 // PG-08, the tactical combat power metric: the company type's AI_Combat_Power, for a squadron
-// its craft's sum (PL-13); the squad-size scale is 1 for every FoC squadron.
+// its craft's sum (PL-13), with the guarded authored team-size scale bound at load (PG-08).
 Real power_metric(const AiType* type) { return type == nullptr ? Real{} : type->combat_power; }
 
 // The company type of an object (PG-08): a squadron container's squadron type, else its own.
@@ -1205,10 +1206,24 @@ struct TacticalWorld::Evaluator final : LookupResolver {
         return Real{}; // the fixture's hardpoint types are not shield generators (fidelity list)
     }
 
-    // PE-29 evaluator scripts: GetDistanceToNearestSpaceField has no fields to find on the map.
-    std::optional<Real> script(const std::string& name, const Lookup&, const std::vector<Binding>&) {
-        if (name == "GETDISTANCETONEARESTSPACEFIELD") return Real::from_repr(0x43abc16d60000000ULL);
-        return std::nullopt;
+    // WGA-453, RDP-E09/E10: Script_<Module>.Evaluate runs the module the mounted corpus supplies in
+    // Data/Scripts/Evaluators/. A missing module, an error or a non-numeric result fails the lookup.
+    std::optional<Real> script(const std::string& name, const Lookup& lookup, const std::vector<Binding>& bindings) {
+        const auto note = [&](const std::string& text) {
+            if (context.proposal_trace) *context.proposal_trace += " {" + text + "}";
+        };
+        if (lookup.tokens.size() != 2 || lookup.tokens[1] != "EVALUATE") {
+            note("Script_ lookups are Script_<Module>.Evaluate");
+            return std::nullopt;
+        }
+        auto* evaluators = engine.script_evaluators();
+        if (evaluators == nullptr) {
+            note("no evaluator modules are hosted");
+            return std::nullopt;
+        }
+        auto outcome = evaluators->evaluate(name, context.player, context.target, bindings);
+        if (!outcome.value) note(outcome.note);
+        return outcome.value;
     }
 };
 

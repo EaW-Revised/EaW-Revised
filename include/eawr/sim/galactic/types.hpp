@@ -134,6 +134,7 @@ struct Route {
 struct FleetMember {
     EntityId id{};
     TypeId type{};
+    bool pathfinder{}; // WGT-06/40: explicit player selection; never automatic
     friend constexpr bool operator==(const FleetMember&, const FleetMember&) noexcept = default;
 };
 
@@ -156,6 +157,7 @@ struct FleetMotion {
     math::Vec3 position{}, facing{};
     std::optional<FleetTransit> transit;
     std::uint64_t orbit_entry{}; // runtime orbit-list order, retained while enroute
+    bool land_on_arrival{}; // GGS-06: retained independently of a refused movement leg
     friend bool operator==(const FleetMotion&, const FleetMotion&) = default;
 };
 struct Fleet {
@@ -181,6 +183,7 @@ struct FleetTypeTraits {
     TypeId type{};
     bool transport{}, can_hyperspace_without_ability{}; // WGM-83, validated original types
     bool requires_live_children{}; // flat members cannot stand in for live container contents
+    bool space_pathfinder{true}; // space representation or transport, supplied by the content provider
     friend bool operator==(const FleetTypeTraits&, const FleetTypeTraits&) = default;
 };
 // Typed replayable inputs for WGM-07's mode admission. Later speech/conflict services own
@@ -189,10 +192,25 @@ struct FleetManagementGates {
     bool queued_campaign_conflict{}, active_speech{};
     friend bool operator==(const FleetManagementGates&, const FleetManagementGates&) = default;
 };
+// WGM-07: retail refuses fleet management while the galaxy is paused. The project admits the listed
+// command kinds during a player pause behind this typed, replayed policy (a deviation from retail).
+// System holds (pending conflict, battle summary, child battle) and invasion from orbit never admit,
+// whatever the policy says.
+enum class PausedAdmission : std::uint8_t { refuse = 0, admit = 1 };
+struct PausePolicy {
+    PausedAdmission fleet_management{}; // create/merge/add/remove/transfer members, orbit slot
+    PausedAdmission surface_deploy{}; // lift to orbit, land to surface
+    PausedAdmission fleet_move{}; // orders to other systems: the transit is set now, locomotion waits for the resume
+    [[nodiscard]] static constexpr PausePolicy admit_all() noexcept {
+        return {PausedAdmission::admit, PausedAdmission::admit, PausedAdmission::admit};
+    }
+    friend bool operator==(const PausePolicy&, const PausePolicy&) = default;
+};
 struct FleetControlSetup {
     std::vector<DetachedUnit> detached_units; // ascending member ID
     std::vector<FleetTypeTraits> types; // ascending supplied TypeId
     FleetManagementGates gates;
+    PausePolicy pause; // the sim default is retail (all refuse); the campaign builder chooses
     friend bool operator==(const FleetControlSetup&, const FleetControlSetup&) = default;
 };
 
@@ -204,6 +222,8 @@ struct MovementType {
     std::uint32_t squadron_capacity{};
     bool hyperspace_eligible{}, squadron{}, fleet_container{}, skips_combat{};
     bool transport{}; // WGM-26/38: own travel speed, contained troops for combat skipping
+    math::Fixed piracy_value{}; // WGM-150: original-type Piracy_Value_Credits of a leaf member
+    math::Fixed cheap_bribe{}, expensive_bribe{}; // WGM-85: original-type Cheap/Expensive_Bribe_Cost of a leaf member
     friend bool operator==(const MovementType&, const MovementType&) = default;
 };
 struct MovementContents {
@@ -215,6 +235,7 @@ struct MovementPlayer {
     PlayerId player{};
     math::Fixed hyperspace_factor{}, corruption_bonus{};
     bool benefits_from_corruption{};
+    bool easily_bribed{}; // WGM-85: selects Cheap (set) or Expensive bribe cost when this player owns the destination
     friend bool operator==(const MovementPlayer&, const MovementPlayer&) = default;
 };
 struct MovementPlanet {
@@ -363,12 +384,19 @@ struct PlanetControl {
     math::Fixed current{}, target{};
     bool contested{}, blockaded{};
     math::Fixed political_income{}; // WGEP-08/75 retained source; neutral/nonpositive does not remove it
+    std::optional<math::Fixed> alignment_multiplier{}; // CGS-17: retained until a changed nondegrading target edits it
     friend bool operator==(const PlanetControl&, const PlanetControl&) = default;
 };
 struct CapturedPlanetType {
     PlayerId player{};
     TypeId type{};
     friend bool operator==(const CapturedPlanetType&, const CapturedPlanetType&) = default;
+};
+struct ControlAlignmentModifier {
+    PlanetId planet{};
+    PlayerId player{};
+    math::Fixed multiplier{}; // CGS-16: raw 1 - strength*bonus or 1 + strength*penalty
+    friend bool operator==(const ControlAlignmentModifier&, const ControlAlignmentModifier&) = default;
 };
 struct PoliticalControlSetup {
     math::Fixed change_seconds{}; // authored Political_Control_Change_Time_Seconds, WGM-73
@@ -384,6 +412,7 @@ struct PoliticalControlSetup {
     std::vector<GroundCapabilityType> ground_capability_types; // empty retains legacy supplied predicates
     std::vector<ControlAbilityType> ability_types; // current-type profiles, ascending type
     std::vector<ControlAbilitySource> ability_sources; // physical presence, ascending planet/actor/ability
+    std::vector<ControlAlignmentModifier> alignment_modifiers; // sparse, ascending planet/player
     friend bool operator==(const PoliticalControlSetup&, const PoliticalControlSetup&) = default;
 };
 // Completed control commits; consumers own victory/story, economy, production,
@@ -928,7 +957,7 @@ struct EconomyCorruptionState {
 
 // GFS-C-01/WGCH-70: live content is immutable; actors remain in the canonical census.
 enum class AbilityKind : std::uint8_t { black_market = 1, technology_theft = 2, corruption = 3,
-    superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7 }; // 4..7: coordinator-reserved host-local values
+    superweapon_hack = 4, planet_destruction = 5, structure_sabotage = 6, hero_neutralization = 7, system_spy = 8 }; // 4..7: coordinator-reserved host-local values
 struct CorruptionChoice {
     corruption_fixture::Type type{}, required_mission_type{};
     math::Fixed price, credit_reward, unlock_build_cost;
@@ -1074,6 +1103,15 @@ struct PreparedTheft {
     bool advance{};
     friend bool operator==(const PreparedTheft&, const PreparedTheft&) = default;
 };
+// WGCH-41/56/108, WGUI-19..25: authored ground spy, invoking the observer owner.
+struct SpyAbilityProfile {
+    std::string name, text_identity;
+    std::uint64_t identity{1};
+    math::Fixed duration;
+    std::uint32_t mask{};
+    bool initially_enabled{true}, causes_despawn{}, hero{};
+    friend bool operator==(const SpyAbilityProfile&, const SpyAbilityProfile&) = default;
+};
 struct GalacticAbilityProfile {
     TypeId type{};
     BlackMarketBuyer market;
@@ -1088,6 +1126,7 @@ struct GalacticAbilityProfile {
     std::optional<DestructionAbilityProfile> destruction{};
     std::optional<SabotageAbilityProfile> sabotage{};
     std::optional<NeutralizeAbilityProfile> neutralize{};
+    std::optional<SpyAbilityProfile> spy{};
     std::vector<AbilityKind> ground_activated{}; // WGCH-157: authored Activation_Style membership
     friend bool operator==(const GalacticAbilityProfile&, const GalacticAbilityProfile&) = default;
 };
@@ -1106,6 +1145,7 @@ struct GalacticAbilitySetup {
     TypeId hack_required_type{};
     math::Fixed hack_cost;
     std::vector<std::string> activated_hack_abilities{}; // authored routing order
+    std::vector<std::string> activated_spy_abilities{}; // WGCH-152 preview routing; execution uses ground membership
     std::vector<std::string> activated_destruction_abilities{}; // WGCH-137/157 authored routing order
     std::vector<std::string> activated_sabotage_abilities{}, activated_neutralize_abilities{}; // WGCH-97 authored routing order
     std::vector<SabotageStructureCost> sabotage_costs{}; // ascending type
@@ -1171,6 +1211,8 @@ struct AbilityActorState {
     bool hack_enabled{}, hack_cancelled{};
     bool destruction_enabled{}, destruction_cancelled{};
     bool sabotage_enabled{}, sabotage_cancelled{}, neutralize_enabled{}, neutralize_cancelled{};
+    bool spy_enabled{}, spy_cancelled{};
+    std::vector<PlanetId> spy_targets{}; // WGCH-108: registered even after a refused insertion
     bool contested_check_disabled{}; // WGCH-58/160: false (the default) keeps the contested-orbit refusal armed
     friend bool operator==(const AbilityActorState&, const AbilityActorState&) = default;
 };

@@ -3,6 +3,7 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/campaign/setup_plan.hpp"
 #include "eawr/campaign/ai_selection_content.hpp"
+#include "eawr/campaign/galactic_story_scripts.hpp"
 #include "eawr/campaign/space_entry.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
@@ -17,7 +18,14 @@ struct GalacticAiRuntimeSetup {
     std::shared_ptr<const script::foc::ai::GalacticSelectionContent> content;
     script::foc::ai::galactic_goals::PlanCatalog plans;
     std::map<std::string, std::string> modules;
+    // WST-53: the sub-plot scripts of this campaign's plots (null when the plots name none); part of the content identity.
+    std::shared_ptr<const GalacticStoryScripts> story_scripts;
+    GalacticStoryPlayers story_players;
+    // RGC-196: the game mode is a multiplayer one; the story scripts' Free_Random then uses the synchronised stream.
+    bool multiplayer{};
     std::string content_identity;
+    // CGS-07/AI-16: what the load went on without. Mutable: the install step appends what materialization skips.
+    mutable std::vector<std::string> load_diagnostics;
     std::shared_ptr<const sim::PartitionExecutor> executor;
     std::size_t immediate_instances{}, immediate_requests{};
     std::map<sim::galactic::PlanetId, script::foc::ai::Real> route_z_adjust;
@@ -144,13 +152,16 @@ struct GalacticAiRuntimeProviders {
     bool execution_writers_tracked{};
     // Observation holds weak owners and process-local timing only.
     std::function<void(GalacticAiRuntimeView)> observe;
+    // The same view for a read-only watcher (sim_headless --live-goals). Unlike `observe` it does not turn on the digest measurement
+    // wrapper, which re-captures and re-hashes the whole native state on every digest request.
+    std::function<void(GalacticAiRuntimeView)> watch;
 };
 enum class GalacticAiRuntimeBirth { fresh_campaign, checkpoint_reconstruction };
 // Fresh schedulers carry the exact host used by their post-reconstruction native
 // installer. Calling this twice produces disjoint worlds, engines and listeners.
 [[nodiscard]] core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts>
 prepare_galactic_ai_runtime(std::shared_ptr<const GalacticAiRuntimeSetup>, GalacticAiRuntimeProviders,
-    GalacticAiRuntimeBirth = GalacticAiRuntimeBirth::fresh_campaign);
+    GalacticAiRuntimeBirth = GalacticAiRuntimeBirth::fresh_campaign, std::vector<std::string>* plan_diagnostics = nullptr);
 using GalacticAiRuntimeProviderFactory = std::function<core::Result<GalacticAiRuntimeProviders>()>;
 struct StartingForceInputs;
 class StockSpaceEntry;
@@ -183,7 +194,12 @@ using GalacticAiStockQueryFactory = std::function<core::Result<GalacticAiStockQu
     std::shared_ptr<const GalacticAiRuntimeSetup>, std::shared_ptr<const StartingForceInputs>,
     std::shared_ptr<const StockSpaceEntry>, GalacticAiStockQueryFactory,
     std::function<void(GalacticAiRuntimeView)> observe = {},
-    std::function<void(const GalacticAiBattleNotice&)> observe_battle = {});
+    std::function<void(const GalacticAiBattleNotice&)> observe_battle = {},
+    std::function<void(GalacticAiRuntimeView)> watch = {});
+// Observer only: per AI player, the goals by goal function (count, active, planned, running plan, largest desire), the retained
+// movement rows and the engine's refusal counters (#3944; empty unless gc_profile::enabled). Reads the live engine, so the caller
+// keeps the session between ticks. Never saved, hashed or read by a decision.
+[[nodiscard]] std::vector<std::string> describe_galactic_ai_goals(const GalacticAiRuntimeView&, const GalacticAiRuntimeSetup&);
 [[nodiscard]] core::Result<void> configure_galactic_ai_runtime(platform::CampaignServiceConfiguration&,
     std::shared_ptr<const GalacticAiRuntimeSetup>, GalacticAiRuntimeProviderFactory);
 } // namespace eawr::campaign

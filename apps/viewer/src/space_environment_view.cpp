@@ -1,7 +1,10 @@
+#include "eawr/scene/scene.hpp"
 #include "space_environment_internal.hpp"
+#include "startup_trace.hpp"
 #include "settings_store.hpp"
 
 #include <cstring>
+#include <fstream>
 #include "eawr/core/load_profile.hpp"
 #include "render_profile_viewport.hpp"
 #include "shutdown_trace.hpp"
@@ -182,6 +185,17 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
     up_source_ = space::source_from_render(camera_.up);
 
     renderer_ = std::make_unique<GodotRenderer>(host, options_.shaders);
+    renderer_->set_texture_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Texture> {
+        auto loaded = assets::load_texture(filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    renderer_->set_model_loader([&filesystem](const assets::Source& source) -> std::optional<assets::Model> {
+        auto loaded = assets::load_model(filesystem, source.logical_path);
+        if (!loaded) return std::nullopt;
+        return std::move(loaded.value());
+    });
+    startup_trace.renderer_probe(renderer_->recipe_memory_probe());
     renderer_->set_camera(camera_);
     renderer_->set_scene_bloom(options_.bloom);
     // Independent material ambient does not change the population's lighting
@@ -212,14 +226,14 @@ bool EnvironmentView::ready(Node3D& host, const assets::Map& map, const vfs::Vfs
             items_.push_back(std::move(missing));
             continue;
         }
-        auto model = assets::load_model(filesystem, *path);
+        auto model = scene::VfsAssetCache(filesystem).shared_model(*path);
         if (!model) {
             missing.model = *path;
             missing.cause = core::format_diagnostic(model.error());
             items_.push_back(std::move(missing));
             continue;
         }
-        const auto [slot, inserted] = sky_models.emplace(role, std::move(model.value()));
+        const auto [slot, inserted] = sky_models.emplace(role, *model.value());
         static_cast<void>(inserted);
         const std::vector<space::SceneSurface> surfaces = space::scene_surfaces(slot->second,
             [this](const std::string_view program) {
@@ -389,6 +403,9 @@ bool EnvironmentView::write_report() const {
         << ", \"kind\": \"space\", \"semantic_complete\": " << (options_.semantic_complete ? "true" : "false") << "},\n"
         << "  \"terrain\": {\"chunks\": 0, \"status\": \"not_applicable\", \"cause\": \"a kind-2 map has no terrain\"},\n";
     if (options_.write_hud_report) options_.write_hud_report(output);
+    output << "  \"cpu_recipe_memory\":{\"phase\":\"report\",\"scope\":\"vector_capacity_excluding_strings_allocator_gpu\",\"retained\":";
+    assets::write_retained_payload(output, renderer_ ? renderer_->recipe_memory() : assets::RetainedPayload{});
+    output << "},\n";
     const lighting::bloom::SceneBloom bloom = options_.bloom.value_or(lighting::bloom::SceneBloom{});
     output << "  \"scene_bloom\": {\"status\": "
         << json(!options_.bloom ? (options_.bloom_skipped_unlit ? "lighting_off" : "off") : !renderer_ ? "renderer_not_created"
@@ -748,6 +765,13 @@ std::optional<int> EnvironmentView::process(const double delta) {
             return 2;
         }
         live_captures_.emplace_back(ViewerPath::utf8(path.filename()), hash_bytes(capture.value().png_bytes));
+        if (render_categories::enabled) {
+            // Preserve the active population before normal shutdown releases its RIDs.
+            auto census_path = path; census_path += ".churn.json";
+            std::ofstream census(census_path, std::ios::binary | std::ios::trunc);
+            if (!census) { static_cast<void>(fail("cannot write render churn census")); return 2; }
+            renderer_->write_churn_census(census);
+        }
     }
     if (frame_ == options_.warmup_frames) timing_start_ = std::chrono::steady_clock::now();
     if (!live.quit && (frame_ < options_.warmup_frames + options_.timed_frames || live.hold)) return std::nullopt;

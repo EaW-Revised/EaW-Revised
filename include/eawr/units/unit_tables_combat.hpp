@@ -58,6 +58,7 @@ struct Weapon final {
     bool opportunity_fire_when_idle{};
     std::optional<std::uint32_t> appearance_delay_frames; // WAD-37/40, hardpoint only
     std::optional<Fixed> full_salvo_delay_multiplier; // Full_Salvo_Weapon_Delay_Multiplier, hardpoint only (WAB-80)
+    bool fire_in_rocket_mode{true}, fire_in_normal_mode{true}; // WRA-02
     bool operator==(const Weapon&) const = default;
 };
 
@@ -76,6 +77,7 @@ struct Hardpoint final {
     BonePoint attachment;
     BonePoint fire_a;
     BonePoint fire_b;
+    bool randomize_between_fire_bones{true}; // WWP-22: retail default, including omitted tags
     std::string special_ability_name;
     std::optional<Fixed> fighter_bay_flyout_distance;
     // HARD_POINT_FIGHTER_BAY (#75): the X axis of the attachment bone's bind frame, model space.
@@ -94,6 +96,12 @@ struct Hardpoint final {
     bool operator==(const Hardpoint&) const = default;
 };
 
+// ML-54: the values an object type carries before its XML is parsed; a ROCKET projectile that does not
+// author a rocket path input flies with these (debug build, object-type defaults).
+inline constexpr std::int64_t rocket_default_straight_distance = 40;
+inline constexpr std::int64_t rocket_default_curve_distance = 50;
+inline constexpr std::int64_t rocket_default_curve_offset = 30;
+
 struct Projectile final {
     std::string id;
     std::optional<Fixed> damage;
@@ -109,7 +117,7 @@ struct Projectile final {
     bool does_hitpoint_damage{};
     std::optional<Fixed> energy_per_shot;
     std::optional<Fixed> ai_combat_power; // weighs a hardpoint's share of its unit's (#361)
-    // Ion stun on detonation (#561, docs/behaviour/space-damage.md IS-01 to IS-09): the
+    // Ion stun on detonation (#561, docs/behaviour/space-damage.md IS-01 to IS-10): the
     // Projectile_Ion_Stun_* tags. The reductions are fractions (0.5 halves the value).
     bool ion_stun{};
     std::optional<Fixed> ion_stun_duration; // seconds

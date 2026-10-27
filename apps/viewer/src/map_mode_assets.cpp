@@ -25,6 +25,11 @@ MapMode::State::State(Options value) : options(std::move(value)) {}
 MapMode::State::~State() {
         free_game_menu();
         shutdown_trace::mark("map mode teardown begins");
+        if (land_population && renderer) {
+            if (live_session) live_session->finish();
+            land_population->release(*renderer);
+            land_population.reset();
+        }
         space.reset();
         shutdown_trace::mark("space view freed");
         release_particles();

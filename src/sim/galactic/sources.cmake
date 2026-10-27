@@ -17,6 +17,7 @@ set(EAWR_SIM_GALACTIC_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/encoding.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fleets.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fleet_intelligence.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ground_intelligence.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/graph.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/history.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/session_history.cpp"

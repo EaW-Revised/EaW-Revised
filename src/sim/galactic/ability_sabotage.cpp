@@ -111,6 +111,7 @@ void GalacticSession::Impl::execute_sabotage(const GameCommand& command, const C
     const auto structure = *found;
     release_structure_object(row, structure);
     std::erase_if(row.objects, [&](const auto& value) { return value.id == structure.id; });
+    if (structure.domain == ProductionDomain::ground) refresh_ground_base_level(index); // WGM-188
     std::erase_if(control->planets[index].transition_modifiers, [&](const auto& m) { return m.source == structure.id; });
     dirty[static_cast<std::size_t>(StateSection::production)] = true;
     dirty[static_cast<std::size_t>(StateSection::control)] = true;

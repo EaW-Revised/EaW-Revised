@@ -311,8 +311,6 @@ core::Result<void> validate_motion(const MotionTable& table) {
     if (!(table.rules.expansion_distance.raw() > 0 && table.rules.expansion_distance.raw() <= coordinate_limit_raw)) {
         return core::Result<void>::failure(invalid("the expansion distance is out of range"));
     }
-    if (table.rules.max_waypoints > (1U << 16U))
-        return core::Result<void>::failure(invalid("waypoint capacity exceeds the resource limit"));
     if (table.rules.reevaluation_frames == 0 || table.rules.reevaluation_frames > (1U << 16U)) {
         return core::Result<void>::failure(invalid("the reevaluation interval must be 1 to 65536 frames"));
     }
@@ -358,8 +356,10 @@ core::Result<void> validate_motion(const MotionTable& table) {
     }
     if (const auto& rules = table.avoidance) {
         const auto positive = [](const Fixed value) { return value.raw() > 0 && value.raw() <= rate_limit_raw; };
+        // #4992: Alliance at War authors zero for the wait leg frame time and cost; a negative one stays refused.
+        const auto non_negative = [](const Fixed value) { return value.raw() >= 0 && value.raw() <= rate_limit_raw; };
         if (!(rules->max_rotations >= whole(1) && rules->max_rotations <= whole(360)) || !positive(rules->wait_speed)
-            || rules->wait_speed > whole(1) || !positive(rules->wait_frames) || !positive(rules->wait_cost)
+            || rules->wait_speed > whole(1) || !non_negative(rules->wait_frames) || !non_negative(rules->wait_cost)
             || !positive(rules->min_obstacle_cost) || !positive(rules->path_cost_coefficient)
             || rules->path_cost_coefficient > whole(1) || !positive(rules->occupation_radius)
             || rules->failure_cutoff.raw() < 0 || rules->failure_cutoff.raw() > rate_limit_raw
@@ -383,6 +383,9 @@ core::Result<void> validate_motion(const MotionTable& table) {
         // 41.822) puts 245 points there at the 50-unit increment; a radius under about 1.25 is rejected.
         const Fixed outer = Fixed::from_raw(rules->destination_search_increment.raw() * (motion_detail::destination_search_rings - 1));
         for (const auto& footprint : table.footprints) {
+            // AV-01, AV-19: static blockers are queried, never destination-search subjects.
+            if (footprint.layer == SpaceLayer::static_object && !footprint.locomotor
+                && table.find(footprint.type_id) == nullptr) continue;
             Calc calc;
             const auto points = motion_detail::ring_points(calc, outer, calc.mul(footprint.radius, rules->occupation_radius));
             if (!calc.ok() || points > motion_detail::max_ring_points) {

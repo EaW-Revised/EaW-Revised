@@ -99,6 +99,9 @@ struct Host {
     bool suspension_used{};
     bool in_object_turn{}; // bindings read staged rows; completed-world queries trip a diagnostic
     mutable std::atomic<bool> rejected_turn_read{false};
+    // True while the main script scheduler services its (partitioned) instances; perception that
+    // runs serial-only Lua (Script_* evaluators, #1702) refuses then.
+    mutable std::atomic<bool> script_service_active{false};
     [[nodiscard]] bool allow_dynamic_read() const noexcept {
         if (!in_object_turn) return true;
         rejected_turn_read.store(true, std::memory_order_relaxed);
@@ -125,6 +128,16 @@ struct Host {
     // The goal system engine (#449); null when only the freestore runs. The bindings only read it.
     const ai::Engine* engine{};
     std::map<tactical::PlayerId, math::Fixed> credit_changes; // current barrier's ordered wallet changes
+    // #1702: what GameObject.Build and Give_Money queued earlier in this barrier. The view does
+    // not hold those commands yet, so a later call answers against them (one start per pad, the balance
+    // net of earlier grants and debits). Cleared with credit_changes at every barrier.
+    std::set<sim::EntityId> queued_pad_starts;
+    std::map<tactical::PlayerId, std::int64_t> queued_wallet; // net raw fixed credits queued (grants minus debits)
+    void clear_barrier_state() {
+        credit_changes.clear();
+        queued_pad_starts.clear();
+        queued_wallet.clear();
+    }
     // S-T3b: raw wallet changes staged by player turns that have not committed yet (stacked reads); zero
     // outside the engine's player loop. The engine answers and counts reads of other players' deltas.
     [[nodiscard]] std::int64_t uncommitted_credits(tactical::PlayerId id) const noexcept;

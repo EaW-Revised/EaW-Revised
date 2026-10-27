@@ -1,3 +1,4 @@
+#include <atomic>
 #include "lan_match.hpp"
 #include <utility>
 #include "eawr/net/lobby_session.hpp"
@@ -124,6 +125,8 @@ public:
         view_.start_enabled = true;
         view_.host = true;
         if (state == "host_waiting") { view_.phase = LanPhase::connecting; view_.connected = view_.start_enabled = false; }
+        else if (state == "paused") { view_.phase = LanPhase::running; view_.clock_paused = true;
+            view_.pause_actor = sim::SeatId{2}; view_.pause_name = "Leia"; pause_fixture_ = true; fixture_hold_after_ = 2; }
         else if (state == "joined") { view_.host = false; view_.read_only = true; view_.start_enabled = false; }
         else if (state == "review") { view_.host = false; view_.read_only = true; view_.start_enabled = false; view_.accept_enabled = true;
             view_.setup_summary = "Host setup: Coruscant\nSeed 42 | Victory: eliminate opponents | Credits 10000 | Tech 1/5\nHeroes on | Superweapons on | Starting units on | Base on | Events off\nSlot 1 Rebel Human | Team 1 | Red | Fleet: X-Wing\nSlot 2 Empire Human | Team 2 | Blue | Fleet: TIE Fighter\nSlot 3 Rebel AI | Team 1 | Green | Fleet: Z-95\nBuild: presentation fixture\nContent: fixture identity"; }
@@ -221,7 +224,18 @@ public:
     std::optional<skirmish::FixtureOptions> offered_setup() const override { return offered_; }
     LanView view() const override { return view_; }
     sim::tactical::PlayerId local_player() const override { return view_.host ? 1U : 2U; }
+    bool request_pause(bool paused) override {
+        if (!lan_gameplay_enabled(view_)) return false;
+        view_.clock_paused = paused; fixture_hold_after_ = 0; fixture_paused_ = paused; return true;
+    }
     platform::LiveStepDriver driver(const sim::tactical::TacticalSetup&) override {
+        if (pause_fixture_) return [this](platform::LiveStepContext& context, std::span<const sim::tactical::PlayerCommand>, std::uint64_t) {
+            if (!context.advance_allowed || fixture_paused_) return core::Result<bool>::success(false);
+            // The driven viewer needs its first ticks before it can show the held clock.
+            if (fixture_hold_after_ > 0 && --fixture_hold_after_ == 0) fixture_paused_ = true;
+            const auto stepped = context.step();
+            return stepped ? core::Result<bool>::success(true) : core::Result<bool>::failure(stepped.error());
+        };
         if (!failed_driver_) return {};
         return [](platform::LiveStepContext&, std::span<const sim::tactical::PlayerCommand>, std::uint64_t) {
             core::Diagnostic diagnostic;
@@ -234,6 +248,9 @@ private:
     LanView view_;
     std::optional<skirmish::FixtureOptions> offered_;
     bool failed_driver_{};
+    bool pause_fixture_{};
+    std::atomic_bool fixture_paused_{false};
+    std::atomic_int fixture_hold_after_{};
     bool online_nine_{};
 };
 }

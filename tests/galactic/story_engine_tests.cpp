@@ -1,11 +1,13 @@
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "eawr/campaign/game_session.hpp"
+#include "eawr/campaign/setup_plan.hpp"
 #include "eawr/campaign/story_plots.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/story_engine.hpp"
+#include "eawr/units/unit_tables_galactic.hpp"
 #include "eawr/vfs/vfs.hpp"
 
 #include <filesystem>
@@ -402,6 +404,145 @@ void loader(const std::filesystem::path& root) {
     expect(take(st::Engine::create({}, plots.plots, plots.subplots)).diagnostics().size() == 2, "loaded plots build an engine; the two unknown prerequisites are reported");
 }
 
+void campaign_story_routes(const std::filesystem::path& root) {
+    namespace cpn = eawr::campaign;
+    namespace dg = eawr::data::galactic;
+    const auto directory = root / "campaign-routes";
+    for (const auto* name : {"good.xml", "evil.xml", "corrupt.xml", "repeat.xml"})
+        write(directory / "xml" / name, "<Story_Mode_Plots/>");
+    write(directory / "xml" / "fourth.xml", "<Story_Mode_Plots><Active_Plot>fourth-sub.xml</Active_Plot></Story_Mode_Plots>");
+    write(directory / "xml" / "fourth-sub.xml", "<Story><Event Name=\"Ready\"><Event_Type>STORY_ELAPSED</Event_Type>"
+        "<Event_Param1>0</Event_Param1></Event></Story>");
+    eawr::vfs::MountSpec mount; mount.layer_id = "campaign-routes"; mount.data_root = directory;
+    const auto files = take(eawr::vfs::Vfs::mount(std::vector<eawr::vfs::MountSpec>{mount}));
+    dg::GalacticData data;
+    cpn::CampaignSetupOptions options;
+    for (const auto* name : {"Copper", "Iron", "Amber", "Renamed_Fourth", "Dormant", "Neutral"}) {
+        dg::Faction faction; faction.name = name; faction.is_neutral = faction.name == "Neutral";
+        data.factions.push_back(faction);
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, name, id != 5});
+    }
+    options.seats = {{{1}, 1, gc::SeatKind::human, 0, true, 1}};
+    options.solo_reference_human = 1;
+    dg::Planet planet; planet.name = "Home"; planet.behaviors = {"PLANET"};
+    planet.galactic_position = dg::Position{}; data.planets.push_back(planet);
+    data.constants = {{"MaximumFleetMovementDistance", "10", sec(10)}, {"Fiscal_Cycle_Time_In_Secs", "45", sec(45)},
+        {"Good_Side_Name", "Copper", {}}, {"Evil_Side_Name", "Iron", {}}, {"Corrupt_Side_Name", "Amber", {}}};
+    dg::Campaign campaign; campaign.name = "Renamed_Campaign"; campaign.starting_active_player = "Copper";
+    campaign.locations = {"Home"}; campaign.planets = {"Home"};
+    campaign.rebel_story_name = "good.xml"; campaign.empire_story_name = "evil.xml"; campaign.underworld_story_name = "corrupt.xml";
+    campaign.story_names = {{"Renamed_Fourth", "fourth.xml"}, {"copper", "repeat.xml"},
+        {"Renamed_Fourth", "missing.xml"}, {"Iron", "repeat.xml"}};
+    data.campaigns.push_back(campaign);
+    const auto plan = [&] { return take(cpn::plan_campaign_setup(data, {}, campaign.name, options)); };
+    auto setup = plan();
+    const auto plots = take(cpn::load_story_plots(files, data, setup));
+    expect(plots.plots.size() == 6 && plots.plots[0].file == "good.xml" && plots.plots[1].file == "evil.xml"
+        && plots.plots[2].file == "corrupt.xml" && plots.plots[3].owner == 4 && plots.plots[3].file == "fourth.xml"
+        && plots.plots[4].owner == 1 && plots.plots[5].owner == 2,
+        "WST-87 named routes precede additional renamed factions and repeated factions add loads");
+    expect(plots.subplots.size() == 1 && plots.subplots[0].owner == 4, "the authored fourth faction owns its sub-plot");
+    expect(std::any_of(plots.notes.begin(), plots.notes.end(), [](const auto& note) {
+        return note.find("Renamed_Campaign") != std::string::npos && note.find("Renamed_Fourth") != std::string::npos
+            && note.find("Data/XML/missing.xml") != std::string::npos;
+    }), "WST-88 missing plots name the campaign/faction/path and later pairs still load");
+    auto& routes = data.campaigns[0].story_names;
+    const auto original = routes;
+    for (const auto* faction : {"Unknown", "Dormant"}) {
+        routes.insert(routes.begin() + 1, {faction, "repeat.xml"});
+        const auto stopped = take(cpn::load_story_plots(files, data, plan()));
+        expect(stopped.plots.size() == 4 && stopped.plots.back().owner == 4,
+            "WST-88 unknown and inactive players stop additional pairs without undoing earlier or named routes");
+        routes = original;
+    }
+    routes.push_back({"Iron", "fourth.xml"});
+    const auto repeated = take(cpn::load_story_plots(files, data, plan()));
+    expect(repeated.plots.size() == 7 && repeated.subplots.size() == 1 && repeated.subplots[0].owner == 2,
+        "WST-89 repeating a plot retains both plot records and replaces the shared sub-plot owner");
+    routes = original;
+    std::string reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto game = take(cpn::GameSession::create(setup.galaxy()));
+        take(game.install_story({}, plots.plots, plots.subplots));
+        take(game.step(executor));
+        const auto ids = cp::game_identities(setup.galaxy());
+        cp::GameLoadOptions load;
+        load.configure_session = [&](auto& fresh) { return fresh.install_story({}, plots.plots, plots.subplots); };
+        const auto bytes = take(cp::save_game_checkpoint(game, ids));
+        const auto restored = take(cp::load_game_checkpoint(bytes, ids, load, executor));
+        expect(restored.session.story_engine()->state().subplots[0].owner == 4,
+            "authored fourth-faction plot ownership survives a checkpoint");
+        if (reference.empty()) reference = game.state_sha256();
+        else expect(reference == game.state_sha256(), "authored plot routing gives equal session hashes on 1/2/4/8 workers");
+        routes[0].name = "other.xml";
+        const auto changed = plan();
+        expect(changed.galaxy().content_identity != setup.galaxy().content_identity,
+            "authored associations reach the setup content identity");
+        expect(!cp::load_game_checkpoint(bytes, cp::game_identities(changed.galaxy()), load, executor),
+            "a checkpoint refuses changed authored associations");
+        auto replay = game.record();
+        expect(replay.setup.content_identity != changed.galaxy().content_identity,
+            "the replay records the campaign association identity");
+        routes = original;
+    }
+}
+
+void installed_campaign_routes(const std::filesystem::path& game_root, const std::filesystem::path& mod_chain) {
+    namespace cpn = eawr::campaign;
+    auto roots = eawr::vfs::mod_chain_roots(mod_chain);
+    roots.emplace_back("expansion", game_root / "corruption" / "Data");
+    roots.emplace_back("base", game_root / "GameData" / "Data");
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (auto& layer : take(eawr::vfs::resolve_manifest_chain(roots))) mounts.push_back(std::move(layer.mount));
+    const auto files = take(eawr::vfs::Vfs::mount(mounts));
+    const auto loaded = take(eawr::data::load_catalog(files, eawr::data::Profile::remake));
+    const auto data = take(eawr::data::galactic::load_galactic_data(files, loaded.catalog));
+    const auto types = eawr::units::galactic_type_table(loaded.catalog);
+    cpn::CampaignSetupOptions options;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        options.players.push_back({{id, id, 0}, faction.name, true});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    // This opt-in case qualifies story routing independently of starting-force placement admission.
+    // Keep every authored story association and the real faction/galaxy data unchanged.
+    auto routing_data = data;
+    for (auto& row : routing_data.campaigns) row.starting_forces.clear();
+    std::size_t checked{};
+    for (const auto& campaign : data.campaigns) {
+        if (campaign.story_names.empty() || campaign.planets.empty()) continue;
+        const auto human = std::find_if(options.players.begin(), options.players.end(), [&](const auto& row) {
+            return eawr::sim::galactic::story::upper(row.faction) == eawr::sim::galactic::story::upper(campaign.starting_active_player);
+        });
+        if (human == options.players.end()) continue;
+        options.solo_reference_human = human->player.player_id;
+        options.seats = {{{1}, human->player.player_id, gc::SeatKind::human, 0, true, 1}};
+        const auto plan = take(cpn::plan_campaign_setup(routing_data, types, campaign.name, options));
+        const auto plots = take(cpn::load_story_plots(files, data, plan));
+        for (const auto& route : campaign.story_names) {
+            const auto owner = std::find_if(options.players.begin(), options.players.end(), [&](const auto& row) {
+                return st::upper(row.faction) == st::upper(route.faction);
+            });
+            expect(owner != options.players.end(), "installed association names an existing faction");
+            if (owner == options.players.end()) break;
+            expect(std::any_of(plots.plots.begin(), plots.plots.end(), [&](const auto& plot) {
+                return plot.owner == owner->player.player_id && plot.file == route.name;
+            }), "installed authored association reaches its player's plot list");
+        }
+        expect(static_cast<bool>(st::Engine::create({}, plots.plots, plots.subplots)), "installed associations produce a valid story root");
+        std::cout << "installed campaign=" << campaign.name << " associations=" << campaign.story_names.size()
+            << " plots=" << plots.plots.size() << " subplots=" << plots.subplots.size() << '\n';
+        ++checked;
+        break; // One selected installed campaign qualifies this data path; it is not a whole-mod admission test.
+    }
+    expect(checked > 0, "installed chain contains a playable campaign with additional faction story associations");
+}
+
 // ---- the engine inside a GameSession --------------------------------------------------------------
 
 gc::GalacticSetup session_setup() {
@@ -556,9 +697,14 @@ void session_rewards() {
 
 int case_galactic_story_engine_tests(int argc, char** argv) {
     try {
+        if (argc == 4 && std::string_view(argv[1]) == "--installed-associations") {
+            installed_campaign_routes(argv[2], argv[3]);
+            return galactic_test::failures ? 1 : 0;
+        }
         order_and_prerequisites(); elapsed_time(); flags(); tech_levels(); perpetual_and_branches(); sub_plots_and_elements();
         land_battle_seam(); cycles_and_tactical_triggers(); digest_covers_clocks(); multiplayer_gate(); construction_refusals(); save_and_restore();
         loader(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
+        campaign_story_routes(argc > 1 ? std::filesystem::path(argv[1]) : std::filesystem::path("story-engine"));
         session(); session_rewards();
     } catch (const std::exception& error) { std::cerr << "FAIL: " << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;

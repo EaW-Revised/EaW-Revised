@@ -20,11 +20,15 @@ namespace sim_headless::cli {
     bool saw_tag_trace = false;
     for (int index = 1; index < argc; ++index) {
         const std::string_view argument(argv[index]);
+        if (argument == "--eawr-mod-mount-report") {
+            options.report_mod_mounts = true;
+            continue;
+        }
         if ((argument == "--replay" || argument == "--hash-out" || argument == "--trace-out"
              || argument == "--workers" || argument == "--events-out"
              || argument == "--snapshot-out" || argument == "--census-out" || argument == "--skirmish"
-             || argument == "--game-root" || argument == "--mod-root" || argument == "--replay-out" || argument == "--ticks"
-             || argument == "--scenario" || argument == "--combat-out" || argument == "--tag-trace-out")
+             || argument == "--game-root" || argument == "--mod-root" || argument == "--map" || argument == "--replay-out" || argument == "--ticks"
+             || argument == "--scenario" || argument == "--combat-out" || argument == "--tag-trace-out" || argument == "--ai-report-out" || argument == "--ai-trace-out")
             && index + 1 >= argc) {
             return std::nullopt;
         }
@@ -87,6 +91,9 @@ namespace sim_headless::cli {
         } else if (argument == "--mod-root" && options.mod_root.empty()) {
             options.mod_root = argv[++index];
             if (options.mod_root.empty()) return std::nullopt;
+        } else if (argument == "--map" && options.map_path.empty()) {
+            options.map_path = argv[++index];
+            if (options.map_path.empty()) return std::nullopt;
         } else if (argument == "--replay-out" && !saw_replay_out) {
             saw_replay_out = true;
             options.replay_out_path = argv[++index];
@@ -111,6 +118,12 @@ namespace sim_headless::cli {
             if (std::filesystem::path(options.tag_trace_path).extension() != ".json") {
                 return std::nullopt;
             }
+        } else if (argument == "--ai-report-out" && options.ai_report_path.empty()) {
+            options.ai_report_path = argv[++index];
+            if (options.ai_report_path.empty()) return std::nullopt;
+        } else if (argument == "--ai-trace-out" && options.ai_trace_path.empty()) {
+            options.ai_trace_path = argv[++index];
+            if (options.ai_trace_path.empty()) return std::nullopt;
         } else if (argument == "--ticks" && !saw_ticks) {
             saw_ticks = true;
             const std::string_view value(argv[++index]);
@@ -123,8 +136,13 @@ namespace sim_headless::cli {
             return std::nullopt;
         }
     }
-    if ((saw_combat && !saw_scenario) || (saw_tag_trace && !saw_skirmish)) {
+    if ((saw_combat && !saw_scenario) || (saw_tag_trace && !saw_skirmish)
+        || (!options.ai_report_path.empty() && (!saw_skirmish || !saw_ticks || options.ticks == 0))
+        || (!options.ai_trace_path.empty() && options.ai_report_path.empty())) {
         return std::nullopt;
+    }
+    if (!options.map_path.empty() && (!saw_skirmish || options.mod_root.empty())) {
+        return std::nullopt; // a map other than the pinned M2 map is a mod start
     }
     if (saw_scenario) {
         // A scenario run writes a trace, and optionally its tick hashes, replay and combat log.
@@ -135,6 +153,10 @@ namespace sim_headless::cli {
         return options;
     }
     if (saw_skirmish) {
+        if (!options.ai_report_path.empty()) {
+            if (saw_replay || saw_trace || saw_events || saw_snapshot || saw_tag_trace || !saw_game_root) return std::nullopt;
+            return options;
+        }
         // The skirmish start writes a census and/or a replay; it runs no ticks itself.
         if (saw_replay || saw_hash || saw_trace || saw_workers || saw_events || saw_snapshot
             || !saw_game_root || (!saw_census && !saw_replay_out && !saw_tag_trace) || (saw_ticks && !saw_replay_out)) {
@@ -192,7 +214,7 @@ namespace sim_headless::cli {
         }
     }
     for (const auto* output : {&options.events_path, &options.snapshot_path, &options.census_path,
-             &options.replay_out_path, &options.combat_path, &options.tag_trace_path}) {
+             &options.replay_out_path, &options.combat_path, &options.tag_trace_path, &options.ai_report_path, &options.ai_trace_path}) {
         if (!output->empty()) {
             paths.emplace_back(*output);
         }

@@ -231,7 +231,12 @@ void external_endpoints() {
     expect(build().value().diagnostics.empty(), "a route not using the duplicated type does not warn");
     campaign.planets = {first.name, second.name};
     data.trade_routes[0] = lane; data.trade_routes[0].point_b = "Unknown_Type";
-    expect(!build(), "undefined endpoint type still refuses instead of becoming campaign-external tolerance");
+    const auto unknown_endpoint = build();
+    expect(unknown_endpoint && unknown_endpoint.value().routes.empty() && unknown_endpoint.value().diagnostics.size() == 1
+        && unknown_endpoint.value().diagnostics[0].code == "campaign_route_unknown_endpoint"
+        && unknown_endpoint.value().diagnostics[0].severity == eawr::core::Severity::warning
+        && unknown_endpoint.value().diagnostics[0].message.find(lane.name) != std::string::npos,
+        "an endpoint that is no planet type skips the route with a named warning and the campaign still builds (WGS-182/183)");
     data.trade_routes[0] = lane; data.trade_routes[0].point_b = outside.name;
     auto valid = lane; valid.name = "Retained_Lane"; data.trade_routes.push_back(valid);
     campaign.trade_routes.push_back(valid.name);
@@ -333,7 +338,7 @@ void partitioned_parity() {
         std::vector<std::string> hashes;
         for (int tick = 0; tick < 4; ++tick) {
             const auto step = session.step(probe).value();
-            expect(step.work.gathered_objects >= 257 && step.work.sections_reused == (tick == 0 ? 0U : 5U), "graph section cached during partitioned service");
+            expect(step.work.gathered_objects >= 257 && step.work.sections_reused == (tick == 0 ? 0U : 6U), "graph section cached during partitioned service");
             expect(step.state_hash.get() == session.state_sha256(), "partitioned cached hash equals full state");
             hashes.push_back(step.state_hash.get());
         }

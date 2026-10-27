@@ -1,9 +1,11 @@
 #pragma once
 
+#include "eawr/skirmish/land_flag.hpp"
 #include "eawr/skirmish/start.hpp"
 #include "eawr/sim/seat.hpp"
 
 #include <memory>
+#include <string>
 
 namespace eawr::skirmish {
 
@@ -28,6 +30,8 @@ struct SetupMap final {
     // names (assets::Map::context_name): the battle loading screen's title (BLD-02, BLD-09).
     std::string display_name;
     std::optional<std::string> context_name;
+    // #3776 L3: land_setup_maps lists land maps; setup_maps lists space maps.
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
 };
 
 // WSS-03/04: ordinary space staging leaves owner/terrain/game type unrestricted.
@@ -42,6 +46,20 @@ struct SetupMapQuery final {
 
     friend bool operator==(const SetupMapQuery&, const SetupMapQuery&) = default;
 };
+
+// WSS-12/13: one dropdown entry per effective catalog faction whose resolved Is_Playable is true, in
+// registry/definition order. The map, the AI and the debug switch play no part; the caption key is the
+// faction's Text_ID (empty when it has none). The index is the catalog ordinal the LAN lobby shares.
+struct SetupFaction final {
+    std::string name;
+    std::string text_id;
+};
+[[nodiscard]] std::vector<SetupFaction> setup_factions(const data::Catalog& catalog);
+
+// Map headers and battle setups use different enum encodings; never cast between them.
+[[nodiscard]] constexpr assets::MapKind setup_map_kind(const sim::tactical::BattleDomain domain) noexcept {
+    return domain == sim::tactical::BattleDomain::land ? assets::MapKind::land : assets::MapKind::space;
+}
 
 [[nodiscard]] bool setup_map_eligible(const assets::Map& map, const SetupMapQuery& query = {});
 
@@ -86,6 +104,13 @@ void repair_setup_selection(SetupSelection& selection, const SetupMap& map, bool
 // Explicit worker count for deterministic comparisons; output order is unchanged.
 [[nodiscard]] core::Result<std::vector<SetupMap>> setup_maps(
     const vfs::Vfs& filesystem, const data::Catalog& catalog, const SetupMapQuery& query, unsigned workers);
+// #3776 L3: the setup screens' list. With `land` false (the release default of land_skirmish_enabled) this is
+// exactly setup_maps(query). With it true and a space query, the land maps (land_setup_maps with the same
+// filters) follow the space maps. Any other query kind is passed through unchanged. A failed land list keeps the
+// space maps; its diagnostic goes to `land_failure` for the caller to report (the sim side has no console).
+[[nodiscard]] core::Result<std::vector<SetupMap>> setup_domain_maps(
+    const vfs::Vfs& filesystem, const data::Catalog& catalog, const SetupMapQuery& query, bool land,
+    std::string* land_failure = nullptr);
 
 
 // Owned by a loaded-content snapshot, shared by its setup and lobby screens.
@@ -101,12 +126,15 @@ public:
         const data::Catalog& catalog, const SetupMapQuery& query) const;
     [[nodiscard]] auto begin() const { return maps_.begin(); }
     [[nodiscard]] auto end() const { return maps_.end(); }
+    // The last load's land-list diagnostic (empty when none); see setup_domain_maps.
+    [[nodiscard]] const std::string& land_failure() const noexcept { return land_failure_; }
 private:
     std::shared_ptr<const vfs::Vfs> filesystem_;
     std::shared_ptr<const data::Catalog> catalog_;
     std::uint64_t generation_{};
     SetupMapQuery query_;
     std::vector<SetupMap> maps_;
+    std::string land_failure_;
 };
 
 // Local controls have one fixed human host and AI nonhost rows (WSS-14/16–19).

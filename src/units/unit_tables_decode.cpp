@@ -1,5 +1,8 @@
 #include "unit_tables_decode.hpp"
+#include "eawr/data/retail_values.hpp"
 #include "eawr/sim/math/geometry.hpp"
+
+#include <array>
 
 namespace eawr::units::unit_tables_detail {
 
@@ -73,7 +76,7 @@ const Frames* Loader::frames(const std::string& path, const std::string& owner) 
     // attached model (loaded only then) placed at the owner's attachment bone.
 BonePoint Loader::point(const std::string& bone, const Frames* owner, const std::string& owner_id,
                     const std::string& field, const std::string& attached_path,
-                    const std::optional<std::size_t> attach_bone) {
+                    const std::optional<std::size_t> attach_bone, const bool attached_only) {
         BonePoint result;
         result.bone = bone;
         const auto note_frame = [&] {
@@ -96,7 +99,8 @@ BonePoint Loader::point(const std::string& bone, const Frames* owner, const std:
             }
         };
         if (bone.empty() || owner == nullptr) return result;
-        if (const auto index = bone_index(*owner->model, bone)) {
+        // HPT-01: an attached turret's names belong to that model, even on a collision with its owner.
+        if (const auto index = attached_only ? std::nullopt : bone_index(*owner->model, bone)) {
             result.position = translation(owner->frames[*index]);
             result.axes = axes(owner->frames[*index]);
             note_frame();
@@ -122,16 +126,13 @@ BonePoint Loader::point(const std::string& bone, const Frames* owner, const std:
 
 std::optional<std::uint32_t> Loader::count(Object& object, const std::string_view tag, const bool required,
         const bool negative_unbounded) {
-        const auto value = object.fixed(tag, report_, required);
+        const auto value = object.integer(tag, report_, required);
         if (!value) return std::nullopt;
-        const auto whole = value->raw() / Fixed::scale;
-        // WPR-33: the debug-build type defaults to -1 and only zero/positive limits gate.
-        if (negative_unbounded && value->raw() < 0 && value->raw() % Fixed::scale == 0) return std::nullopt;
-        if (value->raw() < 0 || value->raw() % Fixed::scale != 0 || whole > std::numeric_limits<std::uint32_t>::max()) {
-            report_.missing(object.effective.object_id, std::string(tag), {}, "not a whole nonnegative 32-bit count");
-            return std::nullopt;
-        }
-        return static_cast<std::uint32_t>(whole);
+        // WPR-33 is a consumer convention, applied after PR-C4 parsing.
+        if (negative_unbounded && *value < 0) return std::nullopt;
+        if (*value < 0) report_.note(object.effective.object_id, std::string(tag), object.text(tag),
+            "PR-C4: signed integer retained in the unsigned table field");
+        return static_cast<std::uint32_t>(*value);
     }
 
 std::vector<InaccuracyEntry> Loader::inaccuracy(Object& object, const std::string_view tag) {
@@ -142,6 +143,17 @@ std::vector<InaccuracyEntry> Loader::inaccuracy(Object& object, const std::strin
             if (!distance) {
                 report_.missing(object.effective.object_id, std::string(tag), trim(node->raw_text),
                                 "expected category, distance");
+                continue;
+            }
+            // ML-51: an unknown category diagnoses and omits only this category/distance row.
+            const auto names = mask(row[0]);
+            const bool known = !names.empty() && std::all_of(names.begin(), names.end(), [&](const auto& name) {
+                return std::any_of(tables_.categories.begin(), tables_.categories.end(),
+                    [&](const EnumValue& value) { return iequals(value.name, name); });
+            });
+            if (!known) {
+                report_.missing(object.effective.object_id, std::string(tag), row[0],
+                    "unknown category; inaccuracy row ignored (ML-51)");
                 continue;
             }
             result.push_back({row[0], *distance});
@@ -176,7 +188,22 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         record_layers(*object);
         unit.id = object->effective.object_id;
         unit.xml_type = object->effective.type_name;
+        // SG-CLS-01: an element name that is no FoC class settled its class from the chain or the tags; never silent.
+        if (!object->effective.class_origin.empty())
+            report_.note(unit.id, "class", object->effective.type_name, object->effective.class_origin);
         unit.variant_chain = object->effective.chain;
+        if (input_.domain == sim::tactical::BattleDomain::land && lower(unit.xml_type).ends_with("company")) {
+            load_land_company(*object);
+            object->note_duplicates(report_);
+            return;
+        }
+        // LS shoot PR 1: a ground object of a land table loads its land body (Land_Model_Name, combat and durability rows).
+        if (input_.domain == sim::tactical::BattleDomain::land && land_ground_object(*object)) {
+            load_land_body(*object, unit);
+            object->note_duplicates(report_);
+            tables_.units.push_back(std::move(unit));
+            return;
+        }
         unit.valid_target = flag(*object, "Is_Valid_Target", false).value_or(true);
         unit.special_weapon = has_behavior(*object, "SPECIAL_WEAPON");
         unit.star_base = has_behavior(*object, "DUMMY_STAR_BASE");
@@ -218,15 +245,15 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         // FW-30: the first matching faction mapping wins; malformed rows are reported.
         for (const auto* node : object->list("Faction_Anim_Subindex", report_)) {
             const auto row = tokens(node->raw_text);
-            const auto index = row.size() == 2 ? number(row[1]) : std::nullopt;
-            if (!index || index->raw() < 0 || index->raw() % Fixed::scale != 0
-                || index->raw() / Fixed::scale > 65535) {
-                report_.missing(unit.id, "Faction_Anim_Subindex", trim(node->raw_text), "expected faction, unsigned 16-bit index");
+            if (row.size() != 2) {
+                report_.missing(unit.id, "Faction_Anim_Subindex", trim(node->raw_text), "expected faction, index");
                 continue;
             }
-            if (iequals(row[0], "Neutral") && !unit.neutral_fog_animation_index) {
-                unit.neutral_fog_animation_index = static_cast<std::uint32_t>(index->raw() / Fixed::scale);
-            }
+            const auto index = read_integer(row[1], report_, unit.id, "Faction_Anim_Subindex");
+            if (index && (*index < 0 || *index > 65535))
+                report_.note(unit.id, "Faction_Anim_Subindex", row[1], "PR-C4: index retained without a 16-bit restriction");
+            if (index && iequals(row[0], "Neutral") && !unit.neutral_fog_animation_index)
+                unit.neutral_fog_animation_index = static_cast<std::uint32_t>(*index);
         }
         // WBF-45/46: scoring uses the original type for squadron and upgrade objects too.
         // These derived result fields do not enter content identity or tactical decisions.
@@ -276,12 +303,18 @@ void Loader::load_unit(const std::string& id, const UnitKind hint) {
         }
         if (unit.affiliation.empty()) report_.missing(unit.id, "Affiliation", {}, "required tag is absent");
         const bool hero_company = iequals(unit.xml_type, "HeroCompany");
-        const bool carried_hero = iequals(unit.xml_type, "HeroUnit") || iequals(unit.xml_type, "GenericHeroUnit");
+        // WHE-SQ-02 / WPR-33: a hero with its own space locomotor is a deployable body,
+        // not a carried identity. Keep the ordinary hull and purchase gates for that body.
+        const bool space_body = has_behavior(*object, "SIMPLE_SPACE_LOCOMOTOR")
+            || has_behavior(*object, "FIGHTER_LOCOMOTOR");
+        const bool carried_hero = (iequals(unit.xml_type, "HeroUnit") || iequals(unit.xml_type, "GenericHeroUnit"))
+            && !space_body;
         if (hero_company) load_company(*object, unit);
         if (iequals(unit.xml_type, "UpgradeObject") || has_behavior(*object, "DUMMY_UPGRADE") || hero_company || carried_hero) mask_flags(*object, unit);
         else if (unit.kind == UnitKind::squadron) load_squadron(*object, unit);
         else if (unit.special_weapon && !unit.star_base) load_planetary_weapon(*object, unit);
         else load_body(*object, unit);
+        if (unit.kind == UnitKind::squadron && unit.max_squad_size == 0) return; // FL-06: skip the invalid type only
         if (!hero_company) load_abilities(*object, unit);
         load_production(*object, unit);
         if (unit.build_pad) {
@@ -361,6 +394,11 @@ void Loader::load_company(Object& object, UnitType& unit) {
 
     // #71: a map object type's footprint alone.
 void Loader::load_obstacle(const std::string& id) {
+        if (input_.domain == sim::tactical::BattleDomain::land) {
+            auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "land static object", report_);
+            if (object) { record_layers(*object); load_land_static(*object); }
+            return;
+        }
         if (tables_.find(id) != nullptr) return; // live capture type already supplies its footprint
         auto object = resolve(*input_.catalog, id, data::Category::game_object, id, "obstacle", report_);
         if (!object) return;
@@ -368,7 +406,7 @@ void Loader::load_obstacle(const std::string& id) {
         ObstacleType obstacle;
         obstacle.id = object->effective.object_id;
         obstacle.xml_type = object->effective.type_name;
-        obstacle.space_layer = trim(object->text("Space_Layer"));
+        obstacle.space_layer = trim(object->text(domain_tag(input_.domain, DomainTag::layer)));
         obstacle.scale_factor = object->fixed("Scale_Factor", report_, false);
         obstacle.influences_capture = flag(*object, "Influences_Capture_Point", false).value_or(true);
         obstacle.living_projectile_collision = flag(*object, "Collidable_By_Projectile_Living", false).value_or(false);
@@ -395,9 +433,14 @@ void Loader::load_obstacle(const std::string& id) {
 SpaceFootprint Loader::read_footprint(Object& object, const Frames* model) {
         SpaceFootprint footprint;
         footprint.space_obstacle = has_space_obstacle(object);
-        footprint.custom_hard_x = object.fixed("Custom_Hard_XExtent", report_, false);
-        footprint.custom_hard_y = object.fixed("Custom_Hard_YExtent", report_, false);
-        footprint.custom_soft_radius = object.fixed("Custom_Soft_Footprint_Radius", report_, false);
+        // LSL-P1: a land body reads its footprint tags with the retail float parse (the land adapter's own rules).
+        const bool land = input_.domain == sim::tactical::BattleDomain::land;
+        const auto real = [&](const std::string_view tag) {
+            return land ? object.retail_float(tag, report_) : object.fixed(tag, report_, false);
+        };
+        footprint.custom_hard_x = real("Custom_Hard_XExtent");
+        footprint.custom_hard_y = real("Custom_Hard_YExtent");
+        footprint.custom_soft_radius = real("Custom_Soft_Footprint_Radius");
         footprint.obstacle_radius = object.fixed("Space_Obstacle_Radius", report_, false);
         auto& hazard = footprint.hazard;
         hazard.behavior = tokens(object.text("Behavior"));
@@ -409,7 +452,12 @@ SpaceFootprint Loader::read_footprint(Object& object, const Frames* model) {
         hazard.asteroid_damage = has_behavior(object, "ASTEROID_FIELD_DAMAGE");
         hazard.nebula_service = has_behavior(object, "NEBULA");
         const auto offset = tokens(object.text("Space_Obstacle_Offset"));
-        if (!offset.empty()) {
+        if (land && !offset.empty()) {
+            // LSL-12: each part is a retail float parse; a missing part keeps its zero default, extra parts are ignored.
+            const std::array<Fixed*, 3> parts{&hazard.obstacle_offset.x, &hazard.obstacle_offset.y, &hazard.obstacle_offset.z};
+            for (std::size_t index = 0; index < parts.size() && index < offset.size(); ++index)
+                if (const auto value = data::retail::float_value(offset[index])) *parts[index] = value->value;
+        } else if (!offset.empty()) {
             if (offset.size() == 3 && number(offset[0]) && number(offset[1]) && number(offset[2])) {
                 hazard.obstacle_offset = {*number(offset[0]), *number(offset[1]), *number(offset[2])};
             } else {
@@ -459,7 +507,7 @@ void Loader::load_projectile(const std::string& id) {
         // WFP-01: REVEAL is an object behaviour, including on a stationary projectile.
         const auto behaviours = tokens(object->text("Behavior"));
         if (std::any_of(behaviours.begin(), behaviours.end(), [](const auto& value) { return iequals(value, "REVEAL"); })) {
-            projectile.reveal_range = object->fixed("Space_FOW_Reveal_Range", report_, true);
+            projectile.reveal_range = object->fixed(domain_tag(input_.domain, DomainTag::reveal_range), report_, true);
             projectile.dense_reveal_multiplier = object->fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
                 .value_or(Fixed::from_raw(Fixed::scale / 2));
         }
@@ -502,15 +550,7 @@ void Loader::load_projectile(const std::string& id) {
         projectile.blast.radius = object->fixed("Projectile_Blast_Area_Range", report_, false).value_or(Fixed{});
         projectile.blast.dropoff = flag(*object, "Projectile_Blast_Area_Dropoff", false).value_or(false);
         const auto signed_count = [&](const std::string_view tag, const std::int32_t fallback) {
-            const auto value = object->fixed(tag, report_, false);
-            if (!value) return fallback;
-            const auto whole = value->trunc_to_integer();
-            if (value->raw() % Fixed::scale != 0 || whole < std::numeric_limits<std::int32_t>::min()
-                || whole > std::numeric_limits<std::int32_t>::max()) {
-                report_.missing(projectile.id, std::string(tag), {}, "expected a signed integer");
-                return fallback;
-            }
-            return static_cast<std::int32_t>(whole);
+            return object->integer(tag, report_, false).value_or(fallback);
         };
         projectile.blast.tiers = signed_count("Projectile_Blast_Area_Dropoff_Tiers", 5);
         projectile.blast.max_victims = signed_count("Projectile_Blast_Area_Max_Victims", 5000);

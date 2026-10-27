@@ -437,8 +437,15 @@ void synthetic_tables() {
     barrage_inputs();
     cluster_bomb_inputs();
     manual_weapon_loading();
+    randomized_fire_bone_loading();
+    hardpoint_turret_loading();
     special_weapon_classification();
     rocket_variant_inputs();
+    unknown_inaccuracy_categories();
+    unknown_restriction_categories();
+    restriction_list_edges();
+    ion_stun_content_errors();
+    ability_limits();
     TempTree tree;
     write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
     const auto loaded = load(tree.root, models(-40.0F));
@@ -472,11 +479,11 @@ void synthetic_tables() {
     expect(station.variant_chain == std::vector<std::string>{"Skirmish_Test_Base", "Test_Base"}, "variant chain");
     expect(station.hull && station.hull->raw() == raw(1600), "station hull through the variant");
     expect(station.victory_relevant, "station is victory relevant");
-    expect(station.space_fow_reveal_range && station.space_fow_reveal_range->raw() == raw(2000),
+    expect(station.fow_reveal_range && station.fow_reveal_range->raw() == raw(2000),
            "sensor range through the variant");
-    expect(tables.units[1].space_fow_reveal_range && tables.units[1].space_fow_reveal_range->raw() == raw(1200)
-               && tables.units[4].space_fow_reveal_range && tables.units[4].space_fow_reveal_range->raw() == raw(500)
-               && !tables.units[2].space_fow_reveal_range,
+    expect(tables.units[1].fow_reveal_range && tables.units[1].fow_reveal_range->raw() == raw(1200)
+               && tables.units[4].fow_reveal_range && tables.units[4].fow_reveal_range->raw() == raw(500)
+               && !tables.units[2].fow_reveal_range,
            "ship and craft authored ranges; a squadron authors none");
     // #271: REVEAL decides; a squadron reveals through its team container, `Team` by
     // default, and a container variant keeps the last of its base's two authored ranges.
@@ -819,15 +826,56 @@ void synthetic_tables() {
     expect(motion.value().rules.reevaluation_frames == 10 && motion.value().rules.guard_range == Fixed::from_raw(raw(750)) && motion.value().rules.max_waypoints == 6,
            "OR-06/OR-14: the fixture's stock values reach the motion rules");
 
-    for (const char* value : {"0", "2", "9", "2.5", "-1", "70000"}) {
+    // HCB-58 (#4992): FoC reads the constant with atoi into 32 bits and compares the queue count as unsigned.
+    for (const auto& [value, capacity] : {std::pair{"0", 0UL}, std::pair{"2", 2UL}, std::pair{"9", 9UL}, std::pair{"2.5", 2UL},
+             std::pair{"-0.5", 0UL}, std::pair{"-1", 4294967295UL}, std::pair{"-2", 4294967294UL}, std::pair{"65536", 65536UL},
+             std::pair{"65537", 65537UL}, std::pair{"70000", 70000UL}, std::pair{"3000000000", 2147483647UL}}) {
         auto changed = tables;
         for (auto& constant : changed.constants.scalars) {
             if (constant.tag == "MaxWaypointsPerPath") constant.value = Fixed::from_decimal(value).value();
         }
         const auto rebound = eawr::units::motion_table(changed);
-        const bool valid = std::string_view(value) == "0" || std::string_view(value) == "2" || std::string_view(value) == "9";
-        expect(static_cast<bool>(rebound) == valid && (!valid || rebound.value().rules.max_waypoints == std::stoul(value)),
-            "HCB-58: authored queue capacity is applied and invalid capacities rejected");
+        expect(rebound && rebound.value().rules.max_waypoints == capacity,
+            std::string{"HCB-58: authored queue capacity "} + value + " reads as the retail unsigned 32-bit value");
+    }
+    // #4992: the authored text reaches the motion rules the way FoC's atoi reads it (Alliance at War authors -1).
+    for (const auto& [text, capacity] : {std::pair{" -1 ", 4294967295UL}, std::pair{"0", 0UL}, std::pair{"6", 6UL},
+             std::pair{"65536", 65536UL}, std::pair{"65537", 65537UL}, std::pair{"2.9", 2UL}, std::pair{"lots", 0UL},
+             std::pair{"7 paths", 7UL}}) {
+        TempTree constants_tree;
+        write_fixture(constants_tree.root, units_xml("3600", "Unit_Select_Test"));
+        const auto path = constants_tree.root / "XML" / "GameConstants.xml";
+        std::string authored;
+        {
+            std::ifstream in(path, std::ios::binary);
+            authored.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        const std::string_view stock = "<MaxWaypointsPerPath> 6 </MaxWaypointsPerPath>";
+        const auto at = authored.find(stock);
+        expect(at != std::string::npos, "HCB-58: the fixture authors MaxWaypointsPerPath");
+        if (at == std::string::npos) continue;
+        authored.replace(at, stock.size(), "<MaxWaypointsPerPath>" + std::string{text} + "</MaxWaypointsPerPath>");
+        {
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out << authored;
+        }
+        const auto reloaded = load(constants_tree.root, models(-40.0F));
+        std::optional<std::uint64_t> got;
+        if (reloaded.tables) {
+            if (const auto rebound = eawr::units::motion_table(*reloaded.tables)) got = rebound.value().rules.max_waypoints;
+        }
+        expect(got == capacity, std::string{"HCB-58: authored text '"} + text + "' loads as the retail unsigned queue capacity");
+    }
+    // #4992: AaW authors 0 for the wait leg's frame time and cost; negatives stay refused.
+    for (const auto& [frames, cost, valid] : {std::tuple{"0", "0.0", true}, std::tuple{"0", "0.8", true},
+             std::tuple{"-1", "0.8", false}, std::tuple{"100", "-0.5", false}}) {
+        auto changed = tables;
+        for (auto& constant : changed.constants.scalars) {
+            if (constant.tag == "WaitOperatorBaseFrameTime") constant.value = Fixed::from_decimal(frames).value();
+            if (constant.tag == "WaitOperatorCostCoefficient") constant.value = Fixed::from_decimal(cost).value();
+        }
+        expect(static_cast<bool>(eawr::units::motion_table(changed)) == valid,
+            std::string{"PC-08: wait leg frame time "} + frames + " and cost " + cost + (valid ? " accepted" : " refused"));
     }
     const auto with_constants = [&](const char* interval, const char* guard) {
         auto changed = tables;

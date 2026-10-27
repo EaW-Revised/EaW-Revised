@@ -10,6 +10,87 @@ New retail output qualifications are WGA-111/112/114; decoded execution-route
 consumption is also specified by WGA-134..136. Force and connectivity queries
 are qualified by WGA-181..194; the owned native component is WGA-195.
 
+## Path connectivity coefficients
+
+Read-only debug-build research qualifies the graph calculation separately from
+execution route costs. These rules describe the four internal/external
+connectivity perceptions; they do not substitute neighbour counts or force
+strength for a path coefficient.
+
+- **WGA-490:** A directed edge requires a positive current allegiance allied to
+  the evaluating player; an internal edge also requires that at its destination.
+  Every player has both graphs, including human and neutral players. Self distance is zero. Distances use the
+  single-precision three-dimensional position calculation, promoted to binary64.
+  Round each copied coordinate to binary32 before subtraction, then round each
+  vector arithmetic operation; large adjacent coordinates may become co-located.
+  A direct trade route divides distance by the single-precision global
+  `TradeRouteMovementFactor`. Other edges exist only within
+  `MaximumFleetMovementDistance`, including equality. The graph retains only
+  vertices incident to an accepted non-self edge, preserving object-query order.
+  Internal costs mirror the earlier matrix triangle. Named route speed and
+  execution threat do not enter these weights. Retail queries trade existence
+  between actual planet objects; an input route with an endpoint outside the
+  snapshot therefore contributes no edge and produces a diagnostic naming it.
+- **WGA-491:** Binary64 shortest-path relaxation preserves the earlier path on
+  equal cost. Positive direct edges start with the source as predecessor; zero
+  edges have no predecessor. Count intermediate vertices, excluding endpoints,
+  on each selected shortest path. Internal graphs count unordered endpoint
+  pairs; external graphs count ordered pairs. Divide each unsigned count by the
+  largest count in that graph; a zero maximum gives zero for every retained
+  vertex. A vertex filtered from the graph has no coefficient entry. Zero edges
+  can leave an incomplete predecessor chain after relaxation. Retail's walk of
+  that NIL chain remains unqualified and needs a capture/research follow-up.
+  The explicit project boundary skips that endpoint pair, contributes no partial
+  counts, emits a diagnostic and preserves the other pairs and publications.
+- **WGA-492:** `FriendlyInternalConnectivity` and
+  `FriendlyExternalConnectivity` read the evaluating player's corresponding
+  graph. A missing vertex returns successful zero. `EnemyInternalConnectivity`
+  starts at zero and takes the maximum across all nonallied players' internal
+  graphs. Missing owning publications stay unavailable. The retail enemy
+  external wrapper forwards an output without initializing it; its equation
+  caller's seed is qualified separately by WGA-494.
+- **WGA-493:** Retail initialization and post-load reconstruction build the two
+  coefficient graphs for each player. This implementation rebuilds derived
+  tables from completed control, geometry, route and diplomacy inputs at fresh
+  binding and restore. It adds no native archive fields. Loaded equations request
+  the producer through their compiled lookup tokens; equal complete inputs reuse
+  the prior publication. Raw authored movement constants are rounded to binary32
+  for this producer, independently of existing fixed-point force consumers.
+- **WGA-494:** Each native lookup expression initializes its own binary64 output
+  to positive zero before calling the engine evaluator. Other expression
+  operands and the outer equation's output do not seed that leaf. A successful
+  callback pushes its output; a failed callback still fails the equation.
+  `EnemyExternalConnectivity` therefore starts at zero and takes the maximum
+  external coefficient over all nonallied players, including human and neutral
+  players. Missing vertex entries contribute nothing and can give successful
+  zero; missing owning publications remain unavailable. This qualifies equation
+  lookups, without claiming that an arbitrary direct native caller seeds zero.
+
+Evidence: debug build, coefficient graph construction, edge weighting, vertex
+filtering and binary64 shortest-path calculation. Synthetic coverage includes
+line, directed terminal, trade-shortcut and equal-path diamond graphs, independent
+lookup output seeds, human/neutral enemy graphs and unavailable owners, with
+independent graphs staged on 1, 2, 4 and 8 workers.
+
+The retail coefficient publication cadence is unqualified (legacy EAWR-4786).
+Integration uses a named coefficient-publication seam at the existing
+connectivity/execution refresh boundary pending the frame-service programme's
+qualification; that boundary is a project policy, not a retail timing claim.
+
+Each changed graph uses Floyd relaxation in O(m^3) time and O(m^2) storage for
+m retained planets. At m=250, two graphs require approximately
+`2 x players x 15.6 million` relaxation candidates per publication. Independent
+player/graph jobs use fixed worker partitions and ordered publication. Fresh
+binding and restore build once; subsequent builds occur only at the admitted
+execution-matrix refresh seam when complete graph inputs differ. Binding each
+tick does not recompute an existing publication. The retail refresh frequency
+is part of the unqualified cadence seam above; no additional timer is invented.
+
+The installed headless CLI accepts `--live-perception <equation>` with
+`--live <ticks> --live-ai on`. It reports failed native lookups beneath that
+exact root equation, including player, target and token path. The observer is
+off by default and does not change perception results or native state.
+
 ## Inputs and ownership
 
 `GalacticWorld::bind` takes a retained completed snapshot, copied player/type/

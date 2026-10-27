@@ -25,7 +25,7 @@
 namespace unit_tables_test_support {
 
 
-void foc_fleet(const bool formation_only) {
+void foc_fleet(const bool formation_only, const bool fire_bones_only) {
     const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
     if (!root) {
         std::cout << "FoC fleet: skipped (set EAWR_EAW_GAME_ROOT)\n";
@@ -55,6 +55,10 @@ void foc_fleet(const bool formation_only) {
     input.catalog = &catalog.value().catalog;
     input.filesystem = &filesystem.value();
     input.model = access.model;
+    if (fire_bones_only) {
+        foc_asymmetric_release_geometry(input);
+        return;
+    }
     if (formation_only) {
         foc_formation_deceleration(input);
         return;
@@ -80,6 +84,7 @@ void foc_fleet(const bool formation_only) {
     foc_leech_shields(input);
     foc_lure(input);
     foc_hardpoint_ranks(input);
+    foc_land_companies(input);
     auto loaded = eawr::units::load_unit_tables(input);
     expect(static_cast<bool>(loaded), "FoC unit tables load");
     if (!loaded) return;
@@ -103,7 +108,7 @@ void foc_fleet(const bool formation_only) {
     auto hero_input = input;
     hero_input.types = {"Han_Solo_Team_Space_MP", "Sundered_Heart", "Rogue_Squadron_Space", "Home_One",
             "Boba_Fett_Team_Space_MP", "Darth_Team_Space_MP", "Admonitor_Star_Destroyer", "Accuser_Star_Destroyer",
-            "Bossk_Team_Space_MP", "IG88_Team_Space_MP", "The_Peacebringer"};
+            "Bossk_Team_Space_MP", "IG88_Team_Space_MP", "The_Peacebringer", "Captain_Piet"};
     // The pinned M2 roster has Rebel/Empire stations; an explicit purchase closure
     // also covers the Underworld companies without expanding that fixture's roster.
     const auto hero_loaded = eawr::units::load_unit_tables(hero_input);
@@ -121,6 +126,14 @@ void foc_fleet(const bool formation_only) {
             std::string("WHE-49: company conversion: ") + purchase);
     }
     if (hero_loaded) {
+        for (const auto* name : {"Boba_Fett", "Captain_Piet"}) {
+            const auto* carried = hero_loaded.value().find(name);
+            expect(carried && !carried->hull && carried->model_path.empty(),
+                std::string("WHE-07/49: installed carried hero retains no independent space body: ") + name);
+        }
+        const auto* capital = hero_loaded.value().find("Accuser_Star_Destroyer");
+        expect(capital && capital->hull && capital->kind == UnitKind::ship,
+            "WHE-04: installed capital hero retains its existing standalone body");
         bool concentrate_found = false;
         for (const auto& unit : hero_loaded.value().units) for (const auto& special : unit.special_abilities) {
             if (special.kind != eawr::sim::tactical::SpecialAbilityKind::concentrate_fire) continue;
@@ -373,9 +386,9 @@ void foc_fleet(const bool formation_only) {
         expect(item.selectable && !item.decoration, "WSU-15: the FoC fleet is selectable and not decoration: " + item.id);
         expect(item.locomotion == (item.kind != UnitKind::station), "WSU-21: stations lack locomotion; ships, craft and teams have it: " + item.id);
         if (expected == authored.end()) {
-            expect(item.kind == UnitKind::squadron && !item.space_fow_reveal_range, "squadron authors no range: " + item.id);
+            expect(item.kind == UnitKind::squadron && !item.fow_reveal_range, "squadron authors no range: " + item.id);
         } else {
-            expect(item.space_fow_reveal_range && item.space_fow_reveal_range->raw() == raw(expected->second),
+            expect(item.fow_reveal_range && item.fow_reveal_range->raw() == raw(expected->second),
                    "authored range: " + item.id);
         }
         const auto sensor = sensors.find(item.id);
@@ -972,6 +985,10 @@ void foc_fleet(const bool formation_only) {
                 : ((row.owner == "Slave_I" || row.owner == "TIE_Prototype") && row.field == "Targeting_Priority_Set")
                   || (row.owner == "Darth_Vader_TIE_Fighter_Container" && row.field == "Create_Team_Type");
         }), "only authored repair reveal, hero targeting and container replenishment gaps remain unresolved");
+    // ML-53: the loader tolerates an unknown restriction name, so this is the stock-data guard against typos.
+    expect(std::none_of(tables.unresolved.begin(), tables.unresolved.end(), [](const auto& row) {
+        return row.field == "Fire_Category_Restrictions";
+    }), "no stock hardpoint names an unknown Fire_Category_Restrictions category");
     expect(std::none_of(tables.unresolved.begin(), tables.unresolved.end(), [](const auto& row) {
         return row.owner == "UL_Extort_Cash_L1_Upgrade" || row.owner == "UL_Extort_Cash_L2_Upgrade";
     }), "upgrade objects never pass through the required ship-body fields");

@@ -1,12 +1,14 @@
 #pragma once
 
 #include "encoding.hpp"
+#include "paused_admission.hpp"
 #include "eawr/sim/galactic/session.hpp"
 
 #include "eawr/sim/galactic/movement.hpp"
 #include "eawr/sim/galactic/graph.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <set>
 
@@ -74,6 +76,16 @@ core::Result<void> gather_native_movement_orbit(Owner& owner, Visit visit, Fleet
 [[nodiscard]] core::Result<bool> native_orbit_conflict(const Fleet&,
     std::optional<std::span<const CensusObject>>, const MovementSetup&, const MovementSetup* contents = nullptr);
 
+// WGM-84/85: the paid admission of the intermediate path planets. `planet_state` yields (owner, orbital occupant)
+// of a path planet; an unowned planet (owner 0) has nobody to pay.
+struct NativeBribeQuote {
+    math::Fixed total{};
+    std::vector<std::pair<PlayerId, math::Fixed>> recipients; // ascending player
+    bool invalid{};
+};
+[[nodiscard]] NativeBribeQuote quote_native_bribe(PlayerId mover, std::span<const FleetMember> departing,
+    std::span<const PlanetId> path, const MovementSetup&,
+    const std::function<std::pair<PlayerId, PlayerId>(PlanetId)>& planet_state);
 struct NativeMovementAdmission {
     GalacticRejectReason reason{GalacticRejectReason::none};
     FleetDeparture departure{};
@@ -98,7 +110,8 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
     if (!owner.setup.movement) return reject(GalacticRejectReason::unknown_value);
     const auto& gates = owner.setup.fleet_control->gates;
     const auto humans = std::count_if(owner.seats.begin(), owner.seats.end(), [](const auto& r) { return r.kind == SeatKind::human; });
-    if (!returning_player && (owner.clock.pause_depth || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech)))) return reject(GalacticRejectReason::paused);
+    if (!returning_player && (owner_paused_refusal(owner, PausedKind::fleet_move, pending_local_conflict, issuer->kind == SeatKind::human)
+            || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech)))) return reject(GalacticRejectReason::paused);
     if (!owner.fleets.contains(move.fleet)) return reject(GalacticRejectReason::unknown_subject);
     auto& f = owner.registry.template get<session_detail::FleetData>(owner.fleets.at(move.fleet));
     if (f.owner != (returning_player ? *returning_player : issuer->player)) return reject(GalacticRejectReason::not_authorized);
@@ -128,6 +141,21 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
         }
         if (!attached) return reject(GalacticRejectReason::invalid_membership);
     }
+    // WGM-84: the first corruption-benefiting mover pays the intermediate planets before anything moves. Retreat
+    // endpoints are supplied directly and are not an ordinary path (WGM-198).
+    if (!returning_player) {
+        std::vector<FleetMember> departing;
+        const auto& left = prepared.departure.left_behind;
+        for (const auto& member : f.members)
+            if (std::find(left.begin(), left.end(), member.id) == left.end()) departing.push_back(member);
+        const auto quote = quote_native_bribe(f.owner, departing, move.path, *owner.movement_inputs,
+            [&](PlanetId planet) { return owner.bribe_planet_state(planet); });
+        if (quote.invalid) return reject(GalacticRejectReason::cannot_depart);
+        if (quote.total > math::Fixed{})
+            if (const auto reason = owner.settle_movement_bribe(f.owner, quote.recipients, quote.total); reason != GalacticRejectReason::none)
+                return reject(reason);
+    }
+    const auto source = f.orbit; // WGM-150: the planet being left
     auto motion = std::move(prepared.motion);
     // Admission is complete: commit the remnant by existing identity, then unlink/depart.
     if (!prepared.departure.left_behind.empty()) {
@@ -147,6 +175,7 @@ void execute_native_movement(Owner& owner, const GameCommand& command, std::uint
         owner.dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
     }
     auto& departing = owner.registry.template get<session_detail::FleetData>(owner.fleets.at(move.fleet));
+    owner.accrue_departure_piracy(move.fleet, departing.owner, source, departing.members);
     departing.orbit = 0; departing.motion = std::move(motion);
     departing.raid_destination = move.raid ? std::optional<PlanetId>{move.path.back()} : std::nullopt;
     owner.relocate_actor(move.fleet, departing.owner, 0, 0);

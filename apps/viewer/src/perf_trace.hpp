@@ -57,6 +57,8 @@ public:
         GodotParticleBackend::FrameWork particle_work{};
         particles::RegistryTimings emitter_timing{}, effects_timing{}, debris_timing{};
         double bookkeeping_ms{};
+        std::size_t slots_grown{}; // This frame, not the session cumulative count.
+        double slot_growth_ms{};
         double hud_ms{};
         double audio_ms{};
         double fog_ms{};
@@ -100,6 +102,9 @@ public:
     // The path of --eawr-perf-trace, nothing without it, or an error text.
     [[nodiscard]] static std::optional<std::string> parse(const godot::PackedStringArray& arguments, std::string& error);
     [[nodiscard]] static bool fine_particle_timings() noexcept { return fine_particle_timings_; }
+    // False with --eawr-perf-no-render-timing: the render_cpu_ms and render_gpu_ms columns are left empty and the
+    // root viewport's render-time measurement is never requested (its per-frame queries stall the Separate render thread).
+    [[nodiscard]] static bool render_timing() noexcept { return render_timing_; }
 
     [[nodiscard]] bool open(const std::string& path, std::string& error);
     // Monotonic entry-to-entry and extension/external intervals; engine delta and
@@ -111,6 +116,7 @@ public:
 
 private:
     static bool fine_particle_timings_;
+    static bool render_timing_;
     std::ofstream output_;
     godot::RID viewport_;
     std::uint64_t frames_{};

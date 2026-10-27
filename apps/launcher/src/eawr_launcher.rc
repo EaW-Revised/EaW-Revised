@@ -4,8 +4,8 @@
 1 24 "eawr_launcher.manifest"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,7,1
- PRODUCTVERSION 0,2,7,1
+ FILEVERSION 0,3,0,0
+ PRODUCTVERSION 0,3,0,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -18,11 +18,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "EaW Revised"
             VALUE "FileDescription", "Empire at War Revised launcher"
-            VALUE "FileVersion", "0.2.7.1"
+            VALUE "FileVersion", "0.3.0"
             VALUE "InternalName", "EAWR"
             VALUE "OriginalFilename", "EAWR.exe"
             VALUE "ProductName", "Empire at War Revised"
-            VALUE "ProductVersion", "0.2.7.1"
+            VALUE "ProductVersion", "0.3.0"
         END
     END
     BLOCK "VarFileInfo"

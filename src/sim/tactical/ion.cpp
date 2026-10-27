@@ -18,8 +18,17 @@ constexpr std::int64_t one_raw = Fixed::scale;
 
 } // namespace
 
+// FoC floors its speed and fire-rate modifier lists at -0.99: a factor of 0.01 (IS-10).
+constexpr std::int64_t min_factor_raw = (one_raw + 50) / 100;
+
+Fixed ion_reduction_factor(const Fixed reduction) noexcept {
+    return Fixed::from_raw(std::max(one_raw - reduction.raw(), min_factor_raw));
+}
+
 bool valid_ion_stun(const IonStunShot& shot) noexcept {
-    const auto fraction = [](const Fixed value) { return value.raw() >= 0 && value.raw() <= one_raw; };
+    const auto fraction = [](const Fixed value) {
+        return value.raw() >= -ion_reduction_limit * one_raw && value.raw() <= ion_reduction_limit * one_raw;
+    };
     return shot.frames >= 1 && shot.frames <= max_ion_stun_frames && fraction(shot.speed_reduction)
         && fraction(shot.rate_reduction);
 }
@@ -43,12 +52,12 @@ bool ion_stunned(const std::optional<IonStunState>& state, const std::uint64_t f
 
 Fixed ion_speed_factor(const std::optional<IonStunState>& state, const std::uint64_t frame) noexcept {
     if (!ion_stunned(state, frame)) return Fixed::from_raw(one_raw);
-    return Fixed::from_raw(one_raw - state->speed_reduction.raw());
+    return ion_reduction_factor(state->speed_reduction);
 }
 
 Fixed ion_fire_rate(const std::optional<IonStunState>& state, const std::uint64_t frame) noexcept {
     if (!ion_stunned(state, frame)) return Fixed::from_raw(one_raw);
-    return Fixed::from_raw(one_raw - state->rate_reduction.raw());
+    return ion_reduction_factor(state->rate_reduction);
 }
 
 std::uint32_t fire_rate_recharge(const std::uint32_t frames, const Fixed rate) noexcept {

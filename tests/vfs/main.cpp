@@ -13,6 +13,7 @@
 #include <ios>
 #include <iostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -96,6 +97,57 @@ struct TempTree {
     }
 };
 
+void vfs_loose_only_mod() {
+    using namespace eawr::vfs;
+    TempTree tree;
+    const auto leaf = tree.root / "loose-mod" / "Data";
+    const auto parent = tree.root / "parent" / "Data";
+    const auto base = tree.root / "base";
+    write_text(leaf / "Xml/Objects.xml", "<Objects><Unit Name=\"Synthetic\"/></Objects>");
+    write_text(parent / "Xml/Parent.xml", "<Objects/>");
+    write_text(base / "MegaFiles.xml", "<Mega_Files><File>Base.meg</File></Mega_Files>");
+    write_bytes(base / "Base.meg", one_entry_meg("Data/Xml/Fallback.xml", "<Fallback/>"));
+    // A missing manifest does not activate even a conventional patch slot.
+    write_bytes(leaf / "Patch.meg", one_entry_meg("Data/Xml/Inactive.xml", "<Inactive/>"));
+    auto roots = mod_chain_roots(std::filesystem::path((tree.root / "loose-mod").native() +
+        std::filesystem::path(";").native() + (tree.root / "parent").native()));
+    roots.emplace_back("base", base);
+    std::ostringstream diagnostics;
+    auto* previous = std::clog.rdbuf(diagnostics.rdbuf());
+    auto chain = resolve_manifest_chain(roots);
+    std::clog.rdbuf(previous);
+    expect(chain && chain.value().size() == 3, "loose-only mod chain resolves");
+    const auto logged = diagnostics.str();
+    const std::string code(diagnostic_codes::manifest_absent);
+    const auto first = logged.find(code);
+    const auto second = first == std::string::npos ? first : logged.find(code, first + code.size());
+    expect(first != std::string::npos && second != std::string::npos &&
+        logged.find(code, second + code.size()) == std::string::npos,
+        "one missing-manifest diagnostic per loose-only mod layer");
+    if (!chain) return;
+    expect(chain.value()[0].manifest_source_id.empty() &&
+        chain.value()[0].declared_archives.empty() && chain.value()[0].missing_archives.empty() &&
+        chain.value()[0].mount.active_archives.empty(), "loose-only layer invents no manifest or archives");
+    std::vector<MountSpec> specs;
+    for (auto& manifest : chain.value()) specs.push_back(std::move(manifest.mount));
+    auto fs = Vfs::mount(specs);
+    expect(static_cast<bool>(fs), "loose-only mod mounts");
+    if (!fs) return;
+    auto bytes = fs.value().open("data/xml/objects.xml");
+    expect(bytes && bytes_as_string(bytes.value()) == "<Objects><Unit Name=\"Synthetic\"/></Objects>",
+        "mixed-case loose XML is visible through VFS");
+    expect(static_cast<bool>(fs.value().open("data/xml/parent.xml")), "loose-only parent supplies XML");
+    expect(static_cast<bool>(fs.value().open("data/xml/fallback.xml")), "installation archive fallback remains visible");
+    expect(!fs.value().open("data/xml/inactive.xml"), "manifestless mod does not activate Patch.meg");
+    for (const auto* id : {"base", "expansion"}) {
+        auto required = resolve_manifest_mount(id, leaf);
+        expect(!required && required.error().code == diagnostic_codes::manifest_invalid,
+            "installation layers still require manifests");
+    }
+    write_text(leaf / "MegaFiles.xml", "<Mega_Files><File>broken</Mega_Files>");
+    expect(!resolve_manifest_mount("mod", leaf), "present malformed mod manifest still fails");
+}
+
 void vfs_mod_chain() {
     using namespace eawr::vfs;
     TempTree tree;
@@ -144,6 +196,8 @@ void vfs_mod_chain() {
     const auto semicolon = tree.root / "leaf;with semicolon";
     std::filesystem::create_directories(semicolon);
     auto single = mod_chain_roots(semicolon);
+    expect(mod_data_root(semicolon) == semicolon && mod_data_root({}).empty(), "data-root adapter preserves direct and empty roots");
+    expect(mod_data_root(tree.root / "leaf") == leaf, "data-root adapter uses the existing Data child");
     expect(single.size() == 1 && single[0].first == "mod" && single[0].second == semicolon,
         "an existing directory named with ';' is one mod root, not a chain");
     auto invalid = mod_chain_roots(std::filesystem::path("leaf;;parent;"));
@@ -372,6 +426,7 @@ int main(const int argc, char** argv) {
     expect(static_cast<bool>(recovered), "archive mounts after read access is restored");
 #endif
 
+    vfs_loose_only_mod();
     vfs_mod_chain();
 
     if (failures == 0) std::cout << "vfs contracts passed\n";

@@ -25,6 +25,7 @@
 #include <fstream>
 #include <ios>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -72,6 +73,7 @@ void expect(const bool condition, const std::string_view message) {
     weapon.fire_a = at(5, 2);
     weapon.fire_b = at(5, -2);
     weapon.has_fire_b = true;
+    weapon.randomize_between_fire_bones = false; // This fixture authors WWP-22 endpoint selection.
     return weapon;
 }
 
@@ -521,6 +523,17 @@ void test_manual_contracts() {
     };
     // Fire midpoint is x=5, so the inclusive minimum is the target at x=105.
     enemy.position = at(105, 0); expect(admitted(), "MC-01: inclusive minimum range");
+    weapon.fire_in_normal_mode = false;
+    own.rocket_attack = false;
+    expect(!admitted(), "WRA-02: rocket-only manual gun refuses normal-mode assignment");
+    own.rocket_attack = true;
+    expect(admitted(), "WRA-02: rocket-only manual gun admits a matching mode");
+    weapon.fire_in_normal_mode = true;
+    weapon.fire_in_rocket_mode = false;
+    own.rocket_attack = true;
+    expect(!admitted(), "WRA-02: normal-only manual gun refuses rocket-mode assignment");
+    own.rocket_attack = false;
+    weapon.fire_in_rocket_mode = true;
     enemy.position = at(104, 0); expect(!admitted(), "MC-01: below minimum range is refused");
     enemy.position = at(705, 0); expect(admitted(), "MC-01: inclusive maximum range");
     enemy.position = at(706, 0); expect(!admitted(), "MC-01: beyond maximum range is refused");
@@ -551,6 +564,12 @@ void test_manual_contracts() {
         && timeout.value().manual_feedback.size() == 1 && timeout.value().manual_feedback.front().player == 1,
         "MC-03: strict frame 301 clears target and addresses requesting player");
     weapon.category_restrictions = 0;
+    weapon.fire_in_normal_mode = false;
+    const auto mode_timeout = detail::step_combat(world, own);
+    expect(mode_timeout && mode_timeout.value().state.weapons.front().manual->target == 0
+        && mode_timeout.value().manual_feedback.size() == 1,
+        "WRA-02: a later forbidden mode uses eligibility timeout instead of holding a live target forever");
+    weapon.fire_in_normal_mode = true;
     world.units[1].position = at(900, 0);
     auto range_wait = detail::step_combat(world, own);
     expect(range_wait && range_wait.value().state.weapons.front().manual->target == 2
@@ -1122,7 +1141,103 @@ void test_manual_session_and_replay() {
         "MC-10: invalid source hardpoint rejected before queue mutation");
 }
 
+void test_manual_rocket_mode() {
+    for (const bool rocket_only : {false, true}) {
+        auto combat = table();
+        for (auto& profile : combat.profiles) profile.weapons.clear();
+        auto gun = ion();
+        gun.requires_manual_target = true; gun.pulse_count = 1;
+        gun.min_recharge_hundredths = gun.max_recharge_hundredths = 0;
+        gun.manual_cooldown_frames = 0;
+        gun.fire_in_normal_mode = !rocket_only; gun.fire_in_rocket_mode = rocket_only;
+        gun.shot.emplace(); gun.shot->speed = units(7); gun.shot->max_travel = units(1000);
+        combat.profiles.front().weapons = {gun};
+        const auto initial = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, fighter_type, 2, at(500, 0))});
+        tactical::AbilityProfile rocket; rocket.kind = tactical::AbilityKind::rocket_attack;
+        tactical::UnitAbilityProfile holder; holder.type_id = shooter_type; holder.abilities = {rocket};
+        tactical::AbilityTable abilities; abilities.profiles = {holder};
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(initial, sensors(), {}, {}, std::nullopt, combat, {}, abilities);
+            expect(static_cast<bool>(created), "WRA-02: manual modal holder session creates");
+            if (!created) continue;
+            auto value = std::move(created).value();
+            if (!rocket_only) expect(static_cast<bool>(value.submit({{0, 1, 0}, {1},
+                tactical::AbilityPayload{tactical::AbilityKind::rocket_attack, tactical::AbilityAction::activate}})),
+                "WRA-02: normal-only gun starts in forbidden rocket mode");
+            expect(static_cast<bool>(value.submit({{1, 1, 1}, {1}, tactical::ManualTargetPayload{2, 0}})),
+                "WRA-02: opposite-mode manual command queues for admission");
+            expect(static_cast<bool>(value.submit({{2, 1, 2}, {1}, tactical::AbilityPayload{
+                tactical::AbilityKind::rocket_attack,
+                rocket_only ? tactical::AbilityAction::activate : tactical::AbilityAction::deactivate}})),
+                "WRA-02: matching manual mode switch queues");
+            expect(static_cast<bool>(value.submit({{3, 1, 3}, {1}, tactical::ManualTargetPayload{2, 0}})),
+                "WRA-02: matching-mode manual command queues");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t rejected{}, accepted{}, shots{};
+            for (std::uint64_t tick = 0; tick < 7; ++tick) {
+                const auto step = value.step(executor);
+                expect(static_cast<bool>(step), "WRA-02: modal manual step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+                if (tick <= 2) {
+                    const auto frozen = value.snapshot();
+                    const auto source = std::find_if(frozen->instances().begin(), frozen->instances().end(),
+                        [](const tactical::TacticalInstance& instance) { return instance.entity_id == 1; });
+                    const auto admission = tactical::manual_special_fire_admission(*frozen, 1, 2);
+                    expect(source != frozen->instances().end() && !source->manual_weapons.empty(),
+                        "WRA-02: frozen mode publishes the manual gun");
+                    if (source == frozen->instances().end() || source->manual_weapons.empty()) break;
+                    expect(source->rocket_attack == (tick < 2 ? !rocket_only : rocket_only),
+                        "WRA-02: frozen manual admission carries the current rocket mode");
+                    expect(admission && admission.value().has_value() == (tick == 2)
+                        && source->manual_weapons.front().available == (tick == 2),
+                        "WRA-02: frozen manual admission and HUD availability share the mode gate");
+                    expect(source->manual_weapons.front().target == eawr::sim::invalid_entity_id,
+                        "WRA-02: forbidden assignment is never retained or released by a later mode switch");
+                }
+                for (const auto& event : step.value().snapshot->events()) {
+                    if (event.order != tactical::OrderKind::manual_target) continue;
+                    rejected += event.kind == tactical::EventKind::order_rejected ? 1U : 0U;
+                    accepted += event.kind == tactical::EventKind::order_accepted ? 1U : 0U;
+                }
+                for (const auto& event : step.value().snapshot->combat_events())
+                    shots += event.shooter == 1 && event.kind == tactical::CombatEventKind::weapon_fired ? 1U : 0U;
+            }
+            expect(rejected == 1 && accepted == 1 && shots == 1,
+                "WRA-02: opposite mode rejects without a retained request; matching mode fires once");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WRA-02: direct/frozen modal manual paths agree on 1/2/4/8 workers");
+        }
+    }
+}
+
 void test_validation() {
+    // Range scalars are independent of the bounded geometry/step domain.
+    for (int field = 0; field < 4; ++field) {
+        auto ranged = table();
+        auto& profile = ranged.profiles.front();
+        auto& weapon = profile.weapons.front();
+        weapon.shot = tactical::ShotProfile{units(1), 0, units(25), units(700), true, true, {}};
+        const auto set_range = [&](const Fixed value) {
+            if (field == 0) profile.max_attack_distance = value;
+            else if (field == 1) weapon.range = value;
+            else if (field == 2) weapon.shot->max_travel = value;
+            else { weapon.range = units(1000000000); weapon.manual_min_range = value; }
+        };
+        set_range(units(999999999));
+        expect(static_cast<bool>(tactical::validate_combat(ranged)), "large finite range scalars are admitted independently");
+        if (field != 3) {
+            set_range(Fixed::from_raw(std::numeric_limits<std::int64_t>::max()));
+            expect(static_cast<bool>(tactical::validate_combat(ranged)), "range admission covers the nonnegative Q24 domain");
+        }
+        set_range(Fixed::from_raw(-1));
+        expect(!tactical::validate_combat(ranged), "negative range scalars remain invalid");
+    }
+    auto geometry = table();
+    geometry.profiles.front().weapons.front().fire_a.x = units(tactical::max_combat_distance + 1);
+    expect(!tactical::validate_combat(geometry), "large ranges do not relax the fire-point geometry bound");
     auto bad = table();
     bad.profiles[0].weapons[0].pulse_count = 0;
     expect(!tactical::validate_combat(bad), "a zero pulse count is rejected");
@@ -1158,6 +1273,33 @@ void test_validation() {
     const auto a = first.uniform(0, 1000000);
     expect(a == second.uniform(0, 1000000) && a != other.uniform(0, 1000000), "keyed draws repeat per key");
     expect(first.uniform(7, 7) == 7 && first.draws() == 2, "a one-value draw still counts");
+}
+
+void test_range_query_endpoints() {
+    using namespace tactical::detail;
+    constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+    constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
+    // Keep indexed body geometry ordinary; only the query endpoints approach int64 limits.
+    const std::vector<tactical::SpaceBody> bodies{{1, 2, at(0, 0)}, {2, 2, at(10, 0)}, {3, 1, at(0, 0)}};
+    CombatWorld world;
+    world.index = tactical::SpaceIndex::build(bodies).value();
+    CollectionTrees collection;
+    collection.update({{1, 2, {at(0, 0), at(0, 0)}}, {2, 2, {at(10, 0), at(10, 0)}},
+        {3, 1, {at(0, 0), at(0, 0)}}}, 0);
+    for (const auto centre_raw : {minimum + 5, maximum - 5}) {
+        const math::Vec3 centre{Fixed::from_raw(centre_raw), {}, {}};
+        const auto half = Fixed::from_raw(maximum);
+        auto indexed = world.candidates(centre, half, 2);
+        world.collection = &collection;
+        auto collected = world.candidates(centre, half, 2);
+        world.collection = nullptr;
+        std::sort(collected.begin(), collected.end());
+        const std::vector<eawr::sim::EntityId> expected = centre_raw < 0
+            ? std::vector<eawr::sim::EntityId>{1} : std::vector<eawr::sim::EntityId>{1, 2};
+        expect(indexed == expected && collected == expected, "range queries clip endpoints without wrap, preserving owner membership");
+    }
+    world.collection = &collection;
+    expect(world.candidates(at(0, 0), Fixed::from_raw(-1), 2).empty(), "negative query extents remain empty");
 }
 } // namespace
 
@@ -1447,7 +1589,9 @@ int main(int argc, char** argv) {
     test_special_manual_routes();
     test_manual_session_and_replay();
     test_manual_contracts();
+    test_manual_rocket_mode();
     test_validation();
+    test_range_query_endpoints();
     test_membership_index();
     test_member_held_identity();
     test_squadron_adoption_and_retention();
@@ -1471,11 +1615,14 @@ int main(int argc, char** argv) {
     test_ai_opportunity_cutoff();
     test_zero_cone();
     test_fire_bone_cone();
+    test_randomized_fire_bones();
     test_launcher_cone();
     test_object_turret();
+    test_hardpoint_turret();
     test_fire_bone_pole();
     test_object_weapon_cone();
     test_unit_weapon_targeting_and_muzzles();
+    test_rocket_launch_axis();
     test_lead();
     test_history_checkpoint();
     test_order_without_attack_distance();

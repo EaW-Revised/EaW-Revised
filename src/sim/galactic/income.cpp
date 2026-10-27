@@ -3,6 +3,7 @@
 #include <array>
 #include <map>
 #include <algorithm>
+#include <string>
 #include <tuple>
 #include "encoding.hpp"
 #include "session_impl.hpp"
@@ -105,9 +106,9 @@ core::Result<void> validate_planet_income_rules(const GalacticSetup& setup) {
         || rules.maximum_alignment_penalty.raw() < 0 || rules.maximum_alignment_penalty.raw() > math::Fixed::scale) return invalid();
     for (std::size_t i = 0; i < rules.factions.size(); ++i)
         if (rules.factions[i].player != setup.players[i].player_id || rules.factions[i].alignment > IncomeAlignment::dark) return invalid();
+    // CGS-16: authored strength is unclamped; checked arithmetic owns overflow.
     for (std::size_t i = 0; i < rules.planets.size(); ++i)
-        if (rules.planets[i].planet != setup.planets[i].id || rules.planets[i].alignment > IncomeAlignment::dark
-            || rules.planets[i].strength.raw() < 0 || rules.planets[i].strength.raw() > math::Fixed::scale) return invalid();
+        if (rules.planets[i].planet != setup.planets[i].id || rules.planets[i].alignment > IncomeAlignment::dark) return invalid();
     for (std::size_t i = 0; i < rules.routes.size(); ++i)
         if (rules.routes[i].route != setup.routes[i].id || !bounded(rules.routes[i].factor)) return invalid();
     for (std::size_t i = 0; i < rules.political_curve.size(); ++i)
@@ -196,8 +197,8 @@ const EconomicPlanet* location(const IncomeSetup& setup, PlanetId planet) {
 
 core::Result<void> validate_income(const GalacticSetup& setup) {
     if (!setup.income) return core::Result<void>::success();
-    const auto invalid = [] { return core::Result<void>::failure(detail::diagnostic(
-        diagnostic_codes::invalid_setup, "invalid galactic economic profiles or source bindings")); };
+    const auto invalid = [](const std::string& where = {}) { return core::Result<void>::failure(detail::diagnostic(
+        diagnostic_codes::invalid_setup, "invalid galactic economic profiles or source bindings" + (where.empty() ? std::string{} : " (" + where + ")"))); };
     const auto& income = *setup.income;
     if (!setup.fiscal || income.types.size() > galactic_max_objects || income.sources.size() > galactic_max_objects
         || income.planets.size() != setup.planets.size() || !ordered(income.types, [](const auto& row) { return row.type; })
@@ -205,23 +206,23 @@ core::Result<void> validate_income(const GalacticSetup& setup) {
     for (std::size_t i = 0; i < income.planets.size(); ++i)
         if (income.planets[i].planet != setup.planets[i].id) return invalid();
     for (const auto& type : income.types) {
-        if (!type.type || type.reductions.size() > galactic_max_objects) return invalid();
+        if (!type.type || type.reductions.size() > galactic_max_objects) return invalid("type " + std::to_string(type.type));
         if (type.technology_price_reduction) {
-            if (!setup.economy_corruption) return invalid();
+            if (!setup.economy_corruption) return invalid("type " + std::to_string(type.type));
             const auto negative = math::subtract({}, *type.technology_price_reduction);
-            if (!negative || !technology_purchase_multiplier(std::array{TechnologyPriceModifier{1, negative.value(), {}}})) return invalid();
+            if (!negative || !technology_purchase_multiplier(std::array{TechnologyPriceModifier{1, negative.value(), {}}})) return invalid("type " + std::to_string(type.type));
         }
         const auto bounded = [](math::Fixed n) { return n.raw() >= -(std::int64_t{1} << 40) && n.raw() <= (std::int64_t{1} << 40); };
         if (type.mining && (!bounded(type.mining->percentage) || !bounded(type.mining->absolute)
-            || !bounded(type.mining->colony_multiplier) || type.mining->colony_multiplier.raw() < 0)) return invalid();
+            || !bounded(type.mining->colony_multiplier) || type.mining->colony_multiplier.raw() < 0)) return invalid("type " + std::to_string(type.type));
         if (type.gambling && (type.gambling->chance.raw() < 0 || type.gambling->chance.raw() > math::Fixed::scale
             || !bounded(type.gambling->minimum) || !bounded(type.gambling->maximum)
             || type.gambling->minimum.raw() > 0 || type.gambling->maximum.raw() < 0
-            || type.gambling->interval_frames > 32767)) return invalid(); // GFC-09 supported integer span
+            || type.gambling->interval_frames > 32767)) return invalid("type " + std::to_string(type.type)); // GFC-09 supported integer span
         // WGEP-163: the authored halt duration must convert to a bounded frame count.
-        if (type.credit_halt && (!bounded(type.credit_halt->seconds) || !halt_frames(type.credit_halt->seconds))) return invalid();
-        if (!ordered(type.reductions, [](const auto& row) { return std::tuple{row.type, row.price, row.category, row.galaxy_wide}; })) return invalid();
-        for (const auto& row : type.reductions) if (!row.type || !bounded(row.reduction)) return invalid();
+        if (type.credit_halt && (!bounded(type.credit_halt->seconds) || !halt_frames(type.credit_halt->seconds))) return invalid("type " + std::to_string(type.type));
+        if (!ordered(type.reductions, [](const auto& row) { return std::tuple{row.type, row.price, row.category, row.galaxy_wide}; })) return invalid("type " + std::to_string(type.type));
+        for (const auto& row : type.reductions) if (!row.type || !bounded(row.reduction)) return invalid("type " + std::to_string(type.type));
     }
     std::map<EntityId, std::tuple<TypeId, PlanetId, PlayerId>> live_sources;
     for (const auto& row : setup.fleets) for (const auto& member : row.members)
@@ -255,22 +256,21 @@ core::Result<void> validate_income(const GalacticSetup& setup) {
     }
     for (const auto& source : income.sources) {
         if (profile(income, source.type) && profile(income, source.type)->technology_price_reduction && !source.planet_source)
-            return invalid(); // WGEP-167: a traveling holder has no planetary data to register this effect.
+            return invalid("source " + std::to_string(source.id) + " type " + std::to_string(source.type)); // WGEP-167: a traveling holder has no planetary data to register this effect.
         if (!source.id || !profile(income, source.type) || !location(income, source.planet)
             || (source.planet_source ? source.id != source.planet
                 : !live_sources.contains(source.id) || live_sources.at(source.id) != std::tuple{source.type, source.planet, source.owner})
-            || (source.owner == 0 ? !source.planet_source : !std::any_of(setup.players.begin(), setup.players.end(), [&](const auto& row) { return row.player_id == source.owner; }))) return invalid();
+            || (source.owner == 0 ? !source.planet_source : !std::any_of(setup.players.begin(), setup.players.end(), [&](const auto& row) { return row.player_id == source.owner; }))) return invalid("source " + std::to_string(source.id) + " type " + std::to_string(source.type));
     }
     if (income.offers.size() > galactic_max_objects || !ordered(income.offers,
-        [](const auto& row) { return std::pair{row.planet, row.type}; })) return invalid();
+        [](const auto& row) { return std::pair{row.planet, row.type}; })) return invalid("production offer table");
     for (const auto& row : income.offers) {
-        if (!location(income, row.planet) || !row.type || row.price.raw() < 0
-            || row.price.raw() > (std::int64_t{1} << 48) || !production_frames(row.seconds)) return invalid();
+        if (!location(income, row.planet) || !row.type) return invalid("production offer table");
     }
     if (setup.production) for (const auto& planet : setup.production->planets) for (const auto& offer : planet.offers) {
         const auto at = std::lower_bound(income.offers.begin(), income.offers.end(), std::pair{planet.planet, offer.type},
             [](const auto& row, const auto& key) { return std::pair{row.planet, row.type} < key; });
-        if (at == income.offers.end() || at->planet != planet.planet || at->type != offer.type) return invalid();
+        if (at == income.offers.end() || at->planet != planet.planet || at->type != offer.type) return invalid("production offer table");
     }
     return core::Result<void>::success();
 }

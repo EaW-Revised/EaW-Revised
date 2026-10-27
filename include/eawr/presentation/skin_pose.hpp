@@ -77,6 +77,22 @@ struct SkinPosePalette final {
     std::vector<Transform> model_transforms;
 };
 
+// Independent immutable output: conversion must be a pure value operation.
+// Unlike SkinPoseBatch, this has no shared cache and can run once per unit on workers.
+template <typename Transform, typename Convert>
+[[nodiscard]] std::shared_ptr<const SkinPosePalette<Transform>> prepare_skin_palette(
+    const std::span<const animation::BonePose> bones, Convert&& convert, SkinPoseWork* work = nullptr) {
+    SkinPoseTimer validation(work ? &work->validation_ms : nullptr);
+    if (work) ++work->validations;
+    if (!valid_skin_pose(bones)) return {};
+    validation.finish();
+    SkinPoseTimer build(work ? &work->build_ms : nullptr);
+    if (work) ++work->builds;
+    auto next = std::make_shared<SkinPosePalette<Transform>>();
+    store_skin_pose(bones, next->palette, next->model_transforms, convert);
+    return next;
+}
+
 template <typename Transform>
 class SkinPoseBatch final {
 public:
@@ -88,14 +104,8 @@ public:
         Convert&& convert, SkinPoseWork* work = nullptr) {
         const auto cached = palettes_.find(bones.data());
         if (cached != palettes_.end() && cached->second->palette.size() == bones.size()) return cached->second;
-        SkinPoseTimer validation(work ? &work->validation_ms : nullptr);
-        if (work) ++work->validations;
-        if (!valid_skin_pose(bones)) return {};
-        validation.finish();
-        SkinPoseTimer build(work ? &work->build_ms : nullptr);
-        if (work) ++work->builds;
-        auto next = std::make_shared<Palette>();
-        store_skin_pose(bones, next->palette, next->model_transforms, std::forward<Convert>(convert));
+        auto next = prepare_skin_palette<Transform>(bones, std::forward<Convert>(convert), work);
+        if (!next) return {};
         palettes_.insert_or_assign(bones.data(), next);
         return next;
     }

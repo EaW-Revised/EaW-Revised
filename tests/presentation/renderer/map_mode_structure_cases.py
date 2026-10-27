@@ -170,10 +170,16 @@ class PopulatedStructureCases:
         self.assertNotIn("--eawr-map-idle-offset applies only to a kind-2 (space) map", source)
         self.assertIn("json(idle_rule)", source)
         # One rule for both kinds: neither populate path positions a clip itself.
+        # The only direct sample_position in the space bundle is the live
+        # (non-idle) clip storage path, prepare_live_clip: it samples a moving
+        # unit's own clip position, not an idle clip.
+        live_sample = "row.player->sample_position("
         for text in (source, space):
             self.assertNotIn("idle_position(", text)
-            self.assertNotIn("sample_position(", text)
-        self.assertIn("declared_idle(scene::space_object_tags(*object).idle)", space)
+            self.assertNotIn("sample_position(", text.replace(live_sample, ""))
+        self.assertNotIn("sample_position(", source)
+        self.assertLessEqual(space.count(live_sample), 1)
+        self.assertIn("scene::space_object_tags(*object).idle)", space)
         self.assertIn("animation::idle_start_frame(", glue)
         # #81: a death clone's clip is posed by the shared death rule too.
         self.assertIn("animation::sample_death_frame(*row.player, {request.position, request.blend_from})", space)

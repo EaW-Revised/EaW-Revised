@@ -157,7 +157,7 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
         }
     }
     if (game_constants == nullptr) {
-        for (const auto tag : {"Nebula_Effect_Color", "Radar_Selected_Units_Color"})
+        for (const auto tag : {"Nebula_Effect_Color", "Radar_Selected_Units_Color", "Radar_Multiplayer_Enemy_Color"})
             fallback(settings, constants_path, tag, "is absent");
     }
     if (game_constants != nullptr) {
@@ -169,6 +169,14 @@ MinimapSettings minimap_settings(const data::XmlNode* radar_map, const data::Xml
             if (const auto parsed = boolean(node->raw_text)) settings.colorize_selected = *parsed;
             else fallback(settings, constants_path, "Radar_Colorize_Selected_Units", "is not Yes or No");
         }
+        if (const data::XmlNode* node = last_child(*game_constants, "Radar_Colorize_Multiplayer_Enemy")) {
+            if (const auto parsed = boolean(node->raw_text)) settings.colorize_enemy = *parsed;
+            else fallback(settings, constants_path, "Radar_Colorize_Multiplayer_Enemy", "is not Yes or No");
+        }
+        if (const data::XmlNode* node = last_child(*game_constants, "Radar_Multiplayer_Enemy_Color")) {
+            if (const auto parsed = colour(node->raw_text)) settings.enemy = *parsed;
+            else fallback(settings, constants_path, "Radar_Multiplayer_Enemy_Color", "is not a colour");
+        } else fallback(settings, constants_path, "Radar_Multiplayer_Enemy_Color", "is absent");
         if (const data::XmlNode* node = last_child(*game_constants, "Radar_Selected_Units_Color")) {
             if (const auto parsed = colour(node->raw_text)) settings.selected = *parsed;
             else fallback(settings, constants_path, "Radar_Selected_Units_Color", "is not a colour");
@@ -357,6 +365,8 @@ std::vector<MinimapBlip> minimap_blips(const std::span<const MinimapUnit> units,
         blip.rotate_icon = type.rotate_icon;
         // MM-07: the owner's colour; the selection's colour for a selected unit.
         blip.colour = unit->selected && settings.colorize_selected ? settings.selected : unit->owner_colour;
+        // Radar_Colorize_Multiplayer_Enemy (stock No): a hostile unit takes the enemy colour unless selected.
+        if (settings.colorize_enemy && unit->hostile && !(unit->selected && settings.colorize_selected)) blip.colour = settings.enemy;
         // WNO-43: capture override follows selected recolouring, even under raw fog.
         if (unit->capture) blip.colour = minimap_capture_colour(*unit->capture, neutral);
         blip.remembered = remembered;

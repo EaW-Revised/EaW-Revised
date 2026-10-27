@@ -148,6 +148,7 @@ void native_shadow_layers() {
             expect(layer.snapshot()->canonical_bytes() == direct.snapshot()->canonical_bytes(),
                 "native snapshot adapter exposes the exact staged rows and event frontier before commit");
         };
+        apply(root, 1, gc::SetFleetPathfinder{10, 20});
         apply(root, 1, gc::RemoveFleetMembers{10, {20}});
         apply(root, 1, gc::AddFleetMembers{11, {20}});
         const auto first_new = root.next_entity_id();
@@ -490,9 +491,23 @@ void adapter() {
     const auto built = eawr::campaign::build_fleet_type_traits(table, bindings);
     expect(built && built.value() == std::vector<gc::FleetTypeTraits>{{7, false, true, false}, {9, true, true, false}, {20, false, true, true}},
         "WGM-100 shared true omission default retains transport and live-child classification");
+    // WGEP-41: the galactic behaviour picks the creation route. A squadron-class type that behaves as
+    // DUMMY_STARSHIP (AaW Kom'rk_Starfighter_Squadron) is a single-ship fleet with no live children.
+    eawr::units::GalacticType single = squadron; single.name = "Single"; single.squadron_units = {"Ship"};
+    single.behavior = {"SELECTABLE", "DUMMY_STARSHIP"};
+    eawr::units::GalacticTypeTable routed; routed.types = {single};
+    const std::vector<eawr::campaign::FleetTypeBinding> routed_binding{{30, "Single"}};
+    const auto single_ship = eawr::campaign::build_fleet_type_traits(routed, routed_binding);
+    expect(single_ship && !single_ship.value().front().requires_live_children,
+        "WGEP-41 a DUMMY_STARSHIP squadron class takes the single-ship route without live children");
     table.types[0].can_hyperspace_without_ability.reset();
     const auto omitted = eawr::campaign::build_fleet_type_traits(table, bindings);
     expect(omitted && omitted.value().front().can_hyperspace_without_ability, "WGM-100 ordinary omitted capability uses the verified true default");
+    table.types[0].can_participate_in_space = false;
+    table.types[1].can_participate_in_space = false;
+    const auto eligibility = eawr::campaign::build_fleet_type_traits(table, bindings).value();
+    expect(!eligibility[0].space_pathfinder && eligibility[1].space_pathfinder,
+        "pathfinder eligibility follows authored space participation and transport representation");
     table.types[0].can_hyperspace_without_ability = false;
     expect(!eawr::campaign::build_fleet_type_traits(table, bindings).value().front().can_hyperspace_without_ability,
         "authored false capability precedes the constructor default");
@@ -567,6 +582,95 @@ void member_transfer_contracts() {
     }
 }
 
+void pathfinder_contracts() {
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto configured = setup();
+        configured.fleet_control->types.front().space_pathfinder = false;
+        configured.fleets.front().members = {{20, 2}, {21, 2}, {23, 1}};
+        auto game = eawr::campaign::GameSession::create(configured).value();
+        const std::vector<gc::CommandPayload> orders = {
+            gc::SetFleetPathfinder{10, 20}, gc::SetFleetPathfinder{10, 21},
+            gc::SetFleetPathfinder{10, 999}, gc::SetFleetPathfinder{12, 30},
+            gc::SetFleetPathfinder{10, 23}, gc::SetFleetPathfinder{10, 22},
+            gc::SetFleetPathfinder{10, 0}, gc::SetFleetPathfinder{10, 20},
+            gc::TransferFleetMembers{{{10, 20}, {10, 999}}, 11, 0},
+            gc::TransferFleetMembers{{{10, 20}}, 11, 0},
+            gc::SetFleetPathfinder{11, 20}, gc::SetFleetPathfinder{11, 0}};
+        for (std::size_t tick = 0; tick < orders.size(); ++tick) {
+            expect(gc::decode_payload(gc::layer_of(orders[tick]), gc::opcode_of(orders[tick]), gc::encode_payload(orders[tick]))
+                == std::optional(orders[tick]), "pathfinder commands have canonical replay payloads");
+            expect(bool(game.submit({{tick, gc::SeatId{1}, tick + 1}, orders[tick]})), "pathfinder command submits");
+        }
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (std::size_t tick = 0; tick < orders.size(); ++tick) {
+            const auto step = game.step(executor).value(); hashes.push_back(step.state_hash.get());
+            const auto& snapshot = *game.galaxy().snapshot();
+            const auto selected = [&](gc::FleetId id) {
+                std::vector<eawr::sim::EntityId> result;
+                for (const auto& member : fleet(snapshot, id)->members) if (member.pathfinder) result.push_back(member.id);
+                return result;
+            };
+            if (tick == 0) expect(selected(10) == std::vector<eawr::sim::EntityId>{20}, "assignment flags the explicit direct member");
+            if (tick >= 1 && tick <= 5) expect(selected(10) == std::vector<eawr::sim::EntityId>{21},
+                "replacement is exclusive and refused unknown/foreign/ground-only/other-fleet members leave it intact");
+            if (tick == 6) expect(selected(10).empty(), "zero clears the slot");
+            if (tick == 8) expect(selected(10) == std::vector<eawr::sim::EntityId>{20} && selected(11).empty(),
+                "invalid grouped transfer preserves the pathfinder and both memberships atomically");
+            if (tick == 9 || tick == 10) expect(selected(10).empty() && selected(11) == std::vector<eawr::sim::EntityId>{20},
+                "atomic transfer retains the selected member identity and its flag");
+            if (tick == 11) expect(selected(11).empty(), "transferred pathfinder can be cleared");
+            if ((tick >= 2 && tick <= 5) || tick == 8) expect(snapshot.events().back().kind == gc::GalacticEventKind::command_rejected,
+                "illegal pathfinder assignment and transfer are refused");
+            if (tick == 1 || tick == 9) {
+                const auto ids = eawr::checkpoint::game_identities(configured);
+                auto saved = eawr::checkpoint::save_game_checkpoint(game, ids).value();
+                auto restored = eawr::checkpoint::load_game_checkpoint(saved, ids, {}, executor);
+                expect(restored && restored.value().session.state_sha256() == step.state_hash.get()
+                    && restored.value().session.galaxy().snapshot()->canonical_bytes() == snapshot.canonical_bytes(),
+                    "pathfinder flags and pending commands round trip through the game checkpoint");
+            }
+        }
+        auto recording = gc::write_replay(game.record());
+        expect(bool(recording), "pathfinder recording encodes");
+        if (recording) {
+            auto decoded = gc::parse_replay(recording.value());
+            expect(bool(decoded), "pathfinder recording decodes");
+            if (decoded) {
+                auto played = eawr::campaign::GameSession::from_replay(decoded.value()).value();
+                for (std::size_t tick = 0; tick < orders.size(); ++tick)
+                    expect(played.step(executor).value().state_hash.get() == hashes[tick], "pathfinder replay reproduces every tick");
+            }
+        }
+        if (workers == 1) reference = hashes;
+        else expect(reference == hashes, "pathfinder assignment/clear/refusal/checkpoint hashes equal on 1/2/4/8 workers");
+    }
+    auto seeded = setup(); seeded.fleets.front().members.front().pathfinder = true;
+    seeded.fleet_control->detached_units.front().member.pathfinder = true;
+    gc::GalacticReplay seed{seeded, 1, {}, {}};
+    expect(gc::parse_replay(gc::write_replay(seed).value()).value() == seed,
+        "tick-zero fleet and detached member flags survive the replay header");
+    auto invalid = gc::encode_payload(gc::SetFleetPathfinder{10, 20}); invalid.push_back(0);
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::set_pathfinder, invalid), "pathfinder payload rejects trailing bytes");
+    invalid = gc::encode_payload(gc::SetFleetPathfinder{0, 20});
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::set_pathfinder, invalid), "pathfinder payload rejects zero fleet");
+    for (const auto mode : {0, 1, 2}) {
+        auto configured = setup();
+        if (mode == 0) { configured.seats.front().kind = gc::SeatKind::ai; configured.seats.front().human_side_id = 0; }
+        if (mode == 1) configured.seats.front().active = false;
+        if (mode == 2) configured.fleet_control->pause.fleet_management = gc::PausedAdmission::refuse;
+        auto world = gc::GalacticSession::create(configured);
+        expect(bool(world), "human-only and pause refusal fixture constructs");
+        if (!world) continue;
+        if (mode == 2) expect(bool(world.value().submit({{0, gc::SeatId{1}, 1}, gc::PauseGalaxy{}})), "pause command submits");
+        expect(bool(world.value().submit({{0, gc::SeatId{1}, 2}, gc::SetFleetPathfinder{10, 20}})), "refusal command submits");
+        const eawr::sim::InlineExecutor executor;
+        auto stepped = world.value().step(executor);
+        expect(stepped && !fleet(*world.value().snapshot(), 10)->members.front().pathfinder, "AI/inactive/paused selection refuses");
+    }
+}
+
 } // namespace
 int case_galactic_fleet_tests(const int argc, const char* const argv[]) {
     if (argc == 3 && std::string_view(argv[1]) == "--generate") {
@@ -581,5 +685,5 @@ int case_galactic_fleet_tests(const int argc, const char* const argv[]) {
         out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
         return out && hashes ? 0 : 1;
     }
-    native_snapshot_inheritance(); native_victory_projection(); native_shadow_layers(); contracts(); adapter(); member_transfer_contracts(); return galactic_test::failures == 0 ? 0 : 1;
+    native_snapshot_inheritance(); native_victory_projection(); native_shadow_layers(); contracts(); adapter(); member_transfer_contracts(); pathfinder_contracts(); return galactic_test::failures == 0 ? 0 : 1;
 }

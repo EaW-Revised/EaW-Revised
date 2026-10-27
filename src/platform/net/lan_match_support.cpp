@@ -26,6 +26,8 @@ core::Result<skirmish::FixtureOptions> fixture_options(const net::SetupOffer& of
     auto decoded = net::decode_skirmish_setup(offer.setup);
     if (!decoded) return core::Result<skirmish::FixtureOptions>::failure(decoded.error());
     const auto& setup = decoded.value();
+    if (auto rejected = net::skirmish_start_refusal(setup))
+        return core::Result<skirmish::FixtureOptions>::failure(rejected->diagnostic());
     skirmish::FixtureOptions result;
     result.map = setup.skirmish->map;
     result.seed = offer.seed;

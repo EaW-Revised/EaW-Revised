@@ -532,7 +532,7 @@ core::Result<Checkpoint> capture(const campaign::GameSession& session, const Ide
 } // namespace
 
 Identities game_identities(const gc::GalacticSetup& setup) {
-    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = 10;
+    Identities out; out.rules_version = gc::galactic_rules_version; out.state_encoding_version = 15;
     out.content = setup.content_identity; out.campaign = setup.campaign_identity;
     return out;
 }

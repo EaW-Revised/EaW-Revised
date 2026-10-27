@@ -66,6 +66,7 @@ inline core::Result<std::vector<SetupMap>> eager_maps(const vfs::Vfs& filesystem
     std::vector<SetupMap> maps;
     const units::UnitTables tables;
     const auto types = assets::object_type_catalog(catalog);
+    const auto playable_factions = setup_factions(catalog);
     auto texts = data::ui::load_language_text_database(filesystem, "ENGLISH");
     for (const auto& record : records.value()) {
         auto map = assets::load_map(filesystem, record.canonical_path, types);
@@ -122,9 +123,15 @@ inline core::Result<std::vector<SetupMap>> eager_maps(const vfs::Vfs& filesystem
                     SetupTeam side{*team, {}, spawns[*team]};
                     for (const auto& candidate : p->marker_for) {
                         for (const auto& faction : tokens(candidate.affiliation)) {
-                            if (faction != "Rebel" && faction != "Empire" && faction != "Underworld") continue;
-                            if (std::find(side.factions.begin(), side.factions.end(), faction) == side.factions.end())
-                                side.factions.push_back(faction);
+                            const auto playable = std::find_if(playable_factions.begin(), playable_factions.end(), [&](const auto& playable_entry) {
+                                    return std::equal(playable_entry.name.begin(), playable_entry.name.end(), faction.begin(), faction.end(),
+                                        [](const char l, const char r) {
+                                            const auto lower = [](const char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; };
+                                            return lower(l) == lower(r);
+                                        }); });
+                            if (playable != playable_factions.end()
+                                && std::find(side.factions.begin(), side.factions.end(), playable->name) == side.factions.end())
+                                side.factions.push_back(playable->name);
                         }
                     }
                     if (!side.factions.empty() && entry.metadata.start_positions

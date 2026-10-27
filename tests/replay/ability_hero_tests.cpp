@@ -4,6 +4,7 @@
 #include "../../src/sim/tactical/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -433,10 +434,121 @@ void test_buzz_team_request() {
 }
 
 
+// WAB-71/72, WSL-04/16a: an ability-created beacon is also an ordinary authored spawner.
+// Cover immediate ship activation and the retained team request's ordered creation path.
+void test_buzz_ship_spawner() {
+    constexpr tactical::TypeId beacon_type = 42, team_type = 40, craft_type = 41, suppressed_base_type = 43;
+    for (const bool team : {false, true}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, team ? team_type : plain_type, 1, at(0, 0), math::identity_quat(), {}},
+                {3, suppressed_base_type, 2, at(5000, 5000), math::identity_quat(), {}}};
+            // Same live-object flag set by marker station placement (WSL-04).
+            initial.units.back().garrison_enabled = false;
+            if (team) {
+                initial.units.push_back({2, craft_type, 1, at(0, 0), math::identity_quat(), {}});
+                initial.squadrons = {{1, {2}}};
+                std::sort(initial.units.begin(), initial.units.end(),
+                    [](const auto& left, const auto& right) { return left.entity_id < right.entity_id; });
+            }
+            auto health = durability();
+            for (const auto type : {team_type, craft_type, beacon_type, suppressed_base_type}) {
+                tactical::DurabilityProfile row;
+                row.type_id = type; row.max_hull = units(60); row.damage_tracking = true;
+                health.profiles.push_back(row);
+            }
+            auto movement = motion();
+            if (team) {
+                tactical::CraftProfile craft;
+                craft.type_id = craft_type; craft.max_speed = units(3); craft.min_speed = units(2);
+                craft.rate_of_turn = units(6); craft.lift = units(6); craft.thrust = units(1);
+                craft.roll_rate = units(3); craft.bank_angle = units(70); craft.strafe_distance = units(500);
+                movement.squadrons.craft = {craft};
+                movement.squadrons.squadrons = {{team_type, {craft_type}, {at(0, 0)},
+                    units(1000), units(200), units(300), units(25)}};
+            }
+            tactical::SpawnerProfile beacon;
+            beacon.type_id = beacon_type; beacon.delay_frames = 2 * 30; beacon.mobile = true;
+            tactical::SpawnEntryProfile entry;
+            entry.squadron = frigate_type; entry.starting = 3; entry.ship = true;
+            beacon.entries = {entry};
+            // An indestructible bay uses the existing no-hardpoint sentinel.
+            beacon.bays = {{tactical::no_hardpoint, at(0, 0), at(200, 0)}};
+            auto station = beacon;
+            station.type_id = suppressed_base_type; station.mobile = false; station.starbase = true;
+            movement.squadrons.spawners = {beacon, station};
+            tactical::AbilityProfile buzz;
+            buzz.kind = tactical::AbilityKind::buzz_droids; buzz.recharge_frames = 800 * 30;
+            buzz.buzz = tactical::BuzzDroidsProfile{beacon_type, {}, units(400), {}, {},
+                {}, math::divide(units(2), units(30)).value(), {}, 30, 2, 0};
+            tactical::AbilityTable abilities;
+            abilities.profiles = {unit_of(team ? team_type : plain_type, buzz)};
+            auto created = tactical::TacticalSession::create(initial, {}, health, movement,
+                std::nullopt, {}, {}, abilities);
+            expect(static_cast<bool>(created), "WSL-16a: ability beacon fixture creates");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            tactical::AbilityPayload input{tactical::AbilityKind::buzz_droids, tactical::AbilityAction::activate};
+            input.position = at(100, 0);
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, input))), "WAB-71: beacon point submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::vector<std::uint64_t> launches;
+            std::optional<eawr::sim::EntityId> beacon_id;
+            std::optional<std::uint64_t> placed;
+            std::size_t ship_count = 0;
+            for (std::uint64_t frame = 0; frame < 240; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "WSL-16a: beacon launch step succeeds");
+                if (!step) { std::cerr << step.error().message << '\n'; break; }
+                hashes.push_back(step.value().state_sha256);
+                const auto live = world.units();
+                for (const auto& unit : live) {
+                    if (unit.type_id == beacon_type && unit.owner == 1 && !beacon_id) {
+                        beacon_id = unit.entity_id; placed = frame;
+                        expect(unit.position == *input.position, "WAB-71: beacon placed at authored point for its owner");
+                    }
+                    if (unit.type_id == frigate_type)
+                        expect(unit.owner == 1 && !world.squadron_state(unit.entity_id),
+                            "WSL-04/16a: launched ship keeps owner and ordinary ship identity; suppressed station launches nothing");
+                }
+                const auto count = static_cast<std::size_t>(std::count_if(live.begin(), live.end(),
+                    [](const auto& unit) { return unit.type_id == frigate_type; }));
+                if (count > ship_count) {
+                    expect(count == ship_count + 1, "FL-02: one ship launches per service");
+                    const auto newest = std::find_if(live.rbegin(), live.rend(),
+                        [](const auto& unit) { return unit.type_id == frigate_type; });
+                    expect(newest != live.rend() && newest->position == at(300, 0),
+                        "WSL-16a: ship placed at beacon bay plus 200 flyout");
+                    launches.push_back(frame); ship_count = count;
+                }
+                if (beacon_id) {
+                    const auto state = world.durability_state(*beacon_id);
+                    expect(state && state->hull > units(40), "WAB-72: 60-health beacon survives its own 2 DPS through all launches");
+                    if (placed && frame > *placed + 30)
+                        expect(state && state->hull < units(60), "WAB-72: armed beacon actually takes authored self damage");
+                }
+            }
+            expect(beacon_id && placed && launches.size() == 3 && ship_count == 3,
+                "WSL-16a: ordered birth registration launches all three authored ships");
+            if (placed && launches.size() == 3) {
+                expect(launches[0] >= *placed && launches[0] < *placed + 30,
+                    "FL-01/02: registered beacon first launches within its first service interval");
+                expect(launches[1] - launches[0] == 60 && launches[2] - launches[1] == 60,
+                    "FL-02: subsequent launches use authored two-second delays at 30 ticks/s");
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WSL-16a: beacon birth and ship launches agree on 1/2/4/8 workers");
+        }
+    }
+}
+
 // WAB-70..74: a BUZZ_DROIDS activation at a point creates the droid object there; from its arming
 // frame it wears itself down, chases the nearest enemy mover in the chase radius around the creation
 // point and damages every one in damage reach. 1/2/4/8 workers give the same hashes.
 void test_buzz_droids() {
+    test_buzz_ship_spawner();
     using K = tactical::AbilityKind;
     constexpr tactical::TypeId droid_type = 30;
     std::vector<std::string> reference;
@@ -763,6 +875,47 @@ void test_banked_ability_geometry() {
 
 
 void test_hero_beams() {
+    // WHE-58: 500000 is an authored distance, with extent-adjusted equality.
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        auto initial = setup();
+        const auto offset = scenario == 0 ? 9 : scenario == 2 || scenario == 4 ? 11 : 10;
+        initial.units = {{1, corvette_type, 1, at(-250000, 0), math::identity_quat(), {}},
+            {2, frigate_type, 2, at(250000 + offset, 0), math::identity_quat(), {}}};
+        tactical::AbilityProfile ordinary;
+        ordinary.kind = tactical::AbilityKind::energy_weapon;
+        ordinary.gui_activated_ability_name = "large_beam";
+        auto holder = unit_of(corvette_type, ordinary);
+        tactical::SpecialAbilityProfile nested;
+        nested.name = "large_beam"; nested.style = tactical::SpecialActivationStyle::user_input;
+        nested.kind = tactical::SpecialAbilityKind::energy_weapon;
+        nested.filter.applicable_categories = 2;
+        nested.beam_max_range = scenario >= 3
+            ? Fixed::from_raw(std::numeric_limits<std::int64_t>::max()) : units(500000);
+        if (scenario == 3 || scenario == 4) nested.beam_min_range = units(500000);
+        holder.special = {nested};
+        tactical::AbilityTable table; table.profiles = {holder};
+        tactical::CombatProfile source; source.type_id = corvette_type; source.category_bits = 1;
+        tactical::CombatProfile target; target.type_id = frigate_type; target.category_bits = 2;
+        tactical::CombatTable combat; combat.profiles = {source, target};
+        tactical::MotionTable movement;
+        tactical::Footprint footprint; footprint.type_id = frigate_type;
+        footprint.x_extent = units(10); footprint.y_extent = units(10);
+        movement.footprints = {footprint};
+        auto created = tactical::TacticalSession::create(initial, {}, durability(), movement, std::nullopt, combat, {}, table);
+        expect(static_cast<bool>(created), "WHE-58: large-range profile binds without a ceiling");
+        if (!created) continue;
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit(command(0, 1, 0, 1,
+            tactical::AbilityPayload{tactical::AbilityKind::energy_weapon, tactical::AbilityAction::activate, 2}))),
+            "WHE-58: large-range target command submits");
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        const auto step = world.step(executor);
+        expect(static_cast<bool>(step), "WHE-58: large-range geometry steps safely");
+        const auto state = world.ability_state(1);
+        expect(state && state->slots.front().active == (scenario != 2 && scenario != 3),
+            "WHE-58: maximum equality passes, positive minimum equality fails, storage-limit addition cannot overflow");
+    }
+
     using K = tactical::AbilityKind;
     for (const auto kind : {K::energy_weapon, K::tractor_beam}) {
         for (const auto scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {

@@ -66,8 +66,13 @@ struct EngineContractAccess {
             if (goal.id == goal_id) retained = &goal;
         if (!retained || !retained->potential || !retained->potential->target_contrast_disabled) return false;
         return std::any_of(player->tasks.begin(), player->tasks.end(), [build](const auto& task) {
-            return task.source == 2 && task.issued == build && !task.staging && !task.failed;
+            return paid_task_matches(task, build);
         });
+    }
+    // task.completion is the admitted native build request (the id galactic_build_budgets publishes
+    // as row.build); task.issued is the selector frame and is a different identity domain.
+    static bool paid_task_matches(const BuildTask& task, sim::EntityId build) {
+        return task.source == 2 && task.completion == build && !task.staging && !task.failed;
     }
     static galactic_learning_gate::Snapshot learning_snapshot(const Engine& engine) {
         using namespace galactic_learning_gate;

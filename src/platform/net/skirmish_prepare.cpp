@@ -231,7 +231,7 @@ core::Result<net::LobbyGame> encode_lan_lobby_game(const skirmish::FixtureOption
         << ' ' << m.allow_heroes << ' ' << m.allow_superweapons << ' ' << m.free_starting_units << ' ' << m.pre_built_base
         << ' ' << m.allow_random_events << ' ' << m.credits.raw() << ' ' << m.start_tech << ' ' << m.max_tech
         << ' ' << m.game_timer << ' ' << m.win_integer << ' ' << m.auto_resolve << ' ' << m.win_float.raw()
-        << ' ' << std::quoted(m.win_condition) << ' ' << std::quoted(m.space_win_condition) << ' ' << options.slots->size();
+        << ' ' << std::quoted(m.win_condition) << ' ' << std::quoted(m.tactical_win_condition) << ' ' << options.slots->size();
     std::set<std::uint32_t> rows;
     std::uint32_t previous{};
     for (const auto& slot : *options.slots) {
@@ -271,7 +271,7 @@ core::Result<skirmish::FixtureOptions> decode_lan_lobby_game(const net::LobbySna
         "Unsupported skirmish staging options version; all peers must use the same build."));
     if (!(in >> delay >> seed_given >> seed >> victory_given >> victory >> m.allow_heroes >> m.allow_superweapons >> m.free_starting_units >> m.pre_built_base
         >> m.allow_random_events >> credits >> m.start_tech >> m.max_tech >> m.game_timer >> m.win_integer >> m.auto_resolve >> win
-        >> std::quoted(m.win_condition) >> std::quoted(m.space_win_condition) >> count)
+        >> std::quoted(m.win_condition) >> std::quoted(m.tactical_win_condition) >> count)
         || delay == 0 || delay > net::max_input_delay || victory > static_cast<unsigned>(sim::tactical::VictoryCondition::all_enemy_units_destroyed)
         || count == 0 || count > net::max_match_seats) return bad();
     if (seed_given) result.seed = seed;

@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "viewer_host_internal.hpp"
 #include "audio_buses.hpp"
 #include "audio_output.hpp"
@@ -5,8 +6,15 @@
 #include "gpu_memory_trace.hpp"
 #include "settings_store.hpp"
 #include "startup_trace.hpp"
+#include "eawr/presentation/render_categories.hpp"
+#include <chrono>
+#include <sstream>
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+
+#if defined(_MSC_VER) && !_HAS_EXCEPTIONS
+#error "Viewer startup requires the exception-enabled STL used by its core libraries"
+#endif
 
 namespace eawr::presentation::godot_backend {
 
@@ -50,6 +58,28 @@ void ViewerHost::apply_preview_render_overrides() {
         Engine::get_singleton()->set_max_fps(*preview_max_fps_);
 }
 
+void ViewerHost::record_render_categories() {
+    if (!render_categories::enabled) return;
+    const auto start = std::chrono::steady_clock::now();
+    const auto viewport = get_viewport()->get_viewport_rid();
+    auto sample = render_categories::Source::capture(static_cast<std::uint64_t>(Engine::get_singleton()->get_process_frames()),
+        static_cast<std::uint64_t>(viewport.get_id()));
+    auto* server = RenderingServer::get_singleton();
+    for (std::size_t index = 0; index < sample.viewport_draws.size(); ++index) {
+        sample.viewport_draws[index] = static_cast<std::uint64_t>(server->viewport_get_render_info(viewport,
+            static_cast<RenderingServer::ViewportRenderInfoType>(index), RenderingServer::VIEWPORT_RENDER_INFO_DRAW_CALLS_IN_FRAME));
+    }
+    // Includes traversal and viewport queries; excludes the separately throttled formatting/I/O.
+    sample.sample_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    render_categories::latest = sample;
+    if (sample.frame % 60 == 0) {
+        std::ostringstream line;
+        line << "EAWR_RENDER_CATEGORIES ";
+        render_categories::write_json(line, sample);
+        UtilityFunctions::print(String::utf8(line.str().c_str()));
+    }
+}
+
 // Exceptions must not escape a GDExtension callback into the engine.
 void ViewerHost::_ready() try {
     mute_lane_audio_output();
@@ -57,8 +87,14 @@ void ViewerHost::_ready() try {
     // UI-07: a text control taking focus cancels held world input (UI-I3).
     get_viewport()->connect("gui_focus_changed", callable_mp(this, &ViewerHost::on_gui_focus_changed));
     options_ = std::make_unique<Options>();
-    const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    const PackedStringArray arguments = viewer_profile_arguments();
+    render_categories::enabled = arguments.has("--eawr-render-counters");
+    if (render_categories::enabled) RenderingServer::get_singleton()->connect("frame_post_draw",
+        callable_mp(this, &ViewerHost::record_render_categories));
     read_host_options(arguments);
+    const auto& profile_options = viewer_profile_options();
+    for (const auto& line : profile_options.report) UtilityFunctions::print(String::utf8(line.c_str()));
+    if (profile_options.error) options_->profile_error = profile_options.error->code + ": " + profile_options.error->message;
 
     if (options_->profile_error.empty() && !options_->profile.empty()
         && options_->profile != "eaw" && options_->profile != "foc" && options_->profile != "remake") {
@@ -149,6 +185,10 @@ void ViewerHost::_ready() try {
         targets.texture_detail = false;
         apply_video(saved.settings.video, targets, applied);
         ActiveSettings::set(saved.settings);
+    } else if (profile_options.launch && ActiveSettings::get() == nullptr) {
+        // Launcher reports do not suppress the player's inherited cap. Keep the raw record unmodified;
+        // only the pacing calculation applies an explicit profile override.
+        ActiveSettings::set(SettingsStore(options_->settings_file).load().settings);
     } else if (!evidence_run && ActiveSettings::get() == nullptr) {
         ActiveSettings::set(presentation::ui::PlayerSettings{});
     }

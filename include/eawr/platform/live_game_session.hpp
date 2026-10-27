@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/galactic/commands.hpp"
 #include "eawr/sim/galactic/replay.hpp"
@@ -23,6 +24,7 @@
 #include <memory>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -119,13 +121,13 @@ public:
         std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
         const units::GalacticTypeTable&, std::string_view campaign,
         campaign::CampaignSetupOptions, std::string_view difficulty, bool install_native_ai = false,
-        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1});
+        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false);
     // Initialize an already agreed multiplayer plan, including native AI, before its tick-zero hash.
     [[nodiscard]] static core::Result<std::unique_ptr<PreparedLiveCampaign>> from_plan(
         std::shared_ptr<const vfs::Vfs>, const data::Catalog&, const data::galactic::GalacticData&,
         const units::GalacticTypeTable&, campaign::CampaignSetupPlan, std::string_view difficulty,
         bool install_native_ai = true,
-        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1});
+        std::array<std::uint64_t, 6> ai_service_periods = {300, 1, 3, 3, 300, 1}, bool observe_native_ai = false);
     [[nodiscard]] std::shared_ptr<const CampaignServiceConfiguration> services() const noexcept;
     ~PreparedLiveCampaign();
     [[nodiscard]] const campaign::CampaignSetupPlan& plan() const noexcept;
@@ -137,6 +139,12 @@ public:
     // The AI players the runtime actually selected (player and authored AI player type).
     struct NativeAiPlayer { sim::galactic::PlayerId player{}; std::string player_type; };
     [[nodiscard]] const std::vector<NativeAiPlayer>& native_ai_players() const noexcept;
+    // What the native AI load went on without (skipped plan files, unknown names), one line each.
+    [[nodiscard]] const std::vector<std::string>& native_ai_diagnostics() const noexcept;
+    // Only with observe_native_ai (which also turns the engine's refusal counters on): a reader of the native AI's goals, one line
+    // per AI player, valid after this campaign moves into a LiveGameSession. Call it only while the session is between ticks
+    // (driven pacing, after wait_for). Empty when the native AI is not installed. Never saved, hashed or read by a decision.
+    [[nodiscard]] std::function<std::vector<std::string>()> native_ai_goal_reader() const;
 private:
     friend class LiveGameSession;
     friend struct AgreedCampaignAccess;
@@ -334,6 +342,10 @@ public:
         // With step_driver this runs under the session state mutex: callbacks must not acquire that mutex
         // or Feed locks (including through live-session accessors).
         std::function<std::vector<sim::galactic::GameCommand>(std::uint64_t)> command_source{};
+        // Called on the simulation thread with the diagnostics a completed step published (script faults, load
+        // notes), under the session state mutex like command_source: it must not call back into the session.
+        // Headless reports use it; presentation does not.
+        std::function<void(std::span<const core::Diagnostic>)> tick_diagnostics{};
         // Deterministic conflict-service inputs, until the fleet entry service is wired.
         struct Entry {
             std::uint64_t tick{};

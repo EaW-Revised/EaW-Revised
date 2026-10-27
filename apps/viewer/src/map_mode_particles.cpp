@@ -1,7 +1,15 @@
+#include "eawr/scene/scene.hpp"
 #include "map_mode_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
 namespace map_mode_detail {
+
+void MapParticleProvider::owner_census(diagnostics::OwnerCensus& output) const {
+    for (const auto& clip : clips_) {
+        if (!output.step(diagnostics::OwnerCensus::animation)) break;
+        if (clip.player) clip.player->owner_census(output);
+    }
+}
 
 const assets::Texture* MapParticleProvider::resolve_texture(const std::string_view authored) {
     const std::size_t slash = authored.find_last_of("/\\");
@@ -322,9 +330,9 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
     if (needs_mesh) {
         std::string binding_failure;
         do {
-            auto model = assets::load_model(*filesystem_, effect.model_logical_path);
+            auto model = scene::VfsAssetCache(*filesystem_).shared_model(effect.model_logical_path);
             if (!model) { binding_failure = core::format_diagnostic(model.error()); break; }
-            auto binding = particles::bind_proxy_mesh(model.value(), effect.proxy_name);
+            auto binding = particles::bind_proxy_mesh(*model.value(), effect.proxy_name);
             if (!binding) { binding_failure = core::format_diagnostic(binding.error()); break; }
             mesh_binding.emplace(std::move(binding.value()));
             const auto placement = std::find_if(scene.placements.begin(), scene.placements.end(),
@@ -332,7 +340,7 @@ void MapParticleProvider::start_attached(const particles::MapEffectPlan& plan, c
             if (placement == scene.placements.end() || !placement->transform) {
                 binding_failure = "host placement has no transform"; break;
             }
-            auto player = animation::Player::create(model.value());
+            auto player = animation::Player::create(*model.value());
             if (!player) { binding_failure = core::format_diagnostic(player.error()); break; }
             auto pose = player.value().sample({});
             if (!pose) { binding_failure = core::format_diagnostic(pose.error()); break; }

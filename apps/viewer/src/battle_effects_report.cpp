@@ -43,6 +43,7 @@ void BattleEffects::release() {
     }
     for (const LiveEffect& effect : effects_) static_cast<void>(registry_->release(effect.handle));
     effects_.clear();
+    registry_->evict_idle();
     energy_owner_effects_.clear();
     leech_effects_.clear();
     weaken_effects_.clear();
@@ -178,6 +179,7 @@ void BattleEffects::write_report(std::ostream& output) const {
         output << ", \"" << name << "\": {";
         bool first = true;
         for (const auto& [key, count] : values) {
+            if (count == 0) continue;
             output << (first ? "" : ", ") << json(key) << ": " << count;
             first = false;
         }
@@ -203,6 +205,17 @@ void BattleEffects::write_report(std::ostream& output) const {
         output << ",\"detached\":" << (sample.detached ? "true" : "false") << '}';
     }
     output << "]}";
+    output << ", \"effect_admission\": ";
+    registry_->write_admission_report(output);
+    output << ", \"effect_eligible_requests\":" << eligible_effects_ << ",\"effect_refusals\":[";
+    for (std::size_t index = 0; index < refused_effects_.size(); ++index) {
+        const auto& refused = refused_effects_[index];
+        output << (index ? "," : "") << "{\"tick\":" << refused.tick << ",\"birth\":" << refused.birth
+            << ",\"lifetime\":" << refused.lifetime << ",\"key\":" << json(refused.key)
+            << ",\"requested_bytes\":" << refused.requested_bytes << ",\"admitted_bytes\":" << refused.admitted_bytes
+            << ",\"reason\":" << json(particles::EffectRegistry::refusal_name(refused.reason)) << '}';
+    }
+    output << "],\"effect_refusal_samples_full\":" << (refused_effects_.size() >= spawn_log_limit ? "true" : "false");
     counts("projectiles_not_drawn", not_drawn_);
     counts("projectile_terminal_culls", terminal_culls_);
     // #862 (AB-66): ability shots fired and their drawn frames, by the projectile type they drew as.
@@ -216,7 +229,19 @@ void BattleEffects::write_report(std::ostream& output) const {
         output << (pool == model_pools_.begin() ? "" : ", ") << json(pool->first) << ": {\"slots\": "
                << pool->second.slots.size() << ", \"max_bound\": " << pool->second.slots.max_bound()
                << ", \"bindings\": " << pool->second.slots.bindings() << ", \"refused\": "
-               << pool->second.slots.refused() << "}";
+               << pool->second.slots.refused()
+               << ", \"requested\": " << pool->second.slots.requested()
+               << ", \"assigned\": " << pool->second.slots.assigned()
+               << ", \"peak_requested\": " << pool->second.peak_requested
+               << ", \"unique_denied_flights\": " << pool->second.unique_denied_flights
+               << ", \"budget_refusals\": " << pool->second.budget_refusals
+               << ", \"allocation_failures\": " << pool->second.allocation_failures
+               << ", \"recipe_refusals\": " << pool->second.recipe_refusals
+               << ", \"growth_attempts\": " << pool->second.slots.growth_attempts()
+               << ", \"reserved_proxy_bytes\": " << pool->second.reserved_bytes
+               << ", \"budget_probe_available\": " << (pool->second.budget_probe_available ? "true" : "false")
+               << ", \"last_refusal_bytes\": " << pool->second.last_refusal_bytes
+               << ", \"last_refusal\": " << json(pool->second.last_refusal) << "}";
     }
     output << "}, \"hit_picks\": {\"by_projectile\": " << hit_picks_by_projectile_ << ", \"by_event\": "
            << hit_picks_by_event_ << "}";

@@ -18,6 +18,7 @@
 #include "../../../third_party/entt/single_include/entt/entt.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -563,12 +564,13 @@ std::vector<std::uint8_t> TacticalSnapshot::canonical_bytes() const {
             bytes.push_back(turret.returning_to_rest ? 1 : 0);
         }
     }
-    for (const auto& instance : instances_) manual_count += instance.manual_weapons.size();
+    for (const auto& instance : instances_) manual_count += instance.manual_weapons.size() + instance.hardpoint_turrets.size();
     if (manual_count != 0 || !manual_clocks_.empty()) {
         bytes.insert(bytes.end(), manual_tag.begin(), manual_tag.end());
         sim::detail::append_u64(bytes, manual_count);
         for (const auto& instance : instances_) {
-            for (const auto& manual : instance.manual_weapons) {
+            for (const auto& views : {std::cref(instance.manual_weapons), std::cref(instance.hardpoint_turrets)})
+            for (const auto& manual : views.get()) {
                 sim::detail::append_u64(bytes, instance.entity_id);
                 sim::detail::append_u32(bytes, manual.hardpoint);
                 sim::detail::append_u32(bytes, manual.requesting_player);

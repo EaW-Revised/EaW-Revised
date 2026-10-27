@@ -59,7 +59,7 @@ enum class StateSection : std::uint16_t {
     history = 22, // GREF-24..26: session-owned per-player chart archives
 };
 inline constexpr std::size_t state_section_count = 23;
-inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v7";
+inline constexpr std::string_view state_encoding_name = "eawr-galactic-state-v8";
 
 struct GalacticTick {
     std::uint64_t completed_tick{};
@@ -146,6 +146,8 @@ public:
     [[nodiscard]] AbilityWork ability_work() const noexcept;
     using AbilityConsumptionHandler = std::function<core::Result<void>(const HeroDefeat&)>;
     void set_ability_consumption_handler(AbilityConsumptionHandler);
+    using GroundAbilityStoryHandler = std::function<core::Result<void>(PlayerId, PlanetId, const std::string&, bool)>;
+    void set_ground_ability_story_handler(GroundAbilityStoryHandler);
     using CorruptionMissionHandler = std::function<core::Result<bool>(const LiveCorruptionMission&, const CorruptionChoice&)>;
     using CorruptionCompletionHandler = std::function<core::Result<void>(PlanetId, corruption_fixture::Type, corruption_fixture::Type, CorruptionCompletionPhase,
         std::span<const PlanetAbilityEntitlements>)>;
@@ -194,6 +196,10 @@ public:
     // (the galaxy is held by the conflict's own pause at that point). Derived by the owner each
     // step; never part of the saved state.
     void set_prebattle_autosave_window(bool open) noexcept;
+    // WGM-07 deviation: a battle-summary hold rides the pause counter without a pending conflict. The
+    // conflict owner derives this from its saved ownership, including at direct restore. It persists
+    // between steps for native admissions; journals retain the effective gate for reconstruction.
+    void set_system_hold(bool held) noexcept;
     // With a hasher, step() leaves the SHA-256 work to it, off the stepping thread; the digest is
     // the one the synchronous path returns. The hasher is not state.
     void set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept;

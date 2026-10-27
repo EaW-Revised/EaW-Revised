@@ -3,6 +3,7 @@
 #include "galaxy_view.hpp"
 #include "ability_drop.hpp"
 #include "eawr/sim/galactic/commands.hpp"
+#include "eawr/sim/galactic/control.hpp"
 #include "eawr/sim/galactic/graph.hpp"
 
 #include <algorithm>
@@ -93,7 +94,7 @@ struct InputWidget {
 };
 struct PointerPoint { float x{}, y{}; };
 enum class DropKind { move, merge, land, orbit_slot, launch, ability };
-using AbilityIntent = std::variant<sim::galactic::PrepareGalacticAbility,
+using AbilityIntent = std::variant<sim::galactic::DeployGroundAbility, sim::galactic::PrepareGalacticAbility,
     sim::galactic::ExecutePreparedAbility, sim::galactic::CancelGalacticAbility, sim::galactic::MoveFleet>;
 struct DropIntent {
     DropKind kind{};
@@ -107,6 +108,7 @@ struct DropIntent {
     std::optional<std::uint8_t> destination_slot;
     std::optional<AbilityIntent> ability{};
     ObjectId destination_actor{};
+    bool land_on_arrival{};
 };
 
 // One queued execution per published capability, scoped to its session lifetime
@@ -149,16 +151,9 @@ struct PendingAbilityDrop {
     return false;
 }
 
-// The typed order a release on the slot submits: preparation for the menu abilities, whose published menu
-// then opens; destruction queues its unpriced execution directly (the host holds no menu for it, WGCH-156).
+// WGCH-155/156: queue the supplied container; the host resolves the live bearer.
 [[nodiscard]] inline AbilityIntent ability_drop_order(const AbilityDrop& drop) {
-    using sim::galactic::AbilityKind;
-    if (drop.kind == AbilityKind::planet_destruction) {
-        sim::galactic::PreparedAbility queued;
-        queued.actor = drop.actor; queued.planet = drop.planet; queued.kind = drop.kind;
-        return sim::galactic::ExecutePreparedAbility{queued};
-    }
-    return sim::galactic::PrepareGalacticAbility{drop.actor, drop.planet, drop.kind};
+    return sim::galactic::DeployGroundAbility{drop.supplied ? drop.supplied : drop.actor, drop.planet};
 }
 
 // WGUI-49/50: resolve the live identity's parents, rather than accepting a
@@ -210,6 +205,30 @@ struct PendingAbilityDrop {
     return result;
 }
 
+// WGM-13/WGUI-55: resolve an orbit icon against the current publication. A named
+// fleet must still be local and parked at the surface origin; an empty icon
+// carries its mapped orbit slot. Simulation admission remains authoritative.
+struct SurfaceOrbitTarget {
+    ObjectId fleet{};
+    std::uint8_t slot{};
+    bool world_destination{}; // A neighbour remains the existing launch-and-move route.
+};
+[[nodiscard]] inline std::optional<SurfaceOrbitTarget> surface_orbit_target(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId origin,
+    ObjectId planet, PlayerId owner, ObjectId fleet, std::optional<std::uint8_t> slot) {
+    if (!origin || !planet) return std::nullopt;
+    if (planet != origin) return SurfaceOrbitTarget{0, 0, true};
+    if (owner != local) return std::nullopt;
+    if (fleet) {
+        for (const auto& row : snapshot.fleets())
+            if (row.id == fleet && row.owner == local && row.orbit == origin && !row.motion.transit)
+                return SurfaceOrbitTarget{fleet, 0};
+        return std::nullopt;
+    }
+    if (!slot || *slot > 2) return std::nullopt;
+    return SurfaceOrbitTarget{0, *slot};
+}
+
 // #3072: a dragged stack moves as one. Every other fleet of `stack` first merges
 // into the order's fleet (the merge target for a merge drop), then `order` follows.
 // One seat submits them in this order, so the merges execute before it.
@@ -228,7 +247,7 @@ struct PendingAbilityDrop {
 // access table; never draw a direct line through an intermediate conflict.
 [[nodiscard]] inline std::optional<std::vector<sim::galactic::PlanetId>> destination_path(
     const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId source,
-    ObjectId destination, std::span<const InputPlanet> planets) {
+    ObjectId destination, std::span<const InputPlanet> planets, bool combat_skip = false) {
     using namespace sim::galactic;
     const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
     if (target == planets.end() || !target->discovered) return std::nullopt;
@@ -250,6 +269,11 @@ struct PendingAbilityDrop {
         access.push_back(row);
     }
     PathOptions options; options.allow_bad_final = true;
+    // WGM-23/38/163: a combat-skipping fleet may also leave a defended
+    // source and pass defended intermediate planets on its next order.
+    options.allow_neutral = combat_skip;
+    options.allow_hostile = combat_skip;
+    options.allow_defended = combat_skip;
     // WGM-18: multiplayer omits the local-reveal gate; the saved session flag decides, never the viewer.
     options.multiplayer = snapshot.victory() && snapshot.victory()->context.multiplayer;
     auto path = find_planet_path(graph.value(), source, destination, access, options);
@@ -257,16 +281,70 @@ struct PendingAbilityDrop {
     return std::move(path).value().planets;
 }
 
+// WGM-38 / WGUI-25: use the same current transport/payload facts as landing execution.
+[[nodiscard]] inline bool fleet_can_land(const sim::galactic::GalacticSnapshot& snapshot,
+    PlayerId local, ObjectId id, std::span<const ObjectId> stack = {}) {
+    if (!snapshot.control() || !snapshot.fleet_control()) return false;
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == id; });
+    if (fleet == fleets.end() || fleet->owner != local || !fleet->orbit || fleet->motion.transit) return false;
+    auto merged = *fleet;
+    for (const auto other_id : stack) if (other_id && other_id != id) {
+        const auto other = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == other_id; });
+        if (other == fleets.end() || other->owner != local || other->orbit != fleet->orbit || other->motion.transit)
+            return false;
+        merged.members.insert(merged.members.end(), other->members.begin(), other->members.end());
+    }
+    bool capable = false;
+    for (const auto& member : merged.members) {
+        const auto& types = snapshot.fleet_control()->types;
+        const auto type = std::find_if(types.begin(), types.end(), [&](const auto& row) { return row.type == member.type; });
+        if (type == types.end() || !type->transport) continue;
+        const auto qualified = sim::galactic::has_ground_capability(*snapshot.control(), member, snapshot.movement());
+        if (!qualified) return false;
+        capable = capable || qualified.value();
+    }
+    return capable;
+}
+
+[[nodiscard]] inline std::optional<std::vector<sim::galactic::CommandPayload>> fleet_stack_orders(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, const DropIntent& intent,
+    std::span<const ObjectId> stack, sim::galactic::CommandPayload order,
+    const std::function<std::optional<AbilityDrop>(ObjectId, ObjectId)>& ability) {
+    auto commands = stack_commands(intent, stack, std::move(order));
+    for (auto& command : commands) {
+        if (const auto* move = std::get_if<sim::galactic::MoveFleet>(&command)) {
+            if (move->path.size() < 2) return std::nullopt;
+            const auto prepared = ability_move_order(snapshot, local, *move,
+                ability ? ability(move->fleet, move->path.back()) : std::nullopt, stack);
+            if (!prepared) return std::nullopt;
+            command = *prepared;
+        } else if (const auto* land = std::get_if<sim::galactic::LandFleet>(&command)) {
+            if (!fleet_can_land(snapshot, local, land->fleet, stack)) return std::nullopt;
+        }
+    }
+    return commands;
+}
+
+// Stack is explicit at every call: empty means an individually selected fleet,
+// while card clicks, previews and releases must supply their complete stack.
 [[nodiscard]] inline std::optional<DropIntent> fleet_destination_intent(
     const sim::galactic::GalacticSnapshot& snapshot, PlayerId local, ObjectId selected_fleet,
-    ObjectId destination, std::span<const InputPlanet> planets) {
+    ObjectId destination, std::span<const InputPlanet> planets, std::span<const ObjectId> stack) {
     const auto fleets = snapshot.fleets();
     const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == selected_fleet; });
     if (fleet == fleets.end() || fleet->owner != local || fleet->motion.transit) return std::nullopt;
     const auto target = std::find_if(planets.begin(), planets.end(), [&](const auto& row) { return row.id == destination; });
     if (target == planets.end() || !target->discovered) return std::nullopt;
     if (destination == fleet->orbit) return DropIntent{DropKind::land, selected_fleet, 0, destination, {}, 0, {}, std::nullopt};
-    auto path = destination_path(snapshot, local, fleet->orbit, destination, planets);
+    const auto skips = [&](ObjectId id) {
+        const auto skip = snapshot.fleet_combat_skip(id);
+        return skip && skip.value();
+    };
+    // A card drag merges its native fleets before departure. One ordinary
+    // companion defeats skipping for that resulting fleet (WGM-38).
+    const bool combat_skip = skips(selected_fleet) && std::all_of(stack.begin(), stack.end(), skips);
+    auto path = destination_path(snapshot, local, fleet->orbit, destination, planets, combat_skip);
     if (!path) return std::nullopt;
     return DropIntent{DropKind::move, selected_fleet, 0, destination, std::move(*path), 0, {}, std::nullopt};
 }
@@ -469,8 +547,13 @@ public:
                     const auto* node = planet(planets, id);
                     if (!node || !node->discovered) return std::nullopt;
                 }
+                if (intent.land_on_arrival) {
+                    if (intent.destination_slot || intent.destination_actor) return std::nullopt;
+                    return TransferSurface{std::move(order.units), intent.path};
+                }
                 return LaunchFleet{std::move(order.units), intent.path, intent.destination_slot, intent.destination_actor};
             }
+            if (intent.land_on_arrival) return std::nullopt;
             return order;
         }
         case DropKind::ability: {
@@ -490,11 +573,11 @@ public:
                     if (order.actor != intent.source || !order.preparation) return std::nullopt;
                 } else {
                     const auto actor = [&] {
-                        if constexpr (std::is_same_v<Order, PrepareGalacticAbility>) return order.actor;
+                        if constexpr ((std::is_same_v<Order, PrepareGalacticAbility> || std::is_same_v<Order, DeployGroundAbility>)) return order.actor;
                         else return order.prepared.actor;
                     }();
                     const auto destination = [&] {
-                        if constexpr (std::is_same_v<Order, PrepareGalacticAbility>) return order.planet;
+                        if constexpr ((std::is_same_v<Order, PrepareGalacticAbility> || std::is_same_v<Order, DeployGroundAbility>)) return order.planet;
                         else return order.prepared.planet;
                     }();
                     const auto* target = planet(planets, intent.planet);

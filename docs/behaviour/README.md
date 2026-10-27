@@ -4,16 +4,20 @@ These notes record format and runtime semantics used by the implementation. A ru
 
 ## Formats and runtime
 
+- [Deliberate deviations](deviations.md): where the remake intentionally differs from the original, with evidence level and owner decision
 - [Galactic frame service schedule](galactic-frame-service-schedule.md): galactic order, cadence, same-frame dependencies and synthetic frame cases; qualified arrival/control and tactical-return probes
 - [Galactic AI frame service schedule](gc-ai-frame-schedule.md): six-system timing, retained-galaxy perception, budget producers and action-admission qualifications for S4
 - [XML registry](xml-registry-edge-cases.md), with [retail admission](xml-registry-retail-addendum.md) and [file-service limits](xml-registry-file-service-addendum.md)
 - [PGLua chunks](pglua-chunks.md), [Lua host](lua-script-model.md), and [declaration index](lua-api-declarations.md)
 - [Tactical logical tick rate](tactical-tick-rate.md): 30 frames per second, pinned pending original-game behaviour recordings
+- [Land pathfinding](land-pathfinding.md): the cell search over the land terrain and occupancy grids (footprint and width admission, giant detour limit, sliced work, admission throttle, checkpoints), with the deviations from the original rectangle search
 - [Frame service schedule](frame-service-schedule.md): command ties, modifier/countdown endpoints, creation and removal boundaries, ship/weapon scan gates, combat timer resets, and rate/recharge/fog/repair, hazard/contact and capture dependencies; TIE first/second-pulse refusal and muzzle advance; waypoint arrival/repeat timing and formation ownership (timing changes after M2 sign-off; captured-pad regression and HUD waypoint seams marked separately)
 - [Tactical time controls](tactical-time-controls.md): pause, fast forward and the game-speed steps (pause and speed controls); [battle end](battle-end.md): the win/lose message and the end 7 s after the outcome (victory display and battle-end delay)
 - [Space targeting](space-targeting.md), [space weapon fire, ship-level target choice and attack orders](space-weapon-fire.md), [space sensor visibility and query order](space-visibility.md), [hull and hardpoint damage, loss, death and repair](space-hardpoints.md), [projectiles, damage types, shields and regeneration](space-damage.md), [ship movement: move, turn in place and stop](space-movement.md), [orders: attacking out of range, attack-move and guard](space-orders.md), [unit abilities: power modes, timers and multipliers](space-abilities.md), [fixed-force victory and defeat](space-victory.md) and [fighter deaths: explode or spin away](space-fighter-deaths.md) (fighter death outcomes)
 - [FoC tactical space AI](foc-tactical-ai.md): architecture, the selected XML and Lua, and the tactical AI host function subset
 - [Debug-build audit](debug-build-audit.md): per-claim verdicts of the simulation, Lua, AI, registry, camera and river notes against the FoC debug build (debug-build behaviour audit)
+- [Loader numeric strictness, galactic tags](loader-strictness-galactic.md): retail parse rules per parser type and where our GC loaders reject values retail accepts (legacy EAWR-4994)
+- [Loader numeric strictness, land tags](loader-strictness-land.md): how the land loader and content adapter read and apply every value retail accepts (legacy EAWR-4994)
 - [TED environments](p1-effective-environment.md) and [terrain-water selection](terrainwater-technique-selection.md)
 - [Tactical camera input](tactical-camera-input.md) and [battle selection, orders and the tactical overview](foc-battle-selection.md) (battle camera, selection and orders)
 - [Battle UI in the world: selection circles, bars, squadron icons, hardpoint reticles](foc-battle-world-ui.md) (battle world UI and squadron selection)

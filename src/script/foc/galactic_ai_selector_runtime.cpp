@@ -164,6 +164,11 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
     const auto input = galactic_selection(player, goal, plan);
     potential.valid = false;
     if (!input || !input->complete || !input->reachable || plan.taskforces.empty()) return false;
+    // HA-01/HA-04: only nonempty forces enable extra hero attachment. A
+    // declared team remains eligible when that extra-attach path is closed.
+    bool hero_attachment = input->attachment_allowed.empty();
+    for (std::size_t index = 0; index < input->attachment_allowed.size() && index < plan.taskforces.size(); ++index)
+        if (!plan.taskforces[index].teams.empty()) hero_attachment |= input->attachment_allowed[index].first;
     const auto contrast_factor = [&](const AiType& type, std::uint64_t category) {
         if (!plan.galactic_contrast_qualified) return average_contrast(*host_, type, category);
         const auto found = plan.galactic_contrast.find(category);
@@ -318,6 +323,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             };
             if (erased[i]) { stage(gg::SelectionStage::freestore, gg::rejected_estimate(), true); continue; }
             const auto& facts = input->types.at(proposals[i]);
+            const bool hero_stage = facts.hero && (facts.special_weapon || hero_attachment);
             const auto* info = host_->type(proposals[i]);
             if (!info) { stage(gg::SelectionStage::freestore, gg::rejected_estimate(), true); continue; }
             const GalacticSelectionObject* best{};
@@ -356,7 +362,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                 const auto& slot = slots[s]; const auto& team = plan.taskforces[slot.force].teams[slot.team];
                 if (slot.force < input->attachment_allowed.size()) {
                     const auto allowed = input->attachment_allowed[slot.force];
-                    if ((facts.hero && !allowed.first) || (facts.special_weapon && !allowed.second)) continue;
+                    if (facts.special_weapon && !allowed.second) continue;
                 }
                 if (team.percentage_based) {
                     // WGA-60: ignored-target percentage teams use cost and the
@@ -394,7 +400,7 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
                 }
             }
             if (candidate.stages[static_cast<std::size_t>(gg::SelectionStage::production)].weight == gg::rejected_estimate()) continue;
-            if (facts.hero) stage(gg::SelectionStage::hero,
+            if (hero_stage) stage(gg::SelectionStage::hero,
                 !facts.hero_containment_allowed || to_single(facts.hero_weight + facts.escort_weight) < real(-100)
                 || (Real{} < facts.hero_maximum_cost && facts.hero_maximum_cost < current_cost)
                 || (Real{} < facts.hero_minimum_cost && current_cost < facts.hero_minimum_cost)
@@ -403,8 +409,8 @@ bool Engine::select_galactic_units(PlayerAi& player, const Goal& goal, Potential
             stage(gg::SelectionStage::terrain, facts.terrain_allowed ? facts.terrain_effectiveness : gg::rejected_estimate(), !facts.terrain_allowed);
             if (!facts.terrain_allowed) continue;
             Real contrast_weight{};
-            if (!facts.hero && plan.ignore_target) contrast_weight = stream(player).uniform(Real{}, to_single(info->combat_power / real(500)));
-            else if (!facts.hero) {
+            if (!hero_stage && plan.ignore_target) contrast_weight = stream(player).uniform(Real{}, to_single(info->combat_power / real(500)));
+            else if (!hero_stage) {
                 const auto* unit = best ? host_->view->find(best->object) : nullptr;
                 const Real power = to_single(info->combat_power * (unit ? unit->health : real(1)));
                 for (std::size_t row = 0; row < potential.current_contrast.size(); ++row) {

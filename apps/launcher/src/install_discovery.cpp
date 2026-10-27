@@ -2,27 +2,17 @@
 
 #include "text_formats.hpp"
 
+#include "eawr/mods/steam/library_folders.hpp"
+
 #include <algorithm>
 #include <cctype>
-#include <fstream>
-#include <iterator>
 #include <system_error>
 
 namespace eawr::launcher {
 
 namespace {
 
-constexpr std::uintmax_t kMaxTextFile = 4u * 1024u * 1024u;
-
-std::optional<std::string> read_text_file(const fs::path& path) {
-    std::error_code error;
-    if (!fs::is_regular_file(path, error)) return std::nullopt;
-    const std::uintmax_t size = fs::file_size(path, error);
-    if (error || size > kMaxTextFile) return std::nullopt;
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream) return std::nullopt;
-    return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
-}
+using mods::steam::read_text_file;
 
 bool directory_exists(const fs::path& path) {
     std::error_code error;
@@ -63,33 +53,6 @@ void add_candidate(std::vector<Candidate>& list, fs::path path, const std::strin
         if (lower_ascii(path_to_utf8(existing.path.lexically_normal())) == lower_ascii(path_to_utf8(path.lexically_normal()))) return;
     }
     list.push_back({std::move(path), source, nested_ok});
-}
-
-void add_library(std::vector<fs::path>& libraries, fs::path path) {
-    if (path.empty()) return;
-    for (const fs::path& existing : libraries) {
-        if (lower_ascii(path_to_utf8(existing.lexically_normal())) == lower_ascii(path_to_utf8(path.lexically_normal()))) return;
-    }
-    libraries.push_back(std::move(path));
-}
-
-void read_library_folders(const fs::path& file, std::vector<fs::path>& libraries) {
-    const std::optional<std::string> text = read_text_file(file);
-    if (!text) return;
-    const std::optional<VdfNode> root = parse_vdf(*text);
-    if (!root) return;
-    const VdfNode* folders = root->child("libraryfolders");
-    if (folders == nullptr || !folders->is_object) return;
-    for (const VdfNode& entry : folders->children) {
-        if (entry.is_object) {
-            // Modern format: "0" { "path" "D:\\Games\\Library" ... }
-            const VdfNode* path = entry.child("path");
-            if (path != nullptr && !path->is_object) add_library(libraries, path_from_utf8(path->value));
-        } else if (all_digits(entry.key)) {
-            // Legacy format: "1" "D:\\Games\\Library"
-            add_library(libraries, path_from_utf8(entry.value));
-        }
-    }
 }
 
 bool is_single_component(const fs::path& name) {
@@ -147,19 +110,15 @@ RootCheck check_root(const fs::path& root) {
 std::vector<fs::path> steam_library_roots(const RegistryReader& registry) {
     std::vector<fs::path> steam;
     if (const auto path = registry.read_string(RegistryHive::current_user, RegistryView::view64, "Software\\Valve\\Steam", "SteamPath")) {
-        add_library(steam, path_from_utf8(*path));
+        mods::steam::add_library(steam, path_from_utf8(*path));
     }
     for (const RegistryView view : {RegistryView::view64, RegistryView::view32}) {
         if (const auto path = registry.read_string(RegistryHive::local_machine, view, "SOFTWARE\\Valve\\Steam", "InstallPath")) {
-            add_library(steam, path_from_utf8(*path));
+            mods::steam::add_library(steam, path_from_utf8(*path));
         }
     }
     std::vector<fs::path> libraries;
-    for (const fs::path& root : steam) {
-        add_library(libraries, root);
-        read_library_folders(root / "steamapps" / "libraryfolders.vdf", libraries);
-        read_library_folders(root / "config" / "libraryfolders.vdf", libraries);
-    }
+    for (const fs::path& root : steam) mods::steam::add_steam_libraries(root, libraries);
     return libraries;
 }
 

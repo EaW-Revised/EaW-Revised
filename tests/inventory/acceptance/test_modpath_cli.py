@@ -198,8 +198,8 @@ class ModPathCliTests(unittest.TestCase):
                                            "--reference-index", str(ROOT / "plan/inventories/lua-declarations.json"),
                                            "--out", str(out / "empty")], cwd=ROOT,
                                           capture_output=True, text=True)
-            self.assertEqual(empty_result.returncode, 2)
-            self.assertIn("missing Data/MegaFiles.xml", empty_result.stderr)
+            self.assertEqual(empty_result.returncode, 0)
+            self.assertIn("EAWR-VFS-0012", empty_result.stderr)
 
             missing_game = subprocess.run([sys.executable, str(ROOT / "tools/inventory/xml_inventory.py"),
                                            "--game-root", str(Path(temporary) / "missing-game"),

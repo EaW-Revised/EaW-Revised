@@ -6,7 +6,7 @@
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/presentation/space/debris.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/sim/tactical/combat.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -98,7 +98,7 @@ private:
     };
     struct ParticleType final {
         std::uint32_t lifetime_frames{};
-        std::optional<particles::SystemDefinition> system;
+        std::shared_ptr<const particles::SystemDefinition> system;
         std::string cause;
     };
     // A running particle effect; `follows` is the serial of the active prop it rides on.

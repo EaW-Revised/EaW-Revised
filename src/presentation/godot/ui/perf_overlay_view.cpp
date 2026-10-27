@@ -1,4 +1,5 @@
 #include "perf_overlay_view.hpp"
+#include "eawr/presentation/render_categories.hpp"
 
 #include <godot_cpp/classes/rendering_server.hpp>
 #include <godot_cpp/classes/theme_db.hpp>
@@ -171,7 +172,8 @@ void EawrPerfOverlay::draw_overlay() {
     const float small_row = font->get_height(small) * 1.05F;
     const float height = pad * 2.0F + (big_row + small_row + graph_height + gap) * 2.0F + small_row + small_row
         + (tick_source_ ? small_row : 0.0F) + big_row
-        + (network_ ? small_row * static_cast<float>(3 + network_->peers.size()) + gap : 0.0F);
+        + (network_ ? small_row * static_cast<float>(3 + network_->peers.size()) + gap : 0.0F)
+        + (render_categories::enabled ? small_row * 5.0F : 0.0F);
 
     panel_rect_ = Rect2(margin, margin, width, height);
     draw_rect(panel_rect_, Color(0.0F, 0.0F, 0.0F, 0.62F), true);
@@ -290,6 +292,25 @@ void EawrPerfOverlay::draw_overlay() {
          HORIZONTAL_ALIGNMENT_RIGHT);
     y += small_row;
     const double average = cost_samples_ > 0 ? cost_sum_ms_ / static_cast<double>(cost_samples_) : 0.0;
+    if (render_categories::enabled) {
+        const auto& sample = render_categories::latest;
+        text(format("draw V/S/UI %llu/%llu/%llu", static_cast<unsigned long long>(sample.viewport_draws[0]),
+            static_cast<unsigned long long>(sample.viewport_draws[1]), static_cast<unsigned long long>(sample.viewport_draws[2])),
+            small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+        y += small_row;
+        for (std::size_t pair = 0; pair < 4; ++pair) {
+            const auto index = pair * 2;
+            const auto label = [&](const std::size_t role) {
+                const auto& c = sample.roles[role];
+                return format("%s S/R/C %llu/%llu/%llu", render_categories::names[role].data(),
+                    static_cast<unsigned long long>(c.submitted), static_cast<unsigned long long>(c.retained),
+                    static_cast<unsigned long long>(c.eligible_casters));
+            };
+            text(label(index), small, dim_colour, HORIZONTAL_ALIGNMENT_LEFT);
+            if (index + 1 < render_categories::role_count) text(label(index + 1), small, dim_colour, HORIZONTAL_ALIGNMENT_RIGHT);
+            y += small_row;
+        }
+    }
     text(format("overlay %.3f ms", average), small, Color(1.0F, 1.0F, 1.0F, 0.5F), HORIZONTAL_ALIGNMENT_LEFT);
     text(format("%s hides", key_name), small, Color(1.0F, 1.0F, 1.0F, 0.5F), HORIZONTAL_ALIGNMENT_RIGHT);
 }
@@ -320,6 +341,10 @@ std::string EawrPerfOverlay::report_json() const {
     output << "], \"draw_calls\": " << draw_calls_ << ", \"visible_units\": ";
     if (visible_units_) output << *visible_units_;
     else output << "null";
+    if (render_categories::enabled) {
+        output << ", \"render_categories\": ";
+        render_categories::write_json(output, render_categories::latest);
+    }
     output << ", \"own_cost_ms\": {\"samples\": " << cost_samples_
            << ", \"avg\": " << (cost_samples_ > 0 ? cost_sum_ms_ / static_cast<double>(cost_samples_) : 0.0)
            << ", \"max\": " << cost_max_ms_ << "}, \"rect\": [" << panel_rect_.position.x << ", " << panel_rect_.position.y

@@ -41,6 +41,35 @@
 
 namespace eawr::sim::tactical {
 
+bool TacticalSession::Impl::heal_in_range(const LiveUnit& source, const LiveUnit& target, const math::Fixed reach) const {
+    // WSH-05, ABF-02: inclusive planar centre first, then the rolled model box.
+    if (within_range(source.state.position, target.state.position, reach, RangeMetric::planar)) return true;
+    const auto* profile = combat.find(target.state.type_id);
+    if (profile && profile->collision) {
+        const auto transform = unit_transform(target);
+        if (!transform) return false;
+        detail::CombatUnit geometry;
+        geometry.profile = profile;
+        geometry.transform = transform.value();
+        const auto overlap = detail::collision_overlaps_sphere(geometry, source.state.position, reach);
+        return overlap && overlap.value();
+    }
+    // WSH-05 inferred fallback: absent height bounds conservatively require equal Z.
+    const auto* footprint = motion.footprint(target.state.type_id);
+    if (!footprint || source.state.position.z != target.state.position.z) return false;
+    const auto basis = math::to_matrix(target.state.rotation, {});
+    if (!basis) return false;
+    const math::Vec2 delta{math::Fixed::from_raw(source.state.position.x.raw() - target.state.position.x.raw()),
+        math::Fixed::from_raw(source.state.position.y.raw() - target.state.position.y.raw())};
+    math::Fixed x{}, y{};
+    const auto& rows = basis.value().rows;
+    if (!math::try_dot(delta, {rows[0][0], rows[1][0]}, x)
+        || !math::try_dot(delta, {rows[0][1], rows[1][1]}, y)) return false;
+    const math::Vec3 closest{math::Fixed::from_raw(std::max<std::int64_t>(std::abs(x.raw()) - footprint->x_extent.raw(), 0)),
+        math::Fixed::from_raw(std::max<std::int64_t>(std::abs(y.raw()) - footprint->y_extent.raw(), 0)), {}};
+    return within_range({}, closest, reach, RangeMetric::planar);
+}
+
 core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>& units,
     const std::map<EntityId, ArrivalState>& arriving, const std::uint64_t tick,
     const PartitionExecutor& executor, std::vector<CombatEvent>& events) {
@@ -67,32 +96,7 @@ core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>&
     });
     if (!phase) return phase;
     const auto in_range = [&](const LiveUnit& source, const LiveUnit& target, const math::Fixed reach) {
-        // WSH-05, ABF-02: inclusive planar centre first, then the rolled model box.
-        if (within_range(source.state.position, target.state.position, reach, RangeMetric::planar)) return true;
-        const auto* profile = combat.find(target.state.type_id);
-        if (profile && profile->collision) {
-            const auto transform = unit_transform(target);
-            if (!transform) return false;
-            detail::CombatUnit geometry;
-            geometry.profile = profile;
-            geometry.transform = transform.value();
-            const auto overlap = detail::collision_overlaps_sphere(geometry, source.state.position, reach);
-            return overlap && overlap.value();
-        }
-        // WSH-05 inferred fallback: absent height bounds conservatively require equal Z.
-        const auto* footprint = motion.footprint(target.state.type_id);
-        if (!footprint || source.state.position.z != target.state.position.z) return false;
-        const auto basis = math::to_matrix(target.state.rotation, {});
-        if (!basis) return false;
-        const math::Vec2 delta{math::Fixed::from_raw(source.state.position.x.raw() - target.state.position.x.raw()),
-            math::Fixed::from_raw(source.state.position.y.raw() - target.state.position.y.raw())};
-        math::Fixed x{}, y{};
-        const auto& rows = basis.value().rows;
-        if (!math::try_dot(delta, {rows[0][0], rows[1][0]}, x)
-            || !math::try_dot(delta, {rows[0][1], rows[1][1]}, y)) return false;
-        const math::Vec3 closest{math::Fixed::from_raw(std::max<std::int64_t>(std::abs(x.raw()) - footprint->x_extent.raw(), 0)),
-            math::Fixed::from_raw(std::max<std::int64_t>(std::abs(y.raw()) - footprint->y_extent.raw(), 0)), {}};
-        return within_range({}, closest, reach, RangeMetric::planar);
+        return heal_in_range(source, target, reach);
     };
     phase = executor.execute_phase("healing-select", tick_partition_count, [&](const std::size_t partition) {
         const auto range = partition_range(partition, units.size());
@@ -105,8 +109,10 @@ core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>&
             for (std::size_t slot = 0; slot < handlers.size(); ++slot) {
                 const auto& handler = handlers[slot];
                 auto& state = source.abilities->special.slots[slot];
-                if (handler.kind != SpecialAbilityKind::force_healing || handler.style != SpecialActivationStyle::space_automatic
+                if (handler.kind != SpecialAbilityKind::force_healing || handler.style != automatic_special_style(setup.domain)
                     || !state.enabled || state.cancelled || tick < state.next_service_frame) continue;
+                // WSH-09: a negative amount without a percent is passive damage, served in the combat step.
+                if (handler.heal_amount.raw() < 0 && handler.heal_percent.raw() <= 0) continue;
                 // WSH-06: a due empty scan advances too; arrivals never restart the interval.
                 state.next_service_frame = tick + handler.heal_interval_frames;
                 if (handler.heal_amount.raw() <= 0 && handler.heal_percent.raw() <= 0) continue;
@@ -163,6 +169,64 @@ core::Result<void> TacticalSession::Impl::service_healing(std::vector<LiveUnit>&
         events.push_back({tick, CombatEventKind::heal_pulse, source.entity_id, static_cast<std::uint32_t>(pulse.slot),
             target.entity_id, pulse.hardpoint, source.position, target.position});
     }
+    return core::Result<void>::success();
+}
+
+core::Result<void> TacticalSession::Impl::select_passive_damage(const UnitStage& staged,
+    const std::map<EntityId, ArrivalState>& arriving, const std::uint64_t tick, const PartitionExecutor& executor,
+    std::vector<PassiveDamagePulse>& pulses) {
+    pulses.clear();
+    if (std::none_of(abilities.profiles.begin(), abilities.profiles.end(), [](const auto& profile) {
+        return std::any_of(profile.special.begin(), profile.special.end(), [](const auto& handler) {
+            return handler.kind == SpecialAbilityKind::force_healing && handler.heal_amount.raw() < 0
+                && handler.heal_percent.raw() <= 0;
+        });
+    })) return core::Result<void>::success();
+    std::vector<const LiveUnit*> units;
+    for (const auto& entry : staged) units.push_back(&entry.second);
+    std::array<std::vector<PassiveDamagePulse>, tick_partition_count> outputs;
+    // WSH-09: sources are read-only here; due deadlines and damage commit serially in source order.
+    const auto phase = executor.execute_phase("passive-damage-select", tick_partition_count, [&](const std::size_t partition) {
+        const auto range = partition_range(partition, units.size());
+        auto& output = outputs[partition];
+        for (auto i = range.begin; i < range.end; ++i) {
+            const auto& source = *units[i];
+            if (!source.abilities || !source.durability || source.durability->hull.raw() <= 0
+                || arriving.contains(source.state.entity_id) || source.abilities->special.service_cancelled) continue;
+            const auto* profile = abilities.find(source.state.type_id);
+            if (profile == nullptr) continue;
+            for (std::size_t slot = 0; slot < profile->special.size(); ++slot) {
+                const auto& handler = profile->special[slot];
+                const auto& state = source.abilities->special.slots[slot];
+                if (handler.kind != SpecialAbilityKind::force_healing || handler.style != automatic_special_style(setup.domain)
+                    || !state.enabled || state.cancelled || tick < state.next_service_frame
+                    || handler.heal_amount.raw() >= 0 || handler.heal_percent.raw() > 0) continue;
+                output.push_back({source.state.entity_id, invalid_entity_id, slot});
+                if (handler.heal_range.raw() <= 0) continue;
+                const LiveUnit* picked = nullptr;
+                auto lowest = math::Fixed::from_raw(math::Fixed::scale);
+                for (const auto* candidate : units) {
+                    if (candidate == &source || !candidate->durability || candidate->durability->hull.raw() <= 0
+                        || arriving.contains(candidate->state.entity_id)) continue;
+                    const auto* fighting = combat.find(candidate->state.type_id);
+                    const auto* health = health_profile(*candidate);
+                    if (!fighting || !health || !players_hostile(snapshot_players, source.state.owner, candidate->state.owner)
+                        || !special_type_matches(handler.filter, candidate->state.type_id, fighting->category_bits)
+                        || !heal_in_range(source, *candidate, handler.heal_range)) continue;
+                    if (!handler.single_target_heal) {
+                        output.push_back({source.state.entity_id, candidate->state.entity_id, slot});
+                        continue;
+                    }
+                    // WSH-02 query-tie seam: the first qualifying unit in stable entity order keeps equal fractions.
+                    const auto fraction = healing_fraction(*health, *candidate->durability);
+                    if (picked == nullptr || fraction < lowest) { picked = candidate; lowest = fraction; }
+                }
+                if (picked != nullptr) output.push_back({source.state.entity_id, picked->state.entity_id, slot});
+            }
+        }
+    });
+    if (!phase) return phase;
+    for (const auto& output : outputs) pulses.insert(pulses.end(), output.begin(), output.end());
     return core::Result<void>::success();
 }
 
@@ -229,11 +293,13 @@ bool TacticalSession::Impl::beam_in_range(const LiveUnit& source, const LiveUnit
     const SpecialAbilityProfile& nested) const {
     const auto* ordinary = combat.find(source.state.type_id);
     const auto maximum = nested.beam_max_range.raw() > 0 ? nested.beam_max_range
-        : ordinary ? ordinary->max_attack_distance.value_or(math::Fixed{}) : math::Fixed{};
+        : attack_distance(source).value_or(math::Fixed{});
     const auto minimum = nested.beam_min_range.raw() > 0 ? nested.beam_min_range
         : ordinary ? ordinary->min_attack_distance : math::Fixed{};
-    const math::Vec2 delta{math::Fixed::from_raw(target.state.position.x.raw() - source.state.position.x.raw()),
-        math::Fixed::from_raw(target.state.position.y.raw() - source.state.position.y.raw())};
+    const auto dx = math::subtract(target.state.position.x, source.state.position.x);
+    const auto dy = math::subtract(target.state.position.y, source.state.position.y);
+    if (!dx || !dy) return false;
+    const math::Vec2 delta{dx.value(), dy.value()};
     math::Fixed distance{};
     if (!math::try_length(delta, distance)) return false;
     math::Fixed extent{};
@@ -244,10 +310,14 @@ bool TacticalSession::Impl::beam_in_range(const LiveUnit& source, const LiveUnit
         if (!math::try_dot(delta, {facing.value().rows[0][0], facing.value().rows[1][0]}, alignment)) return false;
         const auto threshold = math::multiply(distance, math::Fixed::from_raw(7071 * math::Fixed::scale / 10000));
         if (!threshold) return false;
-        extent = std::abs(alignment.raw()) > threshold.value().raw() ? footprint->x_extent : footprint->y_extent;
+        extent = (alignment.raw() > threshold.value().raw() || alignment.raw() < -threshold.value().raw())
+            ? footprint->x_extent : footprint->y_extent;
     }
-    return maximum.raw() > 0 && distance.raw() <= maximum.raw() + extent.raw()
-        && (minimum.raw() <= 0 || distance.raw() > minimum.raw() + extent.raw());
+    // WHE-58: compare adjusted distance, avoiding overflow of authored limit + extent.
+    const auto adjusted = math::subtract(distance, extent);
+    if (!adjusted) return false;
+    return maximum.raw() > 0 && adjusted.value() <= maximum
+        && (minimum.raw() <= 0 || adjusted.value() > minimum);
 }
 
 bool TacticalSession::Impl::beam_usable(const LiveUnit& source, const AbilityKind kind, const std::uint64_t tick) const {
@@ -670,8 +740,8 @@ math::Fixed TacticalSession::Impl::concentrate_defense(const LiveUnit& target, c
         impact_bonus_containers, base->second, nullptr, false));
     auto categories = base->second;
     // Cached base categories; only sparse live source references are checked on later hits.
-    const bool targeted = accumulate_concentrate_bonus(target.state.entity_id, categories, &units);
-    return sum_combat_bonus_categories(categories, targeted || command_ledger.recipients.contains(target.state.entity_id) || command_ledger.battlefield_defence.contains(target.state.owner))[4];
+    static_cast<void>(accumulate_concentrate_bonus(target.state.entity_id, categories, &units));
+    return sum_combat_bonus_categories(categories)[4];
 }
 
 core::Result<void> TacticalSession::Impl::refresh_concentrate_bonuses(std::vector<LiveUnit>& units,
@@ -774,6 +844,18 @@ void TacticalSession::Impl::finish_ion_shot(AbilitySlot& team, const std::vector
         team.target_hardpoint = no_hardpoint;
         if (due < craft.size()) team.ready_tick = tick + ability.recharge_frames;
     }
+
+std::optional<math::Fixed> TacticalSession::Impl::attack_distance(const LiveUnit& unit) const noexcept {
+    if (unit.abilities) {
+        const auto* profile = abilities.find(unit.state.type_id);
+        if (profile) {
+            const auto active = ability_attack_distance(*profile, *unit.abilities);
+            if (active) return active;
+        }
+    }
+    const auto* ordinary = combat.find(unit.state.type_id);
+    return ordinary ? ordinary->max_attack_distance : std::nullopt;
+}
 
 math::Fixed TacticalSession::Impl::ability_factor(const LiveUnit& unit, const AbilityModifier modifier) const {
         if (!unit.abilities) return math::Fixed::from_raw(math::Fixed::scale);
@@ -1117,7 +1199,8 @@ bool TacticalSession::Impl::service_mc30(LiveUnit& unit, const std::span<const U
     // FS-29: armed human count > 2; AI combat-rating threat >= 1000.
     const bool trigger = state.human ? state.armed && state.nearby > 2
         : state.threat >= math::Fixed::from_raw(1000 * math::Fixed::scale);
-    const bool fired = trigger && !slot.active && profile->abilities[*kind_slot].spawned
+    const auto& ability = profile->abilities[*kind_slot];
+    const bool fired = trigger && !slot.active && (ability.spawned || ability.unresolved_spawn)
         && durability.damage && ability_ready(profile->abilities[*kind_slot], slot, ability_gate(unit, tick), tick);
     if (fired) {
         // FD-47: direct instant use in this turn, before the nested proximity sample.

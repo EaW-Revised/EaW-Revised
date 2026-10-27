@@ -130,6 +130,39 @@
 
 ### Flight
 
+Capacity (FL-02, FM-10; debug build: space-squadron creation, team membership and spawn-data setup):
+authored craft, spawn entries and bays use dynamic lists; 64 craft/entries and 255 bays are not
+retail limits. The remake retains authored member order and diagnoses entry/bay counts that
+cannot fit its 32-bit draw and state indices. Session resource exhaustion remains an error.
+`Max_Squad_Size` controls authored team grouping (FL-06). Successfully created craft are
+partitioned in input order into chunks of `min(remaining, maximum)` for both placed and
+bay-born rosters; the default maximum is 10. Craft IDs are committed before the new team
+IDs, and chunks retain member order. The existing placed first-company ID is retained.
+A 186-craft roster with maximum 200 remains one team. Stock/roster-at-most-maximum cases
+retain the existing single-team creation path by construction; synthetic boundary tests
+cover this path, without claiming a broad replay comparison.
+Skirmish visual-slot capacity remains separate from simulation roster capacity (legacy EAWR-4626).
+
+FL-06 additional debug-build evidence (legacy EAWR-4625): team creation advances its cursor only by
+the chosen chunk size. Zero cannot advance; a negative maximum cannot consume the positive
+roster. There is no safe nonpositive fallback in this path. **Remake guard:** malformed,
+fractional, nonpositive or out-of-signed-32-bit maxima skip the offending type, reporting
+its type, tag and authored value, while unrelated types still load. Starting lobby and placed
+companies referencing that skipped definition are omitted, keeping the battle playable with
+its other valid forces; the loader's named authored-value diagnostic is retained. This is input validation,
+not a claimed retail recovery rule. No stock roster limit is used.
+
+The bay caller receives only the first created team: only that team subscribes to bay
+replenishment and receives the bay's escort/position order. Other teams keep creation defaults;
+the team-creation call leaves every team unmarked, then the bay explicitly marks only the
+first returned team as a garrison and subscribes it to detachment. Craft are marked separately
+inside the craft-creation loop. Thus tail teams keep the unmarked creation default; their
+subscription is independently absent. Losing one of those tails does not release the authored launch slot. Losing the first team
+permits one complete replacement roster, even while a tail survives. Per-craft movement and
+team outcome preparation remain partitioned; stable births and team chunks use the existing
+ordered creation commit. Tactical type power follows the separate guarded PG-08 scale; the
+scale does not depend on live depletion or the size of the final chunk.
+
 - **FM-01** (research E75-10, E75-23) A squadron craft is flown by the fighter locomotor once per
   frame. Its `Max_Speed`, `Min_Speed`, `Max_Rate_Of_Turn`, `Max_Lift` and `Max_Rate_Of_Roll` are
   scaled by `Object_Max_Speed_Multiplier_Space` (1.2); `Max_Thrust` and `Strafe_Distance` are not.
@@ -184,12 +217,20 @@
   turns, on the arc its speed and turn rate give (FM-11's turn radius). The roll, pitch and yaw are
   the object's facing, and FoC draws that same triple, so a climbing or diving craft shows its
   pitch. The remake draws each craft's whole rotation and turns it between two frames along the
-  shortest arc (`presentation::space::interpolate_units`). Before the fighter movement-facing correction work the viewer drew only the yaw
+  shortest arc (`presentation::live::interpolate_units`). Before the fighter movement-facing correction work the viewer drew only the yaw
   and the roll: in S-28 the launched craft climb to their layer at 0.5 units per frame, nose up
   60 to 89 degrees, and were drawn level and rising sideways, while the sim's velocity stayed
   within the trace's precision of the facing. Between ticks the viewer also turns an unpitched
   craft's roll the short way (squadron attack-run eye check), so a craft rolling upright through 180 degrees out of a loop
   does not spin a whole turn between two ticks.
+- **FM-27** (debug build; vertical heading correction) A direction whose X and Y components
+  are both zero has yaw zero, including straight up, straight down and the zero direction.
+  The direction-to-facing conversion selects this before evaluating the planar angle; it
+  does not reuse a previous heading or derive one from another axis in that conversion.
+  **Inferred; rotation read-back unverified:** the remake applies that direction convention
+  to a vertical rotation's projected forward axis as well. This prevents an undefined planar
+  angle from aborting the session; a retail rotation read-back has not been traced.
+  Nonzero directions retain the existing angle result.
 - **FM-08** (debug build: the locomotor's height correction; space-movement MV-11; fighter movement-facing correction) In space a
   craft changes height only by pitching. FoC's direct height correction (keeping clear of terrain
   and water, at most `Max_Lift` per frame) runs only in land mode. A squadron reaches its
@@ -197,7 +238,9 @@
   height and flies level (space-movement MV-11).
 - **FM-10** (debug build: roster removal and formation assignment; WSQ-51/57) The squadron's
   first live craft leads it; member k of the current roster flies the k-th `Squadron_Offsets`
-  slot. Removing a craft closes the gap, so later survivors move up one slot.
+  slot. Removing a craft closes the gap, so later survivors move up one slot. A roster index
+  beyond the authored offsets uses (0, 0, 0), including a team with no offsets (debug build:
+  formation-offset lookup). Malformed authored vectors remain diagnosed.
 - **FM-11** (research E75-18) Forming up: a craft flies toward the leader's position plus a turn
   radius (360 / turn rate x speed / 2 pi) along the leader's velocity, plus its own slot minus the
   leader's turned by the leader's facing (FM-14), easing its height toward the wanted one.

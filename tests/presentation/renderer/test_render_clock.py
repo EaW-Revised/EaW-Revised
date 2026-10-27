@@ -100,7 +100,7 @@ int main() {
         frame = source_text("apps/viewer/src/live_session_frame.cpp")
         observe = frame.index("render_clock_.observe(latest->completed_tick())")
         sample = frame.index("population.defer_unit_sample(render_clock_.sample())")
-        pose = frame.index("population.pose_pending_units(renderer)")
+        pose = frame.index("population.pose_pending_units(renderer, pose_workers_)")
         self.assertLess(observe, sample)
         self.assertLess(sample, pose)
         environment = (ROOT / "apps/viewer/src/space_environment_view.cpp").read_text()

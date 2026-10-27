@@ -40,6 +40,7 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const RemoveFleetMembers&) { return CommandLayer::galactic; },
                           [](const MergeFleets&) { return CommandLayer::galactic; },
                           [](const SetFleetOrbitSlot&) { return CommandLayer::galactic; },
+                          [](const SetFleetPathfinder&) { return CommandLayer::galactic; },
                           [](const MoveFleet&) { return CommandLayer::galactic; },
                           [](const RecheckOrbit&) { return CommandLayer::galactic; },
                           [](const LandFleet&) { return CommandLayer::galactic; },
@@ -52,10 +53,12 @@ CommandLayer layer_of(const CommandPayload& payload) noexcept {
                           [](const PrepareBlackMarket&) { return CommandLayer::galactic; },
                           [](const BuyBlackMarket&) { return CommandLayer::galactic; },
                           [](const PrepareGalacticAbility&) { return CommandLayer::galactic; },
+                          [](const DeployGroundAbility&) { return CommandLayer::galactic; },
                           [](const ExecutePreparedAbility&) { return CommandLayer::galactic; },
                           [](const CancelGalacticAbility&) { return CommandLayer::galactic; },
                           [](const LaunchFromSurface&) { return CommandLayer::galactic; },
                           [](const LaunchFleet&) { return CommandLayer::galactic; },
+                          [](const TransferSurface&) { return CommandLayer::galactic; },
                           [](const TransferFleetMembers&) { return CommandLayer::galactic; },
 
                       },
@@ -83,6 +86,7 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const RemoveFleetMembers&) { return galactic_opcodes::remove_members; },
                           [](const MergeFleets&) { return galactic_opcodes::merge_fleets; },
                           [](const SetFleetOrbitSlot&) { return galactic_opcodes::set_orbit_slot; },
+                          [](const SetFleetPathfinder&) { return galactic_opcodes::set_pathfinder; },
                           [](const MoveFleet&) { return galactic_opcodes::move_fleet; },
                           [](const RecheckOrbit&) { return galactic_opcodes::recheck_orbit; },
                           [](const LandFleet&) { return galactic_opcodes::land_transports; },
@@ -95,10 +99,12 @@ std::uint16_t opcode_of(const CommandPayload& payload) noexcept {
                           [](const PrepareBlackMarket&) { return galactic_opcodes::black_market_prepare; },
                           [](const BuyBlackMarket&) { return galactic_opcodes::black_market_buy; },
                           [](const PrepareGalacticAbility&) { return galactic_opcodes::special_prepare; },
+                          [](const DeployGroundAbility&) { return galactic_opcodes::ground_deploy; },
                           [](const ExecutePreparedAbility&) { return galactic_opcodes::special_execute; },
                           [](const CancelGalacticAbility&) { return galactic_opcodes::special_cancel; },
                           [](const LaunchFromSurface&) { return galactic_opcodes::launch_from_surface; },
                           [](const LaunchFleet&) { return galactic_opcodes::launch_fleet; },
+                          [](const TransferSurface&) { return galactic_opcodes::transfer_surface; },
                           [](const TransferFleetMembers&) { return galactic_opcodes::transfer_fleet_members; },
 
                       },
@@ -122,6 +128,7 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const ObserverCommand& command) { detail::encode_observer_command(bytes, command); },
                    [&](const PrepareBlackMarket& c) { detail::put_u64(bytes, c.buyer); detail::put_u64(bytes, c.planet); },
                    [&](const BuyBlackMarket& c) { detail::put_u64(bytes, c.buyer); detail::put_u32(bytes, c.index); },
+                   [&](const DeployGroundAbility& c) { detail::put_u64(bytes, c.actor); detail::put_u64(bytes, c.planet); },
                    [&](const PrepareGalacticAbility& c) {
                        detail::put_u64(bytes, c.actor); detail::put_u64(bytes, c.planet); detail::put_u8(bytes, static_cast<std::uint8_t>(c.kind));
                    },
@@ -142,6 +149,7 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                    [&](const AddFleetMembers& command) { members(command, command.fleet); },
                    [&](const RemoveFleetMembers& command) { members(command, command.fleet); },
                    [&](const MergeFleets& command) { detail::put_u64(bytes, command.source); detail::put_u64(bytes, command.target); },
+                   [&](const SetFleetPathfinder& command) { detail::put_u64(bytes, command.fleet); detail::put_u64(bytes, command.member); },
                    [&](const SetFleetOrbitSlot& command) { detail::put_u64(bytes, command.fleet); detail::put_u8(bytes, command.slot); },
                    [&](const LandFleet& command) { detail::put_u64(bytes, command.fleet); detail::put_u64(bytes, command.planet); },
                    [&](const LaunchFromSurface& command) {
@@ -160,6 +168,12 @@ std::vector<std::uint8_t> encode_payload(const CommandPayload& payload) {
                        detail::put_u8(bytes, command.destination_slot ? 1 : 0);
                        if (command.destination_slot) detail::put_u8(bytes, *command.destination_slot);
                        detail::put_u64(bytes, command.destination_actor);
+                   },
+                   [&](const TransferSurface& command) {
+                       detail::put_u32(bytes, static_cast<std::uint32_t>(command.units.size()));
+                       for (const auto id : command.units) detail::put_u64(bytes, id);
+                       detail::put_u32(bytes, static_cast<std::uint32_t>(command.path.size()));
+                       for (const auto id : command.path) detail::put_u64(bytes, id);
                    },
                    [&](const ProductionCommand& command) {
                        detail::put_u64(bytes, command.planet); detail::put_u64(bytes, command.type);
@@ -300,6 +314,11 @@ std::optional<CommandPayload> decode_payload(
                 || reader.remaining()) return std::nullopt;
             return c;
         }
+        if (opcode == galactic_opcodes::ground_deploy) {
+            DeployGroundAbility c;
+            if (!reader.read_u64(c.actor) || !c.actor || !reader.read_u64(c.planet) || !c.planet || reader.remaining()) return {};
+            return c;
+        }
         if (opcode == galactic_opcodes::special_prepare) {
             PrepareGalacticAbility c; std::uint8_t kind{};
             if (!reader.read_u64(c.actor) || !c.actor || !reader.read_u64(c.planet) || !c.planet
@@ -411,6 +430,28 @@ std::optional<CommandPayload> decode_payload(
             if (!reader.read_u64(c.destination_actor) || reader.remaining()) return std::nullopt;
             return CommandPayload{std::move(c)};
         }
+        if (opcode == galactic_opcodes::transfer_surface) {
+            if (bytes.size() > galactic_replay_max_payload) return std::nullopt;
+            TransferSurface c; std::uint32_t count{};
+            if (!reader.read_u32(count) || !count || count > galactic_max_objects
+                || std::size_t{count} > reader.remaining() / 8) return std::nullopt;
+            std::set<EntityId> units;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                EntityId id{};
+                if (!reader.read_u64(id) || !id || !units.insert(id).second) return std::nullopt;
+                c.units.push_back(id);
+            }
+            if (!reader.read_u32(count) || count < 2 || count > 4096
+                || std::size_t{count} > reader.remaining() / 8) return std::nullopt;
+            std::set<PlanetId> planets;
+            for (std::uint32_t i = 0; i < count; ++i) {
+                PlanetId id{};
+                if (!reader.read_u64(id) || !id || !planets.insert(id).second) return std::nullopt;
+                c.path.push_back(id);
+            }
+            if (reader.remaining()) return std::nullopt;
+            return CommandPayload{std::move(c)};
+        }
         if (opcode == galactic_opcodes::recheck_orbit) {
             RecheckOrbit c;
             if (!reader.read_u64(c.target) || !c.target || reader.remaining()) return std::nullopt;
@@ -452,6 +493,11 @@ std::optional<CommandPayload> decode_payload(
         if (opcode == galactic_opcodes::merge_fleets) {
             MergeFleets c;
             if (!reader.read_u64(c.source) || !reader.read_u64(c.target) || c.source == 0 || c.target == 0 || reader.remaining()) return std::nullopt;
+            return CommandPayload{c};
+        }
+        if (opcode == galactic_opcodes::set_pathfinder) {
+            SetFleetPathfinder c;
+            if (!reader.read_u64(c.fleet) || !c.fleet || !reader.read_u64(c.member) || reader.remaining()) return std::nullopt;
             return CommandPayload{c};
         }
         if (opcode == galactic_opcodes::set_orbit_slot) {

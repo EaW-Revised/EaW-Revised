@@ -265,9 +265,9 @@ void EawrLanLobby::refresh_staging_options(Impl& impl, Resources& resources, con
             flag("TEXT_FREE_STARTING_UNITS", options.free_starting_units);
             flag("TEXT_ALLOW_SUPER_WEAPONS", options.allow_superweapons);
             flag("TEXT_PRE_BUILT_BASE", options.pre_built_base);
-            const auto condition = model::setup_win_condition_index(options.space_win_condition);
+            const auto condition = model::setup_win_condition_index(options.tactical_win_condition);
             const auto condition_text = condition ? resolved(resources.text,
-                std::string(model::setup_win_conditions()[*condition].text_key)) : text(options.space_win_condition);
+                std::string(model::setup_win_conditions()[*condition].text_key)) : text(options.tactical_win_condition);
             lines.push_back(resolved(resources.text, "TEXT_WIN_CONDITION") + ": " + condition_text);
             bool changed = summary->get_item_count() != static_cast<int>(lines.size());
             for (int i = 0; !changed && i < summary->get_item_count(); ++i)
@@ -301,13 +301,11 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
     if (signature != impl.rows_signature) {
         impl.rows_signature = signature;
         state.loading = true;
+        // WSS-12/13: every playable catalog faction, as the setup screen lists them; a map whose stations
+        // cannot start a pick refuses it at Start (project limit), it does not hide the entry.
         std::vector<std::string> factions;
         if (map != nullptr) {
-            for (const skirmish::SetupTeam& team : map->teams) {
-                for (const std::string& faction : team.factions) {
-                    if (std::find(factions.begin(), factions.end(), faction) == factions.end()) factions.push_back(faction);
-                }
-            }
+            for (const auto& entry : skirmish::setup_factions(*resources.content->catalog)) factions.push_back(entry.name);
         }
         impl.row_states.clear();
         for (std::size_t index = 0; index < dialog_rows; ++index) {
@@ -431,17 +429,6 @@ void EawrLanLobby::refresh_staging_roster(Impl& impl, PageState& state, Resource
                 kick->set_visible(shown && impl.host && remote);
                 kick->set_disabled(!room || room->snapshot.phase != net::LobbyPhase::staging);
             }
-            // Faction choices a team has no station for stay listed and disabled, as the setup screen does.
-            if (faction != nullptr && choices_editable && map != nullptr && row.team) {
-                const auto side = std::find_if(map->teams.begin(), map->teams.end(),
-                                               [&](const skirmish::SetupTeam& t) { return t.team == *row.team; });
-                for (int item = 0; item < faction->get_item_count(); ++item) {
-                    const std::string value = utf8(faction->get_item_text(item));
-                    const bool allowed = side != map->teams.end()
-                        && std::find(side->factions.begin(), side->factions.end(), value) != side->factions.end();
-                    faction->set_item_disabled(item, !allowed);
-                }
-            }
             const auto icon = state.accept_icons.find("IDC_ACCEPT_PLAYER_" + suffix);
             if (icon != state.accept_icons.end()) {
                 icon->second->set_visible(shown && row.occupied());
@@ -550,6 +537,7 @@ bool EawrLanLobby::run_action(const std::string& action) {
     if (verb == "host_dropdown" && page_ == Page::host_options) return action_host_dropdown(argument);
 
     if (verb == "staging_dropdown" && page_ == Page::staging) return action_staging_dropdown(argument, number);
+    if (verb == "options" && page_ == Page::staging) return action_options(argument, number);
 
     if (verb == "host") return action_host(impl, argument);
     if (verb == "join") return action_join(impl, argument);
@@ -657,6 +645,19 @@ bool EawrLanLobby::action_humans(const std::string& argument, bool (*number)(con
 }
 
 bool EawrLanLobby::action_host_dropdown(const std::string& argument) {
+    // game_type=<key> picks the host dialog's game type by its text key (the scripted way into a Campaign room).
+    if (argument.rfind("game_type=", 0) == 0) {
+        const std::string key = argument.substr(std::string("game_type=").size());
+        auto* list = EAWR_CONTROL(EawrUiList, "IDC_GAME_TYPE_LIST");
+        if (list == nullptr) return false;
+        for (std::size_t index = 0; index < std::size(game_types); ++index) {
+            if (key != game_types[index].name || !game_types[index].available) continue;
+            list->select(static_cast<int>(index));
+            on_item_selected(static_cast<int64_t>(index), "IDC_GAME_TYPE_LIST");
+            return true;
+        }
+        return false;
+    }
     if (argument != "humans") return false;
     if (auto* combo = EAWR_CONTROL(EawrUiCombo, "IDC_INTERNET_HOST_CLAN_COMBO")) {
         combo->show_popup(); return true;

@@ -172,6 +172,7 @@ core::Result<void> GameSession::Impl::story_notice(GameStoryNotice notice) {
     if (story_engine) {
         const auto& stored = story_notices.back();
         if (auto told = story_engine->notify(stored.player, stored.payload); !told) return told;
+        if (reconstructing_native_notices) static_cast<void>(story_engine->take_script_calls()); // the scripts are restored, not called again
     }
     return story_handler && !reconstructing_native_notices ? story_handler(story_notices.back()) : core::Result<void>::success();
 }
@@ -182,6 +183,7 @@ core::Result<void> GameSession::Impl::story_notice(GameStoryNotice notice) {
 core::Result<void> GameSession::Impl::apply_story_rewards() {
     constexpr unsigned max_rounds = 64;
     for (unsigned round = 0; round < max_rounds; ++round) {
+        if (auto forwarded = forward_story_calls(); !forwarded) return forwarded;
         auto batch = story_engine->take_triggered();
         if (batch.empty()) return core::Result<void>::success();
         const bool replaying = world().replaying_native_effects();
@@ -207,6 +209,12 @@ core::Result<void> GameSession::Impl::apply_story_rewards() {
     }
     story_notes.push_back("reward chain exceeds " + std::to_string(max_rounds) + " rounds; the rest waits for the next step");
     return core::Result<void>::success();
+}
+
+core::Result<void> GameSession::Impl::forward_story_calls() {
+    auto calls = story_engine->take_script_calls();
+    if (calls.empty() || reconstructing_native_notices || !story_scripts || !scripts) return core::Result<void>::success();
+    return forward_galactic_story_calls(scripts->story_scheduler(), *story_scripts, story_engine->definitions(), calls, story_call_sequence);
 }
 
 // WGEP-130/147: the assigned level reaches the story before the unlocks it causes. Not a UI notice.
@@ -389,10 +397,14 @@ core::Result<authoritative::ScriptScheduler> GameSession::Impl::scripts_for(cons
     return authoritative::ScriptScheduler::create(config, {});
 }
 
+void GameSession::Impl::refresh_system_hold() {
+    world().set_system_hold(conflict_pause || summary_conflict != 0 || child.has_value());
+}
+
 core::Result<void> GameSession::Impl::release_summary() {
     if (!summary_conflict) return core::Result<void>::success();
     auto released = world().adjust_conflict_pause(false);
-    if (released) summary_conflict = 0;
+    if (released) { summary_conflict = 0; refresh_system_hold(); }
     return released;
 }
 
@@ -406,7 +418,7 @@ core::Result<void> GameSession::Impl::hold_summary(sim::EntityId conflict, galac
     if (summary_conflict == conflict) return core::Result<void>::success();
     if (auto released = release_summary(); !released) return released;
     auto held = world().adjust_conflict_pause(true);
-    if (held) summary_conflict = conflict;
+    if (held) { summary_conflict = conflict; refresh_system_hold(); }
     return held;
 }
 
@@ -663,7 +675,21 @@ GameSession::GameSession(galactic::GalacticSession galaxy) : impl_(std::make_uni
             mission.state == galactic::CorruptionMissionState::succeeded ? galactic::story::Corruption::complete : galactic::story::Corruption::failed,
             name == owner->story_planets.end() ? std::string{} : name->second, corruption_name(mission.choice.type)}, 0, 0, mission.planet});
     });
-    // WGCH-140: the shared ruins owner announces the destroyed planet before any cleanup or flag write.
+    // WGCH-108: successful ground spy insertion notifies story before consumption.
+    impl_->world().set_ground_ability_story_handler([owner = impl_.get()](galactic::PlayerId player, galactic::PlanetId planet,
+        const std::string& hero, bool hero_source) -> core::Result<void> {
+        const auto name = owner->story_planets.find(planet);
+        galactic::story::TravelNotice notice; notice.kind = galactic::story::Travel::land;
+        notice.planet = name == owner->story_planets.end() ? std::string{} : name->second;
+        notice.fleet.owner = player; notice.fleet.types = {hero};
+        if (hero_source) { notice.fleet.heroes = {hero}; notice.hero = hero; }
+        // WST-31: land-on first, then deploy for an authored named/generic hero.
+        if (const auto told = owner->story_notice({player, notice, 0, 0, planet}); !told) return told;
+        if (!hero_source) return core::Result<void>::success();
+        notice.kind = galactic::story::Travel::deploy_hero;
+        return owner->story_notice({player, std::move(notice), 0, 0, planet});
+    });
+    // WGCH-140: announce destruction before cleanup or flag writes.
     impl_->world().set_planet_ruins_story_handler([owner = impl_.get()](galactic::PlanetId planet) -> core::Result<void> {
         const auto name = owner->story_planets.find(planet);
         galactic::story::TravelNotice notice;
@@ -773,16 +799,24 @@ core::Result<void> GameSession::install_galactic_scripts(authoritative::ScriptSc
     auto fresh = galactic::GalacticSession::create(impl_->galaxy.setup());
     if (!fresh) return core::Result<void>::failure(fresh.error());
     auto host = saved ? authoritative::ScriptedGalacticSession::restore_preserving(
-                            impl_->galaxy, std::move(ai), std::move(story), *saved, impl_->conflict_pause)
+                            impl_->galaxy, std::move(ai), std::move(story), *saved,
+                            impl_->conflict_pause || impl_->summary_conflict != 0 || impl_->child.has_value() || impl_->staged.has_value())
                       : authoritative::ScriptedGalacticSession::create(std::move(fresh).value(), std::move(ai), std::move(story));
     if (!host) return core::Result<void>::failure(host.error());
     if (!saved) host.value().parent_world() = std::move(impl_->galaxy);
+    // WGP-146: bind service ownership to the adopted world as well as the shell.
+    // The hosted barrier records History after AI; the world step must defer it.
+    host.value().parent_world().defer_history_service(true);
     host.value().set_state_hasher(impl_->hasher);
     impl_->scripts.emplace(std::move(host).value());
+    impl_->refresh_system_hold();
     impl_->world().enable_conflict_requests(impl_->conflict_services);
     impl_->world().defer_victory_tail(impl_->world().setup().victory.has_value());
     if (impl_->child) impl_->child->galaxy_hash = impl_->galaxy_hash().value();
     return core::Result<void>::success();
+}
+void GameSession::bind_story_scripts(std::shared_ptr<const GalacticStoryScripts> scripts) noexcept {
+    impl_->story_scripts = std::move(scripts);
 }
 authoritative::ScriptedGalacticSession* GameSession::galactic_scripts() noexcept {
     return impl_->scripts ? &*impl_->scripts : nullptr;

@@ -3,6 +3,7 @@
 #include "eawr/sim/galactic/economy_corruption.hpp"
 #include "eawr/sim/galactic/production.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
+#include "eawr/sim/galactic/corruption_actions.hpp"
 #include "observer_internal.hpp"
 
 #include <algorithm>
@@ -367,8 +368,64 @@ void GalacticSession::Impl::prepare_corruption(const GameCommand& command, const
         prepared.offers.push_back({static_cast<std::uint32_t>(i + 1), choice.price, false});
     }
     if (prepared.corruption_choices.empty()) return reject();
+    const auto* player = find(economy_corruption->players, actor.owner, [](const auto& r) { return r.player; });
+    if (!player) return reject();
+    std::optional<std::uint32_t> selected;
+    if (!player->human) {
+        // Preparation and execution each allocate one request in this command.
+        if (ability_host->next_request >= std::numeric_limits<std::uint64_t>::max() - 1) return reject();
+        // WGCH-03/49/50: AI checks every prerequisite before sampling in slot order.
+        const auto* account = economy ? find(economy->players, actor.owner, [](const auto& r) { return r.player; }) : nullptr;
+        const auto* usage = find(ability_host->corruption_usage, actor.owner, [](const auto& r) { return r.player; });
+        if (!account || !usage) return reject();
+        std::vector<std::pair<std::uint32_t, Fixed>> options;
+        Fixed total;
+        for (std::uint32_t i = 0; i < prepared.corruption_choices.size(); ++i) {
+            const auto& choice = target->slots[prepared.corruption_choices[i].slot];
+            if (account->credits < choice.price
+                || (choice.required_mission_type != CorruptionType::none
+                    && usage->uses[static_cast<std::size_t>(choice.required_mission_type)] < choice.mission_count)
+                || (choice.unit_count && !choice.unit_types.empty()
+                    && corruption_unit_count(choice.unit_types, actor.owner) < choice.unit_count)) continue;
+            bool active_requirement = false, owned_requirement = false;
+            for (const auto& location : setup.ability_host->corruption_planets) {
+                if (std::find(choice.planet_types.begin(), choice.planet_types.end(), location.type) == choice.planet_types.end()) continue;
+                active_requirement = true;
+                const auto entity = planets.find(location.planet);
+                if (entity != planets.end() && registry.get<session_detail::PlanetData>(entity->second).owner == actor.owner)
+                    owned_requirement = true;
+            }
+            if (active_requirement && !owned_requirement) continue;
+            const auto weight = corruption_actions::ai_score(choice.type, usage->uses[static_cast<std::size_t>(choice.type)]);
+            if (weight <= Fixed{}) continue;
+            options.emplace_back(i, weight);
+            auto sum = math::add(total, weight);
+            if (!sum) { failed = true; return; }
+            total = sum.value();
+        }
+        if (options.empty()) return reject();
+        auto draw = economy_draw(*economy_corruption, setup.seed);
+        if (!draw) { failed = true; return; }
+        dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+        auto threshold = math::multiply(total, draw.value());
+        if (!threshold) { failed = true; return; }
+        const auto limit = std::min(threshold.value(), Fixed::from_raw(total.raw() - 1));
+        Fixed cumulative;
+        for (const auto& [index, weight] : options) {
+            auto sum = math::add(cumulative, weight);
+            if (!sum) { failed = true; return; }
+            cumulative = sum.value();
+            if (limit < cumulative) { selected = index; break; }
+        }
+        if (!selected) { failed = true; return; }
+    }
     prepared.id = ability_host->next_request++;
+    const auto choice = selected ? std::optional{prepared_ability(prepared, *selected)} : std::nullopt;
     put(ability_host->preparations, std::move(prepared), [](const auto& r) { return r.actor; }); touch_abilities();
+    if (choice) {
+        ++ability_work.executions;
+        execute_corruption(command, actor, *choice, tick, events); return;
+    }
     event.kind = GalacticEventKind::ability_prepared; event.value = ability_host->next_request - 1; events.push_back(event);
 }
 void GalacticSession::Impl::execute_corruption(const GameCommand& command, const CensusObject& actor,

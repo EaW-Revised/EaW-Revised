@@ -53,6 +53,10 @@ struct ObservedFleet {
     // GHUD-S76: the overview's best ship image is separate from contents
     // knowledge. It grants no entity, fleet identity or typed contents group.
     std::optional<TypeId> overview_type{};
+    // WGUI-92: every member skips combat (WGM-38/163), so the stack shows the stealth overlay. A local
+    // card sets it only when every fleet it merges is all-stealth; an enemy all-stealth fleet is never
+    // published (WGUI-28/29), so the flag stays false there.
+    bool all_stealth{};
     friend bool operator==(const ObservedFleet&, const ObservedFleet&) = default;
 };
 // True when `fleet` is the card's first fleet or the fleet of one of its groups.

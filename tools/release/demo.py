@@ -152,6 +152,8 @@ def main(argv=None):
         fonts.extract(fonts.locate_executable(game), cache, args.allow_unknown_build, False)
         state_file.write_text(json.dumps({"game_root": str(game), "godot": str(godot)}, indent=2) + "\n", encoding="utf-8")
         engine_args = [str(godot), "--path", str(ROOT / "project")]
+        # The stock Godot downloaded for this demo is not the patched engine the Separate render thread needs.
+        engine_args += ["--render-thread", "safe"]
         if args.godot_quit_after is not None:
             engine_args += ["--quit-after", str(args.godot_quit_after)]
         if args.m2:

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <functional>
 #include <set>
 #include <utility>
 #include <tuple>
@@ -52,9 +53,10 @@ core::Result<gc::EconomicPlanet> prepare_economic_planet(const units::GalacticEc
 core::Result<gc::EconomicType> prepare_economic_type(const units::GalacticEconomicType& input,
     gc::TypeId id, std::string_view faction, const units::GalacticTypeTable& types,
     std::span<const EconomicTypeBinding> bindings) {
-    const auto fail = [] {
+    const auto fail = [&](std::string_view reason = {}) {
         core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
-        d.message = "economic profile requires authored values and resolved target types";
+        d.message = "economic profile " + input.name + " requires authored values and resolved target types";
+        if (!reason.empty()) d.message += ": " + std::string(reason);
         return core::Result<gc::EconomicType>::failure(std::move(d));
     };
     if (!id) return fail();
@@ -100,11 +102,12 @@ core::Result<gc::EconomicType> prepare_economic_type(const units::GalacticEconom
     const auto mining_active = active(input.mining_activation), gambling_active = active(input.gambling_activation);
     if (!mining_active || !gambling_active) return fail();
     if (input.mining && mining_active.value()) {
-        if (!input.mining_percentage || !input.mining_absolute || !input.mining_multiplier) return fail();
+        if (!input.mining_percentage || !input.mining_absolute || !input.mining_multiplier) return fail("invalid mining parameters");
         result.mining = gc::PlanetIncomeAbility{*input.mining_percentage, *input.mining_absolute, *input.mining_multiplier};
     }
     if (input.gambling && gambling_active.value()) {
-        if (!input.gambling_chance || !input.gambling_minimum || !input.gambling_maximum || !input.gambling_interval) return fail();
+        if (!input.gambling_chance || !input.gambling_minimum || !input.gambling_maximum || !input.gambling_interval)
+            return fail("invalid gambling parameters");
         std::uint32_t frames{};
         if (input.gambling_interval->raw() > 0) {
             const auto raw = input.gambling_interval->raw();
@@ -136,8 +139,10 @@ core::Result<gc::EconomicType> prepare_economic_type(const units::GalacticEconom
                 || activation == "USER_INPUT" || activation == "INVALID") continue;
             return fail();
         }
-        if (!ability.category || !ability.reduction || !ability.galaxy_wide || *ability.category < 0
-            || *ability.category > std::numeric_limits<std::uint32_t>::max()) return fail();
+        if (!ability.category || *ability.category < 0 || *ability.category > std::numeric_limits<std::uint32_t>::max())
+            return fail("invalid Stacking_Category");
+        if (!ability.reduction) return fail(ability.price ? "invalid Price_Reduction_Percentage" : "invalid Time_Reduction_Percentage");
+        if (!ability.galaxy_wide) return fail("invalid Galaxy_Wide");
         std::vector<const units::GalacticType*> affected;
         for (const auto& type : types.types) {
             const bool included = intersects(type.category_mask, ability.included_categories);
@@ -147,12 +152,14 @@ core::Result<gc::EconomicType> prepare_economic_type(const units::GalacticEconom
         }
         // Explicit entries bypass category/exclusion/affiliation checks.
         for (const auto& name : ability.included_types) {
-            const auto* type = types.find(name); if (!type) return fail(); affected.push_back(type);
+            // CGS-21: unresolved explicit references contribute no target; the
+            // remaining entries and abilities still apply.
+            if (const auto* type = types.find(name)) affected.push_back(type);
         }
         for (const auto* type : affected) {
             if (ability.price && (!type->build_cost_credits || type->build_cost_credits->raw() <= 0)) continue;
             const auto at = std::find_if(bindings.begin(), bindings.end(), [&](const auto& binding) { return same(binding.name, type->name); });
-            if (at == bindings.end() || !at->type) return fail();
+            if (at == bindings.end() || !at->type) return fail("missing identity for target " + type->name);
             result.reductions.push_back({at->type, static_cast<std::uint32_t>(*ability.category), *ability.reduction, ability.price, *ability.galaxy_wide});
         }
     }
@@ -173,9 +180,13 @@ core::Result<gc::CensusType> prepare_census_type(const units::GalacticType& type
     const auto population = sim::math::Fixed::from_integer(type.population_value.value_or(sim::math::Fixed{}).trunc_to_integer()).value();
     const auto additional_capacity = type.additional_population_capacity.value_or(0);
     if (id == 0 || population.raw() < 0
-        || population.raw() > (std::int64_t{1} << 40) || additional_capacity < 0 || additional_capacity > 65536) {
+        || population.raw() > (std::int64_t{1} << 40)
+        || additional_capacity < std::numeric_limits<std::int32_t>::min()
+        || additional_capacity > std::numeric_limits<std::int32_t>::max()) {
         core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup); d.severity = core::Severity::error;
-        d.message = "census requires sourced original population/capacity inputs";
+        d.logical_path = type.file;
+        d.message = "census " + type.name + ": rejected Population_Value=" + std::to_string(population.trunc_to_integer())
+            + ", Additional_Population_Capacity=" + std::to_string(additional_capacity) + ", type id=" + std::to_string(id);
         return core::Result<gc::CensusType>::failure(std::move(d));
     }
     gc::CensusType result{id, population, additional_capacity};
@@ -256,18 +267,18 @@ gc::CensusPlayer prepare_census_player(const data::galactic::Faction& faction, g
 core::Result<gc::ProductionOffer> prepare_production_offer(const units::GalacticType& type,
     gc::ProductionOffer admission, const ProductionPreparation& inputs) {
     using sim::math::Fixed;
-    const auto fail = [&] {
+    const auto fail = [&](const char* why) {
         core::Diagnostic d; d.code = std::string(gc::diagnostic_codes::invalid_setup);
-        d.severity = core::Severity::error; d.message = "production offer requires sourced price/time and complete modifier inputs";
+        d.severity = core::Severity::error; d.message = "production offer requires sourced price/time and complete modifier inputs: " + type.name + " (" + why + ")";
         return core::Result<gc::ProductionOffer>::failure(std::move(d));
     };
     if (!inputs.price_multiplier
         || !inputs.corruption_price_multiplier || !inputs.tech_purchase_multiplier || !inputs.time_multiplier
         || !inputs.base_tech_multiplier || !inputs.ai_time_multiplier || !inputs.corruption_time_multiplier
-        || !inputs.factory_count || *inputs.factory_count < 1) return fail();
+        || !inputs.factory_count || *inputs.factory_count < 1) return fail("modifier inputs");
     // WGEP-42: authoring supplies an unsigned target, not an increment/flag.
     if (type.build_advances_tech_level) {
-        if (*type.build_advances_tech_level < 0 || *type.build_advances_tech_level > std::numeric_limits<std::int32_t>::max()) return fail();
+        if (*type.build_advances_tech_level < 0 || *type.build_advances_tech_level > std::numeric_limits<std::int32_t>::max()) return fail("tech target");
         if (*type.build_advances_tech_level > 0) {
             admission.kind = gc::ProductionKind::technology;
             admission.target_tech = *type.build_advances_tech_level;
@@ -279,7 +290,7 @@ core::Result<gc::ProductionOffer> prepare_production_offer(const units::Galactic
     // GHUD-S84: explicit Sellable_Always permits default-excluded types.
     auto sale = type.sellable;
     std::transform(sale.begin(), sale.end(), sale.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; });
-    if (!sale.empty() && sale != "sellable_default" && sale != "sellable_always" && sale != "sellable_never") return fail();
+    if (!sale.empty() && sale != "sellable_default" && sale != "sellable_always" && sale != "sellable_never") return fail("sale policy");
     const bool superweapon = std::any_of(type.category_mask.begin(), type.category_mask.end(), [](std::string category) {
         std::transform(category.begin(), category.end(), category.begin(), [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c + ('a' - 'A')) : c; });
         return category == "super";
@@ -288,21 +299,18 @@ core::Result<gc::ProductionOffer> prepare_production_offer(const units::Galactic
         && !type.named_hero.value_or(false) && !superweapon);
     for (auto factor : {*inputs.price_multiplier, *inputs.corruption_price_multiplier,
             admission.kind == gc::ProductionKind::technology ? *inputs.tech_purchase_multiplier : Fixed::from_raw(Fixed::scale)}) {
-        if (factor.raw() < 0 || !sim::math::try_multiply(price, factor, price)) return fail();
+        price = gc::production_product(price, factor);
     }
     // WGEP-30: positive sub-credit prices become one; half ties go away from zero.
-    if (price.raw() < 0 || price.raw() > (std::int64_t{1} << 48)) return fail();
-    if (price.raw() > 0 && price.raw() < Fixed::scale) price = Fixed::from_raw(Fixed::scale);
-    admission.price = Fixed::from_integer((price.raw() + Fixed::scale / 2) / Fixed::scale).value();
+    admission.price = gc::production_price(price);
     auto seconds = type.build_time_seconds.value_or(Fixed{});
     if (inputs.tutorial) seconds = Fixed::from_integer(5).value(); // WGEP-32: hardcoded tutorial duration
     else {
         for (auto factor : {*inputs.time_multiplier, *inputs.base_tech_multiplier, *inputs.ai_time_multiplier, *inputs.corruption_time_multiplier})
-            if (factor.raw() < 0 || !sim::math::try_multiply(seconds, factor, seconds)) return fail();
+            seconds = gc::production_product(seconds, factor);
         const auto factories = Fixed::from_integer(*inputs.factory_count);
-        if (!factories || !sim::math::try_divide(seconds, factories.value(), seconds)) return fail();
+        if (!factories || !sim::math::try_divide(seconds, factories.value(), seconds)) return fail("factory division");
     }
-    if (!gc::production_frames(seconds)) return fail();
     admission.seconds = seconds;
     if (type.tech_level) admission.tech = *type.tech_level;
     // WGEP-69: GC population is the original type's integer, never a tactical override.
@@ -494,9 +502,21 @@ core::Result<void> plan_location_requests(const auto* campaign, gc::PlayerId neu
     return core::Result<void>::success();
 }
 
-core::Result<void> plan_starting_placements(const auto* campaign, const CampaignSetupOptions& options, auto& locations,
-    auto& original_types, auto& type_ids, auto& players, auto& referenced_types,
-    auto& placement_plan, auto& force_plan) {
+// CGS-05: a record naming a type that resolves to no object is reported and skipped; the campaign still starts.
+void unknown_record_type(const auto* campaign, auto& diagnostics, const std::string_view tag, const std::string& location,
+    const std::string& type) {
+    core::Diagnostic diagnostic;
+    diagnostic.code = "campaign_unknown_" + std::string(tag) + "_type";
+    diagnostic.severity = core::Severity::warning;
+    diagnostic.logical_path = campaign->file;
+    diagnostic.message = campaign->name + ": " + std::string(tag) + " at " + location + " names unknown type " + type
+        + "; the record is skipped (CGS-05)";
+    diagnostics.push_back(std::move(diagnostic));
+}
+
+core::Result<void> plan_starting_placements(const auto* campaign, const CampaignSetupOptions& options, const units::GalacticTypeTable& types,
+    auto& locations, auto& original_types, auto& type_ids, auto& players, auto& referenced_types,
+    auto& placement_plan, auto& force_plan, auto& diagnostics) {
     // WGS-70: per matching planet, special placements precede stored force traversal. Missing
     // or inactive owners are skipped before consulting the placement provider.
     for (const auto& location : locations) {
@@ -505,7 +525,10 @@ core::Result<void> plan_starting_placements(const auto* campaign, const Campaign
         for (const auto& record : campaign->special_case_production) {
             if (key(record.location) != key(location.original_type)) continue;
             const auto original = original_types.find(key(record.type));
-            if (original == original_types.end()) return invalid<void>("unknown special-placement type " + record.type, campaign->file);
+            if (original == original_types.end()) {
+                unknown_record_type(campaign, diagnostics, "Special_Case_Production", record.location, record.type);
+                continue;
+            }
             const auto* type = original->second;
             const auto id = type_ids.find(key(record.type));
             if (id == type_ids.end()) return invalid<void>("missing original identity for " + record.type, campaign->file);
@@ -519,7 +542,30 @@ core::Result<void> plan_starting_placements(const auto* campaign, const Campaign
             const auto owner = players.find(key(record.faction));
             if (owner == players.end() || !owner->second->active) continue;
             const auto id = type_ids.find(key(record.type));
-            if (id == type_ids.end()) return invalid<void>("missing original identity for starting force " + record.type, campaign->file);
+            if (id == type_ids.end()) {
+                // Debug build: the placement pass skips a record whose unit type did not resolve at load.
+                unknown_record_type(campaign, diagnostics, "Starting_Forces", record.location, record.type);
+                continue;
+            }
+            // CGS-09: creation dispatches on the dummy behaviours; any other type is "unknown", returns null and the
+            // pass goes on with the next record.
+            const auto& behavior = original_types.find(key(record.type))->second->behavior;
+            const bool dispatched = std::any_of(behavior.begin(), behavior.end(), [](const auto& role) {
+                return role == "DUMMY_STAR_BASE" || role == "DUMMY_GROUND_BASE" || role == "DUMMY_GROUND_STRUCTURE"
+                    || role == "DUMMY_ORBITAL_STRUCTURE" || role == "DUMMY_GROUND_COMPANY"
+                    || role == "DUMMY_SPACE_FIGHTER_SQUADRON" || role == "DUMMY_STARSHIP";
+            });
+            // A type with no behaviour list at all is a placeholder, not an authored object; only a type that names
+            // behaviours and none of the creation ones is skipped.
+            if (!behavior.empty() && !dispatched) {
+                unknown_record_type(campaign, diagnostics, "Starting_Forces", record.location, record.type + " (no creation behaviour, CGS-09)");
+                continue;
+            }
+            if (!campaign_type_creatable(types, record.type)) {
+                // CGS-08: the placement pass would create a composite with a null transport or member.
+                unknown_record_type(campaign, diagnostics, "Starting_Forces", record.location, record.type + " (a composite member does not resolve)");
+                continue;
+            }
             referenced_types.insert(id->second);
             const auto player = owner->second->player.player_id;
             const bool human = std::any_of(options.seats.begin(), options.seats.end(), [=](const auto& seat) {
@@ -708,6 +754,13 @@ void seal_campaign_identity(const auto* campaign, const CampaignSetupOptions& op
             identity.bytes.insert(identity.bytes.end(), controller.configuration.begin(), controller.configuration.end());
         }
     }
+    if (options.pause_policy) {
+        // Appended only when chosen explicitly; the mode default is already part of the identity above.
+        identity.text("pause-policy");
+        identity.integer(static_cast<std::uint64_t>(options.pause_policy->fleet_management));
+        identity.integer(static_cast<std::uint64_t>(options.pause_policy->surface_deploy));
+        identity.integer(static_cast<std::uint64_t>(options.pause_policy->fleet_move));
+    }
     galaxy_setup.campaign_identity = core::sha256(identity.bytes);
 }
 
@@ -771,6 +824,12 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     plan.diagnostics_ = model.value().diagnostics;
     plan.galaxy_.planets = model.value().planets;
     plan.galaxy_.routes = model.value().routes;
+    for (const auto& route : model.value().routes) {
+        const auto named = std::find_if(model.value().names.begin(), model.value().names.end(),
+            [&](const auto& row) { return row.id == route.id; });
+        if (named == model.value().names.end()) return invalid<CampaignSetupPlan>("galaxy model has an unnamed route", campaign->file);
+        plan.route_names_.push_back(named->name);
+    }
     plan.galaxy_.content_identity = model.value().content_identity;
     plan.galaxy_.rules.maximum_fleet_movement_distance = model.value().maximum_movement_distance;
     plan.first_free_ = model.value().next_id;
@@ -780,6 +839,11 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     if (!frames) return core::Result<CampaignSetupPlan>::failure(frames.error());
     plan.galaxy_.rules.fiscal_cycle_frames = frames.value();
     plan.galaxy_.fleet_control.emplace();
+    // WGM-07 deviation (owner default): single player and co-op manage their forces during a player pause;
+    // a versus lobby, or a multiplayer setup that does not say, keeps retail's refusal.
+    plan.galaxy_.fleet_control->pause = options.pause_policy ? *options.pause_policy
+        : options.mode == CampaignSetupMode::single_player || (options.seat_control && options.seat_control->teams.size() <= 1)
+            ? gc::PausePolicy::admit_all() : gc::PausePolicy{};
     std::map<std::string, const units::GalacticType*> original_types;
     for (const auto& type : types.types) original_types.emplace(key(type.name), &type);
     std::map<std::string, gc::TypeId> type_ids;
@@ -813,7 +877,7 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     }
     if (auto phase = plan_location_requests(campaign, neutral, planets, plan.galaxy_, plan.locations_); !phase)
         return core::Result<CampaignSetupPlan>::failure(phase.error());
-    if (auto phase = plan_starting_placements(campaign, options, plan.locations_, original_types, type_ids, players, referenced_types, plan.initial_placements_, plan.forces_); !phase)
+    if (auto phase = plan_starting_placements(campaign, options, types, plan.locations_, original_types, type_ids, players, referenced_types, plan.initial_placements_, plan.forces_, plan.diagnostics_); !phase)
         return core::Result<CampaignSetupPlan>::failure(phase.error());
     plan_home_locations(campaign, options, planets, plan.homes_);
     if (auto phase = plan_player_resources(data, campaign, options, plan.homes_, type_ids, referenced_types, plan.credits_, plan.tech_, plan.heroes_); !phase)
@@ -824,6 +888,38 @@ core::Result<CampaignSetupPlan> plan_campaign_setup(const data::galactic::Galact
     if (auto valid = gc::validate_setup(plan.galaxy_); !valid) return core::Result<CampaignSetupPlan>::failure(valid.error());
     seal_campaign_identity(campaign, options, plan.galaxy_);
     return core::Result<CampaignSetupPlan>::success(std::move(plan));
+}
+
+bool campaign_type_creatable(const units::GalacticTypeTable& types, const std::string_view name) {
+    std::set<std::string> visiting;
+    const std::function<bool(std::string_view)> creatable = [&](const std::string_view current) {
+        const auto* type = types.find(current);
+        if (!type) return false;
+        if (!visiting.insert(key(current)).second) return true; // a cycle adds no unresolved member
+        bool ok = true;
+        // A ground company with no authored transport or no members has nothing to create.
+        if (std::find(type->behavior.begin(), type->behavior.end(), "DUMMY_GROUND_COMPANY") != type->behavior.end()
+            && (type->company_transport.empty() || type->company_units.empty())) ok = false;
+        for (const auto* names : {&type->company_units, &type->squadron_units})
+            for (const auto& member : *names) ok = ok && creatable(member);
+        if (!type->company_transport.empty()) ok = ok && creatable(type->company_transport);
+        visiting.erase(key(current));
+        return ok;
+    };
+    return creatable(name);
+}
+
+std::vector<std::string> campaign_referenced_types(const data::galactic::GalacticData& data, const std::string_view campaign) {
+    std::vector<std::string> names;
+    std::set<std::string> seen;
+    const auto add = [&](const std::string& name) {
+        if (!name.empty() && seen.insert(key(name)).second) names.push_back(name);
+    };
+    if (const auto* source = data.campaign(campaign)) {
+        for (const auto& record : source->starting_forces) add(record.type);
+        for (const auto& record : source->special_case_production) add(record.type);
+    }
+    return names;
 }
 
 core::Result<CampaignSetupPlan> plan_live_campaign_setup(const vfs::Vfs& filesystem,

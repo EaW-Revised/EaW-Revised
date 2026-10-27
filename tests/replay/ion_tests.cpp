@@ -1,4 +1,4 @@
-// #561: ion weapons (docs/behaviour/space-damage.md EN-07, IS-01 to IS-09). The pure rules are
+// #561: ion weapons (docs/behaviour/space-damage.md EN-07, IS-01 to IS-10). The pure rules are
 // checked on small values; the session contracts cover the energy drain, the stun's fire-rate and
 // speed cuts and its expiry, with identical hashes at 1, 2, 4 and 8 workers.
 
@@ -146,8 +146,10 @@ void test_drain() {
 void test_stun_rules() {
     const tactical::IonStunShot shot{30, decimal("0.5"), decimal("0.5"), true};
     expect(tactical::valid_ion_stun(shot), "IS-01: FoC's Y-wing shot is a valid stun");
-    expect(!tactical::valid_ion_stun({0, Fixed{}, Fixed{}, false}) && !tactical::valid_ion_stun({30, units(2), Fixed{}, false}),
-        "IS-01: a stun without frames or with a reduction above 1 is rejected");
+    expect(!tactical::valid_ion_stun({0, Fixed{}, Fixed{}, false})
+            && tactical::valid_ion_stun({30, units(100), units(-2), false})
+            && !tactical::valid_ion_stun({30, units(tactical::ion_reduction_limit + 1), Fixed{}, false}),
+        "IS-01, IS-10: a stun without frames is rejected; reductions of 100 and -2 are not");
     auto stun = tactical::ion_stun(std::nullopt, shot, 100);
     expect(stun.end_frame == 130, "IS-03: a first stun ends its frames after the hit");
     expect(tactical::ion_stunned(stun, 129) && !tactical::ion_stunned(stun, 130), "IS-03: stunned before the end frame only");
@@ -164,6 +166,20 @@ void test_stun_rules() {
     expect(tactical::ion_speed_factor(stun, 120) == decimal("0.5") && tactical::ion_speed_factor(stun, 140) == units(1)
             && tactical::ion_fire_rate(stun, 120) == decimal("0.5") && tactical::ion_fire_rate(std::nullopt, 0) == units(1),
         "IS-05, IS-06: the speed and fire-rate factors while stunned and after");
+    // IS-10: FoC floors the factor at 0.01 and caps nothing above.
+    const auto floor = Fixed::from_raw((units(1).raw() + 50) / 100);
+    const tactical::IonStunShot extreme{30, units(100), decimal("0.999"), false};
+    const auto extreme_stun = tactical::ion_stun(std::nullopt, extreme, 0);
+    expect(tactical::ion_speed_factor(extreme_stun, 1) == floor && tactical::ion_fire_rate(extreme_stun, 1) == floor,
+        "IS-10: a reduction of 100 or 0.999 leaves the 0.01 floor, never zero or below");
+    const auto boosted = tactical::ion_stun(std::nullopt, {30, decimal("-0.5"), decimal("-2"), false}, 0);
+    expect(tactical::ion_speed_factor(boosted, 1) == decimal("1.5") && tactical::ion_fire_rate(boosted, 1) == units(3),
+        "IS-10: a negative reduction raises the factor above 1");
+    expect(tactical::fire_rate_recharge(90, units(3)) == 90 && tactical::fire_rate_pulses(5, units(3)) == 15
+            && tactical::fire_rate_gap(6, units(3)) == 2,
+        "IS-10: a fire rate above 1 keeps the recharge, multiplies the burst and shortens the gap");
+    expect(tactical::fire_rate_recharge(90, floor) == 9000 && tactical::fire_rate_pulses(5, floor) == 0,
+        "IS-10: the floor stretches the recharge a hundredfold and empties the burst");
     const auto half = decimal("0.5");
     expect(tactical::fire_rate_recharge(90, half) == 180 && tactical::fire_rate_recharge(7, half) == 14
             && tactical::fire_rate_recharge(10, decimal("0.3")) == 33 && tactical::fire_rate_recharge(90, units(1)) == 90,

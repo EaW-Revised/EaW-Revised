@@ -22,6 +22,7 @@
 #include <ios>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <set>
 #include <span>
 #include <sstream>
@@ -157,6 +158,50 @@ void content_and_placement() {
     factors.corruption_time_multiplier = f(1); factors.factory_count = 2;
     const auto prepared = take(campaign::prepare_production_offer(source, prototype, factors));
     expect(prepared.price == f(1) && prepared.seconds == f(3), "XML price/time prepared with verified floor and factory divisor");
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto signed_source = source;
+        signed_source.build_cost_credits = f(-1);
+        signed_source.build_time_seconds = f(4294967295LL);
+        const auto negative = take(campaign::prepare_production_offer(signed_source, prototype, factors));
+        expect(negative.price == f(-1) && negative.authored_price == f(-1), "unbuyable hero sentinel reaches offer unchanged");
+        expect(take(galactic::production_frames(f(4294967295LL))) == 128849018850ULL,
+            "unsigned source duration fits frame arithmetic without Q24 product overflow");
+        auto config = setup(); config.production->planets.front().offers.front() = negative;
+        auto game = take(campaign::GameSession::create(config));
+        const auto identity = cp::game_identities(config);
+        const auto saved = take(cp::save_game_checkpoint(game, identity));
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto restored = take(cp::load_game_checkpoint(saved, identity, {}, executor));
+        expect(take(cp::save_game_checkpoint(restored.session, identity)) == saved, "negative authored and adjusted price round trip without format changes");
+        expect(bool(game.submit(buy(0, 1))), "negative price reaches purchase consumer");
+        static_cast<void>(take(game.step(executor)));
+        expect(game.galaxy().snapshot()->production()->planets.front().queues[0].empty(), "WGEP-18 unbuyable price cannot create production");
+        auto negative_time = source;
+        auto signed_factors = factors; signed_factors.time_multiplier = f(-1);
+        const auto time_offer = take(campaign::prepare_production_offer(negative_time, prototype, signed_factors));
+        expect(time_offer.seconds == f(-3), "negative time multiplier retained for admission");
+        auto time_config = setup(); time_config.production->planets.front().offers.front() = time_offer;
+        auto time_game = take(campaign::GameSession::create(time_config));
+        expect(bool(time_game.submit(buy(0, 1))), "negative time reaches purchase consumer");
+        static_cast<void>(take(time_game.step(executor)));
+        expect(time_game.galaxy().snapshot()->production()->planets.front().queues[0].empty(), "WGEP-18 negative effective time cannot start production");
+    }
+    expect(galactic::production_price(take(Fixed::from_decimal("-1.5"))) == f(-2), "signed price rounding uses half away from zero");
+    for (const auto field : {&campaign::ProductionPreparation::time_multiplier,
+            &campaign::ProductionPreparation::base_tech_multiplier, &campaign::ProductionPreparation::ai_time_multiplier,
+            &campaign::ProductionPreparation::corruption_time_multiplier}) {
+        auto signed_factors = factors; signed_factors.*field = f(-1);
+        expect(take(campaign::prepare_production_offer(source, prototype, signed_factors)).seconds == f(-3),
+            "each signed time factor is retained, including base, AI and corruption");
+    }
+    auto signed_factors = factors; signed_factors.corruption_price_multiplier = f(-3);
+    expect(take(campaign::prepare_production_offer(source, prototype, signed_factors)).price == f(-2),
+        "negative corruption price factor uses signed half-away rounding");
+    const auto maximum = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    expect(galactic::production_product(maximum, f(2)) == maximum
+        && galactic::production_product(maximum, f(-2)) == Fixed::from_raw(-maximum.raw()),
+        "overflowing production products saturate by sign at the fixed representation boundary");
+
     for (std::int64_t target = 2; target <= 5; ++target) {
         source.build_advances_tech_level = target;
         const auto technology = take(campaign::prepare_production_offer(source, prototype, factors));
@@ -615,6 +660,8 @@ void native_action_production_barrier() {
         const auto blocker = std::find_if(blockers.begin(), blockers.end(), [created_fleet](const auto& row) { return row.fleet == created_fleet; });
         expect(blocker != blockers.end() && blocker->skips_space_combat,
             "a fleet created in an earlier layer refreshes its live combat-skip blocker after membership changes");
+        const auto built_skip = staged.snapshot()->fleet_combat_skip(created_fleet);
+        expect(bool(built_skip) && built_skip.value(), "GST-U01: a freshly built stealth-only fleet skips combat");
         require(barrier->begin_tail()); commit_barrier(barrier); barrier.reset();
         expect(staged.canonical_state_bytes() == direct.canonical_state_bytes(), "new fleet blocker commits the exact live state"); check();
         const auto unchanged = staged.snapshot();
@@ -847,6 +894,20 @@ void census_admission() {
     config = census_setup(); config.census->players[0].base_capacity = 0;
     auto over = take(galactic::GalacticSession::create(config)); submit(over, buy(0, 1, 1, 1001));
     (void)take(over.step(serial)); expect(over.snapshot()->production()->planets[0].queues[0].size() == 1, "zero-pop structure admitted while over cap");
+    config = census_setup(); config.rules.fiscal_cycle_frames = 1000;
+    config.census->types[0].additional_capacity = -5;
+    config.production->players[0].population_capacity = f(-3);
+    auto negative = take(galactic::GalacticSession::create(config));
+    expect(negative.snapshot()->population()[0].capacity == f(-3), "RGC-142 capacity remains negative after the player-wide sum");
+    submit(negative, buy(0, 1));
+    const auto negative_refused = take(negative.step(serial));
+    expect(negative_refused.snapshot->events().back().value == static_cast<std::uint64_t>(galactic::ProductionAdmission::population)
+        && negative.snapshot()->production()->planets[0].queues[0].empty()
+        && negative.snapshot()->player_economy()->players[0].credits == f(2000),
+        "RGC-143/144 negative capacity rejects positive population before queue insertion and payment");
+    submit(negative, buy(1, 2, 1, 1001)); (void)take(negative.step(serial));
+    expect(negative.snapshot()->production()->planets[0].queues[0].size() == 1,
+        "RGC-143 negative capacity still admits zero population");
     config = census_setup(); config.production->planets[0].offers[0].current_limit = 1;
     auto limited = take(galactic::GalacticSession::create(config)); submit(limited, buy(0, 1));
     const auto refused = take(limited.step(serial));
@@ -1123,6 +1184,16 @@ void census_rounding_and_data() {
     eawr::units::GalacticType type; type.population_value = f(3); type.additional_population_capacity = 7;
     galactic::CensusType expected_type{10, f(3), 7}; expected_type.history = galactic::HistoryType{};
     expect(take(campaign::prepare_census_type(type, 10)) == expected_type, "original type adapter consumes loaded values");
+    for (const auto capacity : {std::numeric_limits<std::int32_t>::min(), -5, std::numeric_limits<std::int32_t>::max()}) {
+        type.additional_population_capacity = capacity;
+        expect(take(campaign::prepare_census_type(type, 10)).additional_capacity == capacity,
+            "RGC-140 adapter preserves the full signed 32-bit capacity range");
+        auto signed_setup = census_setup(); signed_setup.census->types[0].additional_capacity = capacity;
+        expect(bool(galactic::validate_setup(signed_setup)), "RGC-140 census admits signed 32-bit capacity");
+    }
+    type.additional_population_capacity = std::int64_t{1} << 31;
+    expect(!campaign::prepare_census_type(type, 10), "capacity outside signed source integer range is refused");
+    type.additional_population_capacity = 7;
     type.population_value = take(Fixed::from_decimal("3.9"));
     expect(take(campaign::prepare_census_type(type, 10)).population == f(3), "authored population uses the source integer overlay");
     type.population_value.reset(); type.additional_population_capacity.reset();

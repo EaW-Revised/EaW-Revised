@@ -85,7 +85,7 @@ struct SetupGameTypeRow final {
 // Project text the retail database has no key for: notices and router-mapping controls. They are project
 // text, kept here so the captions stay keys only (the tests pin both tables).
 enum class SetupNotice : std::uint8_t {
-    land_not_built, credits_not_applied, port_mapping, port_mapping_tooltip, count_
+    land_not_built, port_mapping, port_mapping_tooltip, land_no_ai, land_network, count_
 };
 
 [[nodiscard]] std::string_view setup_notice(SetupNotice notice) noexcept;
@@ -111,6 +111,11 @@ struct SetupCreditsRange final {
 
 // WSS-25: clamp an existing value into the authored bounds without rounding it to an edit bucket.
 [[nodiscard]] std::int64_t setup_credits_clamp(SetupCreditsRange range, std::int64_t value) noexcept;
+// WSS-25: only user edits use the debug build's 1000-credit bucket, relative to the data minimum.
+// The last bucket may exceed a mod's maximum; retain that authored range rather than repairing it.
+[[nodiscard]] std::int64_t setup_credits_edit(SetupCreditsRange range, double value) noexcept;
+// WSS-25: arrow increment from the authored range; dragging does not snap the track position.
+[[nodiscard]] double setup_credits_button_step(SetupCreditsRange range) noexcept;
 
 // One occupied row of the staging: its team (zero-based) and faction name.
 struct SetupRow final {

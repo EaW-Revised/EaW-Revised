@@ -57,6 +57,13 @@ core::Result<AdmittedSeatCommand> TacticalSession::submit_human(const SeatBindin
 }
 
 core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
+    if (impl_->land && (!std::holds_alternative<MovePayload>(command.payload)
+        && !std::holds_alternative<StopPayload>(command.payload)))
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "land sessions currently accept move and stop only"));
+    if (impl_->land) if (const auto* move = std::get_if<MovePayload>(&command.payload); move && (move->append || move->through_hazards))
+        return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+            "land move does not support waypoints or hazard overrides"));
     if (impl_->object_turn_running) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "submit during an object-turn provider call"));
@@ -97,6 +104,8 @@ core::Result<void> TacticalSession::submit(const PlayerCommand& command) {
     impl_->last_submitted.insert_or_assign(command.key.player_id, key);
     return core::Result<void>::success();
 }
+
+void TacticalSession::set_damage_notifications(const bool enabled) noexcept { impl_->publish_damage_changes = enabled; }
 
 void TacticalSession::set_state_hasher(std::shared_ptr<StateHasher> hasher) noexcept { impl_->hasher = std::move(hasher); }
 
@@ -255,6 +264,16 @@ std::optional<AbilityState> TacticalSession::ability_state(const EntityId unit) 
     }
     const auto* able = impl_->registry.try_get<Abilities>(found->second);
     return able != nullptr ? std::optional(able->value) : std::nullopt;
+}
+
+diagnostics::MemoryCapacity TacticalSession::memory_capacity() const {
+    diagnostics::MemoryCapacity result;
+    diagnostics::combat_capacity(result, "sim_combat", impl_->combat);
+    result.vector("sim_gather", "handles", impl_->gather_scratch.handles);
+    result.vector("sim_gather", "starts", impl_->gather_scratch.starts);
+    result.vector("sim_gather", "crafts", impl_->gather_scratch.crafts);
+    result.vector("sim_gather", "units", impl_->gather_scratch.units);
+    return result;
 }
 
 TacticalSession::SlicedSearchUse TacticalSession::sliced_searches() const noexcept {

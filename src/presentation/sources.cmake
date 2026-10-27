@@ -3,6 +3,7 @@
 # ROOT_ONLY lists preserve the root build's existing additional units.
 
 set(EAWR_PRESENTATION_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_pause.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/animation.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/idle_playback.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/animation/unit_clips.cpp"
@@ -30,15 +31,15 @@ set(EAWR_PRESENTATION_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/space/debris.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/environment_scene.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/fog_field.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/space/live_units.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/space/projectiles.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live/live_units.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live/projectiles.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/shield_hits.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/space.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/space_effects.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/space_geometry.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/space_surfaces.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/space/sun_retail.cpp"
-    "${CMAKE_CURRENT_LIST_DIR}/space/unit_fade.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/live/unit_fade.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/terrain/terrain.cpp"
 )
 

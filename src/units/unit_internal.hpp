@@ -1,5 +1,6 @@
 #pragma once
 
+#include "eawr/units/domain_tags.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <map>
@@ -69,6 +70,11 @@ struct Report final {
     }
 };
 
+// PR-C1/C2/C4: skipped placeholders, otherwise a signed, saturating decimal prefix.
+// Reports coercions as notes rather than unresolved input; unsigned storage is a caller decision.
+[[nodiscard]] std::optional<std::int32_t> read_integer(std::string_view text, Report& report,
+    std::string_view owner, std::string_view field);
+
 // A resolved object plus the raw variant layers (derived first). Single values follow ML-24;
 // list selection follows the per-tag rules in docs/unit-data.md.
 struct Object final {
@@ -79,6 +85,10 @@ struct Object final {
     [[nodiscard]] const data::XmlNode* single(std::string_view tag);
     [[nodiscard]] std::string text(std::string_view tag);
     [[nodiscard]] std::optional<Fixed> fixed(std::string_view tag, Report& report, bool required);
+    // LSL-P1: a land float field read as the retail parser reads it; never unresolved, a value read other
+    // than as written (trailing text, no number, saturated) leaves a note. Absent or a placeholder = nullopt.
+    [[nodiscard]] std::optional<Fixed> retail_float(std::string_view tag, Report& report);
+    [[nodiscard]] std::optional<std::int32_t> integer(std::string_view tag, Report& report, bool required);
     // Every occurrence from the most-derived layer that authors the tag.
     [[nodiscard]] std::vector<const data::XmlNode*> list(std::string_view tag, Report& report) const;
     // Notes for single-value tags authored more than once in one layer.

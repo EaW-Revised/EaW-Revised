@@ -14,5 +14,6 @@ constexpr double capture_tolerance = 1.0e-6;
 [[nodiscard]] float to_float(sim::math::Fixed value);
 [[nodiscard]] std::string tag_text(const data::EffectiveObject& object, std::string_view tag);
 [[nodiscard]] std::string space_model_path(const data::EffectiveObject& object);
+[[nodiscard]] std::string battle_model_path(const data::EffectiveObject& object, bool land);
 
 } // namespace eawr::presentation::godot_backend::live_session_detail

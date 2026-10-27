@@ -25,11 +25,15 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   order (SK-11). Retail links each new object at the head of its object list and a marker search
   walks that list, so the search meets the map's markers in reverse TED record order (FoC debug
   build symbols; the Rebel start in the retail capture). M2 uses only k = 0: records 48 and 52
-  for the Rebel, 54 and 57 for the Empire. Marker records must be yaw-only.
+  for the Rebel, 54 and 57 for the Empire. A marker may carry roll or pitch (mod maps do,
+  e.g. Alliance at War's `_mp_space_kuat` stations at 350, 350, 0); a company on a spawn marker
+  keeps the yaw and the census lists the dropped angles, as for map objects.
 - **Station (SK-20, WSS-61).** Each `Team_tt_Space_Station` marker becomes one
   station owned by the first occupied player of that team. Its
   `Marker_For_Specific_Object_Type` entry whose `Affiliation` names the team's
-  faction is placed on the marker with its yaw. Teammates use the allied station
+  faction is placed on the marker with the marker's whole facing (FoC debug build: the
+  marker replacement creates the station from the marker's position and facing triple, as the
+  campaign station does, WGT-09), Rz(yaw) Ry(pitch) Rx(roll). Teammates use the allied station
   and retain separate credits, population and production queues. A player beyond
   its team's spawn-marker count keeps its account but has no spawn marker or
   starting fleet: no reuse or fallback placement occurs (WSS-54, SS-OV01–04).
@@ -89,7 +93,7 @@ identity is the unit-table identity ([unit-data.md](unit-data.md#content-identit
   its type's `Layer_Z_Adjust` over the point it is placed on (a company or craft over the free
   point the placement found on its marker's plane); a squadron's team container is not ([space-movement](behaviour/space-movement.md#heights-666)
   LZ-01, LZ-02). The census lists the raised positions.
-- **Economy (SK-30, SK-31, station purchasing).** Each lobby player starts with `MP_Default_Credits` (6000),
+- **Economy (SK-30, SK-31, WSS-52, station purchasing).** Each lobby player starts with the selected match credits (`MP_Default_Credits` supplies the default, stock 6000),
   earns its station's income, builds at its station and has its faction's population cap; the
   census states them per player. The pinned tick-zero state (`sim_headless --skirmish m2`) is
   built without them; a session given the economy rules (`skirmish::economy_rules`,
@@ -124,13 +128,52 @@ replay data. It changes the snapshot digest and never the state hash, so a repla
 which binds no sensor table, has the same state hash and a different snapshot digest.
 
 `tests/skirmish/fixtures/m2-start.eawr-replay` is that replay with 30 ticks. Its tick-zero state
-hash is `38a8d8870dc82ea2e435b7ca5d6a568caa7603b0f2b88e5ddb031068b2908854`. The CLI test
+hash is `0b96c50559c347dfe1f8b46b39a59f440242f1435b0f27b7310849010f8b9ffe`. The CLI test
 recomputes it from the header and setup bytes with the frozen `EAWRTST` encoding; with
 `EAWR_EAW_GAME_ROOT` the start is rebuilt from FoC data and must write the same bytes.
 The recording adds SKSU setup metadata and MTID content domains to the header. These preserve
 the frozen setup and tick-zero state; MTID playback verifies installed content and binds its sensor table.
 Regenerate it when a start rule, unit-table identity or supported recording metadata changes:
 `sim_headless --skirmish m2 --game-root <install> --replay-out tests/skirmish/fixtures/m2-start.eawr-replay --ticks 30`.
+
+## Headless AI battle report
+
+Add `--ai-report-out <file.json> --ticks <positive count>` to a skirmish start to
+run the mounted AI and scoring scripts with the battle's economy, fog and victory
+rules. Mod starts accept `--mod-root <leaf;parent;...>` and `--map <logical .ted
+path>`. `--workers <count>` selects the simulation worker count.
+
+The report has the following stable JSON keys. Counts cover the whole run, rather
+than samples of its progress output.
+
+| Key | Meaning |
+|---|---|
+| `ticks` | Completed simulation ticks. |
+| `state_hash` | Final combined world and authoritative Lua state SHA-256. |
+| `catalog_type_count` | Registered game-object names in the shared immutable AI type-name index. |
+| `catalog_type_bytes` | Retained vector storage and external string capacity in bytes, excluding allocator/control-block overhead. |
+| `routed_commands` | Script input entries submitted to the simulation. |
+| `accepted_orders`, `rejected_orders` | Counts of the simulation's order acceptance and rejection events. |
+| `moved_units` | Distinct entity IDs whose positions changed after their first observation. |
+| `shots`, `hits` | Weapon-fired and projectile-hit event counts. |
+| `remaining_units` | Entity count at the final tick. |
+| `winner` | Winning player ID, or JSON `null` while no outcome exists. |
+| `commands` | Object mapping each script command verb to its input-entry count, including entries that were not submitted. |
+| `diagnostics` | Array of counted script diagnostics. |
+
+Each diagnostic contains `code`, `message`, `instance`, `thread`, `count` and
+`first_tick`. Entries are grouped by the first four fields, so repeated errors in
+different script instances remain distinguishable. `commands` and
+`routed_commands` count script inputs; `accepted_orders` and `rejected_orders`
+describe the later simulation result and need not total either input count.
+
+Optional `--hash-out <file>` writes a CSV with header
+`tick,state-hash,world-state-hash`: the completed tick, combined world/Lua hash
+and world-only hash. `--replay-out <file>` records the executed simulation commands
+for playback without scripts. Ordinary `--replay` hash output uses the world-only
+hash domain: compare its `sha256` column with the AI run's `world-state-hash`,
+rather than with the combined `state-hash`. Diagnostic reports describe unsupported calls
+as well as working activity; a completed run alone does not establish combat.
 
 ## Retail comparison
 

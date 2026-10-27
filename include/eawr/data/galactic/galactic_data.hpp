@@ -114,6 +114,8 @@ struct Campaign {
     std::string rebel_story_name;
     std::string empire_story_name;
     std::string underworld_story_name;
+    // WST-86..88: ordered faction/plot associations, separate from the three named routes.
+    std::vector<FactionName> story_names;
     std::optional<bool> is_story_campaign;
     std::optional<bool> planet_auto_reveal;
     std::optional<bool> is_autoresolve_allowed;

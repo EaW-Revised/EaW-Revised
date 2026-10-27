@@ -24,7 +24,7 @@
 
 namespace eawr::skirmish {
 
-sim::MatchIdentity match_identity(const StartInputs& inputs) {
+sim::MatchIdentity match_identity(const StartInputs& inputs, const std::span<const std::string> skipped_types) {
     sim::MatchIdentity identity;
     const auto rules = "tactical:" + std::to_string(sim::tactical::tactical_rules_version)
         + ";math:1;Q" + std::to_string(sim::math::Fixed::fractional_bits) + ";tick:"
@@ -45,6 +45,11 @@ sim::MatchIdentity match_identity(const StartInputs& inputs) {
         sim::identity_domain("script-manifest", scripts),
         sim::identity_domain("ai-data", ai),
     };
+    if (!skipped_types.empty()) { // #4589: only a lenient load that skipped something, so stock bytes stay
+        std::string joined;
+        for (const auto& type : skipped_types) joined += type + "\n";
+        identity.domains.push_back(sim::identity_domain("skipped-types", joined));
+    }
     return sim::compute_match_identity(std::move(identity));
 }
 
@@ -252,22 +257,47 @@ core::Result<MatchOptions> defaults_from_constants(const data::XmlNode& root) {
     integer("MP_Default_Allow_Auto_Resolve", options.auto_resolve);
     number("MP_Default_Win_Condition_Float_Param", options.win_float);
     options.win_condition = read("MP_Default_Win_Condition");
-    options.space_win_condition = read("MP_Default_Space_Tactical_Win_Condition");
-    if (options.win_condition.empty() || options.space_win_condition.empty()) invalid = "Default victory condition is empty";
+    options.tactical_win_condition = read("MP_Default_Space_Tactical_Win_Condition");
+    if (options.win_condition.empty() || options.tactical_win_condition.empty()) invalid = "Default victory condition is empty";
     if (!invalid.empty()) return Result::failure(detail::error(diagnostic_codes::input, invalid));
     return Result::success(std::move(options));
+}
+
+void catalog_type_names(StartInputs& inputs, const data::Catalog& catalog) {
+    using Names = std::vector<std::pair<std::string, sim::tactical::TypeId>>;
+    const auto admitted = [](const data::Definition& definition) {
+        return definition.active && definition.namespace_winner && !definition.id.empty()
+            && definition.category == data::Category::game_object;
+    };
+    auto names = std::make_shared<Names>();
+    names->reserve(static_cast<std::size_t>(std::count_if(catalog.definitions().begin(), catalog.definitions().end(), admitted)));
+    for (const auto& definition : catalog.definitions()) {
+        if (!admitted(definition)) continue;
+        auto name = definition.id;
+        for (auto& ch : name) if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - ('a' - 'A'));
+        names->emplace_back(std::move(name), type_id(definition.id));
+    }
+    std::sort(names->begin(), names->end(), [](const auto& left, const auto& right) { return left.first < right.first; });
+    inputs.catalog_types = std::move(names);
 }
 
 void purchase_policy_facts(StartInputs& inputs, const data::Catalog& catalog) {
     // WSS-29/30: resolved flags include inheritance; listing and AI use the same menu.
     for (const auto& definition : catalog.definitions()) {
         if (!definition.winner || definition.category != data::Category::game_object) continue;
-        const bool hero_type = detail::iequals(definition.type_name, "Container")
-            || detail::iequals(definition.type_name, "HeroUnit") || detail::iequals(definition.type_name, "Squadron")
-            || detail::iequals(definition.type_name, "HeroCompany")
-            || detail::iequals(definition.type_name, "UniqueUnit");
-        const bool upgrade_type = detail::iequals(definition.type_name, "UpgradeObject");
-        if (!hero_type && !upgrade_type) continue;
+        // SG-CLS-01: a mod's own element name takes the class its chain or tags give it, so it is resolved first.
+        const bool own_label = !data::is_foc_object_class(definition.type_name);
+        const auto class_is = [&](const std::string_view type_name, const auto&... names) {
+            return (detail::iequals(type_name, names) || ...);
+        };
+        const auto fast_class = [&](const std::string_view type_name) {
+            return std::pair{
+                class_is(type_name, "Container", "HeroUnit", "Squadron", "HeroCompany", "UniqueUnit"),
+                class_is(type_name, "UpgradeObject")};
+        };
+        auto classes = fast_class(definition.type_name);
+        auto& [hero_type, upgrade_type] = classes;
+        if (!own_label && !hero_type && !upgrade_type) continue;
         auto object = [&] {
             // This catalog index does not load each candidate's profile into the M2 scene.
             // Only the resolve is unrecorded; the policy flag reads below remain traced.
@@ -275,6 +305,8 @@ void purchase_policy_facts(StartInputs& inputs, const data::Catalog& catalog) {
             return catalog.resolve(definition.id, data::Category::game_object);
         }();
         if (!object) continue;
+        if (own_label) classes = fast_class(object.value().type_name);
+        if (!hero_type && !upgrade_type) continue;
         const auto enabled = [&](const std::string_view tag) {
             const auto* field = object.value().value(tag);
             if (!field) return false;
@@ -351,13 +383,20 @@ std::optional<std::pair<std::uint32_t, std::uint32_t>> declared_extent_bits(
 }
 
 namespace {
+bool valid_map_path(const std::string_view path) {
+    const auto prefix = path.starts_with("data/art/maps/") ? std::string_view("data/art/maps/")
+        : std::string_view("data/custommaps/");
+    return path.starts_with(prefix) && path.ends_with(".ted")
+        && path.find_first_of("/\\", prefix.size()) == std::string_view::npos
+        && path.find("..") == std::string_view::npos;
+}
+
 core::Result<void> validate_fixture_lobby(const std::string& map_path,
     const std::span<const LobbySlot> slots, const data::Catalog& catalog) {
     using Result = core::Result<void>;
-    if (!map_path.starts_with("data/art/maps/") || !map_path.ends_with(".ted")
-        || map_path.find('/', 14) != std::string::npos || map_path.find("..") != std::string::npos) {
+    if (!valid_map_path(map_path)) {
         return Result::failure(detail::error(diagnostic_codes::fixture,
-            "skirmish map must be a logical data/art/maps/*.ted path"));
+            "skirmish map must be a logical data/art/maps/*.ted or data/custommaps/*.ted path"));
     }
     // ADR-023: fixture handoff also serves network matches. The local dialog
     // keeps its eight-row limit; the loaded map capacity is checked below.
@@ -492,6 +531,7 @@ core::Result<void> read_start_rules(StartInputs& inputs, const std::span<const L
     auto defaults = defaults_from_constants(constants.value().root);
     if (!defaults) return Result::failure(defaults.error());
     inputs.match_defaults = std::move(defaults).value();
+    catalog_type_names(inputs, catalog);
     purchase_policy_facts(inputs, catalog);
     for (const auto& child : constants.value().root.children) {
         // WBF-08: the authored space default selects the installed condition.
@@ -563,6 +603,10 @@ core::Result<std::vector<MapPlacement>> detail::inspect_setup_placements(const a
 core::Result<Fixture> fixture_from_options(
     const FixtureOptions& options, const vfs::Vfs& filesystem, const data::Catalog& catalog) {
     using Result = core::Result<Fixture>;
+    // #3776 L3: a land setup starts through build_land_start; the space and network paths refuse it by name.
+    if (options.domain == sim::tactical::BattleDomain::land)
+        return Result::failure(detail::error(diagnostic_codes::fixture,
+            "Land battles are not supported here yet; network play for land battles comes later."));
     Fixture fixture = m2_fixture();
     if (options.map) {
         fixture.map = *options.map;
@@ -607,10 +651,9 @@ core::Result<Fixture> placed_fixture(const std::string_view map, PlacedForces fo
     using Result = core::Result<Fixture>;
     Fixture fixture;
     fixture.map = std::string(map);
-    if (!fixture.map.starts_with("data/art/maps/") || !fixture.map.ends_with(".ted")
-        || fixture.map.find('/', 14) != std::string::npos || fixture.map.find("..") != std::string::npos) {
+    if (!valid_map_path(fixture.map)) {
         return Result::failure(detail::error(diagnostic_codes::fixture,
-            "demo map must be a logical data/art/maps/*.ted path"));
+            "demo map must be a logical data/art/maps/*.ted or data/custommaps/*.ted path"));
     }
     auto record = filesystem.stat(fixture.map);
     if (!record) return Result::failure(record.error());

@@ -2,6 +2,7 @@
 
 #include "eawr/presentation/godot/renderer.hpp"
 #include "viewer_path.hpp"
+#include "startup_trace.hpp"
 
 #include <array>
 #include <chrono>
@@ -56,7 +57,7 @@ public:
         record(std::move(label), tick, true);
     }
     // A new battle restarts the tick marks.
-    void battle_started() { next_mark_ = 0; }
+    void battle_started() { next_mark_ = 0; memory_tick_pending_ = true; }
     // Godot frees released resources a few frames later; sample again once the setup
     // screen has drawn `settle_frames` frames after the battle went.
     static constexpr std::uint32_t settle_frames = 30;
@@ -68,6 +69,10 @@ public:
         if (settle_ != 0 && --settle_ == 0) sample("setup_settled");
     }
     void at_tick(const double tick) {
+        if (memory_tick_pending_ && tick >= 1200.0) {
+            memory_tick_pending_ = false;
+            startup_trace.memory_tick_1200();
+        }
         while (next_mark_ < tick_marks.size() && tick >= tick_marks[next_mark_]) {
             record("battle_tick_" + std::to_string(static_cast<std::uint64_t>(tick_marks[next_mark_])), tick, false);
             ++next_mark_;
@@ -88,6 +93,7 @@ public:
     }
 
 private:
+    bool memory_tick_pending_{true};
     void ensure_journal() {
         if (!log_path_text_.empty()) return;
         auto* os = godot::OS::get_singleton();

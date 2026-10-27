@@ -50,8 +50,12 @@ struct Options {
     std::string skirmish;
     std::string game_root;
     std::filesystem::path mod_root;
+    bool report_mod_mounts{}; // opt-in CLI contract diagnostic; emitted after the VFS mount succeeds
+    std::string map_path; // --map: a logical space-map path for a mod start (#4589); empty = the pinned M2 map
     std::string replay_out_path;
     std::uint64_t ticks{};
+    std::string ai_report_path; // opt-in completed battle and counted Lua diagnostics
+    std::string ai_trace_path;  // --ai-trace-out (#1702): proposal reasons, pad ownership, construction, credits
     std::string tag_trace_path; // --tag-trace-out (#628)
     // --scenario mode
     std::string scenario_path;

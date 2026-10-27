@@ -114,6 +114,9 @@ void attack_cases() {
     sparse.types[4].starting_spawned_units[0] = {{"Zero", 3}, {"Twenty", 0}, {"Ten", 1}};
     const auto positive = auto_resolve_attacks(value, sparse, bits, humans(), services());
     expect(positive && positive.value()[1][1] == f(90), "first positive-power contribution with positive selected count attacks");
+    sparse.types[4].starting_spawned_units[0].insert(sparse.types[4].starting_spawned_units[0].begin(), {"Missing", 5});
+    const auto with_null = auto_resolve_attacks(value, sparse, bits, humans(), services());
+    expect(with_null && with_null.value()[1][1] == f(90), "RGC-26: a garrison name that resolves to no type is a null entry and is skipped");
     value.gathered.sides[0].combatants[0].tactical = true;
     const auto tactical = auto_resolve_attacks(value, table, bits, humans(), services());
     expect(tactical && tactical.value()[1][1] == f(0), "tactical combatant attacks with own power without galactic garrison");

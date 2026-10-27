@@ -1,11 +1,154 @@
 #include "renderer_internal.hpp"
 #include "eawr/presentation/skin_pose.hpp"
 
+#include <limits>
+#include <new>
+#include <set>
+
 namespace eawr::presentation::godot_backend {
+
+bool GodotRenderer::set_proxy_budget(PresentationBudget* budget) {
+    if (!impl_->proxy_.charges.empty()) return false;
+    impl_->proxy_.budget = budget ? budget : &impl_->proxy_.fallback;
+    return true;
+}
+
+ResourceBudgetSnapshot GodotRenderer::proxy_budget() const {
+    return impl_->proxy_.budget->snapshot(ResourceKind::gpu_proxy);
+}
+
+std::optional<std::uint64_t> GodotRenderer::model_copy_bytes(
+    const std::span<const sim::AssetId> assets) const {
+    if (assets.empty()) return std::nullopt;
+    std::uint64_t bytes{};
+    const auto add = [&](const std::uint64_t count) {
+        if (count > std::numeric_limits<std::uint64_t>::max() - bytes) return false;
+        bytes += count;
+        return true;
+    };
+    for (const auto asset : assets) {
+        const auto resource = impl_->resources_.find(asset);
+        if (resource == impl_->resources_.end()) return std::nullopt;
+        if (!add(sizeof(Impl::Instance))) return std::nullopt;
+        const auto bones = resource->second.skinned ? resource->second.bone_count : 0;
+        if (bones > std::numeric_limits<std::uint64_t>::max() / sizeof(Transform3D)
+            || !add(bones * sizeof(Transform3D))) return std::nullopt;
+        // Charging each piece's full mesh is conservative when pieces share it.
+        bool known_mesh = false;
+        for (const auto& item : resource->second.gpu_items) {
+            known_mesh = known_mesh || item.category == detail::GpuCategory::mesh;
+            if ((item.category == detail::GpuCategory::mesh || !detail::texture_sharing())
+                && !add(item.bytes)) return std::nullopt;
+        }
+        if (!known_mesh) return std::nullopt;
+    }
+    return bytes;
+}
+
+GodotRenderer::ProxyResult GodotRenderer::reserve_proxy_instances(
+    const std::span<const ProxyInstance> requested, const std::function<bool()>& allocation_gate) {
+    auto* rendering = RenderingServer::get_singleton();
+    if (!rendering || !impl_->scenario_.is_valid())
+        return {ProxyOutcome::allocation_failed, 0, "renderer_unavailable"};
+    std::size_t bytes = 0;
+    std::vector<std::size_t> charges;
+    std::set<sim::EntityId> unique;
+    try {
+        charges.reserve(requested.size());
+        for (const auto& proxy : requested) {
+            const auto resource = impl_->resources_.find(proxy.asset);
+            if (resource == impl_->resources_.end() || !resource->second.mesh.is_valid()
+                || impl_->instances_.contains(proxy.entity) || impl_->proxy_.charges.contains(proxy.entity)
+                || !unique.insert(proxy.entity).second)
+                return {ProxyOutcome::invalid_recipe, bytes, "proxy_recipe_unavailable"};
+            // Account retained instance payload and skeleton transform storage.
+            // Driver/RID overhead is unknown until the GPU provider supplies it;
+            // probe_available remains false, never a fabricated VRAM estimate.
+            const auto bones = resource->second.skinned ? resource->second.bone_count : 0;
+            constexpr auto maximum = std::numeric_limits<std::size_t>::max();
+            if (bones > (maximum - sizeof(Impl::Instance)) / sizeof(Transform3D))
+                return {ProxyOutcome::allocation_failed, bytes, "proxy_size_overflow"};
+            const auto charge = sizeof(Impl::Instance) + bones * sizeof(Transform3D);
+            if (charge > maximum - bytes) return {ProxyOutcome::allocation_failed, bytes, "proxy_size_overflow"};
+            bytes += charge;
+            charges.push_back(charge);
+        }
+    } catch (const std::bad_alloc&) {
+        return {ProxyOutcome::allocation_failed, bytes, "proxy_plan_allocation"};
+    }
+    const auto reservation = impl_->proxy_.budget->reserve(ResourceKind::gpu_proxy, bytes);
+    if (reservation != ReservationOutcome::reserved)
+        return {reservation == ReservationOutcome::budget_pressure ? ProxyOutcome::refused_budget
+            : ProxyOutcome::allocation_failed, bytes, reservation == ReservationOutcome::budget_pressure
+            ? "budget_pressure" : "proxy_size_overflow"};
+    std::size_t created = 0;
+    const auto rollback = [&] {
+        for (std::size_t index = 0; index < created; ++index) {
+            const auto entity = requested[index].entity;
+            impl_->proxy_.charges.erase(entity);
+            impl_->forget_instance_pose(entity);
+        }
+        impl_->proxy_.budget->release(ResourceKind::gpu_proxy, bytes);
+    };
+    try {
+        impl_->instances_.reserve(impl_->instances_.size() + requested.size());
+        impl_->proxy_.charges.reserve(impl_->proxy_.charges.size() + requested.size());
+        for (std::size_t index = 0; index < requested.size(); ++index) {
+            if (allocation_gate && !allocation_gate()) {
+                rollback();
+                return {ProxyOutcome::allocation_failed, bytes, "proxy_instance_allocation"};
+            }
+            const auto& proxy = requested[index];
+            // Publish an empty owner first: every later failing allocation has
+            // an RAII-visible RID slot for rollback.
+            auto& instance = impl_->instances_.try_emplace(proxy.entity).first->second;
+            ++created;
+            instance.asset_id = proxy.asset;
+            instance.reserved_proxy = true;
+            instance.rid = rendering->instance_create();
+            if (!instance.rid.is_valid()) {
+                rollback();
+                return {ProxyOutcome::allocation_failed, bytes, "proxy_instance_allocation"};
+            }
+            const auto& resource = impl_->resources_.at(proxy.asset);
+            rendering->instance_set_base(instance.rid, resource.mesh);
+            rendering->instance_set_scenario(instance.rid, impl_->scenario_);
+            rendering->instance_set_visible(instance.rid, false);
+            instance.visible = false;
+            if (impl_->non_casting_.contains(proxy.asset))
+                rendering->instance_geometry_set_cast_shadows_setting(instance.rid, RenderingServer::SHADOW_CASTING_SETTING_OFF);
+            if (render_categories::enabled)
+                instance.category_surfaces = rendering->mesh_get_surface_count(resource.mesh);
+            impl_->copy_instance_pose(proxy.source, proxy.entity, 1.0F);
+            if (render_categories::enabled) {
+                const auto role = impl_->category_roles_.find(proxy.entity);
+                instance.category_role = role == impl_->category_roles_.end()
+                    ? render_categories::Role::unknown : role->second;
+                instance.category_casts = !impl_->non_casting_.contains(proxy.asset);
+            }
+            const auto pending = impl_->skin_poses_.find(proxy.entity);
+            Impl::bind_instance_skin(*rendering, instance, resource,
+                pending == impl_->skin_poses_.end() ? nullptr : &pending->second);
+            if (resource.skinned && resource.bone_count && !instance.skeleton.is_valid()) {
+                rollback();
+                return {ProxyOutcome::allocation_failed, bytes, "proxy_skeleton_allocation"};
+            }
+            impl_->proxy_.charges.emplace(proxy.entity, charges[index]);
+        }
+    } catch (const std::bad_alloc&) {
+        rollback();
+        return {ProxyOutcome::allocation_failed, bytes, "proxy_instance_allocation"};
+    }
+    return {ProxyOutcome::reserved, bytes, {}};
+}
 
 void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const sim::EntityId target,
                                             const float light_factor) {
     if (source == target) return;
+    if (render_categories::enabled) {
+        const auto role = category_roles_.find(source);
+        if (role != category_roles_.end()) category_roles_.insert_or_assign(target, role->second);
+    }
     const auto pose = skin_poses_.find(source);
     if (pose == skin_poses_.end()) clear_skin_pose(target);
     else {
@@ -39,6 +182,7 @@ void GodotRenderer::Impl::copy_instance_pose(const sim::EntityId source, const s
 }
 
 void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
+    if (render_categories::enabled) category_roles_.erase(entity_id);
     // Retirement is explicit, unlike absence from a submitted snapshot. Drop the
     // instance and skeleton now, including when another entity retains its mesh.
     const auto instance = instances_.find(entity_id);
@@ -49,7 +193,76 @@ void GodotRenderer::Impl::forget_instance_pose(const sim::EntityId entity_id) {
     opacities_.erase(entity_id);
 }
 
+void GodotRenderer::Impl::set_render_category(const sim::EntityId entity_id, const render_categories::Role role) {
+    if (!render_categories::enabled) return;
+    category_roles_.insert_or_assign(entity_id, role);
+    const auto instance = instances_.find(entity_id);
+    if (instance != instances_.end()) instance->second.category_role = role;
+}
+
+void GodotRenderer::set_render_category(const sim::EntityId entity_id, const render_categories::Role role) {
+    impl_->set_render_category(entity_id, role);
+}
+
+void GodotRenderer::write_churn_census(std::ostream& output) const {
+    impl_->write_churn_census(output);
+}
+
+void GodotRenderer::Impl::write_churn_census(std::ostream& output) const {
+    if (!render_categories::enabled) { output << "{\"enabled\":false}"; return; }
+    // Report phase only: no census map is built while preparing/submitting a frame.
+    render_churn::Census census;
+    for (const auto& [entity, instance] : instances_) {
+        if (!instance.visible) continue;
+        const auto found = resources_.find(instance.asset_id);
+        if (found == resources_.end()) continue;
+        const auto& resource = found->second;
+        const auto colour = colorizations_.find(entity);
+        const auto light = light_scales_.find(entity);
+        const auto opacity = opacities_.find(entity);
+        const auto fog = fog_consumers_.find(instance.asset_id);
+        const RID material = fog != fog_consumers_.end() && fog->second.material.is_valid()
+            ? fog->second.material : resource.material;
+        const auto rgb = colour == colorizations_.end() ? std::array{1.0F, 1.0F, 1.0F} : colour->second;
+        const auto scale = light == light_scales_.end() ? std::array{1.0F, 1.0F, 1.0F} : light->second;
+        const float alpha = opacity == opacities_.end() ? 1.0F : opacity->second;
+        render_churn::CohortKey key{instance.asset_id, static_cast<std::uint64_t>(material.get_id()),
+            fog == fog_consumers_.end() ? 0 : fog->second.id, static_cast<std::uint32_t>(resource.pass),
+            resource.priority.value_or(0), resource.skinned, !resource.billboard_modes.empty(),
+            alpha >= 1.0F && !non_casting_.contains(instance.asset_id),
+            {render_churn::bits(rgb[0]), render_churn::bits(rgb[1]), render_churn::bits(rgb[2]),
+             render_churn::bits(alpha), render_churn::bits(scale[0]), render_churn::bits(scale[1]), render_churn::bits(scale[2])}};
+        census.add(key);
+    }
+    output << "{\"enabled\":true,\"phase\":\"report\",\"active_instances\":" << census.active
+        << ",\"rigid_instances\":" << census.rigid << ",\"excluded_skin\":" << census.excluded_skin
+        << ",\"excluded_billboard\":" << census.excluded_billboard << ",\"excluded_any\":" << census.excluded_any
+        << ",\"lifetime_rid_events\":";
+    render_churn::write_json(output, render_churn::total);
+    output << ",\"cohorts\":[";
+    bool first = true;
+    for (const auto& [key, count] : census.cohorts) {
+        output << (first ? "" : ",") << "{\"asset\":" << key.asset << ",\"material\":" << key.material
+            << ",\"pass\":" << key.pass << ",\"priority\":" << key.priority << ",\"fog\":" << key.fog
+            << ",\"skin\":" << key.skinned << ",\"billboard\":" << key.billboard << ",\"casts\":" << key.casts
+            << ",\"rigid\":" << key.rigid() << ",\"count\":" << count << ",\"colour_opacity_light_bits\":[";
+        for (std::size_t i = 0; i < key.colour_opacity_light.size(); ++i)
+            output << (i ? "," : "") << key.colour_opacity_light[i];
+        output << "]}"; first = false;
+    }
+    output << "]}";
+}
+
 std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(const sim::AssetId asset_id) const {
+    const auto resource = resources_.find(asset_id);
+    if (resource == resources_.end() || !resource->second.skinned
+        || !resource->second.hidden_geometry_collapses
+        || resource->second.description.route == MaterialRoute::modern_spatial
+        || legacy::reads_wind(resource->second.description)) return {};
+    return resource->second.skin_used_bones;
+}
+
+std::span<const std::uint8_t> GodotRenderer::Impl::skin_geometry_bones_view(const sim::AssetId asset_id) const {
     const auto resource = resources_.find(asset_id);
     if (resource == resources_.end() || !resource->second.skinned
         || !resource->second.hidden_geometry_collapses
@@ -89,6 +302,11 @@ std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(const sim::As
         }
         skin_poses_.at(entity_id).prepared.reset();
     }
+    return bind_skin_pose(entity_id, asset_id, resource->second, std::move(prepared));
+}
+
+core::Result<void> GodotRenderer::Impl::bind_skin_pose(const sim::EntityId entity_id,
+    const sim::AssetId asset_id, const Resource& resource, std::shared_ptr<const SkinPosePalette<Transform3D>> prepared) {
     SkinPoseTimer binding(skin_profile_ ? &skin_work_.binding_ms : nullptr);
     if (skin_profile_) ++skin_work_.bindings;
     if (prepared) {
@@ -101,21 +319,21 @@ std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(const sim::As
     const auto instance = instances_.find(entity_id);
     RenderingServer* rendering = RenderingServer::get_singleton();
     if (instance != instances_.end() && instance->second.asset_id == asset_id && rendering) {
-        if (resource->second.billboard_modes.empty()
-            && !filter_skin_palette_changes(skin_changes_, resource->second.skin_used_bones)) {
+        if (resource.billboard_modes.empty()
+            && !filter_skin_palette_changes(skin_changes_, resource.skin_used_bones)) {
             return failure(diagnostic_codes::invalid_skin_pose, "skin palette usage does not match the skeleton");
         }
         // A billboard refresh may have replaced the base palette: restore it
         // completely before that refresh. Ordinary skeletons retain unchanged
         // bones, so only byte-different palette matrices cross the engine API.
-        const auto changes = resource->second.billboard_modes.empty()
+        const auto changes = resource.billboard_modes.empty()
             ? std::span<const std::uint8_t>(skin_changes_) : std::span<const std::uint8_t>{};
         if (!apply_skin_pose(*rendering, instance->second, pose, changes, skin_profile_ ? &skin_work_ : nullptr)) {
             return failure(diagnostic_codes::invalid_skin_pose,
                 "Godot skeleton palette binding failed");
         }
-        if (!resource->second.billboard_modes.empty()) {
-            refresh_billboards(*rendering, entity_id, instance->second, resource->second);
+        if (!resource.billboard_modes.empty()) {
+            refresh_billboards(*rendering, entity_id, instance->second, resource);
         }
     }
     return core::Result<void>::success();
@@ -185,6 +403,7 @@ void GodotRenderer::Impl::apply_unit_opacity(
     rendering.instance_geometry_set_cast_shadows_setting(instance.rid,
         clamped < 1.0F || non_casting_.contains(instance.asset_id)
             ? RenderingServer::SHADOW_CASTING_SETTING_OFF : RenderingServer::SHADOW_CASTING_SETTING_ON);
+    if (render_categories::enabled) instance.category_casts = clamped >= 1.0F && !non_casting_.contains(instance.asset_id);
 }
 
 core::Result<void> GodotRenderer::Impl::set_material_priority(const sim::AssetId asset_id, const std::int32_t priority) {
@@ -414,6 +633,8 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
     billboard_applied_generation_ = billboard_generation_;
     detail::SubmissionPresence presence(++submit_serial_);
     missing_waits_.begin();
+    const auto category_frame = render_categories::enabled
+        ? static_cast<std::uint64_t>(Engine::get_singleton()->get_process_frames()) : 0;
     for (std::size_t index = 0; index < pieces.size(); ++index) {
         const sim::RenderInstance& source = instances[pieces[index].source];
         Resource* const resource = order_resources_[index];
@@ -449,6 +670,10 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             instance = instances_.emplace(
                 source.entity_id, Instance{.asset_id = source.asset_id, .rid = rid,
                     .skeleton = {}, .object_transform = {}, .placement = {}}).first;
+            if (render_categories::enabled) {
+                const auto role = category_roles_.find(source.entity_id);
+                instance->second.category_role = role == category_roles_.end() ? render_categories::Role::unknown : role->second;
+            }
             const auto pending = skin_poses_.find(source.entity_id);
             bind_instance_skin(*rendering, instance->second, *resource,
                 pending == skin_poses_.end() ? nullptr : &pending->second);
@@ -461,6 +686,7 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             apply_unit_colorization(*rendering, source.entity_id, instance->second);
         } else if (transition == detail::InstanceTransition::replace) {
             if (instance->second.skeleton.is_valid()) {
+                render_churn::record(render_churn::owner(instance->second.category_role, true), render_churn::Event::freed);
                 rendering->free_rid(instance->second.skeleton);
                 instance->second.skeleton = {};
             }
@@ -471,7 +697,16 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
                 pending == skin_poses_.end() ? nullptr : &pending->second);
         }
         presence.retain(instance->second.placement);
+        if (instance->second.reserved_proxy && !instance->second.visible) {
+            rendering->instance_set_visible(instance->second.rid, true);
+            instance->second.visible = true;
+        }
         const bool rebound = transition != detail::InstanceTransition::retain;
+        if (!rebound) {
+            render_churn::record(render_churn::owner(instance->second.category_role), render_churn::Event::retained);
+            if (instance->second.skeleton.is_valid())
+                render_churn::record(render_churn::owner(instance->second.category_role, true), render_churn::Event::retained);
+        }
         const bool moved = detail::place_piece(instance->second.placement, rebound, source.fixed_transform);
         if (moved) {
             instance->second.object_transform = transform_from(adapt_instance(source).column_major);
@@ -482,11 +717,30 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
             refresh_billboards(*rendering, source.entity_id, instance->second, *resource);
             ++work_.billboard_refreshes;
         }
+        if (render_categories::enabled) {
+            instance->second.category_submit_frame = category_frame;
+            // Surfaces are immutable for this upload; query only on create/replacement.
+            if (transition != detail::InstanceTransition::retain) {
+                instance->second.category_surfaces = rendering->mesh_get_surface_count(resource->mesh);
+                const auto role = category_roles_.find(source.entity_id);
+                instance->second.category_role = role == category_roles_.end() ? render_categories::Role::unknown : role->second;
+                const auto opacity = opacities_.find(source.entity_id);
+                instance->second.category_casts = !non_casting_.contains(source.asset_id)
+                    && (opacity == opacities_.end() || opacity->second >= 1.0F);
+            }
+        }
     }
     missing_waits_.end();
     // Every live instance this snapshot carried is stamped; only when some
     // were not does the scan for the ones that left run.
     presence.sweep(instances_, [&](const InstanceMap::iterator current) {
+        if (current->second.reserved_proxy) {
+            if (current->second.visible) {
+                rendering->instance_set_visible(current->second.rid, false);
+                current->second.visible = false;
+            }
+            return std::next(current);
+        }
         return remove_instance(rendering, current);
     }, work_);
     if (fog_) {
@@ -507,8 +761,20 @@ void GodotRenderer::Impl::submit(std::shared_ptr<const sim::RenderSnapshot> snap
 // Poses end with their asset (release), with clear_skin_pose, or are
 // replaced by set_skin_pose.
 GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(RenderingServer* rendering, const InstanceMap::iterator instance) {
-    if (rendering && instance->second.rid.is_valid()) rendering->free_rid(instance->second.rid);
-    if (rendering && instance->second.skeleton.is_valid()) rendering->free_rid(instance->second.skeleton);
+    // All retirement paths (including residency eviction and asset unload)
+    // end their proxy reservation at this single removal point.
+    if (const auto charge = proxy_.charges.find(instance->first); charge != proxy_.charges.end()) {
+        proxy_.budget->release(ResourceKind::gpu_proxy, charge->second);
+        proxy_.charges.erase(charge);
+    }
+    if (rendering && instance->second.rid.is_valid()) {
+        render_churn::record(render_churn::owner(instance->second.category_role), render_churn::Event::freed);
+        rendering->free_rid(instance->second.rid);
+    }
+    if (rendering && instance->second.skeleton.is_valid()) {
+        render_churn::record(render_churn::owner(instance->second.category_role, true), render_churn::Event::freed);
+        rendering->free_rid(instance->second.skeleton);
+    }
     return instances_.erase(instance);
 }
 
@@ -525,8 +791,9 @@ GodotRenderer::Impl::InstanceMap::iterator GodotRenderer::Impl::remove_instance(
         if (work && !uploaded) ++work->palette_uploads;
         uploaded = true;
         if (work) ++work->bone_uploads;
+        const auto transform = transform_from(palette[index]);
         rendering.skeleton_bone_set_transform(instance.skeleton,
-            static_cast<std::int32_t>(index), transform_from(palette[index]));
+            static_cast<std::int32_t>(index), transform);
     }
     return true;
 }
@@ -607,8 +874,17 @@ void GodotRenderer::Impl::bind_instance_skin(
     const PendingPose* pose) {
     if (!resource.skinned || resource.bone_count == 0) return;
     instance.skeleton = rendering.skeleton_create();
+    if (!instance.skeleton.is_valid()) return;
     rendering.skeleton_allocate_data(instance.skeleton,
         static_cast<std::int32_t>(resource.bone_count), false);
+    // Proxy reservation needs a typed allocation failure; retain the existing
+    // non-proxy skin path's behavior.
+    if (instance.reserved_proxy
+        && static_cast<std::size_t>(rendering.skeleton_get_bone_count(instance.skeleton)) != resource.bone_count) {
+        rendering.free_rid(instance.skeleton);
+        instance.skeleton = {};
+        return;
+    }
     rendering.instance_attach_skeleton(instance.rid, instance.skeleton);
     const Transform3D identity;
     for (std::size_t index = 0; index < resource.bone_count; ++index) {

@@ -138,7 +138,7 @@ BattleCommands run_battle(bool native_ai, unsigned workers, std::uint64_t battle
     view::MapInput input;
     const auto snapshot = live->frame().latest;
     const auto intent = view::fleet_destination_intent(*snapshot, human_player, moving_fleet, enemy,
-        input_planets(*snapshot, human_player));
+        input_planets(*snapshot, human_player), {});
     if (!intent) throw std::runtime_error("move intent refused");
     const auto move = input.command(*intent, input_planets(*snapshot, human_player));
     if (!move) throw std::runtime_error("map command refused");

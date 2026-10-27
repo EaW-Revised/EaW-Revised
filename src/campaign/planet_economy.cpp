@@ -38,7 +38,7 @@ core::Result<std::vector<Fixed>> numbers(const data::XmlNode* n, std::size_t siz
     data::tag_trace::used(n); auto text = n->raw_text; for (auto& c : text) if (c == ',') c = ' ';
     std::istringstream stream(text); std::vector<Fixed> r;
     for (std::string word; stream >> word;) {
-        auto value = data::retail::leading_number(word);
+        auto value = data::retail::float_value(word);
         if (!value) return fail<std::vector<Fixed>>("invalid " + n->name);
         r.push_back(value->value);
     }
@@ -88,9 +88,8 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
         gc::CorruptionEconomyPlayer p; p.player = binding.player.player_id; p.faction = faction->second;
         p.benefits = benefits.value(); p.playable = playable.value();
         if (const auto* n = data::retail::single(original, "Displayed_Tech_Level_Adjustment")) {
-            auto value = number(n);
-            if (!value || value.value().raw() % Fixed::scale) return fail<gc::EconomyCorruptionState>("invalid displayed tech adjustment");
-            p.displayed_tech_adjustment = value.value().trunc_to_integer();
+            data::tag_trace::used(n);
+            p.displayed_tech_adjustment = data::retail::integer_constant(n->raw_text);
         } // WGS-76: constructor adjustment zero; WGEP-99: no GC display clamp.
         p.human = std::any_of(setup.seats.begin(), setup.seats.end(), [&](const auto& s) { return s.active && s.player == p.player && s.kind == gc::SeatKind::human; });
         if (!p.benefits && p.playable) {
@@ -109,7 +108,10 @@ core::Result<gc::EconomyCorruptionState> prepare_corruption_economy(const data::
         const auto original = layers(catalog, location->original_type, data::Category::game_object);
         gc::CorruptionEconomyPlanet row; row.planet = p.id;
         if (const auto* n = data::retail::single(original, "Planet_Black_Market_Influences")) { auto value = flag(n); if (!value) return fail<gc::EconomyCorruptionState>("invalid influenced flag"); row.influenced = value.value(); }
-        auto modifier = number(data::retail::single(original, "Planet_Black_Market_Modifier"));
+        // CGS-11: an omitted modifier keeps the zero a freshly constructed planet type holds. Unverified in the debug
+        // build; the omission is reported when the services are prepared.
+        const auto* modifier_node = data::retail::single(original, "Planet_Black_Market_Modifier");
+        auto modifier = modifier_node ? number(modifier_node) : core::Result<Fixed>::success(Fixed{});
         if (!modifier) return core::Result<gc::EconomyCorruptionState>::failure(modifier.error());
         row.market_modifier = modifier.value(); result.planets.push_back(row);
     }

@@ -29,6 +29,7 @@
       "cacheVariables": {
         "BUILD_TESTING": "ON",
         "EAWR_ENABLE_SIM_BOUNDARY_CHECK": "ON",
+        "EAWR_ENABLE_LAND_SKIRMISH": "OFF",
         "EAWR_WARNINGS_AS_ERRORS": "ON",
         "EAWR_EXPECTED_ARCH": "x64"
       }
@@ -76,7 +77,7 @@
         "strategy": "external"
       },
       "cacheVariables": {
-        "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT": "$<$<CONFIG:Debug,RelWithDebInfo>:Embedded>"
+        "CMAKE_MSVC_DEBUG_INFORMATION_FORMAT": "Embedded"
       },
       "condition": {
         "type": "equals",
@@ -91,6 +92,14 @@
       "cacheVariables": {
         "CMAKE_C_COMPILER": "cl",
         "CMAKE_CXX_COMPILER": "cl"
+      }
+    },
+    {
+      "name": "dev-land",
+      "displayName": "Dev only: land skirmish ON / windows-msvc-ninja (never ships)",
+      "inherits": "windows-msvc-ninja",
+      "cacheVariables": {
+        "EAWR_ENABLE_LAND_SKIRMISH": "ON"
       }
     },
     {
@@ -272,6 +281,11 @@
       "jobs": 4
     },
     {
+      "name": "dev-land",
+      "configurePreset": "dev-land",
+      "jobs": 4
+    },
+    {
       "name": "windows-clang-ninja",
       "configurePreset": "windows-clang-ninja",
       "jobs": 4
@@ -362,6 +376,17 @@
     {
       "name": "windows-msvc-ninja",
       "configurePreset": "windows-msvc-ninja",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": false
+      }
+    },
+    {
+      "name": "dev-land",
+      "configurePreset": "dev-land",
       "output": {
         "outputOnFailure": true
       },

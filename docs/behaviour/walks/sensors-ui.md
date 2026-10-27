@@ -386,7 +386,7 @@ Our code: `include/eawr/presentation/ui/selection.hpp` and `src/presentation/ui/
 (picking, selection), `apps/viewer/src/battle_input.cpp` (the pick volumes, the double click, the
 box), `include/eawr/presentation/ui/world_ui.hpp`, `src/presentation/ui/world_ui.cpp` and
 `apps/viewer/src/world_ui_view.cpp` (icons, grid, bars), `src/presentation/godot/ui/unit_cards_view.cpp`
-(card bars), `include/eawr/presentation/space/unit_fade.hpp` and `fog_field.hpp` (fades, the plane).
+(card bars), `include/eawr/presentation/live/unit_fade.hpp` and `fog_field.hpp` (fades, the plane).
 
 | Rules | Ours | Verdict |
 | --- | --- | --- |

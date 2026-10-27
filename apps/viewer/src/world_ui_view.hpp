@@ -58,7 +58,8 @@ public:
         std::optional<camera::TacticalFrame> camera;
         std::array<float, 2> viewport{};
         std::function<std::optional<std::array<float, 2>>(const ui::Vec3f&)> project;
-        std::function<std::optional<ui::Vec3f>(std::array<float, 2>, float)> world_at_height;
+        const BattleScene* scene{};
+        std::function<std::optional<ui::PickRay>(std::array<float, 2>)> ray;
         const LiveSessionView* live{};
         const ui::AbilityState* abilities{}; // the same provider as the unit cards
         // #848 V-5d: false while either overview level is on: no unit bracket (health and shield

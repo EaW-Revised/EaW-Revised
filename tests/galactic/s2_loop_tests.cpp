@@ -246,7 +246,7 @@ void installed_loop(bool purchase_only) {
             const auto attack_snapshot = live->frame().latest;
             const auto initial_result = live->frame().result;
             const auto intent = view::fleet_destination_intent(*attack_snapshot, attacker, moving_fleet, target,
-                input_planets(*attack_snapshot, attacker));
+                input_planets(*attack_snapshot, attacker), {});
             expect(intent && intent->kind == view::DropKind::move && intent->path.size() == 2 && intent->path.back() == target,
                 "map destination resolves the authored trade route");
             if (!intent) throw std::runtime_error("S2 move intent refused");
@@ -285,7 +285,7 @@ void installed_loop(bool purchase_only) {
                 }
                 if (space_result && arrived && !invaded && !frame.pending_conflict) {
                     const auto land = view::fleet_destination_intent(*frame.latest, attacker, moving_fleet, target,
-                        input_planets(*frame.latest, attacker));
+                        input_planets(*frame.latest, attacker), {});
                     expect(land && land->kind == view::DropKind::land, "same-planet destination produces invasion");
                     if (!land) throw std::runtime_error("S2 invasion intent refused");
                     const auto command = input.command(*land, input_planets(*frame.latest, attacker));
@@ -323,7 +323,7 @@ void installed_loop(bool purchase_only) {
         for (const auto destination : {home, enemy}) {
             const auto snapshot = live->frame().latest;
             const auto next = view::fleet_destination_intent(*snapshot, attacker, moving_fleet, destination,
-                input_planets(*snapshot, attacker));
+                input_planets(*snapshot, attacker), {});
             if (!next) {
                 std::cerr << "S2 route refused fleet=" << moving_fleet << " destination=" << destination
                     << " tick=" << tick << " movement=" << bool(snapshot->movement())
@@ -365,7 +365,7 @@ void installed_loop(bool purchase_only) {
         const auto published_access = final.latest->movement()->access;
         expect(refreshed == published_access, "terminal conquest publishes current access, independently recomputed from final presence");
         const auto post_victory = view::fleet_destination_intent(*final.latest, attacker, moving_fleet, home,
-            input_planets(*final.latest, attacker));
+            input_planets(*final.latest, attacker), {});
         std::cout << "S2 terminal access current=" << (refreshed == published_access)
             << " return intent=" << bool(post_victory) << " pause=" << final.latest->clock().pause_depth << '\n';
         for (const auto& row : published_access) if (row.player == attacker)

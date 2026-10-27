@@ -181,9 +181,17 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
             }
         }
     }
-    if (options.campaign == galactic_view::synthetic_campaign && options.hud_fixture == "fleet-drag-home") {
+    const bool stealth_move = options.hud_fixture == "fleet-drag-stealth";
+    if (options.campaign == galactic_view::synthetic_campaign && (options.hud_fixture == "fleet-drag-home" || stealth_move)) {
         // Explicit native Home producer fixture: no configured home, first leader at another world.
-        galaxy_setup.fleets.front().orbit = 102;
+        if (!stealth_move) galaxy_setup.fleets.front().orbit = 102;
+        else {
+            // #5093 / WGM-23: live combat skipping must permit the return
+            // route to expand from this defended destination after arrival.
+            galaxy_setup.fleets.front().members.resize(1);
+            for (auto& row : galaxy_setup.movement->access)
+                if (row.player == galaxy->local.player && row.planet == 102) row.potential_conflict = true;
+        }
         // The census owner requires the live production service, with a complete seat/planet table.
         auto& production = galaxy_setup.production.emplace();
         production.maximum_human_queue = 5;
@@ -206,7 +214,11 @@ bool CaptureHudFixture::configure_setup(GalacticMode::State& state) {
             census.objects.push_back({member.id, member.type, fleet.owner, fleet.orbit, fleet.id, false, false,
                 member.type, 0, sim::galactic::ActorCombatRole::ordinary});
         std::sort(census.objects.begin(), census.objects.end(), [](const auto& left, const auto& right) { return left.id < right.id; });
-        if (content) {
+        if (stealth_move) {
+            auto& hero = census.objects.front();
+            hero.abilities.present = hero.abilities.combat_skip = true;
+        }
+        if (content && !stealth_move) {
             content->home_types.erase(galaxy->local.player);
             content->leader_types[galaxy->local.player] = production_names.at(census.objects.front().current_type);
         }

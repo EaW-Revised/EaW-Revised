@@ -220,6 +220,9 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                 }
                 entry.weapon_delay = ability_factor(unit, AbilityModifier::weapon_delay);
                 entry.fire_rate = ion_fire_rate(unit.ion_stun, world.frame); // IS-06
+                // WFR-01: a hardpoint weapon's fire range grows by the summed category winners.
+                if (unit.upgrade_bonuses[6].raw() != 0)
+                    entry.fire_range = math::Fixed::from_raw(math::Fixed::scale + unit.upgrade_bonuses[6].raw());
                 entry.scatter_radius = ability_factor(unit, AbilityModifier::scatter_radius);
                 if (unit.corrupt) entry.corrupt_inaccuracy = unit.corrupt->inaccuracy;
                 entry.in_nebula = unit.nebula && unit.nebula->present;
@@ -238,6 +241,9 @@ core::Result<detail::CombatWorld> TacticalSession::Impl::combat_world(std::vecto
                     if (const auto salvo = ability_slot(profile, AbilityKind::full_salvo)) {
                         entry.full_salvo = unit.abilities->slots[*salvo].active;
                     }
+                    if (const auto rocket = ability_slot(profile, AbilityKind::rocket_attack))
+                        entry.rocket_attack = unit.abilities->slots[*rocket].active;
+                    entry.ability_attack_range = ability_attack_distance(profile, *unit.abilities);
                     entry.stealth_on = unit.abilities->stealth_on;
                     if (const auto blast = ability_slot(profile, AbilityKind::blast); blast && unit.abilities->charged_blast) {
                         entry.charged_blast = unit.abilities->charged_blast;

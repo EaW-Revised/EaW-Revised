@@ -61,6 +61,11 @@ std::optional<bool> Record::boolean(const std::string_view tag) const {
 }
 
 std::optional<Fixed> Record::parse_number(const XmlNode& at, const std::string_view raw, const std::string_view tag) const {
+    if (tag == "Hyperspace_Speed_Factor" || tag == "Corruption_Hyperspace_Bonus"
+        || tag == "Object_Max_Speed_Multiplier_Galactic" || tag == "MaximumFleetMovementDistance") {
+        const auto parsed = retail::float_value(raw);
+        return parsed ? std::optional(parsed->value) : std::nullopt;
+    }
     const auto parsed = retail::leading_number(raw);
     if (!parsed) {
         issue(IssueKind::bad_value, &at, std::string(tag), trim(raw), "not a number in Q24 range");
@@ -352,7 +357,7 @@ core::Result<GalacticData> load_galactic_data(const vfs::Vfs& filesystem, const 
 
 std::array<std::uint8_t, 32> content_identity(const GalacticData& data) {
     Encoder out;
-    out.text("eawr-galactic-data-v4");
+    out.text("eawr-galactic-data-v5");
     out.each(data.campaigns, [&](const Campaign& campaign) {
         out.text(campaign.name);
         out.text(campaign.campaign_set);
@@ -383,6 +388,7 @@ std::array<std::uint8_t, 32> content_identity(const GalacticData& data) {
         out.text(campaign.rebel_story_name);
         out.text(campaign.empire_story_name);
         out.text(campaign.underworld_story_name);
+        encode(out, campaign.story_names);
         out.texts(campaign.autoresolve_exclusion_locations);
         out.each(campaign.corruption_level_overrides, [&](const LocationLevel& value) {
             out.text(value.location); out.i64(value.level);

@@ -18,7 +18,7 @@ constexpr std::int64_t multiplier_limit_raw = max_damage_multiplier * Fixed::sca
 constexpr std::int64_t health_limit_raw = max_durability_health * Fixed::scale;
 // The largest product of apply_hit: damage x curve value x armor multiplier, in whole units
 // (DG-26's out-of-combat factor is clamped to keep it).
-static_assert(max_durability_health * max_damage_multiplier * max_damage_multiplier
+static_assert(max_hit_damage * max_damage_multiplier * max_damage_multiplier
         <= std::numeric_limits<std::int64_t>::max() / Fixed::scale / 4,
     "the damage pipeline must stay in Q24");
 constexpr std::int64_t curve_x_limit_raw = std::int64_t{3600} * Fixed::scale;
@@ -284,7 +284,7 @@ core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const Damag
         if (hit.defense.raw() != 0) {
             const auto defense = std::clamp(hit.defense, whole(-4), whole(1));
             amount = std::min(q.mul(amount, q.sub(whole(1), defense)),
-                Fixed::from_raw(max_durability_health * max_damage_multiplier * Fixed::scale));
+                Fixed::from_raw(max_hit_damage * max_damage_multiplier * Fixed::scale));
         }
     }
     // DG-06, DG-07: the shield takes the damage first, scaled by the shield armor; what it does

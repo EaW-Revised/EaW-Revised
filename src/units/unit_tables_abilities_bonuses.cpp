@@ -5,7 +5,7 @@ namespace eawr::units::unit_tables_detail {
 void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::string& name, const AbilityFields& child_text) {
     const auto& node = child_text.node;
     if (input_.campaign_scene && (iequals(node.name, "Enhance_Defense_Ability") || iequals(node.name, "Battlefield_Modifier_Ability"))
-        && iequals(child_text("Activation_Style"), "Space_Automatic")) {
+        && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         BattlefieldBonus bonus; bonus.name = name;
         bonus.enabled = boolean(child_text("Initially_Enabled")).value_or(true);
         bonus.all_allies = boolean(child_text("Apply_To_All_Allies")).value_or(false);
@@ -20,7 +20,7 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         }
         if (bonus.defence != Fixed{} || bonus.reveal_delta != Fixed{}) unit.production.battlefield_bonuses.push_back(std::move(bonus));
     }
-    if (iequals(node.name, "Battlefield_Modifier_Ability") && iequals(child_text("Activation_Style"), "Space_Automatic")) {
+    if (iequals(node.name, "Battlefield_Modifier_Ability") && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         // WST-03: the debug build adds (multiplier - 1) to the cloak-duration list only when
         // the multiplier is not 1 (its default).
         const auto text = child_text("Stealth_Duration_Multiplier");
@@ -45,7 +45,7 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         unlock.reverse = boolean(child_text("Reverse_Application_Logic")).value_or(false);
         if (unlock.enable) unit.special_unlocks.push_back(unlock);
     }
-    if (iequals(node.name, "Combat_Bonus_Ability") && iequals(child_text("Activation_Style"), "Space_Automatic")) {
+    if (iequals(node.name, "Combat_Bonus_Ability") && iequals(child_text("Activation_Style"), automatic_activation_name(input_.domain))) {
         CombatBonus bonus;
         bonus.name = name;
         bonus.filter = unit.special_abilities.back().filter;
@@ -63,7 +63,7 @@ void Loader::load_bonus_abilities(Object& object, UnitType& unit, const std::str
         }
         constexpr std::string_view tags[]{"Health_Bonus_Percentage", "Damage_Bonus_Percentage",
             "Energy_Pool_Bonus_Percentage", "Shield_Bonus_Percentage", "Defense_Bonus_Percentage",
-            "Movement_Speed_Bonus_Percentage"};
+            "Movement_Speed_Bonus_Percentage", "Fire_Range_Bonus_Percentage"};
         for (std::size_t index = 0; index < bonus.percentages.size(); ++index) {
             bonus.percentages[index] = number(child_text(tags[index])).value_or(Fixed{});
         }

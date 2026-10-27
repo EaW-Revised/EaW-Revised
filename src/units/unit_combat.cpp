@@ -1,6 +1,7 @@
 #include "eawr/assets/map.hpp"
 #include "eawr/units/unit_tables.hpp"
 #include "unit_internal.hpp"
+#include "unit_turret_frame.hpp"
 
 #include <algorithm>
 #include <array>
@@ -54,6 +55,17 @@ namespace tactical = sim::tactical;
 struct CategoryBits final {
     const UnitTables& tables;
 
+    // ML-53: a restriction name outside the dictionary adds no bit; the other names still count.
+    [[nodiscard]] std::uint64_t known_bits(const std::vector<std::string>& names) const {
+        std::uint64_t bits = 0;
+        for (const auto& name : names) {
+            const auto found = std::find_if(tables.categories.begin(), tables.categories.end(),
+                [&](const EnumValue& value) { return same_name(value.name, name); });
+            if (found != tables.categories.end()) bits |= found->value;
+        }
+        return bits;
+    }
+
     core::Result<std::uint64_t> operator()(const std::vector<std::string>& names) const {
         std::uint64_t bits = 0;
         for (const auto& name : names) {
@@ -69,7 +81,7 @@ struct CategoryBits final {
 };
 
 std::optional<core::Diagnostic> bind_projectile_flight(const Projectile& projectile,
-    tactical::ShotProfile& shot) {
+    tactical::ShotProfile& shot, std::vector<core::Diagnostic>* notes) {
     const bool rocket = same_name(projectile.category, "ROCKET");
     if (rocket || projectile.max_lifetime || projectile.explode_at_target_radius.value_or(false)) {
         tactical::FlightProfile flight;
@@ -79,12 +91,27 @@ std::optional<core::Diagnostic> bind_projectile_flight(const Projectile& project
         flight.lifetime = projectile.max_lifetime;
         flight.authored_distance = projectile.max_flight_distance.value_or(Fixed{});
         if (rocket) {
-            if (!projectile.rocket_curve_distance || !projectile.rocket_curve_offset || !projectile.rocket_straight_distance) {
-                return failure("projectile '" + projectile.id + "' lacks authored rocket path inputs (RFL-02/03)");
-            }
-            flight.curve_distance = *projectile.rocket_curve_distance;
-            flight.curve_offset = *projectile.rocket_curve_offset;
-            flight.straight_distance = *projectile.rocket_straight_distance;
+            // ML-54: each absent path input takes the object-type default, independently.
+            const auto whole_default = [](const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale); };
+            const auto input = [&](const std::optional<Fixed>& authored, const std::int64_t fallback,
+                                   const std::string_view tag) {
+                if (authored) return *authored;
+                if (notes != nullptr) {
+                    auto note = failure("projectile '" + projectile.id + "' authors no " + std::string(tag)
+                        + "; the object-type default " + std::to_string(fallback) + " applies (ML-54)");
+                    note.severity = core::Severity::warning;
+                    const bool known = std::any_of(notes->begin(), notes->end(),
+                        [&](const core::Diagnostic& other) { return other.message == note.message; });
+                    if (!known) notes->push_back(std::move(note));
+                }
+                return whole_default(fallback);
+            };
+            flight.curve_distance = input(projectile.rocket_curve_distance, rocket_default_curve_distance,
+                "Projectile_Rocket_Curve_Distance");
+            flight.curve_offset = input(projectile.rocket_curve_offset, rocket_default_curve_offset,
+                "Projectile_Rocket_Curve_Offset");
+            flight.straight_distance = input(projectile.rocket_straight_distance, rocket_default_straight_distance,
+                "Projectile_Rocket_Straight_Distance");
         }
         shot.flight = flight;
     }
@@ -95,6 +122,7 @@ struct ShotProfileBuilder final {
     const UnitTables& tables;
     const DamageTypeIndex& types;
     const CategoryBits& category_bits;
+    std::vector<core::Diagnostic>* notes{}; // lenient loads: warnings about values a rule bounds (#4589)
 
     core::Result<std::optional<tactical::ShotProfile>> operator()(const Weapon& weapon, const bool hardpoint,
         const std::optional<Fixed> unit_reach = std::nullopt) const {
@@ -143,8 +171,22 @@ struct ShotProfileBuilder final {
             tactical::IonStunShot stun;
             const auto seconds = projectile.ion_stun_duration.value_or(Fixed{});
             stun.frames = static_cast<std::uint32_t>(std::max<std::int64_t>(seconds.raw(), 0) * 30 / Fixed::scale);
-            stun.speed_reduction = projectile.ion_stun_speed_reduction.value_or(Fixed{});
-            stun.rate_reduction = projectile.ion_stun_shot_rate_reduction.value_or(Fixed{});
+            // IS-10: FoC range-checks neither reduction; only an absurd magnitude saturates here.
+            const auto reduction = [&](const std::optional<Fixed>& authored) {
+                constexpr auto limit = tactical::ion_reduction_limit * Fixed::scale;
+                const auto raw = authored.value_or(Fixed{}).raw();
+                if ((raw > limit || raw < -limit) && notes != nullptr) {
+                    auto note = failure("projectile '" + projectile.id + "' authors an ion stun reduction beyond +-"
+                        + std::to_string(tactical::ion_reduction_limit) + "; it saturates there (IS-10)");
+                    note.severity = core::Severity::warning;
+                    const bool known = std::any_of(notes->begin(), notes->end(),
+                        [&](const core::Diagnostic& other) { return other.message == note.message; });
+                    if (!known) notes->push_back(std::move(note));
+                }
+                return Fixed::from_raw(std::clamp(raw, -limit, limit));
+            };
+            stun.speed_reduction = reduction(projectile.ion_stun_speed_reduction);
+            stun.rate_reduction = reduction(projectile.ion_stun_shot_rate_reduction);
             stun.stack = projectile.ion_stun_stack_duration;
             if (!tactical::valid_ion_stun(stun)) {
                 return ShotResult::failure(failure("projectile '" + projectile.id + "' has an invalid ion stun (IS-01)"));
@@ -161,12 +203,16 @@ struct ShotProfileBuilder final {
             || same_name(projectile.category, "LIGHT_SABER") || same_name(projectile.category, "BOMB")
             || same_name(projectile.category, "CLUSTER_BOMB"));
         shot.turn_rate = projectile.max_rate_of_turn.value_or(Fixed{}); // WPJ-09/17: direct deflection turns too
-        if (auto flight_error = bind_projectile_flight(projectile, shot))
+        if (auto flight_error = bind_projectile_flight(projectile, shot, notes))
             return ShotResult::failure(std::move(*flight_error));
         shot.appearance_delay_frames = weapon.appearance_delay_frames.value_or(0);
         for (const auto& row : weapon.inaccuracy) {
-            auto bits = category_bits({row.category});
-            if (!bits) return ShotResult::failure(bits.error());
+            auto names = row.category;
+            std::replace(names.begin(), names.end(), '|', ' ');
+            auto bits = category_bits(detail::tokens(names));
+            // ML-51: loading reports unknown category/distance rows; synthetic tables may
+            // also supply them directly. Neither path rejects the weapon or its owner.
+            if (!bits) continue;
             shot.inaccuracy.push_back({bits.value(), row.distance});
         }
         return ShotResult::success(std::move(shot));
@@ -195,21 +241,22 @@ struct WeaponProfileBuilder final {
         using WeaponResult = core::Result<tactical::WeaponProfile>;
         tactical::WeaponProfile entry;
         entry.hardpoint = hardpoint;
+        entry.fire_in_rocket_mode = weapon.fire_in_rocket_mode;
+        entry.fire_in_normal_mode = weapon.fire_in_normal_mode;
         auto minimum = whole(weapon.min_recharge_seconds.value_or(Fixed{}), 100, what + " recharge");
         auto maximum = whole(weapon.max_recharge_seconds.value_or(Fixed{}), 100, what + " recharge");
         auto delay = whole(weapon.pulse_delay_seconds.value_or(Fixed{}), tactical::logical_frames_per_second,
             what + " pulse delay");
-        auto restrictions = category_bits(weapon.category_restrictions);
+        const auto restrictions = category_bits.known_bits(weapon.category_restrictions);
         if (!minimum) return WeaponResult::failure(minimum.error());
         if (!maximum) return WeaponResult::failure(maximum.error());
         if (!delay) return WeaponResult::failure(delay.error());
-        if (!restrictions) return WeaponResult::failure(restrictions.error());
         entry.min_recharge_hundredths = minimum.value();
         entry.max_recharge_hundredths = std::max(minimum.value(), maximum.value());
         entry.pulse_count = std::max<std::uint32_t>(1, weapon.pulse_count.value_or(1));
         entry.pulse_delay_frames = delay.value();
         if (weapon.full_salvo_delay_multiplier) entry.full_salvo_delay = *weapon.full_salvo_delay_multiplier;
-        entry.category_restrictions = restrictions.value();
+        entry.category_restrictions = restrictions;
         entry.opportunity_when_idle = weapon.opportunity_fire_when_idle;
         entry.opportunity_when_targeting = weapon.opportunity_fire_when_targeting;
         // R-01: the cutoff compares the authored seconds, before the hundredths truncation.
@@ -244,7 +291,7 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
     const PointPlacement& place, const WeaponProfileBuilder& weapon_profile, const ShotProfileBuilder& shot_profile,
     const ProjectilePower& projectile_power, const Fixed& power_sum, const std::optional<std::uint32_t>& barrage_projectile,
     const std::map<std::size_t, std::uint32_t>::iterator& override_projectile,
-    const std::map<std::size_t, std::uint32_t>& ion_override) {
+    const std::map<std::size_t, std::uint32_t>& ion_override, std::vector<core::Diagnostic>* notes) {
     for (std::uint32_t index = 0; index < unit.hardpoints.size(); ++index) {
         const auto& hardpoint = unit.hardpoints[index];
         profile.hardpoint_meshes.push_back(hardpoint.collision_mesh);
@@ -259,7 +306,7 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
         auto entry = weapon_profile(weapon, index, unit.id + " " + hardpoint.id);
         if (!entry) return entry.error();
         apply_hardpoint_weapon_limits(entry, weapon, hardpoint);
-        if (hardpoint.requires_manual_target) {
+        if (hardpoint.requires_manual_target || hardpoint.manual_is_turret) {
             entry.value().manual_turret_required = hardpoint.manual_is_turret;
             const auto seconds = hardpoint.manual_cooldown_seconds.value_or(Fixed{});
             auto frames = sim::math::multiply(seconds, Fixed::from_raw(30 * Fixed::scale));
@@ -308,7 +355,25 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
                         turret.barrel_axes[axis] = turned.value();
                     }
                 }
-                if (usable) entry.value().manual_turret = turret;
+                if (usable) {
+                    bool conditioned = false;
+                    for (auto* axes : {&turret.coordinate_axes, &turret.axes,
+                             turret.barrel ? &turret.barrel_axes : nullptr}) {
+                        if (axes == nullptr) continue;
+                        auto result = detail::condition_turret_frame(*axes);
+                        if (!result) return failure(unit.id + " " + hardpoint.id + ": " + result.error().message);
+                        conditioned = conditioned || result.value();
+                    }
+                    if (conditioned && notes != nullptr) {
+                        core::Diagnostic note;
+                        note.code = std::string(diagnostic_codes::bone_frame);
+                        note.severity = core::Severity::info;
+                        note.message = unit.id + " " + hardpoint.id
+                            + ": HPT-09: slightly sheared authored turret frames orthonormalized in X/Y/Z order";
+                        notes->push_back(std::move(note));
+                    }
+                    entry.value().manual_turret = turret;
+                }
             }
         }
         if (power_sum.raw() > 0 && unit.ai_combat_power) {
@@ -366,6 +431,7 @@ std::optional<core::Diagnostic> append_hardpoint_combat_profiles(const UnitType&
             if (usable) entry.value().fire_axes = turned;
         }
         entry.value().fire_b = entry.value().fire_a;
+        entry.value().randomize_between_fire_bones = hardpoint.randomize_between_fire_bones;
         if (!hardpoint.fire_b.bone.empty() && hardpoint.fire_b.position) {
             auto placed = place(*hardpoint.fire_b.position);
             if (!placed) return placed.error();
@@ -458,6 +524,13 @@ std::optional<core::Diagnostic> append_object_combat_weapon(const UnitType& unit
             auto placed = place(*bone.position);
             if (!placed) return placed.error();
             entry.value().muzzles.push_back(placed.value());
+            // RFL-15: the bone's x axis, turned like a point and unit length (zero without a frame).
+            Vec3 axis{};
+            if (bone.axes) {
+                const auto& x = (*bone.axes)[0];
+                if (auto turned = sim::math::normalize(Vec3{Fixed::from_raw(-x.y.raw()), x.x, x.z})) axis = turned.value();
+            }
+            entry.value().muzzle_axes.push_back(axis);
         }
         profile.weapons.push_back(entry.value());
     }
@@ -484,7 +557,7 @@ std::optional<core::Diagnostic> append_combat_collision_geometry(const UnitType&
         for (const auto& mesh : unit.collision_meshes) {
             std::vector<tactical::CollisionTriangle> triangles;
             triangles.reserve(mesh.triangles.size());
-            for (const auto& corners : mesh.triangles) {
+            for (const auto corners : mesh.triangles) {
                 std::array<Vec3, 3> placed{};
                 for (std::size_t corner = 0; corner < 3; ++corner) {
                     auto point = place(corners[corner]);
@@ -558,7 +631,7 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
     profile.ranged_target_z_adjust = unit.ranged_target_z_adjust.value_or(Fixed{});
     // WST-07/08: the type-level reveal range, whether or not the type has REVEAL.
     profile.target_stealth = unit.target_stealth_units;
-    if (unit.target_stealth_units) profile.stealth_detection_range = unit.space_fow_reveal_range.value_or(Fixed{});
+    if (unit.target_stealth_units) profile.stealth_detection_range = unit.fow_reveal_range.value_or(Fixed{});
     for (const auto index : unit.death_projectile_indices) {
         Weapon payload;
         payload.projectile_index = index;
@@ -591,7 +664,8 @@ std::optional<core::Diagnostic> bind_combat_profile_identity(const UnitType& uni
 
 } // namespace
 
-core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
+core::Result<tactical::CombatTable> combat_table(const UnitTables& tables, const ContentErrors policy,
+    std::vector<core::Diagnostic>* const skipped) {
     using Result = core::Result<tactical::CombatTable>;
     const CategoryBits category_bits{tables};
 
@@ -599,7 +673,8 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
     // The projectile a weapon fires (#74, DG-21 to DG-25): its damage (a hardpoint's own positive
     // damage before the projectile's), speed and flags; the weapon's own Damage_Type before the
     // projectile's; a hardpoint's range limits its travel.
-    const ShotProfileBuilder shot_profile{tables, types, category_bits};
+    const ShotProfileBuilder shot_profile{tables, types, category_bits,
+        policy == ContentErrors::skip_object ? skipped : nullptr};
 
     // AB-66 (#561): the craft of a squadron whose team container has ION_CANNON_SHOT fire its
     // override projectile from their hardpoints while it is on; craft unit index -> projectile.
@@ -631,20 +706,21 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         }
     }
     std::map<std::uint32_t, std::uint32_t> set_index; // unit tables' set index -> combat table's
-    for (std::size_t unit_index = 0; unit_index < tables.units.size(); ++unit_index) {
+    // One unit type's rows, built whole before any is added: a type that fails adds nothing.
+    const auto build_unit = [&](const std::size_t unit_index) -> std::optional<core::Diagnostic> {
         const auto& unit = tables.units[unit_index];
         const auto footprint = detail::space_footprint(unit.id, unit.scale_factor, unit.footprint);
-        if (!footprint) return Result::failure(footprint.error());
-        table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
-            footprint.value().x_extent, footprint.value().y_extent});
-        if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
+        if (!footprint) return footprint.error();
         if (unit.kind == UnitKind::squadron) {
             tactical::CombatProfile company;
             company.type_id = assets::object_type_crc(unit.id);
             company.category_bits = unit.category_bits;
             company.special_weapon = unit.special_weapon;
+            table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
+                footprint.value().x_extent, footprint.value().y_extent});
+            if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
             table.retaliation_team_types.push_back(std::move(company));
-            continue; // squadrons act through their craft (#75)
+            return std::nullopt; // squadrons act through their craft (#75)
         }
         const auto override_projectile = ion_override.find(unit_index);
         std::optional<std::uint32_t> barrage_projectile;
@@ -659,8 +735,9 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         // so (x, y, z) becomes (-y, x, z).
         const PointPlacement place{unit, scale};
         tactical::CombatProfile profile;
-        if (auto phase_error = bind_combat_profile_identity(unit, profile, shot_profile, set_index))
-            return Result::failure(std::move(*phase_error));
+        auto unit_set_index = set_index; // committed only when the whole type builds
+        if (auto phase_error = bind_combat_profile_identity(unit, profile, shot_profile, unit_set_index))
+            return phase_error;
         const WeaponProfileBuilder weapon_profile{category_bits, opportunity_cutoff};
         // Compute_AI_Combat_Power (A-06, research AT-09): a weapon hardpoint's share of the type's
         // AI_Combat_Power is its projectile's AI_Combat_Power over the sum of all its weapon
@@ -669,17 +746,31 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
         Fixed power_sum{};
         for (const auto& hardpoint : unit.hardpoints) {
             auto sum = sim::math::add(power_sum, projectile_power(hardpoint));
-            if (!sum) return Result::failure(failure(unit.id + " AI combat power: " + sum.error().message));
+            if (!sum) return failure(unit.id + " AI combat power: " + sum.error().message);
             power_sum = sum.value();
         }
         if (auto phase_error = append_hardpoint_combat_profiles(unit, profile, place, weapon_profile, shot_profile,
-                projectile_power, power_sum, barrage_projectile, override_projectile, ion_override))
-            return Result::failure(std::move(*phase_error));
+                projectile_power, power_sum, barrage_projectile, override_projectile, ion_override, skipped))
+            return phase_error;
         if (auto phase_error = append_object_combat_weapon(unit, profile, place, weapon_profile, shot_profile, barrage_projectile))
-            return Result::failure(std::move(*phase_error));
+            return phase_error;
         if (auto phase_error = append_combat_collision_geometry(unit, profile, place))
-            return Result::failure(std::move(*phase_error));
+            return phase_error;
+        table.footprints.push_back({footprint.value().type_id, footprint.value().radius,
+            footprint.value().x_extent, footprint.value().y_extent});
+        if (unit.unit_ai) table.unit_ai_types.push_back(assets::object_type_crc(unit.id));
+        set_index = std::move(unit_set_index);
         table.profiles.push_back(std::move(profile));
+        return std::nullopt;
+    };
+    for (std::size_t unit_index = 0; unit_index < tables.units.size(); ++unit_index) {
+        auto error = build_unit(unit_index);
+        if (!error) continue;
+        // Content-error policy (#4589): FoC loads a game with a bad object in it. A lenient load skips that
+        // type, reports it, and fails only a battle that places it; strict (the default) refuses the table.
+        if (policy == ContentErrors::strict) return Result::failure(std::move(*error));
+        error->message = "skipped unit type '" + tables.units[unit_index].id + "': " + error->message;
+        if (skipped != nullptr) skipped->push_back(std::move(*error));
     }
     std::sort(table.profiles.begin(), table.profiles.end(),
         [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
@@ -710,6 +801,30 @@ core::Result<tactical::CombatTable> combat_table(const UnitTables& tables) {
     std::sort(table.footprints.begin(), table.footprints.end(),
         [](const auto& left, const auto& right) { return left.type_id < right.type_id; });
     auto valid = tactical::validate_combat(table);
+    if (!valid && policy == ContentErrors::skip_object) {
+        // The whole-table check names no type, so a lenient load tries each profile alone and drops the
+        // ones the check refuses (#4589); what remains is checked again as a table.
+        std::vector<tactical::CombatProfile> candidates = std::move(table.profiles);
+        table.profiles.clear();
+        std::vector<tactical::CombatProfile> kept;
+        for (auto& candidate : candidates) {
+            table.profiles.assign(1, candidate);
+            auto alone = tactical::validate_combat(table);
+            if (alone) {
+                kept.push_back(std::move(candidate));
+                continue;
+            }
+            if (skipped != nullptr) {
+                std::string name = "type " + std::to_string(candidate.type_id);
+                for (const auto& unit : tables.units) {
+                    if (assets::object_type_crc(unit.id) == candidate.type_id) name = "'" + unit.id + "'";
+                }
+                skipped->push_back(failure("skipped unit type " + name + ": " + alone.error().message));
+            }
+        }
+        table.profiles = std::move(kept);
+        valid = tactical::validate_combat(table);
+    }
     if (!valid) return Result::failure(failure(valid.error().message));
     return Result::success(std::move(table));
 }

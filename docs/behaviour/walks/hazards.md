@@ -262,6 +262,13 @@ The read-only evidence and identifier map remain in ignored research storage.
   A **plain** nebula does not zero shields: shield disable follows the separate
   ion-storm flag. Dense visibility follows WHZ-09, not an unconditional reduction
   of a ship's whole sensor circle when its center enters a nebula.
+  Observation (debug-build Lua capture 2026-10-24, scripted shieldable damage of 100
+  to three identical shielded frigates): in a plain nebula the shield absorbed
+  (1.000 to 0.857, then recharged to 1.000) with the hull unchanged, matching an
+  empty-space control; in a nebula that is also an ion storm the shield stayed 1.000
+  and the hull fell to 0.981; DEFEND was cancelled on nebula contact and stayed
+  unready until after exit. This covers the no-projectile route only. The paired
+  synthetic regression is `test_nebula_storm_pair` in `tests/replay/pathfind_tests.cpp`.
 
 ### Ion storms: within ordinary shield service and damage
 

@@ -21,11 +21,14 @@ struct Options {
     std::optional<fs::path> game_root;     // --game-root, else EAWR_EAW_GAME_ROOT
     std::optional<fs::path> godot;         // --godot, else EAWR_GODOT_EXECUTABLE
     std::optional<fs::path> project;       // --project, else <launcher folder>\project
-    fs::path user_data;                    // --user-data, else Godot's user folder
+    fs::path user_data;                    // --user-data: launcher state/logs only; else Godot's user folder
+    std::optional<fs::path> viewer_user_data; // Injectable Godot user:// folder; independent of --user-data
     fs::path launcher_dir;                 // the folder holding the launcher exe
     bool allow_unknown_build = false;      // --allow-unknown-build: passed to the viewer as --eawr-allow-unknown-build
+    std::optional<bool> safe_render_thread;       // Explicit CLI mode: --render-thread safe|separate; --safe-render-thread aliases Safe
     bool choose_game = false;              // --choose-game (or Shift held): ask even if a choice is saved
     bool no_dialogs = false;               // --no-dialogs: errors go to the log and stderr, nothing is asked (tests, scripts)
+    bool mods = false;                     // --mods: open the bundled mod manager
     bool help = false;                     // --help
     std::optional<int> quit_after;         // --godot-quit-after N
     std::vector<std::wstring> extra;       // everything else, and anything after "--", goes to the viewer

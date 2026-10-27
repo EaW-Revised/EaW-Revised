@@ -305,7 +305,7 @@ core::Result<MotionProfile> TacticalSession::Impl::limits_of(const LiveUnit& uni
         // IS-05: an ion stun cuts the maximum speed only (the ability phase clears an ended stun
         // before any plan of its tick).
         if (limits && unit.ion_stun) {
-            const auto cut = math::Fixed::from_raw(math::Fixed::scale - unit.ion_stun->speed_reduction.raw());
+            const auto cut = ion_reduction_factor(unit.ion_stun->speed_reduction);
             auto slowed = math::multiply(limits.value().max_speed, cut);
             if (!slowed) return core::Result<MotionProfile>::failure(slowed.error());
             auto profile = std::move(limits).value();
@@ -471,12 +471,12 @@ bool TacticalSession::Impl::approach_due(const LiveUnit& unit, const std::uint64
 
 math::Fixed TacticalSession::Impl::approach_range(const LiveUnit& unit, const bool guard,
     const detail::CombatUnit* target) const noexcept {
-        const auto* profile = combat.find(unit.state.type_id);
-        auto range = detail::approach_distance(
-            guard, profile != nullptr ? profile->max_attack_distance : std::nullopt, motion.rules.guard_range);
-        if (guard || target == nullptr || profile == nullptr || !profile->max_attack_distance) return range;
+        const auto maximum = attack_distance(unit);
+        auto range = detail::approach_distance(guard, maximum, motion.rules.guard_range);
+        if (guard || target == nullptr || !maximum) return range;
         // OR-03: slot mapping uses the soft radius for a hardpoint aim, otherwise the
-        // smaller hard extent. These validated dimensions sum well within Q24 bounds.
+        // smaller hard extent. This internal approach radius may reach the Q24 endpoint;
+        // clipping it does not alter the stored attack range.
         auto extension = detail::target_soft_radius(&motion, *target);
         if (!detail::has_aim_hardpoint(*target)) {
             extension = {};
@@ -491,7 +491,8 @@ math::Fixed TacticalSession::Impl::approach_range(const LiveUnit& unit, const bo
                     box.max.y.raw() - box.min.y.raw()) / 2);
             }
         }
-        return math::Fixed::from_raw(range.raw() + extension.raw());
+        const auto reach = math::add(range, extension);
+        return reach ? reach.value() : math::Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
     }
 
 bool TacticalSession::Impl::target_hardpoint_standing(const LiveUnit& target, const std::uint32_t index) const {
@@ -580,9 +581,8 @@ core::Result<std::optional<TacticalSession::Impl::ApproachPlan>> TacticalSession
             unit.state.order.kind == OrderKind::attack ? unit.state.order.hardpoint : attack_hull);
         auto reach = core::Result<math::Fixed>::success(range);
         if (!guard && target_view != nullptr) {
-            const auto* profile = combat.find(unit.state.type_id);
             reach = detail::target_attack_distance(&motion, *target_view, unit.state.position,
-                profile != nullptr ? profile->max_attack_distance.value_or(math::Fixed{}) : math::Fixed{},
+                attack_distance(unit).value_or(math::Fixed{}),
                 detail::has_aim_hardpoint(*target_view));
         }
         if (!reach) return Checked::failure(reach.error());

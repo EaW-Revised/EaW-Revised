@@ -74,6 +74,7 @@ void GalacticMode::State::write_report_session(std::ostringstream& output) const
            << ", \"native_ai_installed_at_start\": " << (options.restore_save ? "null" : native_ai_installed ? "true" : "false")
            << ", \"submitted_orders\": " << submitted_orders
            << ", \"galactic_reveal\": " << (options.galactic_reveal ? "true" : "false");
+    output << ", \"departure_hint_visible\": " << (departure_hint && departure_hint->is_visible_in_tree() ? "true" : "false");
     if (displayed_snapshot) {
         const auto& clock = displayed_snapshot->clock();
         output << ", \"session_tick\": " << clock.session_tick << ", \"galactic_frame\": " << clock.galactic_frame
@@ -762,7 +763,7 @@ void GalacticMode::State::write_report_handoff(std::ostringstream& output) const
            << ",\"accepted\":" << (briefing_accepted ? "true" : "false")
            << ",\"intro_requested\":" << (intro_requested ? "true" : "false")
            << ",\"movie\":" << json(briefing_movie) << ",\"movie_playback\":false,\"intro_playback\":false}";
-    output << ",\n  \"handoff\": {\"requested\": " << (options.synthetic_battle ? "true" : "false")
+    output << ",\n  \"handoff\": {\"requested\": " << (options.synthetic_battle || handoff_requested ? "true" : "false")
            << ", \"conflict\": " << conflict << ", \"returned\": " << (returned ? "true" : "false")
            << ", \"child_ready_tick\": " << child_ready_tick << ", \"loading_frames\": " << loading_frames
            << ", \"begin_wait_frames\": " << begin_wait_frames << ", \"begin_wait_last_tick\": " << begin_wait_last_tick

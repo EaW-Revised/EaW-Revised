@@ -3,6 +3,7 @@
 // map, and prints the tick times after the order with the work and time of the path searches
 // (tactical::PathSearchProbe). Exits 1 when two worker counts disagree on a tick's state hash.
 //
+//   path_bench --land [...] runs the land path search benchmark instead (land_bench.cpp).
 //   path_bench [--game-root <dir>] [--selection owner|owner-group|all|large[,...]] [--order-tick <n>] [--ticks 300]
 //              [--workers 1,4] [--destination x,y] [--timing on|off] [--csv <prefix>] [--list 1]
 //              [--pin <file> [--update-pin 1]] [--replay-out <file>] [--ships <prefix>] [--search-budget <n>]
@@ -42,6 +43,7 @@ int main(const int argc, const char* const argv[]) {
     for (int index = 1; index < argc; ++index) {
         if (std::string_view(argv[index]) == "--melee") return eawr::bench::melee_main(argc, argv);
         if (std::string_view(argv[index]) == "--profile-attach") return eawr::bench::attach_main(argc, argv);
+        if (std::string_view(argv[index]) == "--land") return eawr::bench::land_main(argc, argv);
     }
     const auto options = parse_options(argc, argv);
     if (!options) {

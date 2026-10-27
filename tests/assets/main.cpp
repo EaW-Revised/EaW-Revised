@@ -1,8 +1,10 @@
 #include <utility>
 #include "../support/check.hpp"
 #include "eawr/assets/assets.hpp"
+#include "texture_codec_fixtures.hpp"
 
 #include <bit>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -36,8 +38,101 @@ std::vector<std::byte> animation_fixture(){std::vector<std::byte> info;mini(info
 std::vector<std::byte> dds_fixture(){std::vector<std::byte> out;u32(out,0x20534444);u32(out,124);u32(out,0x100f);u32(out,1);u32(out,1);u32(out,4);u32(out,0);u32(out,1);for(int i=0;i<11;++i)u32(out,0);u32(out,32);u32(out,0x41);u32(out,0);u32(out,32);u32(out,0x00ff0000);u32(out,0x0000ff00);u32(out,0x000000ff);u32(out,0xff000000);u32(out,0x1000);for(int i=0;i<4;++i)u32(out,0);u8(out,3);u8(out,2);u8(out,1);u8(out,4);return out;}
 std::vector<std::byte> tga_fixture(){std::vector<std::byte> out;u8(out,0);u8(out,0);u8(out,10);for(int i=0;i<5;++i)u8(out,0);for(int i=0;i<4;++i)u8(out,0);u16(out,2);u16(out,1);u8(out,24);u8(out,0x20);u8(out,0x81);u8(out,9);u8(out,8);u8(out,7);return out;}
 eawr::assets::Source source(std::string path,std::size_t size){return {std::move(path),"fixture","test",eawr::vfs::AssetOrigin::loose,size};}
+
+std::vector<std::byte> image_bytes(std::string_view hex) {
+    const auto digit = [](char c) { return c <= '9' ? c - '0' : c - 'a' + 10; };
+    std::vector<std::byte> result;
+    for (std::size_t index = 0; index < hex.size(); index += 2)
+        result.push_back(static_cast<std::byte>((digit(hex[index]) << 4) | digit(hex[index + 1])));
+    return result;
+}
+
+void image_codec_tests() {
+    using namespace eawr::assets;
+    using namespace texture_codec_fixtures;
+    const auto rgba = image_bytes(rgba_png);
+    for (const std::string path : {"color.png", "color.tga", "color.dds", "color.bin"}) {
+        auto image = load_texture(rgba, source(path, rgba.size()));
+        expect(bool(image), "PNG is selected by bytes, including PNG data named TGA");
+        if (!image) continue;
+        expect(image.value().width == 2 && image.value().height == 2 && image.value().has_alpha,
+               "PNG dimensions and authored alpha are retained");
+        expect(image.value().format == PixelFormat::rgba8 && image.value().source_origin == ImageOrigin::top_left,
+               "PNG produces top-left RGBA8 pixels");
+        const auto& mip = image.value().mips.front();
+        expect(mip.row_pitch == 8 && mip.bytes.size() == 16, "PNG has one tightly packed mip");
+        const std::vector<std::byte> pixels{std::byte{220},std::byte{15},std::byte{30},std::byte{80},
+            std::byte{15},std::byte{210},std::byte{40},std::byte{255},
+            std::byte{10},std::byte{20},std::byte{230},std::byte{0},
+            std::byte{200},std::byte{180},std::byte{15},std::byte{128}};
+        expect(mip.bytes == pixels, "PNG preserves row order, RGB and partial/zero alpha exactly");
+    }
+    for (const auto encoded : {rgb_png, gray_png, gray_alpha_png}) {
+        const auto bytes = image_bytes(encoded);
+        auto image = load_texture(bytes, source("synthetic.png", bytes.size()));
+        expect(bool(image), "RGB and grayscale PNG layouts decode");
+        if (!image) continue;
+        expect(image.value().width == 2 && image.value().height == 1, "PNG layout dimensions retained");
+        expect(image.value().has_alpha == (encoded == gray_alpha_png), "PNG alpha metadata follows source channels");
+        const auto& pixels = image.value().mips.front().bytes;
+        if (encoded == rgb_png) {
+            expect(pixels[0] == std::byte{220} && pixels[3] == std::byte{255}, "RGB PNG receives opaque alpha");
+        } else {
+            expect(pixels[0] == std::byte{31} && pixels[1] == std::byte{31} && pixels[2] == std::byte{31},
+                   "grayscale PNG expands equally to RGB");
+            expect(pixels[3] == (encoded == gray_alpha_png ? std::byte{80} : std::byte{255}),
+                   "grayscale PNG retains alpha or receives opaque alpha");
+        }
+    }
+    const auto jpeg = image_bytes(rgb_jpeg);
+    auto photograph = load_texture(jpeg, source("synthetic.tga", jpeg.size()));
+    expect(bool(photograph), "JPEG is decoded by bytes with a different suffix");
+    if (photograph) {
+        expect(photograph.value().width == 8 && photograph.value().height == 8 && !photograph.value().has_alpha,
+               "JPEG dimensions and opaque source metadata retained");
+        const auto& pixels = photograph.value().mips.front().bytes;
+        expect(pixels.size() == 8 * 8 * 4 && photograph.value().source_origin == ImageOrigin::top_left,
+               "JPEG produces tightly packed top-left RGBA8");
+        for (std::size_t index = 0; index < pixels.size(); index += 4) {
+            const auto r = std::to_integer<int>(pixels[index]);
+            const auto g = std::to_integer<int>(pixels[index + 1]);
+            const auto b = std::to_integer<int>(pixels[index + 2]);
+            expect(r >= 221 && r <= 227 && g >= 29 && g <= 35 && b >= 45 && b <= 51
+                && pixels[index + 3] == std::byte{255}, "JPEG decodes the invented colour within compression tolerance");
+        }
+    }
+    const auto cmyk = image_bytes(cmyk_jpeg);
+    auto print_image = load_texture(cmyk, source("synthetic-cmyk.jpg", cmyk.size()));
+    expect(bool(print_image), "four-component CMYK JPEG decodes");
+    if (print_image) {
+        expect(!print_image.value().has_alpha, "CMYK colour components are not an alpha channel");
+        const auto& pixels = print_image.value().mips.front().bytes;
+        expect(pixels.size() == 8 * 8 * 4, "CMYK JPEG expands to RGBA8");
+        for (std::size_t index = 3; index < pixels.size(); index += 4)
+            expect(pixels[index] == std::byte{255}, "CMYK JPEG output pixels are opaque");
+    }
+    for (auto bytes : {rgba, jpeg}) {
+        bytes.resize(12);
+        auto invalid = load_texture(bytes, source("truncated.tga", bytes.size()));
+        expect(!invalid && invalid.error().code == diagnostic_codes::texture_format, "truncated image headers fail closed");
+    }
+    auto oversized = rgba;
+    // IHDR is big endian. 8193 squared exceeds the existing pixel budget;
+    // the preflight must reject this before allocating or decoding a plane.
+    for (const std::size_t offset : {16U, 20U}) {
+        oversized[offset] = std::byte{0}; oversized[offset + 1] = std::byte{0};
+        oversized[offset + 2] = std::byte{0x20}; oversized[offset + 3] = std::byte{1};
+    }
+    auto limited = load_texture(oversized, source("oversized.png", oversized.size()));
+    expect(!limited && limited.error().code == diagnostic_codes::limit, "PNG dimensions are bounded before image allocation");
+    auto corrupt = rgba;
+    std::fill(corrupt.begin() + 41, corrupt.end(), std::byte{0});
+    expect(!load_texture(corrupt, source("corrupt.png", corrupt.size())), "invalid PNG image data is rejected");
+    expect(!load_texture(rgba, source("size.png", rgba.size() + 1)), "PNG retains the source-size provenance check");
+}
 }
 int main(){using namespace eawr::assets;
+    image_codec_tests();
     auto mb=model_fixture();auto model=load_model(mb,source("data/art/models/test.alo",mb.size()));expect(bool(model),"valid minimal ALO loads");if(model){expect(model.value().bones.size()==1,"ALO retains bone");expect(model.value().bones[0].relative_transform[4]==1.0F,"ALO retains source float transform");}
     for(const int mode : {0,1,2,3,6,7}){auto encoded=model_fixture(-1,mode);auto decoded=load_model(encoded,source("billboard.alo",encoded.size()));expect(decoded&&decoded.value().bones[0].billboard==static_cast<std::uint32_t>(mode),"0x206 bone retains authored billboard mode");}
     auto cycle=model_fixture(0);auto bad_cycle=load_model(cycle,source("cycle.alo",cycle.size()));expect(!bad_cycle&&bad_cycle.error().code==diagnostic_codes::hierarchy_cycle,"bone self-cycle is rejected");

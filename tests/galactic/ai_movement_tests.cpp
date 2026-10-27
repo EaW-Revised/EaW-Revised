@@ -388,6 +388,7 @@ void invasion_retention() {
         else expect(summary_baseline == trace, "summary invasion equality on 1/2/4/8 workers");
         {
             auto modal_setup = setup; modal_setup.interactive_seat = {1};
+            modal_setup.fleet_control->pause = gc::PausePolicy::admit_all();
             auto modal = take(cp::GameSession::create(modal_setup)); done(configure_summary(modal));
             cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
             outcome.planet = context.planet; outcome.invader = context.invader; outcome.defender = context.defender;
@@ -398,6 +399,59 @@ void invasion_retention() {
                 "invasion fixture owns only its outcome summary hold");
             expect(!accept_by_command(modal, executor, gc::SeatId{1}, 91).accepted() && modal.battle_summary_hold() == 90,
                 "stale invasion leaves matching summary hold intact");
+            {   // WGM-07 deviation: the summary hold is on the pause counter without a pending conflict. The pause
+                // policy admits fleet management during a PLAYER pause, never during this system hold.
+                const auto slot_command = [&](cp::GameSession& session, std::uint64_t sequence) {
+                    done(session.submit({{session.completed_tick(), {1}, sequence}, gc::SetFleetOrbitSlot{10, 1}}));
+                    (void)take(session.step(executor));
+                    for (const auto& event : session.galaxy().snapshot()->events())
+                        if (event.kind == gc::GalacticEventKind::command_rejected && event.sequence == sequence) return event.reason;
+                    return gc::GalacticRejectReason::none;
+                };
+                const auto slot_of = [](cp::GameSession& session) {
+                    for (const auto& fleet : session.galaxy().snapshot()->fleets()) if (fleet.id == 10) return fleet.orbit_slot;
+                    return std::uint8_t{255};
+                };
+                expect(slot_command(modal, 7) == gc::GalacticRejectReason::paused && slot_of(modal) == 0,
+                    "an admitting pause policy still refuses fleet management during the battle-summary hold");
+                auto* modal_owner = owner;
+                const auto native = take(modal_owner->admit_native_fleet(1, gc::SetFleetOrbitSlot{10, 1}));
+                expect(!native.admitted && native.reason == gc::GalacticRejectReason::paused,
+                    "native human admission between ticks retains the summary hold");
+                auto shadow = take(modal_owner->begin_native_actions(1, 8));
+                const auto layered = take(shadow.admit_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false));
+                const auto same_receipt = [](const auto& a, const auto& b) {
+                    return a.admitted == b.admitted && a.object == b.object && a.reason == b.reason;
+                };
+                expect(same_receipt(layered, native), "native player layer copies the same summary-hold input");
+                auto next_player = take(shadow.for_player(2, 8));
+                auto fork = take(shadow.fork_player(1, shadow.next_entity_id(), 8));
+                expect(same_receipt(take(fork.admit_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false)), native),
+                    "independent player fork retains the summary hold");
+                expect(!take(next_player.admit_fleet(2, gc::SetFleetOrbitSlot{10, 1}, false)).admitted,
+                    "following player layer retains ordinary admission gates");
+                const auto summary_build = eawr::checkpoint::game_identities(modal.record().setup);
+                const auto saved = take(eawr::checkpoint::save_game_checkpoint(modal, summary_build));
+                auto direct = take(eawr::checkpoint::load_game_checkpoint(saved, summary_build, load, executor));
+                auto imported_shadow = take(owner->begin_native_actions(1, 8));
+                expect(same_receipt(take(imported_shadow.admit_fleet(1, gc::SetFleetOrbitSlot{10, 1}, false)), native),
+                    "direct import derives the hold before the first world step or native player layer");
+                auto replayed = take(eawr::checkpoint::replay_game_checkpoint_for_testing(saved, summary_build, load, executor));
+                expect(direct.session.state_sha256() == modal.state_sha256()
+                    && replayed.session.state_sha256() == modal.state_sha256(),
+                    "summary-held human commands restore equally through direct import and historical reconstruction");
+                expect(direct.session.record().native_effects == modal.record().native_effects
+                    && replayed.session.record().native_effects == modal.record().native_effects,
+                    "summary-held native refusal receipts reconstruct exactly");
+                expect(slot_command(direct.session, 8) == gc::GalacticRejectReason::paused
+                    && slot_command(replayed.session, 8) == gc::GalacticRejectReason::paused,
+                    "restored summary ownership continues to refuse an admitting human policy");
+                owner = modal_owner;
+                auto plain = take(cp::GameSession::create(modal_setup));
+                done(plain.submit({{plain.completed_tick(), {1}, 1}, gc::PauseGalaxy{}})); (void)take(plain.step(executor));
+                expect(plain.galaxy().clock().pause_depth == 1 && slot_command(plain, 2) == gc::GalacticRejectReason::none && slot_of(plain) == 1,
+                    "the same command is admitted during a player pause alone");
+            }
             done(modal.submit({{modal.completed_tick(), {1}, 1}, gc::PauseGalaxy{}})); (void)take(modal.step(executor));
             expect(!accept_by_command(modal, executor, gc::SeatId{1}, 90).accepted() && modal.galaxy().clock().pause_depth == 2
                 && modal.battle_summary_hold() == 90, "player pause refuses invasion without consuming either hold");
@@ -565,6 +619,51 @@ void equal_owner_invasion_block() {
             && restored.session.record().native_effects == session.record().native_effects,
             "equal-owner disk replay reconstructs the exact admitted nonqueued receipt and terminal retirement");
         if (baseline.empty()) baseline = session.state_sha256(); else expect(baseline == session.state_sha256(), "equal-owner block/retirement equality on1/2/4/8");
+    }
+}
+void summary_hold_survives_undefended_resume() {
+    std::string baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        auto setup = fixture(); setup.interactive_seat = {1};
+        setup.seats.front().kind = gc::SeatKind::human; setup.seats.front().human_side_id = 1;
+        setup.fleet_control->pause = gc::PausePolicy::admit_all();
+        setup.planets.front().owner = 2; setup.control->planets.front().ground_base = {};
+        setup.control->ground_capability_types = {{1, f(1), false, false}, {2, {}, true, false}};
+        setup.movement->contents = {{21, {{40, 1}}}, {22, {{41, 1}}}};
+        auto game = take(cp::GameSession::create(setup)); gc::GalacticSession* world{};
+        done(game.configure_native_replay_owners([&](auto& owner) {
+            world = &owner; return eawr::core::Result<void>::success();
+        }));
+        // Keep dispatch explicit so the pending request can overlap a later summary hold.
+        world->enable_native_invasions(true);
+        const auto invasion = take(world->admit_native_invasion(1, 10));
+        expect(invasion.admitted && invasion.queued, "undefended fixture retains its invasion before either pause owner");
+        cp::AutoResolveOutcomeApplication outcome; outcome.planet_type = "Fixture_Planet";
+        outcome.planet = 1; outcome.invader = 1; outcome.defender = 2;
+        outcome.result.conflict = 90; outcome.result.winner = 1;
+        done(game.stage_auto_resolve_outcome(outcome)); (void)take(game.step(executor));
+        done(game.submit({{game.completed_tick(), {1}, 1}, gc::PauseGalaxy{}})); (void)take(game.step(executor));
+        expect(game.battle_summary_hold() == 90 && world->clock().pause_depth == 2,
+            "player pause and summary ownership overlap before undefended dispatch");
+        done(world->dispatch_native_invasion(invasion.request, 0));
+        expect(world->native_invasion(invasion.request)->state == gc::GalacticSession::NativeInvasion::State::completed
+            && game.battle_summary_hold() == 90 && world->clock().pause_depth == 1,
+            "undefended invasion resumes one level while summary ownership remains");
+        auto after_dispatch = take(world->begin_native_actions(1, 8));
+        const auto immediate = take(after_dispatch.admit_fleet(1, gc::SetFleetOrbitSlot{11, 1}, false));
+        expect(!immediate.admitted && immediate.reason == gc::GalacticRejectReason::paused,
+            "another owner's resume cannot clear the summary gate before the next world step");
+        // Dispatch owns the world-service phase; journal the next direct action at a new frontier.
+        (void)take(game.step(executor));
+        const auto refused = take(world->admit_native_fleet(1, gc::SetFleetOrbitSlot{11, 1}));
+        expect(!refused.admitted && refused.reason == gc::GalacticRejectReason::paused,
+            "another owner's resume cannot clear the summary gate for a native human command");
+        done(game.submit({{game.completed_tick(), {1}, 2}, gc::BattleSummaryAcknowledge{90}})); (void)take(game.step(executor));
+        expect(!game.battle_summary_hold() && take(world->admit_native_fleet(1, gc::SetFleetOrbitSlot{11, 1})).admitted,
+            "native human management is admitted again only after the summary releases");
+        if (baseline.empty()) baseline = game.state_sha256();
+        else expect(game.state_sha256() == baseline, "overlapping hold release equality on 1/2/4/8 workers");
     }
 }
 void native_journal_disk() {
@@ -862,7 +961,7 @@ int case_galactic_ai_movement_tests(int argc, char** argv) {
     }
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--installed") installed();
-        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }
+        else { shared_movement_block(); movement_associations(); taskforce_containment(); invasion_queue_disk(); invasion_retention(); equal_owner_invasion_block(); summary_hold_survives_undefended_resume(); native_journal_disk(); contracts(); changed_path(); bribed_traversal_without_owner(); skipped_arrival_polls(); arrival_then_conflict_before_poll(); packed_remnant_hash(); native_management_gate(); }
     } catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

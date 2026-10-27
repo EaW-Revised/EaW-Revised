@@ -136,22 +136,21 @@ core::Result<units::UnitTables> reachable_tables(const units::UnitTables& raw,
         }
         for (const auto index : unit.death_projectile_indices) projectile(index);
         projectile(unit.retreat_self_destruct_index);
-        if (check_capabilities && unit.collision) for (const auto& mesh : unit.collision_meshes)
-            for (const auto& triangle : mesh.triangles) for (const auto& point : triangle)
-                for (const auto coordinate : {point.x, point.y, point.z}) {
-                    const auto scaled = sim::math::multiply(coordinate, unit.scale_factor.value_or(Fixed::from_raw(Fixed::scale)));
-                    const auto limit = tt::max_mesh_extent * Fixed::scale;
-                    if (!scaled || scaled.value().raw() < -limit || scaled.value().raw() > limit)
-                        return fail<units::UnitTables>("reachable type " + unit.id + " exceeds the collision mesh limit (DG-36..38, 4096 units)");
-                }
+        if (check_capabilities) if (auto error = units::collision_capability_error(unit))
+            return fail<units::UnitTables>(*error);
     }
+    std::string invalid_rockets;
     if (check_capabilities) for (const auto index : projectiles) {
         const auto& p = raw.projectiles[index];
-        if (key(p.category) == "ROCKET"
-            && (p.rocket_curve_offset.value_or(Fixed{}) != Fixed{} || p.rocket_curve_distance.value_or(Fixed{}) <= Fixed{}
-                || !p.explode_at_target_radius.value_or(false)))
-            return fail<units::UnitTables>("reachable projectile " + p.id + " needs an unavailable rocket route (RFL-03/05, #1760)");
+        // RFL-03/05: seeded offsets and post-aim extensions share the ordinary rocket consumer; an absent input takes
+        // the object-type default (ML-54), an authored non-positive one stays invalid.
+        if (key(p.category) == "ROCKET" && p.rocket_curve_distance.value_or(Fixed::from_raw(units::rocket_default_curve_distance * Fixed::scale)) <= Fixed{}) {
+            if (!invalid_rockets.empty()) invalid_rockets += ", ";
+            invalid_rockets += p.id;
+        }
     }
+    if (!invalid_rockets.empty())
+        return fail<units::UnitTables>("reachable projectiles need positive rocket curve distance (RFL-03): " + invalid_rockets);
     if (diagnostics_only) return Result::success({});
     units::UnitTables out; out.campaign_scene = true; out.campaign_ability_locks = raw.campaign_ability_locks;
     out.campaign_multiplayer = raw.campaign_multiplayer;
@@ -294,6 +293,26 @@ struct StockSpaceEntry::Impl {
         return at == types.end() ? nullptr : &*at;
     }
 };
+void StockSpaceEntry::memory_inventory(diagnostics::GcMemory& m) const {
+    m.row("shared.space_entry.metadata", impl_->galactic.types, impl_->types, impl_->sides, impl_->relations, impl_->ai_xml, impl_->ai_modules);
+    for (const auto& [name, map] : impl_->maps) {
+        static_cast<void>(name);
+        if (!map.tables || !m.seen.insert(map.tables.get()).second) continue;
+        const auto& t = *map.tables;
+        m.row("shared.unit_tables.structures", t.units, t.projectiles, t.obstacles, t.priority_sets, t.categories, t.properties);
+        for (const auto& u : t.units) {
+            auto& bytes = m.rows["shared.unit_tables.collision"];
+            if (!u.collision_meshes.capacity() || !m.seen.insert(u.collision_meshes.data()).second) continue;
+            bytes += u.collision_meshes.capacity() * sizeof(units::CollisionMesh);
+            for (const auto& mesh : u.collision_meshes) {
+                bytes += m.bytes(mesh.name);
+                if (!mesh.triangles.empty() && m.seen.insert(mesh.triangles.vertices().data()).second)
+                    bytes += mesh.triangles.capacity_bytes();
+            }
+        }
+    }
+}
+
 StockSpaceEntry::StockSpaceEntry(std::shared_ptr<const Impl> impl) : impl_(std::move(impl)) {}
 
 core::Result<std::shared_ptr<const StockSpaceEntry>> prepare_stock_space_entry(const vfs::Vfs& filesystem,
@@ -642,7 +661,10 @@ core::Result<ResolvedConflictEntry> StockSpaceEntry::resolve(const ConflictRecor
         if (depth > 32) return fail<void>("cyclic fleet contents");
         const auto* type = impl_->type(member.type);
         if (!type) return fail<void>("missing current fleet type binding");
-        if (std::any_of(record.forces.begin(), record.forces.end(), [&](const auto& f) { return f.id == member.id; })) input.roster_order.push_back(member.id);
+        if (std::any_of(record.forces.begin(), record.forces.end(), [&](const auto& f) { return f.id == member.id; })) {
+            input.roster_order.push_back(member.id);
+            if (member.pathfinder) input.pathfinders.push_back(member.id);
+        }
         if (!snapshot.movement()) return core::Result<void>::success();
         const auto contents = std::find_if(snapshot.movement()->contents.begin(), snapshot.movement()->contents.end(), [&](const auto& c) { return c.container == member.id; });
         if (contents == snapshot.movement()->contents.end()) return core::Result<void>::success();

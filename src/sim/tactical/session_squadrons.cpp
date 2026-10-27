@@ -217,7 +217,9 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             const auto placed = math::to_matrix(state.rotation, state.position);
             if (!placed) return Void::failure(placed.error());
             auto unit = new_unit(state, frame);
-            unit.garrison_unit = true; // WU-37: the hangar marks every object it creates.
+            // WU-37/FL-06: the bay marks craft and direct ships. Team creation starts
+            // unmarked; the bay marks only its first returned team below.
+            unit.garrison_unit = true;
             instances.push_back(instance_for(unit, placed.value(), frame));
             survivors.push_back(std::move(unit));
             next = state.entity_id == std::numeric_limits<EntityId>::max() ? invalid_entity_id : state.entity_id + 1;
@@ -359,39 +361,50 @@ core::Result<void> TacticalSession::Impl::launch(const LiveUnit& spawner, const 
             members.push_back(id);
             if (registered != nullptr) registered->push_back(id);
         }
-        if (next == invalid_entity_id) {
-            return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
-        }
-        const auto container = next;
-        if (auto added = add(UnitState{container, squadron->type_id, owner, position.value(),
-                math::identity_quat(), {}}); !added) {
-            return added;
-        }
-        squadron_list.push_back(Squadron{container, members});
-        SquadronState order;
-        order.container = container;
-        order.garrison_unit = true;
-        order.squadron_type = squadron->type_id;
-        order.spawner = free_type != 0 ? invalid_entity_id : spawner.state.entity_id;
-        order.entry = decision.entry;
-        order.roster = members;
-        order.next_scan_frame = frame + logical_frames_per_second; // FT-06: a launched squadron idles first
-        if (profile.mobile) {
-            order.mode = SquadronMode::escort;
-            order.escorted = spawner.state.entity_id;
-            order.anchor = {spawner.state.position.x, spawner.state.position.y, layer_z};
-        } else {
-            const auto& at = position.value();
-            const auto& along = direction.value();
-            const auto x = math::add(at.x, along.x);
-            const auto y = math::add(at.y, along.y);
-            if (!x || !y) {
-                return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "bay point overflows"));
+        // FL-06: commit all craft first, then team chunks in input order.
+        // Only the first returned team is linked to bay replenishment and launch orders.
+        for (std::size_t begin = 0; begin < members.size();) {
+            const auto count = std::min<std::size_t>(members.size() - begin, squadron->max_squad_size);
+            const std::vector<EntityId> team_members(members.begin() + begin, members.begin() + begin + count);
+            if (next == invalid_entity_id) {
+                return Void::failure(detail::diagnostic(diagnostic_codes::resource_limit, context + "stable ID space exhausted"));
             }
-            order.anchor = {x.value(), y.value(), layer_z};
+            const auto container = next;
+            if (auto added = add(UnitState{container, squadron->type_id, owner, position.value(),
+                    math::identity_quat(), {}}); !added) {
+                return added;
+            }
+            survivors.back().garrison_unit = begin == 0; // FL-06: the bay flags only its returned team
+            squadron_list.push_back(Squadron{container, team_members});
+            SquadronState order;
+            order.container = container;
+            order.garrison_unit = begin == 0;
+            order.squadron_type = squadron->type_id;
+            order.spawner = begin != 0 || free_type != 0 ? invalid_entity_id : spawner.state.entity_id;
+            order.entry = decision.entry;
+            order.roster = team_members;
+            order.next_scan_frame = frame + logical_frames_per_second; // FT-06: a launched squadron idles first
+            if (begin != 0) {
+                order.anchor = position.value();
+                order.formation = SquadronFormationState{order.anchor, invalid_entity_id, false, false, false};
+            } else if (profile.mobile) {
+                order.mode = SquadronMode::escort;
+                order.escorted = spawner.state.entity_id;
+                order.anchor = {spawner.state.position.x, spawner.state.position.y, layer_z};
+            } else {
+                const auto& at = position.value();
+                const auto& along = direction.value();
+                const auto x = math::add(at.x, along.x);
+                const auto y = math::add(at.y, along.y);
+                if (!x || !y) {
+                    return Void::failure(detail::diagnostic(diagnostic_codes::worker_failure, context + "bay point overflows"));
+                }
+                order.anchor = {x.value(), y.value(), layer_z};
+            }
+            if (begin == 0) order.formation = SquadronFormationState{order.anchor, order.escorted, !profile.mobile, !profile.mobile, false};
+            orders.emplace(container, std::move(order));
+            begin += count;
         }
-        order.formation = SquadronFormationState{order.anchor, order.escorted, !profile.mobile, !profile.mobile, false};
-        orders.emplace(container, std::move(order));
         return Void::success();
     }
 

@@ -369,6 +369,10 @@ void ScriptedTacticalSession::set_authoritative_hash(const bool every_tick) noex
 
 void ScriptedTacticalSession::set_step_clock(std::function<std::uint64_t()> clock) { impl_->clock = std::move(clock); }
 
+diagnostics::MemoryCapacity ScriptedTacticalSession::memory_capacity() const {
+    return impl_->scripts.memory_capacity();
+}
+
 const tactical::TacticalSession& ScriptedTacticalSession::world() const noexcept { return impl_->world; }
 
 std::uint64_t ScriptedTacticalSession::completed_tick() const noexcept { return impl_->world.completed_tick(); }

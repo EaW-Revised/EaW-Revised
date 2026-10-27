@@ -8,7 +8,7 @@
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -551,15 +551,15 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
         const auto base = static_cast<std::uint64_t>(std::max(0.0, std::floor(tick + 1.0e-9)));
         const auto before = snapshot_at(base);
         const auto after = snapshot_at(base + 1U);
-        std::vector<space::LiveUnitPose> units;
+        std::vector<live::LiveUnitPose> units;
         if (before && after) {
             const double share = std::max(0.0, tick - static_cast<double>(base));
-            units = space::interpolate_units(*before, *after, share, viewer, reveal, fading_emitters);
+            units = live::interpolate_units(*before, *after, share, viewer, reveal, fading_emitters);
             // #447: a craft spinning away keeps running its model's emitters on its spin pose.
-            const auto spinning = space::interpolate_spinning(*before, *after, share, viewer, reveal);
+            const auto spinning = live::interpolate_spinning(*before, *after, share, viewer, reveal);
             units.insert(units.end(), spinning.begin(), spinning.end());
             std::sort(units.begin(), units.end(),
-                      [](const space::LiveUnitPose& left, const space::LiveUnitPose& right) { return left.entity < right.entity; });
+                      [](const live::LiveUnitPose& left, const live::LiveUnitPose& right) { return left.entity < right.entity; });
         } else {
             // The tick has left the snapshot history: where the ships stood is unknown, so none
             // of them runs its emitters (least visible, as a hidden ship's, BP-44).
@@ -596,7 +596,7 @@ bool UnitEmitters::frame(const SpacePopulation& population, const std::span<cons
                 continue;
             }
             const auto unit = std::lower_bound(units.begin(), units.end(), view->entity,
-                [](const space::LiveUnitPose& pose, const sim::EntityId id) { return pose.entity < id; });
+                [](const live::LiveUnitPose& pose, const sim::EntityId id) { return pose.entity < id; });
             if (unit == units.end() || unit->entity != view->entity) {
                 stop_all(ship, "not_shown");
                 continue;

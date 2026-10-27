@@ -6,8 +6,10 @@
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "../../src/sim/galactic/encoding.hpp"
+#include "../support/reverse_partition_executor.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -215,6 +217,258 @@ std::string trace(const ai::GalacticConnectivity& value, bool archived_only = fa
     for (const auto& row : value.goal_reach) { if (archived_only && row.policy == "Single_Hop_Disconnected") continue; out << row.player << ':' << row.source << ':' << row.policy << ':'; for (const auto id : row.production_sites) out << id << ','; out << ';'; }
     for (const auto& row : value.island_paths) out << row.player << ':' << row.planet << ':' << row.least_force << ':' << row.largest << ';';
     return out.str();
+}
+std::string connectivity_players(const eawr::sim::PartitionExecutor& executor, bool fog) {
+    auto config = fixture();
+    for (auto& seat : config.seats) { seat.kind = gc::SeatKind::ai; seat.human_side_id = 0; }
+    auto session = take(world_session(config));
+    auto setup = perception(fog);
+    for (auto& player : setup.players) { player.ai = true; player.human = false; player.neutral = false; }
+    for (const auto* name : {"TARGETPLAYERID", "ENEMYFORCE.HASSPACEFORCE",
+            "ENEMYFORCE.SPACETOTALUNNORMALIZED", "ENEMYFORCE.GROUNDTOTALUNNORMALIZED"})
+        setup.cache_intervals[name] = real(1) / real(2);
+    Host host(setup);
+    cp::GalacticAiUsabilityProvider provider(content(setup));
+    std::string result;
+    for (unsigned tick = 0; tick <= 32; ++tick) {
+        if (tick) (void)take(session.step(executor));
+        if (tick == 7) (void)take(session.set_planet_access(3, true, true));
+        if (tick == 19) (void)take(session.set_planet_access(3, false, true));
+        done(host.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+        const auto output = take(provider.connectivity_publication(session, host.world, host.engine, executor));
+        expect(output->goal_reach.size() == setup.players.size() * config.planets.size() * 6,
+            "every AI player publishes every target and policy");
+        expect(output->island_sizes.size() == setup.players.size(), "every AI player publishes its island sizes");
+        result += trace(*output);
+        for (const auto& row : output->island_sizes)
+            result += std::to_string(row.player) + ":" + std::to_string(row.largest) + ":" + std::to_string(row.second) + ";";
+        const auto native = take(provider.capture());
+        expect(take(provider.record_sync_hash()) == take(provider.record_sync_hash(true)),
+            "ordered player commit keeps the warm and cold provider digests equal");
+        expect(take(host.world.record_sync_hash()) == take(host.world.record_sync_hash(true)),
+            "player perception writes keep the warm and cold world digests equal");
+        result += take(provider.state_hash()) + take(provider.record_sync_hash())
+            + take(host.world.state_hash()) + take(host.world.record_sync_hash());
+        for (const auto& component : native.components)
+            result.append(reinterpret_cast<const char*>(component.second.data()), component.second.size());
+        const auto work = provider.work();
+        expect(take(provider.connectivity_publication(session, host.world, host.engine, executor)) == output,
+            "unchanged player preparation keeps the same immutable publication");
+        expect(provider.work().generations == work.generations, "an idle publication does not rerun player refreshes");
+    }
+    return result;
+}
+// An earlier owner's changed force value invalidates later ordinary ownership
+// reads, even when the later owner's own force rows have not expired. Cover a
+// change in refresh and a change only in finish; splitting those phases lost
+// this dependency in 8aa394290 while remaining equal across worker counts.
+std::string staggered_connectivity_refresh(const eawr::sim::PartitionExecutor& executor, bool finishing) {
+    auto config = fixture(); config.rules.fiscal_cycle_frames = 10000;
+    for (auto& seat : config.seats) { seat.kind = gc::SeatKind::ai; seat.human_side_id = 0; }
+    auto session = take(world_session(config));
+    auto setup = perception(false);
+    for (auto& player : setup.players) { player.ai = true; player.human = false; player.neutral = false; }
+    setup.cache_intervals["TARGETPLAYERID"] = real(0);
+    setup.cache_intervals["ENEMYFORCE.HASSPACEFORCE"] = finishing ? real(3) : real(1) / real(2);
+    for (const auto* token : {"ENEMYFORCE.SPACETOTALUNNORMALIZED", "ENEMYFORCE.GROUNDTOTALUNNORMALIZED"})
+        setup.cache_intervals[token] = real(1) / real(2);
+    Host host(setup); cp::GalacticAiUsabilityProvider provider(content(setup));
+    const std::array equations{
+        take(ai::parse_equation("PRESENCE", "Variable_Target.EnemyForce.HasSpaceForce", {})),
+        take(ai::parse_equation("SPACE", "Variable_Target.EnemyForce.SpaceTotalUnnormalized", {})),
+        take(ai::parse_equation("GROUND", "Variable_Target.EnemyForce.GroundTotalUnnormalized", {}))};
+    const auto seed = [&](gc::PlayerId player) {
+        ai::PlayerAi selected; selected.player = player;
+        for (const auto& planet : config.planets) {
+            ai::Target target; target.object = planet.id; target.name = "OBJECT_" + std::to_string(planet.id);
+            const auto context = host.world.goal_context(selected, &target);
+            for (const auto& equation : equations) {
+                ai::AiRandom random;
+                expect(host.world.perception(host.engine, equation, context, random).has_value(),
+                    "staggered force seed uses a qualified owning context");
+            }
+        }
+    };
+    (void)take(session.step(executor));
+    done(host.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    seed(1);
+    if (finishing) {
+        const std::array<eawr::sim::EntityId, 1> losses{51};
+        done(session.apply_battle_losses(losses));
+    } else done(session.apply_actor_stealth(51, 0, f(1), true));
+    while (session.completed_tick() < 10) (void)take(session.step(executor));
+    ai::GalacticConnectivity inputs;
+    if (!finishing) inputs.stealth_fleets.insert(50);
+    done(host.world.bind(session.snapshot(), std::move(inputs), executor, session.completed_tick(), session.next_entity_id()));
+    seed(3);
+    const auto cached = [](const ai::GalacticPerceptionState& state, gc::PlayerId player, std::string_view token) {
+        return std::find_if(state.cache.begin(), state.cache.end(), [&](const auto& row) {
+            return row.key.player == player && row.key.planet == 2 && !row.key.tokens.empty()
+                && row.key.tokens.back() == token;
+        });
+    };
+    const auto first = take(provider.connectivity_publication(session, host.world, host.engine, executor));
+    const auto before = host.world.state();
+    const auto token = finishing ? "SPACETOTALUNNORMALIZED" : "HASSPACEFORCE";
+    const auto early = cached(before, 1, token), late = cached(before, 3, token);
+    expect(early != before.cache.end() && early->frame == 1 && early->value == (finishing ? real(42) : real(1)),
+        "early owner keeps its pre-change force value through its real expiry");
+    expect(late != before.cache.end() && late->frame == 10 && late->value == real(0),
+        "later owner has the current force value with a later expiry");
+    const auto observer_generation = session.snapshot()->observer_input_generation();
+    while (session.completed_tick() < 17) (void)take(session.step(executor));
+    expect(session.snapshot()->observer_input_generation() == observer_generation,
+        "staggered expiry runs on a quiet observer generation");
+    const auto output = take(provider.connectivity_publication(session, host.world, host.engine, executor));
+    const auto after = host.world.state();
+    const auto changed = cached(after, 1, token), retained = cached(after, 3, token);
+    expect(changed != after.cache.end() && changed->frame == 17 && changed->value == real(0),
+        "early owner refreshes the changed force value at its first expired read");
+    expect(retained != after.cache.end() && retained->frame == 10,
+        "later owner's force value remains a served remembered row");
+    std::size_t owners{}, observations{};
+    for (const auto& row : after.cache) if (row.key.player == 3
+        && row.key.tokens == std::vector<std::string>{"VARIABLE_TARGET", "TARGETPLAYERID"}) {
+        ++owners; expect(row.frame == 17, "earlier force invalidation repeats later zero-interval ownership reads");
+    }
+    for (const auto& row : after.visibility) if (row.player == 3 && row.mask == gc::bit(gc::Intelligence::ownership)) {
+        ++observations; expect(row.last_observed == 17, "later ownership observations retain the legacy synchronization stamp");
+    }
+    expect(owners == config.planets.size() && observations == config.planets.size(),
+        "every later-owner planet retains its ordinary ownership observation");
+    expect(take(provider.record_sync_hash()) == take(provider.record_sync_hash(true))
+        && take(host.world.record_sync_hash()) == take(host.world.record_sync_hash(true)),
+        "corrective player publication keeps warm and cold record digests equal");
+    // The seed also created strength rows for allied planets which the site
+    // pass never reads. Their expired deadlines legitimately request another
+    // refresh. Establish ordinary, unexpired inputs before testing idle reuse.
+    expect(host.world.force_cache_deadline(1, setup.logical_fps, false) < real(17),
+        "unused seeded force rows still have an expired deadline");
+    for (const auto& player : setup.players) {
+        seed(player.player);
+        expect(host.world.force_cache_deadline(player.player, setup.logical_fps, false) >= real(17),
+            "idle reuse requires every seeded force deadline to remain valid");
+    }
+    const auto settled = take(provider.connectivity_publication(session, host.world, host.engine, executor));
+    const auto work = provider.work();
+    expect(take(provider.connectivity_publication(session, host.world, host.engine, executor)) == settled
+        && provider.work().generations == work.generations, "joined revision publication does not spend another refresh");
+    return trace(*first) + trace(*output) + trace(*settled) + take(provider.state_hash()) + take(host.world.state_hash());
+}
+std::string provider_frontiers(const eawr::sim::PartitionExecutor& executor) {
+    auto config = fixture();
+    for (auto& seat : config.seats) { seat.kind = gc::SeatKind::ai; seat.human_side_id = 0; }
+    auto session = take(world_session(config));
+    (void)take(session.step(executor));
+    auto setup = perception(false);
+    for (auto& player : setup.players) { player.ai = true; player.human = false; player.neutral = false; }
+    Host host(setup); cp::GalacticAiUsabilityProvider provider(content(setup));
+    done(host.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    (void)take(provider.connectivity_publication(session, host.world, host.engine, executor));
+    const auto frozen = take(provider.state_hash());
+    auto changed = take(world_session(config));
+    (void)take(changed.step(executor));
+    (void)take(changed.set_planet_access(2, true, true));
+    done(changed.apply_actor_stealth(51, 0, f(1), true));
+    Host changed_host(setup), sibling_host(setup);
+    ai::GalacticConnectivity changed_inputs; changed_inputs.stealth_fleets.insert(50);
+    done(changed_host.world.bind(changed.snapshot(), std::move(changed_inputs), executor,
+        changed.completed_tick(), changed.next_entity_id()));
+    done(sibling_host.world.bind(session.snapshot(), {}, executor, session.completed_tick(), session.next_entity_id()));
+    const std::array<gc::PlayerId, 2> players{1, 3};
+    const auto run = [&]() {
+        done(provider.prepare_decision_frontiers(executor, players));
+        done(executor.execute_phase("test-usability-frontiers", players.size(), [&](std::size_t index) {
+            const auto scope = provider.player_frontier(players[index]);
+            eawr::sim::InlineExecutor inline_executor;
+            if (index == 0) {
+                const auto own = take(provider.movement(1, *changed.snapshot(), changed_host.world, changed_host.engine, inline_executor));
+                const auto foreign = take(provider.movement(3, *changed.snapshot(), changed_host.world, changed_host.engine, inline_executor));
+                expect(!own.access[1].ai_usable && !foreign.access[1].ai_usable,
+                    "a chain's own and foreign queries use its changed access snapshot");
+                const auto generations = provider.work().generations;
+                (void)take(provider.movement(3, *changed.snapshot(), changed_host.world, changed_host.engine, inline_executor));
+                expect(provider.work().generations == generations,
+                    "a repeated foreign query reuses this chain's private replacement");
+            } else {
+                const auto own = take(provider.movement(3, *session.snapshot(), sibling_host.world, sibling_host.engine, inline_executor));
+                expect(own.access[1].ai_usable,
+                    "a sibling's ordinary cache is isolated from foreign access and stealth writes");
+            }
+            expect(take(provider.record_sync_hash()) == take(provider.record_sync_hash(true)),
+                "private provider warm and cold digests describe the same frozen rows and overlay");
+        }));
+        expect(take(provider.state_hash()) == frozen, "player cache writes do not publish before the join");
+    };
+    run();
+    done(provider.discard_decision_frontiers());
+    expect(take(provider.state_hash()) == frozen, "discard leaves canonical provider bytes unchanged");
+    run();
+    {
+        const auto scope = provider.player_frontier(1);
+        expect(!provider.commit_decision_frontiers() && !provider.discard_decision_frontiers(),
+            "the barrier cannot release an active player block");
+    }
+    done(provider.commit_decision_frontiers());
+    expect(take(provider.record_sync_hash()) == take(provider.record_sync_hash(true)),
+        "canonical provider join retains warm and cold identity");
+    const auto joined = take(provider.state_hash());
+    const std::array<gc::PlayerId, 1> single{1};
+    done(provider.prepare_decision_frontiers(executor, single));
+    {
+        const auto scope = provider.player_frontier(1);
+        expect(take(provider.state_hash()) == joined, "one chain keeps the ordinary provider state");
+    }
+    done(provider.commit_decision_frontiers());
+    return joined;
+}
+void connectivity_player_order() {
+    eawr::sim::InlineExecutor inline_frontiers;
+    const auto frontier_reference = provider_frontiers(inline_frontiers);
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(provider_frontiers(executor) == frontier_reference,
+            "provider frontier join is identical on 1/2/4/8 workers");
+    }
+    eawr::test_support::ReverseOrderExecutor reverse_frontiers(8);
+    expect(provider_frontiers(reverse_frontiers) == frontier_reference,
+        "reverse player blocks retain canonical provider bytes");
+    for (const bool fog : {false, true}) {
+        eawr::sim::InlineExecutor inline_executor;
+        const auto reference = connectivity_players(inline_executor, fog);
+        eawr::test_support::ReverseOrderExecutor one_worker(1);
+        expect(connectivity_players(one_worker, fog) == reference,
+            "ordinary single-worker preparation preserves reverse-order identity");
+        for (const auto& phase : one_worker.phases)
+            expect(phase.name.find("galactic-ai-connectivity-") != 0,
+                "one worker admits no player prepass or corrective wave");
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(connectivity_players(executor, fog) == reference,
+                "player publications, archive bytes and record digests equal on 1/2/4/8 workers");
+        }
+        eawr::test_support::ReverseOrderExecutor reverse(8);
+        expect(connectivity_players(reverse, fog) == reference,
+            "reverse player partitions preserve published rows, archive bytes and record digests");
+        bool players = false;
+        for (const auto& phase : reverse.phases) {
+            expect(phase.descending(), "every connectivity prepass visits reverse partitions");
+            if (phase.name == "galactic-ai-connectivity-players") players = players || phase.partitions == 3;
+        }
+        expect(players, "connectivity dispatches one partition for each of the three AI players");
+    }
+    for (const bool finishing : {false, true}) {
+        eawr::sim::InlineExecutor inline_executor;
+        const auto reference = staggered_connectivity_refresh(inline_executor, finishing);
+        for (const auto workers : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            expect(staggered_connectivity_refresh(executor, finishing) == reference,
+                "staggered revision dependencies preserve exact hashes on 1/2/4/8 workers");
+        }
+        eawr::test_support::ReverseOrderExecutor reverse(8);
+        expect(staggered_connectivity_refresh(reverse, finishing) == reference,
+            "staggered revision dependencies preserve exact hashes in reverse player order");
+    }
 }
 std::string route_publications(unsigned workers, bool fog) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
@@ -1054,8 +1308,12 @@ void access_checkpoint(const eawr::sim::PartitionExecutor& executor) {
     encoded.push_back(0); expect(!standalone.restore_planet_access(encoded), "malformed access restore refuses atomically");
 }
 }
-int case_galactic_ai_usability_tests() {
+int case_galactic_ai_usability_tests(int argc, char** argv) {
     try {
+        if (argc > 1 && std::string_view(argv[1]) == "--connectivity-players") {
+            connectivity_player_order();
+            return galactic_test::failures ? 1 : 0;
+        }
         connecting_heap_order();
         for (const bool fog : {false, true}) {
             std::string reference;

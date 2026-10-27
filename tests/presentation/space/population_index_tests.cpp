@@ -1,7 +1,10 @@
 #include "../../support/check.hpp"
 #include "eawr/presentation/space/population_index.hpp"
+#include "eawr/presentation/skin_pose.hpp"
 
 #include <atomic>
+#include <bit>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -128,6 +131,73 @@ private:
     std::size_t workers_{};
 };
 
+void test_parallel_visibility_and_palettes() {
+    using namespace eawr::presentation;
+    namespace animation = eawr::presentation::animation;
+    constexpr std::size_t count = 513; // uneven final visibility batch
+    std::vector<std::vector<animation::BonePose>> source(count);
+    std::vector<SkinPosePalette<animation::Matrix>> reference(count);
+    const auto identity = [](const animation::Matrix& matrix) { return matrix; };
+    for (std::size_t unit = 0; unit < count; ++unit) {
+        source[unit].resize(1 + unit % 31);
+        for (std::size_t bone = 0; bone < source[unit].size(); ++bone) {
+            auto& row = source[unit][bone];
+            row.skin_asset = row.model_asset = animation::Player::identity_matrix();
+            row.skin_asset[12] = static_cast<float>(unit * 17 + bone);
+            row.model_asset[13] = static_cast<float>(bone * 3);
+            row.model_asset[1] = unit % 2 ? -0.0F : 0.0F;
+            row.visible = (unit + bone) % 5 != 0;
+        }
+        store_skin_pose(source[unit], reference[unit].palette, reference[unit].model_transforms, identity);
+    }
+    const auto exact = [](const auto& left, const auto& right) {
+        if (left.size() != right.size()) return false;
+        for (std::size_t bone = 0; bone < left.size(); ++bone)
+            if (std::bit_cast<std::array<std::uint32_t, 16>>(left[bone])
+                != std::bit_cast<std::array<std::uint32_t, 16>>(right[bone])) return false;
+        return true;
+    };
+    const auto visible = [](const std::size_t index) { return index % 7 != 1 && index % 11 != 3; };
+    std::vector<std::uint8_t> expected;
+    expect(space::prepare_population_visibility(count, expected, nullptr, visible), "serial visibility prepares");
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        Executor executor(workers);
+        std::vector<std::uint8_t> shown;
+        expect(space::prepare_population_visibility(count, shown, &executor, visible)
+            && shown == expected && executor.tasks == 9, "visibility is byte-identical with one bounded task per range");
+        std::vector<std::shared_ptr<const SkinPosePalette<animation::Matrix>>> palettes(count);
+        std::vector<SkinPoseWork> work(count);
+        std::vector<std::size_t> converted(count, 0);
+        const auto prepare = [&](const std::size_t index) {
+            const auto convert = [&](const animation::Matrix& matrix) { ++converted[index]; return matrix; };
+            palettes[index] = prepare_skin_palette<animation::Matrix>(source[index], convert, &work[index]);
+        };
+        expect(executor.run(count, prepare), "independent palettes prepare on all worker counts");
+        bool identical = true;
+        for (std::size_t unit = 0; unit < count; ++unit) {
+            identical = identical && palettes[unit] && work[unit].builds == 1 && work[unit].validations == 1
+                && converted[unit] == source[unit].size() // model values only; skin conversion stays changed-only
+                && exact(palettes[unit]->palette, reference[unit].palette)
+                && exact(palettes[unit]->model_transforms, reference[unit].model_transforms);
+        }
+        expect(identical, "worker palettes retain exact serial bytes including hidden bones and signed zero");
+        // Reuse and retire input storage; published palettes must own all their bytes.
+        const auto retained = palettes[0];
+        auto replacement = source[0];
+        replacement[0].visible = !replacement[0].visible;
+        palettes[0] = prepare_skin_palette<animation::Matrix>(replacement, identity);
+        replacement.clear();
+        expect(retained && exact(retained->palette, reference[0].palette), "published palettes outlive mutable input samples");
+        auto bad = source[1];
+        bad[0].model_asset[3] = std::numeric_limits<float>::infinity();
+        expect(!prepare_skin_palette<animation::Matrix>(bad, identity), "non-finite worker palette rejects before publication");
+        executor.fail = true;
+        expect(!space::prepare_population_visibility(count, shown, &executor, visible), "visibility executor failure is explicit");
+        executor.fail = false;
+        expect(space::prepare_population_visibility(0, shown, &executor, visible) && shown.empty(), "retirement clears stale visibility rows");
+    }
+}
+
 void test_exact_parallel_compose() {
     std::vector<std::optional<math::Mat3x4>> transforms(8, math::identity_matrix());
     transforms[3].reset(); // hidden ship retains its previous piece transforms
@@ -186,6 +256,7 @@ int main() {
     test_linear_frame_budget();
     test_attachment_marks();
     test_exact_parallel_compose();
+    test_parallel_visibility_and_palettes();
     if (failures) return 1;
     std::cout << "population piece index contracts passed\n";
 }

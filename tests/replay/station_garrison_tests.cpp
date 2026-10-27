@@ -179,6 +179,9 @@ void test_hangar_replacement() {
             {31, {20}, {m::Vec3{}}, whole(1000), whole(200), whole(300), whole(20)}};
         for (const auto type : {40ULL, 41ULL}) {
             t::SpawnerProfile hangar; hangar.type_id = type; hangar.entries = {{30, 1, reserve}}; hangar.delay_frames = 1;
+            // WSL-04/16a: identical authored ships exercise both the enabled control and suppression.
+            t::SpawnEntryProfile ship; ship.squadron = 10; ship.starting = 1; ship.reserve = reserve; ship.ship = true;
+            hangar.entries.push_back(ship);
             if (reordered && type == 41) hangar.entries.insert(hangar.entries.begin(), {31, 0, 0});
             hangar.bays = {{0, {}, {whole(1), {}, {}}}};
             motion.squadrons.spawners.push_back(hangar);
@@ -187,6 +190,11 @@ void test_hangar_replacement() {
         expect(static_cast<bool>(made), "hangar replacement fixture creates"); if (!made) return;
         auto carrier = std::move(made).value();
         eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto ship_count = [&]() {
+            const auto units = carrier.units();
+            return std::count_if(units.begin(), units.end(), [](const auto& unit) { return unit.type_id == 10; });
+        };
+        const auto starting_ships = ship_count();
         const auto advance = [&](std::uint64_t until) {
             std::vector<t::Event> events;
             while (carrier.completed_tick() < until) {
@@ -204,6 +212,8 @@ void test_hangar_replacement() {
             return events;
         };
         advance(100);
+        if (disabled) expect(ship_count() == starting_ships, "WSL-04: marker station suppresses ordinary ship entries before upgrade");
+        else expect(ship_count() == starting_ships + 1, "WSL-16a: the identical unsuppressed station launches its authored ship");
         expect(carrier.squadrons().size() == (disabled ? 2U : 1U), "FL-13: disabled station retains only its free starting set");
         expect(static_cast<bool>(carrier.submit(buy(100, 1, 0, 1, 91))), "hangar levelup submits");
         const auto events = advance(200);
@@ -215,10 +225,12 @@ void test_hangar_replacement() {
             const auto units = carrier.units();
             const auto station = std::find_if(units.begin(), units.end(), [=](const auto& unit) { return unit.entity_id == replacement; });
             expect(station != units.end() && !station->garrison_enabled, "FL-13: replacement preserves the object garrison flag");
+            expect(ship_count() == starting_ships, "FL-13/WSL-04: upgraded station suppresses ordinary ship entries");
             expect(std::ranges::equal(carrier.squadrons(), launch_setup.squadrons),
                 "FL-13: the two free starting squadrons retain their IDs and craft");
             expect(static_cast<bool>(carrier.submit({{200, 1, 1}, {7, 9}, t::DamagePayload{whole(10000)}})), "free starting craft destruction submits");
             advance(300);
+            expect(ship_count() == starting_ships, "FL-13/WSL-04: upgrade and later losses never enable authored ship spawning");
             expect(carrier.squadrons().empty(), "FL-13: authored station reserves cannot replace free starting squads");
             continue;
         }

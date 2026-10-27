@@ -16,8 +16,8 @@
 // with identical per-tick hashes.
 namespace eawr::sim::galactic {
 
-inline constexpr std::uint16_t galactic_replay_format_version = 5;
-inline constexpr std::uint32_t galactic_rules_version = 4;
+inline constexpr std::uint16_t galactic_replay_format_version = 10;
+inline constexpr std::uint32_t galactic_rules_version = 6;
 inline constexpr std::size_t galactic_replay_max_bytes = 256U * 1024U * 1024U;
 inline constexpr std::size_t galactic_replay_max_payload = 64U * 1024U;
 

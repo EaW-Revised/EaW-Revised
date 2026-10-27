@@ -150,6 +150,7 @@ struct Engine::Impl {
     std::vector<std::vector<Index>> index;
     std::vector<std::map<std::string, std::uint32_t>> by_name;
     std::vector<Triggered> queue;
+    std::vector<ScriptCall> script_calls;
     std::vector<Refusal> unavailable, diagnostics;
     int reset_depth{};
     mutable std::string digest_cache;
@@ -233,7 +234,9 @@ core::Result<void> Engine::Impl::trigger(std::size_t s, std::size_t e, bool forc
             + " (a TRIGGER_EVENT or prerequisite cycle in the data)");
         return ok();
     }
-    // (3) The sub-plot Lua callback is the Lua story host's seam (WST-53/55); it is not part 1.
+    // (3) The sub-plot Lua callback runs before the reward (WST-20, WST-55); the host takes the request.
+    if (!defs[s].script.empty())
+        script_calls.push_back({s, def.authored_name.empty() ? def.name : def.authored_name});
     es.triggered = true; touch(); // (4)
     if (auto done = reward(s, e, depth); !done) return done; // (5)/(6)
     for (const auto dependant : index[s][e].dependants) // (7)
@@ -492,6 +495,7 @@ core::Result<void> Engine::service(Fixed time, bool paused) {
 }
 
 std::vector<Triggered> Engine::take_triggered() { return std::exchange(impl_->queue, {}); }
+std::vector<ScriptCall> Engine::take_script_calls() { return std::exchange(impl_->script_calls, {}); }
 const State& Engine::state() const noexcept { return impl_->state; }
 bool Engine::started() const noexcept { return impl_->state.started; }
 void Engine::mark_started() noexcept { impl_->state.started = true; impl_->touch(); }
@@ -513,7 +517,7 @@ core::Result<void> Engine::restore(State saved) {
     }
     for (const auto& [name, value] : saved.flags) if (name != upper(name)) return invalid("saved flag name is not upper-case");
     impl.state = std::move(saved);
-    impl.queue.clear(); impl.reset_depth = 0; impl.touch();
+    impl.queue.clear(); impl.script_calls.clear(); impl.reset_depth = 0; impl.touch();
     return ok();
 }
 

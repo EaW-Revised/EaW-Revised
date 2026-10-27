@@ -16,6 +16,8 @@ struct LiveConflictAdapters {
     GameSession::AutoResolveProgressReader progress;
     GameSession::AutoResolveWithdrawal withdraw;
     sim::galactic::GalacticSession::MovementAccessProvider access;
+    // WAR-127: the bounty value of a bound type (authored override, else the largest category default).
+    std::function<core::Result<sim::math::Fixed>(std::string_view)> bounty_value;
 };
 // WAR-13/14: canonical manifest of the selected layer and raid participants.
 [[nodiscard]] std::vector<ConflictForce> live_conflict_force_manifest(const ConflictRecord&, const LayerPresence&);

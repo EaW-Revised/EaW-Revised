@@ -1,4 +1,5 @@
 #include "encoding.hpp"
+#include "eawr/sim/galactic/observer.hpp"
 #include "../replay_internal.hpp"
 
 namespace eawr::sim::galactic::detail {
@@ -117,11 +118,17 @@ std::optional<PreparedAbility> decode_prepared_ability(std::span<const std::uint
     p.absence = math::Fixed::from_raw(absence); p.owned = owned != 0; return p;
 }
 void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilitySetup& setup) {
-    put_u32(out, 8); put_i64(out, setup.default_hero_absence.raw()); // encoding 8 adds authored ground activation membership
+    put_u32(out, 9); put_i64(out, setup.default_hero_absence.raw()); // encoding 9 adds ground spy profiles
     put_u32(out, static_cast<std::uint32_t>(setup.profiles.size()));
     for (const auto& p : setup.profiles) {
         put_u8(out, static_cast<std::uint8_t>(p.ground_activated.size()));
         for (const auto kind : p.ground_activated) put_u8(out, static_cast<std::uint8_t>(kind));
+        put_u8(out, p.spy ? 1 : 0);
+        if (p.spy) {
+            const auto& s = *p.spy; text_value(out, s.name); text_value(out, s.text_identity);
+            put_u64(out, s.identity); put_i64(out, s.duration.raw()); put_u32(out, s.mask);
+            put_u8(out, s.initially_enabled ? 1 : 0); put_u8(out, s.causes_despawn ? 1 : 0); put_u8(out, s.hero ? 1 : 0);
+        }
         put_u64(out, p.type); put_i64(out, p.market.price_modifier.raw()); put_u8(out, p.market.causes_despawn ? 1 : 0);
         put_u8(out, p.named ? 1 : 0); put_u8(out, p.respawn_whole_team ? 1 : 0); put_u8(out, p.initially_enabled ? 1 : 0); put_u64(out, p.respawn_structure);
         put_u32(out, static_cast<std::uint32_t>(p.market.absence_min.size()));
@@ -185,6 +192,7 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
     for (const auto& name : setup.activated_hack_abilities) text_value(out, name);
     put_u32(out, static_cast<std::uint32_t>(setup.activated_destruction_abilities.size()));
     for (const auto& name : setup.activated_destruction_abilities) text_value(out, name);
+    names(out, setup.activated_spy_abilities);
     names(out, setup.activated_sabotage_abilities); names(out, setup.activated_neutralize_abilities);
     put_u32(out, static_cast<std::uint32_t>(setup.sabotage_costs.size()));
     for (const auto& c : setup.sabotage_costs) { put_u64(out, c.type); put_i64(out, c.cost.raw()); }
@@ -195,18 +203,28 @@ void encode_ability_setup(std::vector<std::uint8_t>& out, const GalacticAbilityS
 }
 std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::uint8_t> bytes) {
     sim::detail::Reader in(bytes); GalacticAbilitySetup result; std::uint32_t version{}, count{}; std::int64_t value{};
-    if (!in.read_u32(version) || version != 8 || !in.read_i64(value) || value <= 0
+    if (!in.read_u32(version) || version != 9 || !in.read_i64(value) || value <= 0
         || !in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 32) return {};
     result.default_hero_absence = math::Fixed::from_raw(value); TypeId previous{};
     for (std::uint32_t i = 0; i < count; ++i) {
         GalacticAbilityProfile p; std::uint8_t group_count{};
-        if (!in.read_u8(group_count) || group_count > 7) return {};
+        if (!in.read_u8(group_count) || group_count > 8) return {};
         for (std::uint8_t j = 0; j < group_count; ++j) {
             std::uint8_t value_kind{};
-            if (!in.read_u8(value_kind) || value_kind < 1 || value_kind > 7) return {};
+            if (!in.read_u8(value_kind) || value_kind < 1 || value_kind > 8) return {};
             const auto kind = static_cast<AbilityKind>(value_kind);
             if (std::find(p.ground_activated.begin(), p.ground_activated.end(), kind) != p.ground_activated.end()) return {};
             p.ground_activated.push_back(kind);
+        }
+        std::uint8_t has_spy{};
+        if (!in.read_u8(has_spy) || has_spy > 1) return {};
+        if (has_spy) {
+            auto& s = p.spy.emplace(); std::int64_t duration{}; std::uint8_t enabled{}, consumes{}, hero{};
+            if (!text_value(in, s.name) || s.name.empty() || !text_value(in, s.text_identity) || s.text_identity.size() > 1024
+                || !in.read_u64(s.identity) || !s.identity || !in.read_i64(duration) || duration <= 0
+                || !in.read_u32(s.mask) || (s.mask & ~all_intelligence)
+                || !in.read_u8(enabled) || enabled > 1 || !in.read_u8(consumes) || consumes > 1 || !in.read_u8(hero) || hero > 1) return {};
+            s.duration = math::Fixed::from_raw(duration); s.initially_enabled = enabled != 0; s.causes_despawn = consumes != 0; s.hero = hero != 0;
         }
         std::uint8_t despawn{}, named{}, whole{}, enabled{}; std::uint32_t ranges{};
         if (!in.read_u64(p.type) || p.type <= previous || !in.read_i64(value) || value < 0
@@ -264,7 +282,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
             s.initially_enabled = flag != 0; s.cost_factor = math::Fixed::from_raw(factor);
         }
         if (!in.read_u8(has_neutralize) || has_neutralize > 1
-            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize)) return {};
+            || (!market && !has_theft && !corruption && !lifecycle && !has_hack && !has_destruction && !has_sabotage && !has_neutralize && !has_spy)) return {};
         if (has_neutralize) {
             auto& n = p.neutralize.emplace(); std::uint8_t flag{}, minor{}, major{};
             std::int64_t minor_mod{}, major_mod{}, a_lo{}, a_hi{}, t_lo{}, t_hi{};
@@ -342,7 +360,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     for (std::uint32_t i = 0; i < count; ++i) { std::string name; if (!text_value(in, name) || name.empty()) return {}; result.activated_hack_abilities.push_back(std::move(name)); }
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 4) return {};
     for (std::uint32_t i = 0; i < count; ++i) { std::string name; if (!text_value(in, name) || name.empty()) return {}; result.activated_destruction_abilities.push_back(std::move(name)); }
-    if (!names(in, result.activated_sabotage_abilities) || !names(in, result.activated_neutralize_abilities)) return {};
+    if (!names(in, result.activated_spy_abilities) || !names(in, result.activated_sabotage_abilities) || !names(in, result.activated_neutralize_abilities)) return {};
     if (!in.read_u32(count) || count > galactic_max_objects || count > in.remaining() / 16) return {};
     for (std::uint32_t i = 0; i < count; ++i) {
         SabotageStructureCost c; std::int64_t cost{};
@@ -361,7 +379,7 @@ std::optional<GalacticAbilitySetup> decode_ability_setup(std::span<const std::ui
     return in.remaining() ? std::nullopt : std::optional(std::move(result));
 }
 void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityState& s) {
-    put_u32(out, 8); put_u64(out, s.next_request); // coordinator-reserved encoding 8
+    put_u32(out, 9); put_u64(out, s.next_request); // encoding 9 adds spy service flags
     put_u32(out, static_cast<std::uint32_t>(s.actors.size()));
     for (const auto& a : s.actors) {
         put_u64(out, a.actor); put_u64(out, a.type); put_u8(out, a.enabled ? 1 : 0); put_u8(out, a.cancelled ? 1 : 0);
@@ -371,6 +389,9 @@ void encode_ability_state(std::vector<std::uint8_t>& out, const GalacticAbilityS
         put_u8(out, a.destruction_enabled ? 1 : 0); put_u8(out, a.destruction_cancelled ? 1 : 0);
         put_u8(out, a.sabotage_enabled ? 1 : 0); put_u8(out, a.sabotage_cancelled ? 1 : 0);
         put_u8(out, a.neutralize_enabled ? 1 : 0); put_u8(out, a.neutralize_cancelled ? 1 : 0);
+        put_u8(out, a.spy_enabled ? 1 : 0); put_u8(out, a.spy_cancelled ? 1 : 0);
+        put_u32(out, static_cast<std::uint32_t>(a.spy_targets.size()));
+        for (const auto planet : a.spy_targets) put_u64(out, planet);
         put_u8(out, a.contested_check_disabled ? 1 : 0);
     }
     put_u32(out, static_cast<std::uint32_t>(s.preparations.size()));

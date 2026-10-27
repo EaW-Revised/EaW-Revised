@@ -223,6 +223,16 @@ void BattleAudio::prepare_music_and_faction_cues(const std::string_view local_fa
     // BA-20: the command rankings.
     if (auto document = data::load_document(*filesystem_, "data/xml/gameconstants.xml")) {
         rankings_ = audio::split_list(child(document.value().root, "Unit_Command_Rankings_By_Category"));
+        // SND-33: both thresholds are authored; absent/invalid values silence warnings.
+        for (const auto& item : document.value().root.children) {
+            auto* threshold = same(item.name, "Health_Low_Percent_Threshold") ? &health_low_threshold_
+                : same(item.name, "Health_Critical_Percent_Threshold") ? &health_critical_threshold_ : nullptr;
+            if (!threshold) continue;
+            data::tag_trace::used(item);
+            *threshold = number(trim(item.raw_text));
+        }
+        if (!health_low_threshold_ || !health_critical_threshold_)
+            problems_.push_back("health warnings disabled: missing or invalid Health_Low_Percent_Threshold / Health_Critical_Percent_Threshold");
         if (const auto value = number(child(document.value().root, "SpaceIdleMovementSpeed"))) engine_idle_speed_ = *value;
     } else {
         problems_.push_back("data/xml/gameconstants.xml: " + core::format_diagnostic(document.error()));
@@ -400,6 +410,11 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         sounds.death = event(tag(value, "Death_SFXEvent_Start_Die"), where);
         sounds.spin_death = event(tag(value, "Spin_Away_On_Death_SFXEvent_Start_Die"), where);
         sounds.asteroid_damage = event(tag(value, "SFXEvent_Damaged_By_Asteroid"), where);
+        sounds.health_warning = {
+            event(tag(value, "SFXEvent_Health_Low_Warning"), where),
+            event(tag(value, "SFXEvent_Health_Critical_Warning"), where),
+            event(tag(value, "SFXEvent_Enemy_Damaged_Health_Low_Warning"), where),
+            event(tag(value, "SFXEvent_Enemy_Damaged_Health_Critical_Warning"), where)};
         sounds.all_weapons_lost = event(tag(value, "SFXEvent_Hardpoint_All_Weapons_Destroyed"), where);
         sounds.ambient_moving = event(tag(value, "SFXEvent_Ambient_Moving"), where);
         sounds.engine_idle = event(tag(value, "SFXEvent_Engine_Idle_Loop"), where);
@@ -438,6 +453,9 @@ void BattleAudio::prepare_unit_cues(const units::UnitTables& tables, const sim::
         sounds.attack = event(tag(value, "SFXEvent_Attack"), where);
         sounds.group_move = event(tag(value, "SFXEvent_Group_Move"), where);
         sounds.group_attack = event(tag(value, "SFXEvent_Group_Attack"), where);
+        sounds.select_ability = event(tag(value, "SFXEvent_Select_With_Non_Hero_Ability"), where);
+        sounds.move_ability = event(tag(value, "SFXEvent_Move_With_Non_Hero_Ability"), where);
+        sounds.attack_ability = event(tag(value, "SFXEvent_Attack_With_Non_Hero_Ability"), where);
         sounds.assist_move = event(tag(value, "SFXEvent_Assist_Move"), where);
         sounds.assist_attack = event(tag(value, "SFXEvent_Assist_Attack"), where);
         sounds.move_asteroid = event(tag(value, "SFXEvent_Move_Into_Asteroid_Field"), where);

@@ -12,6 +12,13 @@ Real distance(const math::Vec3& a, const math::Vec3& b) {
     const auto squared = to_single(to_single(to_single(x * x) + to_single(y * y)) + to_single(z * z));
     Real out; out.repr = numeric::binary64::square_root(squared.repr); return to_single(out);
 }
+Real coefficient_distance(const math::Vec3& a, const math::Vec3& b) {
+    // WGA-490: retail positions are binary32 before vector subtraction.
+    const auto delta = [](auto x, auto y) { return to_single(to_single(numeric::from_fixed(x)) - to_single(numeric::from_fixed(y))); };
+    const auto x = delta(a.x, b.x), y = delta(a.y, b.y), z = delta(a.z, b.z);
+    const auto squared = to_single(to_single(to_single(x * x) + to_single(y * y)) + to_single(z * z));
+    Real out; out.repr = numeric::binary64::square_root(squared.repr); return to_single(out);
+}
 std::optional<Real> number(const std::vector<Binding>& bindings, std::string_view parameter) {
     for (const auto& binding : bindings) if (binding.parameter == parameter)
         if (const auto* value = std::get_if<Real>(&binding.value)) return *value;
@@ -36,6 +43,154 @@ Real normalized(Real value, Real denominator) {
     const auto result = value / denominator;
     return std::max(Real{}, std::min(real(1), result));
 }
+}
+
+core::Result<std::vector<PathCoefficient>> build_path_coefficients(const PathCoefficientInput& input, std::vector<std::string>* diagnostics) {
+    using Result = core::Result<std::vector<PathCoefficient>>;
+    const auto invalid = [](std::string message) {
+        return Result::failure(detail::make_error(authoritative::codes::invalid_request, std::move(message)));
+    };
+    const auto n = input.planets.size();
+    if ((n && n > std::numeric_limits<std::size_t>::max() / n)
+        || !numeric::binary64::is_finite(input.maximum_distance.repr)
+        || !numeric::binary64::is_finite(input.trade_movement_factor.repr))
+        return invalid("path coefficients require representable geometry and finite constants");
+    std::set<galactic::PlanetId> identities;
+    for (const auto& planet : input.planets)
+        if (!planet.planet || !identities.insert(planet.planet).second)
+            return invalid("path coefficients require unique nonzero planet identities");
+    std::set<std::pair<galactic::PlanetId, galactic::PlanetId>> trades;
+    for (const auto& [from, to] : input.trades) {
+        // WGA-490 queries trade existence only between actual planet objects.
+        if (!identities.contains(from) || !identities.contains(to)) {
+            if (diagnostics) diagnostics->push_back("path coefficient trade edge skipped: endpoint outside snapshot "
+                + std::to_string(from) + " -> " + std::to_string(to));
+            continue;
+        }
+        trades.emplace(from, to); trades.emplace(to, from);
+    }
+    std::vector<Real> edges(n * n, real(-1));
+    std::vector<bool> incident(n);
+    for (std::size_t from = 0; from < n; ++from) {
+        edges[from * n + from] = Real{};
+        if (!input.planets[from].allied) continue;
+        for (std::size_t to = 0; to < n; ++to) {
+            if (from == to || (input.internal && !input.planets[to].allied)) continue;
+            auto cost = coefficient_distance(input.planets[from].position, input.planets[to].position);
+            if (trades.contains({input.planets[from].planet, input.planets[to].planet}))
+                cost = cost / to_single(input.trade_movement_factor);
+            else if (to_single(input.maximum_distance) < cost) continue;
+            if (!(Real{} <= cost)) continue;
+            edges[from * n + to] = cost;
+            incident[from] = incident[to] = true;
+        }
+    }
+    std::vector<std::size_t> nodes;
+    for (std::size_t i = 0; i < n; ++i) if (incident[i]) nodes.push_back(i);
+    const auto count = nodes.size();
+    std::vector<Real> costs(count * count);
+    std::vector<std::size_t> previous(count * count, count);
+    for (std::size_t from = 0; from < count; ++from) for (std::size_t to = 0; to < count; ++to) {
+        const auto cost = input.internal && to < from ? costs[to * count + from] : edges[nodes[from] * n + nodes[to]];
+        costs[from * count + to] = cost;
+        if (Real{} < cost) previous[from * count + to] = from;
+    }
+    // Strict improvements preserve the first equal-cost path in retained node order.
+    for (std::size_t via = 0; via < count; ++via) for (std::size_t from = 0; from < count; ++from) {
+        if (costs[from * count + via] < Real{}) continue;
+        for (std::size_t to = 0; to < count; ++to) {
+            if (costs[via * count + to] < Real{}) continue;
+            const auto candidate = costs[from * count + via] + costs[via * count + to];
+            auto& current = costs[from * count + to];
+            if (current < Real{} || candidate < current) {
+                current = candidate;
+                previous[from * count + to] = previous[via * count + to];
+            }
+        }
+    }
+    std::vector<std::uint32_t> uses(count);
+    std::vector<std::size_t> path; path.reserve(count);
+    for (std::size_t from = 0; from < count; ++from) for (std::size_t to = 0; to < count; ++to) {
+        if (from == to || (input.internal && to < from)) continue;
+        auto at = previous[from * count + to];
+        if (at == count) continue;
+        path.clear();
+        while (at != from) {
+            if (at >= count || path.size() >= count) break;
+            path.push_back(at);
+            at = previous[from * count + at];
+        }
+        if (at != from) {
+            // Project boundary: retail's NIL-chain walk is unqualified. Keep other pairs usable.
+            if (diagnostics) diagnostics->push_back("path coefficient pair skipped: unqualified predecessor chain "
+                + std::to_string(input.planets[nodes[from]].planet) + " -> " + std::to_string(input.planets[nodes[to]].planet));
+            continue;
+        }
+        for (const auto intermediate : path) ++uses[intermediate];
+    }
+    const auto maximum = uses.empty() ? 0U : *std::max_element(uses.begin(), uses.end());
+    std::vector<PathCoefficient> output;
+    for (std::size_t i = 0; i < count; ++i)
+        output.push_back({input.planets[nodes[i]].planet, maximum ? Real(uses[i]) / Real(maximum) : Real{}});
+    return Result::success(std::move(output));
+}
+
+core::Result<void> GalacticWorld::publish_path_coefficients(const sim::PartitionExecutor& executor, bool force) {
+    if (!setup_.path_coefficients_requested) return core::Result<void>::success();
+    if (!bound().snapshot_ || !bound().snapshot_->control() || !setup_.maximum_fleet_distance || !setup_.trade_movement_factor) {
+        path_coefficients_.clear(); // missing owning data stays unavailable, never a numeric fallback
+        return core::Result<void>::success();
+    }
+    // WGA-490: actual current allegiance must be positive as well as allied.
+    std::map<galactic::PlanetId, std::pair<tactical::PlayerId, bool>> allegiance;
+    for (const auto& row : bound().snapshot_->control()->state)
+        allegiance.emplace(row.planet, std::pair{row.current_player, row.current.raw() > 0});
+    struct Job { tactical::PlayerId player{}; std::size_t graph{}; PathCoefficientInput input; };
+    std::vector<Job> jobs;
+    const auto same = [](const auto& a, const auto& b) {
+        return a.internal == b.internal && a.maximum_distance.repr == b.maximum_distance.repr
+            && a.trade_movement_factor.repr == b.trade_movement_factor.repr && a.planets == b.planets && a.trades == b.trades;
+    };
+    for (const auto& owner : setup_.players) for (std::size_t graph = 0; graph < 2; ++graph) {
+        PathCoefficientInput input;
+        input.maximum_distance = setup_.path_maximum_distance.value_or(*setup_.maximum_fleet_distance);
+        input.trade_movement_factor = *setup_.trade_movement_factor;
+        input.internal = graph == 0;
+        for (const auto& planet : bound().snapshot_->planets()) {
+            const auto at = allegiance.find(planet.id);
+            if (at == allegiance.end()) {
+                path_coefficients_.clear(); return core::Result<void>::success();
+            }
+            input.planets.push_back({planet.id, planet.position, at->second.second && allied(owner.player, at->second.first)});
+        }
+        for (const auto& trade : bound().snapshot_->routes()) input.trades.emplace_back(trade.from, trade.to);
+        const auto old = path_coefficients_.find(owner.player);
+        if (force || old == path_coefficients_.end() || !same(input, old->second.inputs[graph]))
+            jobs.push_back({owner.player, graph, std::move(input)});
+    }
+    if (jobs.empty()) return core::Result<void>::success();
+    std::vector<std::vector<PathCoefficient>> staged(jobs.size());
+    std::vector<std::vector<std::string>> diagnostics(jobs.size());
+    std::vector<std::optional<core::Diagnostic>> errors(jobs.size());
+    const auto prepared = executor.execute_phase("galactic-ai-path-coefficients", sim::tick_partition_count, [&](std::size_t partition) {
+        const auto range = sim::partition_range(partition, jobs.size());
+        for (auto i = range.begin; i < range.end; ++i) {
+            auto built = build_path_coefficients(jobs[i].input, &diagnostics[i]);
+            if (built) staged[i] = std::move(built).value(); else errors[i] = built.error();
+        }
+    });
+    if (!prepared) return prepared;
+    for (const auto& error : errors) if (error) return core::Result<void>::failure(*error);
+    // WGA-493: ordered publication at the existing refresh seam; cadence is unqualified (#4786).
+    for (std::size_t i = 0; i < jobs.size(); ++i) {
+        for (const auto& note : diagnostics[i]) path_coefficient_diagnostics_.push_back("player "
+            + std::to_string(jobs[i].player) + (jobs[i].graph == 0 ? " internal: " : " external: ") + note);
+        auto& publication = path_coefficients_[jobs[i].player];
+        auto& values = publication.values[jobs[i].graph]; values.clear();
+        for (const auto& row : staged[i]) values.emplace(row.planet, row.value);
+        publication.inputs[jobs[i].graph] = std::move(jobs[i].input);
+    }
+    return core::Result<void>::success();
 }
 
 core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
@@ -98,6 +253,7 @@ core::Result<void> GalacticWorld::prepare_forces(std::vector<PlanetRow>& rows,
                 while (selected > 0 && facts->starting_spawns[selected].empty()) --selected; // WAR-77 / WGA-183
                 const auto& spawned = facts->starting_spawns[selected];
                 for (const auto& spawn : spawned) {
+                    if (!spawn.type) continue; // RGC-24: a null entry contributes nothing and does not make the estimate unavailable
                     const auto* unit = type(spawn.type);
                     const auto first = std::find_if(spawned.begin(), spawned.end(), [&](const auto& entry) { return entry.type == spawn.type; });
                     if (!unit || first->count < 0) { row.forces_available = false; continue; }

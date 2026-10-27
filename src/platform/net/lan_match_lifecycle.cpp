@@ -32,12 +32,17 @@ bool TcpLanMatch::rejoin()  {
         rejoin_requested_ = true; return true;
     }
 
+bool TcpLanMatch::request_pause(bool paused) {
+    const std::lock_guard lock(mutex_);
+    if (!lan_gameplay_enabled(view_) || pause_requests_.size() >= net::max_batch_commands) return false;
+    pause_requests_.push_back(paused); view_.input_feedback = "Waiting for the shared pause control.";
+    return true;
+}
+
 bool TcpLanMatch::request_speed(std::uint32_t step)  {
         const std::lock_guard lock(mutex_);
         if (!lan_gameplay_enabled(view_) || step >= presentation::ui::speed_step_rates.size()) return false;
-        const auto now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-        if (!speed_window_.accept(now)) return false;
+        if (!speed_window_.accept(view_.session_tick)) return false;
         auto options = view_.options;
         options.tactical_speed = step;
         speed_requests_.push_back(options); view_.input_feedback.clear();
@@ -201,7 +206,7 @@ void TcpLanMatch::cancel()  {
         retained_options_ = {}; retained_offer_ = {}; recovery_factory_ = {};
         diagnostic_bundle_.reset(); diagnostic_sink_ = {}; diagnostic_saved_ = false;
         last_repair_ms_.reset(); repair_notice_.reset(); retained_rejoin_frames_.clear();
-        const std::lock_guard lock(mutex_); rejoin_requested_ = false; speed_requests_.clear(); speed_window_ = {}; abort_requested_ = false; view_ = {}; view_.reason = LanReason::cancelled;
+        const std::lock_guard lock(mutex_); rejoin_requested_ = false; speed_requests_.clear(); pause_requests_.clear(); speed_window_ = {}; abort_requested_ = false; view_ = {}; view_.reason = LanReason::cancelled;
     }
 
 bool TcpLanMatch::request_abort()  {

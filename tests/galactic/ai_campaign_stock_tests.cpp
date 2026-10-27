@@ -2,6 +2,7 @@
 // gate; --installed proves stock preparation and explicit unavailable refusal.
 #include "ai_campaign_stock_private.hpp"
 #include "galactic_support.hpp"
+#include "raid_fixture.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/core/sha256.hpp"
 #include "eawr/campaign/live_setup.hpp"
@@ -9,6 +10,7 @@
 #include "../../src/campaign/galactic_ai_runtime.hpp"
 #include "ai_campaign_gate.hpp"
 #include "ai_learning_gate.hpp"
+#include "ai_history_diff.hpp"
 #include "../../src/campaign/galactic_ai_usability.hpp"
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -37,6 +39,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -122,6 +125,58 @@ void unattended_human_contracts() {
         }
         expect(!game.pending_conflict() && !game.battle_summary_hold() && !game.galaxy().clock().pause_depth
             && game.galaxy().clock().galactic_frame > frame, "human input releases conflict and summary pauses and advances galaxy");
+    }
+}
+void paid_selection_identity_contracts() {
+    using Access = eawr::script::foc::ai::EngineContractAccess;
+    eawr::script::foc::ai::BuildTask task;
+    task.source = 2; task.issued = 334; task.completion = 2167;
+    expect(Access::paid_task_matches(task, 2167), "paid task matches the admitted build request carried in completion");
+    expect(!Access::paid_task_matches(task, 334), "paid task does not match its issue frame as a build id");
+    task.staging = 1;
+    expect(!Access::paid_task_matches(task, 2167), "staging paid task is not an unstaged selection");
+    task.staging = 0; task.failed = true;
+    expect(!Access::paid_task_matches(task, 2167), "failed paid task is not a selection");
+    task.failed = false; task.source = 1;
+    expect(!Access::paid_task_matches(task, 2167), "non-purchase task source is not a paid selection");
+}
+void blocked_invasion_overlap_contract() {
+    namespace gate = galactic_campaign_gate;
+    // A raid arrival retains an explicit pending invasion; with no land admission service it stays
+    // pending, so an ordinary human conflict admitted afterwards is the first conflict it waits behind.
+    const auto setup = raid_test::setup();
+    cp::ConflictRecord conflict;
+    conflict.id = 90000; conflict.planet = 1; conflict.invader = 2; conflict.defender = 1;
+    conflict.tactical.content_identity = setup.content_identity;
+    conflict.tactical.first_free_entity_id = conflict.id + 1;
+    conflict.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+    conflict.seats = {{{1}, 1}, {{2}, 2}};
+    const auto configure = [](cp::GameSession& game) {
+        game.set_conflict_service([](const auto&, const auto&, auto) {
+            return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({});
+        }, [](const auto&) {
+            return eawr::core::Result<eawr::sim::tactical::TacticalContent>::success({});
+        }, {}, cp::ScriptRequirement::none);
+    };
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto game = must(cp::GameSession::create(setup)); configure(game);
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        must(game.submit({{0, {1}, 1}, galactic::MoveFleet{10, {1, 2}, {}, true}}));
+        for (unsigned step = 0; step < 40 && !game.galaxy().pending_native_invasion(); ++step) (void)must(game.step(executor));
+        const auto* invasion = game.galaxy().pending_native_invasion();
+        expect(invasion && invasion->state == galactic::GalacticSession::NativeInvasion::State::pending
+            && invasion->fleet == 10 && invasion->planet == 2, "raid arrival retains a pending invasion");
+        expect(!game.has_pending_conflict_for_admission() && !gate::invasion_blocked_by_conflict(game),
+            "a pending invasion alone is not blocked");
+        const auto request = invasion ? invasion->request : 0;
+        must(game.queue_conflict(conflict, {cp::ConflictRoute::pending_tactical, false, false}));
+        for (unsigned step = 0; step < 4 && !game.has_pending_conflict_for_admission(); ++step) (void)must(game.step(executor));
+        expect(game.pending_conflict() && game.pending_conflict()->id == conflict.id, "the ordinary conflict is the pending admission");
+        const auto* retained = game.galaxy().pending_native_invasion();
+        expect(retained && retained->request == request
+            && retained->state == galactic::GalacticSession::NativeInvasion::State::pending,
+            "the invasion stays retained and pending behind the first conflict");
+        expect(gate::invasion_blocked_by_conflict(game), "gate predicate observes the overlap");
     }
 }
 void worker_verdict_contracts() {
@@ -303,7 +358,7 @@ void freestore_movement_probe(cp::GameSession& game, const cp::GalacticAiRuntime
     movement_probes.push_back(std::move(out));
 }
 int installed(bool release, const std::filesystem::path& directory, bool benchmark, std::uint64_t probe_frames = 0,
-    std::size_t probe_workers = 1, bool human_encounter_only = false) {
+    std::size_t probe_workers = 1, bool human_encounter_only = false, bool hash_baseline = false) {
     const auto root = game_root();
     std::vector<eawr::vfs::MountSpec> mounts;
     for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
@@ -398,13 +453,40 @@ int installed(bool release, const std::filesystem::path& directory, bool benchma
             must(cp::configure_galactic_ai_runtime(configuration, setup, std::move(factory)));
             must(configuration.configure(*root_owner.game()));
             must(configuration.configure_native_ai(*root_owner.game())); initialized = true;
+            if (probe_frames == 1) {
+                // Short stock proof (--prepared-stealth): the stock droid team is born by the prepared AI game's own first
+                // ticks (hero placement), and that birth must keep its authored stealth (WGM-38/163). A retail transport of
+                // stealthy members skips combat, which the staging move of the Rebel tech plan relies on.
+                std::size_t teams{}, stealthy_members{}, members{};
+                for (unsigned tick = 0; tick < 30 && !teams; ++tick) {
+                    must(root_owner.game()->step(*setup->executor));
+                    const auto born = root_owner.game()->galaxy().snapshot();
+                    for (const auto& transport : born->actor_records()) {
+                        const auto type = setup->content->types.find(transport.original_type);
+                        if (type == setup->content->types.end() || eawr::script::foc::ai::upper_case(type->second.name) != "DROIDS_TEAM") continue;
+                        ++teams;
+                        for (const auto& member : born->actor_records()) if (member.container == transport.id) {
+                            ++members; stealthy_members += member.abilities.present && member.abilities.combat_skip;
+                        }
+                        const auto skip = born->actor_combat_skip(transport.id);
+                        if (!skip || !skip.value()) throw std::runtime_error("prepared AI game: stock droid team transport " + std::to_string(transport.id)
+                            + " does not skip combat (members=" + std::to_string(members) + " stealthy=" + std::to_string(stealthy_members) + ")");
+                    }
+                }
+                if (!teams) throw std::runtime_error("prepared AI game: the stock droid team was not born within 30 ticks");
+                if (stealthy_members != members || !members) throw std::runtime_error("prepared AI game: stock droid team lost its authored stealth (members="
+                    + std::to_string(members) + " stealthy=" + std::to_string(stealthy_members) + ")");
+            }
+            if (!probe_frames && !human_encounter_only && !hash_baseline)
+                galactic_history_diff::verify(plan, services, configuration, *setup->executor, directory);
             if (probe_frames) {
                 freestore_movement_probe(*root_owner.game(), *setup, observed, probe_frames, probe_workers);
                 return movement_probes.back().failure.empty() ? 0 : 2;
             }
             const auto report = galactic_campaign_gate::run(*root_owner.game(), *setup, configuration, observed, directory,
-                galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only);
+                galactic_learning_gate::probe(directory / "learning.json"), human_encounter_only, hash_baseline);
             report.write(std::cout);
+            if (hash_baseline) return report.mature_samples == 512 && report.failure.empty() && !failures ? 0 : 2;
             if (human_encounter_only) return report.stop_reason == "unattended_human_encounter_advanced" && report.failure.empty() ? 0 : 2;
             return (benchmark ? report.passed : report.correctness) && !failures ? 0 : 2;
         } catch (const std::exception& error) {
@@ -803,13 +885,19 @@ std::string environment_or(const char* name, std::string fallback) {
     return value && *value ? std::string(value) : fallback;
 #endif
 }
-int tick_profile(std::filesystem::path directory, std::uint64_t ticks) {
+// Command-line form of the EAWR_TICK_PROFILE_* environment, for pool jobs that cannot set it: modes and workers are
+// comma lists, "hw" in the workers list is std::thread::hardware_concurrency(). The environment still wins.
+int tick_profile(std::filesystem::path directory, std::uint64_t ticks, std::string default_modes = "off,on",
+    std::string default_workers = "1") {
     using Live = eawr::platform::LiveGameSession;
     namespace gp = eawr::gc_profile;
     directory = environment_or("EAWR_TICK_PROFILE_DIR", directory.string());
     ticks = std::stoull(environment_or("EAWR_TICK_PROFILE_TICKS", std::to_string(ticks)));
-    const auto modes = split_list(environment_or("EAWR_TICK_PROFILE_MODES", "off,on"));
-    const auto worker_counts = split_list(environment_or("EAWR_TICK_PROFILE_WORKERS", "1"));
+    const auto modes = split_list(environment_or("EAWR_TICK_PROFILE_MODES", default_modes));
+    auto worker_counts = split_list(environment_or("EAWR_TICK_PROFILE_WORKERS", default_workers));
+    for (auto& worker_text : worker_counts)
+        if (worker_text == "hw") worker_text = std::to_string(std::max(1u, std::thread::hardware_concurrency()));
+    std::map<std::string, std::uint64_t> mode_digest;
     std::filesystem::create_directories(directory);
     const InstalledLive fixture;
     constexpr auto phase_count = static_cast<std::size_t>(gp::Phase::count);
@@ -901,6 +989,11 @@ int tick_profile(std::filesystem::path directory, std::uint64_t ticks) {
         std::vector<double> step, wall;
         for (const auto& row : rows) { step.push_back(row.step_ms); wall.push_back(row.wall_ms); }
         const auto step_stats = stats(step), wall_stats = stats(wall);
+        // The same ticks must hash the same at every worker count (summary line for a log-less pool receipt).
+        if (const auto first = mode_digest.emplace(mode, digest); first.first->second != digest) {
+            std::cerr << "tick profile: " << label << " hashes differ from the first worker count of mode " << mode << "\n";
+            ++failures;
+        }
         std::cout << "TICK-PROFILE " << label << " ticks=" << rows.size() << " hash_fnv=" << digest
             << " hashes=" << hashes_all.size() << " step_ms avg/p50/p95/p99/max=" << step_stats[0] << '/' << step_stats[1]
             << '/' << step_stats[2] << '/' << step_stats[3] << '/' << step_stats[4]
@@ -952,7 +1045,8 @@ int main(int argc, char** argv) {
         if (argc > 1 && std::string_view(argv[1]) == "--human-encounter")
             return installed(true, argc > 2 ? argv[2] : "out/galactic-human-encounter", true, 0, 1, true);
         if (argc > 1 && std::string_view(argv[1]) == "--tick-profile")
-            return tick_profile(argc > 2 ? argv[2] : "out/galactic-tick-profile", argc > 3 ? std::stoull(argv[3]) : 30);
+            return tick_profile(argc > 2 ? argv[2] : "out/galactic-tick-profile", argc > 3 ? std::stoull(argv[3]) : 30,
+                argc > 4 ? argv[4] : "off,on", argc > 5 ? argv[5] : "1");
         if (argc > 1 && std::string_view(argv[1]) == "--live-record-contracts") {
             // Exercise the real composed owners and cross-worker midpoint restore in a short
             // window. Accelerated service periods cross several deadlines; this is not timing evidence.
@@ -986,6 +1080,12 @@ int main(int argc, char** argv) {
         if (argc > 1 && (std::string_view(argv[1]) == "--live-production" || std::string_view(argv[1]) == "--live-performance"))
             return live_production(argc > 2 ? argv[2] : "out/galactic-ai-live-production", argc > 3 ? std::stoull(argv[3]) : 1800,
                 std::string_view(argv[1]) == "--live-performance");
+        if (argc > 1 && std::string_view(argv[1]) == "--prepared-stealth") {
+            // Short stock proof of the prepared AI game's stealth facts (checked inside installed() before any frame).
+            const std::filesystem::path directory = argc > 2 ? argv[2] : "out/galactic-ai-prepared-stealth";
+            std::filesystem::create_directories(directory);
+            return installed(true, directory, false, 1, 1);
+        }
         if (argc > 1 && std::string_view(argv[1]) == "--freestore-movement") {
             const std::filesystem::path directory = argc > 2 ? argv[2] : "out/galactic-ai-freestore-movement";
             const std::uint64_t frames = argc > 3 ? std::stoull(argv[3]) : 1800;
@@ -1012,6 +1112,8 @@ int main(int argc, char** argv) {
                 << (directory / "freestore-movement.json").string() << '\n';
             return ok && !failures ? 0 : 2;
         }
+        if (argc > 1 && std::string_view(argv[1]) == "--hash-baseline")
+            return installed(true, argc > 2 ? argv[2] : "out/hash-baseline", true, 0, 1, false, true);
         if (argc > 1) {
             const auto mode = std::string_view(argv[1]);
             return installed(mode == "--release" || mode == "--release-benchmark",
@@ -1025,6 +1127,8 @@ int main(int argc, char** argv) {
         mp_ai_refuses_unsupported_playable_inputs();
         unattended_human_contracts();
         worker_verdict_contracts();
+        paid_selection_identity_contracts();
+        blocked_invasion_overlap_contract();
         qualified_safety_contracts();
         no_source_transit_contracts();
         nested_actor_facts_contracts();

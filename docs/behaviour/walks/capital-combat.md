@@ -139,7 +139,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 | WCC-51 | **Where it lands.** A mesh name that names a hardpoint's `Collision_Mesh` (ASCII case ignored, first in `HardPoints` order) selects that hardpoint. A **destroyable** hardpoint with health takes it all, and the hull nothing (WCC-60). A destroyable hardpoint that is **destroyed** makes the hit do nothing, to the hull as well. A hardpoint that is not destroyable, or no hardpoint, sends it to the hull (WCC-53). | debug build WC-04, WC-05, WC-13 | same (DG-11, HD-02) | does (session_step.cpp hit commit, durability.cpp `apply_damage`). |
 | WCC-52 | A hit that brings a destroyable hardpoint to 0 kills the unit when its type dies with its hardpoints (`Should_Be_Destroyed_When_All_Hardpoints_Destroyed`, default yes) and no destroyable hardpoint stands. The hull goes to 0 and the kill runs (WCC-70). | debug build WC-04, IS-05 | same (HD-21) | does (`apply_damage`). |
 | WCC-53 | **Hull.** The hull loses the damage. A unit that cannot be killed (Lua) keeps max(1, its hull before). Crossing 75 % or 50 % of the maximum hull adds the type's `Damaged_Smoke_Asset_Name` (no M2 ship authors one). The damage-state art index is updated. At 0 the unit is killed (WCC-70). | debug build WC-08 | same (HD-20) | does; the smoke and the art index are not M2. |
-| WCC-54 | **After the hit.** The hull and shield the hit took go to the unit's damage tracking (WCC-82), and its attacker to the AI's threat lists (walk 6). A unit whose displayed health crosses `Health_Critical_Percent_Threshold` or `Health_Low_Percent_Threshold` plays its type's health warning to its local owner, or the attacker's type's enemy-damaged warning to the attacker's local owner. The minimap shows a damage icon for 3 frames (walk 8). | debug build WC-04, WC-18 | missing there | differs: damage tracking is applied for every `DAMAGE_TRACKING` unit (session_abilities.cpp `track_damage`, WCC-82); no health warnings (statuses.json: `GameConstants/Health_Critical_Percent_Threshold` todo). |
+| WCC-54 | **After the hit.** Hull and shield loss feed damage tracking (WCC-82), and attacker identity feeds AI threats. A surviving ordinary hull-health down-crossing requests the local target type's low/critical warning, otherwise the current local source type's enemy-damaged warning; critical wins when both cross. Healing re-arms naturally, with no warning timer. This is ordinary hull health, not WCC-16 displayed hardpoint health; team-container ordinary health is its member average. The minimap shows a damage icon for 3 frames (walk 8). | debug build WC-04/WC-18, corrected by HW-E01..05 role walk in audio SND-33 | damage tracking same; warning correction is SND-33 | does: immutable per-delivery hull facts feed the presentation warning consumer outside hashes; durable squadron-container caller remains a sourced follow-up. |
 
 ### Hardpoint damage and loss
 
@@ -186,7 +186,7 @@ A projectile's hit, a delayed hit and scripted damage (the Lua `Take_Damage`, HD
 | G-8 | WCC-71 | Closed: a kill self-destructs the standing hardpoints and replays the destroyed ones' explosions in the viewer (BP-37) | None left. |
 | G-9 | WCC-16 | Closed: "damaged" is the displayed health (hull, or the lesser of hull and hardpoint share on a type that dies with its hardpoints) | The better-target test counts a ship that lost most of its hardpoints as damaged, as FoC does. |
 | G-10 | WCC-48 | resolved: drain and temporary engine disable | EN-07 to EN-09 cover the expanded production roster. Exact movement-replan latency remains unverified in space-damage G-D2. |
-| G-11 | WCC-54, WCC-63, WCC-70 | lacks: the hardpoint-lost, unit-lost and health-warning sounds | Low (audio). |
+| G-11 | WCC-54, WCC-63, WCC-70 | Warning callers are implemented for durable units; team-container aggregate health warning remains a sourced follow-up (SND-33). | Low (audio); audible acceptance requires a capture. |
 | G-12 | WCC-01, WCC-02 | differs: order within the frame | Low: the cap and the drag lag a ship's fire by a frame; HS G-H1 and EN-03 hold it on the fidelity list. No ticket. |
 
 Tickets, under the tracking issue capital-ship combat rule walk (legacy EAWR-707):
@@ -203,7 +203,7 @@ Tickets, under the tracking issue capital-ship combat rule walk (legacy EAWR-707
 | G-8 | dying-ship hardpoint self-destruction (legacy EAWR-704) |
 | G-9 | displayed-health target scoring (legacy EAWR-705) |
 | G-10 | ion weapons, energy drain and stun (legacy EAWR-561) |
-| G-11 | local loss and health-warning sounds (legacy EAWR-706) |
+| G-11 | WCC-54, WCC-63, WCC-70 | Warning callers are implemented for durable units; team-container aggregate health warning remains a sourced follow-up (SND-33). | Low (audio); audible acceptance requires a capture. |
 
 Totals over the 45 rules. **Same: 37**:
 - WCC-03, -12, -13, -19, -20, -21, -23, -25;
@@ -229,7 +229,7 @@ All are todo in the combat tag report (legacy EAWR-650) unless marked otherwise.
 | `HardPoint/Projectile_Damage` | WCC-22 | G-3 |
 | `HardPoint/Death_Breakoff_Prop` | WCC-62 | read by the viewer, not by a traced loader |
 | `HardPoint/Allows_Special_Weapon_Use` | WCC-61 | not M2 (no superweapons, SK-35) |
-| `GameConstants/Health_Critical_Percent_Threshold` | WCC-54 | G-11 |
+| `GameConstants/Health_Critical_Percent_Threshold` | WCC-54 | Applied by the SND-33 presentation consumer. |
 | `GameConstants/Base_Shield_Vulnerability_Modifier`, `Base_Shield_Delay_Time` | WCC-41, WCC-47 | not M2 (no base shield) |
 | `GameConstants/Under_Construction_Damage_Multiplier` | WCC-41 | not M2 (no construction) |
 | `GameConstants/Ion_Storm_Shield_Disable_Time` | WCC-47 | not M2 (no ion storms) |

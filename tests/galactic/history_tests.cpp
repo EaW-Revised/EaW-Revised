@@ -3,6 +3,7 @@
 #include "eawr/campaign/setup.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/script/authoritative/galactic_bridge.hpp"
+#include "eawr/campaign/game_session.hpp"
 #include "../../src/sim/galactic/checkpoint_fields_internal.hpp"
 
 #include <algorithm>
@@ -224,9 +225,45 @@ void privacy_and_global_axes() {
         && other->history()->lines.size() == 1 && other->history()->lines[0].player == 2,
         "each seat publication contains its own faction only");
 }
+void campaign_install_and_restore() {
+    namespace campaign = eawr::campaign;
+    std::vector<std::string> reference;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto setup = fixture();
+        const auto schedulers = [] {
+            auth::SessionConfig config; config.galactic_clock = true;
+            return std::pair{take(auth::ScriptScheduler::create(config, {})),
+                take(auth::ScriptScheduler::create(config, {}))};
+        };
+        auto game = take(campaign::GameSession::create(setup));
+        auto initial = schedulers();
+        pass(game.install_galactic_scripts(std::move(initial.first), std::move(initial.second)));
+        take(game.step(executor));
+        expect(game.galaxy().history_archive().at(1).size() == 1,
+            "WGP-146 fresh campaign installation records one History sample per admitted turn");
+        const auto owner = take(game.save_checkpoint_state());
+        const auto scripts = take(game.save_galactic_scripts());
+        auto restored = take(campaign::GameSession::create(setup));
+        pass(restored.load_checkpoint_state(owner));
+        auto resumed = schedulers();
+        pass(restored.install_galactic_scripts(std::move(resumed.first), std::move(resumed.second), scripts));
+        std::vector<std::string> hashes;
+        for (unsigned frame = 0; frame < 90; ++frame) {
+            const auto control = take(game.step(executor));
+            const auto loaded = take(restored.step(executor));
+            hashes.push_back(control.state_hash.get());
+            expect(loaded.state_hash.get() == control.state_hash.get()
+                && restored.galaxy().history_archive() == game.galaxy().history_archive(),
+                "campaign History and composed hashes continue equally after fresh and restored script installation");
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "campaign History continuation equals on 1/2/4/8 workers");
+    }
+}
 }
 int main() {
-    try { binary32_contracts(); cadence_and_provider(); compact_and_restore(); owned_membership(); planetary_type_inputs(); step_and_first_restore(); privacy_and_global_axes(); }
+    try { binary32_contracts(); cadence_and_provider(); compact_and_restore(); owned_membership(); planetary_type_inputs(); step_and_first_restore(); privacy_and_global_axes(); campaign_install_and_restore(); }
     catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
     if (failures) return 1;
     std::cout << "History provider, checkpoint and admission contracts passed\n";

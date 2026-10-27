@@ -105,12 +105,16 @@ void TacticalHud::set_retreat(const model::RetreatButtonView& view) {
     }
 }
 
+void TacticalHud::set_pause_notice(const std::string& text) {
+    if (state_->overlay) state_->overlay->set_pause_notice(String::utf8(text.c_str()));
+}
+
 void TacticalHud::set_time_view(const TimeView& view) {
     State& state = *state_;
     state.time_view = view;
     state.time_view_set = true;
-    const String network_help = "Pause and fast-forward are unavailable in multiplayer. Shared speed: "
-        + String::num_int64(view.speed_step) + ". Use = / - to request a change (two per 45 seconds).";
+    const String network_help = "Any active human may pause or resume; these do not count against the speed budget (1 s double-press debounce). Shared speed: "
+        + String::num_int64(view.speed_step) + ". Use = / - to request a change (six per 45 seconds).";
     if (state.pause_button != nullptr) {
         // TM-08: pausing starts an additive flash; it does not hold the selected state.
         state.pause_button->set_pressed_no_signal(false);
@@ -121,7 +125,7 @@ void TacticalHud::set_time_view(const TimeView& view) {
     if (state.fast_forward_button != nullptr) {
         state.fast_forward_button->set_pressed_no_signal(view.fast_forward);
         state.fast_forward_button->set_disabled(!view.fast_forward_enabled);
-        state.fast_forward_button->set_tooltip_text(view.multiplayer ? network_help : String());
+        state.fast_forward_button->set_tooltip_text(view.multiplayer ? "Fast-forward is unavailable in multiplayer. " + network_help : String());
         // TM-08: tinted grey (128) while disabled.
         const float tint = view.fast_forward_enabled ? 1.0F : 128.0F / 255.0F;
         state.fast_forward_button->set_self_modulate(Color(tint, tint, tint, 1.0F));
@@ -163,8 +167,9 @@ void TacticalHud::set_results(const presentation::ui::BattleResults& results) {
     if (state_->overlay != nullptr) state_->overlay->set_results(results);
 }
 
-void TacticalHud::set_replay_writer(const bool allowed, ReplayWriter writer) {
+void TacticalHud::set_replay_writer(const bool allowed, ReplayWriter writer, ReplayWriter session_writer) {
     state_->replay_writer = std::move(writer);
+    state_->session_replay_writer = std::move(session_writer);
     if (state_->overlay) state_->overlay->allow_save_replay(allowed);
 }
 

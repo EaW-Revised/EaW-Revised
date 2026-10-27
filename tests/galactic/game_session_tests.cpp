@@ -340,6 +340,35 @@ void tactical_nesting() {
     }
 }
 
+void multiplayer_boolean_pause_and_child() {
+    auto setup = eawr::campaign::build_synthetic_campaign(coop_campaign()).value();
+    mark_multiplayer(setup);
+    std::vector<eawr::sim::SeatId> humans;
+    for (const auto& seat : setup.seats) if (seat.active && seat.kind == galactic::SeatKind::human) humans.push_back(seat.seat_id);
+    expect(humans.size() >= 2, "pause fixture has two humans");
+    const eawr::sim::InlineExecutor executor;
+    auto game = GameSession::create(setup).value();
+    expect(bool(game.submit({{0, humans[0], 0}, galactic::PauseGalaxy{}})), "first human pause queued");
+    expect(bool(game.submit({{0, humans[1], 0}, galactic::PauseGalaxy{}})), "concurrent human pause queued");
+    expect(bool(game.step(executor)) && game.galaxy().clock().pause_depth == 1, "MP concurrent pauses establish one player hold");
+    expect(bool(game.submit({{1, humans[1], 1}, galactic::ResumeGalaxy{}})), "other human resume queued");
+    expect(bool(game.step(executor)) && game.galaxy().clock().pause_depth == 0, "one resume releases the shared galaxy hold");
+    const auto conflict = conflict_record(setup);
+    expect(bool(game.stage_battle(conflict, battle_content(conflict), eawr::campaign::ScriptRequirement::none)), "MP child stages");
+    expect(bool(game.step(executor)) && game.battle(), "MP child enters");
+    const auto galaxy_frame = game.galaxy().clock().galactic_frame;
+    const auto child_tick = game.battle()->completed_tick();
+    const auto boundary = game.completed_tick();
+    expect(bool(game.submit({{boundary, humans[0], 2}, galactic::PauseGalaxy{}})), "child pause queued");
+    expect(bool(game.submit({{boundary, humans[1], 2}, galactic::PauseGalaxy{}})), "duplicate child pause queued");
+    expect(bool(game.step(executor)) && game.child_paused() && game.battle()->completed_tick() == child_tick,
+        "shared child pause freezes its tactical tick");
+    expect(bool(game.submit({{game.completed_tick(), humans[1], 3}, galactic::ResumeGalaxy{}})), "child resume queued");
+    expect(bool(game.step(executor)) && !game.child_paused() && game.battle()->completed_tick() == child_tick + 1,
+        "one human resume releases only the tactical player hold");
+    expect(game.galaxy().clock().galactic_frame == galaxy_frame, "galaxy remains frozen throughout child pause and resume");
+}
+
 void battle_context_hash() {
     const auto setup = eawr::campaign::build_synthetic_campaign(coop_campaign()).value();
     const auto record = conflict_record(setup);
@@ -664,6 +693,7 @@ int case_galactic_game_session_tests() {
     allocator_extension();
     auto_resolve_seam();
     tactical_nesting();
+    multiplayer_boolean_pause_and_child();
     battle_context_hash();
     container_result_and_invalid_allocator();
     child_scripts_and_failure();

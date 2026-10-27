@@ -4,6 +4,7 @@
 #include "eawr/sim/math/math.hpp"
 #include "eawr/sim/tactical/fighters.hpp"
 #include "eawr/sim/tactical/session.hpp"
+#include "../../src/sim/tactical/combat_algorithms.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -108,6 +109,42 @@ void matrix_budget() {
     }
 }
 
+void hardpoint_turret_budget() {
+    namespace combat = tactical::detail::combat_detail;
+    const math::Vec3 x{whole(1), {}, {}}, y{{}, whole(1), {}}, z{{}, {}, whole(1)};
+    for (const std::size_t slots : {12U, 148U}) {
+        tactical::CombatProfile profile;
+        tactical::WeaponProfile weapon;
+        weapon.hardpoint = 0; weapon.manual_turret_required = true;
+        weapon.manual_turret.emplace();
+        weapon.manual_turret->axes = weapon.manual_turret->coordinate_axes = {x, y, z};
+        weapon.manual_turret->speed = whole(1);
+        weapon.manual_turret->offset.z = whole(120);
+        // A profile copy would allocate these vectors: mechanical service must only read them.
+        weapon.muzzles.assign(8, x);
+        weapon.shot.emplace();
+        weapon.shot->inaccuracy.assign(8, {});
+        profile.weapons.assign(slots, weapon);
+        for (std::uint32_t slot = 0; slot < slots; ++slot) profile.weapons[slot].hardpoint = slot;
+        auto state = tactical::initial_combat(profile, 1, 0, 1);
+        tactical::detail::CombatWorld world;
+        tactical::detail::CombatUnit unit;
+        unit.profile = &profile; unit.combat = &state; unit.transform = math::identity_matrix();
+        std::uint64_t steps = 0;
+        for (unsigned tick = 0; tick < 16; ++tick) {
+            // The existing combat staging copy is outside the mechanical-service budget.
+            combat::UnitCombat service(world, unit);
+            const auto before = allocations.load();
+            auto result = service.run();
+            const auto made = allocations.load() - before;
+            expect(result && made == 0, "HPT-C08: no-fire turret phase makes zero transient allocations/profile copies");
+            steps += service.hardpoint_turret_steps;
+            if (result) state = std::move(result.value().state);
+        }
+        expect(steps == slots * 16, "HPT-C08: phase performs exactly one bounded mechanical step per turret tick");
+    }
+}
+
 void locomotor_budget() {
     tactical::CraftProfile profile;
     profile.type_id = 1;
@@ -158,5 +195,6 @@ int main() {
     }
     matrix_budget();
     locomotor_budget();
+    hardpoint_turret_budget();
     return failures == 0 ? 0 : 1;
 }

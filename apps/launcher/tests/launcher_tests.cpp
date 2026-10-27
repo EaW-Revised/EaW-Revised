@@ -16,6 +16,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <map>
 #include <sstream>
 
@@ -138,64 +139,7 @@ std::string vdf_escaped(const fs::path& path) {
     return out;
 }
 
-// --- text formats ---------------------------------------------------------------------------
-
-void test_json() {
-    const auto json = parse_json("\xEF\xBB\xBF{\"a\": \"caf\\u00e9 \\ud83d\\ude00\", \"n\": -12.5e1, \"b\": true, \"z\": null,"
-                                 " \"l\": [1, {\"k\": \"v\"}], \"s\": \"x\\\\y\\\"q\\n\"}");
-    CHECK(json.has_value());
-    if (!json) return;
-    CHECK(*json->string_member("a") == "caf\xC3\xA9 \xF0\x9F\x98\x80");
-    CHECK(json->member("n")->number == -125.0);
-    CHECK(json->member("b")->boolean);
-    CHECK(json->member("z")->kind == JsonValue::Kind::null);
-    CHECK(json->member("l")->array.size() == 2);
-    CHECK(*json->member("l")->array[1].string_member("k") == "v");
-    CHECK(*json->string_member("s") == "x\\y\"q\n");
-    CHECK(json->member("missing") == nullptr);
-    CHECK(!parse_json("{\"a\": }"));
-    CHECK(!parse_json("{\"a\": 1} trailing"));
-    CHECK(!parse_json("{\"a\": \"\\ud83d\"}"));   // lone surrogate
-    CHECK(!parse_json(""));
-    CHECK(json_quote("a\"b\\c\n\x01") == "\"a\\\"b\\\\c\\n\\u0001\"");
-    const auto round = parse_json(json_quote("caf\xC3\xA9 \"x\"\\ \t"));
-    CHECK(round && round->string == "caf\xC3\xA9 \"x\"\\ \t");
-}
-
-void test_vdf() {
-    const auto modern = parse_vdf("// comment\n\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n"
-                                  "\t\t\"apps\" { \"32470\" \"1234\" }\n\t}\n\t\"1\" { \"path\" \"D:\\\\Spiele \xC3\xBC\" }\n}\n");
-    CHECK(modern.has_value());
-    if (!modern) return;
-    const VdfNode* folders = modern->child("LibraryFolders");
-    CHECK(folders != nullptr && folders->children.size() == 2);
-    CHECK(folders->children[0].child("path")->value == "C:\\Program Files (x86)\\Steam");
-    CHECK(folders->children[0].child("apps")->child("32470")->value == "1234");
-    CHECK(folders->children[1].child("path")->value == "D:\\Spiele \xC3\xBC");
-    const auto unknown_escape = parse_vdf("\"a\" \"C:\\Umlaut\\x\"");
-    CHECK(unknown_escape && unknown_escape->child("a")->value == "C:\\Umlaut\\x");
-    const auto bare = parse_vdf("key value\nother \"two words\"");
-    CHECK(bare && bare->child("key")->value == "value" && bare->child("other")->value == "two words");
-    CHECK(!parse_vdf("\"a\" {"));
-    CHECK(!parse_vdf("\"a\" \"b\" }"));
-    CHECK(!parse_vdf("\"unterminated"));
-}
-
-void test_paths() {
-    const fs::path path = path_from_utf8("C:\\Spiele\\caf\xC3\xA9 \xE6\x97\xA5\xE6\x9C\xAC");
-    CHECK(path.wstring() == L"C:\\Spiele\\caf\u00e9 \u65e5\u672c");
-    CHECK(path_to_utf8(path) == "C:\\Spiele\\caf\xC3\xA9 \xE6\x97\xA5\xE6\x9C\xAC");
-    CHECK(path_from_utf8("bad \xC3\x28 utf8").empty());
-    CHECK(path_from_utf8("surrogate \xED\xA0\x80").empty());
-    CHECK(lower_ascii("GameDATA") == "gamedata");
-    Scratch scratch;
-    fs::create_directories(scratch.path() / "Corruption");
-    const auto child = find_child_ci(scratch.path(), "corruption");
-    CHECK(child && fs::is_directory(*child));   // Windows resolves the case itself; elsewhere the scan does
-    CHECK(!find_child_ci(scratch.path(), "gamedata"));
-    CHECK(same_location(scratch.path() / "corruption", scratch.path() / "CORRUPTION" / ".." / "Corruption"));
-    CHECK(!same_location(scratch.path() / "a", scratch.path() / "b"));
-}
+// The JSON, KeyValues and path cases moved with their code to tests/mods (src/mods/steam).
 
 // --- validation ---------------------------------------------------------------------------------
 
@@ -439,6 +383,14 @@ void test_launch_plan() {
     const std::vector<std::wstring> expected = {L"--path", inputs.project.wstring(), L"--", L"--eawr-game-root", inputs.game_root.wstring(),
                                                 L"--eawr-front-end", L"--eawr-report", inputs.report.wstring()};
     CHECK(args == expected);
+    inputs.safe_render_thread = true;   // the opt-out puts the engine flag right after --path
+    args = godot_arguments(inputs);
+    CHECK(args[2] == L"--render-thread" && args[3] == L"safe" && args[4] == L"--");
+    inputs.render_thread = L"separate";
+    args = godot_arguments(inputs);
+    CHECK(args[2] == L"--render-thread" && args[3] == L"safe" && args[4] == L"--");
+    inputs.render_thread.reset();
+    inputs.safe_render_thread.reset();
     inputs.allow_unknown_build = true;
     inputs.quit_after = 30;
     inputs.extra = {L"--eawr-audio", L"off"};
@@ -515,6 +467,7 @@ struct FlowFixture {
     Scratch scratch;
     fs::path package = scratch.path() / L"EAWR caf\u00e9";
     fs::path user_data = scratch.path() / "user data";
+    fs::path viewer_data = scratch.path() / "Godot user data";
     fs::path game = make_install(scratch.path() / "Games" / L"Star Wars \u65e5\u672c");
     FakeRegistry registry;
     FakeUi ui;
@@ -529,6 +482,7 @@ struct FlowFixture {
         Options options;
         options.launcher_dir = package;
         options.user_data = user_data;
+        options.viewer_user_data = viewer_data;
         return options;
     }
     int run(const Options& options) { return run_launcher(options, registry, ui, runner, log); }
@@ -552,6 +506,316 @@ void test_flow_explicit_game_root() {
     for (const std::wstring& argument : args) CHECK(argument.find(L"console") == std::wstring::npos && argument.find(L"font") == std::wstring::npos);
     CHECK(!load_state(f.user_data).game_root);   // an explicit folder is a one-off: not remembered
     CHECK(f.ui.picks.empty());
+}
+
+void test_render_thread_precedence() {
+    FlowFixture f;
+    Options options = f.options(); options.game_root = f.game;
+    const auto mode = [&]() -> std::wstring {
+        CHECK(f.run(options) == kExitOk);
+        const auto it = std::find(f.runner.args.begin(), f.runner.args.end(), L"--render-thread");
+        return it == f.runner.args.end() ? L"project" : *std::next(it);
+    };
+    CHECK(mode() == L"project");
+    write_file(f.user_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=1\n");
+    CHECK(mode() == L"project"); // stale launcher-side file cannot supply a viewer preference
+    CHECK(f.user_data != f.viewer_data);
+    write_file(f.viewer_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=1\n");
+    write_file(f.user_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=0\n");
+    CHECK(mode() == L"safe");
+    options.safe_render_thread = false;
+    CHECK(mode() == L"separate"); // explicit CLI beats saved Safe
+    options.safe_render_thread.reset();
+    write_file(f.viewer_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=0\n");
+    write_file(f.user_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=1\n");
+    CHECK(mode() == L"separate");
+    options.safe_render_thread = true;
+    CHECK(mode() == L"safe"); // explicit Safe beats saved Separate
+    options.safe_render_thread.reset();
+    write_file(f.viewer_data / "eawr-settings.cfg", "eawr-settings 999\nvideo.render_thread=1\n");
+    CHECK(mode() == L"project");
+    const auto alternate = f.scratch.path() / L"custom settings.cfg";
+    write_file(alternate, "eawr-settings 1\nvideo.render_thread=1\n");
+    options.extra = {L"--eawr-settings-file", alternate.wstring()};
+    CHECK(mode() == L"safe");
+    CHECK(fs::current_path() != f.package);
+    const fs::path relative = L"relative settings.cfg";
+    write_file(f.package / relative, "eawr-settings 1\nvideo.render_thread=1\n");
+    options.extra = {L"--eawr-settings-file", relative.wstring()};
+    CHECK(mode() == L"safe"); // same working directory as the Godot child
+    write_file(f.viewer_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=0\n");
+    options.extra.insert(options.extra.end(), {L"--eawr-settings-file", L""});
+    CHECK(mode() == L"separate"); // an empty final override restores Godot's default user:// path
+    CHECK(parse_command_line({L"--render-thread", L"separate"}).safe_render_thread == false);
+    CHECK(!parse_command_line({L"--render-thread", L"invalid"}).error.empty());
+    CHECK(!parse_command_line({L"--render-thread"}).error.empty());
+}
+
+void test_flow_mods() {
+    FlowFixture f;
+    Options options = f.options();
+    options.game_root = f.game;
+    options.mods = true;
+    CHECK(parse_command_line({L"--mods"}).mods);
+    CHECK(!parse_command_line({L"--", L"--mods"}).mods);
+    CHECK(f.run(options) == kExitError);
+    CHECK(f.runner.calls == 0);
+    write_file(f.package / "launcher" / "project.godot", "config_version=5\n");
+    write_file(f.package / "eawr_mods_service.exe", "service stand-in");
+    CHECK(f.run(options) == kExitOk);
+    const std::vector<std::wstring> expected = {L"--path", (f.package / "launcher").wstring(), L"--",
+        L"--eawr-mods-service", (f.package / "eawr_mods_service.exe").wstring(), L"--eawr-godot",
+        (f.package / "godot" / kGodotExecutableName).wstring(), L"--eawr-game-project",
+        (f.package / "project").wstring(), L"--eawr-game-root", f.game.wstring(),
+        L"--eawr-launch-loop", (f.user_data / "launcher" / "next-action.json").wstring()};
+    CHECK(f.runner.args == expected);
+    CHECK(f.runner.cwd == f.package);
+    CHECK_CONTAINS(f.log_text(), "the mod manager exited with code");
+    f.runner.result.error = "denied";
+    CHECK(f.run(options) == kExitError);
+    CHECK_CONTAINS(f.ui.errors.back(), "could not start the mod manager");
+}
+
+// Every transition runs through the same process seam as the real hidden Windows child.
+void test_flow_launch_loop() {
+    FlowFixture f;
+    auto options = f.options();
+    options.game_root = f.game;
+    options.mods = true;
+    write_file(f.package / "launcher/project.godot", "manager");
+    write_file(f.package / "eawr_mods_service.exe", "service");
+    const auto request = f.user_data / "launcher/next-action.json";
+    const auto profile = f.user_data / "mods" / "profiles" / "sample.json";
+    const auto profile_json = [](const std::string& render) {
+        return "{\"format\":\"eawr-mod-profile\",\"version\":1,\"id\":\"sample\","
+               "\"launch\":{\"render_thread\":\"" + render + "\"}}";
+    };
+    write_file(f.viewer_data / "eawr-settings.cfg", "eawr-settings 1\nvideo.render_thread=1\n"); // profile Separate wins over saved Safe
+    write_file(profile, profile_json("safe") + std::string(65536, ' '));
+    LauncherState state;
+    state.game_root = f.game;
+    std::string error;
+    CHECK(save_state(f.user_data, state, error));
+    write_file(request, R"({"action":"launch-profile","profile":"stale"})");
+    f.runner.on_run = [&] {
+        CHECK(!fs::exists(request)); // stale and consumed requests never reach a child
+        const auto& args = f.runner.args;
+        if (f.runner.calls == 1) {
+            CHECK(std::find(args.begin(), args.end(), L"--eawr-launch-loop") != args.end());
+            write_file(request, R"({"action":"launch-profile","profile":"sample"})");
+        } else if (f.runner.calls == 2 || f.runner.calls == 4 || f.runner.calls == 5) {
+            auto flag = std::find(args.begin(), args.end(), L"--eawr-mod-profile");
+            CHECK(flag != args.end() && flag + 1 != args.end() && *(flag + 1) == profile.wstring());
+            auto render = std::find(args.begin(), args.end(), L"--render-thread");
+            const std::wstring expected = f.runner.calls == 2 ? L"safe" : L"separate";
+            CHECK(render != args.end() && render + 1 != args.end() && *(render + 1) == expected);
+            CHECK(render < std::find(args.begin(), args.end(), L"--"));
+            CHECK(load_state(f.user_data).last_profile == std::optional<std::string>("sample"));
+            CHECK(load_state(f.user_data).game_root && same_location(*load_state(f.user_data).game_root, f.game));
+            if (f.runner.calls == 2) write_file(request, R"({"action":"open-manager"})");
+            if (f.runner.calls == 4) write_file(request, R"({"action":"launch-profile","profile":"sample"})");
+        } else if (f.runner.calls == 3) {
+            CHECK(args[1] == (f.package / "launcher").wstring());
+            write_file(profile, profile_json("separate"));
+            write_file(request, R"({"action":"launch-profile","profile":"sample"})");
+        } else {
+            CHECK(false);
+        }
+    };
+    CHECK(f.run(options) == kExitOk);
+    CHECK(f.runner.calls == 5);
+    CHECK(!fs::exists(request));
+    // Remembering a profile never changes a plain EAWR start.
+    options.mods = false;
+    f.runner.on_run = [&] {
+        CHECK(std::find(f.runner.args.begin(), f.runner.args.end(), L"--eawr-mod-profile") == f.runner.args.end());
+    };
+    CHECK(f.run(options) == kExitOk);
+    CHECK(f.runner.calls == 6);
+}
+
+void test_flow_launch_loop_invalid() {
+    const std::string oversized_request = std::string(R"({"action":"open-manager","pad":")")
+        + std::string(65536, ' ') + R"("})";
+    CHECK(oversized_request.size() > 64 * 1024);
+    CHECK(parse_json(oversized_request).has_value());
+    const std::vector<std::string> requests = {
+        "", "{", "[]", "null", "{}", R"({"action":7})", R"({"action":"unknown"})",
+        R"({"action":"launch-profile"})", R"({"action":"launch-profile","profile":2})",
+        R"({"action":"launch-profile","profile":"../escape"})",
+        R"({"action":"launch-profile","profile":"CON"})",
+        R"({"action":"launch-profile","profile":"missing"})", oversized_request
+    };
+    for (const auto& text : requests) {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        write_file(f.package / "launcher/project.godot", "manager");
+        write_file(f.package / "eawr_mods_service.exe", "service");
+        const auto request = f.user_data / "launcher/next-action.json";
+        f.runner.on_run = [&] { if (!text.empty()) write_file(request, text); };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 1);
+        CHECK(!fs::exists(request));
+    }
+    for (const std::string text : {"{", "{}",
+            R"({"format":"eawr-mod-profile","version":1,"id":"other","launch":{"render_thread":"safe"}})",
+            R"({"format":"eawr-mod-profile","version":2,"id":"sample","launch":{"render_thread":"safe"}})",
+            R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":"invalid"}})"}) {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        const auto request = f.user_data / "launcher/next-action.json";
+        write_file(f.user_data / "mods/profiles/sample.json", text);
+        f.runner.on_run = [&] { write_file(request, R"({"action":"launch-profile","profile":"sample"})"); };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 1);
+        CHECK(!fs::exists(request));
+        CHECK(!load_state(f.user_data).last_profile);
+    }
+}
+
+void test_flow_launch_loop_profile_traversal() {
+    for (bool absolute : {false, true}) {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        write_file(f.package / "launcher/project.godot", "manager");
+        write_file(f.package / "eawr_mods_service.exe", "service");
+        const auto request = f.user_data / "launcher" / "next-action.json";
+        const std::string id = absolute ? path_to_utf8(f.scratch.path() / "absolute") : "../escape";
+        const auto target = absolute ? f.scratch.path() / "absolute.json" : f.user_data / "mods" / "escape.json";
+        // Everything the loop reads is valid except the requested id: removing the
+        // portable-id guard would read this file and start the game a second time.
+        write_file(target, "{\"format\":\"eawr-mod-profile\",\"version\":1,\"id\":" + json_quote(id)
+            + R"(,"name":"Synthetic","order_source":"player","layers":[],"launch":{"mode":"front-end","render_thread":"safe"}})");
+        fs::create_directories(f.user_data / "mods" / "profiles");
+        const auto unguarded_path = f.user_data / "mods" / "profiles" / path_from_utf8(id + ".json");
+        CHECK(fs::is_regular_file(target));
+        CHECK(read_file(unguarded_path) == read_file(target));
+        CHECK(parse_json(read_file(unguarded_path)).has_value());
+        f.runner.on_run = [&] {
+            if (f.runner.calls == 1) {
+                write_file(request, "{\"action\":\"launch-profile\",\"profile\":" + json_quote(id) + "}");
+            }
+        };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 1);
+        CHECK(!fs::exists(request));
+        CHECK(!load_state(f.user_data).last_profile);
+    }
+}
+
+void test_flow_launch_loop_explicit_safe_render_thread() {
+    for (bool safe : {true, false}) {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        options.safe_render_thread = safe ? parse_command_line({L"--safe-render-thread"}).safe_render_thread
+                                          : parse_command_line({L"--render-thread", L"separate"}).safe_render_thread;
+        write_file(f.package / "launcher/project.godot", "manager");
+        write_file(f.package / "eawr_mods_service.exe", "service");
+        write_file(f.viewer_data / "eawr-settings.cfg", safe ? "eawr-settings 1\nvideo.render_thread=0\n"
+                                                           : "eawr-settings 1\nvideo.render_thread=1\n");
+        write_file(f.user_data / "mods/profiles/sample.json",
+            std::string(R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":")")
+            + (safe ? "separate" : "safe") + R"("}})");
+        f.runner.on_run = [&] {
+            if (f.runner.calls == 1) {
+                write_file(f.user_data / "launcher/next-action.json", R"({"action":"launch-profile","profile":"sample"})");
+            } else {
+                const auto& args = f.runner.args;
+                const auto render = std::find(args.begin(), args.end(), L"--render-thread");
+                CHECK(render != args.end() && render + 1 != args.end() && *(render + 1) == (safe ? L"safe" : L"separate"));
+                CHECK(std::count(args.begin(), args.end(), L"--render-thread") == 1);
+                CHECK(render < std::find(args.begin(), args.end(), L"--"));
+            }
+        };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 2);
+    }
+}
+
+void test_flow_launch_loop_profile_beats_saved_render_thread() {
+    for (bool profile_safe : {true, false}) {
+        FlowFixture f;
+        auto options = f.options();
+        options.game_root = f.game;
+        options.mods = true;
+        write_file(f.package / "launcher/project.godot", "manager");
+        write_file(f.package / "eawr_mods_service.exe", "service");
+        write_file(f.viewer_data / "eawr-settings.cfg", profile_safe ? "eawr-settings 1\nvideo.render_thread=0\n"
+                                                                   : "eawr-settings 1\nvideo.render_thread=1\n");
+        write_file(f.user_data / "mods/profiles/sample.json",
+            std::string(R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":")")
+            + (profile_safe ? "safe" : "separate") + R"("}})");
+        f.runner.on_run = [&] {
+            if (f.runner.calls == 1) {
+                write_file(f.user_data / "launcher/next-action.json", R"({"action":"launch-profile","profile":"sample"})");
+            } else {
+                const auto& args = f.runner.args;
+                const auto render = std::find(args.begin(), args.end(), L"--render-thread");
+                CHECK(render != args.end() && render + 1 != args.end() && *(render + 1) == (profile_safe ? L"safe" : L"separate"));
+                CHECK(std::count(args.begin(), args.end(), L"--render-thread") == 1);
+                CHECK_CONTAINS(f.log_text(), " (mod profile)");
+            }
+        };
+        CHECK(f.run(options) == kExitOk);
+        CHECK(f.runner.calls == 2);
+    }
+}
+
+void test_flow_launch_loop_guard_and_failure() {
+    FlowFixture f;
+    auto options = f.options();
+    options.game_root = f.game;
+    options.mods = true;
+    write_file(f.package / "launcher/project.godot", "manager");
+    write_file(f.package / "eawr_mods_service.exe", "service");
+    const auto request = f.user_data / "launcher/next-action.json";
+    f.runner.on_run = [&] {
+        CHECK(!fs::exists(request));
+        write_file(request, R"({"action":"open-manager"})");
+    };
+    CHECK(f.run(options) == kExitError);
+    CHECK(f.runner.calls == 17);
+    CHECK(!fs::exists(request));
+    CHECK_CONTAINS(f.ui.errors.back(), "repeated launch requests");
+    f.runner.result.exit_code = 9;
+    CHECK(f.run(options) == 9); // a failed manager cannot request a restart
+    CHECK(f.runner.calls == 18);
+    CHECK(!fs::exists(request));
+    options.mods = false;
+    CHECK(f.run(options) == 9); // neither can a failed game
+    CHECK(f.runner.calls == 19);
+    CHECK(!fs::exists(request));
+}
+
+void test_flow_launch_loop_long_sessions_and_unclearable_request() {
+    FlowFixture f;
+    auto options = f.options();
+    options.game_root = f.game;
+    write_file(f.package / "launcher/project.godot", "manager");
+    write_file(f.package / "eawr_mods_service.exe", "service");
+    const auto request = f.user_data / "launcher/next-action.json";
+    write_file(f.user_data / "mods/profiles/sample.json",
+        R"({"format":"eawr-mod-profile","version":1,"id":"sample","launch":{"render_thread":"safe"}})");
+    f.runner.result.seconds = kEarlyExitSeconds;
+    f.runner.on_run = [&] {
+        CHECK(!fs::exists(request));
+        if (f.runner.calls < 36) {
+            write_file(request, f.runner.calls % 2 == 1 ? R"({"action":"open-manager"})"
+                : R"({"action":"launch-profile","profile":"sample"})");
+        }
+    };
+    CHECK(f.run(options) == kExitOk); // real game sessions do not exhaust the restart guard
+    CHECK(f.runner.calls == 36);
+    write_file(request / "occupied", "cannot remove a nonempty directory");
+    CHECK(f.run(options) == kExitError);
+    CHECK(f.runner.calls == 36); // never start with an uncleared request
 }
 
 void test_flow_explicit_game_root_invalid() {
@@ -778,12 +1042,13 @@ void test_flow_unwritable_user_data_and_bad_command_line() {
 
 void test_command_line_parsing() {
     const Options options = parse_command_line({L"--game-root", L"D:\\Games\\EaW", L"--godot-quit-after", L"30", L"--allow-unknown-build",
-                                                L"--choose-game", L"--no-dialogs", L"--user-data", L"U:\\data", L"--godot", L"G.exe",
+                                                L"--choose-game", L"--no-dialogs", L"--safe-render-thread", L"--user-data", L"U:\\data", L"--godot", L"G.exe",
                                                 L"--project", L"P", L"--eawr-audio", L"off", L"--", L"--eawr-hud", L"off"});
     CHECK(options.error.empty());
     CHECK(options.game_root == fs::path(L"D:\\Games\\EaW"));
     CHECK(options.quit_after == 30);
     CHECK(options.allow_unknown_build && options.choose_game && options.no_dialogs);
+    CHECK(options.safe_render_thread && !parse_command_line({L"--game-root", L"G"}).safe_render_thread);
     CHECK(options.user_data == fs::path(L"U:\\data") && options.godot == fs::path(L"G.exe") && options.project == fs::path(L"P"));
     CHECK((options.extra == std::vector<std::wstring>{L"--eawr-audio", L"off", L"--eawr-hud", L"off"}));
     CHECK(!parse_command_line({L"--godot-quit-after", L"soon"}).error.empty());
@@ -813,9 +1078,6 @@ void test_project_name_matches_godot_project(const fs::path& project_godot) {
 } // namespace
 
 int main(int argc, char** argv) {
-    test_json();
-    test_vdf();
-    test_paths();
     test_validation();
     test_steam_modern_and_legacy();
     test_steam_manifest_name_must_be_one_folder();
@@ -826,6 +1088,15 @@ int main(int argc, char** argv) {
     test_state();
     test_launch_plan();
     test_flow_explicit_game_root();
+    test_render_thread_precedence();
+    test_flow_mods();
+    test_flow_launch_loop();
+    test_flow_launch_loop_invalid();
+    test_flow_launch_loop_profile_traversal();
+    test_flow_launch_loop_explicit_safe_render_thread();
+    test_flow_launch_loop_profile_beats_saved_render_thread();
+    test_flow_launch_loop_guard_and_failure();
+    test_flow_launch_loop_long_sessions_and_unclearable_request();
     test_flow_explicit_game_root_invalid();
     test_flow_saved_choice_revalidated();
     test_flow_one_discovered_install_is_used_silently();

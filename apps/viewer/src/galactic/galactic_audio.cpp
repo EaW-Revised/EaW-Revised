@@ -255,6 +255,10 @@ void GalacticAudio::play_event(const std::string_view name) {
     if (!accepted.handle) ++playback_failures_[std::string(name) + ": admission_" + std::string(audio::to_string(accepted.result))];
 }
 
+void GalacticAudio::negative_feedback() {
+    play_event(value(audio_fields_, "SFXEvent_GUI_Negative_Feedback"));
+}
+
 const std::vector<audio::Field>& GalacticAudio::type_fields(const std::string_view type) {
     const auto key = audio::upper(type);
     if (const auto found = type_fields_.find(key); found != type_fields_.end()) return found->second;

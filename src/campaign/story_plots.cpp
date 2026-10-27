@@ -65,6 +65,7 @@ bool parse_event(const data::XmlNode& node, story::EventDef& event, std::vector<
     }
     if (name.size() > 255) name.resize(255);
     event.name = story::upper(name);
+    event.authored_name = name;
     std::string incoming;
     for (const auto& child : node.children) {
         const auto& tag = child.name;
@@ -131,7 +132,10 @@ core::Result<void> load_subplot(const vfs::Vfs& files, story::Player owner, std:
         by_name.emplace(event.name, sub.events.size());
         sub.events.push_back(std::move(event));
     }
-    out.subplots.push_back(std::move(sub));
+    // WST-89: a later load of the same authored sub-plot name replaces its owner and definition.
+    const auto existing = std::find_if(out.subplots.begin(), out.subplots.end(), [&](const auto& row) { return row.name == sub.name; });
+    if (existing == out.subplots.end()) out.subplots.push_back(std::move(sub));
+    else *existing = std::move(sub);
     return core::Result<void>::success();
 }
 } // namespace
@@ -176,6 +180,14 @@ core::Result<StoryPlots> load_story_plots(const vfs::Vfs& files, const data::gal
     StoryPlots out;
     const auto* campaign = data.campaign(plan.campaign_name());
     if (!campaign) return core::Result<StoryPlots>::success(std::move(out));
+    const auto load = [&](const CampaignPlayerBinding& binding, const std::string& plot) {
+        const auto first_note = out.notes.size();
+        auto result = load_story_plot(files, binding.player.player_id, plot, out);
+        // WST-88: retain the nonfatal loader result with the complete authored route.
+        for (auto i = first_note; i < out.notes.size(); ++i)
+            out.notes[i] = campaign->name + ": faction " + binding.faction + ", Data/XML/" + plot + ": " + out.notes[i];
+        return result;
+    };
     // WGS-07: Rebel, Empire, then Underworld plot, each for its (active) player.
     struct Route { std::string_view side_constant; const std::string* plot; };
     const std::array routes{Route{"Good_Side_Name", &campaign->rebel_story_name}, Route{"Evil_Side_Name", &campaign->empire_story_name},
@@ -190,7 +202,20 @@ core::Result<StoryPlots> load_story_plots(const vfs::Vfs& files, const data::gal
             return row.active && same(row.faction, trimmed(side->text));
         });
         if (binding == plan.player_bindings().end()) continue; // only existing active players load their plot
-        if (auto loaded = load_story_plot(files, binding->player.player_id, *route.plot, out); !loaded)
+        if (auto loaded = load(*binding, *route.plot); !loaded)
+            return core::Result<StoryPlots>::failure(loaded.error());
+    }
+    // WST-87: generic associations add plots after the named routes, including repeated factions.
+    for (const auto& route : campaign->story_names) {
+        const auto binding = std::find_if(plan.player_bindings().begin(), plan.player_bindings().end(), [&](const auto& row) {
+            return row.active && same(row.faction, route.faction);
+        });
+        if (binding == plan.player_bindings().end()) {
+            out.notes.push_back(campaign->name + ": faction " + route.faction + ", Data/XML/" + route.name
+                + ": no active player; remaining Story_Name associations not loaded (WST-88)");
+            break;
+        }
+        if (auto loaded = load(*binding, route.name); !loaded)
             return core::Result<StoryPlots>::failure(loaded.error());
     }
     return core::Result<StoryPlots>::success(std::move(out));

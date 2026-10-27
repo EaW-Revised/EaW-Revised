@@ -596,6 +596,18 @@ void register_targets(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (!position) return none();
         return one(position_value(*position));
     });
+    // The stock evaluators measure from their Target (GetDistanceToNearestSpaceField, EX-51): the
+    // distance from the target's object or region centre to an object, AI target, TaskForce or position.
+    method("Get_Distance", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        if (arguments.size() < 2) return none();
+        const auto origin = extract_position(*host, arguments[0]);
+        if (!origin) return none();
+        const auto other = extract_position(*host, arguments[1]);
+        if (!other) return fail("Get_Distance: parameter 1 is not a live object or a position");
+        const auto length = distance(*origin, *other);
+        if (!length) return fail("Get_Distance: distance out of range");
+        return one(number(numeric::from_fixed(*length)));
+    });
 }
 
 // DT-03 FindDeadlyEnemy(taskforce | object | AI target of an object).
@@ -935,19 +947,72 @@ void register_functions(ScriptScheduler& scripts, const HostPtr& host, std::vect
         return one(number(low + (high - low) * LuaNumber(draw) / LuaNumber(32767)));
     });
     add("Find_All_Objects_Of_Type", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
-        const Handle* player = arguments.empty() ? nullptr : as_handle(arguments[0], handle_player);
-        const std::string* name = arguments.size() > 1 ? as_text(arguments[1]) : (arguments.size() == 1 ? as_text(arguments[0]) : nullptr);
-        if (name == nullptr) return fail("Find_All_Objects_Of_Type expects a type or category name");
-        bool category = false;
-        const std::uint64_t bits = names_to_bits(*host, *name, category);
-        const auto type = host->types_by_name.find(upper(*name));
+        // RGC-112/113: filters are recognized in order and intersect; a player
+        // may appear alone or on either side of the name/type filter.
+        const Handle* player = nullptr;
+        std::optional<sim::tactical::TypeId> type;
+        std::optional<std::uint64_t> categories, properties;
+        const auto unrestricted = [](const std::optional<std::uint64_t> bits) {
+            return !bits || *bits == std::numeric_limits<std::uint64_t>::max();
+        };
+        const auto mask = [](const auto& names, const std::string& text) -> std::optional<std::uint64_t> {
+            std::uint64_t bits = 0;
+            std::string name;
+            bool valid = true;
+            const auto flush = [&] {
+                const auto found = names.find(upper(name));
+                if (name.empty() || found == names.end()) valid = false;
+                else bits |= found->second;
+                name.clear();
+            };
+            for (const char ch : text) {
+                if (ch == '|') flush();
+                else if (ch != ' ' && ch != '\t') name.push_back(ch);
+            }
+            flush();
+            return valid ? std::optional<std::uint64_t>{bits} : std::nullopt;
+        };
+        std::size_t filter_index = 0;
+        for (const auto& argument : arguments) {
+            ++filter_index;
+            if (const auto* owner = as_handle(argument, handle_player)) { player = owner; continue; }
+            if (const auto* wrapped = as_handle(argument, handle_type); wrapped != nullptr && !type) {
+                if (const auto* info = host->type(wrapped->id)) { type = info->type_id; continue; }
+            }
+            if (const auto* name = as_text(argument)) {
+                if (unrestricted(properties)) {
+                    properties = mask(host->setup.content.properties, *name);
+                    if (properties) continue;
+                }
+                if (unrestricted(categories)) {
+                    categories = mask(host->setup.content.categories, *name);
+                    if (categories) continue;
+                }
+                if (!type) {
+                    const auto key = upper(*name);
+                    const auto found = host->types_by_name.find(key);
+                    if (found != host->types_by_name.end()) { type = found->second->type_id; continue; }
+                    if (const auto& names = host->setup.content.catalog_types) {
+                        const auto registered = std::lower_bound(names->begin(), names->end(), key,
+                            [](const auto& entry, const std::string& value) { return entry.first < value; });
+                        if (registered != names->end() && registered->first == key) { type = registered->second; continue; }
+                    }
+                }
+            }
+            const auto* rejected = as_text(argument);
+            return fail("Find_All_Objects_Of_Type expects a known type, property, category or player; argument "
+                + std::to_string(filter_index) + (rejected ? " '" + *rejected + "'" : " (non-text value)"));
+        }
+        if (player == nullptr && !type && unrestricted(categories) && unrestricted(properties))
+            return fail("Find_All_Objects_Of_Type expects at least one filter");
         std::vector<Value> out;
         for (const ViewUnit& unit : host->view->units) {
             if (player != nullptr && unit.owner != player->id) continue;
             const AiType* info = host->type(unit.type);
-            if (info == nullptr) continue;
-            const bool match = category ? (info->category_bits & bits) != 0 : (type != host->types_by_name.end() && type->second == info);
-            if (match) out.push_back(handle(handle_game_object, unit.id));
+            if (type && unit.type != *type) continue;
+            if (!unrestricted(categories) && (info == nullptr || (info->category_bits & *categories) == 0)) continue;
+            if (!unrestricted(properties) && (info == nullptr || (info->property_bits & *properties) == 0)) continue;
+            out.push_back(handle(handle_game_object, unit.id));
         }
         return one(Value{std::move(out)});
     });

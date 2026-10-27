@@ -1,6 +1,6 @@
 #pragma once
 
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/sim/commands.hpp"
 #include "eawr/sim/tactical/snapshot.hpp"
 
@@ -94,7 +94,7 @@ struct SelfDestructHardpoint {
 // the history, #401 review 1) what the player saw at that tick is unknown and the prop is not
 // thrown: the least visible choice, never a later frame's visibility. The pose points into
 // `snapshot`. `reveal` (--eawr-live-reveal) draws the ship regardless of visibility.
-[[nodiscard]] std::optional<LiveUnitPose> debris_ship_at(const sim::tactical::TacticalSnapshot* snapshot,
+[[nodiscard]] std::optional<live::LiveUnitPose> debris_ship_at(const sim::tactical::TacticalSnapshot* snapshot,
                                                          sim::EntityId unit, sim::tactical::PlayerId viewer,
                                                          bool reveal = false);
 

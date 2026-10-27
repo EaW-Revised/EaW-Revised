@@ -49,7 +49,8 @@ struct SetupOffer {
 
 enum class SetupReason : std::uint8_t {
     malformed = 0, options = 1, identity = 2, tick_zero = 3,
-    local_build = 4, link_closed = 5, timeout = 6, cancelled = 7
+    local_build = 4, link_closed = 5, timeout = 6, cancelled = 7,
+    land_unsupported = 8 // Coordinator-reserved: land tactical MP is not playable yet.
 };
 
 struct SetupRefusal {
@@ -60,6 +61,9 @@ struct SetupRefusal {
     [[nodiscard]] core::Diagnostic diagnostic() const;
     friend bool operator==(const SetupRefusal&, const SetupRefusal&) = default;
 };
+
+// Setup transport accepts both domains; admission to a playable match is separate.
+[[nodiscard]] std::optional<SetupRefusal> skirmish_start_refusal(const sim::tactical::TacticalSetup& setup);
 
 // Offer v3: kind:u8, version:u32, seed:u64, delay:u64, final tick count:u64, domain:text,
 // setup:blob, seat count:u32 and (peer,seat,player):u32 triples, build:text,

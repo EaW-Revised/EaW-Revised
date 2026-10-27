@@ -344,6 +344,12 @@ core::Result<std::vector<std::uint8_t>> save_tactical_checkpoint(const tactical:
         std::move(child_bytes).value()});
     checkpoint.sections.push_back({static_cast<std::uint16_t>(SectionId::child_state), child_state_section_version, true,
         std::move(state_bytes).value()});
+    if (session.domain() == tactical::BattleDomain::land) {
+        auto land = session.save_land_checkpoint_state();
+        if (!land) return fail_in<Bytes>(diagnostic_codes::invalid_save, SectionId::land_state, land.error(), {});
+        checkpoint.sections.push_back({static_cast<std::uint16_t>(SectionId::land_state), land_state_section_version,
+            false, std::move(land).value()});
+    }
     return write_checkpoint(checkpoint);
 }
 
@@ -365,7 +371,7 @@ core::Result<TacticalRestore> load_tactical_checkpoint(const std::span<const std
     for (const auto& section : checkpoint.sections) {
         const auto id = static_cast<SectionId>(section.id);
         if (known_section(section.id) && id != SectionId::seats && id != SectionId::child_log
-            && id != SectionId::child_state && id != SectionId::presentation_hints) {
+            && id != SectionId::child_state && id != SectionId::land_state && id != SectionId::presentation_hints) {
             return inconsistent("section " + std::string(section_name(section.id)) + " belongs to a galaxy, not a tactical checkpoint");
         }
     }
@@ -398,6 +404,11 @@ core::Result<TacticalRestore> load_tactical_checkpoint(const std::span<const std
     RestoreWork work;
     work.checkpoint_bytes = bytes.size();
     const auto* state_section = checkpoint.find(SectionId::child_state);
+    const auto* land_section = checkpoint.find(SectionId::land_state);
+    if ((setup.domain == tactical::BattleDomain::land) != (land_section != nullptr))
+        return inconsistent("section land-state and battle domain disagree");
+    if (land_section && (land_section->version != land_state_section_version || !state_section))
+        return inconsistent("section land-state requires a supported version and child-state");
     auto session = [&]() -> core::Result<tactical::TacticalSession> {
         if (!state_section) return resimulate_child_log(child.value(), factory, executor, &work, path);
         if (state_section->version != child_state_section_version)
@@ -411,6 +422,14 @@ core::Result<TacticalRestore> load_tactical_checkpoint(const std::span<const std
                 "section child-state: factory must return the saved setup and sealed commands at tick zero", path);
         auto loaded = restored.value().load_checkpoint_state(state_section->bytes);
         if (!loaded) return fail_in<tactical::TacticalSession>(diagnostic_codes::section_invalid, SectionId::child_state, loaded.error(), path);
+        if (land_section) {
+            auto land = restored.value().load_land_checkpoint_state(land_section->bytes);
+            if (!land) return fail_in<tactical::TacticalSession>(diagnostic_codes::section_invalid, SectionId::land_state, land.error(), path);
+            auto encoded_land = restored.value().save_land_checkpoint_state();
+            if (!encoded_land || encoded_land.value() != land_section->bytes)
+                return fail<tactical::TacticalSession>(diagnostic_codes::section_invalid,
+                    "section land-state: noncanonical restored state", path);
+        }
         if (restored.value().completed_tick() != child.value().completed_tick
             || core::sha256(restored.value().canonical_state_bytes()) != child.value().state_sha256
             || restored.value().pending_command_count() != queued_count(child.value()))

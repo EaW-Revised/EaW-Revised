@@ -73,6 +73,7 @@ struct SpacePopulation {
     void bind_live_identity(std::size_t ship, std::size_t identity_ship);
     void restore_live_ship(GodotRenderer&, std::size_t) {}
 };
+using BattleScene = SpacePopulation;
 __DRAWN__
 __PLACEMENT__
 __BIND__

@@ -14,6 +14,7 @@
 #include "eawr/sim/tactical/session.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -689,6 +690,15 @@ void test_waypoints() {
         if (first) expect(result->hashes == first->hashes && result->events == first->events,
             "HCB-59: waypoint state and events are identical across partition counts and storage order");
         else first = result;
+    }
+    {
+        // #4992: AaW authors -1; the retail queue compares the count as unsigned, so 4294967295 is no limit.
+        auto unlimited_table = table;
+        unlimited_table.rules.max_waypoints = std::numeric_limits<std::uint32_t>::max();
+        auto unlimited = tactical::TacticalSession::from_replay(replay, {}, {}, unlimited_table);
+        const auto result = unlimited ? run(std::move(unlimited).value(), replay.final_tick_count, 1, true) : std::nullopt;
+        expect(result && near(result->units.back()[0].position.x, units(900), 16 * one),
+            "HCB-58: a wrapped (-1) capacity queues every distinct destination");
     }
     {
         auto reused = replay;

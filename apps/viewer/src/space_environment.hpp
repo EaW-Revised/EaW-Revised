@@ -1,4 +1,7 @@
 #pragma once
+
+#include "battle_scene.hpp"
+#include "battle_camera.hpp"
 #include <utility>
 
 #include "map_camera.hpp"
@@ -53,21 +56,7 @@ struct SpacePopulateContext final {
     sim::EntityId first_entity{};
 };
 // One frame of a live population (#80, the live session's units).
-struct SpaceLiveUpdate final {
-    // This frame's population instances; they replace the previous ones.
-    std::optional<std::vector<sim::RenderInstance>> instances;
-    // Capture this frame too, to the capture path with this suffix before
-    // its extension.
-    std::optional<std::string> capture_suffix;
-    // Keep running past the timed frames (the live run is not done yet).
-    bool hold{};
-    // #453 BEP-03: the player quit; the run ends this frame, timed frames or not.
-    bool quit{};
-    // The live source stopped (the simulation thread failed): the view keeps the last
-    // instances and shows this on screen. An interactive view keeps running; a capture run
-    // fails with it.
-    std::optional<std::string> error;
-};
+using SpaceLiveUpdate = BattleScene::Update;
 struct SpacePopulateResult final {
     std::vector<sim::RenderInstance> instances;
     std::function<void(GodotRenderer&, std::uint32_t)> tick;
@@ -117,7 +106,7 @@ struct SpaceEffectsHook final {
 // The evidence harness also supports the space tactical camera when selected
 // explicitly with --eawr-space-control. Its fixed capture path locks the
 // bridge to --eawr-space-camera for the harness's comparison phases.
-class SpaceEnvironment final {
+class SpaceEnvironment final : public BattleCamera {
 public:
     struct Options final {
         std::string map_path;
@@ -242,6 +231,7 @@ public:
     void live_camera_movie(bool on, const std::array<float, 3>& render_target);
     [[nodiscard]] bool live_camera_movie() const;
     [[nodiscard]] std::string live_camera_overview() const;
+    void owner_census(diagnostics::OwnerCensus& output) const;
 
 private:
     struct State;

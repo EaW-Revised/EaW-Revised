@@ -270,8 +270,8 @@ public:
                     auto selected = tech_index;
                     while (selected > 0 && original->starting_spawned_units[selected].empty()) --selected;
                     for (const auto& spawn : original->starting_spawned_units[selected]) {
-                        const auto* spawned = type(spawn.type);
-                        if (!spawned) return false;
+                        const auto* spawned = types_.find(spawn.type);
+                        if (!spawned) continue; // RGC-26: bomber discovery skips a null entry before reading squadron members
                         for (const auto& unit_name : spawned->squadron_units) {
                             const auto* unit = type(unit_name);
                             if (!unit) return false;
@@ -362,6 +362,7 @@ core::Result<Contribution> contribution(const AutoResolveCombatant& combatant, c
             auto tech = combatant.tech;
             while (tech > 0 && own->starting_spawned_units[tech].empty()) --tech;
             for (const auto& spawn : own->starting_spawned_units[tech]) {
+                if (!types.find(spawn.type)) continue; // RGC-26: a null garrison entry contributes nothing
                 const auto& row = own->starting_spawned_units[tech];
                 const auto first = std::find_if(row.begin(), row.end(), [&](const auto& value) { return same(value.type, spawn.type); });
                 auto added = add_type(spawn.type, first->count, total); // WAR-77: first resolved-type count

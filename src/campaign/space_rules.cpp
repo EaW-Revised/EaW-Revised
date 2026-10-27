@@ -37,12 +37,20 @@ core::Result<void> bind_space_rules(const tactical::TacticalSetup& setup,
         economy.value().campaign_population.emplace_back(battle::type_id(type.id),
             units::population_in_space(type.production.population_value, type.production.space_override_population_value));
     std::sort(economy.value().campaign_population.begin(), economy.value().campaign_population.end());
-    for (auto& menu : economy.value().menus) if (!menu.station_producer) for (auto& option : menu.options) {
-        const auto price = sim::math::multiply(option.price, setup.campaign->corruption_price_multiplier);
-        if (!price) return core::Result<void>::failure(price.error());
-        option.price = price.value();
-        // WBP-11: campaign pads require a positive campaign price.
-        option.available = option.available && option.price.raw() > 0;
+    for (auto& menu : economy.value().menus) {
+        const auto* producer = type_of(*inputs.tables, menu.station);
+        // Preserve the campaign price exemption independently of WPR-33's broader
+        // producer eligibility: pads, UC objects and ordinary mod shipyards were priced.
+        const bool price_exempt = producer && !producer->build_pad && !producer->under_construction
+            && (producer->kind == units::UnitKind::station || !producer->production.income.empty() || producer->capture_point);
+        if (price_exempt) continue;
+        for (auto& option : menu.options) {
+            const auto price = sim::math::multiply(option.price, setup.campaign->corruption_price_multiplier);
+            if (!price) return core::Result<void>::failure(price.error());
+            option.price = price.value();
+            // WBP-11: campaign pads require a positive campaign price.
+            option.available = option.available && option.price.raw() > 0;
+        }
     }
     for (auto& child : economy.value().pads.construction) {
         const auto price = sim::math::multiply(child.price, setup.campaign->corruption_price_multiplier);

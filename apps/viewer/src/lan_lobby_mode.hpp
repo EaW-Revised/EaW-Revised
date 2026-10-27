@@ -40,6 +40,7 @@ namespace eawr::presentation::godot_backend {
 //                                            host:<game name>  join:<game name>  direct:<ip[:port]>
 //                                            map:<name>  ai:<row>  team:<row>=<n>
 //                                            start  accept  cancel  leave
+//                                            options:open|credits=<track value>|accept|cancel|defaults
 //                                            wait:<condition>[@<seconds>]  (game:<name> players:<n>
 //                                              staging joined:<n> chat:<text> page:<name>)
 //                                            online_chat:<name>|<text>  (a line the online window receives)

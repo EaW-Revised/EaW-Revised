@@ -2,6 +2,7 @@
 #include "eawr/sim/galactic/movement.hpp"
 #include "session_impl.hpp"
 #include "encoding.hpp"
+#include "eawr/sim/galactic/corruption_model.hpp"
 #include "native_movement_admission.hpp"
 #include "native_control_admission.hpp"
 
@@ -178,8 +179,10 @@ core::Result<FleetDeparture> prepare_fleet_departure(const Fleet& fleet, const M
             });
         }
         if (departing == 0) invalid("empty departing fleet");
-        out.base_speed = checked(math::multiply(checked(math::multiply(minimum.value_or(Fixed{}),
-            player(inputs, fleet.owner).hyperspace_factor)), inputs.mode_modifier));
+        // LSA-10/11/13: accept authored signs. A nonpositive speed input cannot
+        // advance a forward leg; clamp at consumption so two negatives cannot make a positive speed.
+        out.base_speed = checked(math::multiply(checked(math::multiply(std::max(minimum.value_or(Fixed{}), Fixed{}),
+            std::max(player(inputs, fleet.owner).hyperspace_factor, Fixed{}))), std::max(inputs.mode_modifier, Fixed{})));
         if (out.base_speed.raw() <= 0) invalid("fleet has no positive base hyperspace speed");
         // These are membership sets, not transfer order. Canonicalize equal-key groups
         // whose whole group was packed or left behind; only cut-off ties are unverified.
@@ -199,7 +202,7 @@ core::Result<void> validate_movement_setup(const GalacticSetup& setup) {
         if (!setup.fleet_control || !setup.rules.maximum_fleet_movement_distance) invalid("movement requires fleet control and graph rules");
         const auto& s = *setup.movement;
         if (s.types.size() > galactic_max_objects || s.contents.size() > galactic_max_objects
-            || s.access.size() > galactic_max_players * 4096 || s.mode_modifier.raw() <= 0
+            || s.access.size() > galactic_max_players * 4096
             || !ordered(s.types, [](const auto& r) { return r.type; })
             || !ordered(s.contents, [](const auto& r) { return r.container; })
             || !ordered(s.players, [](const auto& r) { return r.player; })
@@ -209,11 +212,11 @@ core::Result<void> validate_movement_setup(const GalacticSetup& setup) {
             || s.access.size() != setup.players.size() * setup.planets.size()) invalid("movement observer tables must be complete");
         for (const auto& p : setup.players) {
             const auto& r = player(s, p.player_id);
-            if (r.hyperspace_factor.raw() < 0 || r.corruption_bonus.raw() < 0) invalid("negative authored player movement factor");
+            (void)r; // LSA-11/12: retain signed authored factors; movement consumes them below.
             for (const auto& q : setup.planets) (void)access(s, p.player_id, q.id);
         }
         for (const auto& p : setup.planets) if (planet(s, p.id).bounds_half_z.raw() < 0) invalid("negative planet movement bounds");
-        for (const auto& t : s.types) if (t.type == 0 || t.hyperspace_speed.raw() < 0 || t.build_cost.raw() < 0
+        for (const auto& t : s.types) if (t.type == 0
             || (t.squadron && t.fleet_container) || (t.transport && (t.squadron || t.fleet_container))) invalid("invalid authored movement type");
         if (s.raid) {
             if (!setup.control || s.raid->types.size() != s.types.size()
@@ -250,6 +253,31 @@ core::Result<void> validate_movement_setup(const GalacticSetup& setup) {
         if (containers.size() != s.contents.size()) invalid("orphan live movement contents");
         return core::Result<void>::success();
     } catch (const InvalidMovement& error) { return core::Result<void>::failure(error.diagnostic); }
+}
+
+session_detail::NativeBribeQuote session_detail::quote_native_bribe(PlayerId mover, std::span<const FleetMember> departing,
+    std::span<const PlanetId> path, const MovementSetup& movement,
+    const std::function<std::pair<PlayerId, PlayerId>(PlanetId)>& planet_state) {
+    NativeBribeQuote quote;
+    try {
+        if (path.size() < 3 || !player(movement, mover).benefits_from_corruption) return quote;
+        std::map<PlayerId, Fixed> owed;
+        for (std::size_t i = 1; i + 1 < path.size(); ++i) {
+            const auto [owner, occupant] = planet_state(path[i]);
+            if (!owner || occupant == mover) continue; // WGM-85: the mover's own orbit is free; nobody to pay on an unowned gap
+            const bool cheap = player(movement, owner).easily_bribed;
+            Fixed cost{};
+            for (const auto& member : departing) flatten(movement, member, [&](const FleetMember&, const MovementType& leaf) {
+                cost = checked(math::add(cost, cheap ? leaf.cheap_bribe : leaf.expensive_bribe));
+            });
+            if (cost <= Fixed{}) continue;
+            auto& slot = owed[owner];
+            slot = checked(math::add(slot, cost));
+            quote.total = checked(math::add(quote.total, cost));
+        }
+        quote.recipients.assign(owed.begin(), owed.end());
+    } catch (const InvalidMovement&) { quote.invalid = true; }
+    return quote;
 }
 
 session_detail::NativeMovementAdmission session_detail::prepare_native_movement(
@@ -291,6 +319,79 @@ session_detail::NativeMovementAdmission session_detail::prepare_native_movement(
         install_hop(motion, movement, f.owner, positions, routes);
     } catch (const InvalidMovement&) { return {GalacticRejectReason::cannot_depart, {}, {}}; }
     return {GalacticRejectReason::none, prepared.value(), std::move(motion)};
+}
+
+void GalacticSession::Impl::accrue_departure_piracy(FleetId id, PlayerId fleet_owner, PlanetId source,
+    const std::vector<FleetMember>& departing) {
+    if (!economy_corruption || !movement_inputs) return;
+    auto row = std::lower_bound(economy_corruption->planets.begin(), economy_corruption->planets.end(), source,
+        [](const auto& at, PlanetId value) { return at.planet < value; });
+    if (row == economy_corruption->planets.end() || row->planet != source
+        || row->corruption != corruption_fixture::Type::piracy) return;
+    // WGEP-113/WGCH-161: the current first corruption beneficiary, in player-list order.
+    // WGEP-112: the beneficiary must also be fiscally eligible (rows are parallel to the fiscal player list).
+    const auto& beneficiaries = economy_corruption->players;
+    const auto beneficiary = std::find_if(beneficiaries.begin(), beneficiaries.end(), [&](const auto& player) {
+        const auto index = static_cast<std::size_t>(&player - beneficiaries.data());
+        return player.benefits && setup.fiscal && index < setup.fiscal->players.size()
+            && setup.fiscal->players[index].earns_planet_income;
+    });
+    if (beneficiary == beneficiaries.end()) return;
+    std::vector<Fixed> values;
+    for (const auto& member : departing)
+        flatten(*movement_inputs, member, [&](const FleetMember&, const MovementType& leaf) { values.push_back(leaf.piracy_value); });
+    if (std::none_of(values.begin(), values.end(), [](Fixed value) { return value > Fixed{}; })) return;
+    bool allied = fleet_owner == beneficiary->player;
+    if (!allied && control) {
+        const auto relation = std::find_if(control->relations.begin(), control->relations.end(),
+            [&](const auto& pair) { return pair.player == fleet_owner && pair.other == beneficiary->player; });
+        allied = relation != control->relations.end() && relation->allied;
+    }
+    if (allied) return;
+    // WGM-38: stealth is the same live combat-skip predicate.
+    const auto actors = actor_inputs();
+    const bool stealth = actors.empty() ? skips_combat(*movement_inputs, departing)
+        : checked(fleet_combat_skip(Fleet{id, fleet_owner, 0, departing}, actors, movement_inputs.get()));
+    const auto accrued = checked(corruption_fixture::accrue_piracy(row->corruption, allied, stealth, row->piracy, values));
+    if (accrued == row->piracy) return;
+    row->piracy = accrued;
+    dirty[static_cast<std::size_t>(StateSection::economy_corruption)] = true;
+}
+
+std::pair<PlayerId, PlayerId> GalacticSession::Impl::bribe_planet_state(PlanetId id) const {
+    const auto at = planets.find(id);
+    if (at == planets.end()) return {};
+    PlayerId occupant{};
+    if (control) {
+        const auto row = std::lower_bound(control->state.begin(), control->state.end(), id, [](const auto& r, PlanetId v) { return r.planet < v; });
+        if (row != control->state.end() && row->planet == id) occupant = row->orbital_player;
+    } else if (production) {
+        const auto row = std::lower_bound(production->planets.begin(), production->planets.end(), id, [](const auto& r, PlanetId v) { return r.planet < v; });
+        if (row != production->planets.end() && row->planet == id) occupant = row->orbit_occupier;
+    }
+    return {registry.get<session_detail::PlanetData>(at->second).owner, occupant};
+}
+
+GalacticRejectReason GalacticSession::Impl::settle_movement_bribe(PlayerId payer,
+    const std::vector<std::pair<PlayerId, Fixed>>& recipients, Fixed total) {
+    if (!economy) return GalacticRejectReason::insufficient_credits;
+    auto accounts = economy->players;
+    const auto find = [&](PlayerId id) { return std::find_if(accounts.begin(), accounts.end(), [id](const auto& r) { return r.player == id; }); };
+    const auto from = find(payer);
+    if (from == accounts.end() || from->credits < total) return GalacticRejectReason::insufficient_credits;
+    auto debited = math::subtract(from->credits, total);
+    if (!debited) return GalacticRejectReason::insufficient_credits;
+    from->credits = debited.value();
+    for (const auto& [id, amount] : recipients) {
+        const auto to = find(id);
+        if (to == accounts.end()) continue; // a recipient without an account just absorbs the payment
+        auto credited = math::add(to->credits, amount);
+        if (!credited) return GalacticRejectReason::insufficient_credits;
+        to->credits = credited.value();
+    }
+    economy->players = std::move(accounts);
+    dirty[static_cast<std::size_t>(StateSection::players)] = true;
+    return GalacticRejectReason::none;
 }
 
 bool GalacticSession::Impl::raid_qualified(FleetId id, PlanetId destination) const {
@@ -554,6 +655,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             }
             const bool conflict = !raid_arrival && normal_conflict;
             if (raid_arrival) {
+                f.motion.land_on_arrival = false; // WGM-34: raid dispatch owns this landing.
                 const auto completed = t;
                 link_movement_orbit(id, destination, tick, events);
                 std::vector<EntityId> selected;
@@ -587,6 +689,7 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
                 continue;
             }
             if (conflict) {
+                f.motion.land_on_arrival = false; // GGS-06 / WGM-34: conflict consumes the request.
                 const auto transit = t;
                 link_movement_orbit(id, destination, tick, events);
                 gather_movement_orbit(id, destination, tick, events);
@@ -627,6 +730,13 @@ core::Result<void> GalacticSession::Impl::service_movement(std::span<const sessi
             // Transit was consumed by relink, so failure or actor loss cannot replay the action.
             if (completed.destination_actor) dispatch_ground_ability(completed.destination_actor, destination,
                 completed.producer, completed.sequence, tick, events);
+            // GGS-06/07: one attempt through the current surface owner, after orbital
+            // arrival. Refusal or partial capacity leaves the remainder in orbit.
+            if (fleets.contains(id)
+                && registry.get<session_detail::FleetData>(fleets.at(id)).motion.land_on_arrival) {
+                registry.get<session_detail::FleetData>(fleets.at(id)).motion.land_on_arrival = false;
+                execute_landing({{tick, completed.producer, completed.sequence}, LandFleet{id, destination}}, tick, events, false);
+            }
             invalidate_observer_projection(); // after the final slot/member/merge mutation
             dirty[static_cast<std::size_t>(StateSection::fleet_control)] = true;
         }

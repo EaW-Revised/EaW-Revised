@@ -7,7 +7,7 @@
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -81,6 +81,7 @@ void UnitEmitters::write_report(std::ostream& output) const {
     counts(output, "unprepared_model_paths", unprepared_models_);
     counts(output, "late_system_cache_misses", unprepared_systems_);
     counts(output, "late_bind_frame_cache_misses", unprepared_frames_);
+    counts(output, "late_mesh_binding_misses", unprepared_bindings_);
     output << '}';
     counts(output, "started", started_);
     output << ", \"model_axis\": {";

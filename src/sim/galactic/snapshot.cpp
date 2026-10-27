@@ -186,7 +186,7 @@ std::span<const GalacticEvent> GalacticSnapshot::events() const noexcept {
 
 std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     std::vector<std::uint8_t> bytes(detail::snapshot_magic.begin(), detail::snapshot_magic.end());
-    detail::put_u32(bytes, 7); // immutable observer-authorized History publication
+    detail::put_u32(bytes, 8); // GGS-06: retained arrival landing request
     detail::put_u64(bytes, completed_tick());
     detail::put_u64(bytes, clock().session_tick);
     detail::put_u64(bytes, clock().galactic_frame);
@@ -257,8 +257,6 @@ std::vector<std::uint8_t> GalacticSnapshot::canonical_bytes() const {
     PopulationCensus records;
     records.objects.assign(actor_records().begin(), actor_records().end());
     detail::encode_census(bytes, records);
-    detail::put_u8(bytes, history() ? 1 : 0);
-    if (history()) detail::encode_history_snapshot(bytes, *history());
     return bytes;
 }
 

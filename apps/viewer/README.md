@@ -281,11 +281,27 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   whose ship the player did not see (`not_seen`) or whose tick had left the snapshot history
   (`unknown`), and the fires and explosions that ended before a frame reached them
   (`effects_skipped`).
-- `--eawr-live-purchase-slots <N>` (1 to 64, default 10; a purchasing test hook): the model slots composed per
-  buyable unit type. A slot whose unit is gone goes to the next unit of its type (the report's
-  `slots_released`), so a small N shows the reuse without buying past ten squadrons. An
-  `--eawr-live-late-orders on` lets an `--eawr-live-order` name a unit the start does not hold (a
+- `--eawr-live-purchase-slots <N>` (1 to 64, default 10): the model slots composed at load per
+  buyable unit type; further purchases grow a slot on first use (at most `--eawr-live-arrival-budget` new
+  hull/clone pairs per frame, default 8, 1 to 256, so a burst beyond it is drawn over the next frames).
+  Planned launches are exempt from that budget: a launched craft is drawn in its launch frame.
+  `--eawr-live-warm-launches <N>` (0 to 256, default 64) is the number of launch slots composed at load per
+  non-campaign planned launch row; launches beyond it are composed when they launch. GC uses its
+  budget-admitted roster capacity instead of this option. These defaults warm ordinary purchase
+  and planned-launch capacity during loading. Freed slots are reused for units of the same type
+  (the report's `slots_released`). `--eawr-live-late-orders on` lets an `--eawr-live-order` name a unit the start does not hold (a
   bought one, with an ID above every start unit's); it is given as the local player.
+  GC space battles instead expand the selected owner-tech hangars of both initial and reserve
+  carriers, including nested hangars, and warm their simultaneous complements plus reserve hulls
+  before Begin. Admission uses the existing device-memory policy and cached hull/death-clone
+  recipe estimates; shared resident textures are not charged again. Driver overhead is unknown.
+  `campaign_warm` reports requested/admitted counts, estimated bytes, probe availability, loading
+  time, admission policy and partial coverage. A missing device probe retains only existing slots
+  and reports incomplete coverage when more were requested; only an explicit budget-off switch
+  permits unconstrained admission.
+  The frame CSV's `slots_grown` and `slot_growth_ms` count only gameplay growth in that frame.
+  Partial/unplanned demand still uses the synchronous fallback; removing it needs a separate
+  prepared-population path. This load-time mitigation does not claim that fallback is asynchronous.
 - `--eawr-live-death-anim <TYPE>`, `--eawr-live-death-persistence <seconds>`: test hooks that
   give every death clone this `Specific_Death_Anim_Type` or `Death_Persistence_Duration`.
 - `--eawr-live-follow <unit>` (fighter-death eye-check clips): every frame the tactical camera looks at
@@ -382,6 +398,10 @@ report's `ai` lists its players, Lua load and the engine calls it could not make
   that frame after the warm-up, since a paused battle shows one tick on many frames.
 - `--eawr-live-capture-frames a,b,...`: captures by frame after the warm-up, as
   `<capture stem>_fNNNN.png` (what a paused battle shows).
+- `--eawr-perf-no-render-timing` (with `--eawr-perf-trace`): skip the per-frame render-time queries and never ask the engine to
+  measure the root viewport. With the Separate render thread (the default; `--render-thread safe` opts out) those queries make the engine synchronize with
+  the render thread on every frame, so a trace taken with them distorts the frames it records. The `render_cpu_ms` and `render_gpu_ms`
+  columns stay in the header and are empty (not measured); everything else is unchanged, and without the flag the trace is as before.
 - `--eawr-perf-trace <csv>` ([battle bench](../../docs/performance/battle-bench.md)): one row per
   drawn frame of the live session: the frame's wall-clock ms, the engine's process ms (the viewer's own frame work), the root viewport's measured render CPU
   and GPU ms, draw calls, objects and primitives (the renderer's numbers are the previous frame's), and
@@ -720,7 +740,7 @@ scene and image hashes. Original assets and generated captures remain ignored ou
 `common/`; generated `out/` evidence is excluded. After building the extension, the
 cross-platform helper exports one package, validates its sidecars/PCK allowlist and can
 run the packaged headless probe. Before export it runs a bounded `--version` probe and
-requires the pinned Godot `4.7.2.stable.official.ed1daf0bf` build, a matching
+requires the pinned Godot build (the EAWR fork `4.7.2.stable.eawr.fad06b579` or the stock `4.7.2.stable.official.ed1daf0bf`), a matching
 `export-templates.json` `godot_version`, and package/receipt roots that resolve inside
 the repository's ignored `out/` tree. If a smoke receipt reports an engine version, it
 must also match the pin. The matching template is selected from `export-templates.json`:
@@ -797,8 +817,8 @@ cannot pass. A package that cannot be launched still gets a failed receipt.
 `receipt.json` records the command, cwd, timestamps, exit code, stdout/stderr hashes, host OS (including WSL), backend request and observed device, the
 hashes before and after, and the verdict. It is written for failing runs too.
 
-The engine identity is pinned per package. The Windows template is the official
-`4.7.2.stable.official.ed1daf0bf`. The pinned Linux x86_64 and ARM64 templates are the
+The engine identity is pinned per package. The Windows template is the stock official
+`4.7.2.stable.official.ed1daf0bf` (the shipped player runtime is the fork exe, see `third_party/godot/README.md`). The pinned Linux x86_64 and ARM64 templates are the
 locally built P0 templates of the same commit. They report
 `4.7.2.stable.custom_build.ed1daf0bf` plus their build timestamp, and the harness requires
 exactly that. A host-specific engine warning can be waived only with an exact

@@ -30,6 +30,7 @@ inline void configure_fleet_hud_fixture(sim::galactic::GalacticSetup& setup,
     const gc::PlayerId enemy = observer_player == 1 ? 2 : 1;
     setup.rules.maximum_fleet_movement_distance = whole(10000); // explicit synthetic graph input
     setup.fleet_control.emplace();
+    if (fixture == "fleet-drag-paused-admit") setup.fleet_control->pause = gc::PausePolicy::admit_all();
     setup.fleet_control->types = {{1000,false,true,false},{1001,false,true,false},
         {1002,false,true,false},{1003,false,true,false}};
     setup.fleets = {{601,observer_player,101,{{7001,1000},{7002,1000},{7003,1003}},0},

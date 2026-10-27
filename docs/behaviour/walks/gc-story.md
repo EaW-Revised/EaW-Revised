@@ -56,7 +56,8 @@ These walks are linked rather than repeated.
 ## Data model
 
 XML data EST-D1. A campaign names one plot file per playable faction
-(`Rebel_Story_Name`, `Empire_Story_Name`, `Underworld_Story_Name`). A plot file
+(`Rebel_Story_Name`, `Empire_Story_Name`, `Underworld_Story_Name`), followed by
+the ordered faction/plot pairs in `Story_Name` (WST-86..89). A plot file
 (root `Story_Mode_Plots`) lists sub-plot files as `Active_Plot` or
 `Suspended_Plot`, each optionally preceded by a `Lua_Script`. A sub-plot file
 (root `Story`) holds named `Event` elements. Each event has exactly one event
@@ -75,6 +76,30 @@ prerequisites, an optional branch and optional story-dialog fields.
 | WST-06 | Each `Prereq` element is one prerequisite **group**; the event names inside one group are an AND, and several groups are an OR. An event with no prerequisite group starts **active**; one with any group starts inactive. A prerequisite name that matches no event in the same sub-plot asserts and is skipped. Prerequisites never cross sub-plots. | debug build EST-02, EST-05 |
 | WST-07 | After parsing, events are sorted into one list per event type and every prerequisite gets the event as a dependant (no duplicates). The per-type lists and dependant lists are built by walking the sub-plot's **hashed** event table, not document order. Evaluation order inside one event type, and dependant activation order, therefore follow the original container's order. Recover that order before claiming parity; any alternative deterministic order is a project decision still to be made (WST-U01). | debug build EST-02, EST-05 |
 | WST-08 | Event types, reward types and the parameter keywords (filters, comparisons, base kinds, statistic kinds, flash regions, tutorial input kinds, fleet-content kinds and ship classes) resolve through **one** shared name table by an exact checksum of the text. An unknown name resolves to 0: an unknown event type drops the event (WST-04), an unknown reward type means no reward, and an unknown keyword means that keyword's first value (for comparisons: greater-than, WST-27). Aliases exist: `UPDATE_OBJECTIVE` is the replace-objective reward, `STORY_CORRUPTION_INCREASED` is `STORY_CORRUPTION_CHANGED`, and the reward names `STORY_ELEMENT` and `STORY_GOAL_COMPLETED` share the table with event names. The lookup is **exact-case** on the text as authored: the reader stores `Event_Type` and `Reward_Type` and every keyword value unchanged, so `Space` or `Land` is not `SPACE`. `LAND` is not in the table at all (`GROUND` is), so it resolves to the first value, which is the ground meaning; any non-`SPACE` spelling therefore reads as ground wherever the first value is ground (WST-50, WST-44). Every stock event type, reward type and keyword is upper-case except one `Land` on a win-battles event, which lands on the ground value anyway. | debug build EST-07, EST-24, F2169-E02 |
+
+### Authored faction associations
+
+The additional campaign associations use faction names from the data, including
+factions outside the three side constants. These rules extend WGS-07 and WST-01;
+loading their XML does not attach or execute a Lua instance.
+
+| ID | Rule and conditions | Source |
+|---|---|---|
+| WST-86 | `Story_Name` is a string sequence. Each nonempty, non-`TBD` occurrence appends tokens split on space, comma, tab, newline and carriage return. Adjacent tokens in the resulting stream are faction then plot path; XML element boundaries do not delimit a pair. The default is an empty sequence. The campaign reader passes append mode, and copying campaign data copies the sequence: our validated inheritance keeps the copied base sequence before derived occurrences. Each occurrence must contain fewer than 65,536 bytes. The retail pair accessor assumes a complete pair; our validator reports an odd final token and retains only complete pairs, avoiding the original out-of-range read. | debug build ASN-01 (catalog/accessors), ASN-02 (campaign reader, value parser and copy) |
+| WST-87 | Campaign start loads the named Rebel, Empire and Underworld routes first, through their side constants and active players, then the additional pairs in sequence order. Additional pairs do not override the named routes or earlier pairs for the same faction. Repeated factions and repeated plot names each make another load request. | debug build ASN-03 (campaign start), ASN-04 (plot loader) |
+| WST-88 | A pair whose faction has no existing active player ends the additional-pair traversal; later pairs are not attempted. This does not undo named or earlier loads. A missing plot file logs an error and loads nothing, and campaign start continues with the next pair. No generic association supplies a fallback for an absent named route. Our diagnostic includes campaign, faction and `Data/XML/` path. Unknown factions also receive a validated dangling-reference issue. | debug build ASN-03/04; diagnostic context is project policy |
+| WST-89 | Each successful plot load appends its owning-player/plot record, including duplicates. Sub-plots are keyed by the checksum of the authored sub-plot filename; loading the same filename again replaces its stored definition, active flag, script and owner. Our existing document-order policy retains the first slot on replacement; native table order and checksum collisions remain WST-U01. | debug build ASN-04/05 (plot and sub-plot loading) |
+
+`Campaign::story_names` retains the ordered associations. The galactic content
+identity and multiplayer story identity encode their count and every faction/path
+pair, including duplicates. Campaign setup carries the content identity into
+checkpoint and replay admission. The content and story domains are versioned
+when this representation changes.
+
+`Campaign/Story_Name` is recognized by the engine-tag catalog (ET-T019) but is
+absent from the stock-authored registry universe. Its application is
+`src/campaign/story_plots.cpp` `load_story_plots`, under WST-86..89; no
+stock registry row is synthesized for a mod-only occurrence.
 
 ### Service and dispatch
 
@@ -232,7 +257,21 @@ rather than a planet Boolean (debug build EST-16).
 | WST-54 | Each story service considers attached sub-plot Lua (L-22), but pumps it only with a numeric `ServiceRate`. With numeric `LastService`, synchronized elapsed seconds minus the stamp must be strictly greater than the rate; without a numeric stamp it pumps immediately. Missing/nonnumeric rate skips the inspected pump. A continuing pump stamps synchronized elapsed seconds without object Lua's randomized first offset; a finished script detaches. Suspended sub-plots still reach this service (WST-16). GFC-23 and GFSC-14 distinguish this clock from story mode-time elapsed events. | debug build EST-06; EGFS-06 |
 | WST-55 | XML to Lua: every triggered event of a sub-plot with a script calls `Story_Event_Trigger(event name)` before its reward (WST-20). Lua to XML: the global `Story_Event(name[, game object])` sends `STORY_AI_NOTIFICATION` with that string and object to the active mode's story (WST-37). One or two arguments only; a wrong type is a script error. | debug build EST-06, EST-23 |
 | WST-56 | `Get_Story_Plot(file)` returns a plot object for a loaded sub-plot of the active mode's story, or a warning and nothing. Plot methods: `Activate`, `Suspend`, `Reset` (WST-26), `Get_Event(name)` (script error when absent). Event methods: `Set_Event_Parameter(index, values…)` re-runs the event's parameter parser at the **0-based** position (index rounded to the nearest integer), `Set_Reward_Parameter(index, value)`, `Set_Reward_Type(name)`, `Set_Dialog`, `Add_Dialog_Text`, `Clear_Dialog_Text`, `Is_Valid`. `Add_Dialog_Text(text id, up to two arguments)` appends formatting arguments to the event's extra dialog text: each argument may be a game object (its display name), an object type (its display name), a string (looked up as a text id) or a number (printed as an integer); other types are a script error (Focumentation: Lua Commands, Story Mode and Tutorial Scripting System; the wiki says only "extra arguments"). Other story globals: `Add_Objective(text id, boolean)` takes exactly two arguments, appends an objective to the active mode's story objective list at the end, and stores the boolean as the objective's suggestion marker (the wiki says true files it under "Battle Information", false under "Mission Objectives"; the heading is a HUD detail, unverified, WST-U12); `Activate_Retry_Dialog`. `Check_Story_Flag` is an AI tactical story-flag query (player, flag, target, reset) owned by the AI walk, not a WST-27 flag read. | debug build EST-23 |
-| WST-57 | The galactic Lua story scripts call these registered engine functions beyond the story ones: `Find_First_Object`, `Assemble_Fleet`, `Get_Planet_Location`, `Move_To`, `Find_Player`, `Find_All_Objects_Of_Type`, `Get_Parent_Object`, `Get_Type`, `Find_Object_Type`, `Get_Owner`, `Reachable_Target`, `Invade`, `EvaluatePerception`, `Get_Game_Object`, `GameRandom`, `Get_All_Planets`, `Is_Category`, `Activate_Ability`, `Set_Black_Market_Tutorial`, thread functions. Ours binds part of these for tactical AI only (`src/script/foc/plan_bindings.cpp`, `tactical_ai_bindings.cpp`); none has a galactic context yet. `Invade` takes no argument and works only on a fleet that orbits a planet owned by an enemy of the fleet's owner and holds at least one transport-class member; otherwise it warns and does nothing, else it runs an invasion event for the fleet's transports. The entry point has no "FoC campaign only" gate, so the wiki's note that it works only in the campaign is not borne out here (a later stage inside the invasion event is unread; a basic-GC runtime check is wanted, WST-U12) (Focumentation: Lua Commands). | Lua data EST-D3; repository inspection; debug build F2169-E05 |
+| WST-57 | The galactic Lua story scripts call these registered engine functions beyond the story ones: `Find_First_Object`, `Assemble_Fleet`, `Get_Planet_Location`, `Move_To`, `Find_Player`, `Find_All_Objects_Of_Type`, `Get_Parent_Object`, `Get_Type`, `Find_Object_Type`, `Get_Owner`, `Reachable_Target`, `Invade`, `EvaluatePerception`, `Get_Game_Object`, `GameRandom`, `Get_All_Planets`, `Is_Category`, `Activate_Ability`, `Set_Black_Market_Tutorial`, thread functions. The galactic story host binds `Find_Player` per WST-90..94 and the random calls per RGC-190..199. Part of the remaining list is bound for tactical AI (`src/script/foc/plan_bindings.cpp`, `tactical_ai_bindings.cpp`); unimplemented galactic story calls retain named refusals. The tactical/AI `Find_Player` still needs alignment with WST-90..94 (legacy EAWR-4901). `Invade` takes no argument and works only on a fleet that orbits a planet owned by an enemy of the fleet's owner and holds at least one transport-class member; otherwise it warns and does nothing, else it runs an invasion event for the fleet's transports. The entry point has no "FoC campaign only" gate, so the wiki's note that it works only in the campaign is not borne out here (a later stage inside the invasion event is unread; a basic-GC runtime check is wanted, WST-U12) (Focumentation: Lua Commands). | Lua data EST-D3; repository inspection; debug build F2169-E05 |
+
+**Ours (sub-plot script host).** `src/campaign/galactic_story_scripts.cpp` pins every `Library` and `Story` script of the mounted
+data into the story scheduler and starts one instance per sub-plot whose `Lua_Script` names a `Story` module: the module chunk, then
+`Base_Definitions`, then the `main` thread (WST-53, L-27). The plot engine requests one `Story_Event_Trigger(name)` call per triggered
+event of a scripted sub-plot, before the reward record exists (WST-20 step 3); the host forwards it to that sub-plot's instance,
+with the event name as the data spells it (stock scripts key `StoryModeEvents` by the authored spelling, while the engine's own
+event key is upper-cased, WST-04). Pumping follows WST-54 in the bridge. A script whose module is missing from the mounted data runs no
+Lua and is listed in the load notes; a call for a script that finished is dropped. Every galactic engine function this host does not
+implement still faults by name (EAWR-SCRIPT-0215), which ends that script's thread and is published with the step as a diagnostic named by
+its sub-plot. The random calls campaign-start scripts use are bound from sourced rules (RGC-190..199): `DiscreteDistribution.Create`
+(weighted lists holding the script's own values, sampled on the game stream), `GameRandom` and `GameRandom.Free_Random` (the free stream in
+single-player, the synchronised stream in multiplayer); docs/lua-sandbox.md gives the exact forms. `GameRandom.Get_Float` stays a named
+fault until sourced for this host. Not yet set on the
+instance: any per-sub-plot owner object a script might expect; no source says one exists.
 
 ## Dialogs, speech and story goals
 
@@ -534,3 +573,26 @@ destroyed-planet payload. That mapping alone does not implement WST-80's
 pre-cleanup delivery or WST-81/82's retained-filter mutation. The action policy's
 later story-effect position is qualified in WGCH-140; complete continuation and
 reentrant/duplicate cases use WGCH-PD-U03/U04's capture recipes.
+
+## Shared player lookup from story scripts
+
+Read-only **debug build** follow-up, 2026-10-24. GSP-S01..08 identify the
+bounded binding, faction/player lookups, wrapper cache, registration and
+diagnostic/return helpers; raw evidence remains ignored. These rules extend
+WST-57's API inventory. They do not claim a runtime capture.
+
+| ID | Rule | Source |
+|---|---|---|
+| WST-90 | `Find_Player` requires **exactly one string** argument. A wrong argument count or a non-string reports a script diagnostic, marks the script for exit, and returns no values. Numbers are not coerced into faction names. The diagnostic path marks exit even without a configured log callback. | debug build GSP-S01/S07 |
+| WST-91 | The case-insensitive name `local` selects the **configured local-player slot**, rather than the script owner or the first human player. An empty roster has no local player; an invalid local slot takes a debug assertion and the guarded return has no player. A missing player reaches a null-wrapper assertion and returns no values, hence nil when used as one Lua value. This path has no multiplayer-specific branch. | debug build GSP-S01/S03/S05/S08 |
+| WST-92 | Other names are uppercased for lookup in the **loaded faction database**, without a playable-faction or current-campaign filter. An unknown faction reports a script diagnostic, marks script exit, and returns no values. For a known faction, the player-ID lookup table is visited in slot order and the first player with that faction is returned. A known faction with no player returns no values **without** the unknown-faction diagnostic. | debug build GSP-S01/S02/S04/S07 |
+| WST-93 | A successful lookup returns the player object. Repeated lookups of the same player within one script reuse its wrapper identity; different scripts have separate wrappers for that player. The lookup does not create a player, change ownership or consume a random draw. | debug build GSP-S01/S05 |
+| WST-94 | The same global command registration supplies `Find_Player` to story sub-plots, tactical game-object scripts and AI plans. The binding has no galactic-versus-tactical branch: faction and player lookup use the common loaded faction/player roster. | debug build GSP-S01/S06 |
+
+Proposed synthetic cases: mixed-case faction and `local` names; zero, two and
+non-string arguments; an unknown faction versus a loaded faction with no
+player; a configured local player differing from the script owner; absent
+local player; duplicate faction players in different lookup slots; and
+repeated-lookup identity across save/load. These are deductions from the
+inspected branches, not executed retail observations. Runtime confirmation of
+the diagnostics and debug assertions remains open.

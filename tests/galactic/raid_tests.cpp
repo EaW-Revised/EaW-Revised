@@ -36,12 +36,33 @@ void authored_policy() {
     eawr::units::GalacticTypeTable types; types.types = {troop, hero};
     const std::vector<campaign::FleetTypeBinding> bindings{{81, "ModTroop"}, {82, "ModLeader"}};
     const std::vector<campaign::RaidFactionBinding> factions{{41, "Other"}, {44, "modside"}};
+    {
+        eawr::data::galactic::GalacticData absent;
+        // The loader publishes empty mask constants even when all five tags are absent.
+        absent.constants = {{"Raid_Force_Free_Object_Category_Mask", "", {}},
+            {"Raid_Force_Limited_Object_Category_Mask", "", {}}};
+        expect(!take(campaign::build_raid_inputs(types, absent, bindings, factions)),
+            "all five raid tags absent produce an empty RaidSetup without failure");
+    }
     const auto built = take(campaign::build_raid_inputs(types, data, bindings, factions));
     expect(built && built->rules.required_faction == 44 && built->rules.max_heroes == 4 && built->rules.max_limited == 7,
         "raid faction and caps follow modified effective constants");
     expect(built && built->types[0].categories == built->rules.limited_categories
         && built->types[1].categories == built->rules.free_categories && built->types[1].hero,
         "arbitrary authored categories feed the shared predicate");
+    for (const auto value : {"", " \t ", " | , "}) {
+        data.constants[1].text = value;
+        const auto empty_free = take(campaign::build_raid_inputs(types, data, bindings, factions));
+        expect(empty_free && empty_free->types[0].categories == empty_free->rules.limited_categories
+            && empty_free->types[1].categories == 0 && empty_free->types[1].hero
+            && empty_free->rules.required_faction == 44 && empty_free->rules.max_heroes == 4,
+            "CGS-15 empty free mask exempts nothing and retains independent faction and hero gates");
+        data.constants[2].text = value;
+        const auto empty_both = take(campaign::build_raid_inputs(types, data, bindings, factions));
+        expect(empty_both && empty_both->types[0].categories == 0 && empty_both->types[1].categories == 0,
+            "CGS-15 empty limited mask selects no objects");
+        data.constants[2].text = "ModGround | ModAir";
+    }
     data.constants.back().number = f(-1);
     expect(!campaign::build_raid_inputs(types, data, bindings, factions), "malformed raid caps fail setup");
 }

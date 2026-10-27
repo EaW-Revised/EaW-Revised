@@ -48,21 +48,27 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
 
     const auto& latest = live.battle_frame().latest;
     const units::UnitTables* tables = live.tables();
+    if (!selection_.empty()) inspect_.reset(); // #4919: a selection replaces the inspect target
     if (cards_pending_revision_ == live.pending_revision() && cards_snapshot_ == latest && cards_selection_ == selection_.units() && cards_slots_ == card_slots_
-        && card_tables_ == tables) {
+        && card_tables_ == tables && cards_inspect_ == inspect_) {
         refresh_abilities(live);
         return;
     }
     cards_snapshot_ = latest;
     cards_pending_revision_ = live.pending_revision();
     cards_selection_ = selection_.units();
+    cards_inspect_ = inspect_;
     cards_slots_ = card_slots_;
     card_units_.clear();
     card_layout_ = {};
     production_station_.reset();
     // #534: the ability bar mirrors the cards; an empty layout (deselect, the selection's last unit
     // dying or leaving a group) must clear it too, or its last button lingers over an empty panel.
-    if (card_slots_ == 0 || selection_.empty() || !latest || tables == nullptr) {
+    if (!latest || tables == nullptr) {
+        inspect_.reset(); // #4919: nothing to revalidate the inspect target against
+        cards_inspect_.reset();
+    }
+    if (card_slots_ == 0 || (selection_.empty() && !inspect_) || !latest || tables == nullptr) {
         build_buttons_.clear();
         pad_palette_.close();
         ability_bar_ = {};
@@ -101,7 +107,7 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
             const auto* point = live.economy().pads.point(instance->type_id);
             if (point != nullptr && point->build_pad) continue; // WBP-08: explicit opening action above
             if (!live.is_ally_of_local(instance->owner)) continue;
-            const sim::tactical::StationMenu* menu = live.economy().menu(instance->type_id, *faction);
+            const sim::tactical::StationMenu* menu = live.producer_menu(*instance);
             if (menu == nullptr || menu->options.empty()) continue;
             const sim::tactical::EconomyView* economy = live.local_economy();
             std::array<std::size_t, sim::tactical::build_queue_count> sizes{};
@@ -136,6 +142,34 @@ void BattleInput::refresh_cards(const LiveSessionView& live) {
         return static_cast<double>(ui::display_health(*instance.durability,
             durability_table != nullptr ? durability_table->find(instance.type_id) : nullptr));
     };
+    // #4919: an inspected allied structure shows one health card; no ability, build or production
+    // controls, and the cards never select it (card_click refuses while inspecting).
+    if (inspect_) {
+        build_buttons_.clear();
+        pad_palette_.close();
+        std::vector<ui::SelectedUnit> inspected;
+        if (const auto* instance = instances.instance(*inspect_)) {
+            const units::UnitType* type = type_of(*instance);
+            ui::SelectedUnit unit;
+            unit.entity = instance->entity_id;
+            unit.type = type != nullptr ? type->id : std::to_string(instance->type_id);
+            unit.health = health_of(*instance);
+            const auto& durability = instance->durability;
+            if (type != nullptr && type->shielded && durability && durability->shields && durability->max_shields
+                && durability->max_shields->raw() > 0) {
+                unit.shield = std::clamp(static_cast<double>(durability->shields->raw())
+                                             / static_cast<double>(durability->max_shields->raw()), 0.0, 1.0);
+            }
+            inspected.push_back(std::move(unit));
+        } else {
+            inspect_.reset(); // the structure left the session
+            cards_inspect_.reset();
+        }
+        card_units_ = ui::card_units(inspected);
+        card_layout_ = ui::layout_unit_cards(card_units_, card_slots_);
+        ability_bar_ = {};
+        return;
+    }
     // #435: the selection holds a squadron as its team container (#424). The card model reads a
     // squadron through its craft, so a container stands for its live craft here, and every card's
     // members map back to the container below: one card per homogeneous squadron, whose click
@@ -250,7 +284,7 @@ void BattleInput::refresh_heroes(const LiveSessionView& live) {
 }
 
 void BattleInput::hero_click(const sim::EntityId hero, const bool hostile, const bool right,
-                             const bool double_click, LiveSessionView& live, SpaceEnvironment& space) {
+                             const bool double_click, LiveSessionView& live, BattleCamera& space) {
     const auto& latest = live.battle_frame().latest;
     if (!latest || live.tables() == nullptr) return;
     refresh_hero_types(live.tables());
@@ -391,6 +425,7 @@ bool BattleInput::press_ability(const std::uint32_t ability, const LiveSessionVi
 bool BattleInput::card_click(const std::size_t slot, const bool shift, const LiveSessionView& live) {
     // A world gesture or another card click may have changed selection since the last frame.
     refresh_cards(live);
+    if (inspect_) return false; // #4919: an inspect card selects nothing
     const auto next = ui::card_click(card_layout_, card_units_, slot, shift, selection_.units());
     if (!next) return false;
     ++card_clicks_;

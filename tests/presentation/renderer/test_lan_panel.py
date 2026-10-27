@@ -142,9 +142,41 @@ class LanPanelGpu(unittest.TestCase):
                     self.assertTrue(live["lan_message"])
                     for button in ("pause", "fast_forward"):
                         control = data["hud"]["time_panel"][button]
-                        self.assertTrue(control["disabled"])
-                        self.assertIn("unavailable in multiplayer", control["tooltip"])
+                        if button == "fast_forward":
+                            self.assertTrue(control["disabled"])
+                            self.assertIn("unavailable in multiplayer", control["tooltip"])
+                        self.assertIn("Any active human", control["tooltip"])
                         self.assertIn("Shared speed: 2", control["tooltip"])
+
+    def test_shared_pause_actor_and_resume_button(self):
+        import json
+        with tempfile.TemporaryDirectory(prefix="mp-pause-") as temporary:
+            output = Path(os.environ.get("EAWR_LAN_EYECHECK", temporary)).resolve() / "pause"
+            output.mkdir(parents=True, exist_ok=True)
+            for resume in (False, True):
+                name = "resumed" if resume else "paused"
+                report = output / (name + ".json")
+                command = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                    "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-live-session", "m2",
+                    "--eawr-map", "data/art/maps/_mp_space_coruscant.ted", "--eawr-populate",
+                    "--eawr-live-lan-test", "paused", "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                    "--eawr-report", str(report), "--eawr-capture", str(output / (name + ".png")),
+                    "--eawr-live-capture-frames", "90", "--eawr-live-ticks", "60", "--eawr-live-ai", "off",
+                    "--eawr-audio", "off", "--eawr-lighting", "sh", "--eawr-environment", "map", "--eawr-shadows", "on"]
+                if resume:
+                    command += ["--eawr-live-input", "f30:click:hud=resume"]
+                result = subprocess.run(command, cwd=ROOT, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, timeout=600)
+                (output / (name + ".log")).write_text(result.stdout, encoding="utf-8")
+                self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+                data = json.loads(report.read_text(encoding="utf-8"))
+                banner = data["hud"]["battle_overlay"]["paused_banner"]
+                if resume:
+                    self.assertIsNone(banner, "the authored Resume button releases the shared hold")
+                else:
+                    self.assertEqual(banner["text"], "Paused by Leia")
+                    self.assertFalse(data["hud"]["time_panel"]["pause"]["disabled"])
+                    self.assertTrue(data["hud"]["time_panel"]["fast_forward"]["disabled"])
 
     def test_two_viewer_loopback_with_ai(self):
         import csv

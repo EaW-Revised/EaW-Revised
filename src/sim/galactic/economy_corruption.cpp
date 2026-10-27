@@ -192,8 +192,6 @@ core::Result<void> validate_economy_corruption(const GalacticSetup& setup) {
         if (p.player != setup.players[i].player_id || !p.faction || !bounded(p.tech_purchase_multiplier)
             || p.tech_purchase_multiplier < Fixed{} || p.displayed_tech_adjustment < std::numeric_limits<int>::min()
             || p.displayed_tech_adjustment > std::numeric_limits<int>::max()) return fail<void>("invalid player");
-        for (auto n : {p.price[0], p.price[1], p.time[0], p.time[1]})
-            if (!bounded(n) || n < Fixed{}) return fail<void>("invalid production factor");
         for (auto item : p.unlocks) if (!items.contains(item)) return fail<void>("unknown unlock");
         const auto multiplier = technology_purchase_multiplier(p.technology_price_modifiers);
         if (!multiplier || multiplier.value() != p.tech_purchase_multiplier)

@@ -426,6 +426,39 @@ void separate_mesh(std::uint32_t count, bool coop, bool ability_triage, unsigned
     expect(inserted || baseline->second == worlds[0].state_sha256(), "allied human match equals across 1/2/4/8 workers");
     std::cout << "separate owners=" << count << " coop=" << coop << " workers=" << workers
         << " ticks=120 hash=" << worlds[0].state_sha256() << '\n';
+    if (!coop && workers == 1) {
+        // Real drivers, real router: the pauser's own feedback and the other peers' label for it.
+        stage = "separate-owner pause feedback";
+        const auto pauser = count - 1;
+        const auto pump_until = [&](const auto& predicate) {
+            wait([&] {
+                ++now;
+                for (std::uint32_t peer = 0; peer < count; ++peer) require(drivers[peer](contexts[peer], {}, now));
+                return predicate();
+            });
+        };
+        const auto all_paused = [&](bool paused) {
+            return std::all_of(matches.begin(), matches.end(), [paused](const auto& match) { return match->view().clock_paused == paused; });
+        };
+        const auto cycle = [&] {
+            expect(matches[pauser]->request_pause(true), "pauser's request is accepted");
+            pump_until([&] { return all_paused(true); });
+        };
+        cycle();
+        expect(matches[pauser]->view().input_feedback.empty(), "the waiting notice clears once the pause is agreed");
+        for (std::uint32_t peer = 0; peer < count; ++peer)
+            if (peer != pauser) expect(!matches[peer]->view().pause_name.empty() && matches[peer]->view().pause_name != "You",
+                "other peers see a label that names the pauser, not themselves");
+        if (count == 3) expect(matches[0]->view().pause_name == matches[1]->view().pause_name, "two non-pausing peers agree on the pauser's label");
+        const auto resume = [&] {
+            expect(matches[0]->request_pause(false), "any active human may resume");
+            pump_until([&] { return all_paused(false); });
+        };
+        // #4574: a pause/resume pair spends no quota; the unit contracts cover repeated cycles and the debounce.
+        resume();
+        expect(matches[pauser]->view().input_feedback.find("Pause repeated too quickly") == std::string::npos,
+            "a pause and resume pair is never refused");
+    }
     for (auto& match : matches) match->cancel();
 }
 

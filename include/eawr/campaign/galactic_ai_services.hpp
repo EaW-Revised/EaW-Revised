@@ -64,7 +64,12 @@ public:
     [[nodiscard]] std::map<std::string, std::uint64_t, std::less<>> sync_encodes() const;
     [[nodiscard]] std::uint64_t sync_generations() const noexcept { return sync_generations_; }
     [[nodiscard]] bool full_verification_enabled() const noexcept;
+    // Quiescent test diagnostics only; never saved, hashed, or read by gameplay.
+    void measure_sync_owners(bool enabled) const { measure_sync_owners_ = enabled; }
+    [[nodiscard]] const auto& last_sync_owner_nanoseconds() const noexcept { return sync_owner_nanoseconds_; }
 private:
+    mutable bool measure_sync_owners_{};
+    mutable std::map<std::string, std::uint64_t, std::less<>> sync_owner_nanoseconds_;
     using Contributor = std::shared_ptr<script::foc::galactic_ai::StateContributor>;
     explicit ComposedGalacticAiState(std::array<Contributor, 6>);
     std::array<Contributor, 6> owners_;

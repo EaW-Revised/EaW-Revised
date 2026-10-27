@@ -5,6 +5,7 @@
 #include "eawr/platform/live_session.hpp"
 #include "eawr/presentation/particles/attachment_lifecycle.hpp"
 #include "eawr/presentation/particles/particles.hpp"
+#include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/scene/scene.hpp"
@@ -167,6 +168,7 @@ public:
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "unit_emitters" member, followed by ",\n".
     void write_report(std::ostream& output) const;
+    void owner_census(diagnostics::OwnerCensus& output) const;
     void collect_axis_diagnostics(bool enabled) noexcept { collect_axis_diagnostics_ = enabled; }
     // --eawr-perf-trace (#601): the running emitters' particles after the last clock sample.
     [[nodiscard]] std::uint64_t particles() const noexcept { return particles_; }
@@ -296,7 +298,17 @@ private:
     };
 
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
+    // Emitter metadata for the model at `path`: a geometry-stripped copy (bones, mesh names and bones,
+    // proxies; no submeshes) built once from a transient decode, so no decoded Model stays pinned.
+    // Null when the path is no model. It never reaches a renderer upload (assets::geometry_stripped).
     [[nodiscard]] const assets::Model* emitter_model(const std::string& path);
+    // The mesh binding of proxy `ordinal` of the model at `path` (EnhancedMesh emitters only):
+    // decoded once from a transient reload, then kept for every replan.
+    [[nodiscard]] const core::Result<particles::ProxyMeshBinding>& emitter_binding(const std::string& path,
+                                                                                    std::size_t ordinal);
+    // The prepared binding for the frame path: null (and counted) when preparation missed it; never decodes.
+    [[nodiscard]] const core::Result<particles::ProxyMeshBinding>* planned_binding(const std::string& path,
+                                                                                    std::size_t ordinal);
     [[nodiscard]] const EffectSystem& effect_system(const std::string& path);
     [[nodiscard]] const ModelFrames* model_frames(const scene::Placement& placement, const assets::Model*& model);
     void plan(Ship& ship, const SpacePopulation::LiveShipEmitterView& view,
@@ -341,6 +353,8 @@ private:
     const vfs::Vfs* filesystem_;
     std::vector<sim::tactical::TypeId> ion_stun_types_;
     scene::VfsAssetCache cache_;
+    std::map<std::string, std::unique_ptr<const assets::Model>> emitter_models_;
+    std::map<std::pair<std::string, std::size_t>, core::Result<particles::ProxyMeshBinding>> emitter_bindings_;
     std::map<std::string, std::optional<assets::Texture>, std::less<>> textures_;
     std::unique_ptr<GodotParticleBackend> backend_;
     std::unique_ptr<particles::EffectRegistry> registry_;
@@ -351,7 +365,7 @@ private:
     std::map<std::string, ModelFrames> frames_;
     std::map<std::string, EffectSystem> systems_;
     std::set<std::string> model_paths_;
-    std::map<std::string, std::uint64_t> unprepared_models_, unprepared_systems_, unprepared_frames_;
+    std::map<std::string, std::uint64_t> unprepared_models_, unprepared_systems_, unprepared_frames_, unprepared_bindings_;
     bool assets_prepared_{};
     std::uint64_t prepared_model_requests_{}, prepared_models_{}, prepared_system_requests_{}, prepared_systems_{};
     std::uint64_t prepared_source_bytes_{};

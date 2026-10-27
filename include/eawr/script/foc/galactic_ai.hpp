@@ -23,10 +23,15 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace eawr::script::foc::galactic_ai {
 namespace gc = sim::galactic;
+// Process-local diagnostic sink; never read by a decision or included in native state.
+using PerceptionFailureObserver = void(*)(std::string_view, gc::PlayerId, gc::PlanetId, std::span<const std::string>);
+void observe_perception_failures(PerceptionFailureObserver) noexcept;
+
 // Native encoders preserve Number.repr as an unsigned 64-bit binary64
 // interchange word, little endian, without host floating-point conversion.
 using Number = numeric::LuaNumber;
@@ -360,6 +365,10 @@ struct ServiceTrace {
 };
 
 [[nodiscard]] std::vector<std::string> required_xml();
+// The mounted files beyond the stock-named closure that load with it (parse and convert); the rest are
+// named in `skipped` with the reason, as the debug build's per-file loader would report them.
+[[nodiscard]] std::vector<std::string> loadable_extra_xml(const LifecycleSetup&, const std::vector<std::string>& extras,
+                                                          std::vector<std::string>& skipped);
 // WGA-01..05/09, GFSA-02/03. Bounded player/template coordination remains ordered;
 // providers partition their immutable per-planet/producer preparation separately.
 inline constexpr std::string_view lifecycle_component = "galactic-ai-lifecycle";

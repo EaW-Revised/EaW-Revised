@@ -75,8 +75,8 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         for (const auto& entry : replay.setup.outcomes) encoded_size += 20 + entry.payload.size();
     }
     if (replay.setup.interactive_seat.value) encoded_size += 10;
-    if (replay.setup.fleet_control) encoded_size += 20 + replay.setup.fleet_control->types.size() * 11
-        + replay.setup.fleet_control->detached_units.size() * 28 + replay.setup.fleets.size() * 9;
+    if (replay.setup.fleet_control) encoded_size += 23 + replay.setup.fleet_control->types.size() * 12
+        + replay.setup.fleet_control->detached_units.size() * 29 + replay.setup.fleets.size() * 9;
     if (replay.setup.fiscal) {
         std::vector<std::uint8_t> payload; detail::encode_fiscal(payload, *replay.setup.fiscal);
         encoded_size += 6 + payload.size();
@@ -124,7 +124,7 @@ core::Result<void> validate_replay(const GalacticReplay& replay) {
         std::vector<std::uint8_t> payload; detail::encode_control(payload, *replay.setup.control);
         encoded_size += 6 + payload.size();
     }
-    for (const auto& fleet : replay.setup.fleets) encoded_size += fleet.members.size() * 16 + 1 + (fleet.raid_destination ? 8 : 0);
+    for (const auto& fleet : replay.setup.fleets) encoded_size += fleet.members.size() * 17 + 1 + (fleet.raid_destination ? 8 : 0);
     for (std::size_t index = 0; index < replay.commands.size(); ++index) {
         const auto& command = replay.commands[index];
         const auto context = key_text(command.key);
@@ -447,17 +447,24 @@ core::Result<void> parse_fleet_control_extension(sim::detail::Reader& input, Gal
         value = raw != 0; return true;
     };
     if (!flag(control.gates.queued_campaign_conflict) || !flag(control.gates.active_speech)) return malformed("bad fleet gates");
+    // Unknown policy entries are refused (docs/galactic-architecture.md section 2).
+    const auto policy = [&](PausedAdmission& value) {
+        bool admit{}; if (!flag(admit)) return false;
+        value = admit ? PausedAdmission::admit : PausedAdmission::refuse; return true;
+    };
+    if (!policy(control.pause.fleet_management) || !policy(control.pause.surface_deploy) || !policy(control.pause.fleet_move))
+        return malformed("bad fleet pause policy");
     std::uint32_t types{}, units{}, slots{};
-    if (!count(types, 11)) return malformed("bad fleet types");
+    if (!count(types, 12)) return malformed("bad fleet types");
     for (std::uint32_t i = 0; i < types; ++i) {
         FleetTypeTraits row;
-        if (!input.read_u64(row.type) || !flag(row.transport) || !flag(row.can_hyperspace_without_ability) || !flag(row.requires_live_children)) return malformed("bad fleet type");
+        if (!input.read_u64(row.type) || !flag(row.transport) || !flag(row.can_hyperspace_without_ability) || !flag(row.requires_live_children) || !flag(row.space_pathfinder)) return malformed("bad fleet type");
         control.types.push_back(row);
     }
-    if (!count(units, 28)) return malformed("bad detached unit count");
+    if (!count(units, 29)) return malformed("bad detached unit count");
     for (std::uint32_t i = 0; i < units; ++i) {
         DetachedUnit row;
-        if (!input.read_u64(row.member.id) || !input.read_u64(row.member.type) || !input.read_u32(row.owner)
+        if (!input.read_u64(row.member.id) || !input.read_u64(row.member.type) || !flag(row.member.pathfinder) || !input.read_u32(row.owner)
             || !input.read_u64(row.planet)) return malformed("truncated detached unit");
         control.detached_units.push_back(row);
     }
@@ -751,7 +758,7 @@ core::Result<void> parse_replay_objects(sim::detail::Reader& reader, GalacticSet
         Fleet fleet;
         std::uint32_t members{};
         if (!reader.read_u64(fleet.id) || !reader.read_u32(fleet.owner) || !reader.read_u64(fleet.orbit)
-            || !count(members, galactic_max_objects, 16)) {
+            || !count(members, galactic_max_objects, 17)) {
             return malformed("truncated fleet");
         }
         objects += members;
@@ -760,7 +767,9 @@ core::Result<void> parse_replay_objects(sim::detail::Reader& reader, GalacticSet
         }
         for (std::uint32_t member = 0; member < members; ++member) {
             FleetMember row;
-            if (!reader.read_u64(row.id) || !reader.read_u64(row.type)) return malformed("truncated fleet member");
+            std::uint8_t pathfinder{};
+            if (!reader.read_u64(row.id) || !reader.read_u64(row.type) || !reader.read_u8(pathfinder) || pathfinder > 1) return malformed("truncated or invalid fleet member");
+            row.pathfinder = pathfinder != 0;
             fleet.members.push_back(row);
         }
         std::uint8_t raid{};

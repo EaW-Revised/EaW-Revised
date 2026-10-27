@@ -210,6 +210,7 @@ void BattleEffects::prepare_effect_constants() {
 
 template <typename LookOf>
 void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const sim::tactical::CombatTable& combat, LookOf& look_of) {
+    scene::VfsAssetCache model_cache(*filesystem_);
     std::map<std::string, std::string> ability_projectiles;
     for (const units::UnitType& squadron : tables.units) {
         if (squadron.kind != units::UnitKind::squadron) continue;
@@ -354,22 +355,22 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
         // BP-17, BP-19: only a shield takes a hit whole, so only shielded types need their
         // collision meshes and whether they have a SHIELD sub-object.
         if (!type.model_path.empty()) {
-            if (auto model = assets::load_model(*filesystem_, type.model_path)) {
-                looks.shield_mesh = has_shield_mesh(model.value());
-                for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone)
-                    looks.named_bones.emplace(lower(model.value().bones[bone].name), static_cast<std::uint32_t>(bone));
+            if (auto model = model_cache.shared_model(type.model_path)) {
+                looks.shield_mesh = has_shield_mesh(*model.value());
+                for (std::size_t bone = 0; bone < model.value()->bones.size(); ++bone)
+                    looks.named_bones.emplace(lower(model.value()->bones[bone].name), static_cast<std::uint32_t>(bone));
                 if (type.shielded || !looks.asteroid_hits.empty()) {
-                    looks.collision = space::make_shield_collision_mesh(collision_triangles(model.value(), false, &looks.collision_bones));
+                    looks.collision = space::make_shield_collision_mesh(collision_triangles(*model.value(), false, &looks.collision_bones));
                 }
                 // PS-02: the event's damaged hardpoint names the contact mesh; absent mesh uses bone 0.
                 for (const units::Hardpoint& hardpoint : type.hardpoints) {
-                    const auto mesh = std::find_if(model.value().meshes.begin(), model.value().meshes.end(),
+                    const auto mesh = std::find_if(model.value()->meshes.begin(), model.value()->meshes.end(),
                         [&](const assets::Mesh& entry) { return lower(entry.name) == lower(hardpoint.collision_mesh); });
-                    looks.hardpoint_contact_bones.push_back(mesh == model.value().meshes.end() || mesh->bone < 0
+                    looks.hardpoint_contact_bones.push_back(mesh == model.value()->meshes.end() || mesh->bone < 0
                         ? 0U : static_cast<std::uint32_t>(mesh->bone));
                 }
                 if (!looks.asteroid_hits.empty()) looks.asteroid_collision = space::make_shield_collision_mesh(
-                    collision_triangles(model.value(), looks.shield_mesh));
+                    collision_triangles(*model.value(), looks.shield_mesh));
             } else {
                 unresolved_.push_back("model " + type.model_path + ": " + core::format_diagnostic(model.error()));
             }
@@ -395,11 +396,11 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
                 defence.colour = {channel(0), channel(1), channel(2), channel(3)};
                 defence.frames = nested.defence_beam_frames;
                 if (!type.model_path.empty()) {
-                    if (auto model = assets::load_model(*filesystem_, type.model_path)) {
-                        const auto frames = units::bind_frames(model.value());
+                    if (auto model = model_cache.shared_model(type.model_path)) {
+                        const auto frames = units::bind_frames(*model.value());
                         if (frames) for (const auto& name : nested.defence_bones) {
-                            for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone) {
-                                if (lower(model.value().bones[bone].name) != lower(name)) continue;
+                            for (std::size_t bone = 0; bone < model.value()->bones.size(); ++bone) {
+                                if (lower(model.value()->bones[bone].name) != lower(name)) continue;
                                 const auto& frame = frames.value()[bone];
                                 // Keep bind points in model space; the zap consumer applies the quarter turn.
                                 defence.bones.push_back({to_float(frame.rows[0][3]) * looks.scale,
@@ -428,10 +429,10 @@ void BattleEffects::prepare_unit_looks(const units::UnitTables& tables, const si
             // TBF-05: tractor uses the conventional model socket, not Beam_Bone_Name.
             const auto origin_bone = beam == 1 ? std::string{"HP_trac_bone"} : nested.beam_owner_bone;
             if (!origin_bone.empty() && !type.model_path.empty()) {
-                if (auto model = assets::load_model(*filesystem_, type.model_path)) {
-                    const auto frames = units::bind_frames(model.value());
-                    if (frames) for (std::size_t bone = 0; bone < model.value().bones.size(); ++bone) {
-                        if (lower(model.value().bones[bone].name) != lower(origin_bone)) continue;
+                if (auto model = model_cache.shared_model(type.model_path)) {
+                    const auto frames = units::bind_frames(*model.value());
+                    if (frames) for (std::size_t bone = 0; bone < model.value()->bones.size(); ++bone) {
+                        if (lower(model.value()->bones[bone].name) != lower(origin_bone)) continue;
                         const auto& frame = frames.value()[bone];
                         looks.beam_bones[beam] = static_cast<std::uint32_t>(bone);
                         // live_model_point applies the model quarter-turn; keep this fallback in asset space.
@@ -506,7 +507,7 @@ void BattleEffects::prewarm_effect_programs() {
         const auto lookup_start = std::chrono::steady_clock::now();
         const auto* type = particle_type(name);
         backend_->record_prewarm_lookup(std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - lookup_start).count(), !cached && type != nullptr && type->system.has_value());
+            std::chrono::steady_clock::now() - lookup_start).count(), !cached && type != nullptr && bool(type->system));
         if (type != nullptr && type->system) {
             for (const auto& plan : particles::plan_system(*type->system)) {
                 if (plan.drawable) static_cast<void>(backend_->prewarm_program(plan));
@@ -627,7 +628,7 @@ const BattleEffects::ParticleType* BattleEffects::particle_type(const std::strin
             } else if (system.value().emitters.empty()) {
                 type.cause = "particle system declares no emitters";
             } else {
-                type.system = std::move(system).value();
+                type.system = std::make_shared<const particles::SystemDefinition>(std::move(system).value());
             }
         }
     }

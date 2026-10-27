@@ -109,6 +109,7 @@ public:
     // BE-02: the local player's result (true: victory); nullopt hides the message.
     void show_message(std::optional<bool> won);
     void show_paused(bool paused);
+    void set_pause_notice(const godot::String& text);
     // RP-06..RP-08: the retreat countdown line at the tactical countdown position; an empty text hides it.
     void show_countdown(const godot::String& text, const godot::Color& colour, double x_share, double y_share);
     void show_begin(bool ready);
@@ -138,6 +139,7 @@ private:
     [[nodiscard]] float text_width(const Font& font, int pixels, const godot::String& text) const;
 
     Style style_;
+    godot::String pause_notice_;
     std::optional<bool> message_;
     bool paused_{};
     bool ready_{};

@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "eawr/core/json_text.hpp"
 #include "attract_runner.hpp"
 
@@ -351,7 +352,7 @@ bool AttractRunner::requested() {
 
 AttractRunner::Options AttractRunner::from_command_line() {
     Options options;
-    const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    const PackedStringArray arguments = viewer_profile_arguments();
     for (int64_t index = 0; index < arguments.size(); ++index) {
         const std::string argument = utf8(arguments[index]);
         const bool has_value = index + 1 < arguments.size();

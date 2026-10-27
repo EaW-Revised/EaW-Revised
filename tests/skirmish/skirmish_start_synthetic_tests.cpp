@@ -35,7 +35,7 @@ eawr::units::UnitTables synthetic_tables() {
     eawr::units::UnitTables tables;
     auto station_a = unit_type("Station_A", UnitKind::station, "Rebel", 100);
     station_a.hull = whole(1600);
-    station_a.space_fow_reveal_range = whole(2000);
+    station_a.fow_reveal_range = whole(2000);
     station_a.reveal = true;
     station_a.victory_relevant = true;
     eawr::units::Spawner spawner;
@@ -51,11 +51,11 @@ eawr::units::UnitTables synthetic_tables() {
     squadron.team_reveal_range = whole(800); // #271: the squadron reveals through its container
     tables.units.push_back(squadron);
     auto cruiser = unit_type("Cruiser", UnitKind::ship, "Rebel, Empire", 50);
-    cruiser.space_fow_reveal_range = whole(1200);
+    cruiser.fow_reveal_range = whole(1200);
     cruiser.reveal = true;
     tables.units.push_back(cruiser);
     auto fighter = unit_type("Fighter", UnitKind::craft, "Rebel, Empire", 7);
-    fighter.space_fow_reveal_range = whole(500); // authored, but no REVEAL: no sensor (#271)
+    fighter.fow_reveal_range = whole(500); // authored, but no REVEAL: no sensor (#271)
     tables.units.push_back(fighter);
     return tables;
 }
@@ -236,6 +236,26 @@ void synthetic_roster_gate() {
     expect(allowed && allowed.value().profiles.size() == 1 && allowed.value().profiles[0].abilities.size() == 2
         && skirmish::roster_ability_reason("Admonitor_Star_Destroyer", "POWER_TO_WEAPONS").empty(),
         "RG-03/WHE-22: roster admission retains the supported hero mode and another supported ability");
+    {
+        // #4992: FoC fills one slot per ability kind in authored order, so a repeated kind keeps
+        // its last entry (AaW authors ION_CANNON_SHOT twice on 33 types); the load warns once.
+        eawr::units::UnitTables twice;
+        auto twin = unit_type("Twin_Turbo", UnitKind::ship, "Empire", 100);
+        eawr::units::Ability first; first.type = "TURBO"; first.recharge_seconds = whole(25);
+        eawr::units::Ability last = first; last.recharge_seconds = whole(10);
+        eawr::units::Ability hunt_too; hunt_too.type = "HUNT";
+        twin.abilities = {first, hunt_too, last};
+        twice.units.push_back(twin);
+        std::vector<eawr::core::Diagnostic> notes;
+        const auto kept = eawr::units::ability_table(twice, {}, nullptr, true, eawr::units::ContentErrors::strict, &notes);
+        const auto* profile = kept ? kept.value().find(eawr::assets::object_type_crc("Twin_Turbo")) : nullptr;
+        expect(profile && profile->abilities.size() == 2 && profile->abilities[0].kind == tactical::AbilityKind::hunt
+                && profile->abilities[1].kind == tactical::AbilityKind::turbo && profile->abilities[1].recharge_frames == 300,
+            "#4992: a repeated ability kind keeps its last authored entry, in place");
+        expect(notes.size() == 1 && notes[0].severity == eawr::core::Severity::warning
+                && notes[0].message.find("TURBO") != std::string::npos && skirmish::skipped_type_ids(notes).empty(),
+            "#4992: the repeat is a warning, not a skipped type");
+    }
     auto hunter = unit_type("TIE_Interceptor", UnitKind::ship, "Empire", 100);
     eawr::units::Ability hunt;
     hunt.type = "HUNT";

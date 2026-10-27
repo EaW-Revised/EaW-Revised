@@ -17,6 +17,13 @@ eawr_add_game_data_test(NAME galactic_ai_tick_profile COMMAND galactic_ai_campai
     "${CMAKE_CURRENT_BINARY_DIR}/tick-profile" 30)
 set_tests_properties(galactic_ai_tick_profile PROPERTIES LABELS "game-data" TIMEOUT 28800 RUN_SERIAL TRUE
     ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
+# Worker sweep of the same profile (PF mt-2): AI on, 1/2/4/8/hardware workers, 300 ticks (one slow-cadence cycle). The
+# arguments replace the EAWR_TICK_PROFILE_* environment a pool job cannot set; the test fails when the tick hashes differ
+# between worker counts. Run it by name (-R galactic_ai_tick_profile_sweep); batch-only keeps it out of routine runs.
+eawr_add_game_data_test(NAME galactic_ai_tick_profile_sweep COMMAND galactic_ai_campaign_tests --tick-profile
+    "${CMAKE_CURRENT_BINARY_DIR}/tick-profile-sweep" 300 on 1,2,4,8,hw)
+set_tests_properties(galactic_ai_tick_profile_sweep PROPERTIES LABELS "game-data;benchmark;batch-only" TIMEOUT 28800
+    RUN_SERIAL TRUE ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 eawr_add_game_data_test(NAME galactic_ai_campaign_preparation_stock COMMAND galactic_ai_campaign_tests --installed)
 eawr_add_game_data_test(NAME galactic_ai_live_production_stock COMMAND galactic_ai_campaign_tests --live-production
     "${CMAKE_CURRENT_BINARY_DIR}/live-production" 1800)
@@ -26,6 +33,11 @@ set_tests_properties(galactic_ai_live_production_stock galactic_ai_live_performa
     LABELS "game-data" TIMEOUT 28800 RUN_SERIAL TRUE ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 set_tests_properties(galactic_ai_campaign_runtime_contracts PROPERTIES ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
 set_tests_properties(galactic_ai_campaign_preparation_stock PROPERTIES LABELS game-data ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
+# WGM-38/163: the prepared AI game keeps the stock droid team's authored stealth before its first frame.
+eawr_add_game_data_test(NAME galactic_ai_prepared_stealth_stock COMMAND galactic_ai_campaign_tests --prepared-stealth
+    "${CMAKE_CURRENT_BINARY_DIR}/prepared-stealth")
+set_tests_properties(galactic_ai_prepared_stealth_stock PROPERTIES LABELS game-data TIMEOUT 1800 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 # WGA-436..439: installed stock free-store units actually move (movement counter, in-transit witness,
 # no unbound refusal) with equal state hashes at every determinism worker count.
 eawr_add_game_data_test(NAME galactic_ai_freestore_movement_stock COMMAND galactic_ai_campaign_tests --freestore-movement
@@ -34,6 +46,9 @@ set_tests_properties(galactic_ai_freestore_movement_stock PROPERTIES LABELS game
     ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 eawr_add_game_data_test(NAME galactic_ai_campaign_release_stock COMMAND galactic_ai_campaign_tests --release "${CMAKE_CURRENT_BINARY_DIR}/campaign-gate-correctness")
 eawr_add_game_data_test(NAME galactic_ai_campaign_digest_mature_stock COMMAND galactic_ai_campaign_tests --release-benchmark "${CMAKE_CURRENT_BINARY_DIR}/campaign-gate-benchmark")
+eawr_add_game_data_test(NAME galactic_ai_hash_baseline_diagnostic COMMAND galactic_ai_campaign_tests --hash-baseline "${CMAKE_CURRENT_BINARY_DIR}/hash-baseline")
+set_tests_properties(galactic_ai_hash_baseline_diagnostic PROPERTIES LABELS "game-data;benchmark;batch-only" TIMEOUT 7200 RUN_SERIAL TRUE
+    ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 set_tests_properties(galactic_ai_campaign_release_stock PROPERTIES LABELS "game-data;release-gate" ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=1")
 set_tests_properties(galactic_ai_campaign_digest_mature_stock PROPERTIES LABELS "game-data;release-gate;benchmark" ENVIRONMENT "EAWR_VERIFY_GALACTIC_HASH=0")
 set_tests_properties(galactic_ai_campaign_release_stock galactic_ai_campaign_digest_mature_stock PROPERTIES TIMEOUT 7200 RUN_SERIAL TRUE)

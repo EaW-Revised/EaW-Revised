@@ -141,7 +141,7 @@ SquadronScan squadron_target(const CombatWorld& world, const SquadronState& stat
             && !stealth_hidden(*current) && (visible(*current) || state.approach)) return SquadronScan{state.target, state.next_scan_frame};
     }
     SquadronScan result{invalid_entity_id, state.next_scan_frame};
-    if (world.frame < state.next_scan_frame || leader.profile == nullptr || !leader.profile->max_attack_distance) {
+    if (world.frame < state.next_scan_frame || leader.profile == nullptr || !leader.attack_distance()) {
         return result;
     }
     // FT-02, FT-03: one scan a second (project cadence) within the chase range plus the leader's
@@ -153,7 +153,10 @@ SquadronScan squadron_target(const CombatWorld& world, const SquadronState& stat
     } else if (state.mode == SquadronMode::escort || state.diversion == SquadronDiversion::guard) {
         chase = squadron.guard_chase_range;
     }
-    const auto reach_raw = static_cast<std::uint64_t>(chase.raw() + leader.profile->max_attack_distance->raw());
+    // Both admitted ranges are nonnegative int64 scalars; their sum fits uint64,
+    // and the following squared comparison is already wide.
+    const auto reach_raw = static_cast<std::uint64_t>(chase.raw())
+        + static_cast<std::uint64_t>(leader.attack_distance()->raw());
     const auto reach = math::detail::multiply_u64(reach_raw, reach_raw);
     const PrioritySet* set = leader.profile->priority_set ? &world.table->priority_sets[*leader.profile->priority_set] : nullptr;
     const CombatUnit* best = nullptr;

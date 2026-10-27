@@ -909,9 +909,22 @@ void foc_asymmetric_release_geometry(eawr::units::LoadInput input) {
                                     Fixed::from_raw(world.y.raw() - event.origin.y.raw()),
                                     Fixed::from_raw(world.z.raw() - event.origin.z.raw())}).value();
                             };
-                            const auto offset = gun->has_fire_b ? std::min(offset_from(gun->fire_a), offset_from(gun->fire_b))
-                                : offset_from(gun->fire_a);
-                            expect(offset.raw() <= 64, "WWP-73: release lies on a drawn fire bone within Q24 rounding");
+                            if (gun->randomize_between_fire_bones && gun->has_fire_b) {
+                                // WWP-22: a banked pair bounds a world box, rather than two possible origins.
+                                const auto a = m::transform_point(release_transform, gun->fire_a).value();
+                                const auto b = m::transform_point(release_transform, gun->fire_b).value();
+                                const auto bounded = [](const Fixed value, const Fixed first, const Fixed second) {
+                                    return value.raw() >= std::min(first.raw(), second.raw()) - 64
+                                        && value.raw() <= std::max(first.raw(), second.raw()) + 64;
+                                };
+                                expect(bounded(event.origin.x, a.x, b.x) && bounded(event.origin.y, a.y, b.y)
+                                    && bounded(event.origin.z, a.z, b.z),
+                                    "WWP-22/73: randomized release lies in the posed world box within Q24 rounding");
+                            } else {
+                                const auto offset = gun->has_fire_b ? std::min(offset_from(gun->fire_a), offset_from(gun->fire_b))
+                                    : offset_from(gun->fire_a);
+                                expect(offset.raw() <= 64, "WWP-73: release lies on a drawn fire bone within Q24 rounding");
+                            }
                             const auto bank = session.roll_degrees(1).value_or(Fixed{});
                             if (std::abs(number(bank)) > 12.3) banked_release = true;
                             const Vec3 ray{Fixed::from_raw(event.aim.x.raw() - event.origin.x.raw()),

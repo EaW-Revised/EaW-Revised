@@ -1,4 +1,5 @@
 #pragma once
+#include "eawr/assets/memory.hpp"
 
 #include "eawr/assets/assets.hpp"
 #include "eawr/assets/map.hpp"
@@ -15,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -26,6 +28,7 @@
 // of fixed transforms and stable asset IDs. The simulation never sees XML, VFS
 // paths or engine resources; it is handed only what `Scene::instances()`
 // returns. Nothing here depends on an engine.
+namespace eawr::diagnostics { class OwnerCensus; }
 namespace eawr::scene {
 
 inline constexpr std::uint32_t contract_version = 1;
@@ -373,28 +376,59 @@ struct BuildResult final {
                                                const sim::PartitionExecutor& executor);
 
 // Memoising AssetAccess over a mounted VFS, for callers that build many scenes
-// against one mount. Lookups are keyed by canonical logical path in ordered
-// maps; nothing about the result depends on lookup order.
+// against one mount. Decoded models are immutable and shared by resolved file
+// identity. Strong cache retention is unlimited until a byte budget is set;
+// explicit owners and each wrapper's raw model pointers survive cache eviction.
 class VfsAssetCache final {
 public:
+    struct ModelStats final {
+        std::uint64_t calls{}, hits{}, misses{}, unique_loads{};
+        std::uint64_t entries{}, successful_entries{}, failed_entries{}, particle_entries{};
+        std::uint64_t cache_budget_bytes{}, cache_retained_bytes{}, cache_evictions{};
+        // Owner-census diagnostic: decodes a fresh LRU of each budget would have done over
+        // the same request sequence (no effect on the real cache). Empty when census is off.
+        struct BudgetReplay final { std::uint64_t budget_bytes{}, decodes{}; };
+        std::vector<BudgetReplay> budget_replay;
+        // Current live decoded allocations, including caller/renderer owners;
+        // calls/hits/misses/unique_loads above are cumulative work counters.
+        assets::PayloadCapacity capacity;
+    };
     explicit VfsAssetCache(const vfs::Vfs& filesystem);
+    ~VfsAssetCache();
     VfsAssetCache(const VfsAssetCache&) = delete;
     VfsAssetCache& operator=(const VfsAssetCache&) = delete;
 
     [[nodiscard]] AssetAccess access();
     [[nodiscard]] bool exists(std::string_view logical_path);
+    // The returned pointer remains valid until this cache wrapper is destroyed.
     [[nodiscard]] const assets::Model* model(std::string_view logical_path);
+    [[nodiscard]] core::Result<std::shared_ptr<const assets::Model>> shared_model(std::string_view logical_path);
     [[nodiscard]] std::string sha256(std::string_view logical_path);
     [[nodiscard]] bool particle_system(std::string_view logical_path);
+    // Shared by every wrapper of this mounted VFS. Bounds cache-owned vector
+    // capacity, never decoding or asset size; zero disables successful retention.
+    void set_model_cache_budget(std::uint64_t bytes);
+    [[nodiscard]] ModelStats model_stats() const;
+    // Explicit snapshot only: shared LRU identities plus this wrapper's raw pins.
+    // No decoding, cache trimming, or expired-entry removal.
+    void owner_census(diagnostics::OwnerCensus& output) const;
+    // Complete registration requires activation before any wrapper exists.
+    static void enable_owner_census(const vfs::Vfs& filesystem, bool fresh_mount = false);
 
 private:
-    struct Loaded final {
-        std::optional<assets::Model> model;
-        bool particle_system{};
-    };
+    struct ModelStore;
+    struct Loaded;
+    [[nodiscard]] std::shared_ptr<const Loaded> loaded_model(std::string_view logical_path);
     const vfs::Vfs* filesystem_;
+    std::shared_ptr<ModelStore> models_;
+    // Protected by the shared model-store mutex; first use pins a raw result. Keyed by the Loaded address, so the
+    // iteration order differs between runs: only the owner census walks it, and its output sums do not depend on order.
+    std::map<const Loaded*, std::shared_ptr<const Loaded>> raw_models_;
+    // Intrusive diagnostic registration only when this mount opted in.
+    VfsAssetCache* census_previous_{};
+    VfsAssetCache* census_next_{};
+    bool census_registered_{};
     std::map<std::string, bool, std::less<>> exists_;
-    std::map<std::string, Loaded, std::less<>> models_;
     std::map<std::string, std::string, std::less<>> hashes_;
 };
 

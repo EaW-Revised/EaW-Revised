@@ -1,14 +1,22 @@
 #include "eawr/scene/scene.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 
 #include "scene_internal.hpp"
+#include "eawr/assets/asset_names.hpp"
 
 #include "eawr/sim/replay.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <list>
+#include <map>
 #include <optional>
+#include <mutex>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <variant>
 
@@ -20,8 +28,12 @@ namespace eawr::scene {
 [[nodiscard]] std::string probe(const AssetAccess& access, const std::string_view root,
                                 const std::string_view name,
                                 const std::span<const std::string_view> suffixes) {
+    if (!access.exists) return {};
+    if (std::find(suffixes.begin(), suffixes.end(), ".dds") != suffixes.end()) {
+        return assets::resolve_texture_name(root, name, access.exists);
+    }
     const std::string folded = canonical(name);
-    if (folded.empty() || !access.exists) return {};
+    if (folded.empty()) return {};
     const std::string literal = std::string(root) + folded;
     if (access.exists(literal)) return literal;
     std::string stem = folded;
@@ -206,7 +218,120 @@ bool uncaptured_mesh_visible(const assets::Model& model, const assets::Mesh& mes
     return true;
 }
 
-VfsAssetCache::VfsAssetCache(const vfs::Vfs& filesystem) : filesystem_(&filesystem) {}
+struct VfsAssetCache::Loaded final {
+    std::once_flag once;
+    std::shared_ptr<const assets::Model> model;
+    std::optional<core::Diagnostic> error;
+    bool particle_system{};
+    assets::PayloadCapacity capacity;
+    bool complete{};
+};
+struct VfsAssetCache::ModelStore final {
+    std::atomic<bool> census_enabled{false};
+    bool census_coverage_complete{true}; // Late opt-in cannot identify older raw wrappers.
+    VfsAssetCache* census_wrappers{};
+    using Key = std::tuple<bool, std::string, std::string, std::string, vfs::AssetOrigin>;
+    using Recency = std::list<Key>;
+    struct Entry final {
+        std::weak_ptr<Loaded> weak;
+        std::shared_ptr<Loaded> retained;
+        Recency::iterator recent;
+        bool in_lru{};
+    };
+    std::mutex mutex;
+    std::map<Key, Entry> models;
+    Recency recency;
+    std::uint64_t budget_bytes{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t retained_bytes{};
+    std::uint64_t evictions{};
+    ModelStats stats;
+
+    // Diagnostic replay of the request sequence against LRUs of fixed budgets. Census-only.
+    struct Replay final {
+        std::uint64_t budget{}, retained{}, decodes{};
+        Recency order;
+        std::map<Key, std::pair<Recency::iterator, std::uint64_t>> held;
+        void request(const Key& key, const std::uint64_t bytes) {
+            if (const auto found = held.find(key); found != held.end()) {
+                order.splice(order.begin(), order, found->second.first);
+                return;
+            }
+            ++decodes;
+            if (bytes > budget) return;
+            while (!order.empty() && retained > budget - bytes) {
+                const auto victim = held.find(order.back());
+                retained -= victim->second.second;
+                held.erase(victim);
+                order.pop_back();
+            }
+            order.push_front(key);
+            held.emplace(key, std::pair{order.begin(), bytes});
+            retained += bytes;
+        }
+    };
+    std::vector<Replay> replays;
+
+    void replay_request(const Key& key, const std::uint64_t bytes) {
+        if (replays.empty()) {
+            for (const std::uint64_t mib : {128ULL, 256ULL, 512ULL, 1024ULL, 2048ULL}) replays.emplace_back().budget = mib << 20U;
+        }
+        for (auto& replay : replays) replay.request(key, bytes);
+    }
+
+    void evict_last(std::vector<std::shared_ptr<Loaded>>& retired) {
+        auto& entry = models.at(recency.back());
+        retained_bytes -= entry.retained->capacity.total_bytes();
+        retired.push_back(std::move(entry.retained));
+        entry.in_lru = false;
+        recency.pop_back();
+        ++evictions;
+    }
+
+    void trim(std::vector<std::shared_ptr<Loaded>>& retired) {
+        while (!recency.empty() && (budget_bytes == 0 || retained_bytes > budget_bytes)) evict_last(retired);
+    }
+
+    void admit(const Key& key, const std::shared_ptr<Loaded>& loaded,
+               std::vector<std::shared_ptr<Loaded>>& retired) {
+        auto& entry = models.at(key);
+        // Keep failures stable for this mount, including particle classification.
+        if (!loaded->model) { entry.retained = loaded; return; }
+        const auto bytes = loaded->capacity.total_bytes();
+        if (budget_bytes == 0 || bytes > budget_bytes) return;
+        while (!recency.empty() && retained_bytes > budget_bytes - bytes) evict_last(retired);
+        recency.push_front(key);
+        entry.recent = recency.begin();
+        entry.in_lru = true;
+        entry.retained = loaded;
+        retained_bytes += bytes;
+    }
+};
+
+VfsAssetCache::VfsAssetCache(const vfs::Vfs& filesystem)
+    : filesystem_(&filesystem), models_(filesystem.attachment<ModelStore>()) {
+    if (!models_->census_enabled.load(std::memory_order_relaxed)) return;
+    std::lock_guard lock(models_->mutex);
+    census_next_ = models_->census_wrappers;
+    if (census_next_) census_next_->census_previous_ = this;
+    models_->census_wrappers = this;
+    census_registered_ = true;
+}
+
+VfsAssetCache::~VfsAssetCache() {
+    if (!census_registered_) return;
+    std::lock_guard lock(models_->mutex);
+    if (census_previous_) census_previous_->census_next_ = census_next_;
+    else models_->census_wrappers = census_next_;
+    if (census_next_) census_next_->census_previous_ = census_previous_;
+}
+
+void VfsAssetCache::enable_owner_census(const vfs::Vfs& filesystem, const bool fresh_mount) {
+    const auto store = filesystem.attachment<ModelStore>();
+    std::lock_guard lock(store->mutex);
+    if (store->census_enabled.load(std::memory_order_relaxed)) return;
+    store->census_coverage_complete = fresh_mount && store->stats.calls == 0;
+    store->census_enabled.store(true, std::memory_order_relaxed);
+}
 
 AssetAccess VfsAssetCache::access() {
     return AssetAccess{
@@ -225,22 +350,135 @@ bool VfsAssetCache::exists(const std::string_view logical_path) {
     return present;
 }
 
-const assets::Model* VfsAssetCache::model(const std::string_view logical_path) {
-    auto found = models_.find(logical_path);
-    if (found == models_.end()) {
-        Loaded loaded;
+std::shared_ptr<const VfsAssetCache::Loaded> VfsAssetCache::loaded_model(const std::string_view logical_path) {
+    // Use the resolver's identity, including the supplying layer/archive. Missing
+    // paths use the same canonicalization, and invalid paths retain their bytes.
+    const auto record = filesystem_->stat(logical_path);
+    const auto canonical = vfs::canonicalize(logical_path);
+    const ModelStore::Key key = record
+        ? ModelStore::Key{true, record.value().canonical_path, record.value().layer_id,
+                          record.value().source_id, record.value().origin}
+        : ModelStore::Key{false, canonical ? canonical.value() : std::string(logical_path), {}, {}, {}};
+    std::shared_ptr<Loaded> loaded;
+    {
+        std::lock_guard lock(models_->mutex);
+        auto& entry = models_->models.try_emplace(key).first->second;
+        loaded = entry.weak.lock();
+        ++models_->stats.calls;
+        if (!loaded) {
+            loaded = std::make_shared<Loaded>();
+            entry.weak = loaded;
+            ++models_->stats.misses;
+        } else {
+            ++models_->stats.hits;
+            if (entry.in_lru) models_->recency.splice(models_->recency.begin(), models_->recency, entry.recent);
+        }
+    }
+    // Different files decode concurrently. The once flag publishes a fully
+    // initialized immutable result (including failures) to same-file waiters.
+    std::call_once(loaded->once, [&] {
         auto decoded = assets::load_model(*filesystem_, logical_path);
         if (decoded) {
-            loaded.model = std::move(decoded.value());
+            loaded->model = std::make_shared<const assets::Model>(std::move(decoded.value()));
         } else {
             // The model loader rejects a particle-system root explicitly with
             // `unsupported`; that is a distinct cause, not a decode failure.
-            loaded.particle_system = decoded.error().code == assets::diagnostic_codes::unsupported
+            loaded->particle_system = decoded.error().code == assets::diagnostic_codes::unsupported
                 && decoded.error().message.find("particle-system") != std::string::npos;
+            loaded->error = decoded.error();
         }
-        found = models_.emplace(std::string(logical_path), std::move(loaded)).first;
+        // Walk immutable vector metadata once per successful decode, outside
+        // the store lock so distinct identities keep decoding concurrently.
+        loaded->capacity = loaded->model ? assets::payload_capacity(*loaded->model) : assets::PayloadCapacity{};
+        std::vector<std::shared_ptr<Loaded>> retired;
+        {
+            std::lock_guard lock(models_->mutex);
+            loaded->complete = true;
+            ++models_->stats.unique_loads;
+            models_->admit(key, loaded, retired);
+        }
+    });
+    if (loaded->model && models_->census_enabled.load(std::memory_order_relaxed)) {
+        std::lock_guard lock(models_->mutex);
+        models_->replay_request(key, loaded->capacity.total_bytes());
     }
-    return found->second.model ? &*found->second.model : nullptr;
+    return loaded;
+}
+
+const assets::Model* VfsAssetCache::model(const std::string_view logical_path) {
+    const auto loaded = loaded_model(logical_path);
+    if (loaded->model) {
+        // Ordering: loaded_model() has returned, so the once flag already published the decode (std::call_once
+        // happens-before every return from it); the pin is then taken under the store mutex, which also guards
+        // the census walk that reads raw_models_.
+        std::lock_guard lock(models_->mutex);
+        raw_models_.try_emplace(loaded.get(), loaded);
+    }
+    return loaded->model.get();
+}
+
+core::Result<std::shared_ptr<const assets::Model>> VfsAssetCache::shared_model(const std::string_view logical_path) {
+    const auto loaded = loaded_model(logical_path);
+    using Result = core::Result<std::shared_ptr<const assets::Model>>;
+    return loaded->model
+        ? Result::success(std::shared_ptr<const assets::Model>(loaded, loaded->model.get()))
+        : Result::failure(*loaded->error);
+}
+
+VfsAssetCache::ModelStats VfsAssetCache::model_stats() const {
+    std::lock_guard lock(models_->mutex);
+    auto stats = models_->stats;
+    stats.cache_budget_bytes = models_->budget_bytes;
+    stats.cache_retained_bytes = models_->retained_bytes;
+    stats.cache_evictions = models_->evictions;
+    for (const auto& replay : models_->replays) stats.budget_replay.push_back({replay.budget, replay.decodes});
+    for (auto entry = models_->models.begin(); entry != models_->models.end();) {
+        const auto loaded = entry->second.weak.lock();
+        if (!loaded) { entry = models_->models.erase(entry); continue; }
+        ++entry;
+        if (!loaded->complete) continue;
+        ++stats.entries;
+        if (loaded->model) {
+            ++stats.successful_entries;
+            stats.capacity += loaded->capacity;
+        } else {
+            ++stats.failed_entries;
+            if (loaded->particle_system) ++stats.particle_entries;
+        }
+    }
+    return stats;
+}
+
+void VfsAssetCache::owner_census(diagnostics::OwnerCensus& output) const {
+    using Census = diagnostics::OwnerCensus;
+    std::lock_guard lock(models_->mutex);
+    for (const auto& [key, entry] : models_->models) {
+        if (!output.step(Census::model_vertices)) { output.models_incomplete(); break; }
+        static_cast<void>(key);
+        const auto loaded = entry.weak.lock();
+        if (!loaded) continue;
+        if (!loaded->complete) { output.models_incomplete(); continue; }
+        output.model(loaded->model.get(), entry.retained ? Census::strong_lru : 0U, nullptr, true);
+    }
+    if (!models_->census_enabled.load(std::memory_order_relaxed) || !models_->census_coverage_complete)
+        output.models_incomplete();
+    for (auto* wrapper = models_->census_wrappers; wrapper; wrapper = wrapper->census_next_) {
+        if (!output.step(Census::model_vertices)) { output.models_incomplete(); break; }
+        for (const auto& [identity, loaded] : wrapper->raw_models_) {
+            if (!output.step(Census::model_vertices)) { output.models_incomplete(); break; }
+            static_cast<void>(identity);
+            output.model(loaded->model.get(), Census::raw_cache, wrapper, true);
+        }
+    }
+}
+
+void VfsAssetCache::set_model_cache_budget(const std::uint64_t bytes) {
+    std::vector<std::shared_ptr<Loaded>> retired;
+    {
+        std::lock_guard lock(models_->mutex);
+        models_->budget_bytes = bytes;
+        models_->trim(retired);
+    }
 }
 
 std::string VfsAssetCache::sha256(const std::string_view logical_path) {
@@ -256,9 +494,7 @@ std::string VfsAssetCache::sha256(const std::string_view logical_path) {
 }
 
 bool VfsAssetCache::particle_system(const std::string_view logical_path) {
-    static_cast<void>(model(logical_path));
-    const auto found = models_.find(logical_path);
-    return found != models_.end() && found->second.particle_system;
+    return loaded_model(logical_path)->particle_system;
 }
 
 } // namespace eawr::scene

@@ -520,7 +520,7 @@ void test_validation() {
     for (auto& point : table.damage->diminishing) point.y = most;
     for (auto& value : table.damage->armor_mods) value = most;
     expect(static_cast<bool>(tactical::validate_durability(table)), "the largest multipliers are valid");
-    const tactical::Hit largest{units(tactical::max_durability_health), 0, true, true, true, tactical::hull_target};
+    const tactical::Hit largest{units(tactical::max_hit_damage), 0, true, true, true, tactical::hull_target};
     for (const auto& profile : {table.profiles[1], table.profiles[2]}) {
         auto state = tactical::full_durability(profile);
         const auto outcome = tactical::apply_hit(profile, *table.damage, state, largest, 10);
@@ -550,6 +550,72 @@ void test_validation() {
     expect(!tactical::validate_combat(weapons), "an inverted collision box is rejected");
 }
 
+void test_large_range_roundtrip() {
+    constexpr std::int64_t authored = 999999999;
+    auto profiles = combat(authored);
+    auto& shooter = profiles.profiles.front();
+    shooter.max_attack_distance = units(authored);
+    auto& weapon = shooter.weapons.front();
+    weapon.hardpoint = tactical::object_weapon;
+    weapon.range = units(authored);
+    tactical::TacticalReplay replay;
+    replay.setup = setup({unit(1, shooter_type, 1, at(0, 0)), unit(2, frigate_type, 2, at(1500, 0), true)});
+    replay.final_tick_count = 90;
+    const auto written = tactical::write_replay(replay);
+    expect(static_cast<bool>(written), "large-range replay writes");
+    if (!written) return;
+    const auto parsed = tactical::parse_replay(written.value());
+    expect(static_cast<bool>(parsed), "large-range replay parses");
+    if (!parsed) return;
+    const auto make = [&](const tactical::TacticalReplay& recording) {
+        return tactical::TacticalSession::from_replay(recording, sensors(), durability(), {}, std::nullopt, profiles);
+    };
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto created = make(workers == 1 ? replay : parsed.value());
+        expect(static_cast<bool>(created), "billion-unit acquisition, object weapon and shot travel bind together");
+        if (!created) return;
+        auto live = std::move(created).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        bool fired = false;
+        bool full_travel = false;
+        for (int tick = 0; tick < 30; ++tick) {
+            auto step = live.step(executor);
+            expect(static_cast<bool>(step), "large-range acquisition step succeeds");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256);
+            for (const auto& event : step.value().snapshot->combat_events())
+                fired = fired || (event.shooter == 1 && event.target == 2
+                    && event.kind == tactical::CombatEventKind::weapon_fired);
+            for (const auto& projectile : live.projectiles())
+                full_travel = full_travel || projectile.max_travel >= units(authored);
+        }
+        expect(fired && full_travel && !live.projectiles().empty(),
+            "large finite range acquires beyond the old weapon reach and launches with full travel");
+        const auto saved = live.save_checkpoint_state();
+        auto fresh = make(parsed.value());
+        expect(saved && fresh, "large-range in-flight checkpoint creates");
+        if (!saved || !fresh) return;
+        auto restored = std::move(fresh).value();
+        const auto loaded = restored.load_checkpoint_state(saved.value());
+        expect(loaded && restored.canonical_state_bytes() == live.canonical_state_bytes(),
+            "checkpoint preserves full projectile travel and acquisition state");
+        if (!loaded) return;
+        const auto resaved = restored.save_checkpoint_state();
+        expect(resaved && resaved.value() == saved.value(), "large-range checkpoint round-trips byte for byte");
+        for (int tick = 30; tick < 90; ++tick) {
+            const auto a = live.step(executor), b = restored.step(executor);
+            expect(a && b && a.value().state_sha256 == b.value().state_sha256,
+                "large-range restored continuation equals live");
+            if (!a || !b) return;
+            hashes.push_back(a.value().state_sha256);
+        }
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "large-range replay and every tick match on 1/2/4/8 workers");
+    }
+}
+
 } // namespace
 
 using namespace damage_test_support;
@@ -561,6 +627,7 @@ int main(int argc, char** argv) {
     }
     const bool update = argc > 2 && std::string_view(argv[2]) == "--update";
     test_validation();
+    test_large_range_roundtrip();
     test_zero_direct_blast();
     test_curve();
     test_hit_pipeline();

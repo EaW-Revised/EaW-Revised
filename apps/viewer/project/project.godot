@@ -19,6 +19,11 @@ window/size/window_height_override=720
 vsync/vsync_mode=0
 
 [rendering]
+; #4681/#4645: RaW 60 ships per side needs 262144 to avoid instance-uniform allocation errors.
+limits/global_shader_variables/buffer_size=262144
+; Separate render thread (2) is the default (needs the patched engine, third_party/godot/README.md).
+; Opt out per run with the engine flag `--render-thread safe` (launcher: --safe-render-thread).
+driver/threads/thread_model=2
 renderer/rendering_method="forward_plus"
 rendering_device/driver.windows="vulkan"
 rendering_device/fallback_to_d3d12=true

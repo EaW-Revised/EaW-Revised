@@ -117,8 +117,14 @@ std::optional<eawr::viewer::MapCameraSource> MapMode::State::load_map_camera(
                  << "SC-02 " << generated->map_path << ' ' << generated->map_sha256 << ' '
                  << generated->bounds.min_x << ' ' << generated->bounds.max_x << ' '
                  << generated->bounds.min_y << ' ' << generated->bounds.max_y << ' '
-                 << generated->target_x << ' ' << generated->target_y << " distance=1200 yaw=XML"
-                 << " Distance_Min=100 Tactical_Min_Scroll_Speed=823.529412 Pitch_Min=-60 overview=5";
+                 << generated->target_x << ' ' << generated->target_y;
+        if (mode == camera::Mode::space) {
+            identity << " distance=1200 yaw=XML"
+                     << " Distance_Min=100 Tactical_Min_Scroll_Speed=823.529412 Pitch_Min=-60 overview=5";
+        } else {
+            identity << " land zoom=" << generated->zoom << " yaw=" << generated->yaw_degrees
+                     << " height=" << generated->target_height;
+        }
         config_text = identity.str();
     } else config_text = read_camera_file(map_camera_config_path);
     if (!config_text) {
@@ -127,7 +133,8 @@ std::optional<eawr::viewer::MapCameraSource> MapMode::State::load_map_camera(
     }
     source.config_sha256 = sim::sha256_hex(std::span<const std::uint8_t>(
         reinterpret_cast<const std::uint8_t*>(config_text->data()), config_text->size()));
-    source.config_file = generated ? "skirmish-auto-camera" : ViewerPath::utf8(map_camera_config_path.filename());
+    source.config_file = generated ? (mode == camera::Mode::land ? "land-skirmish-auto-camera" : "skirmish-auto-camera")
+                                   : ViewerPath::utf8(map_camera_config_path.filename());
     // Map identity and bounds are validated here, before any activation.
     auto config = generated ? core::Result<eawr::viewer::MapCameraConfig>::success(*generated)
                             : eawr::viewer::parse_map_camera_config(*config_text, options.map_path, map_hash, mode);
@@ -169,7 +176,7 @@ std::optional<eawr::viewer::MapCameraSource> MapMode::State::load_map_camera(
         failure_text = core::format_diagnostic(loaded.error());
         return std::nullopt;
     }
-    if (generated) {
+    if (generated && mode == camera::Mode::space) {
         // Same project distance and owner overrides as the Coruscant live XML.
         const auto& constants = loaded.value().constants;
         config.value().zoom = options.camera_zoom.value_or(std::clamp(

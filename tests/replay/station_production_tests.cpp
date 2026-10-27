@@ -333,6 +333,211 @@ void test_hero_worker_determinism() {
     }
 }
 void test_signed_command_reduction() {
+    // WPR-51/WHE-55: a purchased signed trade-off reaches both damage consumers.
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto rules = economy();
+        rules.upgrades.front().bonuses = {{3, {10}, {Fixed{}, decimal("0.5"), {}, {}, decimal("-0.5"), {}}}};
+        auto health = durability();
+        health.profiles.front().max_shields = {};
+        health.profiles.front().hardpoints.clear();
+        t::CombatProfile ship; ship.type_id = 10; // Explicit orders only; no autonomous scan before research.
+        ship.collision = t::CollisionBox{{whole(-1), whole(-1), whole(-1)}, {whole(1), whole(1), whole(1)}};
+        t::WeaponProfile gun; gun.range = whole(1000);
+        gun.cone_width = gun.cone_height = whole(360);
+        gun.shot = t::ShotProfile{whole(10), t::no_type_index, whole(100), whole(1000), true, true, {}};
+        ship.weapons = {gun};
+        t::CombatTable combat; combat.profiles = {ship};
+        auto start = setup();
+        start.units.erase(start.units.begin() + 3); // keep only one allied recipient and its enemy
+        start.units.back().position.x = whole(10);
+        auto created = t::TacticalSession::create(start, std::vector<t::SensorProfile>{{10, whole(1000)}}, health, {}, std::nullopt, combat, {}, {}, rules);
+        expect(static_cast<bool>(created), "signed upgrade session creates without aborting");
+        if (!created) { std::cerr << created.error().message << '\n'; return; }
+        auto world = std::move(created).value();
+        expect(static_cast<bool>(world.submit(buy(0, 1, 0, 1, 90))), "signed trade-off purchase submits");
+        expect(static_cast<bool>(world.submit({{4, 1, 1}, {3}, t::AttackPayload{5}})), "upgraded shooter attacks");
+        expect(static_cast<bool>(world.submit({{4, 4, 0}, {5}, t::AttackPayload{3}})), "enemy attacks negative defense");
+        expect(static_cast<bool>(world.submit({{5, 1, 2}, {3}, t::StopPayload{}})), "upgraded shooter stops after one ready shot");
+        expect(static_cast<bool>(world.submit({{5, 4, 1}, {5}, t::StopPayload{}})), "enemy stops after one ready shot");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            const auto stepped = world.step(executor);
+            expect(static_cast<bool>(stepped), "signed trade-off steps");
+            if (!stepped) return;
+            hashes.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+        }
+        expect(world.durability_state(5)->hull == whole(85), "positive upgrade damage multiplies by 1+total");
+        expect(world.durability_state(3)->hull == whole(85), "negative-only defense multiplies incoming damage by 1-total");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "signed upgrades agree on 1/2/4/8 workers");
+    }
+    // Negative-only maxima and speed remain bounded after distinct categories add.
+    auto rules = economy();
+    const t::CombatBonuses penalty{whole(-2), whole(-2), whole(-2), whole(-2), {}, whole(-2)};
+    rules.upgrades.front().bonuses = {{3, {10}, penalty}, {4, {10}, penalty}};
+    t::MotionTable movement;
+    movement.rules.arc_degrees = whole(45); movement.rules.expansion_distance = whole(1);
+    movement.profiles = {{10, whole(10), whole(1), whole(1), whole(10), whole(1)}};
+    auto created = t::TacticalSession::create(setup(), {}, durability(), movement, std::nullopt, {}, {}, {}, rules);
+    expect(static_cast<bool>(created), "negative maxima and speed session creates");
+    if (!created) return;
+    auto world = std::optional<t::TacticalSession>{std::move(created).value()};
+    expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 90))), "negative-only upgrade buys");
+    through(*world, 4);
+    const auto state = world->durability_state(3);
+    const auto floor_factor = m::add(whole(1), decimal("-0.99")).value();
+    expect(state && state->hull == m::multiply(whole(100), floor_factor).value()
+        && state->shields == whole(0) && state->energy == whole(0), "negative maxima use consumer floors after reduction");
+    expect(static_cast<bool>(world->submit({{4, 1, 1}, {3}, t::MovePayload{{whole(100), {}, {}}}})), "negative speed move submits");
+    through(*world, 5);
+    const auto motion = world->motion_state(3);
+    expect(motion && !motion->nodes.empty(), "negative speed produces a bounded forward path");
+    if (motion) for (const auto& node : motion->nodes)
+        expect(node.speed >= whole(0) && node.speed <= m::multiply(whole(10), floor_factor).value(),
+            "negative speed uses the post-reduction floor");
+
+    for (const bool shared : {false, true}) for (const bool staged : {false, true}) {
+        std::vector<std::string> lifecycle_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto content = economy();
+            content.upgrades.front().bonuses = {{3, {10}, {decimal("-0.25"), {}, {}, {}, {}, {}}}};
+            if (shared) content.command_bonuses = {{40, 0, {4, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}, 0, false, false, {}, {}}};
+            auto health = durability(); health.profiles.front().max_shields = {};
+            auto made = t::TacticalSession::create(setup(), {}, health, {}, std::nullopt, {}, {}, {}, content);
+            expect(static_cast<bool>(made), "signed health lifecycle session creates");
+            if (!made) return;
+            auto session = std::move(made).value();
+            expect(static_cast<bool>(session.submit({{0, 1, 0}, {3}, t::DamagePayload{whole(20)}})), "damage hull before signed health gain");
+            expect(static_cast<bool>(session.submit(buy(0, 1, 1, 1, 90))), "signed health upgrade buys");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 5; ++tick) {
+                if (tick == 3) {
+                    expect(session.durability_state(3)->hull == whole(shared ? 80 : 55), "negative health gain subtracts its signed delta from damaged hull");
+                    if (staged) expect(static_cast<bool>(session.stage_remove(1)), "negative health source stages removal");
+                    else expect(static_cast<bool>(session.submit({{3, 1, 2}, {1}, t::DamagePayload{whole(5000)}})), "negative health source dies in tick");
+                }
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "signed health lifecycle steps");
+                if (!stepped) return;
+                hashes.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+            }
+            expect(session.durability_state(3)->hull == whole(shared ? 80 : 55), "removing negative health raises maximum without healing");
+            const auto view = session.snapshot();
+            const auto ship = std::find_if(view->instances().begin(), view->instances().end(),
+                [](const auto& instance) { return instance.entity_id == 3; });
+            expect(ship != view->instances().end() && ship->durability && ship->durability->max_hull == whole(shared ? 125 : 100),
+                "negative health removal restores the authored maximum");
+            if (workers == 1) lifecycle_reference = hashes;
+            else expect(hashes == lifecycle_reference, "signed health gain/loss agrees on 1/2/4/8 workers");
+        }
+    }
+
+    for (const bool negative : {false, true}) for (const bool shared : {false, true}) {
+        std::vector<std::string> mixed_reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto content = economy();
+            content.upgrades.front().bonuses = {{3, {10}, {decimal(negative ? "-0.25" : "0.25"), {}, {}, {}, {}, {}}}};
+            content.upgrades[2].bonuses = {{5, {10}, {Fixed{}, decimal("0.1"), {}, {}, {}, {}}}};
+            if (shared) content.command_bonuses = {{40, 0, {4, {10}, {decimal("0.25"), {}, {}, {}, {}, {}}}, 0, false, false, {}, {}}};
+            auto health = durability(); health.profiles.front().max_shields = {};
+            auto made = t::TacticalSession::create(setup(), {}, health, {}, std::nullopt, {}, {}, {}, content);
+            expect(static_cast<bool>(made), "mixed gain/loss health session creates");
+            if (!made) return;
+            auto session = std::move(made).value();
+            expect(static_cast<bool>(session.submit(buy(0, 1, 0, 1, 90))), "mixed tick original health upgrade buys");
+            expect(static_cast<bool>(session.submit({{3, 1, 1}, {3}, t::DamagePayload{whole(15)}})), "mixed tick recipient damaged");
+            expect(static_cast<bool>(session.submit(buy(3, 1, 2, 2, 92))), "mixed tick replacement damage upgrade buys at surviving ally");
+            expect(static_cast<bool>(session.submit({{5, 1, 3}, {1}, t::DamagePayload{whole(5000)}})), "mixed tick original holder dies as other upgrade completes");
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 7; ++tick) {
+                if (tick == 5) {
+                    const auto& before = account(session, 1);
+                    expect(session.unit_state(1).has_value()
+                        && std::any_of(before.completed.begin(), before.completed.end(), [](const auto& held) { return held.type == 90; })
+                        && std::none_of(before.completed.begin(), before.completed.end(), [](const auto& held) { return held.type == 92; })
+                        && !before.queues[1].empty() && before.queues[1].front().type == 92
+                        && before.queues[1].front().complete_frame == 5,
+                        "mixed tick starts with a live old holder and the new source due this frame");
+                }
+                const auto stepped = session.step(executor);
+                expect(static_cast<bool>(stepped), "mixed gain/loss tick steps");
+                if (!stepped) return;
+                if (tick == 5) {
+                    const auto& after = account(session, 1);
+                    expect(!session.unit_state(1).has_value()
+                        && std::none_of(after.completed.begin(), after.completed.end(), [](const auto& held) { return held.type == 90; })
+                        && std::any_of(after.completed.begin(), after.completed.end(), [](const auto& held) { return held.type == 92; }),
+                        "one step both loses the health holder and gains the damage source");
+                    expect(session.durability_state(3)->hull == whole((negative ? 60 : 100) + (shared ? 25 : 0)),
+                        "mixed tick immediately preserves clamp-only health loss");
+                }
+                hashes.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+            }
+            expect(session.durability_state(3)->hull == whole((negative ? 60 : 100) + (shared ? 25 : 0)),
+                "mixed tick health loss only clamps despite simultaneous damage-source gain");
+            expect(std::any_of(account(session, 1).completed.begin(), account(session, 1).completed.end(),
+                [](const auto& held) { return held.type == 92; }), "mixed tick includes a completed new source");
+            if (workers == 1) mixed_reference = hashes;
+            else expect(hashes == mixed_reference, "mixed health-source loss/gain agrees on 1/2/4/8 workers");
+        }
+    }
+
+    for (const bool staged : {false, true}) {
+      std::vector<std::string> rehome_reference;
+      for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto content = economy(); content.campaign = true;
+        for (auto& player : content.players) player.credit_cap = whole(6000);
+        content.campaign_playable_factions = {100, 200};
+        content.upgrades.front().bonuses = {{3, {10, 40}, {decimal("-0.25"), {}, {}, {}, {}, {}}}};
+        t::StationMenu replacement;
+        replacement.station = 10; replacement.faction = 100;
+        replacement.options = {option(90, t::BuildKind::upgrade, t::BuildQueue::upgrades, 2)};
+        content.menus.insert(content.menus.begin(), replacement);
+        auto start = setup(); start.first_free_entity_id = 6;
+        start.campaign.emplace(); start.campaign->players = content.players;
+        auto health = durability();
+        for (auto& profile : health.profiles) profile.max_shields = {};
+        auto made = t::TacticalSession::create(start, {}, health, {}, std::nullopt, {}, {}, {}, content);
+        expect(static_cast<bool>(made), "campaign signed source rehome creates");
+        if (!made) { std::cerr << made.error().message << '\n'; return; }
+        auto session = std::move(made).value();
+        expect(static_cast<bool>(session.submit(buy(0, 1, 0, 1, 90))), "campaign negative health upgrade buys");
+        expect(static_cast<bool>(session.submit({{3, 1, 1}, {3}, t::DamagePayload{whole(15)}})), "campaign recipient damaged before rehome");
+        expect(static_cast<bool>(session.submit({{3, 2, 0}, {2}, t::DamagePayload{whole(15)}})), "campaign excluded recipient damaged before rehome");
+        if (!staged) expect(static_cast<bool>(session.submit({{4, 1, 2}, {1}, t::DamagePayload{whole(5000)}})), "campaign original holder dies");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 6; ++tick) {
+            if (tick == 4) expect(session.unit_state(1).has_value()
+                && account(session, 1).completed.size() == 1 && account(session, 1).completed.front().station == 1,
+                "rehome tick starts with the live original holder and its applied source");
+            if (staged && tick == 4) expect(static_cast<bool>(session.stage_remove(1)), "campaign original holder stages removal");
+            if (staged && tick == 4) expect(!session.unit_state(1).has_value()
+                && account(session, 1).completed.size() == 1 && account(session, 1).completed.front().station == 3
+                && session.durability_state(3)->hull == whole(60) && session.durability_state(2)->hull == whole(735),
+                "staged holder removal immediately rehomes and publishes both eligibility changes");
+            const auto stepped = session.step(executor);
+            expect(static_cast<bool>(stepped), "campaign signed source rehome steps");
+            if (!stepped) return;
+            if (tick == 4) expect(!session.unit_state(1).has_value()
+                && account(session, 1).completed.size() == 1 && account(session, 1).completed.front().station == 3
+                && session.durability_state(3)->hull == whole(60) && session.durability_state(2)->hull == whole(735),
+                "holder loss and both rehome eligibility changes publish in the same tick");
+            hashes.push_back(stepped.value().state_sha256 + stepped.value().snapshot->sha256());
+        }
+        expect(account(session, 1).completed.size() == 1 && account(session, 1).completed.front().station == 3,
+            "campaign source rehomes to a holder with the recipient type");
+        expect(session.durability_state(3)->hull == whole(60), "new container exclusion removes negative health without healing");
+        expect(session.durability_state(2)->hull == whole(735), "former container exclusion gains the signed health delta after rehome");
+        if (workers == 1) rehome_reference = hashes;
+        else expect(hashes == rehome_reference, "campaign signed source rehome agrees on 1/2/4/8 workers");
+      }
+    }
+
     t::CombatBonuses category{};
     t::accumulate_combat_bonus(category, {decimal("-0.5"), {}, {}, {}, {}, {}});
     t::accumulate_combat_bonus(category, {decimal("-0.25"), {}, {}, {}, {}, {}});
@@ -345,6 +550,78 @@ void test_signed_command_reduction() {
         "WHE-55: caps apply after addition with the same fixed rounding as XML percentages");
 }
 void test_bound_production_relationships() {
+    // #4985 / WPR-22/33: a producer authored only for its owner's faction group still lists for the ally.
+    {
+        auto rules = economy();
+        auto basic = option(10, t::BuildKind::unit, t::BuildQueue::units, 2);
+        rules.menus.erase(std::remove_if(rules.menus.begin(), rules.menus.end(),
+            [](const t::StationMenu& menu) { return menu.faction != 100; }), rules.menus.end());
+        for (auto& menu : rules.menus) { menu.options = {basic}; menu.next_level = 0; }
+        expect(rules.menu(40, 200) == nullptr && rules.menu(40, 100) != nullptr
+            && rules.producer_menu(40, 100, 200) == rules.menu(40, 100) && !rules.producer_menu(40, 100, 200)->options.empty(),
+            "WPR-33: an ally of another faction reads the owner's menu, not an empty local lookup");
+        auto world = create(rules); if (!world) return;
+        expect(world->build_allowed(2, 1, 10), "WPR-33: the ally's enqueue at the owner-faction-only producer is accepted");
+    }
+    // WPR-22/33: effect-free research is owned production, not an unavailable ability.
+    std::vector<std::string> token_reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto rules = economy();
+        auto basic = option(10, t::BuildKind::unit, t::BuildQueue::units, 2);
+        auto token = option(90, t::BuildKind::upgrade, t::BuildQueue::upgrades, 2);
+        token.requirements.current_allies = 1;
+        auto dependent = option(11, t::BuildKind::unit, t::BuildQueue::units, 2);
+        dependent.requirements.prerequisites = {90};
+        for (auto& menu : rules.menus) {
+            menu.options = menu.faction == 100 ? std::vector{basic, token, dependent} : std::vector{basic};
+            menu.next_level = 0;
+        }
+        t::UpgradeProfile retained;
+        retained.type = 90;
+        rules.upgrades = {retained};
+        auto world = create(rules); if (!world) return;
+        expect(world->build_allowed(1, 1, 10) && world->build_allowed(2, 1, 90)
+            && !world->build_allowed(1, 2, 90) && !world->build_allowed(4, 1, 90)
+            && !world->build_allowed(1, 1, 99) && !world->build_allowed(1, 1, 11),
+            "WPR-33: authored owner-faction list, alliance and missing token still gate purchases");
+        expect(static_cast<bool>(world->submit(buy(0, 1, 0, 1, 11))), "submit dependent before research");
+        expect(static_cast<bool>(world->submit(buy(0, 1, 1, 1, 10))), "submit ordinary producer unit");
+        expect(static_cast<bool>(world->submit(buy(0, 1, 2, 1, 90))), "submit effect-free research token");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 6; ++tick) {
+            if (tick == 3) {
+                expect(world->build_allowed(1, 1, 11) && world->build_allowed(2, 1, 11)
+                    && !world->build_allowed(1, 1, 90),
+                    "WPR-22/33: held token unlocks allied prerequisites and occupies its current limit");
+                expect(static_cast<bool>(world->submit(buy(3, 1, 3, 1, 11))), "submit newly unlocked ship");
+            }
+            const auto step = world->step(executor);
+            expect(static_cast<bool>(step), "pure research production steps");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+            if (tick < 2) {
+                expect(account(*world, 1).queues[0].size() == 1 && account(*world, 1).queues[1].size() == 1,
+                    "WPR-20/30: unit and effect-free research survive queue validation");
+            }
+            if (tick == 0) {
+                expect(std::count_if(step.value().snapshot->events().begin(), step.value().snapshot->events().end(),
+                    [](const auto& event) { return event.kind == t::EventKind::order_rejected
+                        && event.reason == t::RejectReason::cannot_produce; }) == 1,
+                    "WPR-33: only the premature dependent purchase is refused");
+            }
+        }
+        const auto& ledger = account(*world, 1);
+        expect(ledger.completed.size() == 1 && ledger.completed.front().type == 90
+            && ledger.completed.front().station == 1 && ledger.completed.front().object != 0
+            && ledger.lifetime.at(90) == 1 && ledger.pool == std::vector<t::TypeId>{10, 11}
+            && ledger.credits == whole(5970),
+            "WPR-22: effect-free token remains owned and both ships complete at authored prices");
+        expect(world->durability_state(1)->hull == whole(1000) && ledger.tech_level == 1,
+            "WPR-22: owning a token invents no combat bonus, station replacement or tech increment");
+        if (workers == 1) token_reference = hashes;
+        else expect(hashes == token_reference, "WPR-22/33: token/dependent production agrees on 1/2/4/8 workers");
+    }
     const std::vector<t::SnapshotPlayer> relationships{{1, 0, false}, {2, 0, false}, {3, 0, true}};
     expect(t::players_allied(relationships, 1, 2) && t::players_allied(relationships, 1, 1)
         && !t::players_allied(relationships, 1, 3) && !t::players_allied(relationships, 1, 99),

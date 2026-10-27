@@ -139,7 +139,6 @@ core::Result<tactical::EconomyRules> economy_rules(
         }
         return std::nullopt;
     };
-    const auto credits = scalar("MP_Default_Credits");
     const auto build_multiplier = scalar("Tactical_Build_Time_Multiplier");
     const auto vulnerability = scalar("Space_Elevated_Vulnerability_Factor");
     const auto vulnerable_seconds = scalar("Space_Elevated_Vulnerability_Duration");
@@ -147,8 +146,8 @@ core::Result<tactical::EconomyRules> economy_rules(
     if (start.match.start_tech < 0 || start.match.max_tech < start.match.start_tech) {
         return Result::failure(failure("invalid lobby tech levels"));
     }
-    if ((!campaign && !credits) || !build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
-        return Result::failure(failure("needs MP_Default_Credits, Tactical_Build_Time_Multiplier and the "
+    if (!build_multiplier || !vulnerability || !vulnerable_seconds || !collision_distance) {
+        return Result::failure(failure("needs Tactical_Build_Time_Multiplier and the "
                                        "Space_Elevated_Vulnerability constants"));
     }
     tactical::EconomyRules rules;
@@ -174,16 +173,18 @@ core::Result<tactical::EconomyRules> economy_rules(
     for (const auto& player : start.players) {
         if (campaign) continue; // WGT-27: supplied galactic accounts, never lobby allocation
         if (!player.lobby && !attract) continue;
+        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
+            [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
+        // MAT-15: neutral has no pool account and needs no AI difficulty data.
+        if (attract && faction != inputs.factions.end() && faction->neutral) continue;
         if (!player.human && !tables.ai_credit_multiplier) {
             return Result::failure(failure("AI credits require selected difficulty data"));
         }
         const auto scale = ai_economy_scale(inputs, player, tables);
         if (!scale) return Result::failure(scale.error());
-        const auto faction = std::find_if(inputs.factions.begin(), inputs.factions.end(),
-            [&](const StartFaction& entry) { return detail::iequals(entry.name, player.faction); });
         // A demo player of a faction with no unit cap (neutral objects, or content that sets none) holds no
         // pool; the battle still runs, it just does not refill that player.
-        if (attract && (faction == inputs.factions.end() || faction->neutral || !faction->space_unit_cap)) continue;
+        if (attract && (faction == inputs.factions.end() || !faction->space_unit_cap)) continue;
         if (faction == inputs.factions.end() || !faction->space_unit_cap) {
             return Result::failure(failure("faction " + player.faction + " has no Space_Tactical_Unit_Cap"));
         }
@@ -203,7 +204,7 @@ core::Result<tactical::EconomyRules> economy_rules(
         // unassigned zero facing vector; equivalence of those representations is unverified.
         const auto yaw = marker == start.markers.end() ? Fixed{} : marker->yaw_degrees;
         rules.players.push_back(tactical::EconomyPlayer{
-            player.player.player_id, *credits, *faction->space_unit_cap, !player.human, yaw});
+            player.player.player_id, start.match.credits, *faction->space_unit_cap, !player.human, yaw});
         rules.players.back().start_tech = static_cast<std::uint32_t>(start.match.start_tech);
         rules.players.back().max_tech = static_cast<std::uint32_t>(start.match.max_tech);
         rules.players.back().credit_multiplier = scale.value().credit;
@@ -256,9 +257,9 @@ core::Result<tactical::EconomyRules> economy_rules(
         for (const auto& group : campaign ? production.buildable_campaign : production.buildable) {
             tactical::StationMenu menu;
             menu.station = type_id(type.id);
-            // WBP-33/34: an ordinary captured producer retains its faction queue menu.
-            menu.station_producer = !type.build_pad && !type.under_construction
-                && (type.kind == units::UnitKind::station || !production.income.empty() || type.capture_point);
+            // WPR-33/WBP-33: the authored menu admits ordinary producers independently
+            // of object class, income or capture behavior; construction has its own route.
+            menu.station_producer = !type.build_pad && !type.under_construction;
             menu.faction = faction_id(group.faction);
             menu.next_level = production.next_level.empty() ? 0 : type_id(production.next_level);
             for (const auto& name : group.types) {
@@ -321,9 +322,19 @@ core::Result<tactical::EconomyRules> economy_rules(
                 option.available = option.disabled_reason.empty() && option.price.raw() > 0 && option.build_frames > 0
                     && (costs.upgrade_object || built->hull.has_value() || !built->members.empty()
                         || (deployed != nullptr && (deployed->hull.has_value() || !deployed->members.empty())));
-                if (costs.upgrade_object && !costs.level_up && costs.combat_bonuses.empty() && costs.ability_enables.empty()
+                // WPR-22/33: effect-free prerequisite tokens still complete as owned
+                // objects. Authored effects outside our implemented subsystems remain
+                // a project availability limit, rather than becoming paid no-ops.
+                const bool effect_free = built->inactive_abilities.empty() && built->abilities.empty()
+                    && built->special_abilities.empty() && built->team_abilities.empty() && built->team_special_abilities.empty()
+                    && built->special_unlocks.empty() && !built->consume_after_special_fire
+                    && costs.income.empty() && costs.income_bonuses.empty() && costs.bounties.empty()
+                    && !costs.level_up && !costs.increments_tech && costs.removes_previous.empty() && costs.next_level.empty()
+                    && costs.combat_bonuses.empty() && costs.stealth_duration_bonuses.empty()
+                    && costs.battlefield_bonuses.empty() && costs.ability_enables.empty();
+                if (costs.upgrade_object && !effect_free && !costs.level_up && costs.combat_bonuses.empty() && costs.ability_enables.empty()
                     && !costs.increments_tech
-                    && costs.stealth_duration_bonuses.empty() && (!campaign || costs.bounties.empty()) // WST-03, WGCH-164
+                    && costs.stealth_duration_bonuses.empty() && (!campaign || costs.bounties.empty())
                     && std::none_of(built->special_unlocks.begin(), built->special_unlocks.end(),
                         [](const units::UnitType::SpecialUnlock& unlock) { return unlock.enable; })
                     && std::none_of(costs.income_bonuses.begin(), costs.income_bonuses.end(), [&](const units::IncomeBonus& bonus) {
@@ -332,7 +343,7 @@ core::Result<tactical::EconomyRules> economy_rules(
                             return !target.production.income.empty() && detail::iequals(target.id, bonus.target_source);
                         });
                     })) {
-                    option.available = false; // other automatic abilities await their subsystem
+                    option.available = false;
                 }
                 menu.options.push_back(option);
             }
@@ -528,6 +539,28 @@ core::Result<tactical::EconomyRules> economy_rules(
                 Fixed::from_raw(*width / 2), Fixed::from_raw(*height / 2)};
         }
     }
+    // WPR-51: +8 is a project support limit, not a retail or fixed-point limit.
+    // Preserve authored values and diagnose only the unavailable upgrade, not the session.
+    std::vector<tactical::TypeId> disabled(rules.disabled_types.begin(), rules.disabled_types.end());
+    for (const auto& upgrade : rules.upgrades) {
+        const bool unsupported = std::any_of(upgrade.bonuses.begin(), upgrade.bonuses.end(), [](const auto& bonus) {
+            return std::any_of(bonus.percentages.begin(), bonus.percentages.end(), [](const Fixed value) {
+                return value.raw() > 8 * Fixed::scale;
+            });
+        });
+        if (!unsupported) continue;
+        disabled.push_back(upgrade.type);
+        const auto source = std::find_if(tables.units.begin(), tables.units.end(),
+            [&](const auto& unit) { return type_id(unit.id) == upgrade.type; });
+        const auto name = source != tables.units.end() ? source->id : std::to_string(upgrade.type);
+        for (auto& menu : rules.menus) for (auto& option : menu.options) if (option.type == upgrade.type) {
+            option.available = false;
+            option.disabled_reason = "Upgrade " + name + " bonus above project support limit (+8)";
+        }
+    }
+    std::sort(disabled.begin(), disabled.end());
+    disabled.erase(std::unique(disabled.begin(), disabled.end()), disabled.end());
+    rules.disabled_types = std::move(disabled);
     rules.max_queue = 5; // PU-14: FoC's built-in Max_Build_Queue; its data does not set it
     rules.vulnerability = *vulnerability;
     rules.vulnerability_frames = frames_of(*vulnerable_seconds);

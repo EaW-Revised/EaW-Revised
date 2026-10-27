@@ -166,7 +166,7 @@ void BattleInput::update_hover() {
     hover_point_.reset();
     if (!pointer_) return;
     const auto pick_ray = ray((*pointer_)[0], (*pointer_)[1]);
-    if (pick_ray) hover_point_ = ui::battle_plane_point(*pick_ray);
+    if (pick_ray) hover_point_ = ground_point(*pick_ray);
     // WU-41: a reticle under the pointer keeps its unit hovered, ahead of an icon and the pick.
     if (const auto reticle = world_ui_->reticle_at(*pointer_)) {
         const auto unit = std::find_if(units_.begin(), units_.end(), [&](const ui::BattleUnit& candidate) {

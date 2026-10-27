@@ -17,6 +17,19 @@ template<class T> T required(core::Result<T> result) {
     return std::move(result).value();
 }
 }
+std::array<std::vector<StartingSpawnEntry>, 6> resolve_starting_spawns(const units::GalacticType& owner,
+    const std::function<std::uint64_t(std::string_view)>& identity, std::vector<std::string>& diagnostics) {
+    std::array<std::vector<StartingSpawnEntry>, 6> rows;
+    for (std::size_t tech = 0; tech < rows.size(); ++tech)
+        for (const auto& spawn : owner.starting_spawned_units[tech]) {
+            const auto resolved = identity(spawn.type);
+            if (!resolved && ai::upper_case(spawn.type) != "NONE")
+                diagnostics.push_back(owner.name + ": Starting_Spawned_Units_Tech_" + std::to_string(tech) + " names unknown type "
+                    + spawn.type + "; it stays a null reference (RGC-22)");
+            rows[tech].push_back({resolved, spawn.count});
+        }
+    return rows;
+}
 core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> prepare_ai_perception_content(
     const vfs::Vfs& filesystem, const data::galactic::GalacticData& data, const CampaignSetupPlan& plan,
     const script::foc::ai::GalacticSelectionContent& content, std::string_view difficulty) {
@@ -30,6 +43,9 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
         const auto* radius = data.constant("MaximumFleetMovementDistance");
         if (!radius || !radius->number) throw std::runtime_error("stock force neighbourhood radius unavailable");
         out->maximum_fleet_distance = script::numeric::from_fixed(*radius->number);
+        if (const auto native = ai::parse_real(radius->text)) out->path_maximum_distance = ai::to_single(*native);
+        if (const auto* factor = data.constant("TradeRouteMovementFactor"))
+            if (const auto native = ai::parse_real(factor->text)) out->trade_movement_factor = ai::to_single(*native);
         // WGA-475: absent or zero leaves TargetPoliticalControl unavailable instead of dividing.
         if (const auto* control = data.constant("MaximumPoliticalControl"); control && control->number && control->number->raw())
             out->maximum_political_control = script::numeric::from_fixed(*control->number);
@@ -89,10 +105,12 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
                 planet->special_structures_land ? std::optional{ai::real(std::min<std::int64_t>(*planet->special_structures_land, 5)) / *out->maximum_ground_level} : std::nullopt,
                 {}, authored->second.indigenous_potential, planet->planet_retains_residual_influence.value_or(true)});
         }
-        const auto identity = [&](std::string_view name) {
+        // RGC-22: a name that resolves to no type stays a null reference (0); an explicit None is null without a report.
+        using TypeKey = std::remove_cv_t<std::remove_reference_t<decltype(content.types.begin()->first)>>;
+        const auto identity = [&](std::string_view name) -> TypeKey {
             for (const auto& [id, original] : content.types)
                 if (original.name == ai::upper_case(name)) return id;
-            throw std::runtime_error("stock force spawn original identity unavailable");
+            return 0;
         };
         if (content.registered_types.size() != content.types.size())
             throw std::runtime_error("registered economy type order is incomplete");
@@ -109,8 +127,10 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticPerceptionSetup>> pr
             force.space_weapon = original->second.special_weapon;
             force.space_structure_categories = original->second.garrison_categories;
             force.object_traits = ai::GalacticObjectTraits{original->second.value.hero, original->second.named_hero};
+            const auto spawn_rows = resolve_starting_spawns(*type, [&](const std::string_view name) -> std::uint64_t { return identity(name); },
+                out->spawn_diagnostics);
             for (std::size_t tech = 0; tech < force.starting_spawns.size(); ++tech)
-                for (const auto& spawn : type->starting_spawned_units[tech]) force.starting_spawns[tech].push_back({identity(spawn.type), spawn.count});
+                for (const auto& spawn : spawn_rows[tech]) force.starting_spawns[tech].push_back({static_cast<TypeKey>(spawn.type), spawn.count});
             const auto behaves = [&](std::string_view name) {
                 return std::any_of(type->behavior.begin(), type->behavior.end(),
                     [&](const auto& value) { return ai::upper_case(value) == name; });

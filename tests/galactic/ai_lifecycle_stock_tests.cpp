@@ -164,6 +164,129 @@ struct Rig {
         must(manager->service({sync, mode}, admission, scripts));
     }
 };
+void mounted_equation_files() {
+    auto setup = fixture();
+    setup.xml["data/xml/ai/goalfunctions/fixture.xml"] =
+        "<FunctionSet><Entry><Goal>Conquer</Goal><Function>MountedDesire</Function></Entry></FunctionSet>";
+    const std::string extra = "data/xml/ai/perceptualequations/additional-desires.xml";
+    expect(std::find(setup.xml_paths.begin(), setup.xml_paths.end(), extra) == setup.xml_paths.end(),
+        "fixture keeps the additional filename outside the initial closure");
+    setup.xml[extra] = "<Equations><One>9</One><MountedDesire>1</MountedDesire></Equations>";
+    const std::string malformed = "data/xml/ai/perceptualequations/broken-desires.xml";
+    setup.xml[malformed] = "<Equations><Broken>1</Equations>";
+    const auto skipped = a::include_mounted_ai_files(setup);
+    expect(skipped.size() == 1 && skipped.front().find(malformed) != std::string::npos
+        && !setup.xml.contains(malformed), "a malformed additional equation file is skipped with its diagnostic");
+    const auto loaded = must(a::load_data(setup));
+    expect(loaded.equations.find("mounteddesire") != nullptr,
+        "AI-16 loads mounted equation files even when templates in the initial closure already resolve");
+    const auto* original = loaded.equations.find("One");
+    expect(original && original->program.size() == 1 && original->program.front().value == a::Number(1),
+        "the initial closure keeps first-wins precedence over an additional equation with the same name");
+    Rig rig(setup);
+    expect(rig.manager->goal_functions(2) == std::vector<std::pair<std::string, std::string>>{{"CONQUER", "MountedDesire"}},
+        "a selected galactic goal retains its equation from an additional mounted filename");
+}
+// #4937: a space equation file carrying HardPointType[...] loads in the galactic closure, so an inert AlwaysOff
+// entry (RaW binds Hide_Surprise_Units that way) resolves its equation; an equation that never loads is named (its function set is not registered), not fatal.
+void mounted_space_equation_and_unresolved_entries() {
+    auto setup = fixture();
+    auto& goals = setup.xml.at("data/xml/ai/goals/fixture.xml");
+    goals.replace(goals.find("</Goals>"), 8,
+        "<AlwaysOff><GameMode>Galactic</GameMode><Category>Defensive</Category></AlwaysOff></Goals>");
+    setup.xml["data/xml/ai/goalfunctions/fixture.xml"] =
+        "<FunctionSet><Hide><Goal>AlwaysOff</Goal><Function>Desire_To_Hide_At_Location</Function></Hide>"
+        "<Gone><Goal>Conquer</Goal><Function>Never_Authored</Function></Gone>"
+        "<Kept><Goal>Defence</Goal><Function>One</Function></Kept></FunctionSet>";
+    const std::string space = "data/xml/ai/perceptualequations/offensivespaceequations.xml";
+    setup.xml[space] = "<Equations><Desire_To_Hide_At_Location>(Variable_Target.HardPointHealth "
+        "{Parameter_Hard_Point_Type = HardPointType[Shield_Generator]} > 0.2)</Desire_To_Hide_At_Location></Equations>";
+    expect(a::include_mounted_ai_files(setup).empty() && setup.xml.contains(space),
+        "a mounted space equation file with a HardPointType converter is kept, not skipped");
+    const auto loaded = must(a::load_data(setup));
+    expect(loaded.equations.find("desire_to_hide_at_location") != nullptr,
+        "the AlwaysOff entry's equation comes from the mounted space equation file");
+    const auto lines = a::unresolved_goal_equations(loaded, setup.players);
+    expect(lines == std::vector<std::string>{"galactic AI selected goal equation is missing, function set skipped: player=2 "
+        "player_type=ORDINARY function_set=FIXTURE goal=CONQUER equation=Never_Authored"},
+        "only the entry whose equation never loaded is named (the set is skipped as in retail), with player, type, function set, goal and equation");
+}
+// #4939: an equation file carrying GameObjectPropertiesType[...] (Remake space and land equations) loads in the galactic
+// closure; without the enum in the vocabulary the whole file was skipped with only a load_diagnostics line.
+void mounted_properties_equation() {
+    auto setup = fixture();
+    setup.xml["data/xml/enum/gameobjectpropertiestype.xml"] = "<GameObjectPropertiesType><Hero>0x1</Hero><Bomber>2</Bomber></GameObjectPropertiesType>";
+    const std::string path = "data/xml/ai/perceptualequations/remake_spacecombatequations.xml";
+    setup.xml[path] = "<Equations><Desire_Props>(Variable_Target.HardPointHealth {Parameter_Property_Flags = GameObjectPropertiesType[Hero|Bomber]} > 0)</Desire_Props></Equations>";
+    expect(a::include_mounted_ai_files(setup).empty() && setup.xml.contains(path),
+        "a mounted equation file with a GameObjectPropertiesType converter is kept, not skipped");
+    const auto loaded = must(a::load_data(setup));
+    expect(loaded.equations.find("desire_props") != nullptr, "the GameObjectPropertiesType equation is loaded");
+    auto unknown = fixture();
+    unknown.xml["data/xml/enum/gameobjectpropertiestype.xml"] = setup.xml.at("data/xml/enum/gameobjectpropertiestype.xml");
+    unknown.xml[path] = "<Equations><Desire_Props>(Variable_Target.HardPointHealth {Parameter_Property_Flags = GameObjectPropertiesType[Unknown_Name]} > 0)</Desire_Props></Equations>";
+    expect(!a::include_mounted_ai_files(unknown).empty() && !unknown.xml.contains(path),
+        "an unknown properties name still skips the file with a diagnostic");
+}
+void mounted_template_files() {
+    auto setup = fixture();
+    const auto original_paths = setup.xml_paths;
+    expect(a::include_mounted_ai_files(setup).empty() && setup.xml_paths == original_paths,
+        "AI-16 a complete initial closure without additional mounted files keeps its paths");
+    auto& player = setup.xml.at("data/xml/ai/players/fixture.xml");
+    player.replace(player.find("Default A B C"), 13, "MountedDefault");
+    expect(static_cast<bool>(a::load_data(setup)), "initial AI data parses despite a missing player-referenced template");
+    const auto missing = a::Manager::create(setup, {std::make_shared<Queries>(), {}, {}, std::make_shared<Services>(), {}, {}, {}});
+    expect(!missing && missing.error().message.find("MOUNTEDDEFAULT") != std::string::npos,
+        "a missing selected template remains a named startup error");
+    const std::string extra = "data/xml/ai/templates/additional-templates.xml";
+    setup.xml[extra] = "<AITemplates><MountedDefault><Priority>1</Priority><Budget><Offensive>One</Offensive></Budget></MountedDefault>"
+        "<Default><Priority>99</Priority></Default><UnusedTemplate><Priority>2</Priority></UnusedTemplate></AITemplates>";
+    const std::string malformed = "data/xml/ai/templates/broken-templates.xml";
+    setup.xml[malformed] = "<AITemplates><Broken></AITemplates>";
+    const auto skipped = a::include_mounted_ai_files(setup);
+    expect(skipped.size() == 1 && skipped.front().find(malformed) != std::string::npos && !setup.xml.contains(malformed),
+        "malformed mounted templates retain the existing skip diagnostic");
+    const auto loaded = must(a::load_data(setup));
+    expect(loaded.templates.contains("MOUNTEDDEFAULT") && loaded.templates.contains("UNUSEDTEMPLATE"),
+        "AI-16 discovers referenced and unreferenced templates after successful initial parsing");
+    expect(loaded.templates.at("DEFAULT").priority == 1,
+        "additional template definitions preserve the initial closure's first-wins binding");
+    Rig rig(setup);
+    rig.step(0, 0);
+    expect(rig.manager->lifecycle().players.front().active_templates.size() == 1,
+        "the player initializes with its template from an additional mounted file");
+    const auto included_paths = setup.xml_paths;
+    expect(a::include_mounted_ai_files(setup).empty() && setup.xml_paths == included_paths,
+        "repeated discovery does not duplicate mounted paths");
+}
+void mounted_validation_work() {
+    auto setup = fixture();
+    std::size_t converted{}, rejected{};
+    setup.converters = [&](std::string_view name, std::string_view value) -> std::optional<a::Number> {
+        if (name != "Fixture" || value != "ok") { ++rejected; return std::nullopt; }
+        ++converted; return a::Number(7);
+    };
+    const std::string prefix = "data/xml/ai/perceptualequations/";
+    setup.xml[prefix + "000-rejected.xml"] = "<Equations><Recovered>1</Recovered><Bad>Fixture[bad]</Bad></Equations>";
+    setup.xml[prefix + "001-recovered.xml"] = "<Equations><Recovered>Fixture[ok]</Recovered></Equations>";
+    setup.xml[prefix + "002-shadowed.xml"] = "<Equations><One>Fixture[bad]</One></Equations>";
+    constexpr std::size_t count = 128;
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto name = "Bulk" + std::to_string(i);
+        setup.xml[prefix + name + ".xml"] = "<Equations><" + name + ">Fixture[ok]</" + name + "></Equations>";
+    }
+    const auto skipped = a::include_mounted_ai_files(setup);
+    expect(skipped.size() == 1 && rejected == 1,
+        "first-wins shadowed expressions are not compiled and rejected files publish no partial equations");
+    expect(converted == count + 1, "each additional unshadowed equation is compiled once during discovery");
+    const auto data = must(a::load_data(setup));
+    const auto* recovered = data.equations.find("Recovered");
+    const auto* one = data.equations.find("One");
+    expect(recovered && one && recovered->program.front().value == a::Number(7)
+        && one->program.front().value == a::Number(1),
+        "transactional equation addition preserves recovery and initial duplicate precedence");
+}
 void cadence() {
     Rig rig;
     rig.step(0, 0);
@@ -566,7 +689,28 @@ void installed_loading() {
     };
     a::LifecycleSetup setup;
     for (const auto& path : a::required_xml()) setup.xml[path] = read(path);
+    // Compare the previous successful stock closure (players and equations discovered) with all AI directories.
+    for (const auto folder : {"players", "perceptualequations"})
+        for (const auto& asset : must(files.enumerate(std::string("data/xml/ai/") + folder, ".xml")))
+            if (!setup.xml.contains(asset.canonical_path)) setup.xml.emplace(asset.canonical_path, read(asset.canonical_path));
+    const auto initial_skipped = a::include_mounted_ai_files(setup);
+    const auto initial_data = must(a::load_data(setup));
+    const auto initial_count = setup.xml_paths.size();
+    for (const auto folder : {"goalfunctions", "goals", "templates"})
+        for (const auto& asset : must(files.enumerate(std::string("data/xml/ai/") + folder, ".xml")))
+            if (!setup.xml.contains(asset.canonical_path)) setup.xml.emplace(asset.canonical_path, read(asset.canonical_path));
+    const auto additional_count = setup.xml.size() - initial_count;
+    const auto skipped = a::include_mounted_ai_files(setup);
+    expect(setup.xml_paths.size() + skipped.size() == initial_count + additional_count,
+        "installed AI directory files are all either accepted or diagnosed");
+    std::cout << "mounted stock AI files: additional=" << additional_count << " skipped=" << skipped.size() << '\n';
+    for (std::size_t i = initial_count; i < setup.xml_paths.size(); ++i) std::cout << "AI file added: " << setup.xml_paths[i] << '\n';
+    for (const auto& line : initial_skipped) std::cout << "AI equation file skipped: " << line << '\n';
+    for (const auto& line : skipped) std::cout << "AI file skipped: " << line << '\n';
     const auto data = must(a::load_data(setup));
+    for (const auto& [name, entry] : data.templates) { static_cast<void>(entry); if (!initial_data.templates.contains(name)) std::cout << "AI template added: " << name << '\n'; }
+    for (const auto& [name, entry] : data.goals) { static_cast<void>(entry); if (!initial_data.goals.contains(name)) std::cout << "AI goal added: " << name << '\n'; }
+    for (const auto& [name, entry] : data.function_sets) { static_cast<void>(entry); if (!initial_data.function_sets.contains(name)) std::cout << "AI function set added: " << name << '\n'; }
     expect(data.players.at("BASICEMPIRE").galactic_templates.front() == "BASIC_EMPIRE_DEFAULT", "stock selected Empire template");
     expect(data.players.at("BASICEMPIRENOGALACTICAI").galactic_templates == std::vector<std::string>{"NONE_TEMPLATE"} && !data.players.at("BASICEMPIRENOGALACTICAI").freestore.contains("GALACTIC"), "stock restricted Empire has no ordinary freestore");
     expect(data.players.at("BASICREBELNOGALACTICAI").galactic_templates == std::vector<std::string>{"NONE_TEMPLATE"}, "stock restricted Rebel templates");
@@ -611,7 +755,7 @@ void installed_loading() {
 } // namespace
 
 int main(int argc, char** argv) {
-    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { category_width(); cadence(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
+    try { if (argc > 1 && std::string_view(argv[1]) == "--bounded") bounded_diagnostics(argc > 2 ? static_cast<std::size_t>(std::stoul(argv[2])) : 1); else if (argc > 1 && std::string_view(argv[1]) == "--state") contributor_state(); else if (argc > 1) installed_loading(); else { mounted_equation_files(); mounted_space_equation_and_unresolved_entries(); mounted_properties_equation(); mounted_template_files(); mounted_validation_work(); category_width(); cadence(); configured_cadence(); templates(); template_failure_consumers(); restore(); reversal_funding(); equal_funding_write(); worker_equality(); } }
     catch (const std::exception& error) { ++failures; std::cerr << error.what() << '\n'; }
     return failures ? 1 : 0;
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include "eawr/diagnostics/gc_memory.hpp"
 
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/campaign/setup_plan.hpp"
@@ -66,6 +67,9 @@ struct SpaceEntryInputs {
     std::vector<SpaceEntryType> types;
     std::vector<SpaceEntrySide> sides;
     std::vector<SpaceEntryRider> riders;
+    std::vector<sim::EntityId> pathfinders; // WGT-06/40: frozen flags; only the invader consumes them
+    std::optional<sim::galactic::TypeId> preferred_pathfinder_type; // story provider seam; land selection belongs to its provider
+    bool use_pathfinder{true};
     std::vector<sim::EntityId> roster_order; // live fleet/member order before canonical ID sorting
     std::vector<SpaceEntryStructure> structures;
     std::string station_type;
@@ -118,6 +122,7 @@ struct SpaceFormationResult { bool attacker_cinematic_admitted{}; };
 
 class StockSpaceEntry final {
 public:
+    void memory_inventory(diagnostics::GcMemory&) const;
     [[nodiscard]] core::Result<ResolvedConflictEntry> resolve(const ConflictRecord&,
         const sim::galactic::GalacticSnapshot&, sim::EntityId first_free) const;
     [[nodiscard]] core::Result<sim::tactical::TacticalContent> content(const ConflictRecord&) const;

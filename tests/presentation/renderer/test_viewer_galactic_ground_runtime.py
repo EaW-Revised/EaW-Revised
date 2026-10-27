@@ -100,6 +100,8 @@ var frame = 0
 var viewport
 var source = %s
 var target = %s
+var world_target = %s
+var evidence_path = %s
 var click_land = %s
 var drag_land = %s
 var control = %s
@@ -139,6 +141,11 @@ func _process(delta):
     elapsed += delta
     if elapsed < 1.5: return false
     frame += 1
+    if frame == 16 and world_target in ["launch-world", "launch-world-slot"]:
+        var badge = current_scene.find_child("fleet_presence_101_0", true, false)
+        assert(badge != null and badge.is_visible_in_tree(), "world orbit fleet must draw")
+        target = [badge.get_global_rect().get_center().x, badge.get_global_rect().get_center().y]
+        motion(target, true)
     if frame == 10:
         motion(source, false)
         mouse(source, true, selling)
@@ -146,10 +153,17 @@ func _process(delta):
         if click_land or selling:
             mouse(source, false, selling)
         else:
-            motion([source[0] + 24, source[1]] if drag_land else target, true)
+            motion([source[0] + 24, source[1]] if drag_land or world_target in ["launch-world", "launch-world-slot"] else target, true)
     if frame == 14 and drag_land: motion(target, true)
     if frame == 18 and drag_land:
         print("GROUND DRAG active=", viewport.gui_is_dragging(), " hovered=", viewport.gui_get_hovered_control(), " pointer=", viewport.get_mouse_position(), " target=", target)
+    if frame == 18 and world_target == "launch-world-slot":
+        var slot = current_scene.find_child("fleet_empty_slot_2", true, false)
+        assert(slot != null and slot.is_visible_in_tree(), "world empty orbit slot must draw")
+        target = [slot.get_global_rect().get_center().x, slot.get_global_rect().get_center().y]
+        motion(target, true)
+    if frame == 20 and world_target in ["launch-world", "launch-world-slot"]:
+        viewport.get_texture().get_image().save_png(evidence_path.replace(".png", "-held.png"))
     if frame == 20 and click_land: mouse(target, true)
     if frame == 20 and confirm_sale:
         var sale = current_scene.find_child("g_ground_sell", true, false)
@@ -160,20 +174,20 @@ func _process(delta):
     if frame == 30 and reject_sale: mouse(target, true, true)
     if frame == 32 and reject_sale: mouse(target, false, true)
     if frame == 100:
-        viewport.get_texture().get_image().save_png(%s)
+        viewport.get_texture().get_image().save_png(evidence_path)
         current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
         quit()
     return false
-''' % (json.dumps(start), json.dumps(end), "true" if action == "land" else "false",
+''' % (json.dumps(start), json.dumps(end), json.dumps(action), json.dumps(str(capture).replace("\\", "/")), "true" if action == "land" else "false",
        "true" if action == "land-drag" else "false", "true" if action == "ctrl" else "false",
        "true" if action == "double" else "false", "true" if action.startswith("sale") else "false",
        "true" if action in {"sale-confirm", "sale-unit-ground", "sale-unit-ship"} else "false", "true" if action.startswith("sale-switch") else "false",
-       json.dumps(str(capture).replace("\\", "/"))), encoding="utf-8")
+       ), encoding="utf-8")
         args = ["--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
                 "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
                 "--eawr-font-cache", str(self.font_cache),
                 "--eawr-game-root", support.GAME_ROOT, "--eawr-report", str(report)]
-        if action not in {"land", "land-drag", "launch", "launch-slot", "launch-move"}:
+        if action not in {"land", "land-drag", "launch", "launch-slot", "launch-move", "launch-world", "launch-world-slot"}:
             args += ["--eawr-galactic-paused", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--", *args],
@@ -337,7 +351,7 @@ func _process(delta):
     def test_native_ground_drag_launches_surface_units_into_orbit(self):
         # #2880 / WGM-13: the drag's release is one typed seat command (launch_from_surface, opcode 18)
         # and the live campaign publishes the new orbit state: the unit leaves the roster and joins a fleet.
-        for action in ["launch", "launch-slot"]:
+        for action in ["launch", "launch-slot", "launch-world", "launch-world-slot"]:
             with self.subTest(action=action):
                 data, initial = self.native(action)
                 ground = data["ground_hud"]
@@ -351,7 +365,7 @@ func _process(delta):
                 after = [row for row in data["fleet_hud"]["cards"] if row["local"]]
                 self.assertEqual(sum(row["count"] for row in after), sum(row["count"] for row in before) + 1,
                                  "the launched unit did not join an orbit fleet")
-                if action == "launch":
+                if action in {"launch", "launch-world"}:
                     self.assertEqual((launch["target"], launch["slot"]), (601, 0))
                     self.assertEqual(next(row["count"] for row in after if row["fleet"] == 601),
                                      next(row["count"] for row in before if row["fleet"] == 601) + 1)

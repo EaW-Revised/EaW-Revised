@@ -103,6 +103,19 @@ void test_validation() {
     expect(static_cast<bool>(tactical::validate_motion(tiny)), "a radius of 1.3 is valid (7854 points)");
     tiny.footprints[0].radius = Fixed{};
     expect(static_cast<bool>(tactical::validate_motion(tiny)), "a zero radius is valid (one point per ring)");
+    auto stationary = foc_table();
+    stationary.footprints.back().radius = Fixed::from_raw(1);
+    expect(static_cast<bool>(tactical::validate_motion(stationary)),
+        "a tiny static blocker without a locomotor has no destination-search ring");
+    stationary.footprints.back().layer = tactical::SpaceLayer::capital;
+    expect(!tactical::validate_motion(stationary),
+        "a tiny non-static footprint without locomotor/profile retains the ring guard");
+    stationary.footprints.back().layer = tactical::SpaceLayer::static_object;
+    stationary.footprints.back().locomotor = true;
+    expect(!tactical::validate_motion(stationary), "a tiny locomotor footprint still fails the ring guard");
+    stationary.footprints.back().locomotor = false;
+    stationary.profiles.push_back({pad_type, units(1), units(1), units(1), units(1), units(1)});
+    expect(!tactical::validate_motion(stationary), "a motion profile remains a search subject even on the static layer");
     auto far = foc_table();
     far.avoidance->destination_search_increment = units(1024);
     expect(static_cast<bool>(tactical::validate_motion(far)), "the corvette is valid at the largest increment (5000 points)");
@@ -1234,6 +1247,135 @@ void test_ion_storm_service() {
     expect(!tactical::ability_ready(defend, {}, gate, 0), "WHZ-32: DEFEND gate rejects a storm with a positive online shield");
 }
 
+// #4577 paired regression. Scripted damage exercises only the no-projectile shield route, so this pins no
+// projectile-mesh behaviour. Four identical shielded frigates: plain nebula, pure storm, combined nebula + storm
+// and an empty-space control. Debug-build Lua capture 2026-10-24: a plain nebula shield absorbs like the control
+// and recharges; a storm (alone or combined) absorbs nothing and the hull takes the hit; nebula contact cancels
+// DEFEND while a storm alone does not.
+void test_nebula_storm_pair() {
+    constexpr tactical::TypeId storm_type = 2014;
+    constexpr tactical::TypeId combined_type = 2015;
+    auto motion = foc_table();
+    motion.nebula_service_types = {frigate_type};
+    motion.nebula_disable_seconds = units(5);
+    std::erase_if(motion.footprints, [](const tactical::Footprint& footprint) { return footprint.type_id == frigate_type; });
+    motion.footprints.push_back({storm_type, tactical::SpaceLayer::static_object, units(0), units(0), decimal("206.25"), true});
+    motion.footprints.push_back({combined_type, tactical::SpaceLayer::static_object, units(0), units(0), decimal("206.25"), true});
+    for (auto& footprint : motion.footprints) {
+        if (footprint.type_id < pad_type) continue;
+        footprint.radius = units(100);
+        footprint.nebula = footprint.type_id != storm_type;
+        footprint.ion_storm = footprint.type_id >= storm_type;
+    }
+    tactical::DurabilityTable health;
+    health.rules = {units(1), decimal("0.3"), decimal("0.5")};
+    tactical::DurabilityProfile profile;
+    profile.type_id = frigate_type;
+    profile.max_hull = units(1000);
+    profile.max_shields = units(100);
+    profile.shield_refresh = units(5);
+    health.profiles = {profile};
+    health.damage = tactical::DamageRules{};
+    health.damage->shield_recharge_frames = 1;
+    health.damage->ion_storm_disable_seconds = units(5);
+    tactical::CombatTable combat;
+    tactical::CombatProfile combat_profile;
+    combat_profile.type_id = frigate_type;
+    combat.profiles = {combat_profile};
+    tactical::AbilityTable abilities;
+    tactical::AbilityProfile defend;
+    defend.kind = tactical::AbilityKind::defend;
+    defend.expiration_frames = 2000;
+    abilities.profiles = {{frigate_type, {defend}, false}};
+    const auto source = setup({
+        {1, frigate_type, 1, at(0, 0, 8000), yaw(0), {}},
+        {2, frigate_type, 1, at(1000, 0, 8000), yaw(0), {}},
+        {3, frigate_type, 1, at(2000, 0, 8000), yaw(0), {}},
+        {4, frigate_type, 1, at(3000, 0, 8000), yaw(0), {}},
+        {10, pad_type, 1, at(0, 0, 0), yaw(0), {}},
+        {11, pad_type, 1, at(0, 0, 0), yaw(0), {}},
+        {12, storm_type, 1, at(1000, 0, 0), yaw(0), {}},
+        {13, combined_type, 1, at(2000, 0, 0), yaw(0), {}}});
+    constexpr std::array<std::uint64_t, 3> hit_frames{0, 300, 850}; // before contact, in the hazard after services, after exit
+    struct Row { Fixed shields, hull; bool nebula, storm, defend; };
+    for (const bool use_defend : {false, true}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(source, {}, health, motion, std::nullopt, combat, {}, abilities);
+            expect(created.has_value(), "WHZ-26/30: paired nebula/storm content validates");
+            if (!created) continue;
+            auto& session = created.value();
+            std::uint64_t sequence = 0;
+            // Commands go in tick order: DEFEND and the first hit, the second hit, the exit move, the exit hit.
+            const auto hit_all = [&](const std::uint64_t frame) {
+                for (const eawr::sim::EntityId id : {1U, 2U, 3U, 4U}) {
+                    auto hit = command(frame, sequence++, id, tactical::StopPayload{});
+                    hit.payload = tactical::DamagePayload{units(30), tactical::hull_target};
+                    expect(session.submit(hit).has_value(), "WHZ-32: shieldable scripted damage submits");
+                }
+            };
+            if (use_defend) {
+                for (const eawr::sim::EntityId id : {1U, 2U, 3U, 4U}) {
+                    auto activation = command(0, sequence++, id, tactical::StopPayload{});
+                    activation.payload = tactical::AbilityPayload{tactical::AbilityKind::defend, tactical::AbilityAction::activate};
+                    expect(session.submit(activation).has_value(), "WHZ-32: DEFEND command submits");
+                }
+            }
+            hit_all(hit_frames[0]);
+            hit_all(hit_frames[1]);
+            for (const eawr::sim::EntityId id : {1U, 2U, 3U, 4U}) {
+                expect(session.submit(command(500, sequence++, id, tactical::MovePayload{at((static_cast<int>(id) - 1) * 1000 + 600, 0, 8000)})).has_value(),
+                    "WHZ-31: exit movement submits");
+            }
+            hit_all(hit_frames[2]);
+            eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::array<Row, 4>> rows;
+            std::vector<std::string> hashes;
+            for (std::uint64_t frame = 0; frame < 960; ++frame) {
+                const auto step = session.step(executor);
+                expect(step.has_value(), "WHZ-30: paired frame completes");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                std::array<Row, 4> row{};
+                for (const auto& instance : step.value().snapshot->instances()) {
+                    if (instance.entity_id < 1 || instance.entity_id > 4 || !instance.durability) continue;
+                    row[instance.entity_id - 1] = {instance.durability->shields.value_or(Fixed{}), instance.durability->hull, instance.in_nebula,
+                        instance.in_ion_storm, instance.abilities.front().active};
+                }
+                rows.push_back(row);
+            }
+            if (rows.size() != 960) continue;
+            expect(rows[200][0].nebula && !rows[200][0].storm && !rows[200][1].nebula && rows[200][1].storm
+                && rows[200][2].nebula && rows[200][2].storm && !rows[200][3].nebula && !rows[200][3].storm,
+                "WHZ-26/30: nebula and storm contact are independent flags");
+            expect(!rows[900][0].nebula && !rows[900][1].storm && !rows[900][2].nebula && !rows[900][2].storm,
+                "WHZ-21/31: every ship has left its hazard by the exit hit");
+            if (use_defend) {
+                expect(!rows[200][0].defend && !rows[200][2].defend, "WHZ-23: nebula contact cancels DEFEND, alone or combined");
+                expect(rows[200][1].defend && rows[200][3].defend, "WHZ-32: a storm alone or empty space leaves DEFEND active");
+            } else {
+                for (const auto frame : hit_frames) {
+                    for (unsigned unit = 0; unit < 4; ++unit) {
+                        const auto& hit_row = rows[frame + 1][unit];
+                        if (frame == 300 && (unit == 1 || unit == 2)) {
+                            expect(hit_row.shields == units(100) && hit_row.hull == units(970),
+                                "WHZ-32: storm or combined shield does not absorb; the hull takes the damage");
+                        } else {
+                            // The storm ships keep the 30 hull lost at the middle hit; every other hit leaves the hull untouched.
+                            const bool lost = frame == 850 && (unit == 1 || unit == 2);
+                            expect(hit_row.hull == (lost ? units(970) : units(1000)) && hit_row.shields < units(100) && hit_row.shields == rows[frame + 1][3].shields,
+                                "WHZ-26/32: plain nebula, pre-contact, exit and control shields absorb identically");
+                            expect(rows[frame + 100][unit].shields == units(100), "WHZ-30: the absorbing shield recharges");
+                        }
+                    }
+                }
+            }
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WHZ-26/30..32: paired hashes agree on 1/2/4/8 workers");
+        }
+    }
+}
+
 int main(const int argc, char** argv) {
     const bool regenerate = argc == 3 && std::string_view(argv[2]) == "--regenerate";
     if (argc > 3 || (argc == 3 && !regenerate)) {
@@ -1292,6 +1434,7 @@ int main(const int argc, char** argv) {
     test_context_filter();
     test_nebula_service();
     test_ion_storm_service();
+    test_nebula_storm_pair();
     test_collision();
     test_open_space();
     test_static_layer();

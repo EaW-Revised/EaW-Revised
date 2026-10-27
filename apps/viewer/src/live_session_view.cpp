@@ -8,8 +8,8 @@
 #include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -62,6 +62,13 @@ namespace live_session_detail {
 // The space model an object type draws, as a logical path; empty when it names none.
 [[nodiscard]] std::string space_model_path(const data::EffectiveObject& object) {
     std::string name = tag_text(object, "Space_Model_Name");
+    if (name.empty()) name = tag_text(object, "Model_Name");
+    return name.empty() ? std::string{} : lower_path("data/art/models/" + name);
+}
+
+std::string battle_model_path(const data::EffectiveObject& object, bool land) {
+    if (!land) return space_model_path(object);
+    auto name = tag_text(object, "Land_Model_Name");
     if (name.empty()) name = tag_text(object, "Model_Name");
     return name.empty() ? std::string{} : lower_path("data/art/models/" + name);
 }

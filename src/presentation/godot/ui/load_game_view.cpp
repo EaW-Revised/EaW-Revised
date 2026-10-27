@@ -413,8 +413,16 @@ void EawrSaveReplayScreen::write(const std::string& name, const bool overwrite) 
         context_.recording = context_.recorder(error);
         if (context_.recording.empty()) { notice(error.empty() ? "There is no recording to save." : error); return; }
     }
+    if (context_.session_recording.empty() && context_.session_recorder) {
+        context_.session_recording = context_.session_recorder(error);
+        if (context_.session_recording.empty() && !error.empty()) { notice(error); return; }
+    }
     const auto outcome = platform::write_replay_store(context_.store, name, context_.recording, overwrite, error);
     if (outcome == platform::ReplayWriteResult::saved) {
+        if (!context_.session_recording.empty()
+            && !platform::write_replay_session_companion(context_.store, name, context_.session_recording)) {
+            notice("Cannot save multiplayer session companion."); return;
+        }
         emit_signal("saved", godot_text(name));
         close();
     } else if (outcome == platform::ReplayWriteResult::exists) {

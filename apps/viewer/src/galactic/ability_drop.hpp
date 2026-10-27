@@ -1,12 +1,15 @@
 #pragma once
 #include "galaxy_view.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
+#include "eawr/sim/galactic/commands.hpp"
+#include "eawr/sim/galactic/fleets.hpp"
 #include <algorithm>
 #include <array>
 #include <functional>
 #include <cstdint>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -43,6 +46,8 @@ inline bool enabled(const sim::galactic::GalacticAbilityProfile& p,
     case AbilityKind::planet_destruction: return p.destruction && s.destruction_enabled && !s.destruction_cancelled
         && routed(host.activated_destruction_abilities, p.destruction->name);
     case AbilityKind::technology_theft: return p.theft && s.theft_enabled && !s.theft_cancelled;
+    case AbilityKind::system_spy: return p.spy && s.spy_enabled && !s.spy_cancelled
+        && routed(host.activated_spy_abilities, p.spy->name);
     case AbilityKind::black_market: return p.has_market && s.enabled && !s.cancelled;
     case AbilityKind::structure_sabotage: return p.sabotage && s.sabotage_enabled && !s.sabotage_cancelled
         && routed(host.activated_sabotage_abilities, p.sabotage->name);
@@ -78,7 +83,7 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     const auto* control = snapshot.control();
     if (!control) return false;
     const auto* surface = find(control->planets, target, [](const auto& row) { return row.planet; });
-    if (!surface || surface->destroyed) return false;
+    if (!surface || (surface->destroyed && kind != AbilityKind::system_spy)) return false;
     const auto index = static_cast<std::size_t>(surface - control->planets.data());
     if (index >= control->state.size()) return false;
     const auto& allegiance = control->state[index];
@@ -88,6 +93,7 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     };
     if (kind == AbilityKind::planet_destruction)
         return (!actor.planet || actor.planet == target) && !allied(allegiance.target_player);
+    if (kind == AbilityKind::system_spy) return !allied(allegiance.target_player);
     const auto* economy = snapshot.economy_corruption();
     const auto* economic = economy ? find(economy->planets, target, [](const auto& row) { return row.planet; }) : nullptr;
     if (!economic || economic->destroyed) return false;
@@ -130,6 +136,33 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
     }
     return false;
 }
+
+}
+// WGM-83/101: an ordinary move by an ability-dependent fleet retains the same
+// supplied live container as a special-slot move. Arrival dispatch owns activation.
+[[nodiscard]] inline std::optional<sim::galactic::MoveFleet> ability_move_order(
+    const sim::galactic::GalacticSnapshot& snapshot, PlayerId local,
+    sim::galactic::MoveFleet order, const std::optional<AbilityDrop>& destination,
+    std::span<const ObjectId> stack = {}) {
+    if (order.path.size() < 2 || !snapshot.fleet_control()) return std::nullopt;
+    const auto fleets = snapshot.fleets();
+    const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == order.fleet; });
+    if (fleet == fleets.end() || fleet->owner != local) return std::nullopt;
+    auto merged = *fleet;
+    // A stacked move submits merges first; inspect the members that will actually travel.
+    for (const auto id : stack) if (id && id != fleet->id) {
+        const auto other = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == id; });
+        if (other == fleets.end() || other->owner != local || other->orbit != fleet->orbit || other->motion.transit)
+            return std::nullopt;
+        merged.members.insert(merged.members.end(), other->members.begin(), other->members.end());
+    }
+    const auto ordinary = sim::galactic::fleet_move_without_ability(
+        merged, snapshot.fleet_control()->types, snapshot.movement());
+    if (!ordinary) return std::nullopt;
+    if (ordinary.value() || order.raid || order.destination_actor) return order;
+    if (!destination || !destination->supplied || destination->planet != order.path.back()) return std::nullopt;
+    order.destination_actor = destination->supplied;
+    return order;
 }
 // WGCH-152/153: rank the supplied breakdown BEFORE trying abilities. First wins
 // ties, including ranks above 999; an ineligible top actor never falls through.
@@ -161,9 +194,9 @@ inline bool target_admitted(const sim::galactic::GalacticSnapshot& snapshot,
         if (!selected || rank < best) { selected = actor; best = rank; }
     }
     if (!selected || (policy.space_override && policy.space_override(selected->id, target))) return std::nullopt;
-    // Missing spy/siphon/removal runtimes remain #1143/#1141; never disguise them as another kind.
+    // Missing siphon/removal runtimes remain #1143/#1141; never disguise them as another kind.
     constexpr std::array kinds{AbilityKind::planet_destruction, AbilityKind::technology_theft, AbilityKind::black_market,
-        AbilityKind::structure_sabotage, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
+        AbilityKind::structure_sabotage, AbilityKind::system_spy, AbilityKind::hero_neutralization, AbilityKind::corruption, AbilityKind::superweapon_hack};
     for (const auto kind : kinds) {
         if (policy.kind_restricted && policy.kind_restricted(target, kind)) continue;
         std::vector<ObjectId> pending{selected->id};

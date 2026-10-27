@@ -4,8 +4,11 @@
 #include "eawr/data/tag_trace.hpp"
 #include "xml_internal.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -55,6 +58,22 @@ bool is_placeholder(const std::string_view text) noexcept {
     return value.empty() || value == "TBD";
 }
 
+std::int32_t integer_constant(const std::string_view text) noexcept {
+    std::size_t index = 0;
+    while (index < text.size() && space(text[index])) ++index;
+    bool negative = false;
+    if (index < text.size() && (text[index] == '-' || text[index] == '+')) negative = text[index++] == '-';
+    std::int64_t magnitude = 0;
+    for (; index < text.size() && digit(text[index]); ++index) {
+        magnitude = magnitude * 10 + (text[index] - '0');
+        if (magnitude > (std::int64_t{1} << 32)) magnitude = std::int64_t{1} << 32; // saturates below
+    }
+    const std::int64_t value = negative ? -magnitude : magnitude;
+    if (value > INT32_MAX) return INT32_MAX;
+    if (value < INT32_MIN) return INT32_MIN;
+    return static_cast<std::int32_t>(value);
+}
+
 std::optional<bool> boolean(const std::string_view text) noexcept {
     if (is_placeholder(text)) return std::nullopt;
     const auto value = stripped(text);
@@ -92,6 +111,55 @@ std::optional<LeadingNumber> leading_number(const std::string_view text) {
     auto parsed = sim::math::Fixed::from_decimal(value.substr(0, end));
     if (!parsed) return std::nullopt;
     return LeadingNumber{parsed.value(), !stripped(value.substr(end)).empty()};
+}
+
+std::optional<FloatValue> float_value(const std::string_view text) {
+    if (is_placeholder(text)) return std::nullopt;
+    if (const auto number = leading_number(text)) return FloatValue{number->value, !number->trailing_text};
+    // No representable leading number: find out whether there are no digits (0) or the magnitude is too large.
+    std::string_view value = text;
+    while (!value.empty() && space(value.front())) value.remove_prefix(1);
+    bool negative = false;
+    if (!value.empty() && (value.front() == '+' || value.front() == '-')) {
+        negative = value.front() == '-';
+        value.remove_prefix(1);
+    }
+    const auto starts = [&](const std::string_view word) {
+        return value.size() >= word.size() && ascii_iequals(value.substr(0, word.size()), word);
+    };
+    bool digits = starts("inf");
+    for (std::size_t index = 0; !digits && index < value.size() && (digit(value[index]) || value[index] == '.'); ++index)
+        digits = digit(value[index]);
+    if (!digits) return FloatValue{sim::math::Fixed{}, false};
+    const auto limit = std::numeric_limits<std::int64_t>::max();
+    return FloatValue{sim::math::Fixed::from_raw(negative ? -limit : limit), false};
+}
+
+std::optional<IntegerValue> integer_value(const std::string_view text) {
+    if (is_placeholder(text)) return std::nullopt;
+    std::string_view value = text;
+    while (!value.empty() && space(value.front())) value.remove_prefix(1);
+    bool negative = false;
+    if (!value.empty() && (value.front() == '+' || value.front() == '-')) {
+        negative = value.front() == '-';
+        value.remove_prefix(1);
+    }
+    std::int64_t magnitude = 0;
+    std::size_t end = 0;
+    bool saturated = false;
+    while (end < value.size() && digit(value[end])) {
+        magnitude = magnitude * 10 + (value[end++] - '0');
+        if (magnitude > std::int64_t{1} << 31) {
+            magnitude = std::int64_t{1} << 31;
+            saturated = true;
+        }
+    }
+    const auto low = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::min());
+    const auto high = static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max());
+    const auto signed_value = std::clamp(negative ? -magnitude : magnitude, low, high);
+    saturated = saturated || signed_value != (negative ? -magnitude : magnitude);
+    const bool exact = end > 0 && !saturated && stripped(value.substr(end)).empty();
+    return IntegerValue{static_cast<std::int32_t>(signed_value), exact};
 }
 
 std::optional<ListRule> list_rule(const std::string_view tag) noexcept {

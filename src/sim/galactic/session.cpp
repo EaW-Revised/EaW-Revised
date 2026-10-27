@@ -172,6 +172,9 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         if (issuer->active == active) return reject(GalacticRejectReason::inactive_seat);
         const auto index = static_cast<std::size_t>(issuer - seats.data());
         seats[index].active = active;
+        if (!active && multiplayer_flag() && std::none_of(seats.begin(), seats.end(), [](const auto& row) {
+            return row.active && row.kind == SeatKind::human;
+        })) clock.pause_depth = pending_local_conflict ? std::min(clock.pause_depth, 1U) : 0U;
         update_seat_control_policy(*seat_control, seats);
         // Only the departing/rejoining faction's fallback issuers change activity.
         for (auto& row : seats) if (row.kind == SeatKind::ai && row.player == issuer->player) {
@@ -213,6 +216,12 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         events.push_back(event);
         return;
     }
+    if (const auto* deployment = std::get_if<DeployGroundAbility>(&command.payload)) {
+        const auto before = events.size();
+        dispatch_ground_ability(deployment->actor, deployment->planet, command.key.seat, command.key.sequence, tick, events);
+        if (events.size() == before) { event.kind = GalacticEventKind::command_rejected; event.reason = GalacticRejectReason::unknown_value; events.push_back(event); }
+        return;
+    }
     if (std::holds_alternative<ObserverCommand>(command.payload)) {
         execute_observer(command, tick, events); return;
     }
@@ -243,12 +252,18 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
         // Any active seat, in coop and versus alike, until the multiplayer vote rules land.
         if (issuer == nullptr || !issuer->active) return reject(GalacticRejectReason::inactive_seat);
     }
+    // TP-MP02: one shared human hold; system conflict/summary holds are separate.
+    const std::uint32_t protected_pause = pending_local_conflict ? 1U : 0U;
+    if (multiplayer_flag() && (std::holds_alternative<PauseGalaxy>(command.payload)
+        || std::holds_alternative<ResumeGalaxy>(command.payload)) && issuer->kind != SeatKind::human)
+        return reject(GalacticRejectReason::not_authorized);
     if (std::holds_alternative<PauseGalaxy>(command.payload)) {
+        if (multiplayer_flag() && clock.pause_depth > protected_pause) { events.push_back(event); return; }
         events.push_back(event);
         // WGM-05: nested; only the first pause has first-pause effects.
         ++clock.pause_depth;
         session_dirty();
-        if (clock.pause_depth == 1) {
+        if (clock.pause_depth == 1 || (multiplayer_flag() && clock.pause_depth == protected_pause + 1)) {
             event.kind = GalacticEventKind::galaxy_paused;
             events.push_back(event);
         }
@@ -256,11 +271,13 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     }
     if (std::holds_alternative<ResumeGalaxy>(command.payload)) {
         // WGM-06: a resume needs a positive counter; only the decrement to zero resumes.
-        if (clock.pause_depth == 0) return reject(GalacticRejectReason::not_paused);
+        if (clock.pause_depth == 0 || (multiplayer_flag() && clock.pause_depth <= protected_pause))
+            return reject(GalacticRejectReason::not_paused);
         events.push_back(event);
-        --clock.pause_depth;
+        if (multiplayer_flag()) clock.pause_depth = protected_pause;
+        else --clock.pause_depth;
         session_dirty();
-        if (clock.pause_depth == 0) {
+        if (clock.pause_depth == 0 || (multiplayer_flag() && clock.pause_depth == protected_pause)) {
             event.kind = GalacticEventKind::galaxy_resumed;
             events.push_back(event);
         }
@@ -352,6 +369,10 @@ void GalacticSession::Impl::execute(const GameCommand& command, const std::uint6
     if (std::holds_alternative<LaunchFleet>(command.payload)) {
         execute_launch_fleet(command, tick, events, pending_local_conflict); return;
     }
+    if (const auto* transfer = std::get_if<TransferSurface>(&command.payload)) {
+        execute_launch_fleet({command.key, LaunchFleet{transfer->units, transfer->path, {}, 0}},
+            tick, events, pending_local_conflict, true); return;
+    }
     if (const auto* order = std::get_if<RecheckOrbit>(&command.payload)) {
         event.subject = order->target;
         if (!issuer || issuer->kind != SeatKind::script || !issuer->active) return reject(GalacticRejectReason::not_authorized);
@@ -385,7 +406,10 @@ core::Result<void> GalacticSession::Impl::journal_native_receipt(GalacticSession
     if (native_applying) return core::Result<void>::success();
     std::vector<std::uint8_t> payload;
     detail::put_u32(payload, player); detail::put_u64(payload, actor); detail::put_u64(payload, target);
-    detail::put_u8(payload, conflict_pending ? 1 : 0); detail::put_u16(payload, command ? opcode_of(*command) : 0);
+    // Reconstruction can run before the campaign summary owner is restored. Preserve the effective
+    // admission gate in the existing journal input, including a summary-only system pause.
+    const bool admission_held = conflict_pending || (system_hold && clock.pause_depth && kind != NativeEffectKind::orbit_recheck);
+    detail::put_u8(payload, admission_held ? 1 : 0); detail::put_u16(payload, command ? opcode_of(*command) : 0);
     const auto body = command ? encode_payload(*command) : std::vector<std::uint8_t>{};
     detail::put_u32(payload, static_cast<std::uint32_t>(body.size())); detail::put_bytes(payload, body);
     detail::put_u8(payload, receipt.admitted ? 1 : 0); detail::put_u64(payload, receipt.object);
@@ -835,6 +859,7 @@ core::Result<void> GalacticSession::Impl::commit_tick_commands(const PartitionEx
 }
 
 void GalacticSession::set_prebattle_autosave_window(const bool open) noexcept { impl_->prebattle_autosave_window = open; }
+void GalacticSession::set_system_hold(const bool held) noexcept { impl_->system_hold = held; }
 
 core::Result<GalacticTick> GalacticSession::step(const PartitionExecutor& executor,
     const bool pending_local_conflict) {
@@ -1084,9 +1109,14 @@ core::Result<void> GalacticSession::apply_battle_losses(const std::span<const En
     // WGT-115: persistent orbital sources share the ordinary battle-loss commit.
     if (impl_->production) {
         bool removed{};
-        for (auto& planet : impl_->production->planets) {
+        for (std::size_t index = 0; index < impl_->production->planets.size(); ++index) {
+            auto& planet = impl_->production->planets[index];
+            const bool ground_special = std::any_of(planet.objects.begin(), planet.objects.end(), [&](const auto& object) {
+                return dead(object.id) && object.domain == ProductionDomain::ground && object.kind == ProductionKind::structure;
+            });
             const auto count = std::erase_if(planet.objects, [&](const auto& object) { return dead(object.id); });
             impl_->live_object_count -= count; removed |= count != 0;
+            if (ground_special) impl_->refresh_ground_base_level(index); // WGM-188
         }
         if (removed) impl_->dirty[static_cast<std::size_t>(StateSection::production)] = true;
     }

@@ -124,5 +124,44 @@ class TextureOriginGraphical(unittest.TestCase):
         self.assertLess(wrong_upper_left[0], wrong_upper_left[2])
 
 
+def partial_dds(kind):
+    """Invented red 1024-square texture with seven levels ending at 16x16."""
+    compressed = kind != "rgba"
+    fourcc = {"dxt1": b"DXT1", "dxt3": b"DXT3", "dxt5": b"DXT5"}.get(kind, b"\0" * 4)
+    pixel_format = struct.pack("<II4sIIIII", 32, 4 if compressed else 0x41, fourcc,
+                               0 if compressed else 32, 0xFF, 0xFF00, 0xFF0000, 0xFF000000)
+    header = b"DDS " + struct.pack("<IIIIIII", 124, 0x21007, 1024, 1024, 0, 0, 7)
+    header += bytes(44) + pixel_format + struct.pack("<IIIII", 0x401008, 0, 0, 0, 0)
+    color_block = struct.pack("<HHI", 0xF800, 0, 0)
+    block = {"dxt1": color_block, "dxt3": b"\xff" * 8 + color_block,
+             "dxt5": b"\xff\0" + bytes(6) + color_block, "rgba": b"\xff\0\0\xff"}[kind]
+    payload = bytearray()
+    for level in range(7):
+        edge = 1024 >> level
+        payload.extend(block * (((edge + 3) // 4) ** 2 if compressed else edge ** 2))
+    return header + payload
+
+
+@unittest.skipUnless(os.environ.get("EAWR_GODOT_VIEWER_RUNTIME_TEST")
+                     and os.environ.get("EAWR_GODOT_EXECUTABLE"), "requires GPU rig")
+class PartialMipUploadGraphical(unittest.TestCase):
+    def test_partial_dxt_and_rgba_chains_upload(self):
+        with tempfile.TemporaryDirectory(prefix="eawr-partial-mips-") as temporary:
+            directory = pathlib.Path(temporary)
+            for kind in ("dxt1", "dxt3", "dxt5", "rgba"):
+                with self.subTest(format=kind):
+                    root = directory / kind
+                    # File-content selection intentionally accepts DDS bytes under
+                    # the fixture's authored texture name (ML-52).
+                    install(root, partial_dds(kind))
+                    report, image = run_capture(root, directory / f"{kind}.png")
+                    self.assertEqual(report["status"], "effect_render_passed")
+                    self.assertEqual(report["frames"][-1]["particles"], 1)
+                    self.assertEqual(report["lifecycle"]["live_rids_after_release"], 0)
+                    red = sum(r > 100 and r > g + 50 and r > b + 50
+                              for r, g, b in image.getdata())
+                    self.assertGreater(red, 100, "uploaded synthetic red texture must be visible")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,10 +1,12 @@
 #pragma once
 
 #include "eawr/sim/galactic/types.hpp"
+#include "eawr/sim/math/fixed.hpp"
 
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 // GCMP-07 (#4363): what the multiplayer lobby offers for a campaign, read from the installed content. It is
@@ -27,6 +29,10 @@ struct MpLobbyFaction {
 
 struct MpLobbyCampaign {
     std::string name;
+    // The authored Text_ID and Description_Text keys (#4553); empty when the campaign states none.
+    std::string text_id, description_text;
+    // The galactic map position of each of the campaign's planets: the staging preview's blips (#4553).
+    std::vector<std::pair<math::Fixed, math::Fixed>> planet_points;
     bool supports_custom_settings{};
     // Campaign limits for the custom starting and maximum tech (WGP-69); absent means the data states none.
     std::optional<std::int64_t> minimum_custom_tech, maximum_custom_tech;

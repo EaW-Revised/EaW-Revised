@@ -1379,6 +1379,27 @@ void test_self_destruct() {
         }
     }
 
+    // WHE-61: missing explosion retains the countdown and death, and emits no blast.
+    {
+        auto missing = world;
+        auto& ability = missing.table.profiles.front().abilities.front();
+        ability.spawned.reset();
+        ability.unresolved_spawn = "Missing_Blast";
+        auto sibling = turbo();
+        missing.table.profiles.front().abilities.push_back(sibling);
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            const auto run = run_self_destruct(missing, activate, workers, 110);
+            expect(run.hashes.size() == 110 && run.alive[104] && !run.alive[105],
+                "WHE-61: null explosion cannot make self-destruct immortal");
+            expect(std::all_of(run.spawns.begin(), run.spawns.end(), [](const auto count) { return count == 0; })
+                && !run.enemy.empty() && run.enemy.back() == units(3600),
+                "WHE-61: no explosion is created and no blast damage lands");
+            if (reference.empty()) reference = run.hashes;
+            else expect(run.hashes == reference, "WHE-61: null self-destruct matches on 1/2/4/8 workers");
+        }
+    }
+
     // WSD-02, WSD-08: a cancel switches it off and recharges for the share of the countdown that ran; the
     // ability is refused while it recharges; the unit lives on.
     std::vector<tactical::PlayerCommand> cancel = activate;

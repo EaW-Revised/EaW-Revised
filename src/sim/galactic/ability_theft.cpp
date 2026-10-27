@@ -1,9 +1,11 @@
 #include "session_impl.hpp"
 #include "encoding.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
+#include "eawr/sim/galactic/observer.hpp"
 #include "eawr/sim/galactic/economy_corruption.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace eawr::sim::galactic {
 namespace {
@@ -19,6 +21,73 @@ template<class Rows, class Value, class Key> void put(Rows& rows, Value value, K
     if (at != rows.end() && key(*at) == key(value)) *at = std::move(value);
     else rows.insert(at, std::move(value));
 }
+}
+// WGCH-56/70/108: unpriced, current-owner visibility insertion, then success-only consumption.
+void GalacticSession::Impl::execute_spy(const GameCommand& command, const CensusObject& live,
+    const GalacticAbilityProfile& profile, PlanetId target, std::uint64_t tick, std::vector<GalacticEvent>& events) {
+    const auto actor = live; // the consumption callback removes canonical actor records
+    GalacticEvent event{tick, GalacticEventKind::command_rejected, command.key.seat, actor.id, command.key.sequence};
+    const auto reject = [&] { event.reason = GalacticRejectReason::unknown_value; events.push_back(event); };
+    if (!profile.spy || !observer || !control || !ability_host) return reject();
+    const auto* planet = find(control->planets, target, [](const auto& row) { return row.planet; });
+    const auto* service = find(ability_host->actors, actor.id, [](const auto& row) { return row.actor; });
+    if (!planet || !service || !ground_ability_enabled(profile, *service, AbilityKind::system_spy)) return reject();
+    const auto index = static_cast<std::size_t>(planet - control->planets.data());
+    const auto allegiance = control->state[index].target_player;
+    if (allegiance == actor.owner || std::any_of(control->relations.begin(), control->relations.end(), [&](const auto& row) {
+        return row.player == actor.owner && row.other == allegiance && row.allied;
+    })) return reject();
+    if (ability_host->next_request == std::numeric_limits<std::uint64_t>::max()
+        || (ability_host->results.size() >= galactic_max_objects
+            && !find(ability_host->results, actor.id, [](const auto& row) { return row.actor; }))) return reject();
+    const auto& ability = *profile.spy;
+    std::optional<HeroDefeat> defeat;
+    if (ability.causes_despawn) {
+        if (!ability_consumption_handler) return reject();
+        defeat = prepare_ability_defeat(actor, {}, false);
+        if (!defeat) return reject();
+        // A consumed last passenger leaves no transport or fleet to fight. Include
+        // its empty carrier in the ordinary loss commit; retain non-empty carriers.
+        if (movement_inputs && actor.container) {
+            const auto* contents = find(movement_inputs->contents, actor.container,
+                [](const auto& row) { return row.container; });
+            const auto parent = actor_records.find(actor.container);
+            if (contents && contents->children.size() == 1 && contents->children.front().id == actor.id
+                && parent != actor_records.end() && parent->second.combat_role == ActorCombatRole::transport)
+                defeat->removed_objects.push_back(actor.container);
+        }
+    }
+    // GFS-01/GFD-03: galaxy commands execute before mode service. Child modes retain
+    // galactic orders in their queue, so this entry uses the active galaxy clock.
+    ObserverCommand effect; effect.action = ObserverAction::add; effect.player = actor.owner; effect.planet = target;
+    effect.gameplay_frame = clock.galactic_frame; effect.logical_fps = observer->logical_fps;
+    effect.spy_effect = true; // WGCH-108/WGUI-21: refresh every observer after insertion.
+    effect.source = {actor.id, ability.identity, ability.text_identity, ability.mask, 0}; effect.duration = ability.duration;
+    const auto begin = events.size(); apply_observer({command.key, effect}, tick, events);
+    const bool success = std::any_of(events.begin() + static_cast<std::ptrdiff_t>(begin), events.end(), [](const auto& row) {
+        return row.kind == GalacticEventKind::command_executed;
+    });
+    // WGCH-108: registration follows the attempt, including insertion refusal.
+    auto* retained = find(ability_host->actors, actor.id, [](const auto& row) { return row.actor; });
+    if (!retained) { failed = true; return; }
+    const auto at = std::lower_bound(retained->spy_targets.begin(), retained->spy_targets.end(), target);
+    if (at == retained->spy_targets.end() || *at != target) retained->spy_targets.insert(at, target);
+    if (success && ground_ability_story_handler) {
+        const auto told = ground_ability_story_handler(actor.owner, target, ability.text_identity, ability.hero);
+        if (!told) { failed = true; return; }
+    }
+    if (success && defeat) {
+        consuming_spy = actor.id;
+        const auto consumed = ability_consumption_handler(*defeat);
+        consuming_spy = 0;
+        if (!consumed) { failed = true; return; }
+    }
+    AbilityResult result{ability_host->next_request++, 0, actor.id, target, actor.owner, 0,
+        success ? AbilityOutcome::purchased : AbilityOutcome::refused};
+    result.kind = AbilityKind::system_spy;
+    put(ability_host->results, std::move(result), [](const auto& row) { return row.actor; });
+    touch_abilities(); ++ability_work.executions;
+    event.kind = GalacticEventKind::ability_settled; events.push_back(event);
 }
 void GalacticSession::Impl::prepare_theft(const GameCommand& command, const CensusObject& actor,
     const GalacticAbilityProfile& profile, std::uint64_t tick, std::vector<GalacticEvent>& events) {

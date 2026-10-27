@@ -410,6 +410,27 @@ void filters() {
     source.reductions[0].price = false;
     expect(take(eawr::campaign::prepare_economic_type(source, 900, "Side", types, bindings)).reductions.size() == 4,
         "local time selection has no positive-price guard");
+    for (const bool price : {false, true}) for (const bool galaxy_wide : {false, true}) {
+        auto missing = source;
+        missing.reductions[0].price = price; missing.reductions[0].galaxy_wide = galaxy_wide;
+        missing.reductions[0].included_types = {"Missing_Before", "Explicit", "Missing_After", "Explicit"};
+        const auto resolved = take(eawr::campaign::prepare_economic_type(missing, 900, "Side", types, bindings));
+        expect(resolved.reductions.size() == (price ? 3U : 4U),
+            "CGS-21 missing explicit targets preserve category targets and deduplicated known entries");
+        missing.reductions[0].included_categories.clear();
+        missing.reductions[0].included_types = {"Missing_Before", "Missing_After"};
+        expect(take(eawr::campaign::prepare_economic_type(missing, 900, "Side", types, bindings)).reductions.empty(),
+            "CGS-21 all-null target selection has no effect and does not refuse");
+        missing.reductions.push_back(source.reductions[0]);
+        expect(!take(eawr::campaign::prepare_economic_type(missing, 900, "Side", types, bindings)).reductions.empty(),
+            "CGS-21 an empty ability does not suppress a later valid ability");
+        missing.reductions[0].reduction.reset();
+        expect(!eawr::campaign::prepare_economic_type(missing, 900, "Side", types, bindings),
+            "malformed consumed percentages still refuse even with no resolved targets");
+    }
+    auto absent_identity = bindings; absent_identity.pop_back();
+    expect(!eawr::campaign::prepare_economic_type(source, 900, "Side", types, absent_identity),
+        "a known economic target requires its canonical identity even without a price");
     source.reductions[0].initially_enabled = false;
     expect(take(eawr::campaign::prepare_economic_type(source, 900, "Side", types, bindings)).reductions.empty(),
         "WGEP-93 disabled reduction does not apply at fresh startup");
@@ -651,7 +672,7 @@ void technology_price_planets() {
         absent.income->sources[0] = {config.fleets[0].members[0].id, config.fleets[0].members[0].type, 1, 1, false, true};
         const auto refused = gc::GalacticSession::create(absent);
         expect(!refused && refused.error().code == gc::diagnostic_codes::invalid_setup
-            && refused.error().message == "invalid galactic economic profiles or source bindings",
+            && refused.error().message.starts_with("invalid galactic economic profiles or source bindings (source "),
             "the economic binding validator refuses a traveling planetary technology source");
         absent.income->types[0].technology_price_reduction.reset();
         expect(static_cast<bool>(gc::GalacticSession::create(absent)),

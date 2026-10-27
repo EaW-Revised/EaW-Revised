@@ -1,0 +1,10 @@
+[
+  {
+    "old": "src/presentation/space/live_units.cpp#map_prop_fog_bound",
+    "new": "src/presentation/live/live_units.cpp#map_prop_fog_bound"
+  },
+  {
+    "old": "src/presentation/space/unit_fade.cpp#StealthBlend",
+    "new": "src/presentation/live/unit_fade.cpp#StealthBlend"
+  }
+]

@@ -40,6 +40,8 @@ struct Arguments final {
     bool movement{};
     bool all_types{};
     bool combat{};
+    std::filesystem::path mod_root; // #4589: a mod over FoC (Remake profile), read-only
+    bool refusals{};                // every table's per-object refusals
 };
 
 void usage() {
@@ -65,11 +67,16 @@ std::optional<Arguments> arguments(const int argc, char** argv) {
             result.all_types = true;
         } else if (flag == "--combat") {
             result.combat = true;
+        } else if (flag == "--mod-root" && index + 1 < argc) {
+            result.mod_root = argv[++index];
+        } else if (flag == "--refusals") {
+            result.refusals = true;
         } else {
             return std::nullopt;
         }
     }
     if (result.game_root.empty()) return std::nullopt;
+    if (result.refusals) result.all_types = true;
     return result;
 }
 
@@ -181,20 +188,26 @@ int main(const int argc, char** argv) {
     const std::filesystem::path base = args->game_root / "GameData" / "Data";
     const std::filesystem::path expansion = args->game_root / "corruption" / "Data";
     std::vector<eawr::vfs::MountSpec> specs;
-    for (const auto& [id, root] : {std::pair{std::string("expansion"), expansion}, std::pair{std::string("base"), base}}) {
-        auto manifest = eawr::vfs::resolve_manifest_mount(id, root);
-        if (!manifest) {
-            std::cerr << eawr::core::format_diagnostic(manifest.error()) << '\n';
-            return 1;
-        }
-        specs.push_back(std::move(manifest).value().mount);
+    std::vector<std::pair<std::string, std::filesystem::path>> roots;
+    if (!args->mod_root.empty()) {
+        for (auto& layer : eawr::vfs::mod_chain_roots(args->mod_root)) roots.push_back(std::move(layer));
     }
+    roots.emplace_back("expansion", expansion);
+    roots.emplace_back("base", base);
+    auto chain = eawr::vfs::resolve_manifest_chain(roots);
+    if (!chain) {
+        std::cerr << eawr::core::format_diagnostic(chain.error()) << '\n';
+        return 1;
+    }
+    for (auto& manifest : chain.value()) specs.push_back(std::move(manifest.mount));
     auto filesystem = eawr::vfs::Vfs::mount(specs);
     if (!filesystem) {
         std::cerr << eawr::core::format_diagnostic(filesystem.error()) << '\n';
         return 1;
     }
-    auto loaded = eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc);
+    auto loaded = args->mod_root.empty()
+        ? eawr::data::load_catalog_strict(filesystem.value(), eawr::data::Profile::foc)
+        : eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::remake);
     if (!loaded) {
         std::cerr << eawr::core::format_diagnostic(loaded.error()) << '\n';
         return 1;
@@ -343,6 +356,37 @@ int main(const int argc, char** argv) {
         std::cout << "combat table: "
                   << (combat ? "valid, " + std::to_string(combat.value().profiles.size()) + " profiles" : combat.error().message)
                   << '\n';
+    }
+    if (args->refusals) {
+        // #4589: what each derived table refuses, per object. The combat table skips a failing type and
+        // lists it; the other tables fail whole, so they run again per type (with its dependencies).
+        std::vector<eawr::core::Diagnostic> skipped;
+        const auto combat = eawr::units::combat_table(value, eawr::units::ContentErrors::skip_object, &skipped);
+        if (!combat) std::cout << "REFUSAL combat-table - " << combat.error().code << ' ' << combat.error().message << '\n';
+        for (const auto& row : skipped) std::cout << "REFUSAL combat-type - " << row.code << ' ' << row.message << '\n';
+        const auto report = [&](const char* table, const std::string& type, const eawr::core::Diagnostic& error) {
+            std::cout << "REFUSAL " << table << ' ' << type << ' ' << error.code << ' ' << error.message << '\n';
+        };
+        std::vector<eawr::core::Diagnostic> ability_skipped;
+        const auto abilities = eawr::units::ability_table(value, {}, nullptr, true, eawr::units::ContentErrors::skip_object, &ability_skipped);
+        if (!abilities) std::cout << "REFUSAL ability-table - " << abilities.error().code << ' ' << abilities.error().message << '\n';
+        for (const auto& row : ability_skipped)
+            std::cout << (row.severity == eawr::core::Severity::warning ? "WARNING" : "REFUSAL")
+                      << " ability-type - " << row.code << ' ' << row.message << '\n';
+        std::size_t scanned = 0;
+        for (const auto& unit : value.units) {
+            if (unit.kind == eawr::units::UnitKind::squadron) continue;
+            eawr::units::LoadInput single = input;
+            single.types = {unit.id};
+            single.obstacles.clear();
+            auto one = eawr::units::load_unit_tables(single);
+            if (!one) continue;
+            ++scanned;
+            if (const auto durability = eawr::units::durability_table(one.value()); !durability) report("durability", unit.id, durability.error());
+            if (const auto motion = eawr::units::motion_table(one.value()); !motion) report("motion", unit.id, motion.error());
+        }
+        std::cout << "refusal scan: " << value.units.size() << " units, " << scanned << " single-type loads, "
+                  << skipped.size() << " combat types skipped\n";
     }
     std::cout << "content identity " << identity << '\n';
 

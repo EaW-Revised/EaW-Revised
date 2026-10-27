@@ -25,6 +25,9 @@ inline constexpr std::uint16_t replay_format_version_squadrons = 3;
 // Coordinator-reserved versions: tagged header records extend v2/v3 without changing them.
 inline constexpr std::uint16_t replay_format_version_extensions = 4;
 inline constexpr std::uint16_t replay_format_version_squadron_extensions = 5;
+// Native metadata uses wide header/body lengths; ordinary replays retain formats 2..5.
+inline constexpr std::uint16_t replay_format_version_native = 6;
+inline constexpr std::uint16_t replay_format_version_squadron_native = 7;
 inline constexpr std::size_t replay_header_size = 104;
 inline constexpr std::size_t replay_policy_header_size = 116;
 inline constexpr std::size_t replay_object_turn_record_size = 64; // #3644 OBJT record, after the last command
@@ -53,7 +56,8 @@ struct ReplayMatchOptions final {
     math::Fixed credits{};
     std::int32_t start_tech{}, max_tech{}, game_timer{}, win_integer{}, auto_resolve{};
     math::Fixed win_float{};
-    std::string win_condition, space_win_condition;
+    // The tactical condition keeps the existing second SKSU text field in either domain.
+    std::string win_condition, tactical_win_condition;
     bool operator==(const ReplayMatchOptions&) const = default;
 };
 

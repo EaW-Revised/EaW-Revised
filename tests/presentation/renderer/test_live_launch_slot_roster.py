@@ -5,6 +5,7 @@ Exercise twelve campaign reinforcements, count-budget catch-up, stable standing 
 the unchanged ordinary skirmish capacities and authored launch counts above 64.
 """
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -60,6 +61,16 @@ struct CampaignReserve { EntityId id{}; TypeId type{}; PlayerId owner{}; bool re
 struct CampaignBattleSetup { std::vector<CampaignReserve> reserves; };
 struct TacticalSetup { std::optional<CampaignBattleSetup> campaign; };
 struct HeroDeployment { TypeId purchase{}, deployed{}; };
+struct SpawnEntryProfile { TypeId squadron{}; std::int32_t starting{}; };
+struct SpawnerProfile { TypeId type_id{}; PlayerId owner{}; std::vector<SpawnEntryProfile> entries; };
+struct SquadronTable {
+    std::vector<SpawnerProfile> profiles;
+    const SpawnerProfile* find_spawner(TypeId type, PlayerId owner) const {
+        for (const auto& profile : profiles) if (profile.type_id == type && profile.owner == owner) return &profile;
+        return nullptr;
+    }
+};
+struct MotionTable { SquadronTable squadrons; };
 struct FootprintProfile { math::Fixed layer_z; };
 struct PadChild { TypeId type{}, constructed{}; };
 struct Pads {
@@ -130,11 +141,22 @@ using skirmish::StartPlayer;
 using skirmish::LobbyColour;
 }
 __ARRIVAL_IMPL__
+__CAMPAIGN_HEADER__
+__WARM_HEADER__
+__DEVICE_HEADER__
+using namespace presentation;
 namespace live_session_detail { std::string json(const std::string& text) { return "\"" + text + "\""; } }
 using live_session_detail::json;
 namespace data { enum class Category { game_object }; struct Catalog { std::optional<int> resolve(const std::string&, Category) const { return 1; } }; }
 namespace vfs { struct Vfs { bool stat(const std::string&) const { return true; } }; }
-struct GodotRenderer {};
+struct GodotRenderer {
+    struct Budget { std::uint64_t device_bytes{}, other_bytes{}, resident_bytes{}; bool constrained{}; std::string source{"unprobed"}; };
+    struct Memory { Budget budget; std::uint64_t device_total{}; };
+    static Memory sampled;
+    static Memory gpu_memory() { return sampled; }
+};
+GodotRenderer::Memory GodotRenderer::sampled{};
+struct FrameTimer { explicit FrameTimer(double*, bool = false) {} };
 namespace animation {
 namespace clip_types { constexpr int deploy = 1, undeploy = 2; }
 std::optional<int> clip_type_index(const char*) { return 1; }
@@ -151,20 +173,29 @@ struct SpacePopulation { struct Options { struct PlacedShip {
     std::optional<std::array<std::uint8_t, 3>> team_colour;
 }; };
     std::size_t appended = 0; bool drawn = true;
+    std::vector<Options::PlacedShip> composed;
+    std::span<const Options::PlacedShip> placed_units() const { return composed; }
+    std::optional<std::uint64_t> live_copy_bytes(const GodotRenderer&, std::size_t) const { return 16; }
     std::vector<std::size_t> restored;
     void restore_live_ship(GodotRenderer&, std::size_t ship) { restored.push_back(ship); }
     void bind_live_identity(std::size_t, std::size_t) {}
     bool append_live_ships(GodotRenderer&, const vfs::Vfs&, std::span<const Options::PlacedShip> ships) {
-        appended += ships.size(); return true;
+        appended += ships.size(); composed.insert(composed.end(), ships.begin(), ships.end()); return true;
     }
     bool live_ship_drawn(std::size_t) const { return drawn; }
     std::string failure() const { return "model unavailable"; }
+
+    using PlacedUnit = Options::PlacedShip;
 };
+using BattleScene = SpacePopulation;
 struct DeathClone { std::size_t ship{}; };
 namespace live_session { struct SlotIdentity final { std::size_t ship{}; bool held{}; }; }
 
 struct LiveSessionView {
-    struct { std::uint32_t purchase_slots = 10; } options_;
+    struct { std::uint32_t purchase_slots = 10, warm_launches = 64, arrival_slot_budget = 8; bool land = false; } options_;
+    bool trace_frames_ = false;
+    std::optional<tactical::MotionTable> motion_;
+    const tactical::MotionTable* motion() const { return motion_ ? &*motion_ : nullptr; }
     std::optional<skirmish::SkirmishStart> start_;
     std::optional<units::UnitTables> tables_;
     tactical::EconomyRules economy_;
@@ -193,6 +224,10 @@ struct LiveSessionView {
         const vfs::Vfs* filesystem{}; const data::Catalog* catalog{};
         SpacePopulation* population{}; GodotRenderer* renderer{};
         std::size_t remaining{}, grown{};
+        std::size_t frame_grown{}, warm_requested{}, warm_admitted{};
+        double growth_ms{}, warm_ms{};
+        std::uint64_t warm_estimated_bytes{}, warm_available_bytes{};
+        bool warm_complete{true}, warm_probe_available{}, warm_budget_off{};
         std::vector<sim::EntityId> undrawn;
         std::set<std::pair<tactical::PlayerId, tactical::TypeId>> purchases, failed;
         std::string failure;
@@ -204,6 +239,7 @@ struct LiveSessionView {
     std::optional<std::size_t> grow_launch_slot(sim::EntityId, tactical::TypeId, tactical::PlayerId);
     void prepare_launch_slots(const vfs::Vfs& filesystem, const data::Catalog& catalog,
                               std::optional<battle::ArrivalPlan> selected);
+    bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     std::optional<std::size_t> ship_of(sim::EntityId entity, tactical::TypeId type, tactical::PlayerId owner);
     std::string slotless_report_rows() const;
     std::size_t slotless_units() const {
@@ -219,6 +255,7 @@ struct LiveSessionView {
 };
 __ADD_SLOT__
 __PREPARE__
+__WARM__
 __GROW__
 __BIND_IDENTITY__
 __SHIP_OF__
@@ -413,22 +450,145 @@ int main() {
     if (skirmish_battle.slotless_report_rows() != sk_slotless) return 25;
     skirmish_battle.arrivals_.emplace(9000, 1); // No purchase demand for TIE: provenance alone is insufficient.
     if (skirmish_battle.ship_of(9000, skirmish::type_id("TIE"), 2)) return 21;
-    // Counts above 64 and non-squadron launch rows retain the old skirmish stream.
+    // Full demand above 64 (including hull launches) retains bounded warm capacity.
     auto launch = session(false);
     launch.start_->launches = {{100, 1, "XWing_Squadron", 65}, {100, 1, "Carrier", 1}};
     launch.start_->arrivals = battle::plan_start_arrivals(*launch.start_, *launch.tables_);
     launch.prepare_launch_slots(filesystem, catalog, selected_arrivals(launch));
-    if (launch.slots(1, "XWing") != 0 || launch.slots(1, "Carrier") != 0) return 22;
+    if (launch.slots(1, "XWing") != 128 || launch.slots(1, "Carrier") != 1) return 22;
+    std::size_t launch_craft = 0;
+    for (const auto& row : launch.start_->arrivals.rows) if (row.type == "XWing") launch_craft += row.simultaneous_maximum;
+    if (launch_craft != 130 || launch.start_->arrivals.rows.size() != 3) return 26;
     // Campaign launch rows have no menu cap and include ships as well as squadrons.
     auto gc_launch = session(true);
     gc_launch.start_->launches = launch.start_->launches;
     gc_launch.start_->arrivals = battle::plan_start_arrivals(*gc_launch.start_, *gc_launch.tables_);
     gc_launch.prepare_launch_slots(filesystem, catalog, selected_arrivals(gc_launch));
-    if (gc_launch.slots(1, "XWing") != 133 || gc_launch.slots(1, "Carrier") != 2) return 23;
+    // Intended GC transition: 131 eager XWing copies become 4 recipe slots here;
+    // the separate budgeted loading gate fills complete demand before Begin.
+    if (gc_launch.slots(1, "XWing") != 4 || gc_launch.slots(1, "Carrier") != 2) return 23;
+    // Three reserve carriers' selected hangars are absent from start.launches.
+    // The real preparation and load-gate functions must warm them before play.
+    auto loaded = session(true);
+    for (int index = 0; index < 2; ++index)
+        loaded.setup_->campaign->reserves.push_back({9900U + static_cast<unsigned>(index),
+            skirmish::type_id("Carrier"), 1});
+    loaded.start_->setup = *loaded.setup_;
+    loaded.motion_.emplace();
+    loaded.motion_->squadrons.profiles.push_back({skirmish::type_id("Carrier"), 1,
+        {{skirmish::type_id("XWing_Squadron"), 3}}});
+    loaded.tables_->units[4].abilities = {{"DEFEND"}, {"STEALTH"}};
+    loaded.prepare_launch_slots(filesystem, catalog, selected_arrivals(loaded));
+    if (loaded.slots(1, "XWing") != 4 || loaded.slots(1, "Carrier") != 1) return 50;
+    SpacePopulation warmed_population;
+    warmed_population.composed = loaded.placed_ships_;
+    const auto before_warm = loaded.placed_ships_.size();
+    const auto previews_before_warm = loaded.placement_clones_.size();
+    GodotRenderer::sampled.budget = {1000000, 0, 0, true, "test"};
+    if (!loaded.warm_campaign_slots(warmed_population, renderer)) return 51;
+    if (!loaded.arrival_slots_.warm_complete || loaded.slots(1, "XWing") != 26
+        || loaded.slots(1, "Carrier") != 3) return 52;
+    // #5121's private reserve ghosts survive the warm gate and never become
+    // live capacity, even though their hidden-art flag is also launch_slot.
+    if (loaded.placement_clones_.size() != previews_before_warm) return 59;
+    for (const auto& ghost : loaded.placement_clones_) {
+        if (!loaded.placed_ships_[ghost.ship].placement_preview) return 60;
+        for (const auto& slot : loaded.launch_slots_) if (slot.ship == ghost.ship) return 61;
+    }
+    for (const auto& ship : std::span(loaded.placed_ships_).subspan(before_warm))
+        if (ship.object_id == "XWing" && (!ship.defend_shell || !ship.stealth_shell)) return 53;
+    loaded.arrival_slots_.population = &warmed_population;
+    loaded.arrival_slots_.renderer = &renderer;
+    loaded.arrival_slots_.remaining = 8;
+    for (int index = 0; index < 26; ++index)
+        if (!loaded.ship_of(60000 + index, skirmish::type_id("XWing"), 1)) return 54;
+    if (loaded.arrival_slots_.grown != 0 || loaded.arrival_slots_.frame_grown != 0) return 55;
+    // Exercise the real load-gate policy with measured headroom, not an unlimited stub.
+    const auto budget_case = [&](GodotRenderer::Memory memory, bool additional, bool complete, bool probe, bool off) {
+        auto bounded = session(true);
+        bounded.prepare_launch_slots(filesystem, catalog, selected_arrivals(bounded));
+        SpacePopulation bounded_population;
+        bounded_population.composed = bounded.placed_ships_;
+        const auto count = bounded.launch_slots_.size();
+        const auto ghosts = bounded.placement_clones_.size();
+        GodotRenderer::sampled = std::move(memory);
+        if (!bounded.warm_campaign_slots(bounded_population, renderer)) return false;
+        if (bounded.placement_clones_.size() != ghosts) return false;
+        for (const auto& ghost : bounded.placement_clones_)
+            for (const auto& slot : bounded.launch_slots_) if (slot.ship == ghost.ship) return false;
+        if (bounded.arrival_slots_.warm_complete != complete
+            || bounded.arrival_slots_.warm_probe_available != probe
+            || bounded.arrival_slots_.warm_budget_off != off) return false;
+        if (complete) return bounded.arrival_slots_.warm_admitted == bounded.arrival_slots_.warm_requested;
+        return bounded.launch_slots_.size() == count + (additional ? 1U : 0U)
+            && bounded.arrival_slots_.warm_admitted < bounded.arrival_slots_.warm_requested
+            && bounded.arrival_slots_.warm_estimated_bytes == (additional ? 16U : 0U);
+    };
+    GodotRenderer::Memory tight;
+    tight.budget = {1000, 884, 0, true, "test"}; // Existing 90% policy leaves exactly one 16-byte pair.
+    if (!budget_case(tight, true, false, true, false)) return 56;
+    if (!budget_case({}, false, false, false, false)) return 57; // Unknown: retain existing only.
+    GodotRenderer::Memory disabled;
+    disabled.budget.source = "off";
+    if (!budget_case(disabled, true, true, false, true)) return 58; // Explicit opt-out remains distinct.
+    GodotRenderer::sampled = {};
+    // Real defaults (read from live_session_options.hpp by the test): a small warm pool at load, the rest grown on first use.
+    // Launches are exempt from the per-frame arrival budget: a squadron larger than the warm pool is drawn in its launch frame.
+    auto lazy = session(false);
+    lazy.options_.warm_launches = __DEF_WARM__; lazy.options_.purchase_slots = __DEF_PURCHASE__;
+    lazy.options_.arrival_slot_budget = __DEF_BUDGET__;
+    lazy.start_->launches = {{100, 1, "XWing_Squadron", 65}, {100, 1, "Carrier", 1}};
+    lazy.start_->arrivals = battle::plan_start_arrivals(*lazy.start_, *lazy.tables_);
+    lazy.prepare_launch_slots(filesystem, catalog, selected_arrivals(lazy));
+    if (lazy.slots(1, "XWing") != 2 * __DEF_WARM__ || lazy.slots(1, "Carrier") != 1) return 40;
+    if (lazy.slots(1, "Nebulon_B") != __DEF_PURCHASE__ || lazy.slots(2, "Tartan") != __DEF_PURCHASE__) return 41;
+    lazy.arrival_slots_.population = &population; lazy.arrival_slots_.renderer = &renderer;
+    std::set<std::size_t> lazy_drawn;
+    constexpr int squadron = 4 * __DEF_BUDGET__ + 2 * __DEF_WARM__;  // far more launches than warm slots and the budget together
+    const std::size_t expected_grown = squadron - 2 * __DEF_WARM__;
+    for (int frame = 0; frame < 3; ++frame) {
+        lazy.arrival_slots_.remaining = lazy.options_.arrival_slot_budget; lazy.arrival_slots_.undrawn.clear();
+        for (int index = 0; index < squadron; ++index)
+            if (auto ship = lazy.ship_of(7000 + index, skirmish::type_id("XWing"), 1)) lazy_drawn.insert(*ship);
+        // Fully drawn in the very first frame, whatever the budget, and nothing grows again afterwards.
+        if (lazy_drawn.size() != squadron || !lazy.arrival_slots_.undrawn.empty()) return 42;
+        if (lazy.arrival_slots_.grown != expected_grown) return 43;
+        if (lazy.arrival_slots_.remaining != lazy.options_.arrival_slot_budget) return 44;  // launches never spend the budget
+    }
+    // Purchases and reinforcement pools still wait for it (checked above by the 12-reinforcement case).
     std::cout << "twelve GC reinforcements drawn; undrawn_entities=0; slots_grown=11; stable steady-state bindings\n";
     return 0;
 }
 '''
+
+
+def live_option_defaults():
+    """The real defaults, parsed from live_session_options.hpp, and the flags that set them (live_session_config.cpp)."""
+    options = source_text('apps/viewer/src/live_session_options.hpp')
+    config = source_text('apps/viewer/src/live_session_config.cpp')
+    defaults = {}
+    for name in ('purchase_slots', 'warm_launches', 'arrival_slot_budget'):
+        match = re.search(r'std::uint32_t\s+' + name + r'\{(\d+)\}', options)
+        if match is None:
+            raise AssertionError('no default for ' + name)
+        defaults[name] = int(match.group(1))
+    return defaults
+
+
+class LiveOptionDefaults(unittest.TestCase):
+    def test_warm_slot_defaults_and_flags(self):
+        defaults = live_option_defaults()
+        self.assertEqual(defaults, {'purchase_slots': 10, 'warm_launches': 64, 'arrival_slot_budget': 8})
+        config = source_text('apps/viewer/src/live_session_config.cpp')
+        for flag, field, rule in (('--eawr-live-purchase-slots', 'purchase_slots', 'expects 1 to 64'),
+                                  ('--eawr-live-warm-launches', 'warm_launches', 'expects 0 to 256'),
+                                  ('--eawr-live-arrival-budget', 'arrival_slot_budget', 'expects 1 to 256')):
+            block = config[config.index('name == "' + flag + '"'):]
+            block = block[:block.index('} else if')]
+            self.assertIn('options.' + field + ' =', block, flag)
+            self.assertIn(rule, block, flag)
+        frame = source_text('apps/viewer/src/live_session_frame.cpp')
+        self.assertIn('arrival_slots_.remaining = options_.arrival_slot_budget;', frame)
 
 
 class LiveLaunchSlotRoster(unittest.TestCase):
@@ -436,6 +596,7 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         toolchain = select_toolchain()
         if toolchain is None:
             self.skipTest('requires C++ compiler')
+        defaults = live_option_defaults()
         source = source_text('apps/viewer/src/live_session_fighters.cpp')
         add_slot = extract_function(source, 'void LiveSessionView::add_launch_slot(')
         grow = extract_function(source, 'std::optional<std::size_t> LiveSessionView::grow_launch_slot(')
@@ -446,6 +607,16 @@ class LiveLaunchSlotRoster(unittest.TestCase):
         plan = (ROOT / 'src/battle/arrival_plan.cpp').read_text()
         plan = '\n'.join(line for line in plan.splitlines() if not line.startswith('#')).replace('eawr::battle', 'battle')
         prepare = extract_function(source, 'void LiveSessionView::prepare_launch_slots(')
+        warm = extract_function(source, 'bool LiveSessionView::warm_campaign_slots(')
+        def planner_header(name):
+            text = (ROOT / 'apps/viewer/src' / name).read_text()
+            return '\n'.join(line for line in text.splitlines() if not line.startswith('#')).replace(
+                'namespace eawr::presentation', 'namespace presentation')
+        campaign_header = planner_header('campaign_warm_arrivals.hpp')
+        warm_header = planner_header('reserve_warm_plan.hpp')
+        device_header = (ROOT / 'include/eawr/presentation/godot/device_budget.hpp').read_text()
+        device_header = '\n'.join(line for line in device_header.splitlines() if not line.startswith('#')).replace(
+            'namespace eawr::presentation', 'namespace presentation')
         select = extract_function(source_text('apps/viewer/src/battle_source.cpp'),
                                   'void BattleSourceState::select_arrivals(')
         ship_of = extract_function(source, 'std::optional<std::size_t> LiveSessionView::ship_of(')
@@ -459,8 +630,11 @@ class LiveLaunchSlotRoster(unittest.TestCase):
 struct PopulationStorage {
     bool composed_ = true;
     struct { std::vector<int> placed_ships; } options_;
+    struct { std::vector<int> players; void clear() { players.clear(); } } bind_players_;
     std::vector<std::optional<int>> live_decisions_, live_models_, live_clips_, turret_bindings_, live_alternate_clips_;
     std::vector<std::vector<int>> hull_surface_assets_, contact_bones_, hardpoint_states_;
+    std::vector<std::map<std::uint32_t, int>> hardpoint_turret_bindings_;
+    std::vector<std::map<std::uint32_t, int>> parent_hardpoint_turret_bindings_;
     std::vector<bool> live_shown_, live_defend_, live_stealth_, live_blast_charging_, live_blast_charged_,
         live_retired_, live_death_clone_, backdrop_ships_;
     std::vector<int> live_alternates_, live_alternate_counts_;
@@ -492,9 +666,13 @@ bool storage_contract() {
         || !storage.live_defend_[0] || storage.live_defend_[2]
         || storage.live_clips_[0] != 7 || storage.live_clips_[1] != 9 || storage.live_clips_[2]
         || storage.hardpoint_states_ != std::vector<std::vector<int>>({{2}, {3}})) return false;
+    storage.bind_players_.players = {5};
+    storage.grow();
+    if (storage.bind_players_.players.size() != 1) return false; // An append keeps the shared bind-pose Players.
     storage.composed_ = false;
     storage.grow();
-    return storage.live_shown_ == std::vector<bool>({true, true, true})
+    return storage.bind_players_.players.empty()
+        && storage.live_shown_ == std::vector<bool>({true, true, true})
         && storage.live_defend_ == std::vector<bool>({false, false, false})
         && !storage.live_clips_[0] && storage.hardpoint_states_.empty();
 }
@@ -505,7 +683,7 @@ bool storage_contract() {
             directory = Path(temp)
             cpp = directory / 'launch_slots.cpp'
             exe = directory / ('launch_slots.exe' if os.name == 'nt' else 'launch_slots')
-            cpp.write_text(HARNESS.replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__ROWS__', rows), encoding='utf-8')
+            cpp.write_text(HARNESS.replace('__DEF_WARM__', str(defaults['warm_launches'])).replace('__DEF_PURCHASE__', str(defaults['purchase_slots'])).replace('__DEF_BUDGET__', str(defaults['arrival_slot_budget'])).replace('__STORAGE__', storage).replace('__ARRIVAL_HEADER__', header).replace('__ARRIVAL_IMPL__', plan).replace('__ADD_SLOT__', add_slot).replace('__GROW__', grow).replace('__PREPARE__', prepare).replace('__WARM__', warm).replace('__CAMPAIGN_HEADER__', campaign_header).replace('__WARM_HEADER__', warm_header).replace('__DEVICE_HEADER__', device_header).replace('__SELECT__', select).replace('__BIND_IDENTITY__', bind_identity).replace('__SHIP_OF__', ship_of).replace('__ROWS__', rows), encoding='utf-8')
             compile_fixture(toolchain, cpp, exe)
             ran = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)

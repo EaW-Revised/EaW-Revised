@@ -14,7 +14,7 @@ namespace eawr::presentation::godot_backend {
 // (options_screen.hpp) over a black backdrop with the FoC data's skin.
 //
 //   --eawr-options                       open the hub; the window stays until the screen closes
-//   --eawr-options-page <page>           start on hub, audio, video, advanced, gameplay, keyboard
+//   --eawr-options-page <page>           start on hub, audio, video, performance, advanced, gameplay, keyboard
 //                                        or network
 //   --eawr-options-context main|game     the main menu's hub or the in-game menu's (default main)
 //   --eawr-options-do <action>           a scripted step, repeatable, one per frame, in order:

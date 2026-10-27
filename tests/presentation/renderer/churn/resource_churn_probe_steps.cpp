@@ -1,4 +1,231 @@
+#include "renderer_internal.hpp"
 #include "resource_churn_probe.hpp"
+
+// This access is defined only in the linked Godot probe. It exercises the
+// production upload and Resource lifecycle without adding a runtime test API.
+namespace eawr::presentation::godot_backend::detail {
+struct ModelRecipeProbe final {
+    [[nodiscard]] static std::vector<std::string> verify_textures(GodotRenderer& renderer, const std::string& capture_prefix) {
+        std::vector<std::string> failures;
+        const auto check = [&](const bool valid, const char* message) {
+            if (!valid) failures.emplace_back(message);
+        };
+        auto& impl = *renderer.impl_;
+        auto& rendering = *::godot::RenderingServer::get_singleton();
+        auto texture = eawr_resource_churn_probe::solid(180, 70, 25, 256);
+        for (const std::uint32_t edge : {128U, 64U})
+            texture.mips.push_back(eawr_resource_churn_probe::solid(180, 70, 25, edge).mips.front());
+        texture.source.logical_path = "data/art/textures/recipe-test.dds";
+        auto disk = texture;
+        unsigned loads{};
+        renderer.set_texture_loader([&](const assets::Source&) -> std::optional<assets::Texture> {
+            ++loads;
+            return disk;
+        });
+        const auto model = eawr_resource_churn_probe::plate(60.0F);
+        const auto material = eawr_resource_churn_probe::unshaded("1.0, 1.0, 1.0");
+        for (const sim::AssetId asset : {820U, 821U})
+            check(renderer.upload(asset, model, texture, material).has_value(), "reloadable texture upload failed");
+        if (impl.resources_.size() != 2) return {"reloadable fixture did not create both resources"};
+        check(loads == 1 && renderer.recipe_memory().texture_capacity.texture_payload_bytes == 0,
+            "successful shared upload must verify once and drop its CPU payload");
+        auto& first = impl.resources_.at(820);
+        auto& second = impl.resources_.at(821);
+        const Ref<Image> initial = rendering.texture_2d_get(first.texture);
+        if (initial.is_null() || initial->is_empty()) return {"initial texture readback failed"};
+        const auto initial_bytes = initial->get_data();
+        check(initial->save_png(String((capture_prefix + ".before.png").c_str())) == OK,
+            "initial texture eye-check capture failed");
+        impl.evict_resource(rendering, 820, first);
+        check(impl.admit_resource(rendering, 820, first) && loads == 1,
+            "a still-resident shared GPU texture must re-admit without decoding");
+        impl.evict_resource(rendering, 820, first);
+        impl.evict_resource(rendering, 821, second);
+        check(impl.texture_pool_.empty(), "last eviction must release the GPU texture pool entry");
+        check(impl.admit_resource(rendering, 820, first) && loads == 2,
+            "fully evicted texture must restore by decoding once");
+        const Ref<Image> restored = rendering.texture_2d_get(first.texture);
+        check(restored.is_valid() && restored->get_data() == initial_bytes,
+            "restored texture must have exactly the original GPU mip bytes");
+        if (restored.is_valid())
+            check(restored->save_png(String((capture_prefix + ".restored.png").c_str())) == OK,
+                "restored texture eye-check capture failed");
+        check(renderer.recipe_memory().texture_capacity.texture_payload_bytes == 0,
+            "re-admission must release its transient CPU texture");
+        texture_budget().set_minimum_drop(1);
+        check(impl.apply_texture_drop(rendering), "mip-drop rebuild did not finish");
+        const Ref<Image> smaller = rendering.texture_2d_get(first.texture);
+        check(smaller.is_valid() && smaller->get_width() == 128 && loads == 2
+            && smaller->get_data() == initial_bytes.slice(initial->get_mipmap_offset(1)),
+            "mip change must use the GPU chain after CPU payload release");
+        impl.evict_resource(rendering, 820, first);
+        check(impl.admit_resource(rendering, 820, first) && loads == 3,
+            "eviction after a mip change must re-decode at the active drop");
+        const Ref<Image> smaller_restored = rendering.texture_2d_get(first.texture);
+        check(smaller_restored.is_valid() && smaller_restored->get_width() == 128
+            && smaller_restored->get_data() == smaller->get_data(),
+            "restored lower mip must be identical to the downsized GPU texture");
+        impl.evict_resource(rendering, 820, first);
+        disk.mips[0].bytes[0] = std::byte{0};
+        check(!impl.admit_resource(rendering, 820, first) && !first.mesh.is_valid(),
+            "changed content must refuse admission without leaking partial GPU resources");
+        disk = texture;
+        check(impl.admit_resource(rendering, 820, first), "a later valid restore must recover after refused admission");
+        for (const sim::AssetId asset : {820U, 821U})
+            check(renderer.release(asset).has_value(), "reloadable recipe release failed");
+        renderer.set_texture_loader({});
+        texture_budget().reset();
+        return failures;
+    }
+
+    // Renderer-level release: an authoritative loader/cache model releases after
+    // admission and reloads on restore; a changed-on-disk model is refused and
+    // counted; a derived model that keeps a source path never releases.
+    [[nodiscard]] static std::vector<std::string> verify_models(GodotRenderer& renderer) {
+        std::vector<std::string> failures;
+        const auto check = [&](const bool valid, const char* message) {
+            if (!valid) failures.emplace_back(message);
+        };
+        auto& impl = *renderer.impl_;
+        auto& rendering = *::godot::RenderingServer::get_singleton();
+        const auto counts_before = renderer.model_recipe_counts(); // cumulative: earlier checks share this renderer
+        const auto failures_before = renderer.model_reload_failures();
+        auto authored = eawr_resource_churn_probe::plate(60.0F, 2, true);
+        authored.source.logical_path = "data/art/models/recipe-test.alo";
+        auto disk = authored;
+        unsigned loads{};
+        renderer.set_model_loader([&](const assets::Source&) -> std::optional<assets::Model> {
+            ++loads;
+            return disk;
+        });
+        const auto texture = eawr_resource_churn_probe::solid(255, 0, 0);
+        const auto material = eawr_resource_churn_probe::unshaded("1.0, 0.0, 0.0");
+        const auto owner = std::make_shared<const assets::Model>(authored);
+        check(renderer.upload(830, ModelUpload{owner, ModelSurface{0, 0, false}}, texture, material).has_value(),
+            "authoritative model upload failed");
+        check(renderer.upload(831, authored, texture, material).has_value(), "derived model upload failed");
+        if (impl.resources_.size() != 2) return {"model fixture did not create both resources"};
+        auto& first = impl.resources_.at(830);
+        auto& derived = impl.resources_.at(831);
+        check(first.recipe->model.released() && loads == 0,
+            "authoritative model must release after admission without a second decode");
+        check(!derived.recipe->model.released() && derived.recipe->model.retained() != nullptr,
+            "a derived model that keeps a source path must keep its snapshot");
+        const auto counts = renderer.model_recipe_counts();
+        check(counts.first == counts_before.first + 1 && counts.second == counts_before.second + 1,
+            "one released and one counted fallback expected");
+        std::vector<::godot::String> before;
+        for (std::int32_t index = 0; index < rendering.mesh_get_surface_count(first.mesh); ++index)
+            before.push_back(::godot::UtilityFunctions::var_to_bytes(
+                rendering.mesh_surface_get_arrays(first.mesh, index)).hex_encode());
+        impl.evict_resource(rendering, 830, first);
+        impl.evict_resource(rendering, 831, derived);
+        check(impl.admit_resource(rendering, 830, first) && loads == 1, "released model must restore by one reload");
+        check(impl.admit_resource(rendering, 831, derived) && loads == 1, "derived model must restore without a reload");
+        impl.admission_model_.clear(); // reconcile_residency ends every admission batch this way
+        std::vector<::godot::String> after;
+        for (std::int32_t index = 0; index < rendering.mesh_get_surface_count(first.mesh); ++index)
+            after.push_back(::godot::UtilityFunctions::var_to_bytes(
+                rendering.mesh_surface_get_arrays(first.mesh, index)).hex_encode());
+        check(after == before, "restored model must recreate exactly the same GPU mesh arrays");
+        impl.evict_resource(rendering, 830, first);
+        disk.meshes[0].submeshes[0].vertices[0].position.x += 7.0F;
+        check(!impl.admit_resource(rendering, 830, first) && renderer.model_reload_failures() == failures_before + 1
+                && !first.mesh.is_valid(),
+            "a changed-on-disk model must refuse admission and count the failure");
+        impl.admission_model_.clear();
+        disk = authored;
+        check(impl.admit_resource(rendering, 830, first), "a later valid restore must recover after a refused reload");
+        for (const sim::AssetId asset : {830U, 831U})
+            check(renderer.release(asset).has_value(), "model recipe release failed");
+        renderer.set_model_loader({});
+        return failures;
+    }
+
+    [[nodiscard]] static std::vector<std::string> verify(GodotRenderer& renderer) {
+        std::vector<std::string> failures;
+        const auto check = [&](const bool valid, const char* message) {
+            if (!valid) failures.emplace_back(message);
+        };
+        auto& impl = *renderer.impl_;
+        auto owner = std::make_shared<const assets::Model>(eawr_resource_churn_probe::plate(60.0F, 2, true));
+        const auto* address = owner.get();
+        const auto texture = eawr_resource_churn_probe::solid(255, 0, 0);
+        const auto material = eawr_resource_churn_probe::unshaded("1.0, 0.0, 0.0");
+        for (const sim::AssetId asset : {810U, 811U}) {
+            check(renderer.upload(asset, ModelUpload{owner, ModelSurface{0, 1, false}},
+                texture, material).has_value(), "production shared-model upload failed");
+        }
+        check(owner.use_count() == 3, "production uploads must retain the cache owner twice without copying");
+        const auto shared_memory = renderer.recipe_memory();
+        check(shared_memory.recipes == 2 && shared_memory.models == 1 && shared_memory.textures == 1
+            && shared_memory.model_capacity == assets::payload_capacity(*owner),
+            "production recipe probe must deduplicate shared models and textures");
+        {
+            auto temporary = eawr_resource_churn_probe::plate(40.0F);
+            check(renderer.upload(812, temporary, texture, material).has_value(), "production fallback upload failed");
+            if (impl.resources_.size() != 3) {
+                check(false, "production fallback upload must retain exactly three resources");
+                return failures;
+            }
+            const auto& kept = impl.resources_.at(812).recipe->model.snapshot();
+            check(kept.get() != &temporary && kept.use_count() == 1,
+                "reference upload must own exactly one independent model snapshot");
+            temporary.meshes[0].submeshes[0].vertices[0].position.x = 99999.0F;
+            check(kept->meshes[0].submeshes[0].vertices[0].position.x != 99999.0F,
+                "fallback snapshot must not alias the caller model");
+        }
+        if (impl.resources_.size() != 3) {
+            check(false, "production fixture must retain exactly three resources");
+            return failures;
+        }
+        std::weak_ptr<const assets::Model> lifetime = owner;
+        const auto retained_memory = renderer.recipe_memory();
+        check(retained_memory.recipes == 3 && retained_memory.models == 2 && retained_memory.textures == 1,
+            "production fallback must add one model and share the texture owner");
+        owner.reset();
+        auto& rendering = *::godot::RenderingServer::get_singleton();
+        const auto mesh_bytes = [&](const auto& resource) {
+            std::vector<::godot::String> bytes;
+            const auto count = rendering.mesh_get_surface_count(resource.mesh);
+            for (std::int32_t index = 0; index < count; ++index) {
+                bytes.push_back(::godot::UtilityFunctions::var_to_bytes(
+                    rendering.mesh_surface_get_arrays(resource.mesh, index)).hex_encode());
+            }
+            return bytes;
+        };
+        const auto* fallback = impl.resources_.at(812).recipe->model.retained();
+        for (const sim::AssetId asset : {810U, 811U, 812U}) {
+            auto& resource = impl.resources_.at(asset);
+            const auto before = mesh_bytes(resource);
+            check(before.size() == 1, "production fixture must upload only its selected surface");
+            impl.evict_resource(rendering, asset, resource);
+            check(!resource.mesh.is_valid(), "actual Resource mesh must be evicted");
+            const auto evicted_memory = renderer.recipe_memory();
+            check(evicted_memory.model_capacity == retained_memory.model_capacity
+                && evicted_memory.texture_capacity == retained_memory.texture_capacity
+                && evicted_memory.recipes == retained_memory.recipes,
+                "GPU eviction must retain the same counted CPU recipe payload");
+            check(!lifetime.expired(), "eviction must keep the cache owner alive after cache release");
+            check(impl.admit_resource(rendering, asset, resource), "actual Resource re-admission failed");
+            check(resource.mesh.is_valid() && mesh_bytes(resource) == before,
+                "re-admission must recreate exactly the same GPU mesh arrays");
+            check(resource.recipe->model.retained() == (asset == 812 ? fallback : address),
+                "re-admission must preserve the retained model address");
+        }
+        check(impl.resources_.at(812).recipe->model.snapshot().use_count() == 1,
+            "fallback re-admission must reuse its one snapshot");
+        for (const sim::AssetId asset : {810U, 811U, 812U})
+            check(renderer.release(asset).has_value(), "production recipe release failed");
+        check(lifetime.expired(), "releasing both production uploads must release their shared model");
+        const auto released_memory = renderer.recipe_memory();
+        check(released_memory.recipes == 0 && released_memory.models == 0 && released_memory.textures == 0
+            && released_memory.model_capacity.total_bytes() == 0 && released_memory.texture_capacity.total_bytes() == 0,
+            "final recipe release must remove all counted CPU payload");
+        return failures;
+    }
+};
+} // namespace eawr::presentation::godot_backend::detail
 
 namespace {
 
@@ -14,6 +241,20 @@ std::vector<presentation::animation::BonePose> moved_palette() {
 void EawrResourceChurnProbe::build_steps() {
     const ProbeAssets probe_assets{solid(255, 0, 0), solid(0, 255, 0), solid(0, 0, 255, 32),
         unshaded("1.0, 0.0, 0.0"), unshaded("0.0, 1.0, 0.0"), unshaded("0.0, 0.0, 1.0")};
+    steps_.push_back({"model-recipe-lifecycle", [this] {
+        renderer_ = std::make_unique<GodotRenderer>(*host_);
+        const auto failures = presentation::godot_backend::detail::ModelRecipeProbe::verify(*renderer_);
+        for (const auto& failure : failures) check(false, failure);
+        evidence_.push_back(std::string("\"model_recipe_lifecycle\":") + (failures.empty() ? "true" : "false"));
+        const auto texture_failures = presentation::godot_backend::detail::ModelRecipeProbe::verify_textures(*renderer_, report_path_);
+        for (const auto& failure : texture_failures) check(false, failure);
+        evidence_.push_back(std::string("\"texture_recipe_lifecycle\":") + (texture_failures.empty() ? "true" : "false"));
+        const auto model_failures = presentation::godot_backend::detail::ModelRecipeProbe::verify_models(*renderer_);
+        for (const auto& failure : model_failures) check(false, failure);
+        evidence_.push_back(std::string("\"model_reload_lifecycle\":") + (model_failures.empty() ? "true" : "false"));
+        renderer_.reset();
+    }, {}});
+    if (model_recipes_only_) return;
     build_baseline_steps(probe_assets);
     build_upload_steps(probe_assets);
     build_churn_steps();

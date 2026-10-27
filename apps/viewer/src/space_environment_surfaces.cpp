@@ -212,6 +212,9 @@ void EnvironmentView::upload(Item item, const space::SceneSurface& surface, cons
         effect_clock_assets_.push_back(asset);
     }
     instances_.push_back({static_cast<sim::EntityId>(asset), asset, *matrix});
+    renderer_->set_render_category(static_cast<sim::EntityId>(asset),
+        item.role == "primary_sky" || item.role == "secondary_sky"
+            ? render_categories::Role::sky : render_categories::Role::map);
     if (idle && !geometry.bones.empty() && std::any_of(geometry.meshes.begin(), geometry.meshes.end(),
             [](const assets::Mesh& mesh) {
                 return mesh.bone >= 0 || std::any_of(mesh.submeshes.begin(), mesh.submeshes.end(),

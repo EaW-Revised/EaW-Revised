@@ -120,6 +120,8 @@ struct SaveReplayContext final {
     platform::Path store;
     std::vector<std::uint8_t> recording;
     std::function<std::vector<std::uint8_t>(std::string&)> recorder;
+    std::function<std::vector<std::uint8_t>(std::string&)> session_recorder{};
+    std::vector<std::uint8_t> session_recording{};
     std::string recording_problem;
 };
 

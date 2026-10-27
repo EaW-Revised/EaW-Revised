@@ -46,6 +46,9 @@ struct Frames final {
 [[nodiscard]] bool has_reveal(Object& object);
 [[nodiscard]] bool has_space_obstacle(Object& object);
 [[nodiscard]] std::vector<std::string> mask(const std::string_view text);
+// A land table loads this object through load_land_body: a ground class or movement class, or an object that
+// authors the land model and no space model. Schema classes and tags only, no FoC name lists.
+[[nodiscard]] bool land_ground_object(Object& object);
 
 struct AbilityFields final {
     const data::XmlNode& node;
@@ -57,6 +60,9 @@ public:
     Loader(const LoadInput& input, UnitTables& tables, Report& report);
 
     void run(const std::vector<std::string>& types, const std::vector<std::string>& obstacles);
+    void read_land_statics(std::span<const std::string> types) {
+        for (const auto& type : types) load_obstacle(type);
+    }
 
 private:
     void enqueue(const std::string& id, const UnitKind kind);
@@ -71,7 +77,7 @@ private:
     // attached model (loaded only then) placed at the owner's attachment bone.
     BonePoint point(const std::string& bone, const Frames* owner, const std::string& owner_id,
                     const std::string& field, const std::string& attached_path = {},
-                    const std::optional<std::size_t> attach_bone = std::nullopt);
+                    const std::optional<std::size_t> attach_bone = std::nullopt, bool attached_only = false);
 
     std::optional<std::uint32_t> count(Object& object, const std::string_view tag, const bool required,
         const bool negative_unbounded = false);
@@ -109,9 +115,22 @@ private:
     void load_production(Object& object, UnitType& unit);
 
     void load_body(Object& object, UnitType& unit);
+    // The object weapon of a body (Projectile_Types and its recharge, pulse, scatter, cone and muzzle rows).
+    // `object_damage` also reads the object's own Projectile_Damage (land objects).
+    void read_object_weapon(Object& object, UnitType& unit, const Frames* model, bool object_damage);
+    // LS shoot PR 1: a ground object's body in a land table (Land_Model_Name, health, armor, weapon, targeting,
+    // collision and death rows). No hardpoints, turrets, abilities or production: those stay with their later PRs.
+    void load_land_body(Object& object, UnitType& unit);
     void load_planetary_weapon(Object& object, UnitType& unit);
 
     void load_squadron(Object& object, UnitType& unit);
+
+    // L2a (#1450): a land company object into tables_.land_companies; land loads only.
+    void load_land_company(Object& object);
+    LandCompanyMember land_member(Object& object);
+    LandLocomotionData land_locomotion(Object& object);
+    void load_land_movement_classes();
+    void load_land_static(Object& object);
 
     // CategoryMask and Property_Flags, as names and as enum bits (#270). Returns the categories.
     const std::vector<std::string>& mask_flags(Object& object, UnitType& unit);

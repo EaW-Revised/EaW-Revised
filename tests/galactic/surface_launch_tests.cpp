@@ -133,7 +133,7 @@ std::vector<std::tuple<gc::FleetId, gc::PlayerId, gc::PlanetId, unsigned, std::v
 void wire_format() {
     expect(gc::galactic_opcodes::launch_from_surface == 18 && gc::galactic_opcodes::sell_object == 19
         && gc::galactic_opcodes::transfer_fleet_members == 20 && gc::galactic_opcodes::recheck_orbit == 21
-        && gc::galactic_opcodes::launch_fleet == 22 && gc::galactic_opcodes::first_reserved == 23,
+        && gc::galactic_opcodes::launch_fleet == 22 && gc::galactic_opcodes::first_reserved == 26,
         "launch continuation occupies 22 after orbit recheck 21");
     const gc::CommandPayload typed = gc::LaunchFromSurface{{30, 31}, 0, 2};
     expect(gc::layer_of(typed) == gc::CommandLayer::galactic && gc::opcode_of(typed) == 18, "launch is a galactic-layer opcode 18");
@@ -613,11 +613,180 @@ void restricted_checkpoint_replay_and_workers() {
         else expect(reference == hashes, "restricted launch replay hashes equal on 1/2/4/8 workers");
     }
 }
+// GGS-06/07: the intent survives launch/travel, but landing uses current surface inputs.
+void surface_transfer_wire_and_outcomes() {
+    const gc::CommandPayload payload = gc::TransferSurface{{31, 30}, {1, 2}};
+    const auto bytes = gc::encode_payload(payload);
+    expect(gc::opcode_of(payload) == 25 && gc::decode_payload(gc::CommandLayer::galactic, 25, bytes)
+        == std::optional{payload}, "surface transfer opcode and ordered payload round trip");
+    for (std::size_t n = 0; n < bytes.size(); ++n)
+        expect(!gc::decode_payload(gc::CommandLayer::galactic, 25,
+            std::vector<std::uint8_t>(bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(n))),
+            "truncated surface transfer refuses");
+    auto trailing = bytes; trailing.push_back(0);
+    expect(!gc::decode_payload(gc::CommandLayer::galactic, 25, trailing), "surface transfer rejects trailing bytes");
+    for (const gc::TransferSurface invalid : {gc::TransferSurface{{}, {1, 2}}, {{30, 30}, {1, 2}},
+        {{0}, {1, 2}}, {{30}, {1}}, {{30}, {1, 1}}, {{30}, {1, 0}}})
+        expect(!gc::decode_payload(gc::CommandLayer::galactic, 25, gc::encode_payload(invalid)),
+            "surface transfer rejects malformed selection and path");
+    for (unsigned mode = 0; mode != 13; ++mode) {
+        auto setup = fixture();
+        // The empty receiving surface is deliberately different from the source stack.
+        setup.control->planets[1].landed.clear();
+        setup.observer->planets[1].landed_transports.clear();
+        std::erase_if(setup.movement->contents, [](const auto& row) { return row.container == 51; });
+        if (mode == 1) setup.control->planets[1].surface_accessible = false;
+        if (mode == 2 || mode == 3) {
+            setup.control->max_ground_forces = 3;
+            setup.control->planets[1].landed = {{51, 2, 1}, {52, 2, 1}};
+            setup.movement->contents.push_back({51, {}});
+            setup.movement->contents.push_back({52, {}});
+            if (mode == 2) {
+                setup.control->planets[1].landed.push_back({53, 2, 1});
+                setup.movement->contents.push_back({53, {}});
+            }
+        }
+        if (mode == 4) for (auto& row : setup.movement->access)
+            if (row.player == 1 && row.planet == 2) row.accessible = false;
+        if (mode == 6 || mode == 7) for (auto& row : setup.movement->access)
+            if (row.player == 1 && row.planet == (mode == 6 ? 1U : 2U)) row.potential_conflict = true;
+        if (mode == 9) setup.fleet_control->pause.fleet_move = gc::PausedAdmission::refuse;
+        if (mode == 10 || mode == 11) {
+            setup.planets[1].owner = 2;
+            setup.control->planets[1].ground_base = {2, 1};
+            std::erase_if(setup.fleets, [](const auto& fleet) { return fleet.id == 13; });
+            for (auto& row : setup.control->relations)
+                if ((row.player == 1 && row.other == 2) || (row.player == 2 && row.other == 1)) row.allied = mode == 10;
+            if (mode == 11) {
+                setup.control->planets[1].landed = {{51, 2, 2}};
+                setup.movement->contents.push_back({51, {}});
+            }
+        }
+        eawr::platform::ThreadWorkerAdapter pool(1);
+        auto game = take(gc::GalacticSession::create(setup));
+        std::uint64_t sequence = 1;
+        if (mode == 9) done(game.submit({{0, gc::SeatId{1}, sequence++}, gc::PauseGalaxy{}}));
+        done(game.submit({{0, gc::SeatId{1}, sequence}, gc::TransferSurface{
+            mode == 8 ? std::vector<EntityId>{40} : std::vector<EntityId>{31, 30},
+            mode == 5 ? std::vector<gc::PlanetId>{1, 4} : std::vector<gc::PlanetId>{1, 2}}}));
+        auto snapshot = take(game.step(pool)).snapshot;
+        if (mode == 4 || mode == 8 || mode == 9) {
+            expect(surface_unit(*snapshot, mode == 8 ? 40 : 30) && !fleet_of(*snapshot, 30),
+                "entry denial, authorization and pause preserve surface identities");
+            continue;
+        }
+        if (mode == 5 || mode == 6) {
+            const auto* fleet = fleet_of(*snapshot, 30);
+            expect(fleet && !fleet->motion.transit && fleet->orbit == 1
+                && fleet->motion.land_on_arrival == (mode == 5),
+                "invalid travel retains intent; source conflict suppresses intent");
+            continue;
+        }
+        if (mode == 12) {
+            game.set_movement_access_provider([access = setup.movement->access](const auto&, const auto&) {
+                auto rows = access;
+                for (auto& row : rows) if (row.player == 1 && row.planet == 2) row.accessible = false;
+                return eawr::core::Result<std::vector<gc::MovementAccess>>::success(std::move(rows));
+            });
+            done(game.refresh_movement_access(pool));
+        }
+        bool land_conflict = false;
+        for (unsigned tick = 1; tick != 50; ++tick) {
+            snapshot = take(game.step(pool)).snapshot;
+            land_conflict = land_conflict || event_of(*snapshot, gc::GalacticEventKind::land_conflict_requested, sequence);
+        }
+        const auto* fleet = fleet_of(*snapshot, 30);
+        if (mode == 12) {
+            expect(!fleet && surface_unit(*snapshot, 30) && observed_on_surface(*snapshot, 31)
+                && snapshot->control()->planets[1].landed.empty(), "access bounce retains request and lands on return surface");
+        } else if (mode == 0 || mode == 10) {
+            expect(!fleet && surface_unit(*snapshot, 30) && surface_unit(*snapshot, 31)
+                && observed_on_surface(*snapshot, 30), "empty own/allied surface accepts the same identities");
+            const auto& landed = snapshot->control()->planets[1].landed;
+            expect(landed.size() == 2 && landed[0].id == 31 && landed[1].id == 30,
+                "surface transfer preserves requested transport order");
+        } else if (mode == 3) {
+            expect(fleet && fleet->orbit == 2 && !fleet->motion.land_on_arrival
+                && !surface_unit(*snapshot, 30) && surface_unit(*snapshot, 31),
+                "partial capacity lands first transport and retains overflow in orbit");
+        } else {
+            expect(fleet && fleet->orbit == 2 && !fleet->motion.transit && !fleet->motion.land_on_arrival,
+                "inaccessible/full/space-conflict/defended destinations consume intent and retain orbit");
+            if (mode == 11) expect(!land_conflict, "defended landing refuses without a campaign conflict owner");
+        }
+    }
+}
+
+void surface_transfer_conflict_gather_retains_other_request() {
+    // GGS-08: equal-route fleets arrive in stable identity order. The first
+    // executes its conflict branch; the other is gathered before its own turn.
+    auto setup = fixture();
+    for (auto& row : setup.movement->access)
+        if (row.player == 1 && row.planet == 2) row.potential_conflict = true;
+    eawr::platform::ThreadWorkerAdapter pool(1);
+    auto game = take(gc::GalacticSession::create(setup));
+    done(game.submit({{0, gc::SeatId{1}, 1}, gc::TransferSurface{{30}, {1, 2}}}));
+    done(game.submit({{0, gc::SeatId{1}, 2}, gc::TransferSurface{{31}, {1, 2}}}));
+    auto snapshot = take(game.step(pool)).snapshot;
+    const auto* first = fleet_of(*snapshot, 30);
+    const auto* other = fleet_of(*snapshot, 31);
+    expect(first && other && first->id < other->id && first->motion.transit && other->motion.transit,
+        "two ordered transfers have independent moving fleets");
+    for (unsigned tick = 1; tick != 28; ++tick) snapshot = take(game.step(pool)).snapshot;
+    first = fleet_of(*snapshot, 30); other = fleet_of(*snapshot, 31);
+    expect(first && other && first->orbit == 2 && other->orbit == 2
+        && !first->motion.transit && !other->motion.transit
+        && !first->motion.land_on_arrival && other->motion.land_on_arrival,
+        "arriving conflict fleet clears its request; gathered fleet retains its request");
+    expect(!surface_unit(*snapshot, 30) && !surface_unit(*snapshot, 31), "conflict gathering attempts no landing");
+    if (!first || !other) return;
+    done(game.submit({{28, gc::SeatId{1}, 3}, gc::MoveFleet{first->id, {2, 1}, {}}}));
+    done(game.submit({{28, gc::SeatId{1}, 4}, gc::MoveFleet{other->id, {2, 1}, {}}}));
+    for (unsigned tick = 28; tick != 56; ++tick) snapshot = take(game.step(pool)).snapshot;
+    expect(fleet_of(*snapshot, 30) && !surface_unit(*snapshot, 30)
+        && !fleet_of(*snapshot, 31) && surface_unit(*snapshot, 31),
+        "later ordinary arrival consumes only the gathered fleet's retained landing request");
+}
+
+void surface_transfer_checkpoint_replay_and_workers() {
+    auto setup = fixture();
+    setup.control->planets[1].landed.clear(); setup.observer->planets[1].landed_transports.clear();
+    std::erase_if(setup.movement->contents, [](const auto& row) { return row.container == 51; });
+    const gc::GalacticReplay replay{setup, 28, {{{0, gc::SeatId{1}, 1}, gc::TransferSurface{{31, 30}, {1, 2}}}}};
+    const auto parsed = take(gc::parse_replay(take(gc::write_replay(replay))));
+    expect(parsed == replay, "surface transfer recording round trip");
+    std::vector<std::string> reference;
+    for (const auto workers : eawr::platform::determinism_worker_counts()) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        auto game = take(eawr::campaign::GameSession::from_replay(parsed));
+        const auto identities = cp::game_identities(parsed.setup);
+        std::vector<std::string> hashes{take(game.step(pool)).state_hash.get()};
+        const auto* moving = fleet_of(*game.galaxy().snapshot(), 30);
+        expect(moving && moving->motion.transit && moving->motion.land_on_arrival,
+            "accepted transfer publishes travel and landing request");
+        const auto saved = take(cp::save_game_checkpoint(game, identities));
+        galactic_test::mark_saved(game);
+        for (std::uint64_t tick = 1; tick < parsed.final_tick_count; ++tick) hashes.push_back(take(game.step(pool)).state_hash.get());
+        auto restored = take(cp::load_game_checkpoint(saved, identities, {}, pool));
+        for (std::uint64_t tick = 1; tick < parsed.final_tick_count; ++tick)
+            expect(take(restored.session.step(pool)).state_hash.get() == hashes[static_cast<std::size_t>(tick)],
+                "checkpoint retains transfer intent through landing");
+        expect(surface_unit(*restored.session.galaxy().snapshot(), 30)
+            && !fleet_of(*restored.session.galaxy().snapshot(), 30), "restored transfer completes on surface");
+        expect(take(cp::save_game_checkpoint(restored.session, identities)) == take(cp::save_game_checkpoint(game, identities)),
+            "transfer checkpoint continuation re-saves identical bytes");
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "surface transfer hashes equal on 1/2/4/8 workers");
+    }
+}
 } // namespace
 
 int case_galactic_surface_launch_tests() {
     try {
         wire_format();
+        surface_transfer_wire_and_outcomes();
+        surface_transfer_conflict_gather_retains_other_request();
+        surface_transfer_checkpoint_replay_and_workers();
         creates_and_extends_a_fleet();
         refusals_leave_the_surface_intact();
         movement_created_fleet_adds_no_shell_record();

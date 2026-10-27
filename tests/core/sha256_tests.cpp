@@ -2,10 +2,15 @@
 #include "../support/check.hpp"
 #include "eawr/core/sha256.hpp"
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iomanip>
 #include <iostream>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -30,9 +35,91 @@ void check(const std::span<const std::uint8_t> bytes, const std::string_view exp
     expect(sha256(bytes) == sha256(bytes, Sha256Backend::scalar), "default binary route equals fallback");
     expect(sha256_hex(bytes) == expected, "default hex route matches vector");
 }
+
+std::string table_hex(const std::array<std::uint8_t, 32>& bytes) {
+    constexpr char digits[] = "0123456789abcdef";
+    std::string output(bytes.size() * 2, '\0');
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        output[i * 2] = digits[bytes[i] >> 4U];
+        output[i * 2 + 1] = digits[bytes[i] & 15U];
+    }
+    return output;
+}
+std::string stream_hex(const std::array<std::uint8_t, 32>& bytes) {
+    std::ostringstream output;
+    output << std::hex << std::setfill('0');
+    for (const auto byte : bytes) output << std::setw(2) << static_cast<unsigned>(byte);
+    return output.str();
+}
+// Explicit diagnostic mode only. No timing assertion: the pool is shared.
+int hex_benchmark() {
+    using namespace eawr::core;
+    constexpr std::size_t cases = 64, rounds = 32, iterations = 256;
+    std::array<std::vector<std::uint8_t>, cases> inputs;
+    std::array<std::array<std::uint8_t, 32>, cases> digests{};
+    std::array<std::string, cases> expected;
+    for (std::size_t i = 0; i < cases; ++i) {
+        inputs[i].resize(64 + i * 7);
+        for (std::size_t at = 0; at < inputs[i].size(); ++at)
+            inputs[i][at] = static_cast<std::uint8_t>(i * 19 + at * 37);
+        digests[i] = sha256(inputs[i]);
+        expected[i] = sha256_hex(inputs[i]);
+        expect(table_hex(digests[i]) == expected[i], "table hex preserves every digest byte");
+        expect(stream_hex(digests[i]) == expected[i], "isolated stream matches production hex");
+    }
+    if (failures) return 1;
+    constexpr std::array<std::string_view, 4> names{
+        "sha256_hex", "sha256_plus_stream", "stream_only", "table_only"};
+    std::array<std::vector<double>, names.size()> batches;
+    std::array<std::uint64_t, names.size()> checksums{};
+    bool identical = true;
+    // Rotate arm order and input order across batches. Formatting-only arms
+    // consume exactly the same precomputed 32 bytes; full arms hash the input.
+    for (std::size_t round = 0; round < rounds; ++round) {
+        for (std::size_t step = 0; step < names.size(); ++step) {
+            const auto arm = (round + step) % names.size();
+            const auto begin = std::chrono::steady_clock::now();
+            for (std::size_t iteration = 0; iteration < iterations; ++iteration) {
+                const auto which = (iteration * 17 + round) % cases;
+                std::string output;
+                switch (arm) {
+                case 0: output = sha256_hex(inputs[which]); break;
+                case 1: output = stream_hex(sha256(inputs[which])); break;
+                case 2: output = stream_hex(digests[which]); break;
+                default: output = table_hex(digests[which]); break;
+                }
+                // Identical equality/checksum consumption keeps all output
+                // bytes observable in every arm, including the fast formatter.
+                identical &= output == expected[which];
+                for (const unsigned char byte : output) checksums[arm] += byte;
+            }
+            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - begin).count();
+            batches[arm].push_back(static_cast<double>(elapsed) / static_cast<double>(iterations));
+        }
+    }
+    expect(identical, "every timed SHA and formatting output is byte-identical");
+    expect(std::all_of(checksums.begin(), checksums.end(), [&](auto value) { return value == checksums.front(); }),
+        "all benchmark arms consume identical output bytes");
+    std::cout << "SHA256-HEX-MICROBENCH {\"backend\":\"" << sha256_backend_name(sha256_backend())
+        << "\",\"cases\":" << cases << ",\"batches\":" << rounds << ",\"iterations_per_batch\":" << iterations
+        << ",\"byte_identical\":" << (identical && !failures ? "true" : "false")
+        << ",\"timing_includes_equality_and_checksum\":true,\"arms\":{" << std::setprecision(12);
+    for (std::size_t arm = 0; arm < names.size(); ++arm) {
+        double total{};
+        for (const auto value : batches[arm]) total += value;
+        std::sort(batches[arm].begin(), batches[arm].end());
+        const auto p95 = batches[arm][(rounds * 95 + 99) / 100 - 1];
+        std::cout << (arm ? "," : "") << '\"' << names[arm] << "\":{\"mean_ns_per_call\":"
+            << total / static_cast<double>(rounds) << ",\"p95_batch_mean_ns\":" << p95 << '}';
+    }
+    std::cout << "}}\n";
+    return failures ? 1 : 0;
+}
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--hex-benchmark") return hex_benchmark();
     using namespace eawr::core;
     const auto features = sha256_cpu_features();
     std::cout << "backend=" << sha256_backend_name(sha256_backend())
@@ -53,6 +140,9 @@ int main() {
         return std::span<const std::uint8_t>(reinterpret_cast<const std::uint8_t*>(value.data()), value.size());
     };
     check(text("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    check(text("hello"), "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+    check(text("The quick brown fox jumps over the lazy dog"),
+        "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592");
     check(text("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
         "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
     check(std::vector<std::uint8_t>(1000000, 'a'), "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");

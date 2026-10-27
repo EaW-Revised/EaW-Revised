@@ -3,11 +3,13 @@
 // control does today. The screen and the GPU case are the viewer's (test_options_screen.py).
 
 #include "eawr/presentation/ui/settings.hpp"
+#include "eawr/presentation/ui/performance_deviations.hpp"
 #include "ui_test_support.hpp"
 
 #include <algorithm>
 #include <iostream>
 #include <set>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -15,6 +17,42 @@ using namespace eawr;
 namespace ui = presentation::ui;
 
 void expect(const bool condition, const std::string& message) { test::ui::expect(condition, message.c_str()); }
+
+void test_performance_deviations() {
+    std::set<std::string_view> ids, keys;
+    std::ostringstream table;
+    table << "\n| Rule | Setting key | Name | Scope | Default | Retail behaviour | Our behaviour |\n"
+             "|---|---|---|---|---|---|---|\n";
+    for (const ui::PerformanceDeviation& row : ui::performance_deviations) {
+        expect(!row.rule_id.empty() && ids.insert(row.rule_id).second, "performance rules have unique nonempty IDs");
+        expect(row.setting_key.empty() || keys.insert(row.setting_key).second, "performance setting keys are unique");
+        expect(!row.default_value.empty(), "performance defaults are explicit");
+        expect(row.scope == ui::PerformanceDeviationScope::presentation || row.scope == ui::PerformanceDeviationScope::simulation,
+               "performance scope is explicit");
+        for (const auto cell : {row.rule_id, row.setting_key, row.name, row.default_value, row.retail_behaviour, row.our_behaviour}) {
+            expect(cell.find_first_of("|\r\n") == std::string_view::npos, "registry cells stay single-line table values");
+        }
+        table << "| " << row.rule_id << " | " << row.setting_key << " | " << row.name << " | "
+              << (row.scope == ui::PerformanceDeviationScope::presentation ? "presentation" : "simulation") << " | "
+              << row.default_value << " | " << row.retail_behaviour << " | " << row.our_behaviour << " |\n";
+    }
+    // CTest's build directory is inside its source tree. Avoid cached __FILE__ paths from another build slot.
+    std::filesystem::path root = std::filesystem::current_path();
+    const auto relative = std::filesystem::path("docs") / "behaviour" / "performance-deviations.md";
+    while (!std::filesystem::is_regular_file(root / relative) && root != root.parent_path()) root = root.parent_path();
+    std::ifstream stream(root / relative);
+    expect(stream.is_open(), "performance registry documentation is present in the test source tree");
+    std::ostringstream contents; contents << stream.rdbuf();
+    const std::string document = contents.str();
+    constexpr std::string_view begin = "<!-- performance-deviations:begin -->", end = "<!-- performance-deviations:end -->";
+    const auto first = document.find(begin), last = document.find(end);
+    expect(first != std::string::npos && last != std::string::npos && last > first,
+           "performance documentation has a checked registry table");
+    if (first != std::string::npos && last != std::string::npos && last > first) {
+        expect(document.substr(first + begin.size(), last - first - begin.size()) == table.str(),
+               "performance docs exactly match registry IDs, setting keys, defaults and descriptions");
+    }
+}
 
 bool has_note(const ui::SettingsLoad& load, const std::string& part) {
     return std::any_of(load.notes.begin(), load.notes.end(),
@@ -59,6 +97,33 @@ void test_online_settings() {
     expect(has_note(malformed, "EAWR-NET-1747") && !has_note(malformed, "secret.example"), "damaged service remains invalid with a private typed note");
     stored.network.online_host = "service.example\nnetwork.allow_upnp=0";
     expect(ui::parse_settings(ui::serialize_settings(stored)).settings.network.allow_upnp, "service text cannot inject settings lines");
+}
+
+void test_render_thread_settings() {
+    expect(ui::PlayerSettings{}.video.render_thread == ui::RenderThreadSetting::separate,
+           "Separate is the fresh default");
+    for (const auto mode : {ui::RenderThreadSetting::separate, ui::RenderThreadSetting::safe}) {
+        ui::PlayerSettings value; value.video.render_thread = mode;
+        const auto text = ui::serialize_settings(value);
+        expect(ui::parse_settings(text).settings.video.render_thread == mode, "render thread round trips");
+        expect(ui::stored_render_thread(text) == mode, "launcher reader agrees with serialized UI setting");
+    }
+    for (const std::string value : {"-1", "0", "1", "2", "2147483647", "2147483648", "+1", "bad", "",
+                                   "1\nvideo.render_thread=bad", "0\nvideo.render_thread=2",
+                                   "1\nvideo.render_thread=-2", "0\nvideo.render_thread=2147483648",
+                                   "1\nvideo.render_thread=+1"}) {
+        const auto text = "# comment\n eawr-settings 1 \r\n video.render_thread = " + value + "\n";
+        const auto full = ui::parse_settings(text).settings.video.render_thread;
+        expect(ui::stored_render_thread(text).value_or(ui::RenderThreadSetting::separate) == full,
+               "launcher and UI use identical whitespace, invalid-value and clamping rules");
+    }
+    expect(!ui::stored_render_thread("video.render_thread=1"), "no header means project default");
+    expect(!ui::stored_render_thread("eawr-settings 999\nvideo.render_thread=1"), "unsupported version means project default");
+    expect(!ui::stored_render_thread("eawr-settings 1\n"), "absent setting leaves project default alone");
+    expect(!ui::stored_render_thread(""), "missing file leaves project default alone");
+    const std::string bom = "\xEF\xBB\xBF" "eawr-settings 1\nvideo.render_thread=1\n";
+    expect(ui::parse_settings(bom).defaulted && !ui::stored_render_thread(bom),
+           "launcher and UI consistently reject a BOM rather than reading different preferences");
 }
 
 void test_defaults() {
@@ -353,7 +418,9 @@ void test_session_values() {
 } // namespace
 
 int main() {
+    test_performance_deviations();
     test_online_settings();
+    test_render_thread_settings();
     test_defaults();
     test_camera_keys();
     test_frame_pacing();

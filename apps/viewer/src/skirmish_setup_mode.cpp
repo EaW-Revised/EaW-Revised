@@ -62,6 +62,10 @@ constexpr std::string_view default_lan_endpoint = "127.0.0.1:47624";
 constexpr std::uint16_t default_lan_port = 47624;
 
 String text(std::string_view value) { return String::utf8(value.data(), static_cast<int64_t>(value.size())); }
+// The Land game type is playable only under the land skirmish build option; land control never is.
+bool game_type_available(const model::SetupGameTypeRow& row) {
+    return row.available || (skirmish::land_skirmish_enabled && row.type == model::SetupGameType::land);
+}
 std::string utf8(const String& value) { return value.utf8().get_data(); }
 
 void click(Vector2 position) {
@@ -141,6 +145,8 @@ struct SkirmishSetupMode::State final {
     // MNU-22: the credits slider and its value, and the win-condition choice (WSS-25, WSS-31).
     EawrUiSlider* credits_slider{};
     EawrUiLabel* credits_value{};
+    double shown_credits{};
+    std::uint64_t credits_revision{};
     EawrUiCombo* win_condition{};
     std::optional<skirmish::CreditsBounds> credits_bounds;
     std::optional<BuiltDialog> staging, options_dialog;
@@ -179,6 +185,8 @@ struct SkirmishSetupMode::State final {
     skirmish::SetupMapCache all_maps;
     std::vector<battle::LobbyColour> palette;
     bool custom_maps{};
+    // #3776 L3: the Land game type lists land maps; Space (the default and the only type without the build option) space maps.
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
     skirmish::SetupSelection selection;
     std::optional<skirmish::FixtureOptions> pending;
     int selected{-1};
@@ -219,6 +227,7 @@ struct SkirmishSetupMode::State final {
     void fill_map_list();
     void idle_row(std::size_t row);
     void process_map_kind();
+    void process_game_type();
     void process_cancel();
     void apply_profile();
     void record_profile();
@@ -248,36 +257,15 @@ std::size_t SkirmishSetupMode::State::live_rows() const {
     return skirmish::setup_row_count(maps[static_cast<std::size_t>(selected)]);
 }
 
-// The factions the listed maps offer, in the order of the faction registries, each with the caption its
-// Text_ID gives (the faction's own name when the data or the database gives none).
+// WSS-12/13: every playable faction of the effective catalog, in registry order, each with the caption its
+// Text_ID gives (the faction's own name when the data or the database gives none). The map offers none of
+// this: a faction its stations cannot start is refused at Start, not hidden here.
 void SkirmishSetupMode::State::resolve_factions() {
-    std::vector<std::pair<std::pair<std::size_t, std::size_t>, std::string>> found;
-    std::set<std::string> seen;
-    for (const auto& map : all_maps) {
-        for (const auto& side : map.teams) {
-            for (const auto& name : side.factions) {
-                if (!seen.insert(name).second) continue;
-                const auto* definition = catalog->find(name, data::Category::faction);
-                const auto order = definition ? std::pair{definition->registry_order, definition->definition_order}
-                                              : std::pair{std::size_t(-1), std::size_t(-1)};
-                found.push_back({order, name});
-            }
-        }
-    }
-    std::sort(found.begin(), found.end());
     faction_names.clear();
     faction_captions.clear();
-    for (const auto& entry : found) {
-        std::string shown = entry.second;
-        if (auto resolved = catalog->resolve(entry.second, data::Category::faction)) {
-            if (const auto* id = resolved.value().value("Text_ID")) {
-                std::string key = id->value.raw_text;
-                key = core::trim(key, core::xml_whitespace);
-                if (!key.empty()) shown = lookup(key);
-            }
-        }
-        faction_names.push_back(entry.second);
-        faction_captions.push_back(std::move(shown));
+    for (const auto& entry : skirmish::setup_factions(*catalog)) {
+        faction_names.push_back(entry.name);
+        faction_captions.push_back(entry.text_id.empty() ? entry.name : lookup(entry.text_id));
     }
     // The local player's name: the OS account stands in for the profile name until a profile page exists.
     for (const char* variable : {"USERNAME", "USER"}) {
@@ -337,7 +325,8 @@ bool SkirmishSetupMode::State::load() {
     query.custom.reset();
     auto found = all_maps.load(filesystem, catalog, query);
     if (!found) { failure = found.error().message; return false; }
-    for (const auto& map : all_maps) if (map.metadata.custom == false) maps.push_back(map);
+    if (!all_maps.land_failure().empty()) UtilityFunctions::printerr(text(all_maps.land_failure()));
+    for (const auto& map : all_maps) if (map.metadata.custom == false && map.domain == domain) maps.push_back(map);
     auto skin = data::ui::load_dialog_catalog(*filesystem);
     if (!skin) { failure = skin.error().message; return false; }
     dialogs.emplace(std::move(skin).value());
@@ -591,7 +580,7 @@ bool SkirmishSetupMode::State::build() {
     for (const auto& row : model::setup_game_types()) {
         game_types->add_item(caption(row.text));
         const int index = game_types->get_item_count() - 1;
-        if (!row.available) {
+        if (!game_type_available(row)) {
             game_types->set_item_disabled(index, true);
             game_types->set_item_tooltip(index, caption(model::SetupText::unavailable) + String(": ")
                 + text(model::setup_notice(model::SetupNotice::land_not_built)));
@@ -797,8 +786,7 @@ bool SkirmishSetupMode::State::build() {
         for (const auto& choice : model::setup_win_conditions()) win_condition->add_item(text(lookup(choice.text_key)));
         win_condition->select(-1);
     }
-    // WSS-25: the credits display clamps into the data's bounds without rounding. Its value is
-    // not consumed by a battle yet, so it shows the data's default, disabled, with that reason.
+    // WSS-25: preserve the authored value on display; only a user edit selects a credit bucket.
     credits_slider = gadget_as<EawrUiSlider>(*options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER");
     credits_value = gadget_as<EawrUiLabel>(*options_dialog, "IDC_SKIRMISH_CREDITS_VALUE");
     const bool credits_shown = credits_slider != nullptr && credits_bounds.has_value();
@@ -806,24 +794,11 @@ bool SkirmishSetupMode::State::build() {
         if (auto* control = gadget_control(*options_dialog, id)) control->set_visible(credits_shown);
     }
     if (credits_shown) {
-        const String reason = text(std::string(model::setup_notice(model::SetupNotice::credits_not_applied)));
         credits_slider->set_min(static_cast<double>(credits_bounds->minimum));
         credits_slider->set_max(static_cast<double>(credits_bounds->maximum));
-        // This disabled slider displays an authored value, rather than a slider edit (WSS-25).
-        // A step here would make Godot round an off-grid mod default before drawing it.
+        // Button increments are separate from value rounding so off-grid mod defaults survive.
         credits_slider->set_step(0.0);
-        credits_slider->set_forced_states(KitState::disabled, KitState::disabled);
-        credits_slider->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-        credits_slider->set_tooltip_text(reason);
-        // A slider has no disabled state of its own: a transparent control over it takes the pointer and
-        // carries the reason.
-        auto* cover = memnew(Control);
-        cover->set_name("EawrSetupCreditsReason");
-        cover->set_position(credits_slider->get_position());
-        cover->set_size(credits_slider->get_size());
-        cover->set_mouse_filter(Control::MOUSE_FILTER_STOP);
-        cover->set_tooltip_text(reason);
-        options_dialog->frame->add_child(cover);
+        credits_slider->set_button_step(model::setup_credits_button_step({credits_bounds->minimum, credits_bounds->maximum}));
     }
     options_panel->hide();
 
@@ -833,9 +808,14 @@ bool SkirmishSetupMode::State::build() {
         for (std::size_t i = 0; i < maps.size(); ++i)
             if (maps[i].path == benchmark_map) initial = static_cast<int>(i);
     }
-    list->select(initial);
-    list->ensure_current_is_visible();
-    refresh_map(initial);
+    // A mod may author every map as custom (AaW): the official list is then empty, as in FoC,
+    // and the screen opens with nothing selected and Start disabled until the custom list is chosen.
+    if (maps.empty()) start->set_disabled(true);
+    else {
+        list->select(initial);
+        list->ensure_current_is_visible();
+        refresh_map(initial);
+    }
     apply_profile();
     return true;
 }
@@ -847,7 +827,7 @@ void SkirmishSetupMode::State::apply_profile() {
     const auto& choice = player_profile.skirmish.space;
     const auto kind = player_profile.skirmish.game_type;
     const auto rows = model::setup_game_types();
-    if (kind >= 0 && static_cast<std::size_t>(kind) < rows.size() && rows[static_cast<std::size_t>(kind)].available)
+    if (kind >= 0 && static_cast<std::size_t>(kind) < rows.size() && game_type_available(rows[static_cast<std::size_t>(kind)]))
         game_types->select(kind);
     if (!choice.map.empty()) {
         const auto found = std::find_if(all_maps.begin(), all_maps.end(),
@@ -880,8 +860,7 @@ void SkirmishSetupMode::State::apply_profile() {
         const auto side = std::find_if(map.teams.begin(), map.teams.end(),
             [&](const auto& entry) { return static_cast<int>(entry.team) == team[0]->get_selected_id(); });
         const auto name = std::find(faction_names.begin(), faction_names.end(), choice.faction);
-        if (name != faction_names.end() && side != map.teams.end()
-            && std::find(side->factions.begin(), side->factions.end(), choice.faction) != side->factions.end())
+        if (name != faction_names.end() && side != map.teams.end())
             faction[0]->select(static_cast<int>(name - faction_names.begin()));
     }
     if (choice.colour >= 0 && static_cast<std::size_t>(choice.colour) < palette.size()) colour[0]->select(choice.colour);
@@ -890,7 +869,7 @@ void SkirmishSetupMode::State::apply_profile() {
 
 // Start (not Cancel) writes the choices back: the whole loaded record, with this screen's fields changed.
 void SkirmishSetupMode::State::record_profile() {
-    if (!profile_live || selected < 0) return;
+    if (!profile_live || selected < 0 || domain == sim::tactical::BattleDomain::land) return;
     const auto host_slot = std::find_if(selection.slots.begin(), selection.slots.end(),
         [](const auto& entry) { return entry.slot == 1; });
     if (host_slot == selection.slots.end()) return;
@@ -911,7 +890,7 @@ void SkirmishSetupMode::State::filter_maps() {
     const auto previous = selection.map;
     maps.clear();
     for (const auto& map : all_maps) {
-        if (map.metadata.custom != custom_maps) continue;
+        if (map.metadata.custom != custom_maps || map.domain != domain) continue;
         maps.push_back(map);
     }
     fill_map_list();
@@ -1039,7 +1018,6 @@ void SkirmishSetupMode::State::validate() {
     const auto& map = maps[static_cast<std::size_t>(selected)];
     std::vector<skirmish::LobbySlot> occupied;
     std::vector<std::uint32_t> edited_colours;
-    const String unavailable = caption(model::SetupText::unavailable);
     for (std::size_t slot = 0; slot < skirmish::setup_row_count(map); ++slot) {
         const bool active = slot == 0 || controller[slot]->get_selected() >= controller_easy;
         faction[slot]->set_disabled(!active);
@@ -1078,13 +1056,6 @@ void SkirmishSetupMode::State::validate() {
         if (previous == selection.slots.end() || previous->colour_index.value_or(previous->slot - 1) != record.colour_index)
             edited_colours.push_back(record.slot);
         if (previous == selection.slots.end() || previous->team != record.team || previous->faction != record.faction) notice.clear();
-        const auto side = std::find_if(map.teams.begin(), map.teams.end(), [&](const auto& t) { return t.team == record.team; });
-        for (std::size_t i = 0; i < faction_names.size(); ++i) {
-            const bool allowed = side != map.teams.end()
-                && std::find(side->factions.begin(), side->factions.end(), faction_names[i]) != side->factions.end();
-            faction[slot]->set_item_disabled(static_cast<int>(i), !allowed);
-            faction[slot]->set_item_tooltip(static_cast<int>(i), allowed ? String() : unavailable);
-        }
         occupied.push_back(std::move(record));
     }
     if (occupied.size() != selection.slots.size()) notice.clear();
@@ -1111,7 +1082,10 @@ void SkirmishSetupMode::State::validate() {
     for (const auto& record : selection.slots) rows.push_back({record.team, record.faction});
     const auto blocker = model::setup_blocker_text(model::setup_blocker(rows));
     // R-SETUP-01: the three start checks show the retail messages; any other refusal keeps its own diagnostic.
-    if (options_result) status->set_text(text(notice.empty() ? map.name : notice));
+    if (options_result && notice.empty() && map.domain == sim::tactical::BattleDomain::land)
+    {
+        status->set_text(text(map.name) + String(" - ") + text(model::setup_notice(model::SetupNotice::land_no_ai)));
+    } else if (options_result) status->set_text(text(notice.empty() ? map.name : notice));
     else if (blocker) status->set_text(caption(*blocker));
     else status->set_text(text(options_result.error().message));
 }
@@ -1365,15 +1339,33 @@ void SkirmishSetupMode::State::refresh_options() {
     starting_units->set_pressed_no_signal(editing->value.free_starting_units);
     superweapons->set_pressed_no_signal(editing->value.allow_superweapons);
     if (win_condition != nullptr) {
-        const auto index = model::setup_win_condition_index(editing->value.space_win_condition);
+        const auto index = model::setup_win_condition_index(editing->value.tactical_win_condition);
         win_condition->select(index ? static_cast<int>(*index) : -1);
     }
     if (credits_slider != nullptr && credits_bounds) {
         const auto shown = model::setup_credits_clamp({credits_bounds->minimum, credits_bounds->maximum},
             editing->value.credits.trunc_to_integer());
         credits_slider->set_value_no_signal(static_cast<double>(shown));
+        shown_credits = credits_slider->get_value();
+        credits_revision = credits_slider->edit_revision();
+        editing->value.credits = sim::math::Fixed::from_integer(shown).value();
         if (credits_value != nullptr) credits_value->set_text(text(std::to_string(shown)));
     }
+}
+
+// The game type list chooses the domain of the map list (#3776 L3); without the build option it never changes.
+void SkirmishSetupMode::State::process_game_type() {
+    if (!skirmish::land_skirmish_enabled) return;
+    const auto picked = game_types->get_selected_items();
+    if (picked.is_empty()) return;
+    const auto rows = model::setup_game_types();
+    const auto index = static_cast<std::size_t>(static_cast<int>(picked[0]));
+    if (index >= rows.size()) return;
+    const auto wanted = rows[index].type == model::SetupGameType::land ? sim::tactical::BattleDomain::land
+                                                                       : sim::tactical::BattleDomain::space;
+    if (wanted == domain) return;
+    domain = wanted;
+    filter_maps();
 }
 
 // The official and custom buttons choose the list; exactly one of them shows pressed.
@@ -1422,14 +1414,23 @@ void SkirmishSetupMode::State::process_options() {
     editing->value.allow_heroes = heroes->is_pressed();
     editing->value.free_starting_units = starting_units->is_pressed();
     editing->value.allow_superweapons = superweapons->is_pressed();
+    if (credits_slider != nullptr && credits_bounds
+        && (credits_slider->get_value() != shown_credits || credits_slider->edit_revision() != credits_revision)) {
+        shown_credits = credits_slider->get_value();
+        credits_revision = credits_slider->edit_revision();
+        const auto chosen = model::setup_credits_edit({credits_bounds->minimum, credits_bounds->maximum}, shown_credits);
+        editing->value.credits = sim::math::Fixed::from_integer(chosen).value();
+        editing->custom = true;
+        if (credits_value != nullptr) credits_value->set_text(text(std::to_string(chosen)));
+    }
     // WSS-31: a picked win condition goes into the copy and marks it custom, as a check does.
     if (win_condition != nullptr && win_condition->is_visible_in_tree()) {
         const int picked = win_condition->get_selected();
         const auto choices = model::setup_win_conditions();
-        const auto current = model::setup_win_condition_index(editing->value.space_win_condition);
+        const auto current = model::setup_win_condition_index(editing->value.tactical_win_condition);
         if (picked >= 0 && static_cast<std::size_t>(picked) < choices.size()
             && (!current || static_cast<int>(*current) != picked)) {
-            editing->value.space_win_condition = std::string(choices[static_cast<std::size_t>(picked)].name);
+            editing->value.tactical_win_condition = std::string(choices[static_cast<std::size_t>(picked)].name);
             editing->custom = true;
         }
     }
@@ -1495,6 +1496,7 @@ void SkirmishSetupMode::process() {
     const auto size = state.host->get_viewport()->get_visible_rect().size;
     static_cast<void>(fit_letterbox_canvas(*state.root, size, Vector2(1280, 720)));
     state.process_map_kind();
+    state.process_game_type();
     const auto selected = state.list->get_selected_items();
     if (!selected.is_empty() && selected[0] != state.selected) state.refresh_map(selected[0]);
     const bool was_editing = state.editing.has_value();
@@ -1579,8 +1581,44 @@ void SkirmishSetupMode::process() {
                     ": active=", row == 0 || state.controller[row]->get_selected() >= State::controller_easy ? 1 : 0,
                     " faction=", state.faction[row]->get_text(), " team=", state.team[row]->get_text());
             };
+            const auto report_credits = [&](const char* action) {
+                const auto& match = state.editing ? state.editing->value : *state.selection.match;
+                UtilityFunctions::print("EAWR setup credit edit: ", action, " value=", match.credits.trunc_to_integer(),
+                    " custom=", state.editing ? state.editing->custom : state.selection.custom_options);
+            };
+            const auto credit_button = [&](const bool plus) {
+                if (state.credits_slider == nullptr) return;
+                const auto rect = state.credits_slider->get_global_rect();
+                click(Vector2(plus ? rect.get_end().x - rect.size.y / 2.0F : rect.position.x + rect.size.y / 2.0F,
+                    rect.get_center().y));
+            };
             if (state.frames == 41) {
+                // The optional button increment leaves both existing kit paths unchanged.
+                if (state.credits_slider != nullptr) {
+                    auto* probe = memnew(EawrUiSlider);
+                    state.options_dialog->frame->add_child(probe);
+                    probe->set_position(Vector2(-1000, -1000));
+                    probe->set_size(state.credits_slider->get_size());
+                    probe->set_min(0); probe->set_max(100); probe->set_step(0); probe->set_value(50);
+                    Ref<InputEventMouseButton> press;
+                    press.instantiate(); press->set_button_index(MOUSE_BUTTON_LEFT); press->set_pressed(true);
+                    press->set_position(Vector2(probe->get_size().x - probe->get_size().y / 2.0F, probe->get_size().y / 2.0F));
+                    probe->_gui_input(press);
+                    const auto fallback = probe->get_value();
+                    probe->set_step(2); probe->set_value(50); probe->_gui_input(press);
+                    const auto stepped = probe->get_value();
+                    probe->set_button_step(7); probe->set_value(50); probe->_gui_input(press);
+                    UtilityFunctions::print("EAWR slider buttons: default=", fallback, " range=", stepped,
+                        " override=", probe->get_value());
+                    probe->queue_free();
+                }
                 state.report_layouts();
+                // WSS-12/13: the host row's drop-down lists every playable catalog faction.
+                String listed;
+                for (int item = 0; item < state.faction[0]->get_item_count(); ++item)
+                    listed += (item ? String("|") : String()) + state.faction[0]->get_item_text(item);
+                UtilityFunctions::print("EAWR setup factions: count=", state.faction[0]->get_item_count(),
+                    " items=", listed);
                 for (std::size_t row = 0; row < skirmish::setup_row_count(state.maps[static_cast<std::size_t>(state.selected)]); ++row)
                     report_row(row);
             }
@@ -1634,7 +1672,19 @@ void SkirmishSetupMode::process() {
                         " combo=", String::num(state.win_condition->get_size().x, 1));
                 }
             } else if (state.frames == 84 && state.win_condition != nullptr) state.win_condition->get_popup()->hide();
-            else if (state.frames == 90) state.host->get_tree()->quit(0);
+            else if (state.frames == 86) credit_button(true);
+            else if (state.frames == 88) { report_credits("plus"); save("credits"); }
+            else if (state.frames == 90) click(state.cancel->get_global_rect().get_center());
+            else if (state.frames == 92 || state.frames == 104) click(state.advanced->get_global_rect().get_center());
+            else if (state.frames == 94) report_credits("cancelled");
+            else if (state.frames == 96) credit_button(false);
+            else if (state.frames == 98) report_credits("minus");
+            else if (state.frames == 100) click(state.accept->get_global_rect().get_center());
+            else if (state.frames == 102) report_credits("accepted");
+            else if (state.frames == 106) click(state.defaults_button->get_global_rect().get_center());
+            else if (state.frames == 108) report_credits("defaults");
+            else if (state.frames == 110) click(state.cancel->get_global_rect().get_center());
+            else if (state.frames == 114) state.host->get_tree()->quit(0);
             return;
         }
         if (state.two_vs_two) {
@@ -1758,6 +1808,10 @@ void SkirmishSetupMode::request_start() {
     state_->validate();
     auto options = skirmish::setup_options(state_->selection, state_->maps);
     if (options && state_->connection->get_selected() == 1) {
+        if (options.value().domain == sim::tactical::BattleDomain::land) {
+            state_->status->set_text(text(model::setup_notice(model::SetupNotice::land_network)));
+            return;
+        }
         if (state_->lan && state_->lan->view().start_enabled) {
             state_->record_profile();
             state_->lan->start(options.value());

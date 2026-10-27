@@ -95,7 +95,8 @@ ai::GalacticPerceptionSetup fixture_setup() {
 std::shared_ptr<const gc::GalacticSnapshot> fixture(std::uint64_t frame, std::int64_t ground_level,
     std::int64_t space_level = 2, bool enroute = false,
     std::optional<gc::ObserverSetup> observer = {}, std::optional<gc::EconomyCorruptionState> corruption = {},
-    std::vector<gc::Fleet> more_fleets = {}, std::vector<gc::LiveCorruptionTransition> transitions = {}) {
+    std::vector<gc::Fleet> more_fleets = {}, std::vector<gc::LiveCorruptionTransition> transitions = {},
+    std::optional<gc::PoliticalControlSetup> control = {}) {
     gc::GalacticClock clock; clock.session_tick = clock.galactic_frame = frame;
     gc::PlayerEconomySetup accounts; accounts.players = {{1, whole(123), whole(9999), 3, 5}, {2, whole(456), whole(9999), 2, 5}, {3, {}, whole(9999), 1, 5}};
     gc::ProductionSetup production;
@@ -114,11 +115,172 @@ std::shared_ptr<const gc::GalacticSnapshot> fixture(std::uint64_t frame, std::in
     return std::make_shared<gc::GalacticSnapshot>(frame, clock, std::vector<gc::GalacticPlayer>{{1, 1, 0}, {2, 2, 0}, {3, 3, 0}},
         planets, std::vector<gc::Route>{{40, 10, 20, whole(1)}, {41, 20, 30, whole(1)}}, fleets,
         std::vector<gc::GalacticEvent>{}, std::nullopt, std::nullopt, movement, std::nullopt, std::vector<gc::Seat>{}, accounts, production,
-        std::nullopt, std::vector<gc::PoliticalControlEffect>{}, std::vector<gc::PopulationTotal>{}, observer,
+        control, std::vector<gc::PoliticalControlEffect>{}, std::vector<gc::PopulationTotal>{}, observer,
         std::nullopt, std::nullopt, std::vector<gc::ObservedProductionOffer>{},
         std::shared_ptr<const std::vector<gc::ObservedPlanet>>{}, std::nullopt,
         std::shared_ptr<const std::vector<gc::CensusObject>>{}, std::nullopt, std::nullopt, corruption, nullptr, 0, nullptr, nullptr, nullptr,
         nullptr, nullptr, nullptr, nullptr, std::make_shared<const std::vector<gc::LiveCorruptionTransition>>(std::move(transitions)));
+}
+
+std::string path_coefficient_contracts(unsigned workers) {
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    ai::PathCoefficientInput line;
+    line.maximum_distance = real(1); line.trade_movement_factor = real(1); line.internal = true;
+    for (std::uint64_t i = 0; i < 5; ++i) line.planets.push_back({10 + i, {whole(static_cast<std::int64_t>(i)), {}, {}}, true});
+    const auto value = [](const auto& rows, gc::PlanetId id) -> std::optional<ai::Real> {
+        for (const auto& row : rows) if (row.planet == id) return row.value;
+        return {};
+    };
+    const auto internal = ai::build_path_coefficients(line);
+    expect(internal && internal.value().size() == 5, "WGA-490 retains incident vertices in the input order");
+    expect(value(internal.value(), 10) == real(0) && value(internal.value(), 11) == real(3) / real(4)
+        && value(internal.value(), 12) == real(1) && value(internal.value(), 13) == real(3) / real(4)
+        && value(internal.value(), 14) == real(0), "WGA-491 counts intermediate uses, excludes endpoints and divides by the largest count");
+    auto rounded = line;
+    rounded.planets = {{10, {whole(16777216), {}, {}}, true}, {20, {whole(16777217), {}, {}}, true},
+        {30, {whole(16777218), {}, {}}, true}};
+    const auto rounded_positions = ai::build_path_coefficients(rounded);
+    expect(rounded_positions && rounded_positions.value().size() == 2 && value(rounded_positions.value(), 10) == real(0)
+        && value(rounded_positions.value(), 20) == real(0) && !value(rounded_positions.value(), 30),
+        "WGA-490 rounds each authored coordinate before subtraction, including adjacent large coordinates that co-locate in binary32");
+    line.planets[3].allied = line.planets[4].allied = false;
+    std::array<std::optional<std::vector<ai::PathCoefficient>>, 2> staged;
+    expect(static_cast<bool>(executor.execute_phase("path-coefficient-test", eawr::sim::tick_partition_count, [&](std::size_t partition) {
+        const auto range = eawr::sim::partition_range(partition, staged.size());
+        for (auto i = range.begin; i < range.end; ++i) {
+            auto input = line; input.internal = i == 0;
+            auto result = ai::build_path_coefficients(input);
+            if (result) staged[i] = std::move(result).value();
+        }
+    })), "independent coefficient graphs use disjoint partition output");
+    expect(staged[0] && staged[1] && staged[0]->size() == 3 && staged[1]->size() == 4,
+        "WGA-490 internal excludes hostile destinations; external keeps hostile terminal vertices but not isolated ones");
+    expect(value(*staged[0], 11) == real(1) && !value(*staged[0], 13)
+        && value(*staged[1], 11) == real(1) && value(*staged[1], 12) == real(2) / real(3),
+        "WGA-491 external paths are directed and count ordered pairs");
+    ai::PathCoefficientInput shortcut;
+    shortcut.internal = true; shortcut.maximum_distance = real(10); shortcut.trade_movement_factor = real(4);
+    shortcut.planets = {{10, {}, true}, {20, {whole(10), {}, {}}, true}, {30, {whole(20), {}, {}}, true}};
+    shortcut.trades = {{10, 30}};
+    auto routes = ai::build_path_coefficients(shortcut);
+    expect(routes && value(routes.value(), 20) == real(0), "WGA-490 direct trade edges use the global movement divisor and bypass the radius");
+    shortcut.trade_movement_factor = real(1) / real(2);
+    routes = ai::build_path_coefficients(shortcut);
+    expect(routes && value(routes.value(), 20) == real(1), "WGA-491 a slower trade edge leaves the shorter indirect path");
+    ai::PathCoefficientInput diamond;
+    diamond.internal = true; diamond.maximum_distance = real(3) / real(2); diamond.trade_movement_factor = real(1);
+    diamond.planets = {{10, {}, true}, {20, {whole(1), whole(1), {}}, true},
+        {30, {whole(1), whole(-1), {}}, true}, {40, {whole(2), {}, {}}, true}};
+    const auto tied = ai::build_path_coefficients(diamond);
+    expect(tied && value(tied.value(), 10) == real(1) && value(tied.value(), 20) == real(1)
+        && value(tied.value(), 30) == real(0) && value(tied.value(), 40) == real(0),
+        "WGA-491 equal shortest paths keep the earlier intermediate, rather than splitting or replacing it");
+    auto dangling = shortcut; dangling.trades.push_back({10, 999});
+    std::vector<std::string> endpoint_notes;
+    const auto valid_edges = ai::build_path_coefficients(dangling, &endpoint_notes);
+    expect(valid_edges && value(valid_edges.value(), 20) == real(1) && endpoint_notes.size() == 1
+        && endpoint_notes.front().find("10 -> 999") != std::string::npos,
+        "WGA-490 a route outside the object domain contributes no edge and identifies the skipped endpoints");
+    std::array<std::vector<std::string>, 2> zero_notes;
+    std::array<std::optional<std::vector<ai::PathCoefficient>>, 2> zero_rows;
+    expect(static_cast<bool>(executor.execute_phase("path-coefficient-zero-test", eawr::sim::tick_partition_count, [&](std::size_t partition) {
+        const auto range = eawr::sim::partition_range(partition, zero_rows.size());
+        for (auto i = range.begin; i < range.end; ++i) {
+            auto colocated = shortcut; colocated.internal = i == 0;
+            colocated.planets[1].position = colocated.planets[0].position;
+            colocated.planets[2].position.x = whole(10);
+            auto built = ai::build_path_coefficients(colocated, &zero_notes[i]);
+            if (built) zero_rows[i] = std::move(built).value();
+        }
+    })), "co-located coefficient graphs stage independently");
+    for (std::size_t i = 0; i < zero_rows.size(); ++i)
+        expect(zero_rows[i] && zero_rows[i]->size() == 3 && value(*zero_rows[i], 20) == real(0)
+            && zero_notes[i].size() == 1 && zero_notes[i].front().find("10 -> 30") != std::string::npos,
+            "project NIL-chain boundary skips only the incomplete pair without partial counts or failing publication");
+    std::ostringstream trace;
+    for (const auto& rows : staged) for (const auto& row : *rows) trace << row.planet << ':' << row.value.repr << ';';
+    for (std::size_t i = 0; i < zero_rows.size(); ++i) {
+        for (const auto& row : *zero_rows[i]) trace << row.planet << ':' << row.value.repr << ';';
+        for (const auto& note : zero_notes[i]) trace << note << ';';
+    }
+    return trace.str();
+}
+
+std::vector<std::string> perception_failure_rows;
+void record_perception_failure(std::string_view equation, gc::PlayerId player, gc::PlanetId target, std::span<const std::string> tokens) {
+    std::string row = std::string(equation) + ":" + std::to_string(player) + ":" + std::to_string(target);
+    for (const auto& token : tokens) row += ":" + token;
+    perception_failure_rows.push_back(std::move(row));
+}
+std::string path_coefficient_reader_contracts(unsigned workers) {
+    auto setup = fixture_setup(); setup.uses_fog = false;
+    setup.path_coefficients_requested = true; setup.maximum_fleet_distance = real(100); setup.trade_movement_factor = real(1);
+    auto data = equations({{"coefficients.xml", R"(<Equations>
+<Internal>Variable_Target.FriendlyInternalConnectivity</Internal>
+<External>Variable_Target.FriendlyExternalConnectivity</External>
+<Enemy>Variable_Target.EnemyInternalConnectivity</Enemy>
+<EnemyExternal>Variable_Target.EnemyExternalConnectivity</EnemyExternal>
+<OffsetEnemyExternal>73 + Variable_Target.EnemyExternalConnectivity</OffsetEnemyExternal>
+<Unknown>Variable_Target.UnsupportedConnectivity</Unknown>
+</Equations>)"}});
+    expect(data.equations.uses_lookup({"VARIABLE_TARGET", "FRIENDLYINTERNALCONNECTIVITY"})
+        && data.equations.uses_lookup({"VARIABLE_TARGET", "ENEMYEXTERNALCONNECTIVITY"})
+        && !data.equations.uses_lookup({"VARIABLE_SELF", "FRIENDLYINTERNALCONNECTIVITY"}), "coefficient demand uses the compiled root and leaf");
+    gc::PoliticalControlSetup control;
+    for (const auto planet : {10U, 20U, 30U}) {
+        gc::PlanetControl row; row.planet = planet; row.current_player = 1; row.current = whole(10); control.state.push_back(row);
+    }
+    const eawr::platform::ThreadWorkerAdapter executor(workers);
+    const auto snapshot = fixture(1, 1, 2, false, {}, {}, {}, {}, control);
+    QueryHost host(setup, data);
+    expect(static_cast<bool>(host.world->bind(snapshot, {}, executor, 1, 100)), "coefficient provider initializes from copied control and geometry"); host.initialize(executor);
+    expect(host.query("Internal", 20) == real(1) && host.query("External", 20) == real(1)
+        && host.query("Enemy", 20) == real(0) && host.query("Internal", 10) == real(0), "WGA-492 own graph, endpoint zero and nonallied graph maximum are distinct");
+    expect(host.query("EnemyExternal", 20) == real(0) && host.query("OffsetEnemyExternal", 20) == real(73),
+        "WGA-494 a missing enemy vertex is successful zero, independently of another expression operand");
+    const auto saved = host.world->capture().value();
+    const auto saved_hash = host.world->state_hash().value();
+    perception_failure_rows.clear();
+    {
+        struct Reset { ~Reset() { foc::galactic_ai::observe_perception_failures(nullptr); } } reset;
+        foc::galactic_ai::observe_perception_failures(record_perception_failure);
+        expect(!host.query("Unknown", 20), "an unsupported native leaf remains unavailable rather than becoming seeded zero");
+    }
+    expect(perception_failure_rows == std::vector<std::string>{"Unknown:1:20:VARIABLE_TARGET:UNSUPPORTEDCONNECTIVITY"}
+        && saved_hash == host.world->state_hash().value(),
+        "failure observation identifies root/owner/target/leaf without changing native bytes");
+    QueryHost restored(setup, data);
+    expect(static_cast<bool>(restored.world->bind(snapshot, {}, executor, 1, 100)), "coefficient reconstruction binds completed inputs"); restored.initialize(executor);
+    expect(static_cast<bool>(restored.world->restore(saved)) && restored.query("Internal", 20) == real(1)
+        && restored.query("EnemyExternal", 20) == real(0)
+        && restored.world->state_hash().value() == host.world->state_hash().value(), "WGA-493 derived load rebuild keeps unchanged-snapshot answers and native bytes");
+    control.state[1].current = whole(0);
+    expect(static_cast<bool>(host.world->bind(fixture(2, 1, 2, false, {}, {}, {}, {}, control), {}, executor, 2, 100))
+        && host.query("Internal", 20) == real(1), "ordinary binding retains the last coefficient publication");
+    expect(static_cast<bool>(host.world->publish_path_coefficients(executor)) && host.query("Internal", 20) == real(0),
+        "WGA-490/493 refresh excludes nonpositive current allegiance");
+    for (auto& row : control.state) { row.current_player = 2; row.current = whole(10); }
+    expect(static_cast<bool>(host.world->bind(fixture(3, 1, 2, false, {}, {}, {}, {}, control), {}, executor, 3, 100))
+        && static_cast<bool>(host.world->publish_path_coefficients(executor)) && host.query("Enemy", 20) == real(1)
+        && host.query("Internal", 20) == real(0), "WGA-492 enemy getter reads the nonallied player's graph rather than our own");
+    control.state[2].current_player = 1;
+    expect(static_cast<bool>(host.world->bind(fixture(4, 1, 2, false, {}, {}, {}, {}, control), {}, executor, 4, 100))
+        && static_cast<bool>(host.world->publish_path_coefficients(executor)) && host.query("Enemy", 20) == real(0)
+        && host.query("EnemyExternal", 20) == real(1) && host.query("OffsetEnemyExternal", 20) == real(74),
+        "WGA-494 the human opponent's external graph includes a hostile terminal excluded from its internal graph");
+    control.state[0].current_player = control.state[1].current_player = 3;
+    gc::ObserverSetup neutral_diplomacy;
+    for (const auto id : {1U, 2U, 3U}) { gc::ObserverPlayer row; row.player = id; neutral_diplomacy.players.push_back(row); }
+    neutral_diplomacy.planets = {{10, 3, 3}, {20, 3, 3}, {30, 1, 1}};
+    expect(static_cast<bool>(host.world->bind(fixture(5, 1, 2, false, neutral_diplomacy, {}, {}, {}, control), {}, executor, 5, 100))
+        && static_cast<bool>(host.world->publish_path_coefficients(executor)) && host.query("EnemyExternal", 20) == real(1),
+        "WGA-494 the maximum includes a nonallied neutral player's published external graph");
+    auto absent = setup; absent.trade_movement_factor.reset();
+    QueryHost unbound(absent, data);
+    expect(static_cast<bool>(unbound.world->bind(snapshot, {}, executor, 1, 100)), "missing coefficient owner leaves other perception usable"); unbound.initialize(executor);
+    expect(!unbound.query("Internal", 20) && !unbound.query("EnemyExternal", 20),
+        "missing global movement factor stays unavailable instead of becoming seeded zero");
+    return host.world->state_hash().value() + restored.world->state_hash().value();
 }
 
 std::string supplemental_reader_contracts(unsigned workers) {
@@ -306,6 +468,18 @@ ai::AiData fixture_data() {
 
 std::string producer_preparation_contracts(unsigned workers) {
     eawr::platform::ThreadWorkerAdapter executor(workers);
+    {
+        using Index = std::map<gc::TypeId, std::vector<std::size_t>>;
+        auto index = std::make_shared<Index>();
+        (*index)[100] = {2, 4, 6};
+        eawr::diagnostics::GcMemory memory;
+        memory.row("first", index);
+        memory.row("shared", index);
+        const auto expected = sizeof(Index) + sizeof(Index::value_type)
+            + index->at(100).capacity() * sizeof(std::size_t);
+        expect(memory.rows.at("first") == expected && memory.rows.at("shared") == 0,
+            "shared index inventory counts nested storage once across pointer aliases");
+    }
     auto production = *fixture(1, 1)->production();
     production.maximum_human_queue = 4;
     gc::ProductionPlayer first_player; first_player.player = 1; first_player.population_capacity = whole(100);
@@ -455,6 +629,28 @@ std::string producer_preparation_contracts(unsigned workers) {
         expect(static_cast<bool>(sliced.bind(second, {}, executor, frame, 100))
             && sliced.work().producer_offer_preparations == 2,
             "next fixed slice completes the other chunk without a whole-catalog sweep");
+        const auto retained_prices = [&] {
+            eawr::diagnostics::GcMemory memory;
+            sliced.memory_inventory(memory);
+            std::uint64_t bytes{};
+            for (const auto& [name, size] : memory.rows)
+                if (name.ends_with(".catalog_prices")) bytes += size;
+            return bytes;
+        };
+        expect(retained_prices() == 0, "scheduled catalog validation retains no unrequested price rows");
+        const auto demand = sliced.copy_input();
+        const std::array missing_type{std::numeric_limits<gc::TypeId>::max()};
+        const auto missing = demand->producers.read(1, 10, missing_type);
+        expect(missing && missing.value().empty() && retained_prices() == 0,
+            "missing requested type does not materialize catalog prices");
+        const std::array one_type{gc::TypeId{100}};
+        const auto selected = demand->producers.read(1, 10, one_type);
+        const auto selected_bytes = retained_prices();
+        expect(selected && selected.value().size() == 1 && selected_bytes != 0,
+            "typed query retains its matching price row");
+        const auto repeated = demand->producers.read(1, 10, one_type);
+        expect(repeated && retained_prices() == selected_bytes,
+            "repeated typed query shares the retained price row");
         ai::GalacticWorld atomic(fixture_setup());
         expect(static_cast<bool>(atomic.bind(second, {}, executor, frame, 100)), "atomic deadline oracle binds");
         const auto a = sliced.copy_input(), b = atomic.copy_input();
@@ -462,6 +658,12 @@ std::string producer_preparation_contracts(unsigned workers) {
             && std::equal(a->producers.begin(), a->producers.end(), b->producers.begin(), b->producers.end(),
                 [&](const auto& left, const auto& right) { return producer_key(left) == producer_key(right); }),
             "completed deterministic slices equal atomic rebuild at the deadline");
+        expect(retained_prices() > selected_bytes, "full query materializes previously unrequested prices on demand");
+        const auto full_selected = std::find_if(b->producers.begin(), b->producers.end(),
+            [](const auto& row) { return row.player == 1 && row.planet == 10 && row.type == 100; });
+        expect(selected && selected.value().size() == 1 && full_selected != b->producers.end()
+            && producer_key(selected.value().front()) == producer_key(*full_selected),
+            "retained requested price row equals the independent full-table row");
     }
     check_case(true); check_case(false, 100, false);
     const auto retained_input = deferred.copy_input();
@@ -1031,7 +1233,9 @@ std::string force_contracts(unsigned workers) {
         foc::AiType type; type.type_id = id; type.name = name; type.category_bits = bits; setup.types.push_back(type);
         ai::GalacticForceType facts; facts.type = id; facts.categories = bits; facts.power = real(power); setup.force_types.push_back(facts);
     }
-    setup.force_types[2].starting_spawns[2] = {{100, 2}}; // selected tech 3 falls back to the first nonempty row
+    // Selected tech 3 falls back to the first nonempty row. The leading null entry (RGC-22/24) contributes nothing and does not
+    // make the force estimate unavailable.
+    setup.force_types[2].starting_spawns[2] = {{0, 3}, {100, 2}};
     for (auto& planet : setup.planets) planet.enemy_indigenous.emplace();
     const auto data = equations({{"force.xml", R"(<Equations>
 <Raw>Variable_Target.FriendlyForce.SpaceTotalUnnormalized</Raw>
@@ -1377,7 +1581,7 @@ int case_galactic_ai_perception_stock_tests(int argc, char**) {
             for (const auto workers : {1U, 2U, 4U, 8U}) {
                 const auto trace = owner_scope_contracts(workers) + binding_lifetime_contracts(workers) + interned_contracts(workers) + unchanged_record_contracts(workers) + connectivity_record_contracts(workers) + contracts(workers) + force_contracts(workers)
                     + story_campaign_contracts(workers) + difficulty_seat_contracts(workers)
-                    + producer_preparation_contracts(workers) + supplemental_reader_contracts(workers) + offensive_reader_contracts(workers) + underworld_corruption_readers(workers);
+                    + producer_preparation_contracts(workers) + path_coefficient_contracts(workers) + path_coefficient_reader_contracts(workers) + supplemental_reader_contracts(workers) + offensive_reader_contracts(workers) + underworld_corruption_readers(workers);
                 const auto target_trace = target_contrast_contracts(workers);
                 if (workers == 1) reference = trace + target_trace; else expect(trace + target_trace == reference, "perception cache/context/route contracts equal on 1/2/4/8 workers");
             }

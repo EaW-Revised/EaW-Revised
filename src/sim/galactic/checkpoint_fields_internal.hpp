@@ -27,7 +27,7 @@ template <> struct Fields<::eawr::sim::SeatId> {
 
 template <> struct Fields<::eawr::sim::galactic::AbilityActorState> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.contested_check_disabled);
+        a(v.actor, v.type, v.enabled, v.cancelled, v.theft_enabled, v.theft_cancelled, v.corruption_enabled, v.corruption_cancelled, v.hack_enabled, v.hack_cancelled, v.destruction_enabled, v.destruction_cancelled, v.sabotage_enabled, v.sabotage_cancelled, v.neutralize_enabled, v.neutralize_cancelled, v.spy_enabled, v.spy_cancelled, v.spy_targets, v.contested_check_disabled);
     }
 };
 
@@ -124,6 +124,12 @@ template <> struct Fields<::eawr::sim::galactic::ControlAbilityType> {
         a(v.type, v.abilities);
     }
 };
+template <> struct Fields<::eawr::sim::galactic::ControlAlignmentModifier> {
+    template <class A, class T> static void apply(A& a, T& v) {
+        a(v.planet, v.player, v.multiplier);
+    }
+};
+
 template <> struct Fields<::eawr::sim::galactic::ControlAbilitySource> {
     template <class A, class T> static void apply(A& a, T& v) {
         a(v.planet, v.actor, v.type, v.ability, v.owner);
@@ -246,13 +252,13 @@ template <> struct Fields<::eawr::sim::galactic::Fleet> {
 
 template <> struct Fields<::eawr::sim::galactic::FleetMember> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.id, v.type);
+        a(v.id, v.type, v.pathfinder);
     }
 };
 
 template <> struct Fields<::eawr::sim::galactic::FleetMotion> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.position, v.facing, v.transit, v.orbit_entry);
+        a(v.position, v.facing, v.transit, v.orbit_entry, v.land_on_arrival);
     }
 };
 
@@ -384,7 +390,7 @@ template <> struct Fields<::eawr::sim::galactic::MovementPlanet> {
 
 template <> struct Fields<::eawr::sim::galactic::MovementPlayer> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.player, v.hyperspace_factor, v.corruption_bonus, v.benefits_from_corruption);
+        a(v.player, v.hyperspace_factor, v.corruption_bonus, v.benefits_from_corruption, v.easily_bribed);
     }
 };
 
@@ -410,7 +416,7 @@ template <> struct Fields<::eawr::sim::galactic::MovementSetup> {
 
 template <> struct Fields<::eawr::sim::galactic::MovementType> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.type, v.hyperspace_speed, v.build_cost, v.squadron_capacity, v.hyperspace_eligible, v.squadron, v.fleet_container, v.skips_combat, v.transport);
+        a(v.type, v.hyperspace_speed, v.build_cost, v.squadron_capacity, v.hyperspace_eligible, v.squadron, v.fleet_container, v.skips_combat, v.transport, v.piracy_value, v.cheap_bribe, v.expensive_bribe);
     }
 };
 
@@ -506,7 +512,7 @@ template <> struct Fields<::eawr::sim::galactic::PlanetAccessState> {
 
 template <> struct Fields<::eawr::sim::galactic::PlanetControl> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.planet, v.initialized, v.current_player, v.target_player, v.controller, v.orbital_player, v.current, v.target, v.contested, v.blockaded, v.political_income);
+        a(v.planet, v.initialized, v.current_player, v.target_player, v.controller, v.orbital_player, v.current, v.target, v.contested, v.blockaded, v.political_income, v.alignment_multiplier);
     }
 };
 
@@ -542,7 +548,7 @@ template <> struct Fields<::eawr::sim::galactic::PoliticalControlEffect> {
 
 template <> struct Fields<::eawr::sim::galactic::PoliticalControlSetup> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.change_seconds, v.max_ground_forces, v.players, v.relations, v.types, v.planets, v.routes, v.state, v.captured_types, v.absent_forces, v.ground_capability_types, v.ability_types, v.ability_sources);
+        a(v.change_seconds, v.max_ground_forces, v.players, v.relations, v.types, v.planets, v.routes, v.state, v.captured_types, v.absent_forces, v.ground_capability_types, v.ability_types, v.ability_sources, v.alignment_modifiers);
     }
 };
 

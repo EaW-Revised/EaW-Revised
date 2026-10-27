@@ -13,6 +13,7 @@ const char* ability_slot_text(sim::galactic::AbilityKind kind) {
     case AbilityKind::black_market: return "TEXT_ABILITY_SLOT_BLACK_MARKET";
     case AbilityKind::corruption: return "TEXT_ABILITY_SLOT_CORRUPT_PLANET";
     case AbilityKind::superweapon_hack: return "TEXT_ABILITY_SLOT_HACK_SUPER_WEAPON";
+    case AbilityKind::system_spy: return "TEXT_ABILITY_SLOT_SPY";
     case AbilityKind::technology_theft: return "TEXT_ABILITY_SLOT_SLICE";
     case AbilityKind::structure_sabotage: return "TEXT_ABILITY_SLOT_SABOTAGE";
     case AbilityKind::hero_neutralization: return "TEXT_ABILITY_SLOT_NEUTRALIZE_HERO";
@@ -91,7 +92,7 @@ void GalacticMode::State::update_destruction_hud() {
     state.enabled = gates.galactic && gates.hud_enabled && gates.world_allowed() && !gates.tutorial_locked
         && !gates.action_menu && !gates.selection_locked && !tactical && !loading
         && !retreat_dialog_open && (!battle_dialog || !battle_dialog->visible())
-        && displayed_snapshot->clock().pause_depth == 0;
+        && pause_allows(presentation::GalacticPausedAction::ability);
     // The prepared destruction slot (copied or host fact) wins; otherwise the dragged hero fleet's authored action.
     const bool prepared_slot = state.facts && destruction_source(dragged_fleet);
     const auto key = static_cast<const void*>(displayed_snapshot.get());
@@ -241,7 +242,7 @@ bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool
     if (!drop) return false;
     galactic_view::DropIntent intent;
     intent.kind = galactic_view::DropKind::ability;
-    intent.source = drop->actor; intent.planet = drop->planet;
+    intent.source = drop->supplied; intent.planet = drop->planet;
     intent.ability = galactic_view::ability_drop_order(*drop);
     const auto fleet = std::find_if(displayed_snapshot->fleets().begin(), displayed_snapshot->fleets().end(),
         [&](const auto& row) { return row.id == source; });
@@ -258,7 +259,7 @@ bool GalacticMode::State::drop_hero_ability(galactic_view::ObjectId source, bool
             intent.source = drop->supplied; intent.planet = from; intent.path = *path;
         } else {
             const auto movement = galactic_view::fleet_destination_intent(*displayed_snapshot,
-                galaxy->local.player, source, drop->planet, input_planets());
+                galaxy->local.player, source, drop->planet, input_planets(), {});
             if (!movement) return false;
             intent = *movement;
         }
@@ -285,8 +286,8 @@ void GalacticMode::State::write_destruction_report(std::ostream& output) const {
     });
     const auto rect = state.slot ? state.slot->get_global_rect() : Rect2{};
     output << "{\"source\": " << galactic_detail::json(state.fixture ? "controlled-observer-snapshot" : "campaign-snapshot")
-        << ", \"preparation\": \"seven-kind ranked ground-ability producer WGCH-152\", \"execution_seam\": \"typed shared galactic ability host WGUI-172\""
-        << ", \"unsupported\": \"spy/siphon #1143; removal #1141; raw restrictions/story #2042; remote slots/travel #4471\""
+        << ", \"preparation\": \"eight-kind ranked ground-ability producer WGCH-152\", \"execution_seam\": \"typed shared galactic ability host WGUI-172\""
+        << ", \"unsupported\": \"siphon #1143; removal #1141; raw restrictions/story #2042; remote slots/travel #4471\""
         << ", \"geometry_qualification\": \"WGCH-DB-U01\", \"second_visible\": false"
         << ", \"visible\": " << (state.slot && state.slot->is_visible_in_tree() ? "true" : "false")
         << ", \"actor\": " << (facts ? facts->actor : 0) << ", \"source_id\": " << (facts ? facts->source : 0)

@@ -1,4 +1,5 @@
 #include "render_internal.hpp"
+#include "eawr/presentation/particles/prewarmed_capacity.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -7,6 +8,9 @@
 #include <chrono>
 #include <thread>
 #include <limits>
+#include <new>
+#include <ostream>
+#include <stdexcept>
 #include <utility>
 
 // Quad construction follows the MIT-licensed alo-viewer revision
@@ -29,6 +33,13 @@ struct Measure final {
 };
 }
 
+struct EffectRegistry::LayoutTelemetry final {
+    std::shared_ptr<const SystemDefinition> definition;
+    std::vector<EmitterCapacity> capacities;
+    std::vector<std::size_t> retired_dropped;
+    std::size_t released{};
+};
+
 struct EffectRegistry::Instance final {
     Instance(EffectHandle id, SystemDefinition definition, const std::uint32_t seed,
              const std::size_t capacity, std::optional<MeshBinding> mesh_binding)
@@ -50,6 +61,9 @@ struct EffectRegistry::Instance final {
     }
 
     EffectHandle handle{};
+    std::shared_ptr<const SystemDefinition> admitted_definition;
+    std::size_t charged_bytes{};
+    LayoutTelemetry* telemetry{};
     bool leave_particles{};
     std::vector<EmitterRenderPlan> plans;
     std::vector<std::uint64_t> resources;
@@ -90,6 +104,269 @@ void EffectRegistry::set_stream_bucketing_default(const bool on) noexcept {
 
 EffectRegistry::~EffectRegistry() {
     while (!instances_.empty()) static_cast<void>(release(instances_.back()->handle));
+    evict_idle();
+}
+
+void EffectRegistry::evict_idle() noexcept {
+    for (const auto& instance : idle_) {
+        budget_->release(ResourceKind::cpu_effect, instance->charged_bytes);
+        admission_.idle_bytes -= instance->charged_bytes;
+        ++admission_.evicted;
+    }
+    idle_.clear();
+}
+
+void EffectRegistry::write_admission_report(std::ostream& output) const {
+    output << "{\"eligible\":" << admission_.eligible << ",\"admitted\":" << admission_.admitted
+        << ",\"refused\":" << admission_.refused << ",\"wanted_live_including_drains\":" << instances_.size()
+        << ",\"reused\":" << admission_.reused << ",\"evicted\":" << admission_.evicted
+        << ",\"cpu_allocations\":" << admission_.allocations << ",\"cpu_live_payload_bytes\":" << admission_.live_bytes
+        << ",\"cpu_idle_payload_bytes\":" << admission_.idle_bytes << ",\"cpu_high_water_payload_bytes\":" << admission_.high_water_bytes
+        << ",\"requested_payload_bytes\":" << admission_.requested_bytes << ",\"refused_payload_bytes\":" << admission_.refused_bytes;
+    const auto cpu = budget_->snapshot(ResourceKind::cpu_effect);
+    const auto gpu = budget_->snapshot(ResourceKind::gpu_proxy);
+    output << ",\"cpu_limit_bytes\":";
+    if (cpu.limit_bytes) output << *cpu.limit_bytes; else output << "null";
+    output << ",\"cpu_probe_available\":" << (cpu.probe_available ? "true" : "false")
+        << ",\"gpu_probe_available\":" << (gpu.probe_available ? "true" : "false")
+        << ",\"gpu_reserved_bytes\":";
+    if (gpu.probe_available) output << gpu.reserved_bytes; else output << "null";
+    output << ",\"refusal_reasons\":{\"budget_pressure\":" << admission_.refusals[1]
+        << ",\"allocation_failed\":" << admission_.refusals[2] << ",\"definition_failure\":" << admission_.refusals[3]
+        << ",\"arithmetic_failure\":" << admission_.refusals[4]
+        << "},\"allocation_failure_stages\":{\"cpu\":" << admission_.allocation_failure_stages[1]
+        << ",\"backend\":" << admission_.allocation_failure_stages[2]
+        << ",\"publication\":" << admission_.allocation_failure_stages[3] << "},\"emitters\":[";
+    bool first = true;
+    for (const auto& instance : instances_) {
+        const auto capacities = instance->cpu.emitter_capacities();
+        for (std::size_t index = 0; index < capacities.size(); ++index) {
+            const auto& capacity = capacities[index];
+            const auto live = std::count_if(instance->cpu.particles().begin(), instance->cpu.particles().end(),
+                [&](const auto& particle) { return particle.emitter_index == index; });
+            output << (first ? "" : ",") << "{\"handle\":" << instance->handle << ",\"emitter\":" << index
+                << ",\"native_requested\":" << capacity.native_requested << ",\"scheduling_requested\":" << capacity.requested
+                << ",\"reserved\":" << capacity.reserved << ",\"live\":" << live
+                << ",\"dropped\":" << instance->cpu.emitter_dropped(index) << '}';
+            first = false;
+        }
+    }
+    output << "],\"layouts\":[";
+    first = true;
+    std::size_t layout_index{};
+    for (const auto& layout : layout_telemetry_) {
+        for (std::size_t index = 0; index < layout->capacities.size(); ++index) {
+            const auto& capacity = layout->capacities[index];
+            std::size_t live{}, dropped = layout->retired_dropped[index], owners{};
+            for (const auto& instance : instances_) if (instance->telemetry == layout.get()) {
+                ++owners;
+                for (const auto& particle : instance->cpu.particles()) if (particle.emitter_index == index) ++live;
+                const auto extra = instance->cpu.emitter_dropped(index);
+                dropped += std::min(extra, std::numeric_limits<std::size_t>::max() - dropped);
+            }
+            output << (first ? "" : ",") << "{\"layout\":" << layout_index << ",\"emitter\":" << index << ",\"native_requested\":" << capacity.native_requested
+                << ",\"scheduling_requested\":" << capacity.requested << ",\"reserved_per_instance\":" << capacity.reserved
+                << ",\"live_instances\":" << owners << ",\"released_instances\":" << layout->released
+                << ",\"live\":" << live << ",\"dropped\":" << dropped << '}';
+            first = false;
+        }
+        ++layout_index;
+    }
+    output << "]}";
+}
+
+EffectRegistry::Admission EffectRegistry::spawn_authored(
+    std::shared_ptr<const SystemDefinition> system, const std::uint32_t seed,
+    std::optional<MeshBinding> mesh) {
+    ++admission_.eligible;
+    const auto fail_stage = std::exchange(fail_stage_, AdmissionStage::none);
+    std::unique_ptr<Instance> instance;
+    std::size_t charged{};
+    std::size_t requested{};
+    auto stage = AdmissionStage::cpu;
+    const auto discard = [&] {
+        if (instance) for (const auto resource : instance->resources) if (resource != 0) {
+            backend_->destroy_emitter(resource); --live_resources_;
+        }
+        budget_->release(ResourceKind::cpu_effect, charged);
+        instance.reset(); charged = 0;
+    };
+    const auto reserve_payload = [&](const std::size_t bytes) {
+        auto reservation = budget_->reserve(ResourceKind::cpu_effect, bytes);
+        if (reservation == ReservationOutcome::budget_pressure) {
+            const auto snapshot = budget_->snapshot(ResourceKind::cpu_effect);
+            const auto fixed = snapshot.reserved_bytes - std::min(snapshot.reserved_bytes, admission_.idle_bytes);
+            // Includes other budget consumers and any provisional charge for
+            // this admission. Do not evict if reclaiming all our idle payload
+            // still cannot make this request fit.
+            if (snapshot.limit_bytes && (fixed > *snapshot.limit_bytes || bytes > *snapshot.limit_bytes - fixed))
+                return reservation;
+        }
+        // Stable oldest-idle eviction; active and draining instances never move.
+        while (reservation == ReservationOutcome::budget_pressure && !idle_.empty()) {
+            const auto bytes_to_release = idle_.front()->charged_bytes;
+            budget_->release(ResourceKind::cpu_effect, bytes_to_release); admission_.idle_bytes -= bytes_to_release;
+            idle_.erase(idle_.begin()); ++admission_.evicted;
+            reservation = budget_->reserve(ResourceKind::cpu_effect, bytes);
+        }
+        return reservation;
+    };
+    const auto refuse = [&](const Refusal reason, const char* message) {
+        discard();
+        ++admission_.refused; ++admission_.refusals[static_cast<std::size_t>(reason)];
+        if (reason == Refusal::allocation_failed) ++admission_.allocation_failure_stages[static_cast<std::size_t>(stage)];
+        // The counters retain every refusal; diagnostic text is sampled once
+        // per reason so repeated pressure or invalid definitions stay bounded.
+        if (admission_.refusals[static_cast<std::size_t>(reason)] == 1) {
+            try {
+                diagnostics_.push_back({std::string(diagnostic_codes::backend_resource), core::Severity::warning,
+                    message, {}, {}, {}, {}});
+            } catch (const std::bad_alloc&) { /* Typed refusal survives diagnostic allocation failure. */ }
+        }
+        admission_.refused_bytes += std::min(requested, std::numeric_limits<std::size_t>::max() - admission_.refused_bytes);
+        admission_.requested_bytes += std::min(requested, std::numeric_limits<std::size_t>::max() - admission_.requested_bytes);
+        return Admission{0, reason, false, requested, 0, stage};
+    };
+    try {
+        if (!system) return refuse(Refusal::definition_failure, "effect definition is absent");
+        // A binding is inert without a mesh emitter; do not retain it in an
+        // otherwise reusable CPU layout or let it prevent compatible reuse.
+        if (std::none_of(system->emitters.begin(), system->emitters.end(),
+            [](const auto& emitter) { return emitter.creator_id == 35; })) mesh.reset();
+        if (next_handle_ == std::numeric_limits<EffectHandle>::max())
+            return refuse(Refusal::arithmetic_failure, "effect handle generations exhausted");
+        // Publication cannot allocate once backend ownership has been acquired.
+        if (instances_.size() == instances_.capacity())
+            instances_.reserve(instances_.size() < instances_.max_size() / 2 ? (instances_.size() + 1) * 2 : instances_.max_size());
+        const auto owners = idle_.size() + instances_.size() + 1;
+        if (idle_.capacity() < owners)
+            idle_.reserve(owners < idle_.max_size() / 2 ? owners * 2 : idle_.max_size());
+        const auto reusable = std::find_if(idle_.begin(), idle_.end(), [&](const auto& entry) {
+            return !mesh && entry->admitted_definition == system;
+        });
+        const bool reused = reusable != idle_.end();
+        if (reused) {
+            instance = std::move(*reusable); idle_.erase(reusable);
+            charged = instance->charged_bytes;
+            requested = charged;
+            admission_.idle_bytes -= charged;
+            instance->cpu.reset(seed);
+            instance->handle = next_handle_++;
+            instance->brightness = 1; instance->visible = instance->prepared = instance->backend_visible = true;
+            instance->stepped = instance->deferred = instance->updated = instance->was_rendered = instance->exhausted = false;
+            instance->accumulated = 0; instance->render_active.clear();
+            std::fill(instance->backend_empty.begin(), instance->backend_empty.end(), false);
+            std::fill(instance->backend_terminal.begin(), instance->backend_terminal.end(), false);
+            for (auto& stream : instance->streams) stream.clear();
+            for (auto& bucket : instance->particle_buckets) bucket.clear();
+        } else {
+            std::size_t vertices{};
+            if (mesh) {
+                bool surface{};
+                for (const auto& emitter : system->emitters)
+                    surface |= emitter.creator_id == 35 && emitter.mesh_mode == MeshSpawnMode::random_surface;
+                if (!validate_mesh_binding(*mesh, surface ? MeshSpawnMode::random_surface : MeshSpawnMode::random_vertex))
+                    return refuse(Refusal::definition_failure, "effect mesh binding is invalid");
+                for (const auto& submesh : mesh->geometry.submeshes) {
+                    if (submesh.vertices.size() > std::numeric_limits<std::size_t>::max() - vertices)
+                        return refuse(Refusal::arithmetic_failure, "effect vertex count overflows");
+                    vertices += submesh.vertices.size();
+                }
+            }
+            for (const auto& emitter : system->emitters) if (emitter.creator_id == 35 && !mesh)
+                return refuse(Refusal::definition_failure, "effect mesh emitter requires a binding");
+            const auto capacity = authored_capacity(*system, vertices);
+            if (!capacity) return refuse(capacity.error().message.find("overflow") != std::string::npos
+                ? Refusal::arithmetic_failure : Refusal::definition_failure, capacity.error().message.c_str());
+            auto plans = plan_system(*system);
+            for (const auto& plan : plans) if (!plan.drawable)
+                return refuse(Refusal::definition_failure, "effect has an unsupported render plan");
+            const auto payload = CpuSystem::planned_memory_bytes(*system, capacity.value().emitters);
+            if (!payload) return refuse(Refusal::arithmetic_failure, "effect CPU payload size overflows");
+            std::size_t wanted = payload.value();
+            const bool buckets = default_stream_bucketing.load(std::memory_order_relaxed) && plans.size() > 1;
+            for (std::size_t index = 0; index < plans.size(); ++index) {
+                const auto& plan = plans[index];
+                const auto width = (plan.triangles ? 3U : 4U) * sizeof(ParticleVertex)
+                    + (plan.triangles ? 3U : 6U) * sizeof(std::uint32_t)
+                    + ((plan.sort_particles || plan.legacy_slot_order) ? sizeof(const Particle*) : 0U)
+                    + (buckets ? sizeof(const Particle*) : 0U);
+                const auto count = capacity.value().emitters[index].reserved;
+                if (count > (std::numeric_limits<std::size_t>::max() - wanted) / width)
+                    return refuse(Refusal::arithmetic_failure, "effect stream payload size overflows");
+                wanted += count * width;
+            }
+            requested = wanted;
+            const auto reservation = reserve_payload(wanted);
+            if (reservation != ReservationOutcome::reserved) return refuse(
+                reservation == ReservationOutcome::budget_pressure ? Refusal::budget_pressure : Refusal::arithmetic_failure,
+                "effect payload reservation refused");
+            charged = wanted;
+            if (fail_stage == AdmissionStage::cpu) throw std::bad_alloc{};
+            instance = std::make_unique<Instance>(next_handle_++, *system, seed, capacity.value().total, std::move(mesh));
+            ++admission_.allocations;
+            std::size_t actual = instance->cpu.reserved_memory_bytes();
+            std::size_t reserved{};
+            for (const auto& entry : instance->cpu.emitter_capacities()) reserved += entry.reserved;
+            if (reserved != capacity.value().total)
+                return refuse(Refusal::definition_failure, "effect CPU layout does not support the authored reserves");
+            for (const auto& stream : instance->streams) actual += stream.vertices.capacity() * sizeof(ParticleVertex)
+                + stream.indices.capacity() * sizeof(std::uint32_t) + stream.sorted_particles.capacity() * sizeof(const Particle*);
+            for (const auto& bucket : instance->particle_buckets) actual += bucket.capacity() * sizeof(const Particle*);
+            if (actual < charged) budget_->release(ResourceKind::cpu_effect, charged - actual);
+            else if (actual > charged) {
+                const auto extra = reserve_payload(actual - charged);
+                if (extra != ReservationOutcome::reserved) return refuse(
+                    extra == ReservationOutcome::budget_pressure ? Refusal::budget_pressure : Refusal::arithmetic_failure,
+                    "effect actual CPU payload reservation refused");
+            }
+            charged = actual;
+            // Mesh frame state is binding-specific and never enters the reuse list.
+            if (!instance->cpu.emitter_capacities().empty()) {
+                for (const auto& emitter : system->emitters) if (emitter.creator_id == 35) { plans.clear(); break; }
+                if (!plans.empty()) instance->admitted_definition = system;
+            }
+            instance->charged_bytes = charged;
+            instance->resources.assign(instance->plans.size(), 0U);
+            instance->backend_empty.assign(instance->plans.size(), false);
+            instance->backend_terminal.assign(instance->plans.size(), false);
+            const auto layout = std::find_if(layout_telemetry_.begin(), layout_telemetry_.end(), [&](const auto& entry) {
+                return entry->definition == system && entry->capacities.size() == capacity.value().emitters.size()
+                    && std::equal(entry->capacities.begin(), entry->capacities.end(), capacity.value().emitters.begin(),
+                        [](const auto& a, const auto& b) { return a.native_requested == b.native_requested
+                            && a.requested == b.requested && a.reserved == b.reserved; });
+            });
+            if (layout != layout_telemetry_.end()) instance->telemetry = layout->get();
+            else {
+                auto entry = std::make_unique<LayoutTelemetry>();
+                entry->definition = system; entry->capacities = capacity.value().emitters;
+                entry->retired_dropped.resize(entry->capacities.size());
+                instance->telemetry = entry.get(); layout_telemetry_.push_back(std::move(entry));
+            }
+        }
+        static_cast<void>(instance->cpu.set_detail(detail_));
+        if (fail_stage == AdmissionStage::cpu) throw std::bad_alloc{};
+        stage = AdmissionStage::backend;
+        for (std::size_t index = 0; index < instance->plans.size(); ++index) {
+            if (fail_stage == AdmissionStage::backend && index + 1 == instance->plans.size()) throw std::bad_alloc{};
+            const auto resource = backend_->create_emitter(instance->plans[index]);
+            if (resource == 0) return refuse(Refusal::allocation_failed, "effect backend allocation failed");
+            instance->resources[index] = resource; ++live_resources_;
+        }
+        const auto handle = instance->handle;
+        stage = AdmissionStage::publication;
+        if (fail_stage == AdmissionStage::publication) throw std::bad_alloc{};
+        instances_.push_back(std::move(instance));
+        admission_.live_bytes += charged;
+        admission_.high_water_bytes = std::max(admission_.high_water_bytes, admission_.live_bytes + admission_.idle_bytes);
+        ++admission_.admitted; if (reused) ++admission_.reused;
+        admission_.requested_bytes += std::min(requested, std::numeric_limits<std::size_t>::max() - admission_.requested_bytes);
+        return {handle, Refusal::none, reused, requested, charged};
+    } catch (const std::bad_alloc&) {
+        return refuse(Refusal::allocation_failed, "effect allocation failed before atomic publication");
+    } catch (const std::length_error&) {
+        return refuse(Refusal::arithmetic_failure, "effect allocation length overflows");
+    }
 }
 
 // Handles only grow (spawn appends next_handle_++) and release erases in place, so instances_ is
@@ -270,6 +547,9 @@ core::Result<void> EffectRegistry::set_pinched_cylinder(const EffectHandle handl
     const float radius, const float height, const float fraction) {
     Instance* const instance = find(handle);
     if (!instance) return core::Result<void>::failure(unknown(handle));
+    // This changes the definition's shape; its original immutable reuse key is
+    // no longer compatible. Ordinary dynamic/frame controls are reset on reuse.
+    instance->admitted_definition.reset();
     return instance->cpu.set_pinched_cylinder(radius, height, fraction);
 }
 
@@ -656,6 +936,24 @@ core::Result<void> EffectRegistry::release(const EffectHandle handle) {
         backend_->destroy_emitter(resource);
         --live_resources_;
     }
+    auto& instance = **found;
+    if (instance.telemetry) {
+        ++instance.telemetry->released;
+        for (std::size_t index = 0; index < instance.telemetry->retired_dropped.size(); ++index) {
+            auto& total = instance.telemetry->retired_dropped[index];
+            total += std::min(instance.cpu.emitter_dropped(index), std::numeric_limits<std::size_t>::max() - total);
+        }
+    }
+    std::fill(instance.resources.begin(), instance.resources.end(), 0U);
+    if (instance.charged_bytes != 0 || instance.admitted_definition) {
+        admission_.live_bytes -= instance.charged_bytes;
+        if (instance.admitted_definition) {
+            admission_.idle_bytes += instance.charged_bytes;
+            idle_.push_back(std::move(*found));
+        } else {
+            budget_->release(ResourceKind::cpu_effect, instance.charged_bytes);
+        }
+    }
     instances_.erase(found);
     return core::Result<void>::success();
 }
@@ -691,6 +989,11 @@ std::size_t EffectRegistry::reserved_particles(const EffectHandle handle) const 
     std::size_t reserved{};
     for (const auto& capacity : instance->cpu.emitter_capacities()) reserved += capacity.reserved;
     return reserved;
+}
+
+std::span<const EmitterCapacity> EffectRegistry::emitter_capacities(const EffectHandle handle) const {
+    const auto* instance = find(handle);
+    return instance ? instance->cpu.emitter_capacities() : std::span<const EmitterCapacity>{};
 }
 
 std::size_t EffectRegistry::live_effects() const noexcept { return instances_.size(); }

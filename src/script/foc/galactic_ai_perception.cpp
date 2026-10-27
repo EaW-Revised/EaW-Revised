@@ -3,10 +3,12 @@
 
 #include <algorithm>
 #include <cassert>
+#include <atomic>
 #include <limits>
 
 namespace eawr::script::foc::ai {
 namespace {
+std::atomic<galactic_ai::PerceptionFailureObserver> failure_observer{};
 // Rows the simulation keeps in ascending id order: one binary search instead of a scan per target evaluation.
 template<class Rows, class Id, class Key>
 const auto* sorted_find(const Rows& rows, Id id, Key key) {
@@ -86,6 +88,7 @@ struct GalacticWorld::Evaluator final : LookupResolver {
     unsigned depth{};
     ReadMode mode{ReadMode::ordinary};
     std::optional<int> timeline;
+    std::string_view root_equation;
     Evaluator(const GalacticWorld& w, const Engine& e, const Context& c, unsigned nesting = 0, ReadMode selected = ReadMode::ordinary, std::optional<int> era = {})
         : world(w), engine(e), context(c), depth(nesting), mode(selected), timeline(era) {}
     std::optional<Real> resolve(const Lookup& lookup, const std::vector<Binding>& bindings) override {
@@ -115,9 +118,13 @@ struct GalacticWorld::Evaluator final : LookupResolver {
             random.set_seed(world.setup_.seed + (context.player + 1U) * 0x83U + 0x12345678U
                 + crc32(nested->name) + crc32(context.target ? context.target->name : "")); // PE-12
             Evaluator evaluator(world, engine, context, depth + 1, mode, timeline);
+            evaluator.root_equation = root_equation;
             return run(*nested, evaluator, random);
         }
-        return world.lookup(context, lookup, bindings, mode);
+        const auto value = world.lookup(context, lookup, bindings, mode);
+        if (!value) if (const auto observer = failure_observer.load(std::memory_order_relaxed))
+            observer(root_equation, context.player, context.target ? context.target->object : 0, lookup.tokens);
+        return value;
     }
 };
 
@@ -132,7 +139,7 @@ std::optional<Real> GalacticWorld::evaluate_with_timeline(const Engine& engine, 
     const auto context = goal_context(selected, target);
     AiRandom random; random.set_seed(setup_.seed + (owner + 1U) * 0x83U + 0x12345678U
         + crc32(equation->name) + crc32(target ? target->name : "")); // PE-12
-    Evaluator evaluator(*this, engine, context, 0, ReadMode::read_only, value);
+    Evaluator evaluator(*this, engine, context, 0, ReadMode::read_only, value); evaluator.root_equation = equation->name;
     return run(*equation, evaluator, random);
 }
 
@@ -142,7 +149,8 @@ std::optional<Real> GalacticWorld::perception(const Engine& engine, const Equati
     const auto reads = sequential_reads();
     const Engine::BuildBudgetReads budgets(engine, context.player);
     if (!bound().snapshot_ || !player(context.player) || !refresh_economy_runtime()) return {};
-    Evaluator evaluator(*this, engine, context); return run(equation, evaluator, random);
+    Evaluator evaluator(*this, engine, context); evaluator.root_equation = equation.name;
+    return run(equation, evaluator, random);
 }
 
 std::optional<Real> GalacticWorld::ReadBatch::perception(const Engine& engine, const Equation& equation,
@@ -150,7 +158,8 @@ std::optional<Real> GalacticWorld::ReadBatch::perception(const Engine& engine, c
     if (context.player != owner_) return world_.perception(engine, equation, context, random);
     gc_profile::Scope profile_scope(gc_profile::Phase::perception);
     if (!ready_) return {};
-    Evaluator evaluator(world_, engine, context); return run(equation, evaluator, random);
+    Evaluator evaluator(world_, engine, context); evaluator.root_equation = equation.name;
+    return run(equation, evaluator, random);
 }
 
 std::optional<Real> GalacticWorld::perception_read_only(const Engine& engine, const Equation& equation,
@@ -159,7 +168,8 @@ std::optional<Real> GalacticWorld::perception_read_only(const Engine& engine, co
     const auto reads = sequential_reads();
     const Engine::BuildBudgetReads budgets(engine, context.player);
     if (!bound().snapshot_ || !player(context.player) || !refresh_economy_runtime()) return {};
-    Evaluator evaluator(*this, engine, context, 0, ReadMode::read_only); return run(equation, evaluator, random);
+    Evaluator evaluator(*this, engine, context, 0, ReadMode::read_only); evaluator.root_equation = equation.name;
+    return run(equation, evaluator, random);
 }
 
 std::optional<Real> GalacticWorld::reconstruction_enemy_space(const DerivedExecutionRestore&, const Context& context) const {
@@ -653,6 +663,27 @@ std::optional<Real> GalacticWorld::uncached(const GalacticQueryKey& key, ReadMod
     }
     if (root != "VARIABLE_TARGET") return {};
     const auto* row = planet(key.planet); if (!row) return {};
+    if (token == "FRIENDLYINTERNALCONNECTIVITY" || token == "FRIENDLYEXTERNALCONNECTIVITY"
+        || token == "ENEMYINTERNALCONNECTIVITY" || token == "ENEMYEXTERNALCONNECTIVITY") {
+        // WGA-492: missing vertex is successful zero; missing publication is unavailable.
+        const auto coefficient = [&](tactical::PlayerId owner, std::size_t graph) -> std::optional<Real> {
+            const auto publication = path_coefficients_.find(owner);
+            if (publication == path_coefficients_.end()) return {};
+            const auto& values = publication->second.values[graph];
+            const auto found = values.find(key.planet);
+            return found == values.end() ? Real{} : found->second;
+        };
+        const bool enemy = token == "ENEMYINTERNALCONNECTIVITY" || token == "ENEMYEXTERNALCONNECTIVITY";
+        if (!enemy) return coefficient(key.player, token == "FRIENDLYINTERNALCONNECTIVITY" ? 0 : 1);
+        // WGA-494: each equation lookup seeds its own output with positive zero before native dispatch.
+        Real maximum{};
+        for (const auto& owner : setup_.players) if (!allied(key.player, owner.player)) {
+            const auto value = coefficient(owner.player, token == "ENEMYEXTERNALCONNECTIVITY" ? 1 : 0);
+            if (!value) return {};
+            maximum = std::max(maximum, *value);
+        }
+        return maximum;
+    }
     if (token == "MARKUP") return markup_->value({key.player, false, key.planet}); // WGA-461.
     const auto& production = row->production;
     if (token == "TARGETPLAYERID") {
@@ -942,6 +973,10 @@ core::Result<void> GalacticWorld::restore(GalacticPerceptionState state) {
         if (!hint_keys.emplace(row.player, row.planet, row.name).second)
             return core::Result<void>::failure(detail::make_error(authoritative::codes::invalid_request, "duplicate galactic hint identity"));
     }
+    // WGA-493: reconstruct derived coefficients from completed owners, as at fresh initialization.
+    // No archive fields or stock bytes are added; the runtime cadence seam remains unqualified (#4786).
+    const sim::InlineExecutor coefficient_executor;
+    if (auto rebuilt = publish_path_coefficients(coefficient_executor, true); !rebuilt) return rebuilt;
     const auto lock = query_lock(); mark_state_changed(); ++bound().movement_input_revision_;
     for (auto& [who, owner] : shards_) {
         static_cast<void>(who);
@@ -1024,3 +1059,9 @@ void GalacticWorld::visibility_changed(tactical::PlayerId owner, galactic::Plane
     update_record(owner, 2, static_cast<std::size_t>(retained - mine.visibility.data()));
 }
 } // namespace eawr::script::foc::ai
+
+namespace eawr::script::foc::galactic_ai {
+void observe_perception_failures(PerceptionFailureObserver observer) noexcept {
+    ai::failure_observer.store(observer, std::memory_order_relaxed);
+}
+}

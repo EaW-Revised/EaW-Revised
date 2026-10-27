@@ -4,6 +4,7 @@
 #include "eawr/sim/tactical/session.hpp"
 #include "eawr/net/lobby_session.hpp"
 #include "eawr/net/setup.hpp"
+#include "../skirmish/setup_map_golden.hpp"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -25,7 +26,76 @@ namespace sim = eawr::sim;
 namespace tactical = sim::tactical;
 
 namespace viewer_lan_test {
+namespace {
+void playable_station_candidates() {
+    stage = "loaded playable station candidates in authoritative LAN staging";
+    const auto directory = std::filesystem::temp_directory_path()
+        / ("eawr-lan-candidates-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    setup_map_golden::write_playable_candidate_corpus(directory);
+    const eawr::vfs::MountSpec mount{.layer_id = "lan-candidates", .data_root = directory,
+        .loose_logical_prefix = "data", .active_archives = {}};
+    auto filesystem = require(eawr::vfs::Vfs::mount(std::span(&mount, 1)));
+    auto loaded = require(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
+    auto maps = require(eawr::skirmish::setup_maps(filesystem, loaded.catalog));
+    expect(maps.size() == 1 && maps.front().unavailable.empty(), "LAN loads the authored station candidate map");
+    for (auto& team : maps.front().teams) {
+        expect(team.factions == std::vector<std::string>{"Rebel", "Empire", "Additional_Fleet"},
+            "LAN receives only canonical playable station candidates");
+        // Exercise the LAN guard independently of the loader's canonical spelling.
+        team.factions.front() = "rEbEl";
+    }
+    auto initial = human_setup(2);
+    eawr::skirmish::FixtureOptions selected;
+    selected.map = maps.front().path; selected.match = initial.skirmish->match;
+    selected.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 0, true, {}, 0}, {2, "Empire", 1, true, {}, 1}};
+    const viewer::LanLobbyBuilder builder = [initial](const auto& options) mutable {
+        auto built = initial;
+        built.skirmish->map = *options.map;
+        built.skirmish->slots.clear();
+        for (const auto& slot : *options.slots) {
+            built.skirmish->slots.push_back({slot.slot, slot.human, slot.colour_index, slot.fleet, slot.difficulty});
+            built.players[slot.slot - 1].faction_id = eawr::skirmish::faction_id(slot.faction);
+            built.players[slot.slot - 1].team_id = slot.team;
+        }
+        return eawr::core::Result<tactical::TacticalSetup>::success(std::move(built));
+    };
+    auto host = make_match(), guest = make_match();
+    for (const auto& match : {host, guest}) {
+        match->configure_factions({"Rebel", "Empire", "Additional_Fleet", "Pirates"});
+        match->configure_lobby(match == host ? "Candidate host" : "Candidate guest", match == host ? 0U : 1U, maps, builder);
+    }
+    host->host(0); host->pump_setup(selected);
+    expect(host->lobby_state().has_value(), "LAN host accepts mixed-case station support");
+    guest->join("127.0.0.1:" + std::to_string(host->view().port));
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    while (!guest->lobby_state() || !host->lobby_state() || host->lobby_state()->snapshot.seats.size() != 2
+        || guest->lobby_state()->snapshot != host->lobby_state()->snapshot) {
+        expect(std::chrono::steady_clock::now() < deadline, "playable station candidate LAN admission deadline");
+        host->pump_setup(selected); guest->pump_setup({});
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto guest_seat = host->lobby_state()->snapshot.seats.back();
+    guest_seat.selection.faction = "Rebel";
+    expect(host->lobby_assign(guest_seat.peer, guest_seat.selection),
+        "authoritative LAN validation accepts canonical faction against mixed-case station support");
+    for (const auto* invalid : {"Pirates", "Not_A_Faction"}) {
+        const auto before = host->lobby_state()->snapshot;
+        guest_seat.selection.faction = invalid;
+        expect(!host->lobby_assign(guest_seat.peer, guest_seat.selection),
+            "a peer faction string cannot admit non-playable or non-faction station affiliations");
+        const auto rejected = host->lobby_state();
+        expect(rejected && rejected->snapshot == before && rejected->notice
+            && rejected->notice->message.find("Project limit:") != std::string::npos
+            && rejected->notice->message.find(invalid) != std::string::npos,
+            "LAN retains the roster and names the project-limit refusal");
+    }
+    guest->cancel(); host->cancel();
+    std::filesystem::remove_all(directory);
+}
+}
+
 void capacity_does_not_create_players() {
+    playable_station_candidates();
     stage = "three owners on a two-row loaded map";
     auto initial = setup();
     eawr::skirmish::FixtureOptions selected;
@@ -378,6 +448,8 @@ void ai_difficulty_two_peers() {
         };
         wait(synced);
         require(viewer::select_lan_ai_level(selection, map, 3, 8, item));
+        const auto chosen_credits = item == 3 ? selection.match->credits : units(item == 2 ? 2750 : 11750);
+        selection.match->credits = chosen_credits;
         auto edited = require(viewer::validated_lan_options(selection, std::span<const eawr::skirmish::SetupMap>(&map, 1)));
         edited.seed = current.seed;
         const auto before = host->lobby_state()->snapshot;
@@ -387,6 +459,8 @@ void ai_difficulty_two_peers() {
         wait([&] { return synced() && guest->offered_setup() && guest->offered_setup()->slots->back().difficulty == level; });
         expect(require(viewer::decode_lan_lobby_game(guest->lobby_state()->snapshot)).slots->back().difficulty == level,
             "guest reads the authoritative AI level from the snapshot");
+        expect(require(viewer::decode_lan_lobby_game(guest->lobby_state()->snapshot)).match->credits == chosen_credits,
+            "WSS-52: guest sees the host's selected credits before Ready");
         expect(host->lobby_ready(true) && guest->lobby_ready(true), "both humans ready the selected AI level");
         wait([&] { return host->view().start_enabled; });
         host->start(current);
@@ -396,9 +470,13 @@ void ai_difficulty_two_peers() {
         std::vector<sim::MatchIdentity> digests;
         for (const auto& match : {host, guest}) {
             const auto start = match->take_start();
-            expect(start && start->slots->back().difficulty == level, "each peer starts with the chosen level");
+            expect(start && start->slots->back().difficulty == level && start->match->credits == chosen_credits,
+                "each peer starts with the chosen level and credits");
             const auto built = require(builder(*start));
             expect(built.skirmish->slots.back().difficulty == level, "production preparation preserves the level in the agreed setup");
+            const auto replay = require(tactical::parse_replay(require(tactical::write_replay({built, 30, {}}))));
+            expect(replay.setup.skirmish->match.credits == chosen_credits,
+                "WSS-52: both peers' authenticated setup and replay header retain selected cash");
             encoded.push_back(require(net::encode_skirmish_setup(built)));
             digests.push_back(*built.match_identity);
         }

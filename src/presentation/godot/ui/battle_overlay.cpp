@@ -181,6 +181,11 @@ void EawrBattleOverlay::layout_countdown() {
     countdown_text_.draw(*this, style, countdown_, countdown_rect_, HORIZONTAL_ALIGNMENT_LEFT, false, false, size.y / 720.0F, 1.0F);
 }
 
+void EawrBattleOverlay::set_pause_notice(const String& text) {
+    if (pause_notice_ == text) return;
+    pause_notice_ = text; relayout(); queue_redraw();
+}
+
 void EawrBattleOverlay::show_paused(const bool paused) {
     if (paused_ == paused) return;
     paused_ = paused;
@@ -424,7 +429,7 @@ void EawrBattleOverlay::relayout() {
         rendering->canvas_item_add_triangle_array(item, indices, points, colours, uvs, PackedInt32Array(),
             PackedFloat32Array(), mesh.texture->get_rid());
     }
-    const String& banner_caption = ready_ ? style_.loading_title : style_.paused_text;
+    const String& banner_caption = ready_ ? style_.loading_title : (pause_notice_.is_empty() ? style_.paused_text : pause_notice_);
     const String& button_caption = ready_ ? style_.begin_text : style_.resume_text;
     if (banner) {
         const KitTextStyle style = text_style(style_.banner, style_.paused, banner_pixels);
@@ -609,7 +614,7 @@ std::string EawrBattleOverlay::report_json() const {
            << ", \"quit_visible\": " << (quit_ && quit_->is_visible() ? "true" : "false")
            << ", \"authored_pause_shell\": " << (!style_.pause_meshes.empty() && style_.pause_text && style_.pause_button ? "true" : "false")
            << ", \"resume_rect\": " << rect_json(Rect2(resume_->get_position(), resume_->get_size()))
-           << ", \"paused_banner\": " << (paused_ && !ended_ ? "{\"text\": " + json(utf8(style_.paused_text))
+           << ", \"paused_banner\": " << (paused_ && !ended_ ? "{\"text\": " + json(utf8(pause_notice_.is_empty() ? style_.paused_text : pause_notice_))
                                                                  + ", \"rect\": " + rect_json(banner_rect_) + "}"
                                                            : std::string("null"))
            << ", \"end_panel\": ";

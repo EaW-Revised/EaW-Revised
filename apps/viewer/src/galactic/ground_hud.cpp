@@ -331,6 +331,7 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
             static_cast<void>(map_input.begin_box({point.x,point.y}, found->second.allied, ground_hud.pressed != 0 || over_pad));
     } else if (kind == 1) {
         map_input.move_box({point.x,point.y});
+        if (ground_hud.pressed_object && map_input.box_end) fleet_drag_hover(point);
         // WGP-184: the held company has left its rest point (GUI_Drag_Fleet, once per press).
         if (ground_hud.pressed_object && map_input.box_end && !ground_hud.drag_sound) {
             if (audio) audio->ui_sound("GUI_Drag_Fleet");
@@ -383,7 +384,13 @@ void GalacticMode::State::ground_pointer(int kind, Vector2 point, bool control, 
             }
         }
         ground_hud.pressed = 0; ground_hud.pressed_object = 0; ground_hud.double_release = false;
+        fleet_drag_hover(point);
     }
+    // Pad drags change world orbit targets without changing the camera/publication.
+    // Re-place this planet on input transitions, including the release that restores the fade.
+    hud_label_key.reset();
+    if (const auto label = planet_label_records.find(selected_planet); label != planet_label_records.end())
+        label->second.placed = false;
     for (const auto& widget : ground_hud.widgets) {
         const auto name = "Pad_" + (widget.id < 10 ? std::string("0") : std::string{}) + std::to_string(widget.id);
         if (const auto button = ground_hud.buttons.find(name); button != ground_hud.buttons.end())
@@ -430,14 +437,15 @@ GalacticMode::State::ground_roster_find(galactic_view::ObjectId planet) const {
 bool GalacticMode::State::request_ground_land(bool submit, galactic_view::ObjectId id) {
     if (!id) id = selected_fleet;
     if (!selectable(*this) || !game || !galaxy || !published_snapshot || !id
-        || published_snapshot->clock().pause_depth || !selected_planet) return false;
+        || !pause_allows(presentation::GalacticPausedAction::surface_deploy) || !selected_planet) return false;
     const auto* found = command_roster(selected_planet);
     if (!found || !found->accessible) return false;
     const auto fleets = published_snapshot->fleets();
     const auto fleet = std::find_if(fleets.begin(), fleets.end(), [this,id](const auto& row) {
         return row.id == id && row.owner == galaxy->local.player && row.orbit == selected_planet && !row.motion.transit;
     });
-    if (fleet == fleets.end()) return false;
+    if (fleet == fleets.end()
+        || !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id)) return false;
     if (!submit) return true;
     const auto planets = input_planets();
     const auto command = map_input.command({galactic_view::DropKind::land, id, 0, selected_planet, {}}, planets);
@@ -454,8 +462,8 @@ bool GalacticMode::State::request_ground_land(bool submit, galactic_view::Object
 // press already crossed. A release elsewhere keeps the ordinary rectangle selection.
 bool GalacticMode::State::ground_launch_drop(Vector2 point) {
     if (!ground_hud.pressed || !ground_hud.pressed_object || !map_input.box_end || !selectable(*this) || !game || !galaxy
-        || !published_snapshot || !fleet_organize || !fleet_organize->is_visible_in_tree() || !selected_planet
-        || published_snapshot->clock().pause_depth) return false;
+        || !published_snapshot || !fleet_organize || !selected_planet
+        || !pause_allows(presentation::GalacticPausedAction::surface_deploy)) return false;
     const auto* roster = command_roster(selected_planet);
     if (!roster || !roster->accessible || !roster->allied) return false;
     for (const auto& [name, button] : ground_hud.buttons)
@@ -463,7 +471,7 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
     galactic_view::ObjectId target{};
     std::uint8_t slot{};
     bool over_target{};
-    for (std::size_t index = 0; index < fleet_drop_rects.size() && !over_target; ++index) {
+    for (std::size_t index = 0; index < fleet_drop_rects.size() && fleet_organize->is_visible_in_tree() && !over_target; ++index) {
         if (!fleet_drop_rects[index].has_point(point)) continue;
         over_target = true;
         const auto* card = shown_panel_cards[index];
@@ -476,10 +484,36 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
         if (live == fleets.end()) return false;
         target = *card->fleet;
     }
+    if (!over_target) {
+        // World orbit icons are drop targets even while their organize panel is closed.
+        for (const auto* shell : {command_bar, fleet_organize, advanced_map_shell})
+            if (shell && shell->is_visible_in_tree() && shell->hit(point.x, point.y)) return false;
+        for (const auto& [key, badge] : fleet_badges) {
+            if (!badge.shown || !badge.button->is_visible_in_tree()
+                || !badge.button->get_global_rect().has_point(point)) continue;
+            const auto resolved = galactic_view::surface_orbit_target(*published_snapshot, galaxy->local.player,
+                selected_planet, key.first, badge.owner, badge.fleet.value_or(0), stack_icon_slot(key.first, key.second));
+            if (resolved && resolved->world_destination) continue;
+            if (badge.ground_planet || !resolved) return false;
+            target = resolved->fleet; slot = resolved->slot; over_target = true;
+            break;
+        }
+        for (std::size_t icon = 0; icon < fleet_empty_slots.size() && !over_target; ++icon) {
+            if (!fleet_empty_shown[icon] || !fleet_empty_slots[icon]->is_visible_in_tree()
+                || !fleet_empty_slots[icon]->get_global_rect().has_point(point)) continue;
+            const auto resolved = galactic_view::surface_orbit_target(*published_snapshot, galaxy->local.player,
+                selected_planet, fleet_drag_planet, galaxy->local.player, 0,
+                stack_icon_slot(fleet_drag_planet, static_cast<std::uint8_t>(icon)));
+            if (resolved && resolved->world_destination) continue;
+            if (!resolved) return false;
+            slot = resolved->slot; over_target = true;
+        }
+    }
     // WGM-199: releasing a surface unit on another planet launches then moves.
     // HUD surfaces consume their own drops; only a picked world planet enters here.
     std::vector<sim::galactic::PlanetId> path;
     if (!over_target) {
+        if (!pause_allows(presentation::GalacticPausedAction::fleet_move)) return false;
         for (const auto* shell : {command_bar, fleet_organize, advanced_map_shell})
             if (shell && shell->is_visible_in_tree() && shell->hit(point.x, point.y)) return false;
         const auto* destination = picked_planet(point.x, point.y);
@@ -512,6 +546,7 @@ bool GalacticMode::State::ground_launch_drop(Vector2 point) {
     ++submitted_orders; ++ground_hud.launch_orders;
     ground_hud.last_launch_units = units; ground_hud.last_launch_target = target; ground_hud.last_launch_slot = slot;
     ground_hud.last_launch_path = intent.path;
+    ground_hud.last_launch_land = false;
     map_input.multiselection.clear();
     return true;
 }
@@ -721,7 +756,8 @@ void GalacticMode::State::write_ground_report(std::ostream& output) const {
     output << ",\"rect\":[" << sale_rect.position.x << ',' << sale_rect.position.y << ',' << sale_rect.size.x << ',' << sale_rect.size.y << "]}"
         << ",\"boxes\":" << ground_hud.boxes << ",\"land_orders\":" << ground_hud.land_orders
         << ",\"launch_orders\":" << ground_hud.launch_orders << ",\"reorders\":" << ground_hud.reorders
-        << ",\"launch\":{\"command\":" << json(ground_hud.last_launch_path.empty() ? "launch_from_surface opcode 18" : "launch_fleet opcode 22")
+        << ",\"launch\":{\"command\":" << json(ground_hud.last_launch_land ? "transfer_surface opcode 25"
+            : ground_hud.last_launch_path.empty() ? "launch_from_surface opcode 18" : "launch_fleet opcode 22")
         << ",\"target\":" << ground_hud.last_launch_target << ",\"slot\":" << static_cast<unsigned>(ground_hud.last_launch_slot)
         << ",\"units\":[";
     for (std::size_t i = 0; i < ground_hud.last_launch_units.size(); ++i)

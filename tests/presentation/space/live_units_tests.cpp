@@ -1,10 +1,10 @@
 // #80 part A: where the viewer draws a live session's units between two published ticks
-// (presentation::space::interpolate_units). Synthetic snapshots only.
+// (presentation::live::interpolate_units). Synthetic snapshots only.
 
 #include "../../support/check.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/particles/render.hpp"
 
 #include <algorithm>
@@ -25,6 +25,7 @@
 namespace {
 
 namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 namespace tactical = eawr::sim::tactical;
 namespace math = eawr::sim::math;
 
@@ -80,7 +81,7 @@ void test_interpolation() {
         {2, 100, 2, 2, pose(60.0, 0.0, 0.0), 0b10, {}, {}},
         {4, 100, 1, 1, pose(5.0, 5.0, 90.0), 0b01, {}, {}},
     });
-    const auto half = space::interpolate_units(previous, latest, 0.5, 1);
+    const auto half = live::interpolate_units(previous, latest, 0.5, 1);
     expect(half.size() == 2, "player 1 draws its own units and not the enemy it no longer sees");
     if (half.size() == 2) {
         expect(half[0].entity == 1 && near(half[0].position[0], 5.0) && near(half[0].position[1], -10.0),
@@ -90,14 +91,14 @@ void test_interpolation() {
                "a new unit stands at its latest pose");
         expect(half[0].instance == &latest.instances()[0], "the pose points at the newer instance");
     }
-    const auto enemy = space::interpolate_units(previous, latest, 0.25, 2);
+    const auto enemy = live::interpolate_units(previous, latest, 0.25, 2);
     expect(enemy.size() == 1 && enemy[0].entity == 2 && near(enemy[0].position[0], 52.5),
            "player 2 sees only its own unit");
-    const auto clamped = space::interpolate_units(previous, latest, 7.0, 1);
+    const auto clamped = live::interpolate_units(previous, latest, 7.0, 1);
     expect(!clamped.empty() && near(clamped[0].position[0], 10.0), "alpha above 1 holds the latest pose");
-    expect(space::interpolate_units(previous, latest, 0.5, 9).empty(), "an unknown player sees nothing");
-    expect(near(space::instance_yaw_degrees(pose(0.0, 0.0, -90.0)), -90.0), "yaw is read from the forward column");
-    expect(near(space::instance_yaw_degrees(pose(0.0, 0.0, 180.0)), 180.0), "yaw 180 stays in (-180, 180]");
+    expect(live::interpolate_units(previous, latest, 0.5, 9).empty(), "an unknown player sees nothing");
+    expect(near(live::instance_yaw_degrees(pose(0.0, 0.0, -90.0)), -90.0), "yaw is read from the forward column");
+    expect(near(live::instance_yaw_degrees(pose(0.0, 0.0, 180.0)), 180.0), "yaw 180 stays in (-180, 180]");
     expect(!half.empty() && near(half[0].roll_degrees, 0.0), "a level unit draws no roll");
 }
 
@@ -105,20 +106,20 @@ void test_map_prop_fog_visibility() {
     const std::string idle{"SPACE_OBSTACLE, IDLE, UNIT_AI"};
     const std::string hidden{"HIDE_WHEN_FOGGED"};
     const std::string team{"team"};
-    expect(!space::map_prop_fog_bound(idle, {}) && !space::map_prop_fog_bound({}, {}),
+    expect(!live::map_prop_fog_bound(idle, {}) && !live::map_prop_fog_bound({}, {}),
            "FW-24: asteroid and behavior-free props are not fog-bound");
-    expect(space::map_prop_fog_bound(hidden, {}) && space::map_prop_fog_bound({}, hidden)
-        && space::map_prop_fog_bound(team, idle), "FW-24: either behavior list can bind a prop to fog");
-    expect(space::map_prop_fog_bound(" IDLE, hide_when_fogged\tUNIT_AI ", {})
-        && !space::map_prop_fog_bound("TEAM_LOCOMOTOR, NOT_HIDE_WHEN_FOGGED", {}),
+    expect(live::map_prop_fog_bound(hidden, {}) && live::map_prop_fog_bound({}, hidden)
+        && live::map_prop_fog_bound(team, idle), "FW-24: either behavior list can bind a prop to fog");
+    expect(live::map_prop_fog_bound(" IDLE, hide_when_fogged\tUNIT_AI ", {})
+        && !live::map_prop_fog_bound("TEAM_LOCOMOTOR, NOT_HIDE_WHEN_FOGGED", {}),
         "FW-24: comma/whitespace lists match whole behavior tokens without substring admission");
     // Geonosis places SpaceUnit derelicts with neither behavior list declared.
-    expect(!space::map_prop_fog_bound({}, {}),
+    expect(!live::map_prop_fog_bound({}, {}),
            "FW-24: behavior-free placed derelicts remain unfogged regardless of XML type");
 
     const std::vector<eawr::sim::EntityId> visible{2, 6}, alive{1, 2, 4, 6}, props{1, 2, 3, 4, 7};
     std::vector<eawr::sim::EntityId> drawn;
-    space::map_prop_draw_visibility(visible, alive, props, drawn);
+    live::map_prop_draw_visibility(visible, alive, props, drawn);
     expect(drawn == std::vector<eawr::sim::EntityId>{1, 2, 4, 6},
            "unfogged props merge in ID order once, excluding destroyed owners");
     expect(visible == std::vector<eawr::sim::EntityId>{2, 6}, "drawing preserves sensor contacts");
@@ -132,16 +133,16 @@ void test_map_prop_fog_visibility() {
         {2, 200, 2, 2, pose(60, 0, 0), 0b10, {}, {}},
     });
     const std::vector<eawr::sim::EntityId> prop{1}, living{1, 2};
-    space::map_prop_draw_visibility({}, living, prop, drawn);
-    std::vector<space::LiveUnitPose> poses;
-    expect(space::interpolate_visible_units(previous, latest, 0.5, drawn, false, {}, poses)
+    live::map_prop_draw_visibility({}, living, prop, drawn);
+    std::vector<live::LiveUnitPose> poses;
+    expect(live::interpolate_visible_units(previous, latest, 0.5, drawn, false, {}, poses)
         && poses.size() == 1 && poses.front().entity == 1 && near(poses.front().position[0], 5),
         "a fogged prop keeps its true interpolated pose while an unseen enemy remains hidden");
-    space::UnitFade fade;
+    live::UnitFade fade;
     fade.advance(drawn, living, 1);
     expect(fade.opacity(1).value_or(0) == 1 && !fade.opacity(2),
            "the prop remains fully opaque from its first frame without revealing an enemy");
-    const auto historical = space::interpolate_units(previous, latest, 0.5, 1, false, prop);
+    const auto historical = live::interpolate_units(previous, latest, 0.5, 1, false, prop);
     expect(historical.size() == 1 && historical.front().entity == 1,
            "emitter catch-up samples retain the same unfogged owner");
     expect(latest.visible_entities(1).empty(), "map-prop drawing never changes snapshot visibility");
@@ -149,11 +150,11 @@ void test_map_prop_fog_visibility() {
 
 // #351: the bank roll is read from the transform and eases between ticks like the position.
 void test_roll() {
-    expect(near(space::instance_roll_degrees(banked(40.0, -12.0)), -12.0), "roll is read about the forward axis");
-    expect(near(space::instance_yaw_degrees(banked(40.0, -12.0)), 40.0), "a roll leaves the yaw");
+    expect(near(live::instance_roll_degrees(banked(40.0, -12.0)), -12.0), "roll is read about the forward axis");
+    expect(near(live::instance_yaw_degrees(banked(40.0, -12.0)), 40.0), "a roll leaves the yaw");
     const auto previous = snapshot(10, {{1, 100, 1, 1, banked(40.0, -4.0), 0b01, {}, {}}});
     const auto latest = snapshot(11, {{1, 100, 1, 1, banked(41.0, -6.0), 0b01, {}, {}}});
-    const auto poses = space::interpolate_units(previous, latest, 0.25, 1);
+    const auto poses = live::interpolate_units(previous, latest, 0.25, 1);
     expect(poses.size() == 1 && near(poses[0].roll_degrees, -4.5) && near(poses[0].yaw_degrees, 40.25),
            "roll and yaw ease a quarter of the way");
 }
@@ -170,14 +171,14 @@ void test_fading_entities() {
         {2, 100, 2, 2, pose(10.0, 0.0, 0.0), 0b00, {}, {}},
     });
     const std::vector<eawr::sim::EntityId> fading{2};
-    const auto poses = space::interpolate_units(previous, latest, 0.5, 1, false, fading);
+    const auto poses = live::interpolate_units(previous, latest, 0.5, 1, false, fading);
     expect(poses.size() == 2, "a fading entity outside visible_entities is drawn alongside it");
     if (poses.size() == 2) {
         expect(poses[1].entity == 2 && near(poses[1].position[0], 5.0),
                "the fading entity still eases its true position between ticks");
     }
     const std::vector<eawr::sim::EntityId> fading_own{1};
-    expect(space::interpolate_units(previous, latest, 0.5, 1, false, fading_own).size() == 1,
+    expect(live::interpolate_units(previous, latest, 0.5, 1, false, fading_own).size() == 1,
            "an entity already visible is not drawn twice when it is also listed as fading");
 }
 
@@ -193,9 +194,9 @@ void test_reveal() {
         {2, 100, 2, 2, pose(60.0, 0.0, 0.0), 0b10, {}, {}},
         {4, 100, 1, 1, pose(5.0, 5.0, 90.0), 0b01, {}, {}},
     });
-    const auto hidden = space::interpolate_units(previous, latest, 0.5, 2);
+    const auto hidden = live::interpolate_units(previous, latest, 0.5, 2);
     expect(hidden.size() == 1 && hidden[0].entity == 2, "without reveal player 2 sees only its own unit");
-    const auto revealed = space::interpolate_units(previous, latest, 0.5, 2, true);
+    const auto revealed = live::interpolate_units(previous, latest, 0.5, 2, true);
     expect(revealed.size() == 3, "reveal draws every instance of the latest snapshot");
     if (revealed.size() == 3) {
         expect(revealed[0].entity == 1 && revealed[1].entity == 2 && revealed[2].entity == 4,
@@ -203,7 +204,7 @@ void test_reveal() {
         expect(near(revealed[0].position[0], 5.0) && near(revealed[0].position[1], -10.0),
                "a revealed unit still interpolates between its two ticks");
     }
-    expect(space::interpolate_units(previous, latest, 0.5, 9, true).size() == 3,
+    expect(live::interpolate_units(previous, latest, 0.5, 9, true).size() == 3,
            "reveal draws every instance even for a viewer the snapshot never names");
 }
 
@@ -242,7 +243,7 @@ void test_reveal() {
 void test_spinning() {
     const auto died = spinning(10, {{5, 100, 1, 1, craft(0.0, 0.0, 30.0, 0.0), 0b01, {}, {}}}, {});
     const auto first = spinning(11, {}, {spin(10.0, 30.0, 20.0)});
-    const auto half = space::interpolate_spinning(died, first, 0.5, 1);
+    const auto half = live::interpolate_spinning(died, first, 0.5, 1);
     expect(half.size() == 1, "the owner sees its spinning craft");
     if (half.size() == 1) {
         expect(half[0].spinning && half[0].instance == nullptr, "a spinning craft is no instance");
@@ -250,10 +251,10 @@ void test_spinning() {
         expect(near(half[0].pitch_degrees, 30.0) && near(half[0].roll_degrees, 10.0) && near(half[0].yaw_degrees, 0.0),
                "it keeps the live craft's pitch and rolls half way");
     }
-    expect(space::interpolate_spinning(died, first, 0.5, 2).empty(), "the enemy does not see it");
-    expect(space::interpolate_spinning(died, first, 0.5, 2, true).size() == 1, "reveal draws it for the enemy too");
+    expect(live::interpolate_spinning(died, first, 0.5, 2).empty(), "the enemy does not see it");
+    expect(live::interpolate_spinning(died, first, 0.5, 2, true).size() == 1, "reveal draws it for the enemy too");
     const auto second = spinning(12, {}, {spin(20.0, 30.0, 40.0)});
-    const auto quarter = space::interpolate_spinning(first, second, 0.25, 1);
+    const auto quarter = live::interpolate_spinning(first, second, 0.25, 1);
     expect(quarter.size() == 1 && near(quarter[0].position[0], 12.5) && near(quarter[0].roll_degrees, 25.0)
                && near(quarter[0].pitch_degrees, 30.0),
            "between two spin poses it rolls a quarter of the way");
@@ -396,8 +397,8 @@ void test_pose_worker_budget() {
     const auto canonical = latest.canonical_bytes();
     for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
         PoseExecutor executor(workers);
-        std::vector<space::LiveUnitPose> poses;
-        expect(space::interpolate_visible_units(previous, latest, .5, {}, true, {}, poses, &executor),
+        std::vector<live::LiveUnitPose> poses;
+        expect(live::interpolate_visible_units(previous, latest, .5, {}, true, {}, poses, &executor),
                "pose executor completed");
         expect(executor.runs == 1 && executor.tasks == 512 && poses.size() == 512,
                "each shown unit is exactly one disjoint pose task at every worker count");
@@ -408,7 +409,7 @@ void test_pose_worker_budget() {
         }
         const auto* buffer = poses.data();
         const std::vector<eawr::sim::EntityId> visible{1};
-        expect(space::interpolate_visible_units(previous, latest, 1, visible, false, {}, poses, &executor)
+        expect(live::interpolate_visible_units(previous, latest, 1, visible, false, {}, poses, &executor)
                && poses.size() == 1 && poses.data() == buffer && poses[0].position[0] == 10.0,
                "smaller frames reuse storage without leaving stale poses");
         expect(executor.runs == 1, "a small frame stays inline without waking the pool");

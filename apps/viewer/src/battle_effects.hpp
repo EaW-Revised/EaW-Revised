@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "presentation_constants.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -10,8 +12,8 @@
 
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
-#include "eawr/presentation/space/projectiles.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/projectiles.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/selection.hpp"
 #include "eawr/presentation/space/shield_hits.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -46,8 +48,8 @@ namespace eawr::presentation::godot_backend {
 //   per texture as additive quads/triangles through the particle backend (PrimAdditive), with
 //   FoC's camera-facing geometry (BP-02 to BP-09).
 // - Projectiles whose type draws its Space_Model_Name (BP-01; the concussion missile) are drawn
-//   as that model (#456, BP-60 to BP-62): each flies on a placed ship of a fixed pool per
-//   projectile type, set up before the population is composed, posed along the projectile's
+//   as that model (BP-60 to BP-62): each flies on a reusable placed ship grown from visible
+//   demand, posed along the projectile's
 //   facing every frame, and its model's particle proxies run through UnitEmitters like a unit's.
 // - A projectile hit spawns Projectile_Absorbed_By_Shields_Particle when the shield took all of
 //   it, else the armor-reduced or the plain detonation particle (BP-10, BP-11), at the contact
@@ -107,16 +109,16 @@ public:
     void prepare(const units::UnitTables& tables, const sim::tactical::CombatTable& combat);
     void move_feedback(const sim::math::Vec3& point, ui::OrderMode mode, bool double_click, std::uint64_t tick);
 
-    // #456 BP-62: appends `model_slots` placed ships for each projectile type that draws a model
-    // (after prepare()), before the population is composed.
-    static constexpr std::size_t model_slots = 32;
+    // BP-62: prepare one immutable recipe host per discovered model projectile type.
+    // Visible demand grows reusable slots through the scene's shared-asset proxy seam.
     void plan_projectile_models(std::vector<SpacePopulation::Options::PlacedShip>& placed_ships);
     // #456 BP-60 to BP-62: the model projectiles in flight this frame, from LiveSessionView::frame
     // before it poses the population: each one the local player sees (BP-09) keeps or takes a
     // slot and is appended to `live` at its interpolated pose.
     void pose_projectile_models(const sim::tactical::TacticalSnapshot& previous,
                                 const sim::tactical::TacticalSnapshot& latest, double alpha, const UnitLookup& units,
-                                std::vector<SpacePopulation::LivePose>& live);
+                                std::vector<SpacePopulation::LivePose>& live,
+                                BattleScene* population = nullptr, GodotRenderer* renderer = nullptr);
     using SnapshotAt = std::function<std::shared_ptr<const sim::tactical::TacticalSnapshot>(std::uint64_t)>;
     // The pose of the projectile placed ship `ship` holds at presented tick `tick`, from the
     // snapshots of that tick (for UnitEmitters' catch-up samples); nullopt when `ship` is no
@@ -164,6 +166,7 @@ public:
     void release();
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
     // The report's "battle_effects" member, followed by ",\n".
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     void write_report(std::ostream& output) const;
     // --eawr-perf-trace (#601): the effects alive and their particles after the last clock sample.
     [[nodiscard]] std::size_t live_effects() const noexcept { return effects_.size(); }
@@ -219,9 +222,10 @@ private:
         bool visible_to_enemy{true}; // WFP-01: Model_Visible_To_Enemy
     };
     struct ProjectileVisibility final {
-        space::ProjectileHide hide;
+        live::ProjectileHide hide;
         sim::tactical::PlayerId owner{};
         const ProjectileLook* look{};
+        bool model_denied{};
     };
     std::map<std::uint64_t, ProjectileVisibility> projectile_visibility_;
     ProjectileObserver projectile_observer_;
@@ -277,7 +281,7 @@ private:
         std::uint32_t lifetime_frames{};
         bool attached_to_collision{};  // Particle_Attach_To_Collision (BP-18)
         bool decoration{};            // WPJ-40: only decorations use terminal culls.
-        std::optional<particles::SystemDefinition> system;
+        std::shared_ptr<const particles::SystemDefinition> system;
         std::string cause;
     };
     struct LiveEffect final {
@@ -402,11 +406,29 @@ private:
 
     [[nodiscard]] const ParticleType* particle_type(const std::string& name);
     [[nodiscard]] const assets::Texture* resolve_texture(std::string_view name);
-    // False when the particle backend failed (failure() set).
-    [[nodiscard]] bool spawn(const std::string& particle, const std::array<double, 3>& position,
+    enum class SpawnState : std::uint8_t { spawned, skipped, refused, fatal };
+    struct SpawnOutcome final {
+        SpawnState state{SpawnState::skipped};
+        particles::EffectRegistry::Refusal reason{particles::EffectRegistry::Refusal::none};
+    };
+    [[nodiscard]] SpawnOutcome spawn(const std::string& particle, const std::array<double, 3>& position,
                              const particles::Basis3& basis, const std::string& reason, std::uint64_t tick,
                              sim::EntityId owner = sim::invalid_entity_id, std::uint32_t bone = 0,
                              bool* created = nullptr);
+    [[nodiscard]] bool process_spawn(const std::string& particle, const std::array<double, 3>& position,
+        const particles::Basis3& basis, const std::string& reason, std::uint64_t tick,
+        sim::EntityId owner = sim::invalid_entity_id, std::uint32_t bone = 0, bool* created = nullptr) {
+        return spawn(particle, position, basis, reason, tick, owner, bone, created).state != SpawnState::fatal;
+    }
+    struct RefusedEffect final {
+        std::uint64_t tick{}, birth{};
+        std::uint32_t lifetime{};
+        std::string key;
+        particles::EffectRegistry::Refusal reason{};
+        std::size_t requested_bytes{}, admitted_bytes{};
+    };
+    std::vector<RefusedEffect> refused_effects_;
+    std::uint64_t eligible_effects_{};
     std::vector<TerminalSound> terminal_sounds_;
     [[nodiscard]] bool follow_contacts(const sim::tactical::TacticalSnapshot& latest);
     [[nodiscard]] bool draw_projectiles(const sim::tactical::TacticalSnapshot& previous,
@@ -424,7 +446,7 @@ private:
     [[nodiscard]] const ProjectileLook* look_of(const sim::tactical::Projectile& projectile) const;
     void note_types(const sim::tactical::TacticalSnapshot& previous, const sim::tactical::TacticalSnapshot& latest);
     // BP-63, BP-64: one entry of `list` for the hit `event` ended, drawn from its projectile's ID.
-    [[nodiscard]] const std::string* hit_pick(const std::vector<std::string>& list, space::HitParticleList kind,
+    [[nodiscard]] const std::string* hit_pick(const std::vector<std::string>& list, live::HitParticleList kind,
         const sim::tactical::CombatEvent& event, std::optional<std::uint64_t> projectile);
 
     godot::Node3D* host_;
@@ -478,8 +500,14 @@ private:
     // #456 BP-62: one slot pool per model projectile type, its placed ships, and which pool and
     // slot each of those ships is; the projectiles drawn as models this frame.
     struct ModelPool final {
-        space::ProjectileModelSlots slots{model_slots};
+        live::ProjectileModelSlots slots{1};
         std::vector<std::size_t> ships;
+        std::uint64_t unique_denied_flights{};
+        std::uint64_t budget_refusals{}, allocation_failures{}, recipe_refusals{}, reserved_bytes{};
+        std::size_t peak_requested{};
+        std::string_view last_refusal;
+        std::uint64_t last_refusal_bytes{};
+        bool budget_probe_available{};
     };
     std::map<std::string, ModelPool> model_pools_;
     std::map<std::size_t, std::pair<std::string, std::size_t>> model_ship_slot_;

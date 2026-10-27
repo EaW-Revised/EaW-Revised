@@ -1,7 +1,6 @@
 # Player settings and the options screen
 
-Status: built for the main menu wave (legacy EAWR-2927, EAWR-2923). The in-game menu does not
-open the screen yet; the screen is written to be reused there.
+The Options screen provides main-menu and in-game hubs (legacy EAWR-2927, EAWR-2923).
 
 The facts come from the FoC debug build (profile reading and defaults, each options dialog's
 activation and button handling) and from the effective data's dialog resources
@@ -42,6 +41,7 @@ as the defaults. No compatibility is kept before 1.0: change the format, bump th
 | ST-N1 | Quickmatch default, connection speed, preferred faction, lobby locale | integers | 1 (land), 0 (modem), 0 (random), -1 (the game language) | debug build |
 | ST-N2 | Online service (project-authored) | host, port, trust mode, certificate pin or CA file, relay-only preference | empty host, port 27020, pin trust, relay-only off | project |
 | ST-K3 | Camera keys | arrows / WASD | arrows (retail) | owner request |
+| ST-P3 | Render thread (Performance page, restart required) | Separate / Safe | Separate | owner request |
 | ST-K1 | Key overrides (command name to key text) | map | empty: the project's keys | project |
 
 The retail anti-aliasing level is not stored: its slider drives the render profile (section 4).
@@ -176,6 +176,18 @@ The proposed connection between uncapped rendering and AMD driver timeouts is un
 
 Driven audio recordings keep their explicit audio-pace render clock, including rates below
 30 FPS. Their map owns pacing while active; the player limit resumes after returning to a menu.
+
+### Performance options (ST-P3)
+
+Both Options hubs add **Performance**. This project-owned page uses the loaded dialog skin and
+button styles. The render-thread selector moves here from Video; frame-rate limit and vsync
+remain under Video. **Separate (default)** and **Safe** take effect after restart. Apply and Accept
+save only this preference; Cancel discards it; Defaults selects Separate and saves only after
+Apply or Accept. Other Video settings are preserved.
+
+The [performance-deviation registry](../behaviour/performance-deviations.md) defines the approved
+policy and the checked metadata table. It starts empty; this page adds no simulation or match option.
+CLI and manager-profile startup precedence remains as described in the [launcher guide](../../apps/launcher/README.md).
 
 ### Camera keys (ST-K3)
 

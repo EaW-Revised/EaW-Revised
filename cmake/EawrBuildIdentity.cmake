@@ -11,6 +11,20 @@ if(EAWR_BUILD_VALUE STREQUAL "")
     if(NOT EAWR_BUILD_RESULT EQUAL 0)
         message(FATAL_ERROR "Set EAWR_BUILD_IDENTITY when building without Git metadata")
     endif()
+    # A warm tree skips configure (the pool), which would keep the previous commit's identity: make the build
+    # system re-run configure when HEAD moves (a detached checkout rewrites HEAD, a commit appends to its reflog).
+    # `--git-path` resolves a worktree's own HEAD; without a git directory (a source export) nothing is added.
+    foreach(EAWR_GIT_NAME HEAD logs/HEAD)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --git-path "${EAWR_GIT_NAME}"
+            WORKING_DIRECTORY "${EAWR_BUILD_ROOT}" OUTPUT_VARIABLE EAWR_GIT_FILE OUTPUT_STRIP_TRAILING_WHITESPACE
+            RESULT_VARIABLE EAWR_GIT_FILE_RESULT ERROR_QUIET)
+        if(EAWR_GIT_FILE_RESULT EQUAL 0 AND NOT EAWR_GIT_FILE STREQUAL "")
+            get_filename_component(EAWR_GIT_FILE "${EAWR_GIT_FILE}" ABSOLUTE BASE_DIR "${EAWR_BUILD_ROOT}")
+            if(EXISTS "${EAWR_GIT_FILE}")
+                set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${EAWR_GIT_FILE}")
+            endif()
+        endif()
+    endforeach()
     execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
         WORKING_DIRECTORY "${EAWR_BUILD_ROOT}" OUTPUT_VARIABLE EAWR_BUILD_DIRTY RESULT_VARIABLE EAWR_BUILD_RESULT)
     if(NOT EAWR_BUILD_RESULT EQUAL 0)

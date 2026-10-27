@@ -29,6 +29,7 @@ struct Catalog::Impl {
     std::unordered_map<std::string, std::size_t> winners;
     std::vector<TypeMemberFlags> member_flags;
     std::string member_flags_issue;
+    std::vector<MemberRosterNote> member_roster_notes;
     mutable std::mutex cache_mutex;
     mutable std::unordered_map<std::string, EffectiveObject> resolve_cache;
 };
@@ -40,6 +41,7 @@ struct Catalog::Overlay {
     std::unordered_map<std::size_t, Definition> replaced;
     std::vector<TypeMemberFlags> member_flags;
     std::string member_flags_issue;
+    std::vector<MemberRosterNote> member_roster_notes;
     mutable std::mutex cache_mutex;
     mutable std::unordered_map<std::string, EffectiveObject> resolve_cache;
 };
@@ -82,7 +84,7 @@ void add_nested_abilities(Catalog::Impl& catalog, pugi::xml_node source,
     bool inside_abilities = false);
 void index_winners(Catalog::Impl& catalog, std::vector<core::Diagnostic>& diagnostics);
 void derive_member_flags(std::span<const Definition* const> definitions,
-    std::vector<TypeMemberFlags>& flags, std::string& issue);
+    std::vector<TypeMemberFlags>& flags, std::string& issue, std::vector<MemberRosterNote>& notes);
 std::string ascii_lower(std::string_view value);
 bool ascii_iequals(std::string_view left, std::string_view right);
 std::string trim(std::string_view value);

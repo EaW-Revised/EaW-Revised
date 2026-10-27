@@ -121,33 +121,38 @@ CombatBonuses TacticalSession::Impl::bonuses_for(const LiveUnit& unit, const boo
     }
 
 CombatBonuses TacticalSession::Impl::profile_bonuses(const OwnershipKey key, const std::vector<PlayerEconomy>& accounts,
-    const std::map<EntityId, TypeId>& containers, const std::span<CombatBonuses> categories, const bool total) const {
+    const std::map<EntityId, TypeId>& containers, const std::span<CombatBonuses> categories, const bool total,
+    const bool retained_only) const {
         std::fill(categories.begin(), categories.end(), CombatBonuses{});
         for (const auto& account : accounts) {
             if (!allied(account.player, key.first)) continue;
             for (const auto& held : account.completed) {
                 const auto container = containers.find(held.station);
                 if (container == containers.end() || container->second == key.second) continue;
+                if (retained_only) {
+                    const auto previous = std::find_if(ledgers.begin(), ledgers.end(),
+                        [&](const auto& old) { return old.player == account.player; });
+                    if (previous == ledgers.end()) continue;
+                    const auto old = std::find_if(previous->completed.begin(), previous->completed.end(), [&](const CompletedBuild& before) {
+                        return before.object == held.object && before.type == held.type;
+                    });
+                    if (old == previous->completed.end()) continue;
+                    const auto host = handles.find(old->station);
+                    if (host == handles.end() || registry.get<Identity>(host->second).type_id == key.second) continue;
+                }
                 const auto* upgrade = economy.upgrade(held.type);
                 if (upgrade == nullptr) continue;
                 for (const auto& bonus : upgrade->bonuses) {
                     if (!std::binary_search(bonus.applicable.begin(), bonus.applicable.end(), key.second)) continue;
                     auto& largest = categories[static_cast<std::size_t>(std::lower_bound(bonus_categories.begin(), bonus_categories.end(),
                         bonus.stacking_category) - bonus_categories.begin())];
-                    for (std::size_t index = 0; index < largest.size(); ++index) {
-                        largest[index] = std::max(largest[index], bonus.percentages[index]);
-                    }
+                    // WPR-51/WHE-55: retain negative-only categories; zero is absent.
+                    accumulate_combat_bonus(largest, bonus.percentages);
                 }
             }
         }
         if (!total) return {};
-        CombatBonuses result{};
-        for (const auto& values : categories) {
-            for (std::size_t index = 0; index < result.size(); ++index) {
-                result[index] = math::Fixed::from_raw(result[index].raw() + values[index].raw());
-            }
-        }
-        return result;
+        return sum_combat_bonus_categories(categories);
     }
 
 core::Result<void> TacticalSession::Impl::build_bonus_profiles(const std::vector<PlayerEconomy>& accounts,
@@ -307,11 +312,20 @@ core::Result<TacticalSession::Impl::CommandLedger> TacticalSession::Impl::update
 CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, const CommandLedger& ledger,
     const std::vector<PlayerEconomy>& accounts, const std::map<EntityId, TypeId>& containers,
     const std::span<CombatBonuses> categories, const UnitStage* effect_world, const bool targeted_effects,
-    const std::optional<PlayerId> owner) const {
-    static_cast<void>(profile_bonuses({owner.value_or(unit.state.owner), unit.state.type_id}, accounts, containers, categories, false));
+    const std::optional<PlayerId> owner, const bool retained_only) const {
+    static_cast<void>(profile_bonuses({owner.value_or(unit.state.owner), unit.state.type_id}, accounts, containers, categories, false, retained_only));
     // WHE-55: zero is no contribution; a negative category starts at its first actual value.
     const auto found = ledger.recipients.find(unit.state.entity_id);
     if (found != ledger.recipients.end()) for (const auto source : found->second) {
+        if (retained_only) {
+            const auto before = command_ledger.recipients.find(unit.state.entity_id);
+            if (before == command_ledger.recipients.end()) continue;
+            const auto& wanted = ledger.sources[source];
+            if (std::none_of(before->second.begin(), before->second.end(), [&](const std::size_t old) {
+                const auto& value = command_ledger.sources[old];
+                return value.id == wanted.id && value.profile == wanted.profile;
+            })) continue;
+        }
         const auto& bonus = economy.command_bonuses[ledger.sources[source].profile].bonus;
         const auto category = static_cast<std::size_t>(std::lower_bound(bonus_categories.begin(), bonus_categories.end(),
             bonus.stacking_category) - bonus_categories.begin());
@@ -326,7 +340,6 @@ CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, c
         CombatBonuses contribution{}; contribution[4] = value;
         accumulate_combat_bonus(categories[category], contribution);
     }
-    bool leeching = false;
     if (unit.abilities) {
         const auto* nested = beam_profile(unit, AbilityKind::leech_shields);
         const auto* profile = abilities.find(unit.state.type_id);
@@ -337,12 +350,11 @@ CombatBonuses TacticalSession::Impl::command_bonuses_for(const LiveUnit& unit, c
                 CombatBonuses contribution{};
                 contribution[1] = nested->leech_damage_bonus; // WLS-02, WHE-55: category 0 adds to damage.
                 accumulate_combat_bonus(categories[static_cast<std::size_t>(category - bonus_categories.begin())], contribution);
-                leeching = true;
             }
         }
     }
-    const bool targeted = targeted_effects && accumulate_concentrate_bonus(unit.state.entity_id, categories, effect_world);
-    return sum_combat_bonus_categories(categories, found != ledger.recipients.end() || battlefield != ledger.battlefield_defence.end() || targeted || leeching);
+    if (targeted_effects) static_cast<void>(accumulate_concentrate_bonus(unit.state.entity_id, categories, effect_world));
+    return sum_combat_bonus_categories(categories);
 }
 
 core::Result<void> TacticalSession::Impl::apply_command_bonuses(std::vector<LiveUnit>& live, const CommandLedger& ledger,
@@ -362,21 +374,14 @@ core::Result<void> TacticalSession::Impl::apply_command_bonuses(std::vector<Live
         const auto categories = std::span(scratch).subspan(partition * bonus_categories.size(), bonus_categories.size());
         for (auto offset = range.begin; offset < range.end; ++offset) {
             auto& unit = live[begin + offset];
-            bool gained = false, lost = false;
-            const auto contains = [&](const CommandLedger& records, const CommandSource& wanted) {
-                const auto target = records.recipients.find(unit.state.entity_id);
-                if (target == records.recipients.end()) return false;
-                return std::any_of(target->second.begin(), target->second.end(), [&](const std::size_t source) {
-                    const auto& value = records.sources[source];
-                    return value.id == wanted.id && value.profile == wanted.profile;
-                });
-            };
-            if (const auto target = ledger.recipients.find(unit.state.entity_id); target != ledger.recipients.end())
-                for (const auto source : target->second) gained = gained || !contains(command_ledger, ledger.sources[source]);
-            if (const auto target = command_ledger.recipients.find(unit.state.entity_id); target != command_ledger.recipients.end())
-                for (const auto source : target->second) lost = lost || !contains(ledger, command_ledger.sources[source]);
-            const auto adjustment = gained ? BonusAdjustment::gain : lost ? BonusAdjustment::loss : BonusAdjustment::legacy;
-            const auto changed = apply_bonuses(unit, command_bonuses_for(unit, ledger, accounts, containers, categories), adjustment);
+            // WHE-18/19/55: remove lost sources first (clamp only), then apply gained sources'
+            // signed maximum delta. A single gain flag would heal removed negative sources.
+            const auto retained = handles.contains(unit.state.entity_id)
+                ? command_bonuses_for(unit, ledger, accounts, containers, categories, nullptr, true, std::nullopt, true)
+                : CombatBonuses{};
+            const auto removed = apply_bonuses(unit, retained, BonusAdjustment::loss);
+            if (!removed) { errors[partition] = removed.error(); break; }
+            const auto changed = apply_bonuses(unit, command_bonuses_for(unit, ledger, accounts, containers, categories), BonusAdjustment::gain);
             if (!changed) { errors[partition] = changed.error(); break; }
         }
     });
@@ -1151,18 +1156,24 @@ core::Result<void> execute_reinforcement_deployment(auto& impl, auto& staged, au
             stage.crafts[added.value()] = flight.value();
             members.push_back(added.value());
         }
-        auto container = add(deployed, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0, true);
-        if (!container) return Void::failure(container.error());
-        SquadronState order;
-        order.container = container.value();
-        order.squadron_type = deployed;
-        order.roster = members;
-        order.anchor = math::Vec3{point.x, point.y, layer_z};
-        order.formation = SquadronFormationState{order.anchor, invalid_entity_id, true, true, false}; // WMV-18
-        order.next_scan_frame = tick + arrival_frames;
-        stage.minds.emplace(container.value(), std::move(order));
-        stage.squadrons.push_back(Squadron{container.value(), std::move(members)});
-        event.unit = container.value();
+        // FL-06: one authored purchase may produce several teams, all after its craft.
+        for (std::size_t begin = 0; begin < members.size();) {
+            const auto count = std::min<std::size_t>(members.size() - begin, squadron->max_squad_size);
+            auto container = add(deployed, math::Vec3{point.x, point.y, layer_z}, math::identity_quat(), 0, true);
+            if (!container) return Void::failure(container.error());
+            SquadronState order;
+            order.container = container.value();
+            order.squadron_type = deployed;
+            order.roster.assign(members.begin() + begin, members.begin() + begin + count);
+            order.anchor = math::Vec3{point.x, point.y, layer_z};
+            order.formation = SquadronFormationState{order.anchor, invalid_entity_id, true, true, false}; // WMV-18
+            order.next_scan_frame = tick + arrival_frames;
+            stage.minds.emplace(container.value(), std::move(order));
+            stage.squadrons.push_back(Squadron{container.value(),
+                std::vector<EntityId>(members.begin() + begin, members.begin() + begin + count)});
+            if (begin == 0) event.unit = container.value();
+            begin += count;
+        }
     }
     return Void::success();
 }

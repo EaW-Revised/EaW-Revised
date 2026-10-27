@@ -73,6 +73,7 @@ const IntField fields[] = {
     EAWR_SETTINGS_FIELD("video.window_height", video.window_height, display_size_minimum, display_size_maximum),
     EAWR_SETTINGS_FIELD("video.windowed", video.windowed, 0, 1),
     EAWR_SETTINGS_FIELD("video.vsync", video.vsync, 0, 1),
+    EAWR_SETTINGS_FIELD("video.render_thread", video.render_thread, 0, 1),
     EAWR_SETTINGS_FIELD("video.frame_rate_limit", video.frame_rate_limit, -1, std::numeric_limits<int>::max()),
     EAWR_SETTINGS_FIELD("video.detail_level", video.detail_level, 0, detail_level_maximum),
     EAWR_SETTINGS_FIELD("video.texture_mip_drop", video.texture_mip_drop, 0, 4),

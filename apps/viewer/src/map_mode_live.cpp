@@ -5,9 +5,10 @@
 #include "map_mode.hpp"
 #include "map_mode_internal.hpp"
 #include "eawr/presentation/camera/overview.hpp"
-#include "eawr/presentation/space/projectiles.hpp"
+#include "eawr/presentation/live/projectiles.hpp"
 #include "render_profile_viewport.hpp"
 #include "viewer_path.hpp"
+#include "land_battle_camera.hpp"
 #include "settings_store.hpp"
 #include "eawr/core/tick_profile.hpp"
 
@@ -89,6 +90,11 @@ namespace {
 
 void MapMode::close_requested() {
     if (state_->space && state_->live_session) state_->space->close();
+    if (state_->land_population && state_->live_session) {
+        state_->live_session->finish();
+        state_->status = "land_live_closed";
+        static_cast<void>(state_->write_report());
+    }
 }
 
 void MapMode::State::record_frame_trace(double delta, const core::tick_profile::Recording& ui_recording) {
@@ -132,6 +138,8 @@ void MapMode::State::record_frame_trace(double delta, const core::tick_profile::
         trace_frame.pieces = state.space->live_submit_pieces();
         trace_frame.sent = state.space->live_submit_sent();
         trace_frame.bookkeeping_ms = state.live_session->bookkeeping_ms();
+        trace_frame.slots_grown = state.live_session->frame_slots_grown();
+        trace_frame.slot_growth_ms = state.live_session->slot_growth_ms();
         trace_frame.hud_ms = state.hud_ms;
         trace_frame.audio_ms = state.audio_ms;
         trace_frame.fog_ms = state.fog_ms;
@@ -262,7 +270,7 @@ void MapMode::State::update_follow_camera(const std::optional<int>& finished) {
                         });
                         if (found != before.end()) previous = &*found;
                     }
-                    if (const auto pose = space::interpolate_projectile(previous, *latest, follow_frame.alpha)) {
+                    if (const auto pose = live::interpolate_projectile(previous, *latest, follow_frame.alpha)) {
                         state.space->live_camera_focus(static_cast<float>(pose->position[0]),
                                                        static_cast<float>(pose->position[1]));
                     }
@@ -678,6 +686,8 @@ std::optional<int> MapMode::process(const double delta) {
     if (state.loading != nullptr && state.live_session && state.live_session->phase() == LiveSessionView::Phase::ready
         && state.loading->take_begin()) {
         state.begin_battle();
+        if (state.land_population)
+            UtilityFunctions::print("EAWR land camera viewport after Begin: ", state.camera.width, "x", state.camera.height);
     }
     state.sync_net_perf(delta);
     state.sync_perf_overlay();
@@ -711,6 +721,7 @@ std::optional<int> MapMode::process(const double delta) {
         return 2;
     }
     if (!state.advance_map_camera(delta)) return 2;
+    if (state.land_population) return state.process_land_live(delta);
     if (!state.phases.empty()) return state.process_comparison_capture();
     if (const auto failed = state.draw_map_frame(delta)) return failed;
     if (state.frame == state.options.warmup_frames) {
@@ -821,6 +832,10 @@ void MapMode::input(const Ref<InputEvent>& event) {
             if (const auto raw = map_camera_event(event)) state.space->camera_event(*raw);
         }
         return;
+    }
+    if (state.land_population && state.battle && state.live_session) {
+        LandBattleCamera view(state.camera, state.map_camera.get());
+        if (state.battle->input(event, *state.live_session, *state.land_population, view)) return;
     }
     if (state.map_camera && event.is_valid()) {
         if (const auto* saved = ActiveSettings::get()) {
@@ -965,6 +980,10 @@ void MapMode::viewport_changed(const float width, const float height) {
     if (state_->map_camera_settle_started) return;
     if (auto resized = state_->map_camera->set_viewport(width, height); !resized) {
         state_->failure = core::format_diagnostic(resized.error());
+    } else {
+        // Picking may run before the next process callback after a resize.
+        state_->camera = render_camera(state_->map_camera->frame());
+        if (state_->renderer) state_->renderer->set_camera(state_->camera);
     }
 }
 

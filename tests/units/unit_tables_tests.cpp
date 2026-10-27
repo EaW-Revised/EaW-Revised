@@ -7,8 +7,11 @@
 #include "../support/env.hpp"
 #include "../support/check.hpp"
 #include "unit_tables_support.hpp"
+#include "unit_tables_synthetic_fixtures.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/units/unit_tables.hpp"
+#include "eawr/core/sha256.hpp"
+#include "eawr/presentation/ui/selection.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/platform/sim_workers.hpp"
@@ -27,6 +30,7 @@
 #include "eawr/skirmish/ai.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
 #include "../../src/units/unit_internal.hpp"
+#include "../../src/units/unit_turret_frame.hpp"
 
 #include <algorithm>
 #include <array>
@@ -42,9 +46,18 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <psapi.h>
+#endif
 
 namespace unit_tables_test_support {
 
@@ -62,6 +75,183 @@ Vec3 point(const std::int64_t x, const std::int64_t y, const std::int64_t z) {
     return {Fixed::from_raw(x), Fixed::from_raw(y), Fixed::from_raw(z)};
 }
 
+
+void indexed_collision_geometry() {
+    namespace units = eawr::units;
+    namespace tactical = eawr::sim::tactical;
+    namespace math = eawr::sim::math;
+    namespace ui = eawr::presentation::ui;
+    using Triangle = units::IndexedCollisionTriangles::Triangle;
+    static_assert(std::is_same_v<decltype(std::declval<units::IndexedCollisionTriangles&>().vertices()[0]), const Vec3&>);
+    static_assert(std::is_same_v<decltype(std::declval<units::IndexedCollisionTriangles&>().indices()[0]),
+        const units::IndexedCollisionTriangles::Indices&>);
+    auto source = model("data/art/models/indexed.alo", {bone("Root", -1, {0, 0, 0})});
+    eawr::assets::Mesh mesh;
+    mesh.name = "shield"; mesh.collidable = true; mesh.bone = 0;
+    eawr::assets::Submesh submesh;
+    for (const auto position : std::array<std::array<float, 3>, 5>{{{0, 0, 0}, {2, 0, 0}, {0, 3, 0}, {2, 3, 0}, {0, 0, 0}}}) {
+        eawr::assets::Vertex vertex{};
+        vertex.position = {position[0], position[1], position[2]};
+        submesh.vertices.push_back(vertex);
+    }
+    submesh.indices = {0, 1, 2, 2, 1, 3, 0, 1, 2, 4, 1, 2, 0, 1, 999};
+    mesh.submeshes.push_back(submesh);
+    source.meshes.push_back(mesh);
+    auto base = math::identity_matrix();
+    base.rows[0][3] = Fixed::from_raw(raw(7) + 1);
+    base.rows[1][3] = Fixed::from_raw(raw(-5) + 3);
+    base.rows[2][3] = Fixed::from_raw(raw(2) - 1);
+    std::vector<units::CollisionMesh> meshes;
+    units::detail::append_collision_meshes(source, {math::identity_matrix()}, base, units::no_index, meshes);
+    units::detail::append_collision_meshes(source, {math::identity_matrix()}, base, 1, meshes);
+    expect(meshes.size() == 2, "indexed collision preserves model and attached mesh order");
+    if (meshes.size() != 2) return;
+    const std::array<Vec3, 4> points{{point(raw(7)+1, raw(-5)+3, raw(2)-1),
+        point(raw(9)+1, raw(-5)+3, raw(2)-1), point(raw(7)+1, raw(-2)+3, raw(2)-1),
+        point(raw(9)+1, raw(-2)+3, raw(2)-1)}};
+    // Independent expanded oracle: the original four authored triangles, including duplicates.
+    const std::vector<Triangle> original{{points[0], points[1], points[2]}, {points[2], points[1], points[3]},
+        {points[0], points[1], points[2]}, {points[0], points[1], points[2]}};
+    const auto& indexed = meshes[0].triangles;
+    expect(indexed.vertices().size() == 4 && indexed.size() == original.size(),
+        "indexed collision deduplicates exact coordinates without removing repeated triangles");
+    constexpr auto indexed_metadata_bytes = sizeof(std::vector<Vec3>)
+        + sizeof(std::vector<units::IndexedCollisionTriangles::Indices>) + sizeof(std::optional<std::pair<Fixed, Fixed>>);
+    expect(indexed.capacity_bytes() == 4 * sizeof(Vec3) + 4 * sizeof(units::IndexedCollisionTriangles::Indices) + indexed_metadata_bytes,
+        "indexed collision retains exactly four vertices, four index triples and buffer metadata");
+    const units::IndexedCollisionTriangles empty;
+    expect(empty.empty() && empty.begin() == empty.end() && empty.capacity_bytes() == 0 && !empty.coordinate_bounds(),
+        "empty indexed collision allocates no backing storage");
+    expect(std::equal(indexed.begin(), indexed.end(), original.begin(), original.end()),
+        "indexed collision reconstructs every original fixed corner in order");
+    auto copy = meshes;
+    expect(copy[0].triangles.shares_storage_with(indexed), "table copies share immutable indexed payload");
+    copy[0].triangles = {};
+    expect(indexed.size() == 4 && copy[0].triangles.empty(), "whole-buffer replacement detaches only the copied owner");
+    const auto reindexed = units::IndexedCollisionTriangles({points[2], points[1], points[0], points[3]},
+        {{2, 1, 0}, {0, 1, 3}, {2, 1, 0}, {2, 1, 0}});
+    expect(reindexed == indexed, "geometry equality compares triangle values across different vertex numbering");
+
+    TempTree tree;
+    write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+    auto loaded = load(tree.root, models(-40.0F));
+    expect(loaded.tables.has_value(), "indexed collision consumer fixture loads");
+    if (!loaded.tables) return;
+    auto& tables = *loaded.tables;
+    auto& unit = *std::find_if(tables.units.begin(), tables.units.end(), [](const auto& row) { return row.id == "Test_Frigate"; });
+    unit.collision = units::CollisionBounds{point(raw(-123)+17, raw(-122)+19, raw(-121)+23),
+        point(raw(124)+29, raw(125)+31, raw(126)+37)};
+    unit.collision_meshes.clear();
+    const auto append_u32 = [](auto& bytes, const std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8) bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+    };
+    const auto append_i64 = [](auto& bytes, const std::int64_t value) {
+        const auto bits = static_cast<std::uint64_t>(value);
+        for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(bits >> shift));
+    };
+    std::vector<std::uint8_t> collision_prefix{1};
+    for (const auto p : {unit.collision->min, unit.collision->max})
+        for (const auto c : {p.x, p.y, p.z}) append_i64(collision_prefix, c.raw());
+    std::vector<std::uint8_t> original_bytes;
+    append_u32(original_bytes, 2);
+    for (const auto hardpoint : {units::no_index, std::uint32_t{1}}) {
+        append_u32(original_bytes, 6);
+        for (const char ch : std::string_view{"shield"}) original_bytes.push_back(static_cast<std::uint8_t>(ch));
+        append_u32(original_bytes, hardpoint);
+        append_u32(original_bytes, static_cast<std::uint32_t>(original.size()));
+        for (const auto& triangle : original) for (const auto& p : triangle)
+            for (const auto c : {p.x, p.y, p.z}) append_i64(original_bytes, c.raw());
+    }
+    auto expected_encoding = [&](const units::UnitTables& input) {
+        auto empty = input;
+        auto& target = *std::find_if(empty.units.begin(), empty.units.end(), [](const auto& row) { return row.id == "Test_Frigate"; });
+        target.collision_meshes.clear();
+        auto encoded = units::canonical_encoding(empty);
+        const auto at = std::search(encoded.begin(), encoded.end(), collision_prefix.begin(), collision_prefix.end());
+        expect(at != encoded.end(), "independent raw encoding finds its unique collision prefix");
+        if (at == encoded.end()) return encoded;
+        const auto offset = static_cast<std::size_t>(at - encoded.begin()) + collision_prefix.size();
+        encoded.erase(encoded.begin() + static_cast<std::ptrdiff_t>(offset), encoded.begin() + static_cast<std::ptrdiff_t>(offset + 4));
+        encoded.insert(encoded.begin() + static_cast<std::ptrdiff_t>(offset), original_bytes.begin(), original_bytes.end());
+        return encoded;
+    };
+    unit.collision_meshes = meshes;
+    auto encoded = expected_encoding(tables);
+    expect(units::canonical_encoding(tables) == encoded && units::content_identity(tables) == eawr::core::sha256(encoded),
+        "indexed collision preserves original expanded canonical bytes and SHA256");
+    auto subset = tables;
+    std::erase_if(subset.units, [](const auto& row) { return row.id != "Test_Frigate"; });
+    subset.units[0].targeting_priority_set_index = 0; // witness a remapped closure after load
+    expect(units::canonical_encoding(subset) == expected_encoding(subset),
+        "future copied subsets and remapped references still encode the original raw geometry");
+
+    const auto legacy_error = [&](const units::UnitType& input) -> std::optional<std::string> {
+        if (!input.collision) return std::nullopt;
+        for (const auto hardpoint : {units::no_index, std::uint32_t{1}}) {
+            (void)hardpoint;
+            for (const auto& triangle : original) for (const auto& p : triangle) for (const auto c : {p.x, p.y, p.z}) {
+                const auto scaled = math::multiply(c, input.scale_factor.value_or(Fixed::from_raw(Fixed::scale)));
+                const auto limit = tactical::max_combat_distance * Fixed::scale;
+                if (!scaled || scaled.value().raw() < -limit || scaled.value().raw() > limit)
+                    return "reachable type " + input.id + " mesh shield coordinate "
+                        + (scaled ? "raw " + std::to_string(scaled.value().raw()) : "unrepresentable after scale, source raw " + std::to_string(c.raw()))
+                        + " exceeds cap " + std::to_string(tactical::max_combat_distance) + " units (DG-36)";
+            }
+        }
+        return std::nullopt;
+    };
+    for (const auto scale : {std::int64_t{0}, Fixed::scale, -Fixed::scale, Fixed::scale/3,
+            raw(tactical::max_combat_distance), std::numeric_limits<std::int64_t>::max(), std::numeric_limits<std::int64_t>::min()}) {
+        unit.scale_factor = Fixed::from_raw(scale);
+        expect(units::collision_capability_error(unit) == legacy_error(unit),
+            "prepared collision summary preserves valid, over-cap and overflow answers for zero/negative/fractional scale");
+        // Picking consumes unscaled model-space values, even when scale is zero or non-invertible.
+        const auto pick = [](const auto& triangles) {
+            std::vector<std::array<ui::Vec3f, 3>> result;
+            for (const auto triangle : triangles) {
+                std::array<ui::Vec3f, 3> corners{};
+                for (std::size_t corner = 0; corner < 3; ++corner) {
+                    const auto& p = triangle[corner];
+                    corners[corner] = {static_cast<float>(static_cast<double>(p.x.raw()) / Fixed::scale),
+                        static_cast<float>(static_cast<double>(p.y.raw()) / Fixed::scale),
+                        static_cast<float>(static_cast<double>(p.z.raw()) / Fixed::scale)};
+                }
+                result.push_back(corners);
+            }
+            return ui::make_pick_mesh(std::move(result));
+        };
+        const auto a = pick(indexed), b = pick(original);
+        expect(a.triangles == b.triangles && a.low == b.low && a.high == b.high,
+            "viewer pick triangles and bounds equal the original raw reader");
+    }
+    unit.scale_factor = Fixed::from_raw(Fixed::scale/3);
+    unit.hardpoints[0].collision_mesh = "shield";
+    const auto combat = units::combat_table(tables);
+    expect(static_cast<bool>(combat), "indexed collision combat fixture builds");
+    if (combat) {
+        const auto* profile = combat.value().find(eawr::assets::object_type_crc(unit.id));
+        std::vector<tactical::CollisionTriangle> placed;
+        for (const auto& triangle : original) {
+            std::array<Vec3, 3> corners{};
+            for (std::size_t corner = 0; corner < 3; ++corner) {
+                const auto& p = triangle[corner];
+                const auto x = math::multiply(p.x, *unit.scale_factor).value();
+                const auto y = math::multiply(p.y, *unit.scale_factor).value();
+                const auto z = math::multiply(p.z, *unit.scale_factor).value();
+                corners[corner] = {Fixed::from_raw(-y.raw()), x, z};
+            }
+            placed.push_back({corners[0], corners[1], corners[2]});
+        }
+        expect(profile && profile->meshes.size() == 2, "combat retains both raw-source meshes");
+        if (profile && profile->meshes.size() == 2) {
+            expect(profile->meshes[0] == tactical::collision_mesh(placed, 0, tactical::no_hardpoint, true)
+                && profile->meshes[1] == tactical::collision_mesh(placed, 0, 1, true),
+                "combat transformed triangles, BVH and hardpoint/shield routing equal original expanded input");
+        }
+    }
+    unit.collision.reset();
+    expect(!units::collision_capability_error(unit), "collision-disabled geometry has no capability refusal");
+}
 
 void collision_extents() {
     auto wide = model("data/art/models/wide.alo", {bone("Root", -1, {0, 0, 0})});
@@ -141,11 +331,301 @@ void engine_disable_durations() {
     }
 }
 
+bool space_unit_definition(const eawr::data::Catalog& catalog, const eawr::data::Definition& definition) {
+    // Inspect parsed ancestry before resolving: unrelated projectile variants do
+    // not belong to the combat-unit guard. Selected units still resolve normally,
+    // so their missing bases and cycles remain errors.
+    // A projectile may author a space model without being a combat unit.
+    if (eawr::units::detail::iequals(definition.type_name, "Projectile")) return false;
+    std::vector<const eawr::data::Definition*> seen;
+    for (const auto* current = &definition; current != nullptr;) {
+        if (std::find(seen.begin(), seen.end(), current) != seen.end()) break;
+        seen.push_back(current);
+        for (const auto kind : {"SpaceUnit", "Squadron", "StarBase"})
+            if (eawr::units::detail::iequals(current->type_name, kind)) return true;
+        const eawr::data::XmlNode* parent = nullptr;
+        for (const auto& tag : current->root.children) {
+            if (eawr::units::detail::iequals(tag.name, "Space_Model_Name")) return true;
+            if (!parent && eawr::units::detail::iequals(tag.name, "Variant_Of_Existing_Type")) parent = &tag;
+        }
+        current = parent ? catalog.find(eawr::units::detail::trim(parent->raw_text),
+            eawr::data::Category::game_object) : nullptr;
+    }
+    return false;
+}
+
+// Flush load-time phases before a large installed-content decode can page.
+void guard_memory_phase(const std::string_view phase, const std::string_view type = {}) {
+    std::uint64_t private_bytes = 0, working_set_bytes = 0;
+#if defined(_WIN32)
+    PROCESS_MEMORY_COUNTERS_EX counters{};
+    counters.cb = static_cast<DWORD>(sizeof(counters));
+    if (GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),
+            static_cast<DWORD>(sizeof(counters)))) {
+        private_bytes = counters.PrivateUsage;
+        working_set_bytes = counters.WorkingSetSize;
+    }
+#endif
+    std::cout << "Guard phase " << phase << " type=" << type << " private_bytes=" << private_bytes
+              << " working_set_bytes=" << working_set_bytes << std::endl;
+}
+
+// Only the installed-mod regression reports authored resolution defects instead
+// of failing catalog admission. The catalog's strict resolve contract is unchanged.
+std::vector<std::string> guard_resolved_space_types(const eawr::data::Catalog& catalog,
+    std::vector<std::string>& authored_defects) {
+    std::vector<std::string> types;
+    for (const auto& definition : catalog.definitions()) {
+        if (!definition.namespace_winner || definition.category != eawr::data::Category::game_object) continue;
+        if (!space_unit_definition(catalog, definition)) continue;
+        const auto object = catalog.resolve(definition.id, definition.category);
+        if (!object) {
+            authored_defects.push_back(definition.type_name + " '" + definition.id + "': "
+                + eawr::core::format_diagnostic(object.error()));
+            continue;
+        }
+        types.push_back(definition.id);
+    }
+    return types;
+}
+
+bool guard_turret_refusal(const std::string_view message) {
+    for (const auto marker : {"invalid manual turret", "invalid object turret", "HPT-09:", "unusable bone axes"})
+        if (message.find(marker) != std::string_view::npos) return true;
+    return false;
+}
+
+std::vector<std::string> guard_combat_profiles(eawr::units::UnitTables tables,
+    std::vector<std::string>& authored_defects, std::vector<std::string>& turret_refusals,
+    std::vector<eawr::core::Diagnostic>& notes) {
+    // Keep the loaded projectile/priority lookup collections; bind and validate
+    // each unit independently so another unit's footprint cannot abort its check.
+    auto units = std::move(tables.units);
+    std::vector<std::string> admitted;
+    for (const auto& unit : units) {
+        tables.units.assign(1, unit);
+        const auto combat = eawr::units::combat_table(tables, eawr::units::ContentErrors::strict, &notes);
+        if (!combat) {
+            const auto defect = unit.id + ": " + eawr::core::format_diagnostic(combat.error());
+            (guard_turret_refusal(combat.error().message) ? turret_refusals : authored_defects).push_back(defect);
+            continue;
+        }
+        if (combat.value().find(eawr::assets::object_type_crc(unit.id))) admitted.push_back(unit.id);
+    }
+    return admitted;
+}
+
+void independent_guard_profiles() {
+    TempTree tree;
+    write_fixture(tree.root, units_xml("3600", "Guard_Profile_Test"));
+    auto loaded = load(tree.root, models(-40.0F));
+    expect(loaded.tables.has_value(), "independent guard profile fixture loads");
+    if (!loaded.tables) return;
+    const auto* good = loaded.tables->find("Test_Frigate");
+    expect(good != nullptr, "independent guard profile fixture has its valid unit");
+    if (!good) return;
+    auto bad = *good;
+    bad.id = "Guard_Invalid_Footprint";
+    bad.scale_factor = Fixed::from_raw(Fixed::scale);
+    bad.footprint.collision_x = bad.footprint.collision_y = Fixed::from_raw(Fixed::scale);
+    bad.footprint.custom_soft_radius = Fixed::from_raw(raw(eawr::sim::tactical::max_combat_distance + 1));
+    loaded.tables->units = {bad, *good};
+    expect(!eawr::units::combat_table(*loaded.tables), "synthetic strict combat still rejects the invalid footprint");
+    std::vector<std::string> defects, refusals;
+    std::vector<eawr::core::Diagnostic> notes;
+    const auto admitted = guard_combat_profiles(*loaded.tables, defects, refusals, notes);
+    expect(defects.size() == 1 && defects.front().find(bad.id) != std::string::npos && refusals.empty()
+        && std::find(admitted.begin(), admitted.end(), "Test_Frigate") != admitted.end(),
+        "installed guard reports a bad footprint and still admits the independent valid profile");
+    expect(guard_turret_refusal("combat table: invalid manual turret of weapon 16")
+        && guard_turret_refusal("HPT-09: authored turret frame shear exceeds 1/256")
+        && !guard_turret_refusal("Turret_Unit: combat table: invalid target footprint"),
+        "installed guard distinguishes turret-frame refusals from unrelated authored defects");
+}
+
+void space_unit_guard_selection() {
+    TempTree tree;
+    auto xml = units_xml("3600", "Guard_Select_Test");
+    xml.insert(xml.rfind("</Objects>"),
+        "<Projectile Name=\"Guard_Unrelated_Projectile\">"
+        "<Variant_Of_Existing_Type>Guard_Missing_Base</Variant_Of_Existing_Type>"
+        "<Space_Model_Name>guard_projectile.alo</Space_Model_Name></Projectile>"
+        "<SpaceUnit Name=\"Guard_Broken_Unit\">"
+        "<Variant_Of_Existing_Type>Guard_Missing_Base</Variant_Of_Existing_Type></SpaceUnit>"
+        "<SpaceUnit Name=\"Guard_Second_Broken_Unit\">"
+        "<Variant_Of_Existing_Type>Guard_Other_Missing_Base</Variant_Of_Existing_Type></SpaceUnit>"
+        "<SpaceProp Name=\"Guard_Model_Base\"><Space_Model_Name>guard.alo</Space_Model_Name></SpaceProp>"
+        "<SpaceProp Name=\"Guard_Inherited_Model\">"
+        "<Variant_Of_Existing_Type>Guard_Model_Base</Variant_Of_Existing_Type></SpaceProp>");
+    write_fixture(tree.root, xml);
+    const std::array mounts{eawr::vfs::MountSpec{"base", tree.root, "data", {}}};
+    auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "Remake guard selection fixture mounts");
+    if (!filesystem) return;
+    auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(loaded), "Remake guard selection uses non-strict catalog admission");
+    if (!loaded) return;
+    const auto& catalog = loaded.value().catalog;
+    for (const auto& [name, selected] : std::array{
+            std::pair{"Guard_Unrelated_Projectile", false}, std::pair{"Guard_Broken_Unit", true},
+            std::pair{"Guard_Inherited_Model", true}}) {
+        const auto* definition = catalog.find(name, eawr::data::Category::game_object);
+        expect(definition && space_unit_definition(catalog, *definition) == selected,
+            "Remake guard selects space definitions, including inherited models, before resolution");
+    }
+    const auto broken = catalog.resolve("Guard_Broken_Unit", eawr::data::Category::game_object);
+    expect(!broken && broken.error().code == "EAWR-XML-0008",
+        "Remake guard retains missing-base failure for a selected unit");
+    std::vector<std::string> authored_defects;
+    const auto retained = guard_resolved_space_types(catalog, authored_defects);
+    expect(authored_defects.size() == 2
+        && std::any_of(authored_defects.begin(), authored_defects.end(), [](const auto& defect) {
+            return defect.find("Guard_Broken_Unit") != std::string::npos && defect.find("EAWR-XML-0008") != std::string::npos;
+        })
+        && std::any_of(authored_defects.begin(), authored_defects.end(), [](const auto& defect) {
+            return defect.find("Guard_Second_Broken_Unit") != std::string::npos && defect.find("EAWR-XML-0008") != std::string::npos;
+        }), "installed guard collects every authored missing-base defect without changing strict resolution");
+    expect(std::find(retained.begin(), retained.end(), "Test_Frigate") != retained.end()
+        && std::find(retained.begin(), retained.end(), "Guard_Inherited_Model") != retained.end()
+        && std::find(retained.begin(), retained.end(), "Guard_Broken_Unit") == retained.end(),
+        "installed guard retains resolved space units after collecting authored defects");
+    const auto unrelated = catalog.resolve("Guard_Unrelated_Projectile", eawr::data::Category::game_object);
+    expect(!unrelated && unrelated.error().code == "EAWR-XML-0008",
+        "Remake guard selection does not repair an unrelated authored defect");
+}
+
 } // namespace
 
 using namespace unit_tables_test_support;
 
 int main(const int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--mod-loadability") {
+        ability_limits();
+        return failures == 0 ? 0 : 1;
+    }
+    const bool bounded_guard = argc >= 2 && std::string_view(argv[1]) == "--remake-combat-guard-bounded";
+    if (bounded_guard || (argc == 2 && std::string_view(argv[1]) == "--remake-combat-guard")) {
+        const auto game = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
+        const auto mod = eawr::testing::environment("EAWR_REMAKE_MOD_ROOT");
+        if (!game || game->empty() || !mod || mod->empty()) {
+            std::cout << "SKIP: Remake chain not configured; set EAWR_EAW_GAME_ROOT and EAWR_REMAKE_MOD_ROOT\n";
+            return 77;
+        }
+        auto roots = eawr::vfs::mod_chain_roots(std::filesystem::path(*mod));
+        for (const auto& [name, root] : roots) {
+            if (!std::filesystem::is_directory(root)) {
+                std::cout << "SKIP: Remake chain layer is not installed: " << name << '\n';
+                return 77;
+            }
+        }
+        roots.emplace_back("expansion", std::filesystem::path(*game) / "corruption" / "Data");
+        roots.emplace_back("base", std::filesystem::path(*game) / "GameData" / "Data");
+        const auto fail = [](const eawr::core::Diagnostic& diagnostic) {
+            std::cerr << eawr::core::format_diagnostic(diagnostic) << '\n';
+            return 1;
+        };
+        guard_memory_phase("mount-begin");
+        auto chain = eawr::vfs::resolve_manifest_chain(roots);
+        if (!chain) return fail(chain.error());
+        std::vector<eawr::vfs::MountSpec> specs;
+        for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+        auto filesystem = eawr::vfs::Vfs::mount(specs);
+        if (!filesystem) return fail(filesystem.error());
+        guard_memory_phase("catalog-begin");
+        // Parsed-content admission reports unrelated authored defects separately.
+        auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::remake);
+        if (!catalog) return fail(catalog.error());
+        guard_memory_phase("catalog-end");
+        std::vector<std::string> authored_defects;
+        auto types = guard_resolved_space_types(catalog.value().catalog, authored_defects);
+        expect(!types.empty(), "Remake combat guard discovers unit types from parsed content");
+        if (bounded_guard && argc > 2) {
+            std::vector<std::string> selected;
+            for (int index = 2; index < argc; ++index) {
+                const std::string name = argv[index];
+                expect(std::find(types.begin(), types.end(), name) != types.end(),
+                    "bounded Remake guard filter names a resolved space type");
+                if (std::find(selected.begin(), selected.end(), name) == selected.end()) selected.push_back(name);
+            }
+            if (failures != 0) return 1;
+            types = std::move(selected);
+        }
+        guard_memory_phase("selection-end");
+        std::int64_t max_shear_raw{};
+        std::vector<eawr::core::Diagnostic> notes;
+        std::vector<std::string> turret_refusals, admitted;
+        std::size_t loaded_count = 0;
+        const auto load_and_bind = [&](const eawr::vfs::Vfs& content, const std::vector<std::string>& selected) {
+            eawr::scene::VfsAssetCache cache(content);
+            eawr::units::LoadInput input;
+            input.catalog = &catalog.value().catalog;
+            input.filesystem = &content;
+            input.model = cache.access().model;
+            input.types = selected;
+            guard_memory_phase("tables-begin", bounded_guard ? selected.front() : "all");
+            auto tables = eawr::units::load_unit_tables(input);
+            if (!tables) { fail(tables.error()); return false; }
+            guard_memory_phase("tables-end", bounded_guard ? selected.front() : "all");
+            // Dependencies were loaded with the real loader; validate each selected owner once.
+            if (bounded_guard) std::erase_if(tables.value().units,
+                [&](const auto& unit) { return unit.id != selected.front(); });
+            loaded_count += tables.value().units.size();
+            for (const auto& unit : tables.value().units) for (const auto& hardpoint : unit.hardpoints) {
+                if (!hardpoint.manual_is_turret) continue;
+                for (const auto* bone : {&hardpoint.attachment, &hardpoint.manual_turret, &hardpoint.manual_barrel}) {
+                    if (!bone->axes) continue;
+                    auto axes = *bone->axes;
+                    bool usable = true;
+                    for (auto& axis : axes) {
+                        auto normalized = eawr::sim::math::normalize(axis);
+                        if (!normalized) { usable = false; break; }
+                        axis = normalized.value();
+                    }
+                    if (!usable) continue;
+                    auto shear = eawr::units::detail::turret_frame_shear(axes);
+                    if (!shear) { fail(shear.error()); return false; }
+                    max_shear_raw = std::max(max_shear_raw, shear.value().raw());
+                }
+            }
+            const auto accepted = guard_combat_profiles(std::move(tables).value(), authored_defects, turret_refusals, notes);
+            admitted.insert(admitted.end(), accepted.begin(), accepted.end());
+            guard_memory_phase("bind-end", bounded_guard ? selected.front() : "all");
+            return true;
+        };
+        if (bounded_guard) {
+            for (const auto& type : types) {
+                guard_memory_phase("unit-begin", type);
+                {
+                    // The decoded-model store belongs to the VFS, not the cache wrapper.
+                    // Release the entire closure before opening the next selected unit.
+                    auto closure = eawr::vfs::Vfs::mount(specs);
+                    if (!closure) return fail(closure.error());
+                    if (!load_and_bind(closure.value(), {type})) return 1;
+                }
+                guard_memory_phase("unit-released", type);
+            }
+        } else if (!load_and_bind(filesystem.value(), types)) return 1;
+        std::cout << "Configured chain max authored turret shear: Q24 " << max_shear_raw
+                  << " / " << Fixed::scale << " = "
+                  << static_cast<double>(max_shear_raw) / static_cast<double>(Fixed::scale) << '\n';
+        std::cout << "Authored data defects (" << authored_defects.size() << "):\n";
+        for (const auto& defect : authored_defects) std::cout << defect << '\n';
+        for (const auto& note : notes) std::cout << eawr::core::format_diagnostic(note) << '\n';
+        std::cout << "Turret-frame refusals (" << turret_refusals.size() << "):\n";
+        for (const auto& refusal : turret_refusals) std::cerr << refusal << '\n';
+        expect(turret_refusals.empty(), "Remake combat guard has zero turret-frame refusals");
+        for (const auto name : {"Victory_Destroyer_Rep", "Tector_Star_Destroyer_Republic",
+                 "AAA_Ship_Prop_Imp_Secutor", "Secutor_Inferno",
+                 "Eclipse_Star_Dreadnought_P1", "Eclipse_Star_Dreadnought_P4"}) {
+            const bool found = std::find(admitted.begin(), admitted.end(), name) != admitted.end();
+            expect(found, "Remake combat guard admits the named regression unit");
+            std::cout << "Regression unit " << name << ": " << (found ? "admitted" : "REFUSED") << '\n';
+        }
+        std::cout << "Remake combat guard: " << types.size() << " selected types, "
+                  << loaded_count << " loaded, " << admitted.size()
+                  << " combat profiles, " << failures << " failures\n";
+        return failures == 0 ? 0 : 1;
+    }
     // A selected installed-mod battle, using the same faction dependency closure as the viewer.
     // Arguments supply all installed paths, the playable map and both faction names.
     if (argc == 7 && std::string_view(argv[1]) == "--battle-mod") {
@@ -322,6 +802,12 @@ int main(const int argc, char** argv) {
         if (!active) { std::cerr << "Each AI must issue production and attack orders\n"; return 1; }
         return 0;
     }
+    if (argc == 2 && std::string_view(argv[1]) == "--fire-bones-installed") {
+        const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
+        if (!root || root->empty()) return 77;
+        foc_fleet(false, true);
+        return failures == 0 ? 0 : 1;
+    }
     if (argc == 2 && (std::string_view(argv[1]) == "--installed"
         || std::string_view(argv[1]) == "--formation-deceleration-installed")) {
         const auto root = eawr::testing::environment("EAWR_EAW_GAME_ROOT");
@@ -417,7 +903,8 @@ int main(const int argc, char** argv) {
     }
     // Targeted installed-mod regression: game root, mod chain, craft type. This uses
     // real XML inheritance and model resolution without starting a renderer.
-    if (argc == 5 && std::string_view(argv[1]) == "--bank-angle-mod") {
+    if (argc == 5 && (std::string_view(argv[1]) == "--bank-angle-mod"
+        || std::string_view(argv[1]) == "--squadron-mod")) {
         auto roots = eawr::vfs::mod_chain_roots(std::filesystem::path(argv[3]));
         roots.emplace_back("expansion", std::filesystem::path(argv[2]) / "corruption" / "Data");
         roots.emplace_back("base", std::filesystem::path(argv[2]) / "GameData" / "Data");
@@ -439,6 +926,43 @@ int main(const int argc, char** argv) {
         if (!tables) { std::cerr << tables.error().message << '\n'; return 1; }
         auto motion = eawr::units::motion_table(tables.value());
         if (!motion) { std::cerr << motion.error().message << '\n'; return 1; }
+        if (std::string_view(argv[1]) == "--squadron-mod") {
+            namespace tactical = eawr::sim::tactical;
+            const auto type = eawr::assets::object_type_crc(argv[4]);
+            const auto* profile = motion.value().squadrons.find_squadron(type);
+            expect(profile && !profile->members.empty(), "FL-02: installed squadron has a flight profile");
+            if (!profile) return 1;
+            expect(!has_row(tables.value().unresolved, argv[4], "Squadron_Offsets"),
+                "FM-10: installed missing offsets are valid");
+            tactical::TacticalSetup setup;
+            setup.players = {{1, 1, 1, tactical::player_flag_commandable}};
+            tactical::Squadron squadron{1, {}};
+            setup.units.push_back({1, type, 1, {}, eawr::sim::math::identity_quat(), {}});
+            std::size_t zero_offsets = 0;
+            for (std::size_t index = 0; index < profile->members.size(); ++index) {
+                const auto id = static_cast<eawr::sim::EntityId>(index + 2);
+                setup.units.push_back({id, profile->members[index], 1, profile->offsets[index],
+                    eawr::sim::math::identity_quat(), {}});
+                squadron.members.push_back(id);
+                if (profile->offsets[index] == Vec3{}) ++zero_offsets;
+            }
+            setup.squadrons.push_back(squadron);
+            auto created = tactical::TacticalSession::create(setup, {}, {}, motion.value());
+            if (!created) { std::cerr << created.error().message << '\n'; return 1; }
+            auto session = std::move(created).value();
+            const eawr::platform::ThreadWorkerAdapter executor(4);
+            for (int tick = 0; tick < 40; ++tick) {
+                const auto stepped = session.step(executor);
+                if (!stepped) { std::cerr << stepped.error().message << '\n'; return 1; }
+            }
+            const auto groups = session.squadrons();
+            expect(groups.size() == 1 && groups.front().members == squadron.members,
+                "FL-02: installed team starts and advances with every authored member in order");
+            std::cout << "installed squadron start: " << argv[4] << ", members=" << profile->members.size()
+                      << ", zero_offsets=" << zero_offsets << ", ticks=40, hash=" << session.state_sha256()
+                      << ", failures=" << failures << '\n';
+            return failures == 0 ? 0 : 1;
+        }
         const auto* craft = motion.value().squadrons.find_craft(eawr::assets::object_type_crc(argv[4]));
         expect(craft && craft->bank_angle == Fixed::from_raw(raw(360)),
             "FM-03: installed mod craft binds with its authored bank of 360");
@@ -456,6 +980,10 @@ int main(const int argc, char** argv) {
     }
     if (argc == 2 && std::string_view(argv[1]) == "--formation-deceleration") {
         synthetic_tables();
+        return failures == 0 ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--land-companies") {
+        land_companies();
         return failures == 0 ? 0 : 1;
     }
     if (argc != 1) return 1;
@@ -568,6 +1096,8 @@ int main(const int argc, char** argv) {
             "UA-05: unusable required turret axes report a contract failure instead of silently disabling fire");
     }
     engine_disable_durations();
+    space_unit_guard_selection();
+    independent_guard_profiles();
     object_weapon_defaults();
     squadron_container_health();
     retail_value_rules();
@@ -578,6 +1108,8 @@ int main(const int argc, char** argv) {
     presentation_admission();
     priority_rules();
     content_identity();
+    domain_tags();
+    land_companies();
     {
         TempTree tree;
         write_fixture(tree.root, units_xml("250", "Select_Test"));
@@ -674,6 +1206,7 @@ int main(const int argc, char** argv) {
         }
     }
     mass_driver_type();
+    indexed_collision_geometry();
     collision_extents();
     if (failures != 0) {
         std::cerr << failures << " unit table contract(s) failed\n";

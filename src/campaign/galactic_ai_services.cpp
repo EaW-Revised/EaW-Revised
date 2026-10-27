@@ -9,6 +9,7 @@
 #include <exception>
 #include <cstdlib>
 #include <cassert>
+#include <chrono>
 
 namespace eawr::campaign {
 namespace ai = script::foc::galactic_ai;
@@ -230,10 +231,18 @@ core::Result<std::string> ComposedGalacticAiState::sync_hash() const {
         digests.emplace(std::move(name), cache.digest);
         return core::Result<void>::success();
     };
+    const auto measured_append = [&](std::string name, const Contributor& owner) {
+        if (!measure_sync_owners_) return append(std::move(name), owner);
+        const auto begin = std::chrono::steady_clock::now();
+        auto result = append(name, owner);
+        const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
+        sync_owner_nanoseconds_[name] = static_cast<std::uint64_t>(elapsed);
+        return result;
+    };
     for (std::size_t i = 0; i < owners_.size(); ++i)
-        if (auto copied = append(std::string(components[i]), owners_[i]); !copied) return core::Result<std::string>::failure(copied.error());
+        if (auto copied = measured_append(std::string(components[i]), owners_[i]); !copied) return core::Result<std::string>::failure(copied.error());
     for (const auto& [name, owner] : external_)
-        if (auto copied = append(name, owner); !copied) return core::Result<std::string>::failure(copied.error());
+        if (auto copied = measured_append(name, owner); !copied) return core::Result<std::string>::failure(copied.error());
     if (total_bytes > ai::native_state_max_bytes) {
         auto exact = capture(); if (!exact) return core::Result<std::string>::failure(exact.error());
     }

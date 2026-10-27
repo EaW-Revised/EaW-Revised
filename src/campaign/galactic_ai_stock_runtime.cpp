@@ -6,6 +6,9 @@
 #include "../script/foc/galactic_ai_movement_runtime.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <map>
+#include <sstream>
 
 namespace eawr::campaign {
 namespace ga = script::foc::galactic_ai;
@@ -58,7 +61,7 @@ core::Result<ga::FreestoreFacts> stock_actor_facts(const script::foc::ai::Galact
     if (planet(actor)) { row.object.kind = ga::FreestoreKind::planet; row.object.planet = actor; }
     else if (has(traits, "FLEET")) row.object.kind = ga::FreestoreKind::fleet;
     else if (has(traits, "DUMMY_GROUND_STRUCTURE") || has(traits, "DUMMY_GROUND_BASE")) row.object.kind = ga::FreestoreKind::ground_structure;
-    else if (has(traits, "DUMMY_SPACE_STRUCTURE") || has(traits, "DUMMY_STAR_BASE")) row.object.kind = ga::FreestoreKind::space_structure;
+    else if (has(traits, "DUMMY_ORBITAL_STRUCTURE") || has(traits, "DUMMY_STAR_BASE")) row.object.kind = ga::FreestoreKind::space_structure;
     if (row.parent && planet(row.parent)) {
         row.parent_is_planet = row.object.directly_parented_to_planet = true;
         row.object.planet = row.parent;
@@ -250,19 +253,67 @@ core::Result<void> apply_galactic_ai_actor_changes(ga::QualifiedFreestore& owner
     owner.replace(staged);
     return core::Result<void>::success();
 }
+std::vector<std::string> describe_galactic_ai_goals(const GalacticAiRuntimeView& view, const GalacticAiRuntimeSetup& setup) {
+    std::vector<std::string> lines;
+    const auto engine = view.engine.lock(); const auto actions = view.actions.lock();
+    if (!engine) return lines;
+    const auto refusals = engine->galactic_refusals();
+    for (const auto& selected : setup.lifecycle.players) {
+        struct Row { std::size_t goals{}, active{}, planned{}, running{}; double largest{}; };
+        std::map<std::string, Row> by_function;
+        std::size_t total{};
+        for (const auto& goal : engine->galactic_goal_observations(selected.player)) {
+            auto& row = by_function[goal.function];
+            ++row.goals; ++total;
+            if (goal.active) ++row.active;
+            if (goal.planned) ++row.planned;
+            if (goal.running_plan) ++row.running;
+            row.largest = std::max(row.largest, std::strtod(goal.desire.c_str(), nullptr));
+        }
+        std::uint64_t movements{};
+        if (actions) for (const auto& [request, movement] : actions->movements()) {
+            static_cast<void>(request);
+            if (movement.player == selected.player) ++movements;
+        }
+        std::ostringstream line;
+        line << "player " << selected.player << ' ' << selected.player_type << ": " << total << " goals, " << movements << " movement rows";
+        for (const auto& [name, row] : by_function)
+            line << "; " << name << " n=" << row.goals << " active=" << row.active << " planned=" << row.planned
+                 << " running=" << row.running << " desire<=" << row.largest;
+        std::string refused;
+        for (const auto& [key, count] : refusals) if (key.first == selected.player) refused += (refused.empty() ? "" : ", ") + key.second + '=' + std::to_string(count);
+        line << "; refusals: " << (refused.empty() ? "none" : refused);
+        lines.push_back(line.str());
+        for (const auto& goal : engine->galactic_goal_observations(selected.player)) {
+            std::size_t move_requests{};
+            if (actions && goal.running_plan) for (const auto& [request, movement] : actions->movements()) {
+                static_cast<void>(request);
+                if (movement.player == selected.player && movement.plan_id == goal.running_plan) ++move_requests;
+            }
+            std::ostringstream detail;
+            detail << "player " << selected.player << " goal=" << goal.goal << " definition=" << goal.function
+                   << " target=" << goal.target << " desire=" << goal.desire << " active=" << goal.active
+                   << " plan=" << (goal.plan.empty() ? "none" : goal.plan) << " running=" << goal.running_plan
+                   << " retained_move_requests=" << move_requests;
+            lines.push_back(detail.str());
+        }
+    }
+    return lines;
+}
 core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
     std::shared_ptr<const GalacticAiRuntimeSetup> setup, std::shared_ptr<const StartingForceInputs> starting,
     std::shared_ptr<const StockSpaceEntry> space, GalacticAiStockQueryFactory queries,
     std::function<void(GalacticAiRuntimeView)> observe,
-    std::function<void(const GalacticAiBattleNotice&)> observe_battle) {
+    std::function<void(const GalacticAiBattleNotice&)> observe_battle,
+    std::function<void(GalacticAiRuntimeView)> watch) {
     using Factory = GalacticAiRuntimeProviderFactory;
     if (!setup || !starting || !space || !queries) return absent<Factory>("immutable setup/placement/child/B query factory");
-    Factory factory = [setup, starting, space, queries, observe, observe_battle]() -> core::Result<GalacticAiRuntimeProviders> {
+    Factory factory = [setup, starting, space, queries, observe, observe_battle, watch]() -> core::Result<GalacticAiRuntimeProviders> {
         auto fresh = queries(); if (!fresh) return core::Result<GalacticAiRuntimeProviders>::failure(fresh.error());
         auto query = std::move(fresh).value();
         if (!query.usability || (!query.connectivity && !query.connectivity_publication) || !query.movement || !query.external.contains("GALACTIC_USABILITY"))
             return absent<GalacticAiRuntimeProviders>("qualified B usability/connectivity/movement/native owner");
-        GalacticAiRuntimeProviders out; out.external = std::move(query.external); out.observe = observe;
+        GalacticAiRuntimeProviders out; out.external = std::move(query.external); out.observe = observe; out.watch = watch;
         if (!query.freestore_members) query.freestore_members = freestore_member_qualifier(setup->content);
         if (!query.build_budgets) query.build_budgets = [](const auto& engine, const auto& actions, const auto& funding) {
             return engine.galactic_build_budgets(actions, funding);
@@ -438,7 +489,7 @@ core::Result<GalacticAiRuntimeProviderFactory> stock_galactic_ai_providers(
             ga::FreestoreType trait; trait.type = id; trait.transport = behaves("TRANSPORT");
             if (behaves("FLEET")) trait.kind = ga::FreestoreKind::fleet;
             else if (behaves("DUMMY_GROUND_STRUCTURE") || behaves("DUMMY_GROUND_BASE")) trait.kind = ga::FreestoreKind::ground_structure;
-            else if (behaves("DUMMY_STAR_BASE")) trait.kind = ga::FreestoreKind::space_structure;
+            else if (behaves("DUMMY_ORBITAL_STRUCTURE") || behaves("DUMMY_STAR_BASE")) trait.kind = ga::FreestoreKind::space_structure;
             out.freestore_types.push_back(trait);
         }
         struct SafetyPublication {

@@ -144,7 +144,11 @@ public:
         if (tick && tick->galaxy) {
             const std::lock_guard lock(mutex_);
             const auto& game = adapter_->game();
-            view_.clock_paused = game.battle() ? game.child_paused() : game.galaxy().clock().pause_depth != 0;
+            view_.clock_paused = game.battle() ? game.child_paused()
+                : game.galaxy().clock().pause_depth > (game.pending_conflict() || game.battle_summary_hold() ? 1U : 0U);
+            if (view_.clock_paused && adapter_->pause_actor()) {
+                view_.clock_actor = *adapter_->pause_actor(); view_.clock_action = "paused";
+            }
             for (const auto seat_id : adapter_->clock_refusals()) {
                 const auto at = std::find_if(view_.clock_refusals.begin(), view_.clock_refusals.end(),
                     [&](const auto& row) { return row.seat == seat_id; });
@@ -263,7 +267,8 @@ private:
         const std::lock_guard lock(mutex_);
         view_.completed_tick = adapter_->completed_tick();
         const auto& game = adapter_->game();
-        view_.clock_paused = game.battle() ? game.child_paused() : game.galaxy().clock().pause_depth != 0;
+        view_.clock_paused = game.battle() ? game.child_paused()
+            : game.galaxy().clock().pause_depth > (game.pending_conflict() || game.battle_summary_hold() ? 1U : 0U);
         for (const auto& event : pumped.departure_events) {
             view_.departed.push_back(event.key.seat);
             if (event.key.seat == local_seat()) {

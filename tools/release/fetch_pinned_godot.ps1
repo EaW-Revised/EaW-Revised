@@ -1,19 +1,20 @@
-# Download the pinned official Godot 4.7.2 Windows GUI runtime for the player and debug archives.
-# The zip is checked against its published SHA-512 (the same pin as prototypes/godot/install_dependencies.ps1);
+# Download the pinned patched Godot 4.7.2 Windows GUI runtime (EAWR fork build, third_party/godot/README.md) for the
+# player and debug archives. The zip is checked against its SHA-512 pin (the fork release's SHA512-SUMS.txt);
 # tools/release/package_release.py then checks the extracted exe's own SHA-256 and `--version`. Writes only the
 # GUI exe (never the console companion) to <Out>\ and prints its path.
 param([string]$Out = "out/godot-runtime")
 
 $ErrorActionPreference = "Stop"
-$release = "https://github.com/godotengine/godot/releases/download/4.7.2-stable"
-$name = "Godot_v4.7.2-stable_win64.exe"
-$sha512 = "83decd58fdf67b9d657958a1ae6bf1929c20785315a81effe245874cdc57acb709bf868e00778a96984338c1b29dafdb453c6847747694621c6ecf5da2259993"
+$release = "https://github.com/Thom-Ernst/godot/releases/download/eawr-4.7.2-fad06b579"
+$name = "Godot_v4.7.2-stable_win64.exe"      # the exe inside the zip, and the name the player folder keeps
+$asset = "Godot_v4.7.2-stable-eawr-fad06b579_win64.exe.zip"
+$sha512 = "16b255f4b50ebe4fca9cbb89b53ec06e1f625b905e78f6effa886359f7bbdceaa00e7ee27a4c6814c1a8ae8a11f5b5a8fab5e0e04bc9efefdc18b3f682f8d97d"
 
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
-$zip = Join-Path $Out "$name.zip"
-if (-not (Test-Path -LiteralPath $zip)) { Invoke-WebRequest "$release/$name.zip" -OutFile $zip }
+$zip = Join-Path $Out $asset
+if (-not (Test-Path -LiteralPath $zip)) { Invoke-WebRequest "$release/$asset" -OutFile $zip }
 $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA512).Hash.ToLowerInvariant()
-if ($actual -ne $sha512) { throw "SHA-512 mismatch for $name.zip: $actual" }
+if ($actual -ne $sha512) { throw "SHA-512 mismatch for ${asset}: $actual" }
 
 $extract = Join-Path $Out "extract"
 Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue

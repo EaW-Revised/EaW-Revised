@@ -1,4 +1,5 @@
 #include "damage_support.hpp"
+#include "eawr/diagnostics/memory_capacity.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 
 #include <algorithm>
@@ -11,10 +12,17 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace damage_test_support {
+
+static_assert(std::is_same_v<decltype(std::declval<tactical::CollisionMesh&>().triangles[0]),
+    const tactical::CollisionTriangle&>);
+static_assert(std::is_same_v<decltype(std::declval<tactical::CollisionMesh&>().nodes[0]),
+    const tactical::CollisionNode&>);
+static_assert(sizeof(tactical::CollisionMesh) == 48, "DG-36: shared buffers reduce per-mesh metadata from 64 to 48 bytes");
 
 void test_first_projectile_contact() {
     namespace d = tactical::detail;
@@ -296,7 +304,70 @@ void test_depleted_shield_mesh() {
     expect(empty && empty.value().mesh_hardpoint == 0, "DG-38: an empty shield's mesh still lets the shot pass");
 }
 
+void test_adaptive_mesh_grid() {
+    const auto all = [](std::size_t) { return true; };
+    const auto placed = math::to_matrix(math::identity_quat(), at(0, 0)).value();
+    auto table = combat();
+    auto& profile = table.profiles[1];
+    for (int power = 12; power <= 18; ++power) {
+        for (const auto offset : {-1, 0, 1}) {
+            const auto extent = (std::int64_t{1} << power) + offset;
+            for (const auto sign : {-1, 1}) {
+                const auto x = sign * extent;
+                auto mesh = tactical::collision_mesh(plate(x, 5), tactical::no_hardpoint, tactical::no_hardpoint, false);
+                const auto expected = power - 12 + (offset > 0 ? 1 : 0);
+                expect(mesh.grid_exponent == expected, "DG-36: smallest grid at each signed power-of-two boundary");
+                profile.meshes = {mesh};
+                profile.mesh_bounds = tactical::CollisionBox{at(x, -5, -5), at(x, 5, 5)};
+                const auto valid = tactical::validate_combat(table);
+                expect(static_cast<bool>(valid) == (extent <= tactical::max_combat_distance),
+                    "DG-36: geometry accepted through the inclusive hard cap");
+                if (extent > tactical::max_combat_distance) {
+                    expect(!valid && valid.error().message.find("collision mesh 0: coordinate raw ") != std::string::npos
+                            && valid.error().message.find("type ") != std::string::npos
+                            && valid.error().message.find("exceeds cap 262144 units (DG-36)") != std::string::npos,
+                        "DG-36: hard-cap refusal identifies type, mesh, observed coordinate and cap");
+                    continue;
+                }
+                const auto hit = tactical::segment_hits_meshes(profile.meshes, all, placed, at(x - 8, 0), at(x + 8, 0));
+                expect(hit && hit.value() && hit.value()->fraction.raw() == one / 2,
+                    "DG-36: signed adaptive contact at each extent boundary including the cap");
+                ++profile.meshes[0].grid_exponent;
+                expect(!tactical::validate_combat(table), "DG-36: a stale or nonminimal derived cache is refused");
+            }
+        }
+    }
+    // A 38.47k-unit fixture uses exponent 4; grid crossings retain rounded fractions.
+    auto large = tactical::collision_mesh(plate(38471, 100), 2, 1, true);
+    expect(large.grid_exponent == 4, "DG-36: measured-scale station uses a half-unit quantum");
+    const auto crossing = [&](const std::int64_t sign) {
+        auto triangles = plate(sign * 4097, 5);
+        for (auto& triangle : triangles) for (auto* p : {&triangle.a, &triangle.b, &triangle.c})
+            p->x = Fixed::from_raw(p->x.raw() + sign * one / 32);
+        const std::vector<tactical::CollisionMesh> meshes{
+            tactical::collision_mesh(std::move(triangles), 0, 0, false)};
+        const auto hit = tactical::segment_hits_meshes(meshes, all, placed,
+            at(sign * 4096, 0), at(sign * 4098, 0));
+        expect(hit && hit.value() && hit.value()->fraction.raw() == one * 17 / 32,
+            "DG-36: half-quantum crossing rounds away from zero on either side");
+    };
+    crossing(1); crossing(-1);
+    std::vector<tactical::CollisionMesh> mixed{
+        tactical::collision_mesh(plate(0, 5), tactical::no_hardpoint, tactical::no_hardpoint, false), large, large};
+    auto hit = tactical::segment_hits_meshes(mixed, all, placed, at(38460, 0), at(38482, 0));
+    expect(hit && hit.value() && hit.value()->mesh == 1 && hit.value()->fraction.raw() == one / 2,
+        "DG-36: a small mesh cannot suppress a large contact; equal fractions keep earlier mesh");
+    hit = tactical::segment_hits_meshes(mixed, [](std::size_t i) { return i == 2; }, placed, at(38460, 0), at(38482, 0));
+    expect(hit && hit.value() && hit.value()->mesh == 2, "DG-38: adaptive shield/source gates keep mesh indices");
+    const auto turned = math::to_matrix(math::normalize(math::Quat{Fixed{}, Fixed{}, decimal("0.70710678"),
+        decimal("0.70710678")}).value(), at(10, 20)).value();
+    hit = tactical::segment_hits_meshes(mixed, all, turned, at(10, 38480), at(10, 38502));
+    expect(hit && hit.value() && hit.value()->mesh == 1 && close_to(hit.value()->fraction, 0.5, 0.03),
+        "DG-36: adaptive geometry uses the same local rotation and translation");
+}
+
 void test_meshes() {
+    test_adaptive_mesh_grid();
     test_projectile_mesh_budget();
     test_depleted_shield_mesh();
     const auto all = [](std::size_t) { return true; };
@@ -343,6 +414,81 @@ void test_meshes() {
     expect(tree[0].nodes.size() > 1 && tree[0].triangles.size() == field.size(), "DG-36: the field gets a tree");
     expect(tactical::collision_mesh(field, tactical::no_hardpoint, tactical::no_hardpoint, false) == tree[0],
         "DG-36: the tree is built the same every time");
+    {
+        // A live session and its content retain independent profile metadata but one immutable
+        // tree. Replacing/destroying an owner's geometry must not invalidate the other owner.
+        tactical::CombatTable owner;
+        owner.profiles.resize(1);
+        owner.profiles[0].meshes = tree;
+        auto retained = owner;
+        const auto* triangles = owner.profiles[0].meshes[0].triangles.data();
+        const auto* nodes = owner.profiles[0].meshes[0].nodes.data();
+        expect(retained.profiles[0].meshes[0].triangles.data() == triangles
+            && retained.profiles[0].meshes[0].nodes.data() == nodes,
+            "DG-36: profile copies share triangle and BVH allocations");
+        retained.profiles[0].meshes[0].hardpoint = 7;
+        expect(owner.profiles[0].meshes[0].hardpoint == tactical::no_hardpoint,
+            "DG-36: routing metadata remains independent of shared geometry");
+        owner.profiles.clear();
+        const auto independently_built = tactical::collision_mesh(field, 7, tactical::no_hardpoint, false);
+        expect(retained.profiles[0].meshes[0] == independently_built,
+            "DG-36: surviving owner sees identical tree order, coordinates and bounds");
+        const auto before = tactical::segment_hits_meshes(tree, all, math::identity_matrix(), at(-69, -69, -10), at(-69, -69, 10));
+        const auto after = tactical::segment_hits_meshes(retained.profiles[0].meshes, all, math::identity_matrix(),
+            at(-69, -69, -10), at(-69, -69, 10));
+        expect(before && after && before.value() && after.value()
+            && before.value()->fraction == after.value()->fraction && before.value()->mesh == after.value()->mesh,
+            "DG-36: retained shared tree preserves exact segment contact");
+        retained.profiles[0].meshes[0] = tactical::collision_mesh(plate(0, 5), 0, 0, false);
+        expect(tree[0].triangles.data() == triangles && tree[0].nodes.data() == nodes
+            && tree[0] == tactical::collision_mesh(field, tactical::no_hardpoint, tactical::no_hardpoint, false),
+            "DG-36: replacing one buffer leaves another owner's data unchanged");
+        auto moved = std::move(retained.profiles[0].meshes[0]);
+        expect(retained.profiles[0].meshes[0].triangles.empty() && retained.profiles[0].meshes[0].nodes.empty()
+            && !moved.triangles.empty() && !moved.nodes.empty(),
+            "DG-36: moved buffers retain ownership and leave safe empty readers");
+        auto content = combat();
+        auto& profile = content.profiles[1];
+        profile.meshes = tree;
+        profile.mesh_bounds = tactical::CollisionBox{tree[0].nodes[0].min, tree[0].nodes[0].max};
+        eawr::diagnostics::MemoryCapacity inventory;
+        eawr::diagnostics::combat_capacity(inventory, "viewer", content);
+        const auto physical = inventory.physical_collision_bytes();
+        eawr::diagnostics::MemoryCapacity session_inventory;
+        const auto copied_content = content;
+        eawr::diagnostics::combat_capacity(session_inventory, "sim", copied_content);
+        inventory.append(session_inventory);
+        expect(physical == tree[0].triangles.capacity() * sizeof(tactical::CollisionTriangle)
+                + tree[0].nodes.capacity() * sizeof(tactical::CollisionNode)
+            && inventory.physical_collision_bytes() == physical,
+            "DG-36: physical capacity deduplicates shared geometry across appended owner queries");
+        std::uint64_t logical_triangles = 0;
+        for (std::size_t index = 0; index < inventory.count; ++index)
+            if (std::string_view(inventory.rows[index].name) == "triangles") logical_triangles += inventory.rows[index].bytes;
+        expect(logical_triangles == 2 * tree[0].triangles.capacity() * sizeof(tactical::CollisionTriangle),
+            "DG-36: logical owner rows retain both references separately from physical capacity");
+        const auto independent_tree = tactical::collision_mesh(field, 0, 0, false);
+        inventory.collision_buffer(independent_tree.triangles);
+        inventory.collision_buffer(independent_tree.nodes);
+        expect(inventory.physical_collision_bytes() == 2 * physical,
+            "DG-36: equal-valued independent allocations count as distinct physical storage");
+        std::vector<math::Vec3> raw;
+        raw.reserve(64);
+        raw.resize(3);
+        inventory.collision_buffer(raw);
+        inventory.collision_buffer(raw.data(), raw.capacity() * sizeof(math::Vec3));
+        expect(inventory.physical_collision_bytes() == 2 * physical + raw.capacity() * sizeof(math::Vec3),
+            "DG-36: raw buffer capacity includes unused storage and deduplicates repeated readers");
+        auto live = tactical::TacticalSession::create(setup({unit(1, frigate_type, 1, at(0, 0))}),
+            sensors(), durability(), {}, std::nullopt, content);
+        expect(static_cast<bool>(live), "DG-36: live session admits shared collision content");
+        if (live) {
+            const auto* live_profile = live.value().combat().find(profile.type_id);
+            expect(live_profile && live_profile->meshes[0].triangles.data() == profile.meshes[0].triangles.data()
+                && live_profile->meshes[0].nodes.data() == profile.meshes[0].nodes.data(),
+                "DG-36: actual SessionStoreRules shares the content's immutable geometry");
+        }
+    }
     std::uint64_t state = 0x9e3779b97f4a7c15ULL;
     const auto next = [&]() {
         state ^= state << 13;
@@ -380,14 +526,14 @@ void test_meshes() {
     expect(disabled && !disabled.value() && disabled_work.meshes == 0 && disabled_work.boxes == 0
             && disabled_work.triangles == 0, "DG-36a: disabled meshes do no collision work");
 
-    // Validation: meshes need the box and their bounds, and must stay within 4096 units.
+    // Validation: meshes need the box and their bounds; oversized meshes derive a coarser grid.
     auto table = combat();
     table.profiles[1].meshes = {tactical::collision_mesh(plate(0, 5), tactical::no_hardpoint, tactical::no_hardpoint, false)};
     expect(!tactical::validate_combat(table), "DG-36: meshes without their bounds are refused");
     table.profiles[1].mesh_bounds = tactical::CollisionBox{at(0, -5, -5), at(0, 5, 5)};
     expect(static_cast<bool>(tactical::validate_combat(table)), "DG-36: a mesh with its box and bounds is accepted");
     table.profiles[1].meshes = {tactical::collision_mesh(plate(5000, 5), tactical::no_hardpoint, tactical::no_hardpoint, false)};
-    expect(!tactical::validate_combat(table), "DG-36: a mesh beyond 4096 units is refused");
+    expect(static_cast<bool>(tactical::validate_combat(table)), "DG-36: a mesh beyond 4096 units uses an adaptive grid");
 }
 
 // #536, DG-11, DG-36, DG-38 in a session: the corvette of DG-F2 faces the shooter with a hardpoint

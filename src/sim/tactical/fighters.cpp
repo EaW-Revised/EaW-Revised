@@ -68,9 +68,8 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
     }
     for (const auto& squadron : table.squadrons) {
         const auto label = "squadron type " + std::to_string(squadron.type_id);
-        if (squadron.members.empty() || squadron.members.size() > max_members
-            || squadron.offsets.size() != squadron.members.size()) {
-            return invalid(label + ": 1 to 64 members, one offset each");
+        if (squadron.max_squad_size == 0 || squadron.members.empty() || squadron.offsets.size() != squadron.members.size()) {
+            return invalid(label + ": at least one member, one normalized offset each");
         }
         for (const auto member : squadron.members) {
             if (find_by_type(table.craft, member) == nullptr) {
@@ -86,8 +85,10 @@ core::Result<void> validate_squadron_table(const SquadronTable& table) {
     }
     for (const auto& spawner : table.spawners) {
         const auto label = "spawner type " + std::to_string(spawner.type_id);
-        if (spawner.entries.size() > max_entries || spawner.bays.size() > max_bays) {
-            return invalid(label + ": at most 64 entries and 255 bays");
+        // FL-02: dynamic lists; only the draw and stored index width limits their count.
+        if (spawner.entries.size() > std::numeric_limits<std::uint32_t>::max()
+            || spawner.bays.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return invalid(label + ": entry and bay counts must fit in uint32");
         }
         for (const auto& entry : spawner.entries) {
             if (entry.starting < 0 || entry.reserve < unlimited_reserve) {

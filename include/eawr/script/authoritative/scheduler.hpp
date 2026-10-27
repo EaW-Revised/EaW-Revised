@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 // Authoritative script scheduler (#247, docs/lua-sandbox.md): sandboxed script
 // instances serviced once per simulation tick. Each instance owns one Lua
 // state of the authoritative numeric profile; its service reads only its own
@@ -255,6 +257,8 @@ public:
     virtual core::Result<void> start_timer(numeric::LuaNumber seconds, ScriptEvent event) = 0;
     // Adds a diagnostic to this instance's service report; the call goes on.
     virtual void report(std::string_view code, std::string message) = 0;
+    // Requests the same end-of-invocation exit as _ScriptExit; returns normally, independent of Lua pcall.
+    virtual void request_exit() noexcept = 0;
     virtual core::Result<void> register_proximity(ProximityQuery query) = 0;
     virtual core::Result<void> cancel_proximity(Handle object) = 0;
     virtual core::Result<void> service_proximities(Handle object, const ProximityCandidates& candidates) = 0;
@@ -336,6 +340,16 @@ public:
     // Registers a global binding (or `Table.member` on a binding object) for
     // every instance created afterwards.
     [[nodiscard]] core::Result<void> register_binding(std::string_view name, Binding binding);
+    // `GameRandom.Free_Random` draws outside the synchronized stream, so register_binding refuses it. A host whose
+    // retail behaviour is sourced binds it here (the galactic story host, RGC-195..199: a separate fixed-seed stream
+    // in single-player, the synchronized stream in multiplayer). Everything else about the registration is as for
+    // register_binding.
+    [[nodiscard]] core::Result<void> register_free_random(Binding binding);
+    // Registers a module of the manifest that every instance created afterwards runs in its own state, after the
+    // bindings and before its root chunk, so the module's globals are ordinary instance state: saved, hashed,
+    // restored and rolled back with the Lua graph. For script-visible APIs that are objects of the script itself
+    // (a weighted list holding the script's own values) and need no host storage. Before the first instance.
+    [[nodiscard]] core::Result<void> register_prelude(std::string_view module);
     // Registers a method of the host handles of one kind: `handle.Method(...)`
     // calls the binding with the handle as its first argument (the retail
     // wrapper objects are called with '.', not ':'). Reading a name no
@@ -396,6 +410,10 @@ public:
     // nullopt otherwise. Reads only.
     [[nodiscard]] core::Result<std::optional<Value>> read_global(std::uint64_t instance, std::string_view name);
 
+    // Diagnostic const query at a completed tick; caller excludes concurrent stepping.
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
+    // Const allocator observation; no Lua collection, stack write or synchronized state.
+    [[nodiscard]] std::uint64_t diagnostic_lua_bytes() const;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] bool uses_galactic_clock() const noexcept;
     [[nodiscard]] TickDuration tick_duration() const noexcept;
@@ -440,6 +458,7 @@ public:
     [[nodiscard]] std::uint64_t sync_graph_encodes() const noexcept;
 
 private:
+    [[nodiscard]] core::Result<void> install_binding(std::string_view name, Binding binding, bool free_random);
     struct Impl;
     explicit ScriptScheduler(std::unique_ptr<Impl> impl) noexcept;
     std::unique_ptr<Impl> impl_;

@@ -11,6 +11,27 @@
 
 namespace eawr::script::foc::ai {
 
+namespace {
+
+// #1702: the first lookup of a proposal trace that had no value, as "TOKENS: note" (the evaluator's
+// own note, when it gave one). Lookups are traced as " {note} [TOKENS parameter=value...=value]".
+std::string unavailable_blocker(const std::string& trace) {
+    const auto end = trace.find("=unavailable]");
+    if (end == std::string::npos) return {};
+    const auto open = trace.rfind(" [", end);
+    if (open == std::string::npos) return {};
+    std::string lookup = trace.substr(open + 2, end - open - 2);
+    lookup = lookup.substr(0, lookup.find(' '));
+    const auto close = trace.rfind('}', open);
+    if (close != std::string::npos && close + 1 == open) {
+        const auto brace = trace.rfind(" {", close);
+        if (brace != std::string::npos) lookup += ": " + trace.substr(brace + 2, close - brace - 2);
+    }
+    return lookup;
+}
+
+} // namespace
+
 using namespace engine_internal;
 
 namespace {
@@ -207,10 +228,20 @@ void Engine::propose(PlayerAi& player) {
         const Target* target = nullptr;
         // Journal the evaluation already being performed; never evaluate again to observe it.
         // Global goals include authored mod purchase/funding goals as well as stock ones.
-        const bool trace_proposal = host_->setup.journal && !player.galactic
-            && (function.goal->application.contains("GLOBAL") || function.goal_name == "DEFEND_SPACE_STATION");
+        const bool trace_all = host_->setup.journal && host_->setup.trace_proposals && !player.galactic;
+        const bool trace_proposal = trace_all || (host_->setup.journal && !player.galactic
+            && (function.goal->application.contains("GLOBAL") || function.goal_name == "DEFEND_SPACE_STATION"));
         std::string proposal_trace;
         const auto decision = [&](std::string event, std::string reason) {
+            if (trace_all) {
+                // #1702: folded by AiJournal::fold_proposal: "<reason>[ | blocker]\n<trace>".
+                if (reason == "authored perception unavailable")
+                    if (const auto blocker = unavailable_blocker(proposal_trace); !blocker.empty()) reason += " | " + blocker;
+                journal_plan(PlanEvent{static_cast<std::uint64_t>(frame_), player.player,
+                    std::string(proposal_trace_plan), function.goal_name, target_name(target), std::move(event),
+                    std::move(reason) + '\n' + proposal_trace});
+                return;
+            }
             if (!host_->setup.journal || (function.goal_name != "PURCHASE_SPACE_UPGRADES_GENERIC"
                 && function.goal_name != "SKIRMISH_UPGRADE_SPACE_STATION"
                 && function.goal_name != "TACTICAL_MULTIPLAYER_BUILD_SPACE_UNITS_GENERIC"

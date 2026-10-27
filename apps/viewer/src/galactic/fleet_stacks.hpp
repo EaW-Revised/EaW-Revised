@@ -43,6 +43,7 @@ struct FleetStackIcon final {
     std::size_t texture{};              // index into the authored stack textures
     std::optional<sim::galactic::TypeId> best;
     bool local{};
+    bool stealth{};                     // WGUI-92: every fleet of the icon is all-stealth
     std::vector<FleetStackEntry> contents; // WGUI-166 hover encyclopedia cells
     friend bool operator==(const FleetStackIcon&, const FleetStackIcon&) = default;
 };
@@ -111,6 +112,7 @@ struct StackAccumulator final {
     std::optional<sim::galactic::FleetId> fleet;
     std::size_t count{};
     bool local{};
+    bool stealth{true};
     std::vector<const sim::galactic::ObservedFleetGroup*> groups;
     std::vector<FleetStackEntry> contents;
     std::optional<sim::galactic::TypeId> overview_type;
@@ -128,7 +130,7 @@ struct StackAccumulator final {
 //    the local slot 1 fills the centre and local slots 0 and 2 merge into the
 //    right icon. GHUD-S76: presence alone does not draw a stack; a card is
 //    required, so an unknown count never produces an empty disk.
-// Overlays (stealth, raid), true-type remapping and transported contents are
+// The raid overlay (no producer yet), true-type remapping and transported contents are
 // not published yet and stay seams.
 [[nodiscard]] inline std::vector<FleetStackIcon> fleet_stack_icons(
     std::span<const sim::galactic::ObservedFleet* const> cards, const StackHealth& health,
@@ -140,6 +142,7 @@ struct StackAccumulator final {
                         const bool whole) {
         if (!slot.used) { slot.owner = card.owner; slot.local = card.local; slot.fleet = card.fleet; }
         slot.used = true;
+        slot.stealth = slot.stealth && card.all_stealth;
         if (!card.local && card.overview_type) {
             const auto candidate = health ? health(*card.overview_type) : std::nullopt;
             const auto current = health && slot.overview_type ? health(*slot.overview_type) : std::nullopt;
@@ -179,6 +182,7 @@ struct StackAccumulator final {
         icon.icon = static_cast<std::uint8_t>(index);
         icon.owner = slot.owner; icon.fleet = slot.fleet; icon.local = slot.local;
         icon.count = slot.count;
+        icon.stealth = slot.stealth;
         icon.texture = stack_texture_index(slot.count, textures);
         icon.best = slot.overview_type ? slot.overview_type : best_stack_ship(slot.groups, health);
         icon.contents = slot.contents;

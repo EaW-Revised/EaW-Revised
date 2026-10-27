@@ -8,6 +8,10 @@
 
 #include <godot_cpp/classes/rendering_device.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/variant/callable_method_pointer.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
+
+#include "device_memory_probe.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -30,11 +34,6 @@
 #endif
 
 namespace eawr::presentation::godot_backend::detail {
-
-struct DeviceMemory final {
-    std::uint64_t bytes{};
-    std::string source;
-};
 
 namespace vulkan_probe {
 // The few Vulkan declarations needed (vulkan_core.h layouts).
@@ -89,7 +88,8 @@ using EnumerateDeviceExtensions = std::int32_t (*)(void* device, const char* lay
 }
 } // namespace vulkan_probe
 
-[[nodiscard]] inline DeviceMemory probe_device_memory() {
+// Called only by the RenderingServer render-thread callback below.
+[[nodiscard]] inline DeviceMemory read_device_memory_on_render_thread() {
     using namespace vulkan_probe;
     godot::RenderingServer* rendering = godot::RenderingServer::get_singleton();
     if (rendering == nullptr) return {0, "no rendering server"};
@@ -146,6 +146,38 @@ using EnumerateDeviceExtensions = std::int32_t (*)(void* device, const char* lay
         if (bytes != 0) return {bytes, "vulkan device-local heaps"};
     }
     return {0, "vulkan memory properties unavailable"};
+}
+
+[[nodiscard]] inline DeviceMemoryProbe& device_memory_probe() {
+    static DeviceMemoryProbe probe;
+    return probe;
+}
+
+inline void sample_device_memory_on_render_thread() {
+    auto memory = read_device_memory_on_render_thread();
+    if (memory.bytes == 0) {
+        godot::UtilityFunctions::push_warning("VRAM probe unavailable: ", memory.source.c_str());
+    } else {
+        godot::UtilityFunctions::print("VRAM probe bytes=", static_cast<int64_t>(memory.bytes),
+            " source=", memory.source.c_str());
+    }
+    device_memory_probe().publish(std::move(memory));
+}
+
+[[nodiscard]] inline std::optional<DeviceMemory> probe_device_memory() {
+    auto& probe = device_memory_probe();
+    return request_device_memory(probe, [&] {
+        auto* rendering = godot::RenderingServer::get_singleton();
+        if (rendering == nullptr) {
+            probe.publish({0, "no rendering server"});
+        } else {
+            // Godot executes this immediately in Safe mode and queues it in Separate
+            // mode. Never hold the cache mutex across the call or wait for the worker.
+            rendering->call_on_render_thread(callable_mp_static(&sample_device_memory_on_render_thread));
+        }
+    }, [] {
+        godot::UtilityFunctions::push_warning("VRAM probe still pending on the render thread; device budget remains unknown");
+    });
 }
 
 } // namespace eawr::presentation::godot_backend::detail

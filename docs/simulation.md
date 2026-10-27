@@ -131,6 +131,8 @@ later tickets that add systems to the per-unit phases and events to the stream.
 | `EAWR-SIM-0309` | warning: unit orders of a command were rejected at execution |
 | `EAWR-SIM-0310` | unsupported worker count, executor or system failure |
 | `EAWR-SIM-0311` | land tactical provider unavailable: land setup/replay parses, but session creation requires the land terrain field (L1) |
+| `EAWR-SIM-0312` | invalid land terrain content, movement-mask profile, bounds or occupancy input |
+| `EAWR-SIM-0313` | invalid land path checkpoint (a saved search that does not fit the grid it is restored against) |
 
 ## Workers and the phase map
 
@@ -191,7 +193,21 @@ player's row bytes in the original order, keeping all replay hashes and pins unc
 
 ### Phase map
 
-`TacticalSession::step`, in order:
+For terrain-backed land sessions, `step` takes the land host below. Each scope's
+stress timing includes its worker wait, preparation and ordered reduction; the
+serial remainder includes command admission and canonical encoding/hash.
+
+| Step | Runs | Why |
+|---|---|---|
+| Commands | serial | Canonical command and squad ID order; move and stop only. A move with no legal L4 placement reports rejection and preserves the previous order. |
+| `land-path-slices` | partitioned, ordered admission and route installation | One shared path per squad, 4096 work per tick and 256 per admitted slice; ended routes install in ascending squad ID ([LP-17](behaviour/land-pathfinding.md)). |
+| `land-member-proposals` | partitioned, ordered reduction | Squad and member motion plus swept-pair flags read immutable inputs and write disjoint slots; accepted poses reduce in stable ID order. |
+| Late retained contacts | partitioned observations/discovery, ordered service | LR1-03/D5: contact paths can affect the next ordinary motion invocation, with no second move in the current tick ([land movement](behaviour/land-local-movement.md#tactical-movement-host)). |
+| `land-occupancy-commit` | serial ordered commit, partitioned cell preparation | The L1 occupancy snapshot takes the moved members in ascending object ID. |
+| `land-publication` | partitioned | Reads committed member/squad poses, writes disjoint live state rows with terrain height and checked yaw rotation, then publishes the snapshot. |
+| State hash | serial, or supplied hash service | Appends the optional land state to canonical state; profiling values never enter state. |
+
+For space sessions, `TacticalSession::step` runs in order:
 
 | Step | Runs | Why |
 |---|---|---|

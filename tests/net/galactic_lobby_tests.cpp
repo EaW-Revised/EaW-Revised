@@ -32,6 +32,7 @@
 #include <limits>
 #include <sstream>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <set>
 #include <stdexcept>
@@ -206,7 +207,7 @@ void skirmish_bytes_pinned() {
     auto& m = *options.match;
     m.allow_heroes = true; m.allow_superweapons = false; m.free_starting_units = true; m.pre_built_base = false; m.allow_random_events = true;
     m.credits = Fixed::from_raw(12345); m.start_tech = 2; m.max_tech = 5; m.game_timer = 30; m.win_integer = 3; m.auto_resolve = 2;
-    m.win_float = Fixed::from_raw(99); m.win_condition = "WC"; m.space_win_condition = "SW";
+    m.win_float = Fixed::from_raw(99); m.win_condition = "WC"; m.tactical_win_condition = "SW";
     options.slots = std::vector<eawr::skirmish::LobbySlot>{{1, "Rebel", 1, true, {}, 0}, {2, "Empire", 2, false, {}, 1}};
     const auto game = require(viewer::encode_lan_lobby_game(options, 3));
     const std::string text(game.options.begin(), game.options.end());
@@ -257,6 +258,39 @@ void campaign_list() {
     expect(cp::list_mp_lobby_campaigns(modded.data)[0].factions.size() == 5, "a faction the campaign's records name is listed, however many there are");
     modded.data.campaigns[0].home_locations.pop_back();
     expect(cp::list_mp_lobby_campaigns(modded.data)[0].factions.size() == 4, "a faction no campaign record names is not listed");
+}
+
+// ---- the campaign list shows the authored name and description (#4553) ----
+
+void campaign_labels() {
+    Local local;
+    local.data.campaigns[0].text_id = "TEXT_CAMPAIGN_SINGLE_21";
+    local.data.campaigns[0].description_text = "TEXT_CAMPAIGN_DESC_21";
+    const auto list = local.catalog();
+    expect(list[0].text_id == "TEXT_CAMPAIGN_SINGLE_21" && list[0].description_text == "TEXT_CAMPAIGN_DESC_21",
+        "the list carries the campaign's Text_ID and Description_Text keys");
+    expect(list[0].planet_points.size() == 1 && list[0].planet_points[0].first.raw() == 0 && list[0].planet_points[0].second.raw() == 0,
+        "the list carries each planet's galactic position for the staging preview");
+    const std::map<std::string, std::string, std::less<>> table{
+        {"TEXT_CAMPAIGN_SINGLE_21", "Galactic Conquest"}, {"TEXT_CAMPAIGN_DESC_21", "Rule the galaxy.\\nSecond line."}};
+    const auto resolve = [&](const std::string_view key) -> std::optional<std::string> {
+        const auto found = table.find(key);
+        if (found == table.end()) return std::nullopt;
+        return found->second;
+    };
+    auto labels = cp::label_mp_lobby_campaign(list[0], resolve);
+    expect(labels.title == "Galactic Conquest" && labels.description == "Rule the galaxy.\nSecond line." && labels.missing.empty(),
+        "the stock campaign shows its localized name and description, with the line break expanded");
+    auto gone = list[0];
+    gone.text_id = "TEXT_MOD_NAME"; gone.description_text = "TEXT_MOD_DESC";
+    labels = cp::label_mp_lobby_campaign(gone, resolve);
+    expect(labels.title == gone.name && labels.description.empty()
+            && labels.missing == std::vector<std::string>{"TEXT_MOD_NAME", "TEXT_MOD_DESC"},
+        "a campaign whose text is missing falls back to its ID, no description, and names the missing keys");
+    gone.text_id.clear(); gone.description_text.clear();
+    labels = cp::label_mp_lobby_campaign(gone, resolve);
+    expect(labels.title == gone.name && labels.description.empty() && labels.missing.empty(),
+        "a campaign that authors no text shows its ID without a log line");
 }
 
 // ---- staging validation, on hand-built room snapshots ----
@@ -661,6 +695,150 @@ void content_mismatch_returns_to_staging() {
 
 // ---- the viewer's own match (what the lobby screen drives) over real loopback TCP ----
 
+// The legacy two-build path remains an independent reference for the combined preparation.
+void combined_agreement_identity() {
+    Local local;
+    const auto options = two_side_options(local);
+    const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const auto draft = require(net::galactic_roster_draft(snapshot, cp::list_mp_lobby_campaigns(local.data)));
+    const cp::MpSessionTerms terms{options.seed, local.content.command_quota, local.content.byte_quota};
+    const auto sealed = require(cp::seal_mp_roster(local.content, draft, terms));
+    auto reference = require(cp::derive_mp_agreement(local.content, sealed, terms));
+    std::vector<std::string> hashes;
+    const eawr::platform::ThreadWorkerAdapter reference_workers(1);
+    for (unsigned tick = 0; tick < 12; ++tick) hashes.push_back(require(reference.session->step(reference_workers)).state_hash.get());
+    const auto replay = require(gc::write_replay(reference.session->record()));
+    for (const unsigned workers : {1u, 2u, 4u, 8u}) {
+        auto candidate = draft;
+        auto combined = require(cp::seal_mp_agreement(local.content, candidate, terms));
+        expect(candidate == sealed && combined.content == reference.content && combined.tick_zero == reference.tick_zero
+            && combined.ai_configuration == reference.ai_configuration, "combined preparation retains every legacy claim and identity domain");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (const auto& hash : hashes) expect(require(combined.session->step(executor)).state_hash.get() == hash,
+            "combined preparation preserves every legacy tick on 1/2/4/8 workers");
+        expect(require(gc::write_replay(combined.session->record())) == replay, "combined preparation preserves legacy replay bytes");
+    }
+    auto unchanged_draft = draft;
+    auto bad_terms = terms; ++bad_terms.command_quota;
+    expect(!cp::seal_mp_agreement(local.content, unchanged_draft, bad_terms) && unchanged_draft == draft,
+        "failed preparation retains refusal and leaves the caller's draft unchanged");
+}
+
+void preparation_attempt_lifetime() {
+    Local local;
+    unsigned preparations = 0;
+    local.content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        ++preparations;
+        return eawr::core::Result<cp::MpPreparedSession>::success({
+            std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+    };
+    viewer::GalacticLobbyBackend backend(local.content);
+    const auto options = two_side_options(local);
+    auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    auto offer = require(backend.offer(snapshot, seats));
+    require(backend.offer(snapshot, seats));
+    const auto local_identity = require(backend.identify(offer));
+    const auto owner = backend.agreement();
+    expect(preparations == 1, "one preparation covers sealing, repeated offer and identify in one attempt");
+    auto claimed = offer; claimed.identity.build = "foreign build";
+    expect(require(backend.identify(claimed)).content == local_identity.content && preparations == 1,
+        "cached identity remains local even when the remote identity claim differs");
+    auto changed_payload = require(net::decode_galactic_setup(offer.setup));
+    changed_payload.roster.tick_zero[0] ^= 1;
+    claimed = offer; claimed.setup = require(net::encode_galactic_setup(changed_payload));
+    expect(require(backend.identify(claimed)).content != local_identity.content && preparations == 2,
+        "changed tick-zero claim independently derives a differing identity");
+    ++snapshot.revision;
+    offer = require(backend.offer(snapshot, seats));
+    require(backend.identify(offer));
+    expect(preparations == 3 && backend.agreement()->session != owner->session, "changed revision creates a fresh owner");
+    snapshot.room += "-next";
+    offer = require(backend.offer(snapshot, seats));
+    require(backend.identify(offer));
+    expect(preparations == 4, "identical choices in a different room cannot reuse an owner");
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    require(backend.agreement()->session->step(executor));
+    require(backend.identify(offer));
+    expect(preparations == 5 && backend.agreement()->session->completed_tick() == 0,
+        "an advanced candidate is independently rebuilt at tick zero");
+    offer = require(backend.offer(snapshot, seats));
+    require(backend.identify(offer));
+    expect(preparations == 6, "discarded advanced preparation cannot reenter through offer");
+    backend.set_adapter_factory([](const net::SetupOffer&, const cp::MpAgreement&)
+        -> eawr::core::Result<std::unique_ptr<net::SessionAdapter>> {
+        return eawr::core::Result<std::unique_ptr<net::SessionAdapter>>::failure(
+            net::lobby_diagnostic(net::LobbyReason::setup_failed, "intentional factory failure"));
+    });
+    expect(!backend.build(offer), "factory failure is reported");
+    require(backend.offer(snapshot, seats));
+    expect(preparations == 7, "handover invalidates preparation even when the factory fails");
+    auto bad_ai = require(net::decode_galactic_setup(offer.setup));
+    auto ai = std::find_if(bad_ai.roster.players.begin(), bad_ai.roster.players.end(), [](const auto& player) {
+        return !player.ai_configuration.empty();
+    });
+    expect(ai != bad_ai.roster.players.end(), "fixture includes an AI claim");
+    ai->ai_configuration.push_back(42);
+    claimed = offer; claimed.setup = require(net::encode_galactic_setup(bad_ai));
+    expect(require(backend.identify(claimed)).content != local_identity.content,
+        "changed AI claim independently derives a differing identity");
+}
+
+void wire_identity_and_preparation_keys() {
+    Local local;
+    unsigned preparations = 0;
+    local.content.prepare_session = [&](const cp::CampaignSetupPlan& plan, std::string_view)
+        -> eawr::core::Result<cp::MpPreparedSession> {
+        ++preparations;
+        return eawr::core::Result<cp::MpPreparedSession>::success({
+            std::make_shared<cp::GameSession>(require(cp::GameSession::create(plan.galaxy()))), {}});
+    };
+    viewer::GalacticLobbyBackend backend(local.content);
+    const auto options = two_side_options(local);
+    const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    const auto offer = require(backend.offer(snapshot, seats));
+    const auto cached_identity = require(backend.identify(offer));
+    const auto cached = backend.agreement();
+    expect(preparations == 1, "wire identity fixture has one cached preparation");
+    viewer::GalacticLobbyBackend fresh(local.content);
+    const auto decoded_identity = require(fresh.identify(offer));
+    expect(preparations == 2 && decoded_identity.build == cached_identity.build
+        && decoded_identity.content == cached_identity.content && fresh.agreement()->tick_zero == cached->tick_zero,
+        "fresh identify of the decoded wire roster agrees with the cached sealed preparation");
+
+    const auto misses = [&](const auto& change, const char* message) {
+        auto changed = offer;
+        change(changed);
+        const auto before = preparations;
+        require(backend.identify(changed));
+        expect(preparations == before + 1 && backend.agreement()->session != cached->session, message);
+        const auto after_miss = preparations;
+        require(backend.identify(offer));
+        expect(preparations == after_miss && backend.agreement()->session == cached->session,
+            "only the exact original inputs recover the unchanged candidate");
+    };
+    misses([](auto& value) { ++value.seed; }, "changed seed independently derives");
+    misses([](auto& value) { ++value.seats.front().peer; }, "changed seat mapping independently derives");
+    misses([](auto& value) { --value.final_tick_count; }, "changed final tick independently derives");
+    misses([](auto& value) { value.recovery.reconnect = !value.recovery.reconnect; }, "changed recovery independently derives");
+    misses([](auto& value) { ++value.input_delay; }, "changed input delay independently derives");
+    misses([](auto& value) { value.domain += "-other"; }, "changed domain independently derives");
+
+    const auto payload = require(net::decode_galactic_setup(offer.setup));
+    // GCSU v1: magic/version, two length-prefixed texts, custom, three i64 options, heroes, then two u32 quotas.
+    const auto quota_offset = 8U + 4U + payload.roster.campaign.size() + 4U + payload.roster.difficulty.size() + 1U + 24U + 1U;
+    for (const auto offset : {quota_offset, quota_offset + 4U}) {
+        auto changed = offer;
+        changed.setup.at(offset) ^= 1U; // Invalid quotas cannot be produced by the canonical encoder.
+        const auto before = preparations;
+        const auto agreed = backend.agreement();
+        expect(!backend.identify(changed) && preparations == before && backend.agreement() == agreed,
+            "identify refuses a changed wire quota before reuse or derivation and preserves the agreement");
+    }
+}
+
 void reoffer_keeps_agreed_services() {
     auto local = std::make_shared<Local>();
     using Services = eawr::platform::CampaignServiceConfiguration;
@@ -692,6 +870,22 @@ void reoffer_keeps_agreed_services() {
     expect(backend.agreement()->session != agreed_a->session && backend.runtime_services() != services_a,
         "a new agreement switches owner and services together");
     expect(agreed_a->runtime_services == services_a, "a retained launch still owns A's services");
+}
+
+// #4554: the scripted GC LAN acceptance (--eawr-gc-lan-final-tick) shortens host and joiner alike. The backend exposes
+// the value so the lobby's setup hook can apply it to the session limit that setup.cpp checks against the offer;
+// a real game never sets it and keeps the default cap.
+void acceptance_final_tick_agrees() {
+    auto local = std::make_shared<Local>();
+    viewer::GalacticLobbyBackend backend(local->content);
+    auto options = two_side_options(*local);
+    const auto snapshot = snapshot_of(options, {seat_of(0, 1, options, 1, "Host"), seat_of(1, 2, options, 2, "Guest")});
+    const std::vector<net::SetupSeat> seats{{0, {1}, 1}, {1, {2}, 2}};
+    expect(backend.final_tick_count() == net::max_session_ticks, "a real game carries no acceptance tick limit");
+    expect(require(backend.offer(snapshot, seats)).final_tick_count == net::max_session_ticks, "the ordinary offer keeps the default cap");
+    backend.acceptance_final_tick(3900);
+    expect(backend.final_tick_count() == 3900, "the acceptance limit is readable by the setup hook");
+    expect(require(backend.offer(snapshot, seats)).final_tick_count == 3900, "host and joiner offers carry the same acceptance limit");
 }
 
 // The same projection used by ViewerHost, compiled without Godot.
@@ -1196,6 +1390,7 @@ int main(int argc, char** argv) {
         codec_and_mode();
         skirmish_bytes_pinned();
         campaign_list();
+        campaign_labels();
         staging_validation();
         roster_draft();
         two_peer_room();
@@ -1203,7 +1398,11 @@ int main(int argc, char** argv) {
         nine_seat_room();
         two_sides_with_extra_ai();
         content_mismatch_returns_to_staging();
+        combined_agreement_identity();
+        preparation_attempt_lifetime();
+        wire_identity_and_preparation_keys();
         reoffer_keeps_agreed_services();
+        acceptance_final_tick_agrees();
         viewer_staging_room();
         viewer_staging_room(12000);
         viewer_many_seat_launch(9);

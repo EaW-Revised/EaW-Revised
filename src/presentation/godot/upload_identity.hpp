@@ -76,8 +76,9 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
 
 // `binding_textures` are appended after the material, so an upload without
 // any keeps the identity it had before per-binding textures existed.
+template <typename Model>
 [[nodiscard]] inline std::vector<std::uint8_t> upload_identity_bytes(
-    const assets::Model& model,
+    const Model& model,
     const assets::Texture& texture,
     const MaterialDescription& material,
     const std::span<const NamedTexture> binding_textures = {}) {
@@ -87,7 +88,7 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
     // vertex colours included.
     out.size(model.bones.size());
     out.size(model.meshes.size());
-    for (const assets::Mesh& mesh : model.meshes) {
+    for (const auto& mesh : model.meshes) {
         out.scalar(mesh.visible);
         if (!mesh.visible) continue;
         out.scalar(mesh.bone);
@@ -144,8 +145,9 @@ inline void write_texture(UploadIdentityWriter& out, const assets::Texture& text
     return std::move(out).take();
 }
 
+template <typename Model>
 [[nodiscard]] inline UploadIdentity upload_identity(
-    const assets::Model& model,
+    const Model& model,
     const assets::Texture& texture,
     const MaterialDescription& material,
     const std::span<const NamedTexture> binding_textures = {}) {

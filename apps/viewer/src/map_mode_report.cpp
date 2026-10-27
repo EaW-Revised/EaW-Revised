@@ -1,6 +1,7 @@
 #include "eawr/core/json_text.hpp"
 #include "viewer_path.hpp"
 #include "map_mode_internal.hpp"
+#include "land_battle_camera.hpp"
 #include "startup_trace.hpp"
 #include "gpu_memory_trace.hpp"
 #include "render_profile_viewport.hpp"
@@ -120,7 +121,18 @@ bool MapMode::State::write_report() const {
         << ", \"sha256\": " << json(map_hash)
         << ", \"kind\": " << json(map_kind)
         << ", \"semantic_complete\": " << (semantic_complete ? "true" : "false") << "},\n";
+    if (land_population && live_session) {
+        output << "  \"land_live\": {\"locomotion\":\"authored\",\"external_inputs\":\"unverified\",\"pose_trace\":[";
+        for (std::size_t i = 0; i < land_pose_trace.size(); ++i) { if (i) output << ","; output << land_pose_trace[i]; }
+        output << "]},\n";
+        if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
+        live_session->write_report(output);
+        if (battle) { LandBattleCamera view(camera, map_camera.get()); battle->write_report(output, view); }
+    }
     startup_trace.write(output);
+    output << "  \"cpu_recipe_memory\":{\"phase\":\"report\",\"scope\":\"vector_capacity_excluding_strings_allocator_gpu\",\"retained\":";
+    assets::write_retained_payload(output, renderer ? renderer->recipe_memory() : assets::RetainedPayload{});
+    output << "},\n";
     gpu_memory_trace.write(output);
     if (hud) output << "  \"hud\": " << hud->report_json() << ",\n";
     output << "  \"perf_overlay\": " << perf_report_json() << ",\n";

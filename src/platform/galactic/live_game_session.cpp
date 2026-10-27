@@ -1,4 +1,5 @@
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/platform/live_game_lockstep.hpp"
 #include "eawr/platform/agreed_campaign.hpp"
 #include "eawr/platform/tactical_feed.hpp"
@@ -6,6 +7,8 @@
 #include "eawr/platform/campaign_end_provider.hpp"
 #include "eawr/assets/map.hpp"
 #include "eawr/core/ascii.hpp"
+#include "eawr/core/text.hpp"
+#include "eawr/core/gc_profile.hpp"
 #include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 
@@ -23,6 +26,7 @@
 #include "../../campaign/galactic_ai_usability.hpp"
 
 #include <algorithm>
+#include <sstream>
 #include <condition_variable>
 #include <exception>
 #include <iterator>
@@ -180,6 +184,8 @@ public:
     std::shared_ptr<const CampaignServiceConfiguration> services;
     LiveSaveCampaignSource saved_campaign; // #3035
     std::vector<NativeAiPlayer> native_ai_players;
+    std::vector<std::string> native_ai_diagnostics;
+    std::function<std::vector<std::string>()> native_ai_goal_reader;
 };
 PreparedLiveCampaign::PreparedLiveCampaign(std::unique_ptr<Impl> impl) noexcept : impl_(std::move(impl)) {}
 PreparedLiveCampaign::~PreparedLiveCampaign() = default;
@@ -187,7 +193,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     std::shared_ptr<const vfs::Vfs> filesystem_owner, const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, std::string_view name,
     campaign::CampaignSetupOptions options, std::string_view difficulty, bool install_native_ai,
-    std::array<std::uint64_t, 6> ai_service_periods) {
+    std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai) {
     using Result = core::Result<std::unique_ptr<PreparedLiveCampaign>>;
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
@@ -205,25 +211,29 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::create
     auto plan = campaign::plan_live_campaign_setup(filesystem, data, types, name, std::move(options), difficulty);
     if (!plan) return Result::failure(plan.error());
     auto prepared = from_plan(std::move(filesystem_owner), catalog, data, types, std::move(plan).value(),
-        difficulty, install_native_ai, ai_service_periods);
+        difficulty, install_native_ai, ai_service_periods, observe_native_ai);
     if (prepared) prepared.value()->impl_->saved_campaign = std::move(saved_campaign);
     return prepared;
 }
 core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_plan(
     std::shared_ptr<const vfs::Vfs> filesystem_owner, const data::Catalog& catalog, const data::galactic::GalacticData& data,
     const units::GalacticTypeTable& types, campaign::CampaignSetupPlan plan, std::string_view difficulty,
-    bool install_native_ai, std::array<std::uint64_t, 6> ai_service_periods) {
+    bool install_native_ai, std::array<std::uint64_t, 6> ai_service_periods, bool observe_native_ai) {
     using Result = core::Result<std::unique_ptr<PreparedLiveCampaign>>;
     if (!filesystem_owner) return Result::failure(diagnostic("EAWR-SAVE-0104", "Missing campaign filesystem owner."));
     const auto& filesystem = *filesystem_owner;
     const std::shared_ptr<const vfs::Vfs> scoring_files = filesystem_owner;
+    std::optional<core::gc_load::Scope> step(std::in_place, "prep.services");
     auto services = campaign::prepare_live_campaign_services(filesystem, catalog, data, types, plan, difficulty);
     if (!services) return Result::failure(services.error());
+    step.emplace("prep.campaign_root");
     auto root = campaign::CampaignRoot::create(std::move(plan), services.value());
     if (!root) return Result::failure(root.error());
+    step.emplace("prep.space_entry");
     auto provider = campaign::prepare_stock_space_entry(filesystem, catalog, data, types, *root.value().plan(),
         root.value().plan()->mode() == campaign::CampaignSetupMode::multiplayer ? difficulty : std::string_view{});
     if (!provider) return Result::failure(provider.error());
+    step.emplace("prep.conflicts_and_copies");
     if (auto configured = campaign::configure_live_campaign_conflicts(root.value(), filesystem, catalog, data, types, provider.value()); !configured)
         return Result::failure(configured.error());
     auto configuration = std::make_shared<CampaignServiceConfiguration>();
@@ -294,7 +304,17 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     std::map<galactic::TypeId, bool> prevented_types;
     for (const auto& type : types.types) {
         auto effective = catalog.resolve(type.name, data::Category::game_object);
-        if (!effective) return Result::failure(effective.error());
+        if (!effective) {
+            // CGS-07: a variant whose base resolves to no object keeps its own authored tags (the type table lists the
+            // unresolved base as an issue).
+            bool own_prevents = false;
+            if (const auto* own = catalog.find(type.name, data::Category::game_object))
+                for (const auto& child : own->root.children)
+                    if (core::iequals(child.name, "Prevents_Story_Campaign_Autoresolve"))
+                        own_prevents = data::retail::boolean(child.raw_text).value_or(false);
+            prevented_types.emplace(assets::object_type_crc(type.name), own_prevents);
+            continue;
+        }
         bool prevents = false;
         if (const auto* value = effective.value().value("Prevents_Story_Campaign_Autoresolve")) {
             data::tag_trace::used(value->value);
@@ -332,6 +352,9 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
             return faction && !faction->is_neutral.value_or(false);
         });
     std::vector<NativeAiPlayer> native_ai_players;
+    step.emplace("prep.ai_runtime");
+    std::shared_ptr<const campaign::GalacticAiRuntimeSetup> installed_runtime;
+    const auto observed_view = std::make_shared<campaign::GalacticAiRuntimeView>();
     if (install_native_ai && has_ai) {
         const auto* fog = data.constant("AIUsesFogOfWarGalactic");
         const auto uses_fog = fog ? data::retail::boolean(fog->text) : std::nullopt;
@@ -343,8 +366,10 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
             std::make_shared<sim::InlineExecutor>(), *uses_fog, galactic::galactic_max_objects, galactic::galactic_max_objects, difficulty,
             ai_service_periods);
         if (!runtime) return Result::failure(runtime.error());
+        installed_runtime = runtime.value();
         for (const auto& selected : runtime.value()->lifecycle.players)
             native_ai_players.push_back({selected.player, selected.player_type});
+        step.emplace("prep.ai_usability");
         auto usability = campaign::prepare_stock_galactic_ai_usability(data, campaign_plan, runtime.value()->perception);
         if (!usability) return Result::failure(usability.error());
         campaign::GalacticAiStockQueryFactory queries = [content = usability.value()] {
@@ -356,7 +381,13 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
             out.external.emplace("GALACTIC_USABILITY", std::move(owner));
             return core::Result<campaign::GalacticAiStockQueries>::success(std::move(out));
         };
-        auto factory = campaign::stock_galactic_ai_providers(runtime.value(), services.value().stock_starting_forces, space, std::move(queries));
+        std::function<void(campaign::GalacticAiRuntimeView)> watch;
+        if (observe_native_ai || diagnostics::GcMemory::enabled()) {
+            gc_profile::enabled.store(true, std::memory_order_relaxed); // the refusal counters the goal lines print
+            watch = [holder = observed_view](campaign::GalacticAiRuntimeView view) { *holder = std::move(view); };
+        }
+        auto factory = campaign::stock_galactic_ai_providers(runtime.value(), services.value().stock_starting_forces, space, std::move(queries),
+            {}, {}, std::move(watch));
         if (!factory) return Result::failure(factory.error());
         if (auto configured = campaign::configure_galactic_ai_runtime(*configuration, runtime.value(), std::move(factory).value()); !configured)
             return Result::failure(configured.error());
@@ -364,6 +395,7 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     // Install before publishing the prepared snapshot: owner transfer must not
     // reconstruct its galaxy. The off path skips all native AI preparation,
     // validation and restore hooks; native AI saves require the explicit opt-in.
+    step.emplace("prep.ai_install");
     if (install_native_ai && configuration->configure_native_ai) {
         auto configured = configuration->configure_native_ai(*root.value().game());
         if (!configured) return Result::failure(configured.error());
@@ -371,8 +403,26 @@ core::Result<std::unique_ptr<PreparedLiveCampaign>> PreparedLiveCampaign::from_p
     // The prepared owner already completed startup; restore uses its independent
     // reconstruction factory rather than rerunning this fresh-campaign callback.
     configuration->configure_native_ai = {};
+    step.reset();
     auto impl = std::make_unique<Impl>(std::move(root).value(), std::move(configuration));
     impl->native_ai_players = std::move(native_ai_players);
+    if (installed_runtime) impl->native_ai_diagnostics = installed_runtime->load_diagnostics; // includes what the install skipped
+    if (installed_runtime && (observe_native_ai || diagnostics::GcMemory::enabled()))
+        impl->native_ai_goal_reader = [setup = installed_runtime, observed_view, space, scripts = impl->root.game()->galactic_scripts()] {
+            if (diagnostics::GcMemory::enabled()) {
+                diagnostics::GcMemory memory;
+                if (const auto world = observed_view->world.lock()) world->memory_inventory(memory);
+                if (const auto engine = observed_view->engine.lock()) engine->memory_inventory(memory);
+                space->memory_inventory(memory);
+                memory.row("gc.ai.modules", setup->modules, setup->content_identity);
+                if (scripts)
+                    memory.rows["lua.story_vm_lower_bound"] += scripts->story_scheduler().diagnostic_lua_bytes();
+                std::ostringstream output;
+                memory.write(output);
+                return std::vector<std::string>{output.str()};
+            }
+            return campaign::describe_galactic_ai_goals(*observed_view, *setup);
+        };
     return Result::success(std::unique_ptr<PreparedLiveCampaign>(new PreparedLiveCampaign(std::move(impl))));
 }
 campaign::GameSession& AgreedCampaignAccess::session(PreparedLiveCampaign& prepared) noexcept { return *prepared.impl_->root.game(); }
@@ -388,6 +438,8 @@ std::shared_ptr<const galactic::GalacticSnapshot> PreparedLiveCampaign::snapshot
     return galaxy.view_snapshot({seat->player});
 }
 const std::vector<PreparedLiveCampaign::NativeAiPlayer>& PreparedLiveCampaign::native_ai_players() const noexcept { return impl_->native_ai_players; }
+const std::vector<std::string>& PreparedLiveCampaign::native_ai_diagnostics() const noexcept { return impl_->native_ai_diagnostics; }
+std::function<std::vector<std::string>()> PreparedLiveCampaign::native_ai_goal_reader() const { return impl_->native_ai_goal_reader; }
 bool PreparedLiveCampaign::native_ai_installed() const noexcept { return impl_->root.game()->native_ai_installed(); }
 
 core::Result<std::vector<std::uint8_t>> encode_auto_summary_hint(
@@ -854,7 +906,7 @@ public:
             battle_frame_ = {battle_frame_.latest ? battle_frame_.latest : snapshot, snapshot, Clock::now()};
             battle_snapshots_.push_back(snapshot);
             if (battle_snapshots_.size() > 64) battle_snapshots_.pop_front();
-            battle_events_.record(*snapshot, stepped.value().asteroid_impacts, battle_base_types_);
+            battle_events_.record(*snapshot, stepped.value().asteroid_impacts, battle_base_types_, stepped.value().damage_changes);
             if (const auto* world = session_->battle()) {
                 if (const auto* cells = world->fog_cells()) {
                     for (std::size_t player = 0; player < world->players().size(); ++player) {
@@ -1290,6 +1342,7 @@ public:
                     } else {
                         auto stepped = core::Result<campaign::GameTick>::success(std::move(*driven.value()));
                         rejected.insert(rejected.end(), stepped.value().diagnostics.begin(), stepped.value().diagnostics.end());
+                        if (options_.tick_diagnostics && !stepped.value().diagnostics.empty()) options_.tick_diagnostics(stepped.value().diagnostics);
                         std::unique_lock lock(mutex_);
                         for (const auto seat : options_.step_driver->clock_refusals()) battle_pause_requests_.erase(seat);
                         publish_completed_tick(stepped, step_started, step_started + source_time, step_done,
@@ -1430,6 +1483,7 @@ public:
                         }
                     }
                     auto stepped = session_->step(executor);
+                    if (stepped && options_.tick_diagnostics && !stepped.value().diagnostics.empty()) options_.tick_diagnostics(stepped.value().diagnostics);
                     const auto step_done = Clock::now();
                     std::unique_lock lock(mutex_);
                     if (!stepped) failure_ = stepped.error();

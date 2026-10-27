@@ -1,5 +1,46 @@
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
 
+add_executable(land_contact_tests land_contact_tests.cpp)
+target_link_libraries(land_contact_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_contact_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_contact_tests)
+add_test(NAME land_contact_contracts COMMAND land_contact_tests)
+
+add_executable(land_movement_tests land_movement_tests.cpp)
+target_link_libraries(land_movement_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_movement_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_movement_tests)
+add_test(NAME land_movement_contracts COMMAND land_movement_tests)
+
+add_executable(land_generic_team_tests land_generic_team_tests.cpp)
+target_link_libraries(land_generic_team_tests PRIVATE eawr::checkpoint eawr::skirmish eawr::platform)
+target_compile_features(land_generic_team_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_generic_team_tests)
+add_test(NAME land_generic_team_contracts COMMAND land_generic_team_tests)
+set_tests_properties(land_generic_team_contracts PROPERTIES TIMEOUT 900)
+
+add_executable(land_terrain_tests land_terrain_tests.cpp)
+target_link_libraries(land_terrain_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_terrain_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_terrain_tests)
+add_test(NAME land_terrain_contracts COMMAND land_terrain_tests)
+eawr_add_game_data_test(NAME land_terrain_stock_maps COMMAND land_terrain_tests --installed)
+set_tests_properties(land_terrain_stock_maps PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)
+
+add_executable(land_path_tests land_path_tests.cpp)
+target_link_libraries(land_path_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_path_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_path_tests)
+add_test(NAME land_path_contracts COMMAND land_path_tests)
+eawr_add_game_data_test(NAME land_path_stock_maps COMMAND land_path_tests --installed)
+set_tests_properties(land_path_stock_maps PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)
+
+add_executable(land_placement_tests land_placement_tests.cpp)
+target_link_libraries(land_placement_tests PRIVATE eawr::skirmish eawr::platform)
+target_compile_features(land_placement_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_placement_tests)
+add_test(NAME land_placement_contracts COMMAND land_placement_tests)
+
 add_executable(upgrade_identity_tests upgrade_identity_tests.cpp)
 target_link_libraries(upgrade_identity_tests PRIVATE eawr::skirmish)
 target_compile_features(upgrade_identity_tests PRIVATE cxx_std_20)
@@ -169,6 +210,12 @@ add_test(NAME path_bench_owner_work
         --pin "${EAWR_SKIRMISH_FIXTURES}/path-bench-owner.work.csv")
 set_tests_properties(path_bench_owner_work PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
 
+# The land path benchmark (docs/behaviour/land-pathfinding.md): one stock land map's searches, planned
+# whole and run through the throttled slice scheduler at 1 and 4 workers, must give the same routes.
+# Needs EAWR_EAW_GAME_ROOT, skipped otherwise.
+add_test(NAME path_bench_land COMMAND path_bench --land --searches 40 --workers 1,4 --timing off)
+set_tests_properties(path_bench_land PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:")
+
 # The close-range battle benchmark (#601) at size S, trimmed to its first 600 ticks (the fighters
 # engage, the hangars launch and the deaths start): every tick's state hash must agree across 1, 2, 4
 # and 8 workers. Needs EAWR_EAW_GAME_ROOT, skipped otherwise.
@@ -281,3 +328,27 @@ eawr_add_game_data_test(NAME installed_replay_recording
         --out "${CMAKE_BINARY_DIR}/installed-replays" --check)
 set_tests_properties(installed_replay_recording PROPERTIES
     LABELS "batch-only;installed-required;game-data" TIMEOUT 2400)
+
+# #4589: a start that places a skipped unit type fails, the menus drop skipped types, the skip set binds into
+# the match identity (no game data).
+add_executable(skipped_types_tests skipped_types_tests.cpp)
+target_link_libraries(skipped_types_tests PRIVATE eawr::skirmish)
+target_compile_features(skipped_types_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(skipped_types_tests)
+add_test(NAME skipped_types_contracts COMMAND skipped_types_tests)
+add_executable(land_session_tests land_session_tests.cpp)
+target_link_libraries(land_session_tests PRIVATE eawr::checkpoint eawr::skirmish eawr::platform)
+target_compile_features(land_session_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_session_tests)
+add_test(NAME land_session_contracts COMMAND land_session_tests)
+set_tests_properties(land_session_contracts PROPERTIES TIMEOUT 900)
+eawr_add_game_data_test(NAME land_session_stock_map COMMAND land_session_tests --installed)
+set_tests_properties(land_session_stock_map PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)
+
+add_executable(land_start_tests land_start_tests.cpp)
+target_link_libraries(land_start_tests PRIVATE eawr::skirmish eawr::platform eawr::checkpoint)
+target_compile_features(land_start_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(land_start_tests)
+add_test(NAME land_start_contracts COMMAND land_start_tests)
+eawr_add_game_data_test(NAME land_start_stock_maps COMMAND land_start_tests --installed)
+set_tests_properties(land_start_stock_maps PROPERTIES SKIP_REGULAR_EXPRESSION "SKIPPED:" TIMEOUT 900)

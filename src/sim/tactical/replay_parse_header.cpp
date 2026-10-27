@@ -22,7 +22,7 @@ namespace {
             || decoded > std::numeric_limits<std::int32_t>::max()) return false;
         *value = static_cast<std::int32_t>(decoded);
     }
-    if (!reader.read_i64(win_float) || !text(match.win_condition) || !text(match.space_win_condition)
+    if (!reader.read_i64(win_float) || !text(match.win_condition) || !text(match.tactical_win_condition)
         || !reader.read_u32(setup.victory_condition) || !reader.read_u32(slots) || slots > max_players) return false;
     match.allow_heroes = (flags & 1U) == 0;
     match.allow_superweapons = (flags & 2U) == 0;
@@ -70,7 +70,7 @@ core::Result<void> parse_fixed_header(
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    std::uint16_t& header_size,
+    std::uint32_t& header_size,
     std::uint32_t& header_reserved,
     std::uint32_t& player_count,
     std::uint64_t& unit_count,
@@ -85,7 +85,13 @@ core::Result<void> parse_fixed_header(
     std::uint32_t decoded_bits{};
     std::uint32_t numerator{};
     std::uint32_t denominator{};
-    if (!reader.read_bytes(magic) || !reader.read_u16(format) || !reader.read_u16(header_size)
+    if (!reader.read_bytes(magic) || !reader.read_u16(format))
+        return fail<Parsed>(diagnostic_codes::malformed, "truncated replay format", logical_path);
+    const bool wide_header = format == replay_format_version_native || format == replay_format_version_squadron_native;
+    std::uint16_t narrow_header_size{};
+    const bool length_read = wide_header ? reader.read_u32(header_size) : reader.read_u16(narrow_header_size);
+    if (!wide_header) header_size = narrow_header_size;
+    if (!length_read
         || !reader.read_u32(rules) || !reader.read_u32(decoded_math) || !reader.read_u32(decoded_bits)
         || !reader.read_u32(numerator) || !reader.read_u32(denominator)
         || !reader.read_u64(replay.setup.seed) || !reader.read_u64(replay.final_tick_count)
@@ -97,9 +103,9 @@ core::Result<void> parse_fixed_header(
     if (magic != replay_magic) {
         return fail<Parsed>(diagnostic_codes::malformed, "invalid replay magic", logical_path);
     }
-    extensions = format == replay_format_version_extensions
+    extensions = wide_header || format == replay_format_version_extensions
         || format == replay_format_version_squadron_extensions;
-    squadrons = format == replay_format_version_squadrons
+    squadrons = format == replay_format_version_squadron_native || format == replay_format_version_squadrons
         || format == replay_format_version_squadron_extensions;
     if ((format != replay_format_version && !squadrons && !extensions) || rules != tactical_rules_version
         || decoded_math != math_version || decoded_bits != fractional_bits) {
@@ -110,7 +116,7 @@ core::Result<void> parse_fixed_header(
             logical_path);
     }
     if ((!extensions && header_size != replay_header_size)
-        || (extensions && (header_size < replay_header_size + 4U || header_size > bytes.size()))) {
+        || (extensions && (header_size < replay_header_size + (wide_header ? 6U : 4U) || header_size > bytes.size()))) {
         return fail<Parsed>(diagnostic_codes::malformed,
             "invalid replay-v2 header size " + std::to_string(header_size), logical_path);
     }
@@ -477,8 +483,10 @@ core::Result<void> parse_extension_native_scene(
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    const std::uint16_t length) {
+    const std::uint32_t length) {
     using Parsed = void;
+    if (length > reader.remaining() || length > replay_max_bytes)
+        return fail<Parsed>(diagnostic_codes::malformed, "truncated native scene body", logical_path);
     std::vector<std::uint8_t> encoded(length);
     if (replay.setup.native_scene || !reader.read_bytes(encoded))
         return fail<Parsed>(diagnostic_codes::malformed, "duplicate or truncated native scene", logical_path);
@@ -546,7 +554,7 @@ core::Result<void> parse_header_extensions(
     Reader& reader,
     const std::string_view logical_path,
     TacticalReplay& replay,
-    const std::uint16_t header_size,
+    const std::uint32_t header_size,
     const bool extensions,
     std::vector<EntityId>& disabled_garrisons,
     std::vector<UnitState>& carriers,
@@ -560,9 +568,17 @@ core::Result<void> parse_header_extensions(
         std::uint16_t previous_tag{};
         for (std::uint32_t index = 0; index < count; ++index) {
             std::uint16_t tag{}, length{};
+            std::uint32_t native_length{};
             if (reader.offset() > header_size || header_size - reader.offset() < 4U
-                || !reader.read_u16(tag) || !reader.read_u16(length)
-                || length > header_size - reader.offset()) {
+                || !reader.read_u16(tag)) {
+                return fail<Parsed>(diagnostic_codes::malformed, "truncated replay header extension", logical_path);
+            }
+            const bool native = tag == replay_extension_native_scene;
+            const auto format = peek_replay_format_version(bytes);
+            if (native && format != replay_format_version_native && format != replay_format_version_squadron_native)
+                return fail<Parsed>(diagnostic_codes::version, "native scene requires wide replay framing", logical_path);
+            if ((native ? (header_size - reader.offset() < 4U || !reader.read_u32(native_length)) : !reader.read_u16(length))
+                || (native ? native_length : length) > header_size - reader.offset()) {
                 return fail<Parsed>(diagnostic_codes::malformed, "truncated replay header extension", logical_path);
             }
             if (tag <= previous_tag) {
@@ -656,7 +672,7 @@ core::Result<void> parse_header_extensions(
                 continue;
             }
             if (tag == replay_extension_native_scene) {
-                if (auto section = parse_extension_native_scene(reader, logical_path, replay, length); !section) {
+                if (auto section = parse_extension_native_scene(reader, logical_path, replay, native_length); !section) {
                     return core::Result<void>::failure(section.error());
                 }
                 continue;

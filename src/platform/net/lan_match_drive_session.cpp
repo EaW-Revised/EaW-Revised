@@ -1,4 +1,5 @@
 #include "lan_match_internal.hpp"
+#include <string_view>
 
 namespace eawr::presentation::godot_backend::lan_detail {
 
@@ -11,6 +12,7 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
               { view_.phase = LanPhase::reconnecting; view_.recovery = LanRecovery::held; }
           else if (io_->monitor->frozen()) view_.recovery = LanRecovery::desync; }
         diagnostics_->view(view());
+        gate_.advance_allowed = context.advance_allowed && adapter_->control_due(now);
         auto pumped = session.pump(now);
         if (!pumped) {
             if (online_options_ && pumped.error().code == net::mesh_errors::left) mesh_left_text_ = removed_seat_text(session);
@@ -49,6 +51,7 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
             if (!published) return fail<bool>("Published recovery adapter has the wrong mode.");
             auto activated = activate_adapter(*published); if (!activated) return DriverResult::failure(activated.error());
         }
+        if (pumped.value().completed) adapter_->completed_at(now);
         const auto& completeness = session.waiting_for();
         const bool waiting = (completeness && !completeness->peers.empty()) || !io_->monitor->waiting_for_peers().empty();
         const auto missing = completeness && !completeness->peers.empty() ? completeness->peers : io_->monitor->waiting_for_peers();
@@ -62,6 +65,29 @@ DriverResult TcpLanMatch::drive_session(const tactical::TacticalSetup& setup, pl
         {
             const std::lock_guard lock(mutex_);
             view_.peer_confirmed_tick = io_->monitor->peer_confirmed_tick();
+            if (view_.peer_confirmed_tick) view_.peer_confirmed_tick = adapter_->world_boundary(*view_.peer_confirmed_tick);
+            view_.clock_paused = adapter_->clock.paused;
+            view_.session_tick = adapter_->clock.completed; view_.world_tick = context.completed_tick();
+            view_.pause_actor = adapter_->clock.actor; view_.pause_change_tick = adapter_->clock.changed_at;
+            if (view_.pause_actor) {
+                const auto& seats = setup_result().offer().seats;
+                const auto at = std::find_if(seats.begin(), seats.end(), [&](const auto& seat) { return seat.seat == *view_.pause_actor; });
+                // The pauser's own peer decides the label; a lobby row below overrides it with the chosen name.
+                view_.pause_name = at == seats.end() ? "Player" : at->peer == view_.seat ? "You" : "Player " + std::to_string(at->peer + 1);
+                if (lobby_ && at != seats.end()) for (const auto& row : lobby_->snapshot().seats)
+                    if (row.peer == at->peer) view_.pause_name = row.selection.name;
+            }
+            if (pumped.value().completed) {
+                // Only the pause notice is owned here; other input feedback (a cancelled reservation) must survive.
+                static constexpr std::string_view refused = "Pause repeated too quickly; try again in a second. Resume is always available.";
+                static constexpr std::string_view waiting_text = "Waiting for the shared pause control.";
+                // The agreed pause (or resume) is the answer to the request; so is any pause input of ours that changed nothing.
+                const auto own_seat = setup_result().offer().seats[view_.seat].seat;
+                if (view_.input_feedback == waiting_text && adapter_->pause_answered(own_seat)) view_.input_feedback.clear();
+                if (adapter_->clock_refused && *adapter_->clock_refused == own_seat)
+                    view_.input_feedback = refused;
+                else if (view_.input_feedback == refused) view_.input_feedback.clear();
+            }
             view_.link_stats.reset();
             view_.net_peers.clear();
             // The ledger scan is bounded but the driver polls far more often than the overlay redraws.

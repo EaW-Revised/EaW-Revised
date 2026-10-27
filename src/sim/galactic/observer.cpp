@@ -153,7 +153,7 @@ core::Result<void> validate_observer(const GalacticSetup& setup) {
     const auto invalid = [](std::string message) { return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, std::move(message))); };
     if (setup.planets.size() > 4096 || o.players.size() != setup.players.size() || o.planets.size() != setup.planets.size()
         || o.records.size() != o.players.size() * o.planets.size() || o.records.size() > galactic_max_objects
-        || o.types.size() > galactic_max_objects || !o.logical_fps || o.reveal_delay_seconds < math::Fixed{} || o.automatic_reveal_range < math::Fixed{})
+        || o.types.size() > galactic_max_objects || !o.logical_fps || o.reveal_delay_seconds < math::Fixed{})
         return invalid("observer tables or ranges are invalid");
     const auto listed = [&](PlayerId id) { return observer_detail::find(setup.players, id, [](const auto& p) { return p.player_id; }) != nullptr; };
     if (o.history_players.size() > galactic_max_players) return invalid("too many configured History players");

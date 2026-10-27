@@ -401,7 +401,7 @@ void GodotRenderer::Impl::set_surface_material(RenderingServer& rendering, const
         rendering->shader_set_code(consumer.shader,
             String::utf8(source.data(), static_cast<int64_t>(source.size())));
         if (const auto problem = fog_uniform_problem(*rendering, consumer.shader)) {
-            rendering->free_rid(consumer.shader);
+            render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
             consumer.shader = {};
             return pushed(diagnostic_codes::shader_compile_failed,
                 "Godot rejected the " + family
@@ -410,7 +410,7 @@ void GodotRenderer::Impl::set_surface_material(RenderingServer& rendering, const
         }
         const auto tokens = shader_tokens(source).value_or(std::vector<std::string>{});
         if (auto problem = portable_limit_problem(reflected_uniforms(*rendering, consumer.shader), tokens)) {
-            rendering->free_rid(consumer.shader);
+            render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
             consumer.shader = {};
             return pushed(diagnostic_codes::shader_compile_failed,
                 family
@@ -442,8 +442,8 @@ void GodotRenderer::Impl::detach_fog_consumer(const sim::AssetId asset_id, FogCo
     if (consumer.shader.is_valid() && rendering) {
         const Resource& resource = resources_.at(asset_id);
         set_surface_material(*rendering, resource.mesh, resource.material);
-        rendering->free_rid(consumer.material);
-        rendering->free_rid(consumer.shader);
+        render_churn::free_rid(*rendering, consumer.material, render_churn::Owner::model_resource);
+        render_churn::free_rid(*rendering, consumer.shader, render_churn::Owner::model_resource);
     }
     consumer.shader = {};
     consumer.material = {};

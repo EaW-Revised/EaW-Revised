@@ -1,17 +1,27 @@
 #include "galactic/scene_content.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/text.hpp"
+#include "eawr/campaign/mp_lobby_catalog.hpp"
+#include "../support/env.hpp"
+#include "../support/result.hpp"
 
 #ifdef NDEBUG
 #undef NDEBUG
 #endif
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cmath>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <sstream>
+#include <string>
+#include <string_view>
+#include <vector>
 
 using namespace eawr;
 using namespace viewer::galactic;
@@ -247,11 +257,124 @@ void campaign_art_is_data_driven() {
     const auto missing_neutral = load_scene_content(filesystem.value(), catalog.value().catalog, no_neutral_tables, "Art");
     assert(!missing_neutral);
     assert(missing_neutral.error().message == "campaign has no drawable Neutral faction Color");
+    // #4575: a roster numbering (the lobby's) replaces the scene's own; the faction behind an id follows the roster.
+    auto rostered = scene;
+    rebind_players(rostered, {{5, "NEUTRAL"}, {3, "test"}, {9, "Missing"}, {3, "Neutral"}});
+    assert(rostered.snapshot.players.size() == 2 && rostered.factions.size() == 2);
+    assert(rostered.factions.at(3).faction == "Test" && rostered.factions.at(5).faction == "Neutral");
+    assert(!rostered.factions.contains(1) && !rostered.factions.contains(9));
+    assert(affiliation_for_owner(rostered, PlayerId{3})->primary == scene.factions.at(1).primary);
+    assert(affiliation_for_owner(rostered, std::nullopt)->faction == "Neutral");
+    assert(rostered.leader_types.at(3) == "Modded_Ship" && core::iequals(rostered.home_types.at(3), "Alpha"));
+    assert(rostered.snapshot.planets[1].owner == std::optional<PlayerId>{3});
+    assert(!rostered.snapshot.planets[2].owner);
+    assert(initial_home(rostered, PlayerId{3}) && !initial_home(rostered, PlayerId{1}));
     std::filesystem::remove_all(root);
 }
 }
 
-int main() {
+// #4575: every playable faction of the installed data (base and expansion) draws with its authored Color. The
+// expected value is read straight from the faction XML files, not through the catalog the viewer uses.
+std::array<float, 4> authored_colour(const std::string& text) {
+    std::array<float, 4> values{0, 0, 0, 255};
+    std::string cleaned = text;
+    std::replace(cleaned.begin(), cleaned.end(), ',', ' ');
+    std::istringstream stream(cleaned);
+    for (auto& value : values) if (!(stream >> value)) break;
+    return values;
+}
+
+int stock_faction_colours() {
+    const auto root = eawr::testing::game_root();
+    if (!root) { std::cout << "SKIPPED: installed game data requires EAWR_EAW_GAME_ROOT\n"; return 77; }
+    std::vector<vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::testing::must(vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data")).mount);
+    auto files = eawr::testing::must(vfs::Vfs::mount(mounts));
+    const auto loaded = eawr::testing::must(data::load_catalog_strict(files, data::Profile::foc));
+    const auto tables = eawr::testing::must(data::galactic::load_galactic_data(files, loaded.catalog));
+    const auto scene = eawr::testing::must(load_scene_content(files, loaded.catalog, tables, "Sandbox_Equal_Footing_Empire"));
+
+    std::map<std::string, std::array<float, 4>> expected;
+    const auto registry = eawr::testing::must(data::load_document(files, "data/xml/factionfiles.xml"));
+    for (const auto& entry : registry.root.children) {
+        if (!core::iequals(entry.name, "File")) continue;
+        std::string path = entry.raw_text;
+        path = core::trim(path, core::xml_whitespace);
+        const auto document = eawr::testing::must(data::load_document(files, "data/xml/" + path));
+        for (const auto& faction : document.root.children) {
+            if (!core::iequals(faction.name, "Faction")) continue;
+            for (const auto& attribute : faction.attributes) if (core::iequals(attribute.name, "Name"))
+                for (const auto& tag : faction.children)
+                    if (core::iequals(tag.name, "Color")) expected[core::to_lower(attribute.value)] = authored_colour(tag.raw_text);
+        }
+    }
+    std::size_t checked = 0;
+    bool underworld = false;
+    for (const auto& faction : tables.factions) {
+        if (!faction.is_playable.value_or(false)) continue;
+        const auto want = expected.find(core::to_lower(faction.name));
+        if (want == expected.end()) { std::cerr << "no authored Color for " << faction.name << std::endl; return 1; }
+        const auto player = std::find_if(scene.snapshot.players.begin(), scene.snapshot.players.end(),
+            [&](const auto& row) { return core::iequals(row.faction, faction.name); });
+        if (player == scene.snapshot.players.end()) {
+            std::cerr << "playable faction has no scene player: " << faction.name << '\n'; return 1;
+        }
+        const auto* appearance = affiliation_for_owner(scene, player->id);
+        if (!appearance) { std::cerr << "no affiliation for " << faction.name << '\n'; return 1; }
+        const std::array<float, 3> shown{appearance->primary.r, appearance->primary.g, appearance->primary.b};
+        for (std::size_t i = 0; i < 3; ++i) {
+            if (std::abs(shown[i] - want->second[i] / 255.0F) > 0.0001F
+                || player->colour[i] != static_cast<std::uint8_t>(want->second[i])) {
+                std::cerr << "faction colour differs from its authored Color: " << faction.name << '\n'; return 1;
+            }
+        }
+        if (core::iequals(faction.name, "Underworld")) {
+            underworld = true;
+            assert(player->colour[0] == 247 && player->colour[1] == 201 && player->colour[2] == 13);
+        }
+        ++checked;
+    }
+    if (checked < 3 || !underworld) { std::cerr << "too few playable factions checked: " << checked << std::endl; return 1; }
+    // The multiplayer lobby numbers only a campaign's own factions, so its ids differ from the scene's.
+    std::size_t lobby_checked = 0, renumbered = 0;
+    for (const auto& lobby : campaign::list_mp_lobby_campaigns(tables)) {
+        // The stock multiplayer campaigns author no active faction, so no scene loads for them; faction colours do not
+        // depend on the campaign, so the solo scene stands in and only the lobby's numbering is under test.
+        auto rostered = scene;
+        std::vector<std::pair<PlayerId, std::string>> roster;
+        for (const auto& faction : lobby.factions) roster.emplace_back(faction.player, faction.name);
+        for (const auto& faction : lobby.factions) {
+            const auto* before = affiliation_for_owner(scene, PlayerId{faction.player});
+            if (faction.playable && (!before || !core::iequals(before->faction, faction.name))) ++renumbered;
+        }
+        rebind_players(rostered, roster);
+        for (const auto& faction : lobby.factions) {
+            if (!faction.playable) continue;
+            const auto want = expected.find(core::to_lower(faction.name));
+            if (want == expected.end()) { std::cerr << "no authored Color for " << faction.name << std::endl; return 1; }
+            const auto* appearance = affiliation_for_owner(rostered, PlayerId{faction.player});
+            if (!appearance || !core::iequals(appearance->faction, faction.name)
+                || std::abs(appearance->primary.r - want->second[0] / 255.0F) > 0.0001F
+                || std::abs(appearance->primary.g - want->second[1] / 255.0F) > 0.0001F
+                || std::abs(appearance->primary.b - want->second[2] / 255.0F) > 0.0001F) {
+                std::cerr << "lobby " << lobby.name << ": " << faction.name << " does not draw with its authored Color\n"; return 1;
+            }
+            ++lobby_checked;
+        }
+    }
+    // The scene's own numbering really does name another faction for lobby ids (the Underworld case of this bug).
+    if (renumbered == 0) { std::cerr << "no lobby id differs from the scene numbering" << std::endl; return 1; }
+    if (lobby_checked == 0) { std::cerr << "no lobby faction checked" << std::endl; return 1; }
+    std::cout << "faction colours checked: " << checked << ", lobby: " << lobby_checked << '\n';
+    return 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--stock-colours") {
+        try { return stock_faction_colours(); }
+        catch (const std::exception& error) { std::cerr << "stock colours: " << error.what() << std::endl; return 1; }
+    }
     campaign_art_is_data_driven();
     const auto light = galaxy_lighting({123, 0, 90});
     const auto same = galaxy_lighting({999, 0, 90});

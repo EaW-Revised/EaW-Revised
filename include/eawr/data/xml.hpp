@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 
+namespace eawr::diagnostics { class OwnerCensus; }
 namespace eawr::data {
 
 enum class Profile : std::uint8_t { eaw, foc, remake };
@@ -84,9 +85,30 @@ struct TypeMemberFlags {
     friend bool operator==(const TypeMemberFlags&, const TypeMemberFlags&) = default;
 };
 
+// A Company_Units / Squadron_Units slot whose name resolves to no game object. The member-marking pass skips that slot and
+// goes on (EAWR recovery policy under RGC-154: the debug build's behaviour for it is undefined, not a retail claim).
+struct MemberRosterNote {
+    std::string owner;
+    std::string tag; // Company_Units or Squadron_Units
+    std::size_t slot{};
+    std::string name;
+    std::string logical_path;
+    std::uint64_t line{1};
+    friend bool operator==(const MemberRosterNote&, const MemberRosterNote&) = default;
+};
+
+// SG-CLS-01: whether an element name is one FoC's game-object files use (ASCII case-insensitive).
+[[nodiscard]] bool is_foc_object_class(std::string_view name);
+
 struct EffectiveObject {
     std::string object_id;
+    // The object's class. FoC reads no class from the element name (one type class for every element), so an
+    // element name that is not a FoC class is replaced by the nearest class named along the variant chain, then by
+    // the class the effective tags imply (SG-CLS-01).
     std::string type_name;
+    // Empty when the element name was already a class; else how `type_name` was settled: `ancestor:<Name>`,
+    // `tags:<Class>` or `unclassed` (the element name stays).
+    std::string class_origin;
     Category category{Category::game_object};
     std::vector<std::string> chain; // derived to root base
     std::vector<EffectiveValue> values;
@@ -168,10 +190,14 @@ public:
     [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id) const;
     [[nodiscard]] core::Result<EffectiveObject> resolve(std::string_view object_id, Category category) const;
     [[nodiscard]] core::Result<TypeMemberFlags> member_flags(std::string_view object_id) const;
+    // Roster slots the member-marking pass skipped because their name resolves to no object, in discovery order.
+    [[nodiscard]] const std::vector<MemberRosterNote>& member_roster_notes() const noexcept;
     [[nodiscard]] const std::vector<Definition>& definitions() const noexcept;
     [[nodiscard]] const std::vector<InventoryFile>& physical_inventory() const noexcept;
     [[nodiscard]] const std::vector<RegistryFile>& registry_files() const noexcept;
     [[nodiscard]] const std::vector<RegistryRoot>& registry_roots() const noexcept;
+    // Read-only opt-in diagnostic; output storage must be allocated before entry.
+    void owner_census(diagnostics::OwnerCensus& output) const;
 
 private:
     struct Overlay;

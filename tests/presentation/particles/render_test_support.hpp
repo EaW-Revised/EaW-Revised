@@ -226,6 +226,8 @@ private:
 
 inline particles::CameraFrame test_camera() { return particles::camera_frame_from_render({0, 20, 60}, {0, 0, 0}, {0, 1, 0}); }
 
+void test_authored_effect_admission();
+void test_authored_effect_capacity_and_reset();
 void test_offscreen_updates_and_bounds();
 void test_empty_stream_residency();
 

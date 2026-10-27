@@ -21,6 +21,9 @@ public:
     core::Result<TacticalTick> run();
 
 private:
+    void record_damage_change(const LiveUnit& target, math::Fixed before,
+        EntityId source = invalid_entity_id, const UnitStage* staged = nullptr);
+    std::vector<DamageChange> damage_changes_; // ordered commits only, not partition jobs
     core::Result<void> gather();
     core::Result<void> prepare_craft();
     core::Result<void> prepare_chase_pairs(std::vector<CraftView>& craft_views, std::map<EntityId, EntityId>& craft_squadron,

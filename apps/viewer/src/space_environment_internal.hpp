@@ -280,6 +280,7 @@ struct TacticalLoad final {
 
 class EnvironmentView final {
 public:
+    void owner_census(diagnostics::OwnerCensus& output) const;
     explicit EnvironmentView(const SpaceEnvironment::Options& options) : options_(options) {}
     EnvironmentView(const EnvironmentView&) = delete;
     EnvironmentView& operator=(const EnvironmentView&) = delete;

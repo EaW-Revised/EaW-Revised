@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <map>
@@ -63,9 +64,10 @@ constexpr std::array<SetupGameTypeRow, 3> game_types{{
 
 constexpr std::array<std::string_view, static_cast<std::size_t>(SetupNotice::count_)> notices{{
     "Land battles are not part of this build yet.",
-    "The starting credits are not applied to a battle yet; every player starts with the data's default.",
     "Map router port",
     "Opt in to a temporary TCP router mapping for Internet hosting. CGNAT cannot be bypassed.",
+    "land battle: no AI yet, every seat is player-controlled",
+    "Land battles over the network are not supported yet.",
 }};
 
 // WSS-31: all enemy units, then the enemy starbase. The captions are the database's win-condition keys, which
@@ -110,6 +112,22 @@ std::optional<std::size_t> setup_win_condition_index(const std::string_view name
 std::int64_t setup_credits_clamp(const SetupCreditsRange range, const std::int64_t value) noexcept {
     if (range.maximum < range.minimum) return range.minimum;
     return std::clamp(value, range.minimum, range.maximum);
+}
+
+std::int64_t setup_credits_edit(const SetupCreditsRange range, const double value) noexcept {
+    if (range.maximum <= range.minimum || !std::isfinite(value)) return range.minimum;
+    // WSS-25: the data loader admits nonnegative fixed-point bounds, so the difference and
+    // bucket fit an integer. The bucket size is a debug-build constant, not a stock choice list.
+    const auto offset = static_cast<std::int64_t>(std::floor(std::clamp(value,
+        static_cast<double>(range.minimum), static_cast<double>(range.maximum))
+        - static_cast<double>(range.minimum) + 0.5));
+    return range.minimum + ((offset + 999) / 1000) * 1000;
+}
+
+double setup_credits_button_step(const SetupCreditsRange range) noexcept {
+    if (range.maximum <= range.minimum) return 0.0;
+    const auto span = range.maximum - range.minimum;
+    return static_cast<double>(span) / static_cast<double>(std::max<std::int64_t>(1, span / 1000));
 }
 
 SetupBlocker setup_blocker(const std::span<const SetupRow> occupied) {

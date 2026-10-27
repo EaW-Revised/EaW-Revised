@@ -3,7 +3,7 @@
 This file lists the third-party code the project vendors, links, derives from or fetches,
 with its licence. Each section below names the pinned version and where it appears:
 
-- **Vendored and linked:** Lua 5.0.2, EnTT, pugixml (under `third_party/`).
+- **Vendored and linked:** Lua 5.0.2, EnTT, pugixml, stb_image (under `third_party/`).
 - **Code derived or ported (MIT):** alo-viewer; semantics cross-checked against
   pg-starwarsgame-lsp, PetroglyphTools and eaw-schema.
 - **Fetched, not in this repository:** Godot and godot-cpp (the viewer), and the tools
@@ -35,6 +35,16 @@ shipped with project binaries.
   integer outputs are checked in with their reproduction method) and psutil
   (BSD-3-Clause).
 
+## stb_image
+
+The portable asset library and viewer link stb_image v2.30, pinned to commit
+`013ac3beddff3dbffafd5177e7972067cd2b5083` of <https://github.com/nothings/stb>.
+The unmodified header is vendored at `third_party/stb/stb_image.h`; its implementation
+is compiled once per consumer through `src/assets/texture_codecs.cpp`, with only
+in-memory PNG/JPEG decoding enabled. stb_image is dual-licensed under the MIT
+License or the public-domain Unlicense, at the user's option. Both texts are
+preserved in `third_party/stb/LICENSE` and the header.
+
 ## GameNetworkingSockets and protobuf (optional online transport)
 
 With `EAWR_ENABLE_GNS` the build fetches Valve's GameNetworkingSockets v1.6.1
@@ -57,6 +67,13 @@ engine binary is redistributed in this repository. Exact archive hashes, source
 URLs and the licence files a viewer package bundles are pinned in
 `apps/viewer/dependencies.json`. Godot's own `COPYRIGHT.txt` lists the third-party
 code the engine includes (FreeType, mbedTLS and others) and ships in each package.
+
+The player and debug archives bundle a patched Godot 4.7.2 built from our public fork
+https://github.com/Thom-Ernst/godot (branch `eawr/4.7.2-stable`, commit
+`fad06b57944fbf17833fe3c65dc9ff1d7446c639`): upstream 4.7.2-stable plus two small fixes for the
+Separate render thread (see `third_party/godot/README.md`). Godot is MIT-licensed
+(Copyright (c) 2014-present Godot Engine contributors, 2007-2014 Juan Linietsky, Ariel Manzur);
+the fork keeps the upstream licence files and every package bundles them.
 
 The optional Linux ARM64 package reproduction uses Arm GNU Toolchain 14.2.Rel1,
 GPL-3.0-or-later with the GCC Runtime Library Exception. The helper reuses a verified

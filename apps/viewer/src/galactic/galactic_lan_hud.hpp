@@ -95,14 +95,15 @@ public:
             auto [at, inserted] = refusals_.try_emplace(refusal.seat, Stamp{refusal.completed_tick, now_ms});
             if (!inserted && at->second.tick != refusal.completed_tick) at->second = {refusal.completed_tick, now_ms};
             if (refusal.completed_tick >= view.clock_change_tick && visible(at->second.since, now_ms))
-                append(name(refusal.seat) + " clock change refused: 2 changes per 45 session seconds");
+                append(name(refusal.seat) + " speed change refused: 6 per 45 session seconds");
         }
         if (!action_ || action_->tick != view.clock_change_tick || action_->seat != view.clock_actor
             || action_->text != view.clock_action)
             action_ = Action{view.clock_change_tick, now_ms, view.clock_actor, view.clock_action};
         // An agreed resume or release of a system hold clears a stale paused line immediately.
         if (view.clock_action == "paused" && !view.clock_paused) action_->cleared = true;
-        if (!view.clock_action.empty() && !action_->cleared && visible(action_->since, now_ms))
+        if (view.clock_paused && view.clock_action == "paused" && !action_->cleared) append("Paused by " + name(view.clock_actor));
+        else if (!view.clock_action.empty() && !action_->cleared && visible(action_->since, now_ms))
             append(name(view.clock_actor) + " " + view.clock_action);
         return text;
     }

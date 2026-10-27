@@ -201,9 +201,12 @@ No per-script reseeding and no presentation consumer of that stream. Define
 bounded integer draws with rejection sampling (including its draw consumption)
 and fractional draws built from integer draws with a fixed soft-float formula;
 freeze vectors before exposing APIs.
-`Free_Random` is forbidden in authoritative scripts despite its inventory presence;
-any selected caller needs an evidenced presentation classification or explicit
-compatibility resolution. Never silently alias it to synchronized randomness.
+`Free_Random` was forbidden in authoritative scripts until retail's behaviour was sourced
+(RGC-195..199): retail itself runs it on the synchronised stream in multiplayer, and the
+galactic story host binds it that way (RGC-196, a warning and the plain `GameRandom` call),
+with the single-player free stream a fixed-seed counter that the instance saves with its
+draws (docs/lua-sandbox.md, free stream). No other host binds it; a new caller needs the same
+sourced classification.
 
 Time is completed simulation ticks with a session-fixed rational tick duration.
 `GetCurrentTime` rounds ticks × tick duration once to binary64; frame queries use

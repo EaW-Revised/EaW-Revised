@@ -9,8 +9,11 @@
 #include "eawr/sim/tactical/victory.hpp"
 #include "eawr/sim/tactical/visibility.hpp"
 #include "eawr/sim/tactical/retreat.hpp"
+#include "eawr/sim/tactical/land_terrain.hpp"
+#include "eawr/sim/tactical/land_session.hpp"
 
 #include <optional>
+#include <memory>
 #include <vector>
 
 namespace eawr::sim::tactical {
@@ -31,6 +34,8 @@ struct TacticalContent {
     MapBox map_box;
     std::optional<RetreatConfig> retreat;
     BattleDomain domain{BattleDomain::space};
+    std::shared_ptr<const LandTerrain> land_terrain;
+    LandSessionContent land;
 };
 
 } // namespace eawr::sim::tactical

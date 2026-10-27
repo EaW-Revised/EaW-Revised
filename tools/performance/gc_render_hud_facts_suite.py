@@ -144,7 +144,7 @@ class HudFactsPair(unittest.TestCase):
     def engine(self, label, out, campaign, mod, reveal, ai, script, extra_engine=()):
         self.install(label)
         report = out / "report.json"
-        args = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", *extra_engine,
+        args = [os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720", "--render-thread", "safe", *extra_engine,
                 "--path", str(ROOT / "apps/viewer/project")]
         if script:
             args += ["--script", str(script)]

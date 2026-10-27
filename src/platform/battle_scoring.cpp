@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <limits>
 
+#include "eawr/data/retail_values.hpp"
 #include "eawr/data/tag_trace.hpp"
 #include "eawr/script/authoritative/scheduler.hpp"
 #include "eawr/script/foc/tactical_ai.hpp"
@@ -102,6 +103,14 @@ struct BattleScoring::Impl {
 BattleScoring::BattleScoring(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 BattleScoring::~BattleScoring() = default;
 
+core::Result<std::optional<Fixed>> scoring_decimal(const std::string_view raw) {
+    using Out = core::Result<std::optional<Fixed>>;
+    if (data::retail::is_placeholder(raw)) return Out::success(std::nullopt);
+    auto parsed = Fixed::from_decimal(trim(std::string(raw)));
+    if (!parsed) return Out::failure(parsed.error());
+    return Out::success(parsed.value());
+}
+
 core::Result<std::unique_ptr<BattleScoring>> BattleScoring::create(const vfs::Vfs& files,
     const data::Catalog& catalog, const units::UnitTables& tables,
     std::map<sim::tactical::PlayerId, std::string> factions, std::string map) {
@@ -161,22 +170,26 @@ core::Result<std::unique_ptr<BattleScoring>> BattleScoring::create(const vfs::Vf
                 auto maximum = Number(10); // verified debug-build type default
                 const auto object = catalog.resolve(unit.id, data::Category::game_object);
                 if (!object) return Result::failure(object.error());
+                // PR-C1/C2: an empty or TBD value skips the key; the default stays.
                 if (const auto* field = object.value().value("Max_Squad_Size")) {
                     data::tag_trace::used(field->value);
-                    const auto parsed = Fixed::from_decimal(trim(field->value.raw_text));
+                    const auto parsed = scoring_decimal(field->value.raw_text);
                     if (!parsed) return Result::failure(parsed.error());
-                    if (parsed.value().raw() % Fixed::scale != 0)
+                    if (parsed.value() && parsed.value()->raw() % Fixed::scale != 0)
                         return Result::failure(error("scoring Max_Squad_Size is not an integer"));
-                    maximum = numeric(parsed.value());
+                    if (parsed.value()) maximum = numeric(*parsed.value());
                 }
                 type.power = type.power * std::clamp(maximum / Number(unit.members.size()), Number(0), Number(1));
             }
         }
         if (auto object = catalog.resolve(unit.id, data::Category::game_object)) {
+            // PR-C1/C2: an empty or TBD Build_Cost_Credits (AaW authors <Build_Cost_Credits /> on six
+            // types) skips the key, so the debug-build default of zero stays (WBF-45).
             if (const auto* build = object.value().value("Build_Cost_Credits")) {
                 data::tag_trace::used(build->value);
-                if (auto parsed = Fixed::from_decimal(trim(build->value.raw_text))) type.build = parsed.value();
-                else return Result::failure(parsed.error());
+                const auto parsed = scoring_decimal(build->value.raw_text);
+                if (!parsed) return Result::failure(parsed.error());
+                if (parsed.value()) type.build = *parsed.value();
             }
         }
         state->types.emplace(battle::type_id(unit.id), std::move(type));

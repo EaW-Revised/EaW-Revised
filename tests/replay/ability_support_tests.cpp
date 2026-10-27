@@ -463,6 +463,173 @@ void test_space_healing() {
 }
 
 
+// WSH-09 (#4868): a negative automatic Heal_Amount without a percent is passive damage to enemies in range.
+void test_passive_damage_aura() {
+    tactical::TacticalSetup setup;
+    setup.seed = 4868;
+    setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {2, 1, 1, tactical::player_flag_commandable},
+        {3, 3, 3, tactical::player_flag_commandable}};
+    setup.units = {{1, 99, 1, at(0, 0), math::identity_quat(), {}},
+        {2, 100, 1, at(100, 0), math::identity_quat(), {}},    // friendly: never damaged
+        {3, 100, 3, at(200, 0), math::identity_quat(), {}},    // hostile in range
+        {4, 101, 3, at(250, 0), math::identity_quat(), {}},    // hostile, category outside the filter
+        {5, 100, 3, at(900, 0), math::identity_quat(), {}},    // hostile, outside the range
+        {6, 100, 3, at(0, 150), math::identity_quat(), {}},    // hostile in range, damaged first (lowest %)
+        {7, 100, 2, at(50, 50), math::identity_quat(), {}}};   // allied player: never damaged
+    tactical::DurabilityTable durability;
+    // The damage pipeline only runs with damage rules: one damage row, one armor row, a neutral modifier.
+    tactical::DamageRules damage_rules; damage_rules.damage_types = 1; damage_rules.armor_types = 1;
+    damage_rules.armor_mods = {units(1)}; damage_rules.shield_recharge_frames = 90; damage_rules.energy_recharge_frames = 150;
+    durability.damage = damage_rules;
+    for (const tactical::TypeId type : {99U, 100U, 101U}) {
+        tactical::DurabilityProfile profile; profile.type_id = type; profile.max_hull = units(1000);
+        durability.profiles.push_back(profile);
+    }
+    tactical::CombatTable combat;
+    for (const tactical::TypeId type : {99U, 100U, 101U}) {
+        tactical::CombatProfile profile; profile.type_id = type; profile.category_bits = type == 101 ? 2 : 1;
+        combat.profiles.push_back(profile);
+    }
+    for (const bool single_target : {false, true}) {
+        tactical::AbilityTable abilities; abilities.passive_damage_type = 0;
+        tactical::UnitAbilityProfile owner; owner.type_id = 99;
+        tactical::SpecialAbilityProfile aura; aura.name = "Passive_Damage"; aura.kind = tactical::SpecialAbilityKind::force_healing;
+        aura.style = tactical::SpecialActivationStyle::space_automatic; aura.initially_enabled = true;
+        aura.heal_range = units(300); aura.heal_amount = units(-30); aura.heal_interval_frames = 15;
+        aura.single_target_heal = single_target; aura.filter.applicable_categories = 1;
+        owner.special.push_back(aura); abilities.profiles.push_back(owner);
+        expect(static_cast<bool>(tactical::validate_abilities(abilities)), "WSH-09: the aura table is valid");
+        std::vector<std::string> baseline;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto made = tactical::TacticalSession::create(setup, {}, durability, {}, std::nullopt, combat, {}, abilities);
+            expect(static_cast<bool>(made), "WSH-09: aura session creates"); if (!made) continue;
+            auto session = std::move(made.value());
+            expect(static_cast<bool>(session.submit(command(1, 1, 6, 6,
+                tactical::DamagePayload{units(400), tactical::hull_target}))), "WSH-09: the lowest-health victim is pre-damaged");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            std::size_t pulses_on_3 = 0, pulses_on_6 = 0;
+            for (std::uint64_t tick = 0; tick <= 61; ++tick) {
+                const auto stepped = session.step(executor); expect(static_cast<bool>(stepped), "WSH-09: aura tick advances");
+                if (!stepped) break;
+                hashes.push_back(stepped.value().state_sha256);
+                for (const auto& event : stepped.value().snapshot->combat_events()) {
+                    if (event.kind != tactical::CombatEventKind::heal_pulse) continue;
+                    expect(event.shooter == 1 && event.target != 1 && event.target != 2 && event.target != 4 && event.target != 5 && event.target != 7,
+                        "WSH-09: only enemies inside the range and filter are pulsed");
+                    pulses_on_3 += event.target == 3 ? 1U : 0U;
+                    pulses_on_6 += event.target == 6 ? 1U : 0U;
+                }
+            }
+            if (baseline.empty()) baseline = hashes; else expect(hashes == baseline, "WSH-09: aura 1/2/4/8 hashes match");
+            const auto hull = [&](const eawr::sim::EntityId id) { return session.durability_state(id)->hull.raw(); };
+            expect(single_target ? pulses_on_3 + pulses_on_6 == 5 : pulses_on_3 == 5 && pulses_on_6 == 5,
+                "WSH-09: the aura pulses on its interval, five times in 62 ticks at 15");
+            expect(hull(2) == units(1000).raw() && hull(4) == units(1000).raw() && hull(5) == units(1000).raw()
+                && hull(7) == units(1000).raw(), "WSH-09: friendly, allied, filtered and out-of-range units are untouched");
+            if (single_target) {
+                // An initial poll before the pre-damage lands may tie and take the first unit in entity order.
+                expect(pulses_on_3 <= 1 && pulses_on_6 >= 3 && hull(3) >= units(970).raw(),
+                    "WSH-02/09: single-target damage picks the lowest health fraction only");
+                expect(std::abs(hull(6) - (units(600).raw() - static_cast<std::int64_t>(pulses_on_6) * units(30).raw())) <= 1000,
+                    "WSH-09: each pulse removes the negated amount from the victim");
+            } else {
+                expect(pulses_on_3 == 5 && pulses_on_6 == pulses_on_3, "WSH-09: every enemy in range is pulsed");
+                expect(std::abs(hull(3) - (units(1000).raw() - static_cast<std::int64_t>(pulses_on_3) * units(30).raw())) <= 1000,
+                    "WSH-09: each pulse removes the negated amount from every victim");
+            }
+            const auto encoded = tactical::write_replay(session.record());
+            expect(static_cast<bool>(encoded), "WSH-09: aura replay writes"); if (!encoded) continue;
+            const auto parsed = tactical::parse_replay(encoded.value());
+            expect(static_cast<bool>(parsed), "WSH-09: aura replay encodes");
+            if (parsed) {
+                auto replay = tactical::TacticalSession::from_replay(parsed.value(), {}, durability, {}, std::nullopt, combat, {}, abilities);
+                expect(static_cast<bool>(replay), "WSH-09: aura replay creates");
+                if (replay) for (const auto& hash : hashes) {
+                    const auto step = replay.value().step(executor);
+                    expect(step && step.value().state_sha256 == hash, "WSH-09: aura damage replays identically");
+                }
+            }
+        }
+    }
+}
+
+// WSH-09 (#4868) review edges: dead source or victim, interval 0, no damage rules, and the exact single-target tie.
+void test_passive_damage_edges() {
+    struct Outcome { std::size_t on_3{}, on_6{}, late_on_3{}, late_from_1{}, total{}; std::int64_t hull_1{}, hull_3{}, hull_6{}; };
+    const auto run = [](const bool rules, const std::int64_t amount, const std::uint32_t interval, const bool single,
+        const eawr::sim::EntityId kill, const bool second_source = false) {
+        tactical::TacticalSetup setup;
+        setup.seed = 4869;
+        setup.players = {{1, 1, 1, tactical::player_flag_commandable}, {3, 3, 3, tactical::player_flag_commandable}};
+        setup.units = {{1, 99, 1, at(0, 0), math::identity_quat(), {}}, {3, 100, 3, at(200, 0), math::identity_quat(), {}},
+            {6, 100, 3, at(0, 150), math::identity_quat(), {}}};
+        if (second_source) setup.units.insert(setup.units.begin() + 1, decltype(setup.units)::value_type{2, 99, 1, at(100, 0), math::identity_quat(), {}});
+        tactical::DurabilityTable durability;
+        if (rules) {
+            tactical::DamageRules damage_rules; damage_rules.damage_types = 1; damage_rules.armor_types = 1;
+            damage_rules.armor_mods = {units(1)}; damage_rules.shield_recharge_frames = 90; damage_rules.energy_recharge_frames = 150;
+            durability.damage = damage_rules;
+        }
+        tactical::CombatTable combat;
+        for (const tactical::TypeId type : {99U, 100U}) {
+            tactical::DurabilityProfile profile; profile.type_id = type; profile.max_hull = units(1000);
+            durability.profiles.push_back(profile);
+            tactical::CombatProfile fighting; fighting.type_id = type; fighting.category_bits = 1;
+            combat.profiles.push_back(fighting);
+        }
+        tactical::AbilityTable abilities; abilities.passive_damage_type = 0;
+        tactical::UnitAbilityProfile owner; owner.type_id = 99;
+        tactical::SpecialAbilityProfile aura; aura.name = "Passive_Damage"; aura.kind = tactical::SpecialAbilityKind::force_healing;
+        aura.style = tactical::SpecialActivationStyle::space_automatic; aura.initially_enabled = true;
+        aura.heal_range = units(300); aura.heal_amount = units(-amount); aura.heal_interval_frames = interval;
+        aura.single_target_heal = single; aura.filter.applicable_categories = 1;
+        owner.special.push_back(aura); abilities.profiles.push_back(owner);
+        Outcome out;
+        auto made = tactical::TacticalSession::create(setup, {}, durability, {}, std::nullopt, combat, {}, abilities);
+        expect(static_cast<bool>(made), "WSH-09: edge session creates"); if (!made) return out;
+        auto session = std::move(made.value());
+        if (kill != 0) expect(static_cast<bool>(session.submit(command(1, 1, 1, kill,
+            tactical::DamagePayload{units(5000), tactical::hull_target}))), "WSH-09: the kill command is accepted");
+        const eawr::platform::ThreadWorkerAdapter executor(1);
+        for (std::uint64_t tick = 0; tick <= 61; ++tick) {
+            const auto stepped = session.step(executor); expect(static_cast<bool>(stepped), "WSH-09: edge tick advances");
+            if (!stepped) break;
+            for (const auto& event : stepped.value().snapshot->combat_events()) {
+                if (event.kind != tactical::CombatEventKind::heal_pulse) continue;
+                ++out.total;
+                out.on_3 += event.target == 3 ? 1U : 0U; out.on_6 += event.target == 6 ? 1U : 0U;
+                out.late_on_3 += event.target == 3 && event.tick >= 2 ? 1U : 0U;
+                out.late_from_1 += event.shooter == 1 && event.tick >= 2 ? 1U : 0U;
+            }
+        }
+        // A destroyed unit has no durability state left: hull 0.
+        const auto hull = [&](const eawr::sim::EntityId id) {
+            const auto state = session.durability_state(id); return state ? state->hull.raw() : std::int64_t{0};
+        };
+        out.hull_1 = hull(1); out.hull_3 = hull(3); out.hull_6 = hull(6);
+        return out;
+    };
+    const auto tie = run(true, 30, 15, true, 0);
+    expect(tie.on_3 == 5 && tie.on_6 == 0 && tie.hull_6 == units(1000).raw(),
+        "WSH-02/09: an exact health tie keeps the first unit in entity order");
+    const auto dead_source = run(true, 30, 15, false, 1);
+    expect(dead_source.hull_1 == 0 && dead_source.hull_3 == units(1000).raw() - static_cast<std::int64_t>(dead_source.on_3) * units(30).raw(),
+        "WSH-09: the kill command destroyed the source, so the following checks are not vacuous");
+    expect(dead_source.late_from_1 == 0, "WSH-09: a dead source never pulses again");
+    const auto dead_victim = run(true, 30, 15, false, 3);
+    expect(dead_victim.hull_3 == 0 && dead_victim.hull_1 == units(1000).raw(), "WSH-09: the kill command destroyed the victim");
+    expect(dead_victim.late_on_3 == 0 && dead_victim.on_6 == 5, "WSH-09: a dead victim takes no further pulse, the others keep theirs");
+    // Two auras picking one single target in a tick: a lethal first pulse takes the kill and the second is dropped
+    // at commit (accepted; the next due tick picks the next enemy), so the victim is pulsed exactly once.
+    const auto shared = run(true, 1000, 15, true, 0, true);
+    expect(shared.on_3 == 1 && shared.hull_3 == 0, "WSH-09: a victim killed by the first aura takes no second pulse in that tick");
+    const auto no_rules = run(false, 30, 15, false, 0);
+    expect(no_rules.total == 0, "WSH-09: without damage rules nothing is delivered and no pulse event is emitted");
+    const auto every_tick = run(true, 1, 0, false, 0);
+    expect(every_tick.on_3 >= 60 && every_tick.on_6 == every_tick.on_3, "WSH-09: a zero base interval pulses on every tick");
+}
+
 void test_peacebringer_blast_session() {
     class PhaseOrder final : public eawr::sim::PartitionExecutor {
     public:

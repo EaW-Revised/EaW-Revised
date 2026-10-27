@@ -2,6 +2,10 @@
 #include "asset_internal.hpp"
 
 #include <algorithm>
+#include <array>
+#include <memory>
+
+#include <stb_image.h>
 
 namespace eawr::assets {
 namespace {
@@ -18,6 +22,41 @@ core::Result<T> fail(const Source& source, std::string message, const std::uint6
 std::string extension(std::string_view path) {
     const auto dot=path.find_last_of('.');std::string result(dot==std::string_view::npos?std::string_view{}:path.substr(dot));
     std::transform(result.begin(),result.end(),result.begin(),[](unsigned char c){return static_cast<char>((c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c));});return result;
+}
+
+core::Result<Texture> load_png_jpeg(const std::span<const std::byte> bytes, Source source) {
+    // ML-52: format selection consumes file contents, independent of its suffix.
+    // The caller already enforces the 512 MiB file budget, below the codec's
+    // signed input-length limit. Read dimensions before allocating image memory.
+    const auto* input = reinterpret_cast<const stbi_uc*>(bytes.data());
+    const auto input_size = static_cast<int>(bytes.size());
+    int width{}, height{}, channels{};
+    if (stbi_info_from_memory(input, input_size, &width, &height, &channels) == 0)
+        return fail<Texture>(source, "invalid or truncated PNG/JPEG header", 0, diagnostic_codes::texture_format);
+    std::size_t pixels{};
+    if (width <= 0 || height <= 0
+        || !detail::checked_multiply<std::size_t>(static_cast<std::size_t>(width), static_cast<std::size_t>(height), pixels)
+        || pixels > max_texture_pixels)
+        return fail<Texture>(source, "PNG/JPEG pixel count exceeds safety limit", 0, diagnostic_codes::limit);
+    const std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> decoded(
+        stbi_load_from_memory(input, input_size, &width, &height, &channels, STBI_rgb_alpha), stbi_image_free);
+    if (!decoded)
+        return fail<Texture>(source, "invalid or truncated PNG/JPEG image data", 0, diagnostic_codes::texture_format);
+    Texture result;
+    result.source = std::move(source);
+    result.width = static_cast<std::uint32_t>(width);
+    result.height = static_cast<std::uint32_t>(height);
+    result.format = PixelFormat::rgba8;
+    result.source_origin = ImageOrigin::top_left;
+    result.has_alpha = channels == 2 || channels == 4;
+    MipLevel mip;
+    mip.width = result.width;
+    mip.height = result.height;
+    mip.row_pitch = result.width * 4U;
+    const auto* begin = reinterpret_cast<const std::byte*>(decoded.get());
+    mip.bytes.assign(begin, begin + pixels * 4U);
+    result.mips.push_back(std::move(mip));
+    return core::Result<Texture>::success(std::move(result));
 }
 
 core::Result<Texture> load_bmp(const std::span<const std::byte> bytes, Source source) {
@@ -128,7 +167,31 @@ core::Result<Texture> load_tga(const std::span<const std::byte> bytes, Source so
 }
 } // namespace
 
-core::Result<Texture> load_texture(const std::span<const std::byte> bytes, Source source){if(bytes.size()>detail::max_file_size)return core::Result<Texture>::failure(detail::error(source,diagnostic_codes::limit,"texture exceeds 512 MiB safety limit"));if(source.stored_size!=0&&source.stored_size!=bytes.size())return core::Result<Texture>::failure(detail::error(source,diagnostic_codes::source_mismatch,"provenance size does not match supplied texture bytes"));const auto ext=extension(source.logical_path);if(bytes.size()>=2&&bytes[0]==std::byte{'B'}&&bytes[1]==std::byte{'M'})return load_bmp(bytes,std::move(source));if(bytes.size()>=4&&bytes[0]==std::byte{'D'}&&bytes[1]==std::byte{'D'}&&bytes[2]==std::byte{'S'}&&bytes[3]==std::byte{' '})return load_dds(bytes,std::move(source));if(bytes.size()>=18){const auto image_type=std::to_integer<unsigned>(bytes[2]);const auto depth=std::to_integer<unsigned>(bytes[16]);if((image_type==2U||image_type==3U||image_type==10U||image_type==11U)&&(depth==8U||depth==24U||depth==32U))return load_tga(bytes,std::move(source));}return fail<Texture>(source,"texture bytes are not supported BMP, DDS or TGA (extension "+ext+")",0,diagnostic_codes::texture_format);}
+core::Result<Texture> load_texture(const std::span<const std::byte> bytes, Source source) {
+    if (bytes.size() > detail::max_file_size)
+        return core::Result<Texture>::failure(detail::error(source, diagnostic_codes::limit, "texture exceeds 512 MiB safety limit"));
+    if (source.stored_size != 0 && source.stored_size != bytes.size())
+        return core::Result<Texture>::failure(detail::error(source, diagnostic_codes::source_mismatch, "provenance size does not match supplied texture bytes"));
+    constexpr std::array png_signature{std::byte{0x89}, std::byte{'P'}, std::byte{'N'}, std::byte{'G'},
+        std::byte{0x0d}, std::byte{0x0a}, std::byte{0x1a}, std::byte{0x0a}};
+    const bool png = bytes.size() >= png_signature.size()
+        && std::equal(png_signature.begin(), png_signature.end(), bytes.begin());
+    const bool jpeg = bytes.size() >= 3 && bytes[0] == std::byte{0xff}
+        && bytes[1] == std::byte{0xd8} && bytes[2] == std::byte{0xff};
+    if (png || jpeg) return load_png_jpeg(bytes, std::move(source));
+    if (bytes.size() >= 2 && bytes[0] == std::byte{'B'} && bytes[1] == std::byte{'M'})
+        return load_bmp(bytes, std::move(source));
+    if (bytes.size() >= 4 && bytes[0] == std::byte{'D'} && bytes[1] == std::byte{'D'}
+        && bytes[2] == std::byte{'S'} && bytes[3] == std::byte{' '}) return load_dds(bytes, std::move(source));
+    if (bytes.size() >= 18) {
+        const auto image_type = std::to_integer<unsigned>(bytes[2]);
+        const auto depth = std::to_integer<unsigned>(bytes[16]);
+        if ((image_type == 2U || image_type == 3U || image_type == 10U || image_type == 11U)
+            && (depth == 8U || depth == 24U || depth == 32U)) return load_tga(bytes, std::move(source));
+    }
+    return fail<Texture>(source, "texture bytes are not supported BMP, DDS, TGA, PNG or JPEG (extension "
+        + extension(source.logical_path) + ")", 0, diagnostic_codes::texture_format);
+}
 core::Result<Texture> load_texture(const vfs::Vfs& filesystem,const std::string_view path){
     core::load_profile::Scope load_scope(core::load_profile::Phase::texture);auto record=filesystem.stat(path);if(!record)return core::Result<Texture>::failure(record.error());auto bytes=filesystem.open(path);if(!bytes)return core::Result<Texture>::failure(bytes.error());return load_texture(bytes.value(),source_from(record.value()));}
 } // namespace eawr::assets

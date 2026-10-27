@@ -43,7 +43,7 @@ public:
     // `game_menu` is the in-game menu itself (IDD_GAME_OPTIONS_DIALOG, in_game context only): Options opens
     // the hub, whose Back returns here; Resume closes the screen; Quit Game asks first, then closes it with
     // quit_requested() set.
-    enum class Page : std::uint8_t { hub, audio, video, advanced_video, gameplay, keyboard, network, game_menu };
+    enum class Page : std::uint8_t { hub, audio, video, performance, advanced_video, gameplay, keyboard, network, game_menu };
 
     struct Options final {
         // The content the caller already mounted (its VFS); otherwise the roots below are mounted

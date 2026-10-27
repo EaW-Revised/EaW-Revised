@@ -78,7 +78,7 @@ public:
         const auto turns = div(degrees, whole(360));
         return trig_ != nullptr ? trig_->sample(turns).cosine : math::cos_turn(turns);
     }
-    // A zero vector has no direction: the failure names the call that asked.
+    // FM-27: a zero vector uses heading zero; other failures name the call that asked.
     math::Fixed atan2_deg(math::Fixed y, math::Fixed x, const std::source_location from = std::source_location::current()) {
         const auto turns = math::atan2_turn(y, x);
         if (!turns) {

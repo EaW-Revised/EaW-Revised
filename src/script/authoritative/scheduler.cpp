@@ -455,6 +455,14 @@ core::Result<ScriptScheduler> ScriptScheduler::create(SessionConfig config, Modu
 }
 
 core::Result<void> ScriptScheduler::register_binding(::std::string_view name, Binding binding) {
+    return install_binding(name, ::std::move(binding), false);
+}
+
+core::Result<void> ScriptScheduler::register_free_random(Binding binding) {
+    return install_binding("GameRandom.Free_Random", ::std::move(binding), true);
+}
+
+core::Result<void> ScriptScheduler::install_binding(::std::string_view name, Binding binding, const bool free_random) {
     if (!impl_->instances.empty()) {
         return core::Result<void>::failure(
             detail::make_error(codes::invalid_request, "bindings are registered before the first instance"));
@@ -465,8 +473,9 @@ core::Result<void> ScriptScheduler::register_binding(::std::string_view name, Bi
     if (!valid || !binding) {
         return core::Result<void>::failure(detail::make_error(codes::invalid_request, "invalid binding name: " + ::std::string(name)));
     }
-    // Free_Random draws outside the synchronized stream; it has no authoritative form.
-    if (name == "GameRandom.Free_Random" || name == "Free_Random") {
+    // Free_Random draws outside the synchronized stream; a host binds it only through register_free_random, which
+    // takes responsibility for the sourced policy (RGC-195..199).
+    if (!free_random && (name == "GameRandom.Free_Random" || name == "Free_Random")) {
         return core::Result<void>::failure(
             detail::make_error(codes::forbidden_capability, ::std::string(name) + " is forbidden in authoritative scripts"));
     }
@@ -486,6 +495,25 @@ core::Result<void> ScriptScheduler::register_binding(::std::string_view name, Bi
             codes::invalid_request, "name belongs to the sandbox global `" + ::std::string(base) + "': " + ::std::string(name)));
     }
     impl_->shared->bindings.push_back(detail::BindingEntry{::std::string(name), ::std::move(binding)});
+    return core::Result<void>::success();
+}
+
+core::Result<void> ScriptScheduler::register_prelude(::std::string_view module) {
+    if (!impl_->instances.empty()) {
+        return core::Result<void>::failure(
+            detail::make_error(codes::invalid_request, "preludes are registered before the first instance"));
+    }
+    const auto normal = ModuleManifest::normalise(module);
+    if (!normal || impl_->shared->manifest.find(module) == nullptr) {
+        return core::Result<void>::failure(
+            detail::make_error(codes::invalid_request, "prelude is not in the session manifest: " + ::std::string(module)));
+    }
+    auto& preludes = impl_->shared->preludes;
+    if (::std::find(preludes.begin(), preludes.end(), *normal) != preludes.end()) {
+        return core::Result<void>::failure(
+            detail::make_error(codes::invalid_request, "duplicate prelude: " + ::std::string(module)));
+    }
+    preludes.push_back(*normal);
     return core::Result<void>::success();
 }
 
@@ -572,6 +600,19 @@ core::Result<void> ScriptScheduler::create_instance(const ::std::uint64_t id, ::
         detail::install_bindings(*instance);
         instance->sandbox->seal();
         instance->sandbox->set_budget(impl_->shared->config.quotas.instructions_per_service);
+        for (const ::std::string& prelude : impl_->shared->preludes) {
+            const ::std::string* source = impl_->shared->manifest.find(prelude);
+            if (instance->sandbox->load_source(*source, "@" + prelude) != 0) {
+                return core::Result<void>::failure(detail::make_error(codes::module_rejected, detail::error_text(state)));
+            }
+            const int ran = lua_pcall(state, 0, 0, 0);
+            if (instance->sandbox->fault() != detail::sf::SandboxFault::none) {
+                return core::Result<void>::failure(detail::make_error(
+                    detail::fault_code(instance->sandbox->fault()), "prelude faulted: " + detail::error_text(state)));
+            }
+            if (ran != 0) return core::Result<void>::failure(detail::make_error(codes::script_error, detail::error_text(state)));
+            lua_settop(state, 0);
+        }
         const ::std::string chunk_name = "@" + *ModuleManifest::normalise(root_module);
         if (instance->sandbox->load_source(*bytes, chunk_name) != 0) {
             return core::Result<void>::failure(detail::make_error(codes::module_rejected, detail::error_text(state)));
@@ -1151,6 +1192,40 @@ core::Result<::std::optional<Value>> ScriptScheduler::read_global(
     }
     lua_settop(state, top);
     return ReadResult::success(::std::move(value));
+}
+
+namespace {
+struct LuaMemoryObservation {
+    ::std::uint64_t bytes{}, states{};
+    bool complete{true};
+};
+
+template<class Instances>
+LuaMemoryObservation observe_lua_memory(const Instances& instances) {
+    LuaMemoryObservation result;
+    for (const auto& entry : instances) {
+        if (!entry.second->sandbox) continue;
+        // Lua 5.0 reports KiB rounded down; coroutines share their root's allocator.
+        // Query exactly one root per Sandbox, without a collection or stack change.
+        const auto kib = detail::sf::lua_getgccount(entry.second->sandbox->state());
+        if (kib < 0) { result.complete = false; continue; }
+        result.bytes += static_cast<::std::uint64_t>(kib) * 1024U;
+        ++result.states;
+    }
+    return result;
+}
+} // namespace
+
+diagnostics::MemoryCapacity ScriptScheduler::memory_capacity() const {
+    const auto observed = observe_lua_memory(impl_->instances);
+    diagnostics::MemoryCapacity result;
+    result.complete = observed.complete;
+    result.add("lua", "vm_gc_kib_bytes_lower_bound", observed.bytes, observed.states);
+    return result;
+}
+
+::std::uint64_t ScriptScheduler::diagnostic_lua_bytes() const {
+    return observe_lua_memory(impl_->instances).bytes;
 }
 
 ::std::uint64_t ScriptScheduler::completed_tick() const noexcept { return impl_->completed_tick; }

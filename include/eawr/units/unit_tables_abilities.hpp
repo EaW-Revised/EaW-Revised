@@ -53,6 +53,7 @@ struct Ability final {
     std::optional<bool> is_pulsing;
     std::string lure_particle;
     bool disable_movement{}; // WIN-02, WMS-02: authored movement lock while deployed
+    std::optional<Fixed> targeting_max_attack_distance; // WRA-03: active targeting reach
     bool operator==(const Ability&) const = default;
 };
 
@@ -81,7 +82,7 @@ struct CombatBonus final {
     std::uint32_t stacking_category{};
     std::vector<std::string> types;
     std::vector<std::string> categories;
-    std::array<Fixed, 6> percentages{}; // health, damage, energy, shield, defense, speed
+    std::array<Fixed, 7> percentages{}; // health, damage, energy, shield, defense, speed, fire range
     std::string name;
     sim::tactical::SpecialAbilityFilter filter;
     std::string specific_faction;

@@ -368,7 +368,7 @@ public:
     [[nodiscard]] std::string sha256() const;
 
 private:
-    std::shared_ptr<const HistorySnapshot> history_;
+    std::shared_ptr<const HistorySnapshot> history_; // per-viewer publication, excluded from canonical bytes
     GalacticSnapshot() = default;
     PlayerId view_player_{}; // publication context, excluded from canonical bytes
     std::shared_ptr<const std::vector<AbilityResult>> ability_results_;

@@ -135,6 +135,7 @@ public:
     [[nodiscard]] ::std::uint64_t tick() const noexcept override { return instance_.tick; }
     [[nodiscard]] ::std::int64_t thread() const noexcept override { return instance_.current_thread; }
     [[nodiscard]] RandomStream& random() noexcept override { return instance_.random; }
+    void request_exit() noexcept override { instance_.exit_requested = true; }
     [[nodiscard]] ::std::uint64_t command_sequence() const noexcept override { return instance_.command_sequence; }
 
     void issue_command(::std::string verb, ValueList arguments) override {
@@ -309,7 +310,7 @@ int generic_body(lua_State* state, bool drop_self, bool bound = false) {
         if (local_handler && position == 2 && lua_isfunction(state, position)) continue;
         // L-54: these numeric APIs diagnose non-numbers but still draw. Do not
         // reject or traverse an arbitrary Lua graph before the binding sees it.
-        if ((entry.name == "GameRandom" || entry.name == "GameRandom.Get_Float") &&
+        if ((entry.name == "GameRandom" || entry.name == "GameRandom.Get_Float" || entry.name == "GameRandom.Free_Random") &&
             lua_type(state, position) != LUA_TNUMBER) continue;
         if (!read_value(instance, state, position, 0, arguments[position - 1], error)) {
             const ::std::string message = ::std::string(codes::invalid_request) + ": " + entry.name + " argument " +

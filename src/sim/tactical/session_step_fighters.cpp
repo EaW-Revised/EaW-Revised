@@ -100,9 +100,8 @@ bool session_detail::Tick::squadron_refresh_skips(const LiveUnit*& target, const
         }
         auto reach = core::Result<math::Fixed>::success(impl_->approach_range(*leader, false, target_view));
         if (target_view != nullptr) {
-            const auto* profile = impl_->combat.find(leader->state.type_id);
             reach = detail::target_attack_distance(&impl_->motion, *target_view, leader->state.position,
-                profile != nullptr ? profile->max_attack_distance.value_or(math::Fixed{}) : math::Fixed{},
+                impl_->attack_distance(*leader).value_or(math::Fixed{}),
                 detail::has_aim_hardpoint(*target_view));
         }
         if (!reach) { outcome.error = reach.error(); return true; }

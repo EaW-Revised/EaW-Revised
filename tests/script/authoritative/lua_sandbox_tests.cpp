@@ -74,6 +74,16 @@ void run_clock_rng() {
     for (int index = 0; index < 64; ++index) static_cast<void>(wide.next_below(bound));
     rejected = wide.draws() - 64;
     expect(rejected > 10, "a bound just above 2^63 rejects about half the words");
+    // RGC-197: the free stream has its own counter and a seed fixed by the host, not the session's.
+    auth::RandomStream plain(0x5EED, 5, 4), mixed(0x5EED, 5, 4), other_seed(0xBEEF, 5, 4);
+    const std::uint64_t first_free = mixed.next_free_word();
+    expect(first_free == auth::random_word(auth::free_stream_seed, 5, 4, 0) && first_free == other_seed.next_free_word(),
+        "the free stream is keyed by its fixed seed, not the session seed");
+    expect(mixed.draws() == (std::uint64_t{1} << 32) && mixed.next_word() == plain.next_word() && mixed.next_word() == plain.next_word(),
+        "a free draw does not move the game stream");
+    expect(mixed.draws() == ((std::uint64_t{1} << 32) | 2) && auth::RandomStream(0x5EED, 5, 4, mixed.draws()).next_free_word() == mixed.next_free_word(),
+        "both counters travel in the saved draws value and resume where they stopped");
+    expect(mixed.next_free_word() != first_free, "free draws advance");
     std::string sequence;
     auth::RandomStream digest_stream(0x5EED, 77, 3);
     for (int index = 0; index < 10'000; ++index) {

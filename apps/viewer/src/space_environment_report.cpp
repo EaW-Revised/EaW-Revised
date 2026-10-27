@@ -1,8 +1,21 @@
 #include "eawr/core/json_text.hpp"
 #include "space_environment_internal.hpp"
+#include "startup_trace.hpp"
 #include "render_profile_viewport.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 
 namespace eawr::presentation::godot_backend {
+void SpaceEnvironment::owner_census(diagnostics::OwnerCensus& output) const {
+    if (state_ && state_->view) state_->view->owner_census(output);
+}
+
+void space_environment_detail::EnvironmentView::owner_census(diagnostics::OwnerCensus& output) const {
+    for (const auto& idle : environment_idle_) {
+        if (!output.step(diagnostics::OwnerCensus::animation)) break;
+        if (idle.player) idle.player->owner_census(output);
+    }
+}
+
 namespace space_environment_detail {
 
 [[nodiscard]] std::string report_strings(const std::vector<std::string>& values) {
@@ -165,6 +178,10 @@ bool SpaceEnvironment::State::write_report() const {
            "\"not_applicable\", \"cause\": \"a kind-2 map has no terrain view; terrain::build rejects it by contract "
            "and is not called\"},\n";
     if (options.write_hud_report) options.write_hud_report(output);
+    startup_trace.write(output);
+    output << "  \"cpu_recipe_memory\":{\"phase\":\"report\",\"scope\":\"vector_capacity_excluding_strings_allocator_gpu\",\"retained\":";
+    assets::write_retained_payload(output, renderer ? renderer->recipe_memory() : assets::RetainedPayload{});
+    output << "},\n";
     output
         << "  \"populate\": {\"requested\": false, \"declared_placements\": " << declared_placements
         << ", \"composed\": " << (options.fog && fog_units ? fog_units->units().size() : 0) << ", \"cause\": "

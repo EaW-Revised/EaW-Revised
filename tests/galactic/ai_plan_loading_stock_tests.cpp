@@ -86,6 +86,135 @@ void category_order_contracts() {
     expect(materialized.plans.front().galactic_contrast_order == g::galactic_contrast_category_order(collisions)
         && materialized.plans.front().galactic_contrast.at(16).front().weight == ai::real(1),
         "materialization resolves authored keys to retained map order and preserves the first duplicate's weighted list");
+    // RGC-61/62/64: an undefined exclusion is ignored, an undefined inclusion name is skipped, and a row left with no possible
+    // type is removed; the plan is kept and each omission is listed.
+    g::PlanDefinitionData tolerant; tolerant.name = "TOLERANT"; tolerant.module = "tolerant.lua";
+    tolerant.goals = {"ONE"};
+    tolerant.teams = {{"Main", {"Unit = 1", "-Missing", "Ghost = 2", "Ghost | Phantom = 1,3", "Unit | Ghost = 1", "K16 = 1"}}};
+    g::PlanCatalog tolerant_catalog; tolerant_catalog.plans = {tolerant};
+    const auto kept = g::materialize_plan_catalog(host, tolerant_catalog);
+    expect(kept && kept.value().plans.size() == 1 && kept.value().plans.front().taskforces.size() == 1
+        && kept.value().plans.front().taskforces.front().teams.size() == 2,
+        "unknown-only and candidate-less category rows are removed at parse time, the plan and its other rows are kept");
+    const auto listed = [&](std::string_view needle) {
+        return kept && std::any_of(kept.value().diagnostics.begin(), kept.value().diagnostics.end(),
+            [&](const auto& line) { return line.find(needle) != std::string::npos; });
+    };
+    expect(listed("excludes unknown type Missing") && listed("unknown type Ghost") && listed("unknown type Phantom"),
+        "the ignored exclusion and the skipped inclusion names are listed");
+}
+bool mentions(const std::vector<std::string>& lines, std::string_view needle) {
+    return std::any_of(lines.begin(), lines.end(), [&](const auto& line) { return line.find(needle) != std::string::npos; });
+}
+std::string with_override(const std::string& script, const std::string& lua) {
+    return script + "\nlocal original = Base_Definitions\nfunction Base_Definitions() original(); " + lua + " end";
+}
+// RGC-162..165: plan admission is item-level; an empty catalog is a reported state, not a refused startup.
+void admission_contracts(const std::string& script) {
+    const std::string path = "data/scripts/ai/example.lua";
+    // Gate 3: a wrong-typed override is not applied and does not refuse the plan; the override is noted once.
+    {
+        const auto kept = must(g::load_plan_catalog({}, {{path, with_override(script, "MagicPlan = 'wrong'; MinimumCost = false; AllowEngagedUnits = 4")}}));
+        const auto& definition = plan(kept, "EXAMPLE");
+        expect(kept.plans.size() == 1 && !definition.magic && !definition.allow_engaged
+            && definition.additional_cost == ai::real(3) && !definition.minimum_cost,
+            "wrong-typed overrides are not applied; the plan and its other overrides are kept");
+        expect(kept.item_diagnostics.size() == 3 && mentions(kept.item_diagnostics, "wrong-typed MagicPlan override")
+            && mentions(kept.item_diagnostics, "wrong-typed MinimumCost override") && mentions(kept.item_diagnostics, "wrong-typed AllowEngagedUnits override"),
+            "each wrong-typed override gets one diagnostic");
+        expect(must(g::load_plan_catalog({}, {{path, script}})).item_diagnostics.empty(), "a clean plan reports no item diagnostics");
+    }
+    // Gates 5-7: a non-table task force entry is skipped beside a valid one; a non-text required category is skipped.
+    {
+        const auto kept = must(g::load_plan_catalog({}, {{path, with_override(script,
+            "TaskForce = {'notatable', {'Main', 'Infantry = 1', 7}, {}, {7}}; RequiredCategories = {'Infantry', 5}")}}));
+        const auto& definition = plan(kept, "EXAMPLE");
+        expect(kept.plans.size() == 1 && definition.teams.size() == 1 && definition.teams.front().name == "Main"
+            && definition.teams.front().declarations == std::vector<std::string>{"Infantry = 1"},
+            "bad task force entries and declarations are skipped, the valid one stays");
+        expect(definition.required_categories == std::vector<std::string>{"Infantry"}, "a non-text required category is skipped");
+        expect(kept.item_diagnostics.size() == 5 && mentions(kept.item_diagnostics, "entry 1 is not a table")
+            && mentions(kept.item_diagnostics, "entry 3 is not a table") && mentions(kept.item_diagnostics, "entry 4 has no name")
+            && mentions(kept.item_diagnostics, "declaration 2 is not text") && mentions(kept.item_diagnostics, "RequiredCategories entry"),
+            "each skipped item gets one diagnostic");
+        expect(std::all_of(kept.item_diagnostics.begin(), kept.item_diagnostics.end(),
+            [&](const auto& line) { return line.starts_with(path + ": "); }),
+            "every skipped item diagnostic retains its source plan path");
+    }
+    // Gate 6: no usable task force refuses the file only.
+    {
+        std::map<std::string, std::string> two{{path, script}, {"data/scripts/ai/hollow.lua", with_override(script, "TaskForce = {'notatable', {}}")}};
+        const auto kept = must(g::load_plan_catalog({}, two));
+        expect(kept.plans.size() == 1 && kept.plans.front().name == "EXAMPLE" && kept.skipped_plans.size() == 1
+            && kept.skipped_plans.front().find("hollow.lua") != std::string::npos, "a plan left with no task force is refused alone");
+    }
+    // Gate 4: no goal type refuses the file only.
+    {
+        std::map<std::string, std::string> two{{path, script}, {"data/scripts/ai/nogoal.lua", with_override(script, "Category = ' | '")}};
+        const auto kept = must(g::load_plan_catalog({}, two));
+        expect(kept.plans.size() == 1 && kept.skipped_plans.size() == 1, "a plan with no goal type is refused alone");
+    }
+    // RGC-164: an empty catalog starts the AI with no plans and says so; no catalog entry exists to divide by or index.
+    for (const auto& empty : {std::map<std::string, std::string>{{path, "require('MissingLibrary')"}}, std::map<std::string, std::string>{},
+             std::map<std::string, std::string>{{"data/scripts/ai/helper/nested.lua", script}}}) {
+        const auto none = g::load_plan_catalog({}, empty);
+        expect(none && none.value().plans.empty() && mentions(none.value().item_diagnostics, "starts with no plans")
+            && g::goal_plan_registrations(none.value()).empty(), "a catalog with no loadable plan is empty, reported, and not a refusal");
+    }
+    // L-03a / RGC-163: a helper is not a plan, but a later-directory plan can require it only when run.
+    {
+        namespace auth = eawr::script::authoritative;
+        const std::string folder = "data/scripts/ai/landmode/";
+        const std::map<std::string, std::string> inventory{
+            {folder + "late.lua", R"LUA(
+function Base_Definitions() Category = "One"; TaskForce = {{"Main", "Infantry = 1"}} end
+function DifficultyBasedMinPause(difficulty) return 1 end
+function ReadLateHelper()
+ local path = "data/scripts/ai/landmode/" .. "helper"
+ return require(path).Value
+end
+)LUA"},
+            {folder + "helper.lua", "return require('data/scripts/ai/landmode/dependency')"},
+            {folder + "dependency.lua", "return {Value = 17}"}};
+        const auto catalog = must(g::load_plan_catalog({}, inventory, [](const auto&) { return true; }));
+        expect(catalog.plans.size() == 1 && catalog.plans.front().name == "LATE" && catalog.skipped_plans.size() == 2,
+            "later-directory helpers do not register as plans");
+        auth::ModuleManifest manifest;
+        for (const auto& [module, bytes] : inventory) must(manifest.add(module, bytes));
+        must(manifest.add("probe.lua", "require('data/scripts/ai/landmode/late'); LoadedValue = ReadLateHelper()"));
+        auto runtime = must(auth::ScriptScheduler::create({}, std::move(manifest)));
+        must(runtime.create_instance(1, "probe.lua"));
+        const auto value = must(runtime.read_global(1, "LoadedValue"));
+        expect(value && std::get<ai::Real>(value->data) == ai::real(17),
+            "frozen inventory supports a computed runtime require and its transitive non-plan dependency");
+    }
+    // RGC-163: the five directories feed one registry in the debug build's order; the directory does not pick the mode.
+    {
+        const std::map<std::string, std::string> five{{"data/scripts/interventions/event.lua", script}, {"data/scripts/ai/storyarc/arc.lua", script},
+            {"data/scripts/ai/landmode/land.lua", script}, {"data/scripts/ai/spacemode/space.lua", script}, {path, script},
+            {"data/scripts/ai/spacemode/deeper/skipped.lua", script}, {"data/scripts/ai/readme.txt", script}, {"data/scripts/library/lib.lua", script}};
+        const auto all = must(g::load_plan_catalog({}, five));
+        std::vector<std::string> order;
+        for (const auto& definition : all.plans) order.push_back(definition.name);
+        expect(order == std::vector<std::string>{"EXAMPLE", "SPACE", "LAND", "ARC", "EVENT"},
+            "five plan directories load in directory order; nested folders, other extensions and the library do not");
+        // The runtime admits a plan from the four later directories only when a galactic goal names it; the first directory keeps all.
+        const auto galactic_only = must(g::load_plan_catalog({}, five, [](const auto& definition) { return definition.name == "LAND" || definition.name == "EVENT"; }));
+        order.clear();
+        for (const auto& definition : galactic_only.plans) order.push_back(definition.name);
+        expect(order == std::vector<std::string>{"EXAMPLE", "LAND", "EVENT"} && galactic_only.unused_plans == 2,
+            "plans of the later directories join only when admitted; the first directory is never filtered");
+        // Gate 2: the earlier definition of a name wins; the later file is refused and listed.
+        std::map<std::string, std::string> twice{{path, script}, {"data/scripts/ai/spacemode/example.lua", with_override(script, "MinimumCost = 99")}};
+        const auto first = must(g::load_plan_catalog({}, twice));
+        expect(first.plans.size() == 1 && first.plans.front().minimum_cost == ai::real(17) && first.plans.front().module == path
+            && mentions(first.item_diagnostics, "already defined"), "a repeated plan name keeps the earlier directory's definition and lists the other");
+        // The earlier file failing leaves the name free for the later one.
+        twice[path] = "function Base_Definitions( return end";
+        const auto later = must(g::load_plan_catalog({}, twice));
+        expect(later.plans.size() == 1 && later.plans.front().minimum_cost == ai::real(99) && later.skipped_plans.size() == 1,
+            "a failed earlier file registers nothing, so the later file of that name is taken");
+    }
 }
 void fixture() {
     category_order_contracts();
@@ -144,13 +273,17 @@ function main() error("definition loading must not run a plan thread") end
     counts.exclusions["ONE"] = 0; goal.mode = "SPACE";
     expect(!g::activation_allowed(definition, goal, policy, counts), "wrong manager mode rejected");
     modules["data/scripts/ai/bad.lua"] = "function Base_Definitions() end\nfunction DifficultyBasedMinPause(d) return 1 end";
-    expect(!g::load_plan_catalog({}, modules), "malformed plan fails whole catalog instead of silently dropping it");
+    const auto without_bad = g::load_plan_catalog({}, modules);
+    expect(without_bad && without_bad.value().plans.size() == 1 && without_bad.value().skipped_plans.size() == 1
+        && without_bad.value().skipped_plans.front().find("bad.lua") != std::string::npos,
+        "a plan with no task force is skipped and listed, the other plan loads");
+    modules["data/scripts/ai/broken.lua"] = "function Base_Definitions( return end";
+    const auto without_broken = g::load_plan_catalog({}, modules);
+    expect(without_broken && without_broken.value().plans.size() == 1 && without_broken.value().skipped_plans.size() == 2,
+        "a plan script that does not compile is skipped and listed, the other plan loads");
+    modules.erase("data/scripts/ai/broken.lua");
     modules.erase("data/scripts/ai/bad.lua");
-    modules["data/scripts/ai/example.lua"] = script + "\nlocal original = Base_Definitions\nfunction Base_Definitions() original(); MagicPlan = 'wrong' end";
-    expect(!g::load_plan_catalog({}, modules), "malformed override is not silently treated as absent");
-    modules["data/scripts/ai/example.lua"] = "require('MissingLibrary')";
-    expect(!g::load_plan_catalog({}, modules), "missing stock dependency fails");
-    expect(!g::load_plan_catalog({}, {}), "empty module set fails");
+    admission_contracts(script);
 }
 std::string game_root() {
     auto root = eawr::testing::game_root(eawr::testing::EmptyEnvironment::present);
@@ -158,12 +291,13 @@ std::string game_root() {
     if (root->empty()) throw std::runtime_error("Stock loading requires a nonempty game root");
     return std::move(*root);
 }
-std::map<std::string, std::string> modules(const eawr::vfs::Vfs& fs) {
+// `base_only`: the library and the first plan directory, which is what the stock closure holds; otherwise all five directories.
+std::map<std::string, std::string> modules(const eawr::vfs::Vfs& fs, bool base_only = true) {
     std::map<std::string, std::string> out;
     for (const auto& asset : must(fs.enumerate("data/scripts", ".lua"))) {
         if (!asset.canonical_path.starts_with("data/scripts/library/")
-            && !(asset.canonical_path.starts_with("data/scripts/ai/")
-                && asset.canonical_path.substr(16).find('/') == std::string::npos)) continue;
+            && !(base_only ? g::plan_directory_index(asset.canonical_path) == std::optional<std::size_t>{0}
+                           : g::plan_directory_index(asset.canonical_path).has_value())) continue;
         const auto bytes = must(fs.open(asset.canonical_path));
         std::string text(bytes.size(), '\0');
         if (!text.empty()) std::memcpy(text.data(), bytes.data(), text.size());
@@ -201,6 +335,29 @@ void installed() {
         [](const auto& entry) { return entry.second.mode == "GALACTIC"; });
     expect(galactic_goals == 61, "selected stock galactic closure loads 61 goals through production data loader");
     expect(catalog.plans.size() == 55, "all 55 top-level stock definitions load, including disabled plans");
+    // RGC-163 and AI-12: the shared stock registry also has one inert SpaceMode definition bound to AlwaysOff.
+    {
+        const auto everything = modules(fs, false);
+        const auto widened = must(g::load_plan_catalog({}, everything, [&](const auto& definition) {
+            return std::any_of(definition.goals.begin(), definition.goals.end(), [&](const auto& name) {
+                const auto goal = data.goals.find(name);
+                return goal != data.goals.end() && goal->second.mode == "GALACTIC";
+            });
+        }));
+        expect(everything.size() > stock_modules.size(), "stock ships plan files in the later plan directories");
+        const auto inert = std::find_if(widened.plans.begin(), widened.plans.end(),
+            [](const auto& definition) { return definition.name == "SYSTEMATICDISABLE"; });
+        expect(widened.plans.size() == 56 && inert != widened.plans.end()
+            && inert->module == "data/scripts/ai/spacemode/systematicdisable.lua"
+            && inert->goals == std::vector<std::string>{"ALWAYSOFF"},
+            "five-directory stock catalog adds exactly the inert SystematicDisable definition");
+        auto first_directory_plans = widened.plans;
+        std::erase_if(first_directory_plans, [](const auto& definition) { return definition.name == "SYSTEMATICDISABLE"; });
+        expect(first_directory_plans == catalog.plans && widened.minimum_pause_seconds == catalog.minimum_pause_seconds,
+            "the original 55 stock definitions and pause values remain identical");
+        std::cout << "Stock later-directory plans: " << widened.unused_plans << " not galactic, " << widened.skipped_plans.size() << " skipped, "
+            << widened.item_diagnostics.size() << " item notes\n";
+    }
     // WGA-25 plan catalog, plus its two previously omitted AlwaysOff entries.
     const auto names = ai::split_names(R"NAMES(
 AI_PLAN_EXPANSIONGENERIC_GENERATEMAGICCASHDROP AI_PLAN_EXPANSIONGENERIC_REMOVECORRUPTION

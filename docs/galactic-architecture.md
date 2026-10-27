@@ -119,11 +119,18 @@ it directly. `GameSession` composes it with scripts and a tactical child (sectio
   caller still checks the retained timer when the mode itself is serviced; a blanket
   omission of fiscal checks is not sourced (GFS-03/05, GFC-01/02). AI/script admission
   has its own gates and clocks (GFC-11..18/23); WGA-04 permits planning during auto-resolve.
-  Command admission asks a versioned per-command-kind pause policy from session setup
-  future option (legacy EAWR-2038). Its FoC default refuses fleet rearrangement, fleet swaps
-  and orbit-to-surface or surface-to-orbit moves while paused (WGM-07 and owner requirement).
-  Unknown policy entries are refused and listed as unverified. The effective policy is
+  Command admission asks a per-command-kind pause policy from session setup
+  (legacy EAWR-2038). It is implemented as `PausePolicy` in the fleet-control setup, rules version 5. Its FoC default
+  refuses fleet rearrangement, fleet swaps and orbit-to-surface or surface-to-orbit moves while
+  paused (WGM-07); the project admits fleet management, surface deployment and fleet movement
+  during a player pause when the entry says `admit` (single player and co-op default). One
+  predicate (`paused_admission.hpp`) serves the live owner and the sparse player layers: a system
+  hold (pending conflict, battle summary, child battle), a non-human issuer and invasion from
+  orbit always refuse. Unknown policy bytes are refused on parse. The effective policy is
   hashed, replayed and checkpointed; peers never consult local settings at admission.
+  The campaign derives the system hold from its conflict and summary ownership, including on
+  direct restore. Native admission journals retain the effective hold input so their receipts
+  reconstruct identically before the campaign owner is restored; sparse player layers copy that input.
   Story service is separate from object and AI service: WST-11/12/16 still allow story
   dispatch and suspended-plot Lua work while paused, with elapsed accumulators frozen.
   Saved checkpoints keep the exact counter; the original

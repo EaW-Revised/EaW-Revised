@@ -2,6 +2,8 @@
 # Paths are absolute so both projects can include this list directly.
 
 set(EAWR_SKIRMISH_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/land_start.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/land_terrain.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/ai.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/attract.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/census.cpp"

@@ -80,6 +80,10 @@ struct MpAgreement {
 [[nodiscard]] core::Result<sim::galactic::MpRoster> seal_mp_roster(const MpLocalContent&,
     sim::galactic::MpRoster draft, const MpSessionTerms&);
 
+// Seals a draft and retains the same local preparation used for its identity. The draft changes only on success.
+[[nodiscard]] core::Result<MpAgreement> seal_mp_agreement(const MpLocalContent&,
+    sim::galactic::MpRoster& draft, const MpSessionTerms&);
+
 // Independent derivation for a received (or sealed) roster. Fails when the content cannot run the roster at all:
 // campaign missing or not multiplayer, unknown factions, an unplayable faction on a human seat, a roster the galaxy
 // refuses. Differences from the host's claims are not failures here; they surface as identity domains that differ.

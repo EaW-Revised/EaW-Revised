@@ -50,11 +50,14 @@ EAWR_GALACTIC_POLICY(ObserverCommand, engine_only); // ability, control and cloc
 EAWR_GALACTIC_POLICY(PrepareBlackMarket, human_wire);
 EAWR_GALACTIC_POLICY(BuyBlackMarket, human_wire);
 EAWR_GALACTIC_POLICY(PrepareGalacticAbility, human_wire);
+EAWR_GALACTIC_POLICY(DeployGroundAbility, human_wire);
 EAWR_GALACTIC_POLICY(ExecutePreparedAbility, human_wire);
 EAWR_GALACTIC_POLICY(CancelGalacticAbility, human_wire);
 EAWR_GALACTIC_POLICY(LaunchFromSurface, human_wire);
 EAWR_GALACTIC_POLICY(LaunchFleet, human_wire);
+EAWR_GALACTIC_POLICY(TransferSurface, human_wire);
 EAWR_GALACTIC_POLICY(TransferFleetMembers, human_wire);
+EAWR_GALACTIC_POLICY(SetFleetPathfinder, human_wire);
 EAWR_GALACTIC_POLICY(BattleSummaryAcknowledge, human_wire);
 EAWR_GALACTIC_POLICY(InvasionAccept, human_wire); // the sending seat accepts its own prepared selection (GCMP-04)
 #undef EAWR_GALACTIC_POLICY
@@ -127,18 +130,22 @@ Bytes GalacticSessionAdapter::clock_state() const {
     put(bytes, static_cast<std::uint8_t>(clock_limiter_.policy()), 1);
     put(bytes, GalacticClockLimiter::window_ticks, 8);
     put(bytes, GalacticClockLimiter::changes_per_window, 4);
+    put(bytes, pause_actor_.has_value() ? 1U : 0U, 1);
+    put(bytes, pause_actor_ ? pause_actor_->value : 0U, 4);
     put(bytes, clock_limiter_.history().size(), 4);
     for (const auto& [seat_id, changes] : clock_limiter_.history()) {
         put(bytes, seat_id.value, 4);
         put(bytes, changes.size(), 4);
         for (const auto tick : changes) put(bytes, tick, 8);
     }
+    put(bytes, clock_limiter_.toggles().size(), 4);
+    for (const auto& [seat_id, tick] : clock_limiter_.toggles()) { put(bytes, seat_id.value, 4); put(bytes, tick, 8); }
     return bytes;
 }
 
 std::string GalacticSessionAdapter::clock_hash(std::string base) const {
     if (options_.clock_policy == GalacticClockPolicy::unrestricted) return base;
-    constexpr std::string_view domain = "eawr-galactic-lan-clock-v1";
+    constexpr std::string_view domain = "eawr-galactic-lan-clock-v2";
     Bytes bytes(domain.begin(), domain.end());
     bytes.insert(bytes.end(), base.begin(), base.end());
     const auto clock = clock_state();
@@ -234,20 +241,38 @@ core::Result<void> GalacticSessionAdapter::install(const std::span<const SeatInp
     tick_refusal_begin_ = refused_.size();
     clock_limiter_.expire(tick);
     clock_refusals_.clear();
+    bool predicted_pause = game_->battle() ? game_->child_paused()
+        : game_->galaxy().clock().pause_depth > (game_->pending_conflict() || game_->battle_summary_hold() ? 1U : 0U);
     for (auto& command : decoded) {
-        const bool clock_command = std::holds_alternative<galactic::PauseGalaxy>(command.payload)
-            || std::holds_alternative<galactic::SetSpeed>(command.payload); // Resume is always allowed.
+        const bool pause_request = std::holds_alternative<galactic::PauseGalaxy>(command.payload);
+        const bool resume_request = std::holds_alternative<galactic::ResumeGalaxy>(command.payload);
+        const bool speed_request = std::holds_alternative<galactic::SetSpeed>(command.payload);
         const auto live_seats = game_->galaxy().seats();
         const auto issuer = std::find_if(live_seats.begin(), live_seats.end(),
             [&](const auto& row) { return row.seat_id == command.key.seat; });
-        if (clock_command && issuer != live_seats.end() && issuer->active
-            && !clock_limiter_.admit(command.key.seat, tick)) {
-            if (std::find(clock_refusals_.begin(), clock_refusals_.end(), command.key.seat) == clock_refusals_.end())
-                clock_refusals_.push_back(command.key.seat);
-            refused_.push_back(fail_with<void>(session_errors::admission,
-                "Shared clock limit: two pause/speed changes per 45 session seconds per seat.").error());
+        const bool live_issuer = issuer != live_seats.end() && issuer->active;
+        // #4574: pause and resume never spend the speed budget. Resume is always allowed; a pause only has the debounce.
+        if (live_issuer && resume_request && predicted_pause) clock_limiter_.note_resume(command.key.seat, tick);
+        const bool debounced = live_issuer && pause_request && !predicted_pause
+            && !clock_limiter_.admit_pause(command.key.seat, tick);
+        const bool speed_limited = live_issuer && speed_request && !clock_limiter_.admit_speed(command.key.seat, tick);
+        if (debounced || speed_limited) {
+            std::string text = "Pause repeated too quickly; try again in a second.";
+            if (speed_limited) {
+                if (std::find(clock_refusals_.begin(), clock_refusals_.end(), command.key.seat) == clock_refusals_.end())
+                    clock_refusals_.push_back(command.key.seat);
+                text = "Shared clock limit: speed changes are limited to " + std::to_string(ClockThrottle::speed_changes_per_window)
+                    + " per " + std::to_string(ClockThrottle::window_seconds) + " session seconds per seat; the next is allowed in "
+                    + std::to_string(clock_limiter_.speed_wait_seconds(command.key.seat, tick)) + " s.";
+            }
+            refused_.push_back(fail_with<void>(session_errors::admission, text).error());
             tick_commands_.push_back(std::move(command)); // Attempts remain in the agreed input journal.
             continue;
+        }
+        if (issuer != live_seats.end() && issuer->active && issuer->kind == galactic::SeatKind::human) {
+            if (pause_request && !predicted_pause) pause_actor_ = command.key.seat;
+            if (pause_request) predicted_pause = true;
+            if (resume_request) predicted_pause = false;
         }
         if (auto submitted = game_->submit(command); !submitted) {
             // Installation is the executing sealed tick. An input that outlived its conflict is a shared

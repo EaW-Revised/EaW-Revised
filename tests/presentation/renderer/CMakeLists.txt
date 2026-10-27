@@ -1,4 +1,20 @@
 find_package(Threads REQUIRED)
+add_executable(eawr_texture_recipe_contracts texture_recipe_tests.cpp)
+target_include_directories(eawr_texture_recipe_contracts PRIVATE
+    "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_link_libraries(eawr_texture_recipe_contracts PRIVATE eawr::core)
+target_compile_features(eawr_texture_recipe_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_texture_recipe_contracts)
+add_test(NAME texture_recipe_contracts COMMAND eawr_texture_recipe_contracts)
+
+add_executable(eawr_model_recipe_contracts model_recipe_tests.cpp)
+target_include_directories(eawr_model_recipe_contracts PRIVATE
+    "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/src/presentation/godot")
+target_link_libraries(eawr_model_recipe_contracts PRIVATE eawr::core Threads::Threads)
+target_compile_features(eawr_model_recipe_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_model_recipe_contracts)
+add_test(NAME model_recipe_contracts COMMAND eawr_model_recipe_contracts)
+
 add_executable(eawr_particle_reuse_contracts particle_reuse_tests.cpp)
 target_include_directories(eawr_particle_reuse_contracts PRIVATE "${PROJECT_SOURCE_DIR}/src/presentation/godot")
 target_compile_features(eawr_particle_reuse_contracts PRIVATE cxx_std_20)
@@ -52,6 +68,22 @@ add_test(NAME light_effect_contracts COMMAND eawr_light_effect_contracts)
 # report verifier always runs, its graphical run skips unless
 # EAWR_GODOT_RESOURCE_CHURN_RUNTIME_TEST is set.
 find_package(Python3 3.8 REQUIRED COMPONENTS Interpreter)
+add_executable(eawr_owner_census_real_contracts owner_census_real_tests.cpp)
+target_link_libraries(eawr_owner_census_real_contracts PRIVATE eawr::scene Threads::Threads)
+target_compile_features(eawr_owner_census_real_contracts PRIVATE cxx_std_20)
+eawr_target_project_warnings(eawr_owner_census_real_contracts)
+add_test(NAME owner_census_real_contracts COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/run_owner_census_real.py" "$<TARGET_FILE:eawr_owner_census_real_contracts>")
+if(WIN32)
+    add_executable(eawr_crash_handler_probe crash_handler_probe.cpp
+        "${PROJECT_SOURCE_DIR}/apps/viewer/src/crash_handler.cpp")
+    target_include_directories(eawr_crash_handler_probe PRIVATE "${PROJECT_SOURCE_DIR}/apps/viewer/src")
+    target_link_libraries(eawr_crash_handler_probe PRIVATE dbghelp)
+    target_compile_features(eawr_crash_handler_probe PRIVATE cxx_std_20)
+    eawr_target_project_warnings(eawr_crash_handler_probe)
+    add_test(NAME viewer_crash_handler COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_crash_handler.py" "$<TARGET_FILE:eawr_crash_handler_probe>")
+endif()
 
 add_test(NAME skirmish_setup_gpu_contract
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_skirmish_setup.py")
@@ -127,7 +159,17 @@ eawr_add_python_contract(python_presentation_renderer_batchmesh_alpha tests.pres
 eawr_add_python_contract(python_presentation_renderer_batchmesh_alpha_fog tests.presentation.renderer.test_batchmesh_alpha_fog)
 
 
+
+
+
+
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_ability_travel_runtime tests.presentation.renderer.test_viewer_galactic_ability_travel_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_filter_states_runtime tests.presentation.renderer.test_viewer_galactic_filter_states_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_panel_input_runtime tests.presentation.renderer.test_viewer_galactic_panel_input_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_raid_runtime tests.presentation.renderer.test_viewer_galactic_raid_runtime)
+
 eawr_add_python_contract(python_presentation_renderer_battle_load tests.presentation.renderer.test_battle_load)
+eawr_add_python_contract(python_presentation_renderer_perf_trace_no_render_timing tests.presentation.renderer.test_perf_trace_no_render_timing)
 eawr_add_python_contract(python_presentation_renderer_camera_contract tests.presentation.renderer.test_camera_contract)
 eawr_add_python_contract(python_presentation_renderer_camera_input tests.presentation.renderer.test_camera_input)
 eawr_add_python_contract(python_presentation_renderer_capture_size tests.presentation.renderer.test_capture_size)
@@ -144,6 +186,9 @@ eawr_add_python_contract(python_presentation_renderer_hud_flytext tests.presenta
 eawr_add_python_contract(python_presentation_renderer_hud_readouts tests.presentation.renderer.test_hud_readouts)
 eawr_add_python_contract(python_presentation_renderer_input_routing tests.presentation.renderer.test_input_routing)
 
+eawr_add_python_contract(python_presentation_renderer_memory_attribution tests.presentation.renderer.test_memory_attribution)
+eawr_add_python_contract(python_presentation_renderer_owner_census tests.presentation.renderer.test_owner_census)
+eawr_add_python_contract(python_presentation_renderer_owner_census_snapshot tests.presentation.renderer.test_owner_census_snapshot)
 
 eawr_add_python_contract(python_presentation_renderer_front_end tests.presentation.renderer.test_front_end)
 eawr_add_python_contract(python_presentation_renderer_front_end_campaign tests.presentation.renderer.test_front_end_campaign)
@@ -157,6 +202,7 @@ eawr_add_python_contract(python_presentation_renderer_map_free_camera tests.pres
 eawr_add_python_contract(python_presentation_renderer_map_mode tests.presentation.renderer.test_map_mode)
 eawr_add_python_contract(python_presentation_renderer_game_io_failures tests.presentation.renderer.test_game_io_failures)
 eawr_add_python_contract(python_presentation_renderer_map_particles tests.presentation.renderer.test_map_particles)
+
 
 
 
@@ -236,9 +282,12 @@ eawr_add_python_contract(python_presentation_renderer_additive_scene_clock tests
 set_tests_properties(python_presentation_renderer_additive_scene_clock PROPERTIES LABELS gpu)
 
 eawr_add_python_contract(python_presentation_renderer_live_purchase_slots tests.presentation.renderer.test_live_purchase_slots)
+
+eawr_add_python_contract(python_presentation_renderer_reserve_warm_plan tests.presentation.renderer.test_reserve_warm_plan)
 eawr_add_python_contract(python_presentation_renderer_live_slot_identity tests.presentation.renderer.test_live_slot_identity)
 
 eawr_add_python_contract(python_presentation_renderer_terminal_wrecks tests.presentation.renderer.test_terminal_wrecks)
+eawr_add_python_contract(python_presentation_renderer_projectile_model_growth tests.presentation.renderer.test_projectile_model_growth)
 
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_hero_bar_runtime tests.presentation.renderer.test_viewer_galactic_hero_bar_runtime)
 set_tests_properties(python_presentation_renderer_viewer_galactic_hero_bar_runtime PROPERTIES LABELS gpu)

@@ -101,6 +101,8 @@ class Package:
         (self.game / "corruption" / "Data").mkdir(parents=True)
         (self.game / "corruption" / "StarWarsG.exe").write_bytes(FAKE_EXE)
         self.user_data = self.root / "user data ü"
+        self.appdata = self.root / "Godot profile ü"
+        self.viewer_data = self.appdata / "Godot" / "app_userdata" / "EAWR Viewer"
         self.record = self.root / "record.json"
 
     def run(self, *arguments: str, env: dict | None = None) -> subprocess.CompletedProcess:
@@ -108,6 +110,7 @@ class Package:
         for name in ("EAWR_EAW_GAME_ROOT", "EAWR_GODOT_EXECUTABLE"):
             environment.pop(name, None)
         environment["EAWR_FAKE_GODOT_RECORD"] = str(self.record)
+        environment["APPDATA"] = str(self.appdata)
         environment.update(env or {})
         self.record.unlink(missing_ok=True)
         return subprocess.run([str(self.package / "EAWR.exe"), "--user-data", str(self.user_data), "--no-dialogs", *arguments],
@@ -225,6 +228,50 @@ class LauncherSmoke(unittest.TestCase):
         self.assertNotIn("--eawr-allow-unknown-build", p.recorded()["argv"])
         self.assertEqual(p.run("--game-root", str(p.game), "--allow-unknown-build").returncode, 0)
         self.assertIn("--eawr-allow-unknown-build", p.recorded()["argv"])
+
+    def test_safe_render_thread_flag_is_an_engine_argument(self):
+        p = self.package
+        self.assertEqual(p.run("--game-root", str(p.game)).returncode, 0)
+        self.assertNotIn("--render-thread", p.recorded()["argv"])
+        self.assertEqual(p.run("--game-root", str(p.game), "--safe-render-thread").returncode, 0)
+        argv = p.recorded()["argv"]
+        self.assertEqual(argv[argv.index("--render-thread") + 1], "safe")
+
+    def test_saved_render_thread_and_explicit_cli_precedence(self):
+        p = self.package
+        p.user_data.mkdir(parents=True, exist_ok=True)
+        p.viewer_data.mkdir(parents=True, exist_ok=True)
+        settings = p.viewer_data / "eawr-settings.cfg"
+        self.assertNotEqual(p.user_data, p.viewer_data)
+        for saved, extra, expected in ((1, (), "safe"), (1, ("--render-thread", "separate"), "separate"),
+                                       (0, (), "separate"), (0, ("--safe-render-thread",), "safe")):
+            with self.subTest(saved=saved, extra=extra):
+                settings.write_text(f"eawr-settings 1\nvideo.render_thread={saved}\n", encoding="utf-8")
+                (p.user_data / "eawr-settings.cfg").write_text(f"eawr-settings 1\nvideo.render_thread={1 - saved}\n", encoding="utf-8")
+                self.assertEqual(p.run("--game-root", str(p.game), *extra).returncode, 0)
+                argv = p.recorded()["argv"]
+                self.assertEqual(argv[argv.index("--render-thread") + 1], expected)
+                self.assertLess(argv.index("--render-thread"), argv.index("--"))
+
+        settings.unlink()
+        self.assertEqual(p.run("--game-root", str(p.game)).returncode, 0)
+        self.assertNotIn("--render-thread", p.recorded()["argv"], "missing viewer file ignores stale launcher-side file")
+
+    def test_relative_and_empty_settings_overrides_match_the_child_working_directory(self):
+        p = self.package
+        relative = "relative settings ü.cfg"
+        (p.package / relative).write_text("eawr-settings 1\nvideo.render_thread=1\n", encoding="utf-8")
+        p.viewer_data.mkdir(parents=True)
+        (p.viewer_data / "eawr-settings.cfg").write_text("eawr-settings 1\nvideo.render_thread=0\n", encoding="utf-8")
+        self.assertNotEqual(pathlib.Path.cwd(), p.package)
+        for extra, expected in ((("--eawr-settings-file", relative), "safe"),
+                                (("--eawr-settings-file", relative, "--eawr-settings-file", ""), "separate")):
+            with self.subTest(extra=extra):
+                self.assertEqual(p.run("--game-root", str(p.game), "--", *extra).returncode, 0)
+                argv = p.recorded()["argv"]
+                self.assertIn("--render-thread", argv)
+                self.assertEqual(argv[argv.index("--render-thread") + 1], expected)
+                self.assertEqual(argv[argv.index("--eawr-settings-file") + 1], relative)
 
     def test_explicit_godot_path_is_used(self):
         p = self.package

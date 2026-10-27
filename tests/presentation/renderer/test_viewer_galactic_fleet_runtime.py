@@ -16,6 +16,77 @@ except ImportError:
 
 @unittest.skipUnless(support.RUNTIME and support.GAME_ROOT, "requires GPU viewer and installed FoC")
 class GalacticFleetRuntime(unittest.TestCase):
+    def test_stock_stealth_badge_preserves_authored_corner_padding(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-gc-stealth-badge-"))
+        report, facts, capture = (directory / name for name in ("report.json", "badge.json", "corner.png"))
+        driver = directory / "input.gd"
+        driver.write_text('''extends SceneTree
+var elapsed = 0.0
+var frame = 0
+func _initialize(): call_deferred("_start")
+func _start():
+    var instance = load(ProjectSettings.get_setting("application/run/main_scene")).instantiate()
+    root.add_child(instance)
+    current_scene = instance
+func key(code):
+    for down in [true, false]:
+        var event = InputEventKey.new()
+        event.keycode = code
+        event.pressed = down
+        Input.parse_input_event(event)
+func finish(rows):
+    root.get_texture().get_image().save_png(%s)
+    var file = FileAccess.open(%s, FileAccess.WRITE)
+    file.store_string(JSON.stringify(rows))
+    file.close()
+    current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+    quit()
+func _process(delta):
+    elapsed += delta
+    if elapsed < 2.0: return false
+    frame += 1
+    # Real planet navigation brings the selected home system into view.
+    if frame == 10: key(KEY_PAGEUP)
+    if frame == 12: key(KEY_PAGEDOWN)
+    if frame == 100:
+        var rows = []
+        for overlay in root.find_children("fleet_stealth_overlay", "TextureRect", true, false):
+            if not overlay.is_visible_in_tree() or overlay.texture == null: continue
+            var rect = overlay.get_global_rect()
+            if not root.get_visible_rect().encloses(rect): continue
+            var image = overlay.texture.get_image()
+            var weight = 0.0
+            var centre = Vector2.ZERO
+            for y in image.get_height():
+                for x in image.get_width():
+                    var alpha = image.get_pixel(x, y).a
+                    weight += alpha
+                    centre += Vector2(x + 0.5, y + 0.5) * alpha
+            if weight > 0.0: centre /= weight
+            rows.append({"size": [image.get_width(), image.get_height()],
+                "centre": [centre.x / image.get_width(), centre.y / image.get_height()],
+                "rect": [rect.position.x, rect.position.y, rect.size.x, rect.size.y]})
+        finish(rows)
+    if elapsed > 90.0: finish([])
+    return false
+''' % (json.dumps(capture.as_posix()), json.dumps(facts.as_posix())), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "Sandbox_Equal_Footing_Empire", "--eawr-game-root", support.GAME_ROOT,
+            "--eawr-galactic-paused", "yes", "--eawr-report", str(report)],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(capture.is_file())
+        rows = json.loads(facts.read_text(encoding="utf-8"))
+        self.assertTrue(rows, "stock home-system navigation must expose a stealth stack")
+        for row in rows:
+            # WGUI-92: stock overlay art carries padding around a lower-left badge.
+            # The tightly cropped focused-panel alternate would centre at (0.5, 0.5).
+            self.assertLess(row["centre"][0], 0.45, row)
+            self.assertGreater(row["centre"][1], 0.6, row)
+            self.assertGreater(row["rect"][2], 0, row)
+
     @staticmethod
     def drawn(row, width=1280, height=720):
         x, y, w, h = row["rect"]
@@ -82,7 +153,7 @@ class GalacticFleetRuntime(unittest.TestCase):
                 visible = {row["name"]: row for row in hud["controls"] if row["visible"]}
                 self.assertIn("q1_fleet", visible)
                 self.assertIn("q2_fleet", visible)
-                self.assertNotIn("q1_0000", visible, "pathfinder waits for its provider")
+                self.assertIn("q3_0000", visible, "local mixed-layout panel exposes the pathfinder slot")
                 self.assertIn("q4_fleet", visible)
                 self.assertTrue(capture.is_file())
 

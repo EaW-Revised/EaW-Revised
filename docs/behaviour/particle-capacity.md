@@ -45,7 +45,10 @@ parent lookup without rebuilding allocating hash tables each update. The retaine
 For caller budget `H`, particle storage and free slots each have at most `H`
 elements, event scratch at most `2H`, and child links at most `min(H,65536)`.
 `reserved_memory_bytes()` reports their actual reserved payload bytes, excluding
-immutable definitions, mesh data and allocator overhead. Render streams reserve
+immutable definitions, mesh data and allocator overhead. This also excludes the
+per-instance every-vertex `mesh_vertices_` location array and `vertex_order_`
+scratch array (16 and 4 payload bytes per vertex respectively on the validated
+64-bit Windows build), not just the shared mesh geometry. Render streams reserve
 at most four vertices and six indices per admitted particle, plus one pointer
 when sorting is requested. Backend buffers/textures are additional and retain
 existing backend allocation policy. No native scene-wide memory bound is claimed.
@@ -55,3 +58,62 @@ Contracts cover mixed dense/sparse roots, isolated bursts, parent/every-vertex
 multiplication, host-budget partitioning, retirement and allocation-free dependent
 updates. Caller sizing helpers remain conservative automatic budget recommendations;
 they no longer determine which emitter may consume another emitter's space.
+
+
+## Effect admission and reusable ownership (legacy EAWR-4722)
+
+Battle and breakoff effects use a checked authored capacity sum rather than the
+former 4096-particle system budget or 256-live-effect gate. Native and scheduling
+requests remain separate per emitter; the sourced 5003 base still precedes parent
+and actual bound-vertex multiplication. Unsupported emitters, cycles, missing mesh
+bindings and arithmetic overflow refuse the complete effect with a diagnostic.
+Explicit-budget registry consumers retain their existing policy.
+Valid bursting emitters whose authored batch truncates to zero keep zero reserve
+and are admitted, including alongside nonzero siblings.
+
+This admission policy is a project choice. It is not a claimed retail scene-wide
+limit or retail memory-failure rule. Immutable shared definition identity selects
+compatible CPU layouts. Release returns backend objects through the existing backend
+cache and retains reusable CPU payload in stable release order. Each admission uses
+a new monotonically increasing handle generation; old handles never address reused
+storage. Reuse resets particle IDs, random seed (including zero), frame, scheduling,
+dynamic settings, visibility, brightness and drain state. Binding-specific mesh
+instances and mutated shape definitions are discarded rather than reused.
+Partitioned updates and ordered backend publication are unchanged.
+The developer stream-bucketing switch applies when a layout is constructed;
+live and idle layouts retain that setting until evicted. Bindings passed to
+definitions without mesh emitters are cleared before admission and reuse.
+
+Reservations cover the measured reserved particle/free-slot/event/child payload
+and reserved render-stream/sort/bucket payload; immutable definitions, allocator
+metadata and backend allocations are outside that CPU payload figure. Growth reserves
+its checked planned payload before construction and reconciles actual vector capacity
+before publication. Pressure evicts oldest idle CPU layouts first when reclaiming
+idle payload can make the request fit; impossible requests preserve idle layouts.
+The same rule applies to reconciliation of extra actual payload. Admitted live and
+draining visuals are preserved. Backend or CPU allocation failure rolls back all new
+ownership; it is distinct from budget pressure and definition/arithmetic refusal.
+No active effect is stolen and no emitter reserve is silently clipped into success.
+
+The shared presentation budget interface can accept a cached platform provider.
+Its default implementation accounts CPU payload without inventing a process-memory
+limit. Production currently never sets an admission budget: it uses accounting only,
+so pressure refusal and pressure-driven eviction are exercised by injected contract
+budgets rather than normal game admission. Device/process probes and GPU reservations are explicitly unavailable until
+the renderer owner supplies them; unavailable GPU bytes are reported as null.
+No RAM/VRAM fit, capture, performance or 4GB-hardware acceptance claim follows.
+The model-projectile admission ceiling is outside this change.
+
+Registry reports count requests, admissions, refusals by reason, CPU allocations,
+reuse/eviction, live/idle payload and high water, plus per-live-emitter native,
+scheduling, reserved, live and dropped particles. Per-layout retirement totals
+survive teardown and idle eviction. Battle refusal samples record
+the event birth and lifetime once, with reason and byte demand; samples have the
+existing spawn-log diagnostic bound and an explicit full flag. Current wanted
+ownership includes admitted draining records; exact hypothetical drain duration
+for a refused effect is not reconstructed from cumulative refusal counts.
+Registry refusal diagnostic text is sampled once per reason, while counters count
+every refusal. `effects_dropped` counts refused requests across budget, allocation,
+definition and arithmetic causes; it is not a budget-only counter. Zero-valued
+name-map counters are omitted. A refused contact show-reset keeps the stopped group
+hidden and retries on a later visible sample without replacing its old handle.

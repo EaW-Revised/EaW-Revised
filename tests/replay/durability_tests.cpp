@@ -93,6 +93,14 @@ void test_validation() {
     auto huge = foc_table();
     huge.profiles[0].max_hull = Fixed::from_raw(tactical::max_durability_health * one + 1);
     expect(!tactical::validate_durability(huge), "a hull above the bound fails");
+    // SKI-64 (#4992): FoC has no health cap; mod hulls after the space health multiplier
+    // (AaW Arc_Hammer 960000 x 1.5, Stargate's 9,999,999 x 1.5) and the bound itself validate.
+    for (const std::int64_t whole_hull : {std::int64_t{1'440'000}, std::int64_t{14'999'999}, tactical::max_durability_health}) {
+        auto modded = foc_table();
+        modded.profiles[0].max_hull = units(whole_hull);
+        expect(static_cast<bool>(tactical::validate_durability(modded)),
+            "a mod hull of " + std::to_string(whole_hull) + " is within the bound");
+    }
     auto healthless = foc_table();
     healthless.profiles[0].hardpoints[0].max_health = Fixed{};
     expect(!tactical::validate_durability(healthless), "a destroyable hardpoint needs health");

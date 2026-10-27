@@ -210,6 +210,73 @@ Fixture battle_fixture(const cp::CampaignSetupPlan& plan, const eawr::units::Gal
     std::sort(m.contents.begin(), m.contents.end(), [](const auto& a, const auto& b) { return a.container < b.container; });
     return out;
 }
+// WAR-60 branch (b) / WAR-127: stock bounty values and the NalHutta payout, per death.
+void bounty_installed() {
+    const auto root = game_root(); if (!root) { eawr::testing::skip_installed("SKIPPED: stock bounty needs EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto* folder : {"corruption", "GameData"}) mounts.push_back(take(eawr::vfs::resolve_manifest_mount(folder, std::filesystem::path(*root) / folder / "Data")).mount);
+    auto filesystem = take(eawr::vfs::Vfs::mount(mounts)); const auto catalog = take(eawr::data::load_catalog(filesystem, eawr::data::Profile::foc));
+    auto data = take(dg::load_galactic_data(filesystem, catalog.catalog)); const auto types = eawr::units::galactic_type_table(catalog.catalog);
+    // Player 1 owns the stock Rebel infantry company and loses it; player 2 owns the conflict planet.
+    const auto credits = [](const gc::GalacticSession& world, gc::PlayerId player) {
+        for (const auto& row : world.snapshot()->player_economy()->players) if (row.player == player) return row.credits.raw();
+        throw std::runtime_error("bounty fixture missing player economy");
+    };
+    const auto run = [&](const std::string& victim_faction, std::vector<std::string> planets, bool allied, std::vector<eawr::sim::EntityId> dead,
+                         std::vector<eawr::sim::EntityId> deaths, std::pair<std::int64_t, std::int64_t>* delta, std::optional<std::int64_t>* company_total = nullptr,
+                         std::string_view omitted_faction = {}) {
+        auto local = data; dg::Campaign authored; authored.name = "BountyFixture"; authored.locations = planets; authored.planets = planets; authored.starting_active_player = victim_faction;
+        for (auto& faction : local.factions) if (faction.name == omitted_faction) faction.benefits_from_corruption.reset();
+        authored.starting_tech_levels = {{victim_faction, 0}, {"Empire", 0}}; authored.max_tech_levels = {{victim_faction, 5}, {"Empire", 5}}; local.campaigns.push_back(authored);
+        cp::CampaignSetupOptions options; options.seed = 123; options.solo_reference_human = 1;
+        options.players = {{{1, 1, 0}, victim_faction, true}, {{2, 2, 0}, "Empire", true}, {{3, 3, 0}, "Neutral", true}};
+        options.seats = {{gc::SeatId{1}, 1, gc::SeatKind::human, 0, true, 1}, {gc::SeatId{2}, 2, gc::SeatKind::ai, 1, true, 0}};
+        for (const auto& type : types.types) options.types.push_back({eawr::assets::object_type_crc(type.name), type.name});
+        std::sort(options.types.begin(), options.types.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
+        auto plan = take(cp::plan_campaign_setup(local, types, authored.name, options));
+        auto fixture = battle_fixture(plan, types, true);
+        if (allied) for (auto& relation : fixture.setup.control->relations) if (relation.player != relation.other) relation.allied = true;
+        auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, local, types, plan, fixture.originals));
+        if (company_total) {
+            // WAR-127: the company's carrier and each trooper are separate deaths with their own values.
+            const auto* company = types.find("Rebel_Infantry_Squad");
+            std::int64_t total = adapters.bounty_value(company->company_transport).value().raw();
+            for (const auto& member : company->company_units) total += adapters.bounty_value(member).value().raw();
+            *company_total = total;
+        }
+        auto world = take(gc::GalacticSession::create(fixture.setup));
+        const auto before = std::pair{credits(world, 1), credits(world, 2)};
+        cp::AutoResolveOutcomeApplication application; application.planet = fixture.conflict.planet; application.invader = 1; application.defender = 2; application.land = true;
+        application.result.conflict = fixture.conflict.id; application.result.winner = 2; application.destroyed = dead;
+        for (const auto id : deaths) application.deaths.push_back({id, 500, 1, 2});
+        check(adapters.outcomes.bounty(world, application));
+        *delta = {credits(world, 1) - before.first, credits(world, 2) - before.second};
+    };
+    const auto whole = [](std::int64_t value) { return f(value).raw(); };
+    std::vector<eawr::sim::EntityId> company; for (eawr::sim::EntityId id = 100; id <= 115; ++id) company.push_back(id);
+    std::pair<std::int64_t, std::int64_t> delta; std::optional<std::int64_t> total;
+    // Acceptance (WAR-99): Empire owns NalHutta, the Underworld company dies -> Empire +125, victim unchanged.
+    run("Underworld", {"NalHutta", "Shola"}, false, company, {100}, &delta, &total);
+    expect(total && *total == whole(125) && delta == std::pair{std::int64_t{0}, whole(125)}, "WAR-99 stock company pays 125 to the NalHutta owner only");
+    run("Underworld", {"NalHutta_Story", "Shola"}, false, company, {100}, &delta);
+    expect(delta == std::pair{std::int64_t{0}, whole(125)}, "WAR-60 NalHutta_Story also qualifies the killer");
+    run("Underworld", {"Shola", "Kamino"}, false, company, {100}, &delta);
+    expect(delta == std::pair<std::int64_t, std::int64_t>{}, "WAR-97 control: no NalHutta pays nothing");
+    run("Underworld", {"NalHutta", "Shola"}, true, company, {100}, &delta);
+    expect(delta == std::pair<std::int64_t, std::int64_t>{}, "WAR-60 an allied killer is not paid");
+    run("Rebel", {"NalHutta", "Shola"}, false, company, {100}, &delta);
+    expect(delta == std::pair<std::int64_t, std::int64_t>{}, "WAR-60 a victim faction without Benefits_From_Corruption pays nothing");
+    run("Underworld", {"NalHutta", "Shola"}, false, {101}, {101}, &delta);
+    expect(delta == std::pair{std::int64_t{0}, whole(5)}, "WAR-87 one trooper death pays one trooper bounty");
+    run("Underworld", {"NalHutta", "Shola"}, false, {101, 102}, {101, 102}, &delta);
+    expect(delta == std::pair{std::int64_t{0}, whole(10)}, "WAR-87 two deaths pay two separate bounties");
+    run("Underworld", {"NalHutta", "Shola"}, false, {101}, {}, &delta);
+    expect(delta == std::pair<std::int64_t, std::int64_t>{}, "a casualty without a death-list entry has no final blow");
+    run("Underworld", {"NalHutta", "Shola"}, false, company, {100}, &delta, nullptr, "Empire");
+    expect(delta == std::pair{std::int64_t{0}, whole(125)}, "WGS-94 omitted killer flag defaults false without blocking NalHutta payout");
+    run("Underworld", {"NalHutta", "Shola"}, false, company, {100}, &delta, nullptr, "Underworld");
+    expect(delta == std::pair<std::int64_t, std::int64_t>{}, "WGS-94 omitted victim flag defaults false and pays no bounty");
+}
 // WAR-U04/WAR-126: only the projectile-gated blaster kinds are inert; every other damage-triggered
 // kind (and a mixed type) still fails the lethal closure with the explicit diagnostic.
 void damage_handler_qualification() {
@@ -247,6 +314,38 @@ void installed() {
     for (const auto& type : types.types) options.types.push_back({eawr::assets::object_type_crc(type.name), type.name});
     std::sort(options.types.begin(), options.types.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
     auto plan = take(cp::plan_campaign_setup(data, types, authored.name, options));
+    {
+        auto fixture = battle_fixture(plan, types, false);
+        fixture.setup.planets.push_back({3, {f(-10), {}, {}}, 1});
+        if (fixture.setup.victory) {
+            auto planet = fixture.setup.victory->context.planets[1]; planet.planet = 3;
+            fixture.setup.victory->context.planets.push_back(planet);
+        }
+        fixture.setup.movement->planets.push_back({3, f(1), false});
+        for (const auto& player : fixture.setup.players) fixture.setup.movement->access.push_back({player.player_id, 3, true, false});
+        std::sort(fixture.setup.movement->access.begin(), fixture.setup.movement->access.end(), [](const auto& a, const auto& b) {
+            return std::pair{a.player, a.planet} < std::pair{b.player, b.planet};
+        });
+        auto destination = fixture.setup.control->planets[1]; destination.planet = 3;
+        fixture.setup.control->planets.push_back(destination);
+        auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, fixture.originals));
+        std::optional<std::string> hash;
+        for (const auto count : eawr::platform::determinism_worker_counts()) {
+            eawr::platform::ThreadWorkerAdapter executor(count);
+            auto world = take(gc::GalacticSession::create(fixture.setup));
+            check(world.load_checkpoint_state(take(world.save_checkpoint_state())));
+            cp::AutoResolveOutcomeApplication application; application.planet = 1;
+            application.result.retreat_player = 1; application.retreat_fleets = {10};
+            check(adapters.outcomes.retreat(world, application));
+            const auto snapshot = world.snapshot();
+            const auto fleet = std::find_if(snapshot->fleets().begin(), snapshot->fleets().end(), [](const auto& row) { return row.id == 10; });
+            expect(fleet != snapshot->fleets().end() && fleet->motion.transit && fleet->motion.transit->path.back() == 3,
+                "WGM-211/212 live auto-resolve return chooses last-created equal-distance base");
+            (void)take(world.step(executor));
+            if (hash) expect(*hash == world.state_sha256(), "live auto-resolve tie equals on 1/2/4/8 workers");
+            else hash = world.state_sha256();
+        }
+    }
     {
         auto fixture = battle_fixture(plan, types, true, true);
         fixture.conflict.raid = true;
@@ -377,8 +476,11 @@ void installed() {
         expect(requested, "later enemy arrival requests a conflict using refreshed live presence");
         if (!arrival_hash) arrival_hash = galaxy.state_sha256(); else expect(*arrival_hash == galaxy.state_sha256(), "live access and arrival hashes agree on 1/2/4/8");
     }
-    for (const unsigned scenario : {0U, 1U, 2U, 3U}) {
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U}) {
         const bool land = scenario != 0, conquest = scenario >= 2, commissioned = scenario == 3;
+        auto resolver_data = data;
+        if (scenario == 4) for (auto& faction : resolver_data.factions)
+            if (faction.name == "Rebel" || faction.name == "Empire") faction.benefits_from_corruption.reset();
         auto fixture = battle_fixture(plan, types, land, conquest);
         const auto type_id = [&](std::string_view name) {
             const auto at = std::find_if(plan.type_bindings().begin(), plan.type_bindings().end(), [&](const auto& row) { return row.original_type == name; });
@@ -464,7 +566,7 @@ void installed() {
         std::optional<cp::AutoResolveOutcomeApplication> reference; std::optional<std::string> hash;
         for (const std::size_t count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count); auto game = take(cp::GameSession::create(fixture.setup));
-            auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, data, types, plan, fixture.originals));
+            auto adapters = take(cp::make_stock_auto_resolver(filesystem, catalog.catalog, resolver_data, types, plan, fixture.originals));
             game.set_conflict_service([](const auto&, const auto&, auto) { return eawr::core::Result<std::optional<cp::RecordedAdmission>>::success({}); }, unused_tactical_content(), {}, eawr::campaign::ScriptRequirement::none);
             game.set_movement_access_provider(std::move(adapters.access));
             game.set_auto_resolver(std::move(adapters.resolve)); game.set_auto_resolve_progress_reader(std::move(adapters.progress)); game.set_auto_resolve_outcome_services(std::move(adapters.outcomes));
@@ -541,6 +643,8 @@ void installed() {
             expect(game.auto_resolve_needs_service() && game.auto_resolve_progress().has_value(), "stock resolver retains progress at initiate");
             const auto tick = take(game.step(executor)); const auto outcome = game.latest_auto_resolve_outcome();
             expect(outcome && tick.result && outcome->result.winner == (conquest ? 1U : 2U), "stock space/land conflict chooses the expected winner"); if (!outcome) continue;
+            if (scenario == 4) expect(!outcome->deaths.empty() && !outcome->destroyed.empty(),
+                "WGS-94 live auto-resolve with omitted faction flags completes its death and bounty services");
             expect(std::binary_search(outcome->destroyed.begin(), outcome->destroyed.end(), losing_company), "stock losing squadron/company is confirmed absent");
             expect(tick.galaxy->planets()[0].owner == 2, "stock defended result retains political control");
             if (!reference) { reference = *outcome; hash = tick.state_sha256; } else expect(*reference == *outcome && *hash == tick.state_sha256, "stock outcome and committed hash equal on 1/2/4/8");
@@ -660,7 +764,7 @@ void withdrawal_command() {
 
 }
 int case_galactic_auto_resolve_live_tests(int argc, char**) {
-    try { if (argc > 1) installed(); else { roster_publication(); withdrawal_command(); raid_manifest(); journal_selection(); retreat_return(); damage_handler_qualification(); } }
+    try { if (argc > 1) { installed(); bounty_installed(); } else { roster_publication(); withdrawal_command(); raid_manifest(); journal_selection(); retreat_return(); damage_handler_qualification(); } }
     catch (const std::exception& e) { std::cerr << e.what() << '\n'; return 1; }
     return galactic_test::failures ? 1 : 0;
 }

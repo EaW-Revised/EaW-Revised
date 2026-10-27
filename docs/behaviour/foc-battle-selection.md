@@ -63,6 +63,13 @@ orders, as next-tick commands.
   alone; with Shift it toggles the unit in or out of the selection; with Ctrl it adds every own
   unit of that type on screen. A click on another player's unit changes nothing. A click on empty
   space clears the selection, or, while an attack or move mode is armed, only disarms it.
+- S-1a (DEV-1). Deliberate deviation (legacy EAWR-4919): a plain click on an allied structure the local player
+  does not own inspects it (health card only). The inspect target lives outside the selection, issues no
+  order, opens no build menu or ability, sends no net message and changes no simulation state. An allied click replaces your current selection with the inspect card; reselect your units afterwards. Esc, a box drag, select-all or any selection drops it. Shift,
+  Ctrl, double click, box and select-all still skip it. Retail evidence (debug-build walk via GhidrAssist, not captured, no artifact committed): the selection
+  admission accepts an object only when the local player owns it, or in a multiplayer tactical game when
+  its type is community property and it is allied. Not verified by capture: whether a skirmish against AI
+  counts as that mode, and what panel retail shows for an allied community object.
 - S-2 (SEL-5, SEL-6). A left drag is measured by the larger side of its rectangle. Larger than
   `MinimumDragSelectDistance` (100 cursor pixels) it box-selects on release; otherwise the release
   is a click at the release point. The box is drawn once it passes that distance, or at once while

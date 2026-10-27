@@ -254,6 +254,15 @@ void goal_state_contracts() {
         ai::EngineContractAccess::running(*control.engine, first->goal);
         ai::GoalStateContributor saved(control.engine, fixture_identity());
         const auto bytes = must(saved.capture()); const auto hash = must(saved.state_hash());
+        const auto observations = control.engine->galactic_goal_observations(1);
+        expect(observations.size() == 1 && observations.front().goal == first->goal
+            && observations.front().target == first->target && observations.front().function == "GOAL"
+            && observations.front().desire == "1" && observations.front().active && observations.front().planned
+            && observations.front().running_plan == control.engine->galactic_goal(1, first->goal)->running_plan
+            && observations.front().plan == first->definition, "goal observer reports target, desire and selected running plan");
+        expect(control.engine->galactic_goal_observations(99).empty(), "goal observer has no rows for an unknown player");
+        expect(must(saved.capture()).components == bytes.components && must(saved.state_hash()) == hash,
+            "goal observation leaves native state and digest unchanged");
         if (workers == 1) reference = hash; else expect(hash == reference, "full native state hash equals across 1/2/4/8");
         Owner resumed(fixture_setup(), fixture_data(), fixture_plans(), selections);
         must(resumed.world->bind(fixture_snapshot(), {}, executor, 0, 1000));

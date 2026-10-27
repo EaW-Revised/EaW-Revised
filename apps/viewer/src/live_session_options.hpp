@@ -77,6 +77,8 @@ struct ScriptedInput final {
 };
 
 struct Options final {
+    bool land{};
+    std::filesystem::path land_bindings;
     std::shared_ptr<const PreparedBattle> borrowed_battle;
     std::shared_ptr<platform::TacticalFeed> borrowed_feed;
     std::shared_ptr<LanMatch> lan;
@@ -107,10 +109,17 @@ struct Options final {
     // so the buttons' looks can be seen before the simulation has ability state (#76).
     bool ability_demo{};
     bool shield_flash{};                                 // --eawr-live-shield-flash on|off (default off)
-    // --eawr-live-purchase-slots <N> (#530, test hook): purchase model slots per buyable type,
-    // 10 by default (space-purchasing PU-G25); a small N shows the reuse of a dead unit's slot
-    // without buying past ten squadrons.
+    // --eawr-live-purchase-slots <N> (#530): purchase model slots composed at load per buyable type
+    // (space-purchasing PU-G25). Default 10 keeps ordinary purchases warm so model composition stays at load.
+    // Further purchases grow a slot on first use under the per-frame arrival budget (arrival_slot_budget).
     std::uint32_t purchase_slots{10};
+    // --eawr-live-warm-launches <N>: non-campaign launch slots at load per planned row (the first-wave
+    // pool; the rest grow on first use). Default 64 keeps the established warm capacity.
+    std::uint32_t warm_launches{64};
+    // --eawr-live-arrival-budget <N>: at most N new hull/clone pairs are composed per frame for purchases and
+    // reinforcement pools that arrive without a warm slot (a burst beyond N is drawn over the following frames).
+    // Planned launches are exempt: a launched craft is drawn in its launch frame. Default 8.
+    std::uint32_t arrival_slot_budget{8};
     // --eawr-live-late-orders on (#530, test hook): an --eawr-live-order may name a unit the
     // start does not hold (bought or launched later); it is given as the local player.
     bool late_orders{};

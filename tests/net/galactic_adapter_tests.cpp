@@ -262,6 +262,9 @@ void classification_and_codec() {
     };
 
     expect(static_cast<bool>(accepted(1, galactic::PauseGalaxy{})), "a human seat may pause");
+    expect(static_cast<bool>(accepted(1, galactic::DeployGroundAbility{100, planet}))
+        && net::galactic_payload_authority(galactic::DeployGroundAbility{}) == net::GalacticPayloadAuthority::human_wire,
+        "generic ground deployment is typed human wire; live owner/location admission belongs to the host");
     expect(static_cast<bool>(accepted(2, galactic::DebugSetPlanetOwner{planet, 2})), "versus seat 2 is a human seat");
     expect(net::galactic_payload_authority(galactic::PostLoadFixup{}) == net::GalacticPayloadAuthority::engine_only
             && net::galactic_payload_authority(galactic::SeatRejoin{}) == net::GalacticPayloadAuthority::engine_only
@@ -411,13 +414,16 @@ void shared_clock_limit_at_execution() {
         Rig::Options options;
         options.final_tick = 40;
         options.workers = {1, workers};
-        options.clock_policy = net::GalacticClockPolicy::two_per_45_seconds;
+        options.clock_policy = net::GalacticClockPolicy::limited;
         Rig rig(versus_setup(), options);
         const auto send = [&](net::PeerIndex peer, const galactic::CommandPayload& payload) {
             return require(rig.sessions[peer].submit([&](auto key) { return net::encode_galactic_input(key, payload); }));
         };
         const auto pause = send(0, galactic::PauseGalaxy{});
-        const auto speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
+        // #4574: six speed changes per 45 session seconds; the pause above does not spend any of them.
+        auto speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
+        for (std::size_t extra = 1; extra < net::ClockThrottle::speed_changes_per_window; ++extra)
+            speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(math::Fixed::scale / 2)});
         const auto refused_speed = send(0, galactic::SetSpeed{false, math::Fixed::from_raw(2 * math::Fixed::scale)});
         const auto other_resume = send(1, galactic::ResumeGalaxy{});
         expect(pause.tick == speed.tick && speed.tick == refused_speed.tick && other_resume.tick == pause.tick,
@@ -444,7 +450,7 @@ void shared_clock_limit_at_execution() {
                     expect(rig.games[peer]->galaxy().clock().strategic_speed.raw() == math::Fixed::scale / 2,
                         "strategic speed applies on the same completed tick on both peers");
                     expect(rig.adapters[peer]->refused().size() == 1,
-                        "third clock request is refused during execution, not while receiving");
+                        "seventh speed change is refused during execution, not while receiving");
                     const eawr::sim::SeatCommandKey probe{20, rig.humans[0], 99};
                     expect(bool(rig.adapters[peer]->validate({probe, require(net::encode_galactic_input(probe, galactic::PauseGalaxy{}))})),
                         "wire admission does not depend on the already exhausted execution budget");
@@ -457,8 +463,10 @@ void shared_clock_limit_at_execution() {
         expect(rig.hashes[0] == rig.hashes[1] && rig.inputs[0] == rig.inputs[1],
             "clock acceptance/refusal produces equal digests and canonical input on 1/2/4/8 workers");
         expect(rig.adapters[0]->refused().size() == 1 && rig.adapters[1]->refused().size() == 1
-            && rig.adapters[0]->refused()[0].message == rig.adapters[1]->refused()[0].message,
-            "the third request is refused identically on both peers");
+            && rig.adapters[0]->refused()[0].message == rig.adapters[1]->refused()[0].message
+            && rig.adapters[0]->refused()[0].message.find("speed changes are limited to 6 per 45 session seconds") != std::string::npos
+            && rig.adapters[0]->refused()[0].message.find("next is allowed in 45 s") != std::string::npos,
+            "the seventh speed change is refused identically on both peers, naming the limit and the wait");
         const net::GalacticSessionAdapter unrestricted(*rig.games[0], *rig.executors[0]);
         expect(unrestricted.state_hash() != rig.adapters[0]->state_hash(),
             "the named clock policy/history participate in the agreed state hash");

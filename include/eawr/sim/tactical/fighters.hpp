@@ -62,6 +62,7 @@ struct SquadronProfile {
     math::Fixed autonomous_move_extension_vs_attacker{}; // WMV-17: threat to team or escort
     math::Fixed formation_deceleration{}; // WMV-44: this member type, not its child craft
     math::Fixed formation_type_max_speed{}; // WMV-44: scaled own type maximum; zero bypasses the ratio
+    std::uint32_t max_squad_size{10}; // FL-06: partition successful craft in input order
     friend bool operator==(const SquadronProfile&, const SquadronProfile&) = default;
 };
 
@@ -126,7 +127,7 @@ inline constexpr std::int64_t max_spin_seconds = 60;
 // Fails with EAWR-SIM-0305 unless type IDs strictly increase in each list, speeds, rates and
 // distances and the side errors are in [0, max_motion_rate] (max speed, turn and thrust positive), a spin-away
 // chance is in [0, 1] and its time in [0, max_spin_seconds], a squadron lists
-// 1 to 64 members with one offset each, a spawner has at most 64 entries and 255 bays, counts are
+// at least one member with one normalized offset each, spawner entry/bay counts fit uint32, counts are
 // nonnegative (a reserve may be unlimited_reserve), finite starting plus reserve fits in int32,
 // and points lie within max_motion_coordinate.
 [[nodiscard]] core::Result<void> validate_squadron_table(const SquadronTable& table);

@@ -26,6 +26,18 @@
     "constant": "replay_format_version_squadron_extensions",
     "name": "v5 (squadron extensions)",
     "documented": true
+   },
+   {
+    "value": 6,
+    "constant": "replay_format_version_native",
+    "name": "v6 (native scene)",
+    "documented": true
+   },
+   {
+    "value": 7,
+    "constant": "replay_format_version_squadron_native",
+    "name": "v7 (native scene, squadrons)",
+    "documented": true
    }
   ],
   "header_extensions": [

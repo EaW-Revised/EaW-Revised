@@ -399,6 +399,19 @@ std::shared_ptr<const PerceptionToken> compile_perception_token(const std::vecto
 
 core::Result<EquationSet> EquationSet::parse(
     const std::vector<std::pair<std::string, std::string>>& files, const ConverterFunction& converters) {
+    return parse_new(files, converters, nullptr);
+}
+
+core::Result<void> EquationSet::append(
+    const std::vector<std::pair<std::string, std::string>>& files, const ConverterFunction& converters) {
+    auto added = parse_new(files, converters, this);
+    if (!added) return core::Result<void>::failure(added.error());
+    equations_.merge(added.value().equations_);
+    return core::Result<void>::success();
+}
+
+core::Result<EquationSet> EquationSet::parse_new(
+    const std::vector<std::pair<std::string, std::string>>& files, const ConverterFunction& converters, const EquationSet* prior) {
     EquationSet set;
     for (const auto& [path, raw] : files) {
         // Comments and the declaration go; each child element of the root is one equation.
@@ -432,7 +445,7 @@ core::Result<EquationSet> EquationSet::parse(
             const std::size_t end = text.find(end_tag, close + 1);
             if (end == std::string::npos) return core::Result<EquationSet>::failure(parse_error(path + ": " + key + " is not closed"));
             const std::string upper_key = upper(key);
-            if (!set.equations_.contains(upper_key)) {
+            if (!set.equations_.contains(upper_key) && (!prior || !prior->equations_.contains(upper_key))) {
                 auto equation = parse_equation(key, std::string_view(text).substr(close + 1, end - close - 1), converters);
                 if (!equation) return core::Result<EquationSet>::failure(equation.error());
                 set.equations_.emplace(upper_key, std::move(equation).value());
@@ -446,6 +459,13 @@ core::Result<EquationSet> EquationSet::parse(
 const Equation* EquationSet::find(std::string_view name) const {
     const auto found = equations_.find(upper(name));
     return found == equations_.end() ? nullptr : &found->second;
+}
+bool EquationSet::uses_lookup(const std::vector<std::string>& tokens) const {
+    for (const auto& [name, equation] : equations_) {
+        static_cast<void>(name);
+        for (const auto& lookup : equation.lookups) if (lookup.tokens == tokens) return true;
+    }
+    return false;
 }
 
 namespace {

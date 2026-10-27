@@ -229,6 +229,10 @@
 
 ### Flight (heading, turn, pitch, speed, move)
 
+FM-27's zero yaw is verified for a direction between points with coincident planar
+coordinates. Applying it when reading back a vertical rotation is an inference from that
+conversion; the retail rotation read-back remains unverified.
+
 - **WSQ-23** (debug build; FM-02) A heading toward a point: the point in the craft's frame
   (unyawed, then unpitched), its yaw and pitch clamped to [-180, 180).
 - **WSQ-24** (debug build, EWSQ-15; FM-06) Flip upkeep at the start of every service: a pitch past

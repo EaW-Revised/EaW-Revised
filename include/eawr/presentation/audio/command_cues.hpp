@@ -23,6 +23,12 @@ template<class Cue>
     return line ? line : group && group_line ? group_line : ordinary;
 }
 
+// SND-77: an enabled non-hero ability swaps in the authored variant; an unauthored one keeps the ordinary line.
+template<class Cue>
+[[nodiscard]] constexpr const Cue* ability_variant(bool ability_enabled, const Cue* variant, const Cue* ordinary) noexcept {
+    return ability_enabled && variant ? variant : ordinary;
+}
+
 [[nodiscard]] constexpr bool assist_eligible(bool same_object, bool same_type, bool vehicle_thief) noexcept {
     return !same_object && !same_type && !vehicle_thief;
 }

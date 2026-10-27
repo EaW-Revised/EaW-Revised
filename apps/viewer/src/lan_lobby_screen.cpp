@@ -108,11 +108,15 @@ bool EawrLanLobby::build(Options options, const skirmish::SetupMapCache* shared_
     resources.defaults = std::move(defaults).value();
     if (auto bounds = skirmish::read_credits_bounds(filesystem)) resources.credits_bounds = bounds.value();
     skirmish::SetupMapQuery query;
+    query.kind = skirmish::setup_map_kind(options_.domain);
     query.custom.reset();
     const auto* shared = shared_maps ? shared_maps->find(filesystem, *resources.content->catalog, query) : nullptr;
     if (shared) resources.maps = *shared;
     else {
-        auto maps = skirmish::setup_maps(filesystem, *resources.content->catalog, query);
+        std::string land_failure;
+        auto maps = skirmish::setup_domain_maps(filesystem, *resources.content->catalog, query,
+            skirmish::land_skirmish_enabled, &land_failure);
+        if (!land_failure.empty()) UtilityFunctions::printerr(String::utf8(land_failure.c_str()));
         if (!maps) {
             failure_ = maps.error().message;
             return false;
@@ -442,13 +446,6 @@ void EawrLanLobby::on_item_selected(const int64_t index, String id) {
             record->faction = utf8(combo->get_item_text(static_cast<int>(index)));
         } else if (field == "IDC_PLAYER_TEAM") {
             record->team = static_cast<std::uint32_t>(id_value);
-            // Keep a faction the new team can start with.
-            const auto side = std::find_if(map.teams.begin(), map.teams.end(),
-                                           [&](const skirmish::SetupTeam& t) { return t.team == record->team; });
-            if (side != map.teams.end() && !side->factions.empty()
-                && std::find(side->factions.begin(), side->factions.end(), record->faction) == side->factions.end()) {
-                record->faction = side->factions.front();
-            }
         } else if (field == "IDC_PLAYER_COLOR") {
             static_cast<void>(skirmish::select_setup_colour(impl.selection, slot, static_cast<std::uint32_t>(id_value),
                                                             resources.palette.size()));
@@ -697,6 +694,27 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     shot.page = pages[static_cast<std::size_t>(page_)];
     shot.name = impl.name;
     shot.colour = impl.colour;
+    if (resources_) {
+        const auto& match = state_ && state_->editing ? state_->editing->value
+            : impl.host && impl.selection.match ? *impl.selection.match
+            : impl.offered && impl.offered->match ? *impl.offered->match : resources_->defaults;
+        shot.credits = match.credits.trunc_to_integer();
+        shot.options_open = state_ && state_->editing.has_value();
+        shot.credits_custom = shot.options_open ? state_->editing->custom : impl.selection.custom_options;
+        if (resources_->credits_bounds) {
+            shot.credits_min = resources_->credits_bounds->minimum;
+            shot.credits_max = resources_->credits_bounds->maximum;
+        }
+        if (state_ && state_->options_dialog) {
+            if (const auto* gadget = find_gadget(*state_->options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER"))
+                if (const auto* slider = cast<EawrUiSlider>(gadget->control)) {
+                    shot.credits_position = slider->get_value();
+                    shot.credits_enabled = slider->get_mouse_filter() != Control::MOUSE_FILTER_IGNORE;
+                }
+            if (const auto* gadget = find_gadget(*state_->options_dialog, "IDC_SKIRMISH_CREDITS_VALUE"))
+                if (const auto* label = cast<EawrUiLabel>(gadget->control)) shot.credits_caption = utf8(label->get_text());
+        }
+    }
     for (const model::LobbyGame& game : impl.shown) {
         const model::LobbyRowText row = impl.join_selection.source() == model::LobbySourceKind::online
             ? model::online_row_text(game) : model::lobby_row_text(game);
@@ -731,6 +749,14 @@ EawrLanLobby::Snapshot EawrLanLobby::snapshot() const {
     if (state_ && state_->dialog) shot.rectangles = dialog_rectangles(*state_->dialog);
     if (impl.host && impl.map_index >= 0) shot.map = resources_->maps[static_cast<std::size_t>(impl.map_index)].name;
     else if (impl.offered && impl.offered->map) shot.map = *impl.offered->map;
+    if (state_ && page_ == Page::staging && match_->galactic_room()) {
+        if (const auto* description = EAWR_CONTROL(EawrUiLabel, "EAWR_CAMPAIGN_DESCRIPTION"); description != nullptr && description->is_visible())
+            shot.campaign_description = utf8(description->get_text());
+        if (impl.host) {
+            if (const auto* list = EAWR_CONTROL(EawrUiList, "IDC_STAGING_MAP_LIST"))
+                for (int i = 0; i < list->get_item_count(); ++i) shot.campaigns.push_back(utf8(list->get_item_text(i)));
+        }
+    }
     if (state_ && page_ == Page::staging && !impl.host) {
         if (const auto* name = EAWR_CONTROL(EawrUiLabel, "EAWR_JOINER_MAP_NAME")) shot.drawn_map = utf8(name->get_text());
         shot.preview_visible = state_->preview && state_->preview->is_visible() && state_->preview->get_texture().is_valid();

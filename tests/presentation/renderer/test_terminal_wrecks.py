@@ -9,6 +9,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / 'tools'))
 from native_cpp_fixture import compile_fixture, select_toolchain
+from tests.presentation.renderer.pose_threads_harness import HARNESS as POSE_HARNESS
 
 
 def function(path, signature):
@@ -58,6 +59,7 @@ struct Player {
     bool visible_end{};
     mutable std::atomic<int> samples{};
     std::uint32_t playable_frames() const { return 3; }
+    core::Result<int> sample_position(std::uint64_t position, std::uint32_t subdivisions, Pose& output) const;
 };
 core::Result<Pose> sample_death_frame(const Player& player, const DeathFrame& frame) {
     ++player.samples;
@@ -69,6 +71,12 @@ core::Result<Pose> sample_death_frame(const Player& player, const DeathFrame& fr
     for (auto& bone : pose.bones) { bone.skin_asset.fill(1.0F); bone.model_asset.fill(1.0F); }
     return {std::move(pose)};
 }
+core::Result<int> Player::sample_position(std::uint64_t position, std::uint32_t subdivisions, Pose& output) const {
+    auto pose = sample_death_frame(*this, {{position, subdivisions}, 0.0F});
+    output.bones.assign(pose.value().bones.begin(), pose.value().bones.end());
+    return {0};
+}
+
 }
 namespace particles {
 class StepExecutor {
@@ -78,10 +86,11 @@ public:
 };
 }
 struct Executor : particles::StepExecutor {
-    unsigned count; mutable unsigned runs{};
+    unsigned count; mutable unsigned runs{}; bool fail{};
     explicit Executor(unsigned workers) : count(workers) {}
     bool run(std::size_t size, const std::function<void(std::size_t)>& task) const override {
         ++runs;
+        if (fail) { if (size) task(0); return false; }
         std::vector<std::thread> jobs;
         for (unsigned worker = 0; worker < count; ++worker)
             jobs.emplace_back([&, worker] { for (auto i = worker; i < size; i += count) task(i); });
@@ -95,8 +104,17 @@ struct GodotRenderer {
     std::map<sim::EntityId, std::array<float,3>> colours;
     std::vector<sim::AssetId> released;
     std::vector<sim::EntityId> uploads;
-    std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId id) const {
-        const auto found = usage.find(id); return found == usage.end() ? std::vector<std::uint8_t>{} : found->second;
+    std::span<const std::uint8_t> skin_geometry_bones_view(sim::AssetId id) const {
+        const auto found = usage.find(id); return found == usage.end() ? std::span<const std::uint8_t>{} : found->second;
+    }
+    struct PreparedSkinPose { std::vector<animation::BonePose> bones; };
+    static inline std::atomic<unsigned> preparations{};
+    static PreparedSkinPose prepare_skin_pose(std::span<const animation::BonePose> bones) {
+        ++preparations;
+        return {std::vector<animation::BonePose>(bones.begin(), bones.end())};
+    }
+    core::Result<int> set_prepared_skin_pose(sim::EntityId entity, sim::AssetId asset, const PreparedSkinPose& pose) {
+        return set_skin_pose(entity, asset, pose.bones);
     }
     core::Result<int> set_skin_pose(sim::EntityId entity, sim::AssetId, std::span<const animation::BonePose>) {
         palettes.insert(entity); uploads.push_back(entity); return {0};
@@ -119,14 +137,15 @@ struct SpacePopulation {
     struct ParkedShip { std::vector<GatedInstance> pieces; std::vector<LiveClipInstance> clips;
         std::vector<AnimatedInstance> animated; };
     struct PreparedLiveClip {
-        const animation::Player* player{}; bool terminal{}, cached{}, hidden{};
-        std::vector<std::vector<std::uint8_t>> geometry;
-        std::optional<animation::Pose> pose; std::string failure;
+        const animation::Player* player{}; bool terminal{}, cached{}, hidden{}, consumed{};
+        std::vector<std::span<const std::uint8_t>> geometry;
+        animation::Pose sample;
+        bool pose{}; GodotRenderer::PreparedSkinPose palette; std::string failure;
     };
     std::vector<PreparedLiveClip> prepared_clips_;
+    std::vector<std::size_t> active_clips_;
     std::span<const LiveClipPose> pending_clip_poses_;
     void prepare_live_clip(std::size_t);
-    const std::function<void(std::size_t)> live_clip_task_{[this](std::size_t index) { prepare_live_clip(index); }};
     bool arrival_sample{};
     void schedule_arrival_sample() { arrival_sample = true; }
 
@@ -168,6 +187,7 @@ struct SpacePopulation {
     void retire_live_ship(GodotRenderer&, std::size_t, bool = false);
     void restore_live_ship(GodotRenderer&, std::size_t);
 };
+using BattleScene = SpacePopulation;
 __FUNCTIONS__
 int main() {
     for (const unsigned workers : {1,2,4,8}) {
@@ -191,11 +211,20 @@ int main() {
         for (std::size_t ship = 5; ship < 260; ++ship) requests.push_back({ship,{3,1},0,false});
         assert(population.pose_live_clips(renderer, requests, &executor));
         assert(executor.runs == 1);
+        const auto clean = [&] {
+            assert(population.pending_clip_poses_.empty() && population.active_clips_.empty());
+            for (const auto& row : population.prepared_clips_)
+                assert(!row.player && !row.pose && row.geometry.empty() && row.sample.bones.empty());
+        };
+        clean();
         assert(population.live_clip_terminal_hidden(0));
         assert(!population.live_clip_terminal_hidden(1)); // visible end pose
         assert(!population.live_clip_terminal_hidden(2)); // transient mid-clip hide
         assert(!population.live_clip_terminal_hidden(3)); // unposed/static extra geometry
         assert(!population.live_clip_terminal_hidden(4)); // blend still active
+        const auto* bone_data = population.prepared_clips_[2].sample.bones.data();
+        const auto bone_capacity = population.prepared_clips_[2].sample.bones.capacity();
+        const auto* geometry_data = population.prepared_clips_[0].geometry.data();
         const auto uploads = renderer.uploads.size();
         const auto* scratch = population.prepared_clips_.data();
         assert(scratch != nullptr && population.prepared_clips_.capacity() >= 260);
@@ -207,6 +236,18 @@ int main() {
         assert(retained->samples == 1 && population.live_clip(1)->samples == 1);
         assert(population.prepared_clips_.data() == scratch && executor.runs == 1);
         assert(renderer.uploads.size() == uploads); // held poses do not cross renderer API
+        clean();
+        assert(population.prepared_clips_[2].sample.bones.data() == bone_data);
+        assert(population.pose_live_clips(renderer, requests, &executor));
+        clean();
+        assert(population.prepared_clips_[2].sample.bones.data() == bone_data);
+        assert(population.prepared_clips_[2].sample.bones.capacity() == bone_capacity);
+        assert(population.prepared_clips_[0].geometry.data() == geometry_data);
+        Executor failed(workers); failed.fail = true;
+        assert(!population.pose_live_clips(renderer, requests, &failed));
+        clean();
+        assert(population.pose_live_clips(renderer, requests, &executor));
+        clean();
         assert(population.held_clip_bones(0,{3,1},0).size() == 2);
         assert(population.held_clip_bones(0,{1,1},0).empty()); // catch-up reads its own sample
         population.animated_instances_.push_back({10,100,0});
@@ -230,6 +271,25 @@ int main() {
         // A later retirement really releases a nonreusable upload and player.
         population.retire_live_ship(renderer, 0, false);
         assert(renderer.released == std::vector<sim::AssetId>{100} && !population.live_clip(0));
+        // Sampling remains necessary for contacts even with no palette consumer.
+        SpacePopulation contacts; GodotRenderer unused;
+        auto contact_player = std::make_shared<animation::Player>();
+        contacts.clips_.push_back(contact_player); contacts.live_clips_ = {0};
+        contacts.live_alternate_clips_.resize(1); contacts.live_retired_ = {false};
+        contacts.live_death_clone_ = {false}; contacts.live_shown_ = {true};
+        contacts.contact_bones_.resize(1); contacts.rebuild_piece_index();
+        const SpacePopulation::LiveClipPose contact_request{0,{1,1},0,false};
+        const auto preparations = GodotRenderer::preparations.load();
+        assert(contacts.pose_live_clips(unused, std::span(&contact_request,1), &executor));
+        assert(contact_player->samples == 1 && contacts.contact_bones_[0].size() == 2);
+        assert(unused.uploads.empty() && GodotRenderer::preparations == preparations);
+        // One-worker admission uses the BASE serial upload and retains its buffers.
+        contacts.live_clip_instances_.push_back({0,42,100});
+        contacts.rebuild_piece_index();
+        const auto capacity = contacts.prepared_clips_.capacity();
+        assert(contacts.pose_live_clips(unused, std::span(&contact_request,1), nullptr));
+        assert(contact_player->samples == 2 && unused.uploads == std::vector<sim::EntityId>{42});
+        assert(GodotRenderer::preparations == preparations && contacts.prepared_clips_.capacity() == capacity);
     }
 }
 """
@@ -362,6 +422,7 @@ struct SpacePopulation {
     bool live_clip_terminal_hidden(std::size_t ship) const { return hidden.contains(ship); }
     void retire_live_ship(GodotRenderer&, std::size_t ship, bool reusable) { retired.emplace_back(ship,reusable); }
 };
+using BattleScene = SpacePopulation;
 struct LiveSessionView {
     struct DeathClone { std::size_t ship{}; };
     struct ActiveClone { std::uint64_t unit{}, death_tick{}; SpacePopulation::LivePose pose;
@@ -418,6 +479,7 @@ MATERIAL_GUARD_HARNESS = r"""
 #include <cassert>
 #include <cstdint>
 #include <map>
+#include <span>
 #include <vector>
 namespace sim { using AssetId = std::uint64_t; }
 enum class MaterialRoute { legacy, modern_spatial };
@@ -432,6 +494,7 @@ struct GodotRenderer {
         };
         std::map<sim::AssetId, Resource> resources_;
         std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId) const;
+        std::span<const std::uint8_t> skin_geometry_bones_view(sim::AssetId) const;
     };
 };
 __FUNCTIONS__
@@ -440,20 +503,27 @@ int main() {
     auto& resource = renderer.resources_[1];
     const auto original = resource.skin_used_bones;
     assert(renderer.skin_geometry_bones(1) == original);
+    assert(renderer.skin_geometry_bones_view(1).data() == resource.skin_used_bones.data());
     resource.skinned = false;
     assert(renderer.skin_geometry_bones(1).empty());
+    assert(renderer.skin_geometry_bones_view(1).empty());
     resource.skinned = true;
     resource.hidden_geometry_collapses = false;
     assert(renderer.skin_geometry_bones(1).empty());
+    assert(renderer.skin_geometry_bones_view(1).empty());
     resource.hidden_geometry_collapses = true;
     resource.description.route = MaterialRoute::modern_spatial;
     assert(renderer.skin_geometry_bones(1).empty());
+    assert(renderer.skin_geometry_bones_view(1).empty());
     resource.description.route = MaterialRoute::legacy;
     resource.description.wind = true;
     assert(renderer.skin_geometry_bones(1).empty());
+    assert(renderer.skin_geometry_bones_view(1).empty());
     resource.description.wind = false;
     assert(renderer.skin_geometry_bones(1) == original);
+    assert(renderer.skin_geometry_bones_view(1).data() == resource.skin_used_bones.data());
     assert(renderer.skin_geometry_bones(2).empty());
+    assert(renderer.skin_geometry_bones_view(2).empty());
     assert(renderer.resources_.size() == 1 && resource.skin_used_bones == original);
 }
 """
@@ -576,13 +646,36 @@ int main() {
 
 
 class TerminalWrecks(unittest.TestCase):
+    def test_pose_call_sites_workers_fallback_and_ordered_publication(self):
+        toolchain = select_toolchain()
+        if toolchain is None:
+            self.skipTest('requires C++ compiler')
+        animation_path = 'apps/viewer/src/space_populate_animation.cpp'
+        functions = [function(animation_path, signature) for signature in (
+            'void SpacePopulation::pose_units(', 'bool SpacePopulation::pose_live_turrets(')]
+        functions.append(function('apps/viewer/src/space_populate.cpp',
+                                  'void SpacePopulation::refresh_instances('))
+        visibility = function('include/eawr/presentation/space/population_index.hpp',
+                              '[[nodiscard]] bool prepare_population_visibility(')
+        harness = POSE_HARNESS.replace('__VISIBILITY__', visibility).replace('__FUNCTIONS__', '\n'.join(functions))
+        with tempfile.TemporaryDirectory(prefix='eawr-pose-workers-') as temp:
+            directory = Path(temp)
+            cpp = directory / 'pose_workers.cpp'
+            exe = directory / ('pose_workers.exe' if os.name == 'nt' else 'pose_workers')
+            cpp.write_text(harness)
+            compile_fixture(toolchain, cpp, exe)
+            run = subprocess.run([str(exe)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_independent_material_deformation_vetoes_terminal_geometry(self):
         toolchain = select_toolchain()
         if toolchain is None:
             self.skipTest('requires C++ compiler')
         harness = MATERIAL_GUARD_HARNESS.replace('__FUNCTIONS__', function(
             'src/presentation/godot/renderer_instances.cpp',
-            'std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones('))
+            'std::vector<std::uint8_t> GodotRenderer::Impl::skin_geometry_bones(') + '\n' + function(
+            'src/presentation/godot/renderer_instances.cpp',
+            'std::span<const std::uint8_t> GodotRenderer::Impl::skin_geometry_bones_view('))
         with tempfile.TemporaryDirectory(prefix='eawr-wreck-material-') as temp:
             directory = Path(temp)
             cpp = directory / 'wreck_material.cpp'

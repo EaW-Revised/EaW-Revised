@@ -36,13 +36,19 @@ public:
         const std::array<math::Vec3, 3>& axes, math::Fixed angle, bool pitch, bool direction);
     WeaponProfile manual_pose(const WeaponProfile& weapon, const ManualWeaponState& state);
     void manual_turret(const WeaponProfile& weapon, ManualWeaponState& state);
+    void hardpoint_turret(std::uint32_t slot);
+    math::Vec3 hardpoint_turret_position(const WeaponProfile& weapon, const ManualWeaponState& state,
+        math::Vec3 position, bool direction = false);
+    bool hardpoint_turret_fire(const WeaponProfile& weapon, const ManualWeaponState& state,
+        const CombatUnit& target);
+    std::uint64_t hardpoint_turret_steps{}; // HPT-08: deterministic diagnostic; never authoritative state.
     bool point_object_turret(const WeaponProfile& weapon, WeaponState::TurretState& state,
         const CombatUnit& target);
     void point_object_turret_target();
     void advance_object_turret(const ManualTurretProfile& profile, WeaponState::TurretState& state);
     void idle_object_turret(const WeaponProfile& weapon, WeaponState::TurretState& state);
     math::Vec3 object_turret_muzzle(const WeaponProfile& weapon, const WeaponState::TurretState& state,
-        math::Vec3 muzzle);
+        math::Vec3 muzzle, bool direction = false);
     [[nodiscard]] CombatState target_state(math::Fixed divert, EntityId formation_target,
         math::Vec3 diversion_anchor, const FormationAttackContext* formation);
     [[nodiscard]] core::Result<CombatState> retaliation_state(const CombatUnit& attacker,
@@ -149,6 +155,9 @@ public:
     // WAB-80: the weapon delay factor of one hardpoint: the unit's ability multiplier, times the
     // hardpoint's full-salvo multiplier while FULL_SALVO is on (rounded to Q24).
     [[nodiscard]] math::Fixed delay_factor(const WeaponProfile& weapon) const noexcept;
+    // WFR-01: the weapon's fire range with the unit's fire-range bonus; the object weapon's range is its
+    // targeting distance, which the bonus does not touch.
+    [[nodiscard]] math::Fixed fire_reach(const WeaponProfile& weapon);
 
     // W-10: the shot leads the target, which keeps the velocity of its last frame's move. No lead
     // without a projectile.
@@ -202,7 +211,7 @@ public:
         [[nodiscard]] std::vector<OpportunityCandidate> candidates(const std::size_t index) override {
             const auto& weapon = owner_.profile_.weapons[slot_];
             // R-07: box of half extent 1.1 x range on every axis, one player's objects.
-            const auto half = math::Fixed::from_raw(weapon.range.raw() * 11 / 10);
+            const auto half = math::Fixed::from_raw(owner_.fire_reach(weapon).raw() * 11 / 10);
             const auto ids = owner_.world_.candidates(owner_.unit_.position, half, owner_.world_.players[index].player_id);
             std::vector<OpportunityCandidate> result;
             result.reserve(ids.size());

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "eawr/presentation/godot/device_budget.hpp"
 
 #include <algorithm>
 #include <array>
@@ -27,7 +28,8 @@ public:
     static constexpr std::uint32_t min_edge = 64;
     // The share of the device's budget the process may fill before textures give way; the rest
     // is slack for what the device counter does not see yet (allocations in flight, drivers).
-    static constexpr std::uint64_t usable_numerator = 9, usable_denominator = 10;
+    static constexpr std::uint64_t usable_numerator = device_budget_usable_numerator;
+    static constexpr std::uint64_t usable_denominator = device_budget_usable_denominator;
     // The engine releases a freed texture's memory a few frames later; until then the device
     // counter still holds it, and it is not counted as memory outside the pool.
     static constexpr std::uint64_t release_frames = 3;
@@ -195,7 +197,7 @@ private:
         pending_frame_ = std::max(pending_frame_, frame);
     }
     void update_budget() {
-        const std::uint64_t usable = state_.device_bytes / usable_denominator * usable_numerator;
+        const std::uint64_t usable = usable_device_budget_bytes(state_.device_bytes);
         state_.texture_budget = usable > state_.other_bytes ? usable - state_.other_bytes : 0;
     }
 

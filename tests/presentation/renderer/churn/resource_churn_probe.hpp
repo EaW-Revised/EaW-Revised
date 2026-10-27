@@ -166,6 +166,7 @@ private:
     bool finished_{};
     bool finishing_{};
     bool leak_control_{};
+    bool model_recipes_only_{};
     std::string report_path_;
     std::vector<std::string> failures_;
     std::vector<std::string> samples_;

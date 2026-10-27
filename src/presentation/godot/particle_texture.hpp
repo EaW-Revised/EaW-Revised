@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "texture_mip_tail.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -105,6 +106,12 @@ struct ParticleTexturePreparation final {
                 }
             }
         }
+    }
+    if (texture_mip_tail_bytes(source) != 0) {
+        auto last = source.mips.back();
+        last.bytes.assign(result.bytes.end() - static_cast<std::ptrdiff_t>(last.bytes.size()), result.bytes.end());
+        const auto tail = texture_mip_tail(source, &last);
+        result.bytes.insert(result.bytes.end(), tail.begin(), tail.end());
     }
     return result;
 }

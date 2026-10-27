@@ -201,7 +201,7 @@ void old_saves(const galactic::GalacticSetup& config) {
     }
     const auto result = cp::load_game_checkpoint(old, identities, {}, serial);
     expect(!result && result.error().code == cp::diagnostic_codes::version, "an old save fails with the named version code");
-    expect(!result && result.error().message.find("33") != std::string::npos && result.error().message.find("35") != std::string::npos,
+    expect(!result && result.error().message.find("33") != std::string::npos && result.error().message.find(std::to_string(cp::galaxy_section_version)) != std::string::npos,
         "the diagnostic names the found and expected versions");
 }
 

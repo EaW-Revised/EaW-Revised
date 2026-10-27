@@ -14,7 +14,7 @@ using Path = platform::Path;
 constexpr std::array<std::uint8_t, 8> replay_magic{'E', 'A', 'W', 'R', 'P', 'L', 'Y', 0};
 constexpr std::size_t fixed_header_size = 104; // versions 2 to 5 share these 104 bytes
 constexpr std::uint16_t first_tactical_version = 2;
-constexpr std::uint16_t last_tactical_version = 5;
+constexpr std::uint16_t last_tactical_version = 7;
 constexpr std::uint16_t first_extension_version = 4;
 constexpr std::uint16_t skirmish_setup_tag = 2; // SKSU
 constexpr std::size_t max_string = 1024;
@@ -88,28 +88,40 @@ ReplayHeaderSummary read_replay_header(const std::span<const std::uint8_t> bytes
     }
     Cursor cursor(bytes);
     cursor.seek(8);
-    std::uint16_t header_size{};
-    if (!cursor.u16(summary.format_version) || !cursor.u16(header_size)) return refuse(summary, "truncated header");
+    std::uint32_t header_size{};
+    if (!cursor.u16(summary.format_version)) return refuse(summary, "truncated header");
+    const bool wide = summary.format_version == 6 || summary.format_version == 7;
+    std::uint16_t narrow_size{};
+    if (wide ? !cursor.u32(header_size) : !cursor.u16(narrow_size)) return refuse(summary, "truncated header");
+    if (!wide) header_size = narrow_size;
+    const std::size_t shift = wide ? 2U : 0U;
     if (summary.format_version < first_tactical_version || summary.format_version > last_tactical_version) {
         return refuse(summary, "replay format version " + std::to_string(summary.format_version) + " cannot be played");
     }
-    if (header_size < fixed_header_size || bytes.size() < fixed_header_size) return refuse(summary, "truncated header");
-    cursor.seek(24);
+    if (header_size < fixed_header_size + shift || bytes.size() < fixed_header_size + shift) return refuse(summary, "truncated header");
+    cursor.seek(24 + shift);
     if (!cursor.u32(summary.tick_numerator) || !cursor.u32(summary.tick_denominator)) {
         return refuse(summary, "truncated header");
     }
-    cursor.seek(40);
+    cursor.seek(40 + shift);
     if (!cursor.u64(summary.final_tick_count)) return refuse(summary, "truncated header");
     if (summary.tick_numerator == 0 || summary.tick_denominator == 0) return refuse(summary, "invalid tick rate");
 
     if (summary.format_version >= first_extension_version && header_size > fixed_header_size) {
         if (bytes.size() < header_size) return refuse(summary, "truncated header");
-        cursor.seek(fixed_header_size);
+        cursor.seek(fixed_header_size + shift);
         std::uint32_t records{};
         if (!cursor.u32(records)) return refuse(summary, "truncated header");
         for (std::uint32_t record = 0; record < records; ++record) {
-            std::uint16_t tag{}, length{};
-            if (!cursor.u16(tag) || !cursor.u16(length) || cursor.offset() + length > header_size) {
+            std::uint16_t tag{}, narrow_length{};
+            std::uint32_t length{};
+            if (cursor.offset() > header_size || header_size - cursor.offset() < 4U || !cursor.u16(tag))
+                return refuse(summary, "truncated header extension");
+            const bool native = wide && tag == 15;
+            if (native ? !cursor.u32(length) : !cursor.u16(narrow_length))
+                return refuse(summary, "truncated header extension");
+            if (!native) length = narrow_length;
+            if (cursor.offset() > header_size || length > header_size - cursor.offset()) {
                 return refuse(summary, "truncated header extension");
             }
             if (tag == skirmish_setup_tag) {

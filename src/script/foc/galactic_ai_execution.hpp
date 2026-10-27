@@ -14,7 +14,7 @@ namespace eawr::script::foc::galactic_ai {
 struct ExecutionPathMatrix {
     gc::PlayerId player{};
     std::vector<gc::PlanetId> nodes;
-    std::vector<std::uint32_t> costs;
+    std::vector<std::uint64_t> costs;
     std::vector<std::size_t> previous;
 };
 // Derived memo of one player's last build; never saved, hashed or published. When the next build of the same
@@ -29,17 +29,17 @@ struct ExecutionGeometry {
         bool usable{};
         friend bool operator==(const Fact&, const Fact&) noexcept = default;
     };
-    static constexpr std::int32_t no_edge = -1, out_of_range = -2; // else the packed distance, scaled by ten
+    static constexpr std::int64_t no_edge = -1, out_of_range = -2; // else the packed distance, scaled by ten
     std::vector<Fact> facts;
     std::vector<std::array<std::uint64_t, 3>> trades; // from, to, speed bits; ascending
     std::uint64_t maximum_distance{};
-    std::vector<std::int32_t> distance; // n * n
+    std::vector<std::int64_t> distance; // n * n
 };
 struct ExecutionBuildMemo {
     std::shared_ptr<const ExecutionGeometry> geometry;
     gc::PlayerId player{};
     std::vector<gc::PlanetId> nodes;
-    std::vector<std::uint32_t> edges;
+    std::vector<std::uint64_t> edges;
     std::vector<ai::GalacticExecutionRoute> rows; // build order, before the publication sort
     std::shared_ptr<const ExecutionPathMatrix> paths;
 };

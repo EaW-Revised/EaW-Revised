@@ -8,6 +8,8 @@
 #include "eawr/vfs/vfs.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/setup.hpp"
+#include "../../src/script/foc/tactical_ai_world.hpp"
+#include "eawr/platform/sim_workers.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -30,6 +32,101 @@ void expect(bool condition, const std::string& message) {
 
 std::optional<std::string> environment(const char* name) {
     return eawr::testing::environment(name);
+}
+
+// WAS-27 / #4717: installed data acceptance. The caller supplies the read-only
+// content chain, map and ordinary factory; no mod name is baked into discovery.
+int ordinary_producer_acceptance(const std::filesystem::path& root, const std::string& mods,
+    const std::string& map, const std::string& factory_name) {
+    auto roots = eawr::vfs::mod_chain_roots(mods);
+    roots.emplace_back("expansion", root / "corruption" / "Data");
+    roots.emplace_back("base", root / "GameData" / "Data");
+    auto chain = eawr::vfs::resolve_manifest_chain(roots);
+    if (!chain) { std::cerr << chain.error().message << '\n'; return 1; }
+    std::vector<eawr::vfs::MountSpec> specs;
+    for (auto& layer : chain.value()) specs.push_back(std::move(layer.mount));
+    auto files = eawr::vfs::Vfs::mount(specs);
+    if (!files) { std::cerr << files.error().message << '\n'; return 1; }
+    auto catalog = eawr::data::load_catalog_strict(files.value(), eawr::data::Profile::remake);
+    if (!catalog) { std::cerr << catalog.error().message << '\n'; return 1; }
+    eawr::scene::VfsAssetCache cache(files.value());
+    eawr::units::LoadInput input;
+    input.catalog = &catalog.value().catalog; input.filesystem = &files.value(); input.model = cache.access().model;
+    for (const auto type : eawr::units::pinned_m2_types()) input.types.emplace_back(type);
+    input.types.push_back(factory_name);
+    input.space_map = map;
+    auto tables = eawr::units::load_unit_tables(input);
+    if (!tables) { std::cerr << tables.error().message << '\n'; return 1; }
+    skirmish::FixtureOptions options;
+    options.map = map;
+    options.slots = std::vector<skirmish::LobbySlot>{{1, "Empire", 0, true, {}}, {2, "Empire", 0, false, {}},
+        {3, "Rebel", 1, false, {}}, {4, "Rebel", 1, false, {}}};
+    auto selected_fixture = skirmish::fixture_from_options(options, files.value(), catalog.value().catalog);
+    if (!selected_fixture) { std::cerr << selected_fixture.error().message << '\n'; return 1; }
+    const auto& fixture = selected_fixture.value();
+    auto inputs = skirmish::read_start_inputs(fixture, files.value(), catalog.value().catalog, tables.value());
+    if (!inputs) { std::cerr << inputs.error().message << '\n'; return 1; }
+    auto start = skirmish::build_start(fixture, inputs.value());
+    if (!start) { std::cerr << start.error().message << '\n'; return 1; }
+    auto economy = skirmish::economy_rules(start.value(), inputs.value(), tables.value());
+    if (!economy) { std::cerr << economy.error().message << '\n'; return 1; }
+    const auto factory = skirmish::type_id(factory_name);
+    auto setup = start.value().setup;
+    setup.units = {{1, factory, 1}};
+    setup.squadrons.clear();
+    setup.free_garrisons.clear();
+    const auto faction = setup.players.front().faction_id;
+    const auto* menu = economy.value().menu(factory, faction);
+    expect(menu && menu->station_producer, "WAS-27 installed: ordinary producer has an authored queue menu");
+    if (!menu) return 1;
+    const tactical::BuildOption* chosen = nullptr;
+    for (const auto& option : menu->options) {
+        if (option.kind == tactical::BuildKind::unit && option.available
+            && !economy.value().disabled_types.contains(option.type)
+            && option.price.raw() > 0 && option.build_frames > 0
+            && option.requirements.current_player != 0U && option.requirements.current_allies != 0U
+            && option.requirements.lifetime_player != 0U && option.requirements.lifetime_allies != 0U) {
+            chosen = &option; break;
+        }
+    }
+    expect(chosen != nullptr, "WAS-27 installed: authored menu has a purchasable unit");
+    if (!chosen) return 1;
+    for (const auto prerequisite : chosen->requirements.prerequisites)
+        setup.units.push_back({static_cast<eawr::sim::EntityId>(setup.units.size() + 1), prerequisite, 1});
+    for (auto& account : economy.value().players) {
+        account.credits = eawr::sim::math::Fixed::from_integer(1000000).value();
+        account.population_cap = 1000;
+    }
+    auto world = tactical::TacticalSession::create(setup, {}, {}, {}, {}, {}, {}, {}, economy.value());
+    if (!world) { std::cerr << world.error().message << '\n'; return 1; }
+    auto host = std::make_shared<foc::detail::Host>();
+    host->ai_world = std::make_shared<foc::ai::TacticalWorld>(*host);
+    host->setup = skirmish::ai_setup(start.value(), inputs.value(), tables.value());
+    for (const auto& type : host->setup.content.types) host->types.emplace(type.type_id, &type);
+    const auto* info = host->type(factory);
+    expect(info && !info->star_base, "WAS-27 installed: producer is an ordinary non-starbase type");
+    host->world = &world.value(); host->snapshot = world.value().snapshot();
+    host->view = foc::detail::build_view(world.value(), *host->snapshot);
+    foc::ai::Engine engine(host, {}, {});
+    expect(world.value().build_allowed(2, 1, chosen->type), "WAS-27 installed: authoritative admission accepts human teammate factory");
+    const auto selected = engine.producer(2, chosen->type);
+    expect(selected == 1, "WAS-27 installed: AI discovers the ordinary teammate factory");
+    if (selected == 0) return 1;
+    expect(world.value().submit({{0, 2, 0}, {selected}, tactical::BuyPayload{chosen->type}}).has_value(),
+        "WAS-27 installed: AI buyer submits selected producer through BuyPayload");
+    const eawr::platform::ThreadWorkerAdapter executor(4);
+    std::uint64_t completion = 0;
+    for (std::uint64_t tick = 0; tick <= chosen->ai_build_frames + 2ULL; ++tick) {
+        const auto stepped = world.value().step(executor);
+        if (!stepped) { std::cerr << stepped.error().message << '\n'; return 1; }
+        if (!world.value().ledgers()[1].pool.empty()) { completion = world.value().completed_tick(); break; }
+    }
+    expect(completion != 0 && world.value().ledgers()[1].pool.front() == chosen->type
+        && world.value().ledgers()[0].pool.empty(), "WAS-27 installed: completed purchase enters AI buyer pool");
+    std::cout << "ordinary_producer factory=" << factory_name << " selected=" << selected << " owner=1 buyer=2 type="
+        << chosen->type << " buy_tick=0 completion_tick=" << completion << " players=" << setup.players.size()
+        << " buyer_credits_raw=" << world.value().ledgers()[1].credits.raw() << " failures=" << failures << '\n';
+    return failures == 0 ? 0 : 1;
 }
 
 std::optional<Content> load(const std::filesystem::path& root, bool rebel_ai, bool underworld,

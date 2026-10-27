@@ -1,5 +1,7 @@
 #include "perf_trace.hpp"
 #include "startup_trace.hpp"
+#include "eawr/presentation/render_categories.hpp"
+#include "eawr/presentation/render_churn.hpp"
 
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/display_server.hpp>
@@ -10,18 +12,22 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include <iomanip>
+#include <span>
 
 using namespace godot;
 
 namespace eawr::presentation::godot_backend {
 
 bool PerfTrace::fine_particle_timings_{};
+bool PerfTrace::render_timing_{true};
 
 std::optional<std::string> PerfTrace::parse(const PackedStringArray& arguments, std::string& error) {
     fine_particle_timings_=false;
+    render_timing_=true;
     particles::EffectRegistry::set_stream_bucketing_default(true);
     for (int64_t index = 0; index < arguments.size(); ++index) {
         if (String(arguments[index]) == String("--eawr-particle-fine-timings")) fine_particle_timings_=true;
+        if (String(arguments[index]) == String("--eawr-perf-no-render-timing")) render_timing_=false;
         if (String(arguments[index]) == String("--eawr-particle-stream-reference"))
             particles::EffectRegistry::set_stream_bucketing_default(false);
     }
@@ -46,7 +52,7 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
     auto* tree = Object::cast_to<SceneTree>(Engine::get_singleton()->get_main_loop());
     if (tree != nullptr && tree->get_root() != nullptr) {
         viewport_ = tree->get_root()->get_viewport_rid();
-        RenderingServer::get_singleton()->viewport_set_measure_render_time(viewport_, true);
+        if (render_timing_) RenderingServer::get_singleton()->viewport_set_measure_render_time(viewport_, true);
     }
     output_ << "frame,frame_ms,process_ms,render_cpu_ms,render_gpu_ms,draw_calls,objects,primitives,tick,units,"
                "projectiles,effects,effect_particles,emitter_particles,particle_ms,ticks,tick_ms,submit_ms,pieces,sent,bookkeeping_ms,hud_ms,audio_ms,fog_ms,pose_ms,compose_ms,refresh_ms,opacity_ms,"
@@ -54,11 +60,24 @@ bool PerfTrace::open(const std::string& path, std::string& error) {
                ",emitter_owner_setup_ms,emitter_owner_fading_ms,emitter_owner_catchup_ms,emitter_owner_update_ms,emitter_owner_place_ms,emitter_owner_brightness_ms,emitter_owner_registry_ms,emitter_owner_finish_ms,clone_retire_ms"
                ",effects_owner_setup_ms,effects_owner_lookup_ms,effects_owner_abilities_ms,effects_owner_contacts_ms,effects_owner_events_ms,effects_owner_projectiles_ms,effects_owner_advance_ms,effects_owner_finish_ms,effects_shield_cast_ms"
                ",effects_combat_events,effects_hit_events,effects_lifecycle_events,particle_retirement_ms"
-               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases\n";
+               ",sim_completed_tick,presentation_lag_ticks,sim_pacing_lag_ms,sim_discarded_wall_ms,ui_accessor_lock_wait_ms,ui_accessor_lock_phases"
+               ",render_counters_enabled,render_counter_frame,render_counter_ms,visible_draws,shadow_draws,canvas_draws";
+    for (const auto name : std::span{render_categories::names}.first(static_cast<std::size_t>(render_categories::Role::debris)))
+        for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
+            output_ << ',' << name << '_' << metric;
+    output_ << ",particle_bounds_attempted,particle_bounds_sent,particle_bounds_skipped"
+               ",particle_visibility_attempted,particle_visibility_sent,particle_visibility_skipped";
+    for (const auto name : std::span{render_categories::names}.subspan(static_cast<std::size_t>(render_categories::Role::debris)))
+        for (const auto metric : {"submitted", "retained", "eligible_casters", "retained_surfaces"})
+            output_ << ',' << name << '_' << metric;
+    render_churn::write_csv_header(output_);
+    output_ << ",slots_grown,slot_growth_ms";
+    output_ << '\n';
     return true;
 }
 
 void PerfTrace::begin_frame() {
+    render_churn::frame = {};
     frame_entry_ = Clock::now();
     const auto ms = [](const Clock::duration elapsed) { return std::chrono::duration<double, std::milli>(elapsed).count(); };
     wall_frame_ms_ = previous_entry_ ? ms(frame_entry_ - *previous_entry_) : 0.0;
@@ -71,11 +90,16 @@ void PerfTrace::frame(const Frame& frame) {
     const double viewer_main_ms = std::chrono::duration<double, std::milli>(Clock::now() - frame_entry_).count();
     auto* server = RenderingServer::get_singleton();
     auto* performance = Performance::get_singleton();
-    const double cpu = viewport_.is_valid() ? server->viewport_get_measured_render_time_cpu(viewport_) : 0.0;
-    const double gpu = viewport_.is_valid() ? server->viewport_get_measured_render_time_gpu(viewport_) : 0.0;
+    // The two render-time queries make the Separate render thread synchronize with the main thread on every
+    // frame (the engine warns); --eawr-perf-no-render-timing skips them and leaves both columns empty (not measured).
+    const bool timed = render_timing_ && viewport_.is_valid();
+    const double cpu = timed ? server->viewport_get_measured_render_time_cpu(viewport_) : 0.0;
+    const double gpu = timed ? server->viewport_get_measured_render_time_gpu(viewport_) : 0.0;
     const double process = performance->get_monitor(Performance::TIME_PROCESS) * 1000.0;
-    output_ << frames_++ << ',' << std::fixed << std::setprecision(3) << frame.frame_ms << ',' << process << ',' << cpu
-            << ',' << gpu
+    output_ << frames_++ << ',' << std::fixed << std::setprecision(3) << frame.frame_ms << ',' << process << ',';
+    if (render_timing_) output_ << cpu << ',' << gpu;
+    else output_ << ',';
+    output_
             << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_DRAW_CALLS_IN_FRAME))
             << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_OBJECTS_IN_FRAME))
             << ',' << static_cast<std::uint64_t>(performance->get_monitor(Performance::RENDER_TOTAL_PRIMITIVES_IN_FRAME))
@@ -137,6 +161,17 @@ void PerfTrace::frame(const Frame& frame) {
             << ',' << frame.ui_accessor_lock_wait_ms << ",\"";
     for (const auto& [name, elapsed] : frame.ui_accessor_lock_phases) output_ << name << '=' << elapsed << ';';
     output_ << '"';
+    const auto& categories = render_categories::latest;
+    output_ << ',' << (render_categories::enabled ? 1 : 0) << ',' << categories.frame << ',' << categories.sample_ms;
+    for (const auto count : categories.viewport_draws) output_ << ',' << count;
+    for (const auto& role : std::span{categories.roles}.first(static_cast<std::size_t>(render_categories::Role::debris)))
+        output_ << ',' << role.submitted << ',' << role.retained << ',' << role.eligible_casters << ',' << role.retained_surfaces;
+    for (const auto& calls : {frame.particle_work.bounds_calls, frame.particle_work.visibility_calls})
+        output_ << ',' << calls.attempted << ',' << calls.sent << ',' << calls.skipped;
+    for (const auto& role : std::span{categories.roles}.subspan(static_cast<std::size_t>(render_categories::Role::debris)))
+        output_ << ',' << role.submitted << ',' << role.retained << ',' << role.eligible_casters << ',' << role.retained_surfaces;
+    render_churn::write_csv_row(output_, render_churn::frame);
+    output_ << ',' << frame.slots_grown << ',' << frame.slot_growth_ms;
     output_ << '\n';
     previous_report_end_ = Clock::now();
 }

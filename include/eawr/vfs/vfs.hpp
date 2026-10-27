@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <typeindex>
 #include <vector>
 #include <utility>
 
@@ -72,18 +73,24 @@ inline constexpr std::string_view archive_limit = "EAWR-VFS-0008";
 inline constexpr std::string_view archive_path_collision = "EAWR-VFS-0009";
 inline constexpr std::string_view manifest_invalid = "EAWR-VFS-0010";
 inline constexpr std::string_view mount_invalid = "EAWR-VFS-0011";
+inline constexpr std::string_view manifest_absent = "EAWR-VFS-0012";
 } // namespace diagnostic_codes
 
 [[nodiscard]] core::Result<std::string> canonicalize(std::string_view logical_path);
 
 // Resolves only manifest-declared archives plus the engine's exact conventional
 // SFX and patch slots. It never mounts an arbitrary discovered *.meg file.
+// Base/expansion require a manifest; other layers without one mount loose files
+// only (ML-09), log manifest_absent, and leave manifest_source_id empty.
 [[nodiscard]] core::Result<ManifestResolution> resolve_manifest_mount(
     std::string layer_id,
     const std::filesystem::path& data_root
 );
 
 using LayerRoot = std::pair<std::string, std::filesystem::path>;
+
+// A mod may name its containing folder or the data root itself.
+[[nodiscard]] std::filesystem::path mod_data_root(const std::filesystem::path& root);
 
 // Split the quoted leaf;parent;... CLI value without losing native path encoding.
 [[nodiscard]] std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain);
@@ -127,7 +134,17 @@ public:
     ) const;
     [[nodiscard]] core::Result<std::vector<AssetRecord>> candidates(std::string_view logical_path) const;
 
+    // Immutable decoded resources belong to this mounted content set. The VFS
+    // owns their lifetime without depending on the libraries that decode them.
+    template<class T> [[nodiscard]] std::shared_ptr<T> attachment() const {
+        return std::static_pointer_cast<T>(attachment(typeid(T), []() -> std::shared_ptr<void> {
+            return std::make_shared<T>();
+        }));
+    }
+
 private:
+    [[nodiscard]] std::shared_ptr<void> attachment(std::type_index type,
+        std::shared_ptr<void> (*create)()) const;
     struct Impl;
     explicit Vfs(std::unique_ptr<Impl> impl);
     std::unique_ptr<Impl> impl_;

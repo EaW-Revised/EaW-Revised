@@ -255,7 +255,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_spawned_
         const auto& profile = *phase.impl_->abilities.find(holder->state.type_id);
         const auto slot = *ability_slot(profile, payload.ability);
         const auto& ability = profile.abilities[slot];
-        if (!ability.spawned) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
+        if (!ability.spawned && !ability.unresolved_spawn) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         if (payload.action == AbilityAction::autofire_on || payload.action == AbilityAction::autofire_off) {
             if (!ability.supports_autofire) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         } else if (payload.action == AbilityAction::activate) {
@@ -268,7 +268,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_spawned_
                 && !payload.position) return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
             const auto position = payload.position && *payload.position != math::Vec3{}
                 ? *payload.position : holder->state.position;
-            if (payload.ability == AbilityKind::weaken_enemy && ability.spawned->reach.raw() > 0
+            if (payload.ability == AbilityKind::weaken_enemy && ability.spawned && ability.spawned->reach.raw() > 0
                 && !within_range(holder->state.position, position, ability.spawned->reach, RangeMetric::planar))
                 return core::Result<RejectReason>::success(RejectReason::ability_unavailable);
         }
@@ -287,7 +287,7 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_spawned_
         auto position = holder->state.position;
         if ((payload.ability == AbilityKind::fow_reveal_ping || payload.ability == AbilityKind::weaken_enemy)
             && *payload.position != math::Vec3{}) position = *payload.position;
-        phase.spawn_instant_ability(*holder, payload.ability, *ability.spawned, position);
+        if (ability.spawned) phase.spawn_instant_ability(*holder, payload.ability, *ability.spawned, position);
         state.started_tick = command_tick;
         state.ready_tick = command_tick + ability.recharge_frames;
     }
@@ -548,6 +548,8 @@ core::Result<RejectReason> session_detail::Tick::CommandHandlers::apply_buzz_dro
     // point, unturned, for its owner; the droids act from the arming frame on.
     auto droid = phase.impl_->create_buzz_droids(source, point, command_tick, next_id);
     const auto droid_id = droid.state.entity_id;
+    if (squadron_table.find_spawner(droid.state.type_id, droid.state.owner) != nullptr)
+        phase.staging_.value().born_spawners.push_back(droid_id);
     staged.emplace(droid_id, std::move(droid));
     phase.track_victory_change(nullptr, &staged.at(droid_id).state, false);
     auto& live = staged.at(unit_id); // insertion can move the vector

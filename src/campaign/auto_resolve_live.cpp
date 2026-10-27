@@ -14,6 +14,7 @@
 #include "battle_return_internal.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <limits>
 #include <map>
 #include <set>
@@ -75,6 +76,7 @@ struct Prepared {
     std::map<std::string, std::string> movement_class;
     std::map<gc::PlanetId, std::string> planet_types, planet_terrain;
     std::set<std::string> immune, unqualified;
+    std::map<std::string, Fixed> bounty; // WAR-U05: bounty value per bound type, keyed like `key`
     std::vector<StartingForceRelation> relations;
     Prepared(const CampaignSetupPlan& p) : plan(p) {}
 };
@@ -98,30 +100,6 @@ core::Result<CombatantFacts> facts(const Prepared& p, const gc::GalacticSnapshot
         auto value = facts(p, snapshot, child, depth + 1); if (!value) return value; out.contents.push_back(std::move(value).value());
     }
     return core::Result<CombatantFacts>::success(std::move(out));
-}
-core::Result<gc::PlanetId> retreat_destination(const gc::GalacticSnapshot& snapshot, gc::PlanetId source,
-    gc::PlayerId player, bool surface) {
-    const auto src = std::find_if(snapshot.planets().begin(), snapshot.planets().end(), [&](const auto& row) { return row.id == source; });
-    if (src == snapshot.planets().end()) return fail<gc::PlanetId>("missing retreat source");
-    // WGM-61..63: ordered selector tiers; equal nearest-distance is WGM-U03.
-    const auto orbit = [&](const auto& planet) { return std::any_of(snapshot.fleets().begin(), snapshot.fleets().end(), [&](const auto& fleet) { return fleet.orbit == planet.id && fleet.owner == player; }); };
-    const auto base = [&](const auto& planet) { const auto* c = control_planet(snapshot, planet.id); return c && (c->ground_base.owner == player || c->starbase.owner == player); };
-    const auto neutral = [&](const auto& planet) { return snapshot.control() && std::any_of(snapshot.control()->players.begin(), snapshot.control()->players.end(), [&](const auto& row) { return row.player == planet.owner && row.neutral; }); };
-    for (unsigned tier = 0; tier < 4; ++tier) {
-        std::optional<Fixed> nearest; gc::PlanetId chosen{}; bool tied{};
-        for (const auto& planet : snapshot.planets()) {
-            if (planet.id == source) continue;
-            const bool eligible = tier == 0 ? (surface ? base(planet) : orbit(planet)) : tier == 1 ? (surface ? orbit(planet) : base(planet)) : tier == 2 ? neutral(planet) : true;
-            if (!eligible) continue;
-            auto x = sim::math::subtract(planet.position.x, src->position.x), y = sim::math::subtract(planet.position.y, src->position.y), z = sim::math::subtract(planet.position.z, src->position.z);
-            if (!x || !y || !z) return fail<gc::PlanetId>("retreat distance overflow");
-            auto distance = sim::math::length(sim::math::Vec3{x.value(), y.value(), z.value()}); if (!distance) return core::Result<gc::PlanetId>::failure(distance.error());
-            if (!nearest || distance.value() < *nearest) { nearest = distance.value(); chosen = planet.id; tied = false; }
-            else if (distance.value() == *nearest) tied = true;
-        }
-        if (chosen) { if (tied) return fail<gc::PlanetId>("unqualified equal-distance retreat destinations (WGM-U03)"); return core::Result<gc::PlanetId>::success(chosen); }
-    }
-    return core::Result<gc::PlanetId>::success(source); // orbital fallback WGM-99; surface caller rejects WGM-U10.
 }
 } // namespace
 
@@ -324,6 +302,12 @@ AutoResolveAttackServices attacks(const std::shared_ptr<Prepared>& p, const Auto
     };
     return out;
 }
+std::function<core::Result<Fixed>(std::string_view)> bounty_value_reader(const std::shared_ptr<Prepared>& p) {
+    return [p](std::string_view type) -> core::Result<Fixed> {
+        const auto row = p->bounty.find(key(type)); if (row == p->bounty.end()) return fail<Fixed>("missing bounty value for ordinary casualty type");
+        return core::Result<Fixed>::success(row->second);
+    };
+}
 AutoResolveOutcomeInputs outcome_inputs(const std::shared_ptr<Prepared>& p, AutoResolveRoster roster, gc::PlanetId planet) {
     AutoResolveOutcomeInputs inputs; inputs.planet_type = p->planet_types.at(planet);
     inputs.raid_destination_entries = roster.raid_entries;
@@ -371,6 +355,20 @@ core::Result<void> load_inputs(Prepared& p, const vfs::Vfs& filesystem) {
     auto tables = units::load_unit_tables(input); if (!tables) return core::Result<void>::failure(tables.error()); p.bits = std::move(tables).value().categories;
     if (p.bits.empty()) return fail<void>("missing dynamic category enum");
     for (const auto& row : p.bits) p.host.setup.content.categories.emplace(key(row.name), static_cast<std::uint64_t>(row.value));
+    // WAR-U05: Default_Bounty_By_Category_SP rows, matched by category name.
+    std::map<std::string, Fixed> bounty_defaults;
+    {
+        auto constants = data::load_document(filesystem, "Data/XML/GameConstants.xml"); if (!constants) return core::Result<void>::failure(constants.error());
+        for (const auto& child : constants.value().root.children) {
+            if (key(child.name) != "DEFAULT_BOUNTY_BY_CATEGORY_SP") continue;
+            data::tag_trace::used(child);
+            const auto comma = child.raw_text.find(',');
+            if (comma == std::string::npos) return fail<void>("malformed default bounty row");
+            const auto value = data::retail::leading_number(child.raw_text.substr(comma + 1));
+            if (!value) return fail<void>("malformed default bounty value");
+            auto& slot = bounty_defaults[key(child.raw_text.substr(0, comma))]; slot = value->value;
+        }
+    }
     for (const auto& type : p.types.types) {
         script::foc::AiType ai; ai.name = key(type.name); ai.type_id = assets::object_type_crc(type.name);
         const auto* tactical_type = tables.value().find(type.name);
@@ -382,6 +380,23 @@ core::Result<void> load_inputs(Prepared& p, const vfs::Vfs& filesystem) {
             const auto* value = effective.value().value(tag); if (!value) return std::string{}; data::tag_trace::used(value->value); return key(value->value.raw_text);
         };
         p.movement_class[key(type.name)] = text("MovementClass");
+        {
+            // WAR-U05: the authored override wins when it is not negative; otherwise the largest
+            // default among the type's categories, never below zero.
+            Fixed value = Fixed::from_integer(-1).value(); bool overridden = false;
+            if (const auto* node = effective.value().value("Override_Bounty_SP")) {
+                data::tag_trace::used(node->value);
+                if (const auto number = data::retail::leading_number(node->value.raw_text)) { value = number->value; overridden = value.raw() >= 0; }
+            }
+            if (!overridden) {
+                value = Fixed{};
+                std::string category;
+                const auto flush = [&]() { const auto row = bounty_defaults.find(key(category)); if (row != bounty_defaults.end()) value = std::max(value, row->second); category.clear(); };
+                for (const char c : text("CategoryMask")) { if (c == '|' || c == ',' || std::isspace(static_cast<unsigned char>(c))) { if (!category.empty()) flush(); } else category.push_back(c); }
+                if (!category.empty()) flush();
+            }
+            p.bounty[key(type.name)] = value;
+        }
         const auto immune = text("Immune_To_Damage"); if (data::retail::boolean(immune).value_or(false)) p.immune.insert(key(type.name));
         if (const auto* abilities = effective.value().value("Abilities")) {
             // WAR-86/WAR-U04: a damage-triggered handler is an explicit diagnostic unless its kind is
@@ -468,6 +483,7 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
     }
     LiveConflictAdapters result;
     result.progress = [runtime]() { return runtime->progress; };
+    result.bounty_value = bounty_value_reader(p);
     result.withdraw = [runtime](sim::EntityId conflict, gc::PlayerId player) {
         if (runtime->conflict != conflict || !runtime->progress || !runtime->progress->initiated
             || !runtime->strength || !request_auto_resolve_retreat(runtime->round, *runtime->strength, player)) return false;
@@ -520,6 +536,68 @@ core::Result<LiveConflictAdapters> make_stock_auto_resolver(const vfs::Vfs& file
         auto application = plan_auto_resolve_outcome(conflict, roster, *step.value().state.outcome, outcome_inputs(p, roster, conflict.planet));
         if (!application) return core::Result<std::optional<AutoResolveOutcomeApplication>>::failure(application.error());
         return core::Result<std::optional<AutoResolveOutcomeApplication>>::success(std::move(application).value());
+    };
+    result.outcomes.bounty = [p](gc::GalacticSession& galaxy, const AutoResolveOutcomeApplication& a) -> core::Result<void> {
+        if (a.deaths.empty() || a.destroyed.empty()) return core::Result<void>::success();
+        const auto snapshot = galaxy.snapshot();
+        ConflictRecord admitted; admitted.id = a.result.conflict; admitted.planet = a.planet; admitted.invader = a.invader; admitted.defender = a.defender;
+        admitted.layer = a.land ? BattleLayer::land : BattleLayer::space;
+        auto roster = collect_live_auto_resolve_roster(admitted, *snapshot, p->plan, p->types, p->originals);
+        if (!roster) return core::Result<void>::failure(roster.error());
+        std::map<sim::EntityId, const AutoResolveObject*> objects;
+        for (const auto& object : roster.value().objects) objects.emplace(object.id, &object);
+        const auto faction_benefits = [&](gc::PlayerId player) -> core::Result<bool> {
+            const auto binding = std::find_if(p->plan.player_bindings().begin(), p->plan.player_bindings().end(), [&](const auto& row) { return row.player.player_id == player; });
+            if (binding == p->plan.player_bindings().end()) return fail<bool>("missing bounty player traits");
+            const auto* faction = p->data.faction(binding->faction); if (!faction) return fail<bool>("missing bounty faction traits");
+            // WGS-94: an omitted faction flag retains the false constructor default.
+            return core::Result<bool>::success(faction->benefits_from_corruption.value_or(false));
+        };
+        const auto allied = [&](gc::PlayerId left, gc::PlayerId right) {
+            const auto* control = snapshot->control(); if (!control) return false;
+            return std::any_of(control->relations.begin(), control->relations.end(), [&](const auto& row) { return row.allied && row.player == left && row.other == right; });
+        };
+        const auto owns_nalhutta = [&](gc::PlayerId player) {
+            for (const auto& planet : snapshot->planets()) {
+                if (planet.owner != player) continue;
+                const auto type = p->planet_types.find(planet.id);
+                if (type != p->planet_types.end() && (key(type->second) == "NALHUTTA" || key(type->second) == "NALHUTTA_STORY")) return true;
+            }
+            return false;
+        };
+        // WAR-87: each recipient death is its own event, in death-list order then container order. A death
+        // that the lethal closure kept alive (immune) is absent from the casualty list and blocks its contents.
+        std::set<sim::EntityId> casualties(a.destroyed.begin(), a.destroyed.end()), visited;
+        for (const auto& death : a.deaths) {
+            if (!death.final_blow_player) continue;
+            std::vector<sim::EntityId> pending{death.id};
+            while (!pending.empty()) {
+                const auto id = pending.back(); pending.pop_back();
+                const auto found = objects.find(id);
+                if (found == objects.end() || !casualties.contains(id) || !visited.insert(id).second) continue;
+                const auto& victim = *found->second;
+                pending.insert(pending.end(), victim.fleet_members.rbegin(), victim.fleet_members.rend());
+                pending.insert(pending.end(), victim.contents.rbegin(), victim.contents.rend());
+                const auto value = p->bounty.find(key(victim.current_type));
+                if (value == p->bounty.end()) return fail<void>("missing bounty value for ordinary casualty type");
+                const auto killer = death.final_blow_player;
+                // WAR-60: no payout to the victim's owner or ally.
+                if (killer == victim.owner || allied(victim.owner, killer)) continue;
+                auto killer_benefits = faction_benefits(killer); if (!killer_benefits) return core::Result<void>::failure(killer_benefits.error());
+                // Branch (a), a benefiting killer on a default-corruption system, stays a seam (legacy #4911): it pays nothing here.
+                if (killer_benefits.value()) continue;
+                auto victim_benefits = faction_benefits(victim.owner); if (!victim_benefits) return core::Result<void>::failure(victim_benefits.error());
+                if (!victim_benefits.value() || !owns_nalhutta(killer)) continue;
+                // Collection is treated as enabled here. The flag default is unqualified and the explicit
+                // ENABLE/DISABLE_BOUNTY_COLLECTION switch is not modelled (legacy #4911).
+                const auto credits = (value->second.raw() + Fixed::scale / 2) / Fixed::scale;
+                if (credits <= 0) continue;
+                auto amount = Fixed::from_integer(credits); if (!amount) return core::Result<void>::failure(amount.error());
+                auto added = galaxy.add_credits(killer, amount.value(), one);
+                if (!added) return core::Result<void>::failure(added.error());
+            }
+        }
+        return core::Result<void>::success();
     };
     result.outcomes.control = [](gc::GalacticSession& galaxy, const AutoResolveOutcomeApplication& a) {
         const auto snapshot = galaxy.snapshot();

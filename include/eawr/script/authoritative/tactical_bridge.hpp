@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 // Script commands as replay input (#247, docs/lua-sandbox.md "Command routing"):
 // one authoritative tick of a tactical session that runs scripts. The world
 // owns an optional in-tick object turn; other scripts are serviced after it,
@@ -187,6 +189,8 @@ public:
     [[nodiscard]] core::Result<ScriptedTick> step(
         const sim::PartitionExecutor& executor, std::span<const sim::tactical::PlayerCommand> player_input = {});
 
+    // Diagnostic const query at a completed tick; caller excludes concurrent stepping.
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     [[nodiscard]] const sim::tactical::TacticalSession& world() const noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     // Script state hash at the tick barrier (ScriptScheduler::state_hash).

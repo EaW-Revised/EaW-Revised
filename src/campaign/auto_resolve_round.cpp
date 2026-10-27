@@ -60,6 +60,7 @@ Fixed garrison_power(const AutoResolveCombatant& combatant, const GalacticType& 
     Fixed sum;
     const auto row = garrison(combatant, own);
     for (const auto& spawn : row) {
+        if (!types.find(spawn.type)) continue; // RGC-26: a starting-spawn name that resolves to no type is a null entry; skipped
         const auto first = std::find_if(row.begin(), row.end(), [&](const auto& value) { return same(value.type, spawn.type); });
         sum = plus(sum, mul(power(type(types, spawn.type)), checked(Fixed::from_integer(first->count))));
     }
@@ -161,6 +162,7 @@ std::array<std::vector<Fixed>, 2> attacks(const AutoResolveStrength& strength, c
             const auto spawned = garrison(combatant, own);
             bool fired = false;
             for (const auto& spawn : spawned) {
+                if (!types.find(spawn.type)) continue; // RGC-26: null garrison entry
                 const auto& value = type(types, spawn.type);
                 const auto first = std::find_if(spawned.begin(), spawned.end(), [&](const auto& row) { return same(row.type, spawn.type); });
                 if (first->count > 0 && power(value) > Fixed{}) { hit(value); fired = true; break; }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include "eawr/campaign/setup_plan.hpp"
 #include "../script/foc/galactic_ai_actions.hpp"
 #include "../script/foc/galactic_ai_world.hpp"
@@ -32,11 +33,35 @@ struct GalacticAiIslandMemo {
 };
 
 class GalacticAiUsabilityProvider final : public script::foc::galactic_ai::TrackedStateContributor {
+    struct Cache;
 public:
     using World = script::foc::ai::GalacticWorld;
     using Engine = script::foc::ai::Engine;
     using MovementInput = script::foc::galactic_ai::NativeActions::MovementInput;
     explicit GalacticAiUsabilityProvider(std::shared_ptr<const GalacticAiUsabilityContent>);
+    // Barrier owner prepares sorted, unique chain owners before any worker starts.
+    // One chain keeps ordinary sequential semantics. Multiple chains read the
+    // frozen provider plus their own private cache writes, including foreign reads.
+    [[nodiscard]] core::Result<void> prepare_decision_frontiers(const sim::PartitionExecutor&,
+        std::span<const sim::galactic::PlayerId> players);
+    class PlayerFrontier {
+    public:
+        PlayerFrontier(const PlayerFrontier&) = delete;
+        PlayerFrontier& operator=(const PlayerFrontier&) = delete;
+        ~PlayerFrontier();
+    private:
+        friend class GalacticAiUsabilityProvider;
+        PlayerFrontier(GalacticAiUsabilityProvider&, sim::galactic::PlayerId);
+        const GalacticAiUsabilityProvider* previous_owner_{};
+        GalacticAiUsabilityProvider* previous_frontier_{};
+        GalacticAiUsabilityProvider* acquired_{};
+    };
+    [[nodiscard]] PlayerFrontier player_frontier(sim::galactic::PlayerId player) { return PlayerFrontier(*this, player); }
+    // After every scope has exited, publish only each chain owner's cache and
+    // deadlines in canonical order; foreign caches remain private read overlays.
+    // Connectivity/retained-row publication remains a barrier-owner operation.
+    [[nodiscard]] core::Result<void> commit_decision_frontiers();
+    [[nodiscard]] core::Result<void> discard_decision_frontiers();
     [[nodiscard]] core::Result<bool> usability(sim::galactic::PlayerId,
         const sim::galactic::GalacticSnapshot&, sim::galactic::PlanetId) const;
     [[nodiscard]] core::Result<MovementInput> movement(sim::galactic::PlayerId,
@@ -48,23 +73,25 @@ public:
         const sim::galactic::GalacticSession&, World&, const Engine&, const sim::PartitionExecutor&);
     // #2676/WGA-185: an ability producer must resolve the live fleet predicate
     // before enabling stealth; this bounded provider cannot fabricate that owner.
-    void refuse_live_stealth() noexcept { live_stealth_unavailable_ = true; }
-    void refuse_story_path_inputs() noexcept { story_path_unavailable_ = true; }
+    void refuse_live_stealth() noexcept;
+    void refuse_story_path_inputs() noexcept;
     [[nodiscard]] core::Result<script::foc::galactic_ai::NativeState> capture() const override;
     [[nodiscard]] core::Result<void> restore(const script::foc::galactic_ai::NativeState&) override;
     [[nodiscard]] core::Result<std::string> state_hash() const override;
     [[nodiscard]] core::Result<std::string> record_sync_hash(bool cold = false) const override;
-    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override { return records_.byte_size() + prepared_through_.size() * 13 + 1024; }
+    [[nodiscard]] std::size_t record_byte_upper_bound() const noexcept override;
     // Pending invalidation also depends on upstream writers after our last read.
     [[nodiscard]] std::optional<std::uint64_t> state_revision() const noexcept override { return std::nullopt; }
     struct Work { std::uint64_t generations{}, planets{}, searches{}, edges{}, stealth_preparations{}, site_searches{},
         island_reuses{}, access_reuses{}, presence_reuses{}, island_read_reuses{}, row_reuses{}, block_row_reuses{}; };
-    [[nodiscard]] Work work() const noexcept { return work_; }
+    [[nodiscard]] Work work() const noexcept;
     // Diagnostic and test switch: false rebuilds every derived output from the live owners on each refresh instead of
     // replaying remembered reads, unchanged reach rows and unchanged flattened rows. Outputs and archive bytes are equal
     // either way; this only decides how much work a refresh does.
-    void set_incremental(bool enabled) noexcept { incremental_ = enabled; }
+    void set_incremental(bool enabled) noexcept;
 private:
+    [[nodiscard]] GalacticAiUsabilityProvider* selected_frontier() const noexcept;
+    [[nodiscard]] const Cache* find_cache(sim::galactic::PlayerId) const;
     [[nodiscard]] core::Result<void> prepare_stealth(const sim::galactic::GalacticSnapshot&);
     // Bound by connectivity to the same live owners that use this contributor.
     const sim::galactic::GalacticSession* observed_session_{};
@@ -106,9 +133,18 @@ private:
         };
         IslandPass island_pass;
     };
+    struct PlayerPreparation;
+    struct ConnectivityFinish;
+    [[nodiscard]] core::Result<sim::galactic::PathPlanet> access_row(const PlayerPreparation&,
+        const sim::galactic::GalacticSnapshot&, std::size_t) const;
+    [[nodiscard]] core::Result<void> finish_connectivity(ConnectivityFinish&, Cache&,
+        const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const sim::galactic::PlanetGraph&, std::uint64_t);
+    [[nodiscard]] core::Result<ConnectivityPublication> parallel_connectivity(
+        const sim::galactic::GalacticSnapshot&, World&, const Engine&, const sim::PartitionExecutor&,
+        const sim::galactic::PlanetGraph&, std::uint64_t);
     [[nodiscard]] core::Result<const Cache*> refresh(sim::galactic::PlayerId,
         const sim::galactic::GalacticSnapshot&, const World&, const Engine&, const sim::PartitionExecutor&,
-        const script::foc::ai::DerivedExecutionRestore* = nullptr, bool force = false);
+        const script::foc::ai::DerivedExecutionRestore* = nullptr, bool force = false, PlayerPreparation* = nullptr);
     std::shared_ptr<const GalacticAiUsabilityContent> content_;
     std::map<sim::galactic::PlayerId, Cache> caches_;
     // Retain the consumed expiry, not a later reader's refreshed World clock.
@@ -139,5 +175,12 @@ private:
     std::vector<std::pair<sim::galactic::PlayerId, std::uint64_t>> published_versions_;
     std::uint64_t output_epoch_{};
     Work work_;
+    // Frontiers own only queried caches/deadlines; retained rows and their digest
+    // stay immutable on the frozen barrier owner until the canonical join.
+    const GalacticAiUsabilityProvider* frozen_provider_{};
+    std::map<sim::galactic::PlayerId, std::unique_ptr<GalacticAiUsabilityProvider>> decision_frontiers_;
+    std::atomic<bool> frontier_active_{};
+    static thread_local const GalacticAiUsabilityProvider* frontier_owner_;
+    static thread_local GalacticAiUsabilityProvider* frontier_provider_;
 };
 } // namespace eawr::campaign

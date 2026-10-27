@@ -129,7 +129,8 @@ void EawrUiSlider::set_from_track(const float x) {
 }
 
 void EawrUiSlider::_gui_input(const Ref<InputEvent>& event) {
-    const double step = get_step() > 0.0 ? get_step() : (get_max() - get_min()) / 20.0;
+    const double step = button_step_ > 0.0 ? button_step_
+        : get_step() > 0.0 ? get_step() : (get_max() - get_min()) / 20.0;
     if (const Ref<InputEventMouseMotion> motion = event; motion.is_valid()) {
         const Part part = part_at(motion->get_position());
         if (held_ == Part::track) set_from_track(motion->get_position().x);

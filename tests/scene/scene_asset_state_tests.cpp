@@ -1,8 +1,300 @@
 #include "scene_test_support.hpp"
+#include "eawr/assets/asset_names.hpp"
+#include <bit>
+#include <thread>
 
 namespace eawr::tests::scene_tests {
 
 namespace {
+void texture_name_contracts() {
+    Assets assets;
+    const auto access = assets.access();
+    constexpr std::string_view root = "data/art/textures/";
+    assets.files.insert("data/art/textures/folder.with.dots/hull.dds");
+    assets.files.insert("data/art/textures/folder.with.dots/hull.tga");
+    const auto resolve = [&](const std::string_view name) {
+        return eawr::assets::resolve_texture_name(root, name, access.exists);
+    };
+    for (const auto suffix : {".png", ".bmp", ".jpg", ".SOURCE", ".detail", ".detail.png"}) {
+        expect(resolve(" Folder.With.Dots\\HULL" + std::string(suffix) + " ")
+                   == "data/art/textures/folder.with.dots/hull.dds",
+            "source extensions and multi-dot leaves retry first dot-token DDS with canonical paths");
+    }
+    expect(resolve("folder.with.dots/hull") == "data/art/textures/folder.with.dots/hull.tga",
+        "extensionless collision preserves the old TGA-before-DDS winner");
+    // Compare the complete miss sequence as well as winners, including the
+    // legacy duplicate literal probe and directory dots on extensionless names.
+    for (const auto name : {"hull", "hull.tga", "hull.dds", "hull.detail.tga", "hull.detail.dds",
+                            "folder.with.dots/hull", ".tga", ".dds"}) {
+        std::vector<std::string> candidates;
+        const auto missing = [&](const std::string& path) { candidates.push_back(path); return false; };
+        const auto result = eawr::assets::resolve_texture_name(root, name, missing);
+        std::string stem = name;
+        if (stem.size() > 4 && (stem.ends_with(".tga") || stem.ends_with(".dds"))) stem.resize(stem.size() - 4);
+        expect(result.empty() && candidates == std::vector<std::string>{std::string(root) + name,
+                   std::string(root) + stem + ".tga", std::string(root) + stem + ".dds"},
+            "legacy name shapes preserve the complete original probe sequence");
+    }
+    assets.files.insert("data/art/textures/folder.with.dots/hull.detail.dds");
+    expect(resolve("folder.with.dots/hull.detail.tga") == "data/art/textures/folder.with.dots/hull.detail.dds",
+        "dotted TGA stem keeps full-stem DDS ahead of first-token DDS");
+    assets.files.insert("data/art/textures/folder.with.dots/hull.detail.tga");
+    expect(resolve("folder.with.dots/hull.detail.dds") == "data/art/textures/folder.with.dots/hull.detail.dds",
+        "dotted DDS literal wins when both full-stem siblings exist");
+    assets.files.erase("data/art/textures/folder.with.dots/hull.detail.dds");
+    expect(resolve("folder.with.dots/hull.detail.dds") == "data/art/textures/folder.with.dots/hull.detail.tga",
+        "dotted DDS stem keeps full-stem TGA ahead of first-token DDS");
+    expect(resolve("folder.with.dots/hull.TGA") == "data/art/textures/folder.with.dots/hull.tga",
+        "a literal TGA wins even when DDS is present");
+    assets.files.insert("data/art/textures/folder.with.dots/hull.png");
+    expect(resolve("FOLDER.WITH.DOTS/HULL.PNG") == "data/art/textures/folder.with.dots/hull.png",
+        "a case-folded literal PNG wins over shipped siblings");
+    assets.files.insert("data/art/textures/folder.with.dots/hull.detail.dds");
+    expect(resolve("folder.with.dots/hull.detail.png") == "data/art/textures/folder.with.dots/hull.dds",
+        "multi-dot retry uses the first dot-token rather than replacing the last extension");
+    assets.files.erase("data/art/textures/folder.with.dots/hull.dds");
+    expect(resolve("folder.with.dots/hull.bmp").empty(),
+        "other source extensions do not invent TGA retries");
+    expect(resolve("folder.with.dots/hull.dds") == "data/art/textures/folder.with.dots/hull.tga",
+        "existing DDS-to-TGA fallback stays available");
+    expect(resolve("folder.with.dots/hull") == "data/art/textures/folder.with.dots/hull.tga",
+        "existing extensionless-to-TGA fallback stays available");
+    expect(resolve("missing.png").empty() && resolve(" ").empty(),
+        "a missing or blank texture stays unresolved for placeholder and diagnostic handling");
+    assets.models.emplace("data/art/models/source.alo", model({"MeshGloss.fx"}, "Folder.With.Dots/HULL.PNG", {}));
+    auto surfaces = eawr::scene::construction_surfaces(access, "data/art/models/source.alo");
+    expect(surfaces.size() == 1 && surfaces[0].textures.size() == 1
+        && surfaces[0].textures[0].resolved == "data/art/textures/folder.with.dots/hull.png",
+        "scene acquisition uses the shared literal-first texture rule");
+    assets.files.erase("data/art/textures/folder.with.dots/hull.png");
+    assets.files.insert("data/art/textures/folder.with.dots/hull.dds");
+    surfaces = eawr::scene::construction_surfaces(access, "data/art/models/source.alo");
+    expect(surfaces.size() == 1 && surfaces[0].textures.size() == 1
+        && surfaces[0].textures[0].resolved == "data/art/textures/folder.with.dots/hull.dds",
+        "PNG-authored scene material finds a shipped DDS");
+    assets.files.erase("data/art/textures/folder.with.dots/hull.dds");
+    assets.files.erase("data/art/textures/folder.with.dots/hull.tga");
+    surfaces = eawr::scene::construction_surfaces(access, "data/art/models/source.alo");
+    expect(surfaces.size() == 1 && surfaces[0].textures.size() == 1
+        && surfaces[0].textures[0].resolved.empty()
+        && surfaces[0].textures[0].declared == "Folder.With.Dots/HULL.PNG",
+        "scene miss retains the authored diagnostic name and unresolved placeholder input");
+}
+
+void shared_model_cache_contracts() {
+    TempTree tree;
+    const auto directory = tree.root / "art" / "models";
+    std::filesystem::create_directories(directory);
+    // A synthetic model with an empty skeleton and connections, authored from
+    // the chunk grammar. Distinct mounts must still retain distinct provenance.
+    const std::array<std::uint32_t, 11> words{
+        0x200, 0x8000000cU, 0x201, 4, 0,
+        0x600, 0x80000014U, 0x601, 12, 0x00000401, 0x04040000};
+    std::vector<std::byte> bytes;
+    for (const auto word : words)
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            bytes.push_back(static_cast<std::byte>((word >> shift) & 0xffU));
+    // Complete the second connection mini's zero count.
+    bytes.insert(bytes.end(), 4, std::byte{});
+    const auto write = [&](std::string_view name, std::span<const std::byte> data) {
+        std::ofstream file(directory / name, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    };
+    write("shared.alo", bytes);
+    write("bad.alo", {});
+    const std::array<std::byte, 8> particle{
+        std::byte{0}, std::byte{9}, std::byte{0}, std::byte{0},
+        std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+    write("particle.alo", particle);
+    const std::array mounts{eawr::vfs::MountSpec{"first", tree.root, "data", {}}};
+    std::weak_ptr<const eawr::assets::Model> lifetime;
+    {
+        auto mounted = eawr::vfs::Vfs::mount(mounts);
+        expect(static_cast<bool>(mounted), "synthetic model cache mount succeeds");
+        if (!mounted) return;
+        auto& filesystem = mounted.value();
+        eawr::scene::VfsAssetCache first(filesystem);
+        std::array<const eawr::assets::Model*, 16> results{};
+        std::vector<std::jthread> threads;
+        for (std::size_t i = 0; i < results.size(); ++i) threads.emplace_back([&, i] {
+            eawr::scene::VfsAssetCache other(filesystem);
+            results[i] = other.model("data\\art\\models\\shared.alo");
+        });
+        threads.clear();
+        auto loaded = first.shared_model("DATA/ART/MODELS/SHARED.ALO");
+        expect(static_cast<bool>(loaded), "synthetic model decodes");
+        if (!loaded) return;
+        lifetime = loaded.value();
+        const auto* identity = loaded.value().get();
+        expect(std::all_of(results.begin(), results.end(), [&](const auto* item) { return item == identity; }),
+            "all cache objects and threads share one immutable decoded identity");
+        auto stats = first.model_stats();
+        expect(stats.calls == 17 && stats.hits == 16 && stats.misses == 1 && stats.unique_loads == 1,
+            "cross-cache aliases decode once with exact work counters");
+        expect(stats.entries == 1 && stats.successful_entries == 1 && stats.failed_entries == 0
+            && stats.capacity == eawr::assets::payload_capacity(*identity),
+            "concurrent aliases count decoded vector capacity exactly once");
+        const auto initial_capacity = stats.capacity;
+        const auto failed = first.shared_model("data/art/models/bad.alo");
+        write("bad.alo", bytes);
+        const auto failed_again = eawr::scene::VfsAssetCache(filesystem).shared_model("DATA/ART/MODELS/BAD.ALO");
+        expect(!failed && !failed_again && eawr::core::format_diagnostic(failed.error()) == eawr::core::format_diagnostic(failed_again.error()),
+            "failed decoding and its diagnostic are cached across consumers");
+        expect(first.particle_system("data/art/models/particle.alo")
+            && eawr::scene::VfsAssetCache(filesystem).particle_system("DATA/ART/MODELS/PARTICLE.ALO"),
+            "particle-system rejection remains distinct and is shared");
+        expect(first.model("data/art/models/absent.alo") == nullptr
+            && first.model("DATA/ART/MODELS/ABSENT.ALO") == nullptr,
+            "missing model aliases share a failed entry");
+        stats = first.model_stats();
+        expect(stats.misses == 4 && stats.unique_loads == 4 && stats.hits == 19,
+            "successful, malformed, particle and missing entries each load once");
+        expect(stats.entries == 4 && stats.successful_entries == 1 && stats.failed_entries == 3
+            && stats.particle_entries == 1 && stats.capacity == initial_capacity,
+            "failures have entries without adding decoded capacity");
+        first.set_model_cache_budget(0);
+        expect(!first.shared_model("data/art/models/bad.alo")
+            && first.particle_system("data/art/models/particle.alo")
+            && first.model_stats().unique_loads == 4,
+            "disabling successful retention preserves cached failures and particle classification");
+        const std::array other_mounts{eawr::vfs::MountSpec{"second", tree.root, "data", {}}};
+        auto other = eawr::vfs::Vfs::mount(other_mounts);
+        expect(static_cast<bool>(other), "second content set mounts");
+        if (other) {
+            eawr::scene::VfsAssetCache separate(other.value());
+            const auto* other_model = separate.model("data/art/models/shared.alo");
+            expect(other_model && other_model != identity && other_model->source.layer_id == "second",
+                "different mounted content never aliases decoded models or layer provenance");
+            expect(separate.model("data/art/models/bad.alo") != nullptr,
+                "a new content set retries failures from an earlier mount");
+        }
+    }
+    expect(lifetime.expired(), "decoded models are released with their mounted content set");
+}
+
+void model_cache_budget_contracts() {
+    TempTree tree;
+    const auto directory = tree.root / "art" / "models";
+    std::filesystem::create_directories(directory);
+    // One bone plus empty connections, authored from the public chunk grammar.
+    const auto u32 = [](std::vector<std::byte>& out, std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            out.push_back(static_cast<std::byte>((value >> shift) & 0xffU));
+    };
+    const auto chunk = [&](std::uint32_t kind, const std::vector<std::byte>& payload, bool group = false) {
+        std::vector<std::byte> out;
+        u32(out, kind);
+        u32(out, static_cast<std::uint32_t>(payload.size()) | (group ? 0x80000000U : 0));
+        out.insert(out.end(), payload.begin(), payload.end());
+        return out;
+    };
+    const auto add = [](std::vector<std::byte>& out, const std::vector<std::byte>& part) {
+        out.insert(out.end(), part.begin(), part.end());
+    };
+    std::vector<std::byte> bone;
+    add(bone, chunk(0x203, {std::byte{'R'}, std::byte{'O'}, std::byte{'O'}, std::byte{'T'}, std::byte{}}));
+    std::vector<std::byte> data;
+    u32(data, 0xffffffffU);
+    u32(data, 1);
+    for (unsigned index = 0; index < 12; ++index)
+        u32(data, std::bit_cast<std::uint32_t>(index == 0 || index == 4 || index == 8 ? 1.0F : 0.0F));
+    add(bone, chunk(0x205, data));
+    std::vector<std::byte> skeleton;
+    std::vector<std::byte> count;
+    u32(count, 1);
+    add(skeleton, chunk(0x201, count));
+    add(skeleton, chunk(0x202, bone, true));
+    std::vector<std::byte> connections;
+    add(connections, chunk(0x601, {std::byte{1}, std::byte{4}, std::byte{}, std::byte{}, std::byte{}, std::byte{},
+        std::byte{4}, std::byte{4}, std::byte{}, std::byte{}, std::byte{}, std::byte{}}));
+    std::vector<std::byte> bytes;
+    add(bytes, chunk(0x200, skeleton, true));
+    add(bytes, chunk(0x600, connections, true));
+    for (const auto name : {"a.alo", "b.alo", "c.alo"}) {
+        std::ofstream file(directory / name, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+    const std::array mounts{eawr::vfs::MountSpec{"budget", tree.root, "data", {}}};
+    auto mounted = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(mounted), "model budget fixture mounts");
+    if (!mounted) return;
+    auto& filesystem = mounted.value();
+    eawr::scene::VfsAssetCache cache(filesystem);
+    const auto load = [&](std::string_view name) -> std::shared_ptr<const eawr::assets::Model> {
+        auto result = cache.shared_model(std::string("data/art/models/") + std::string(name));
+        expect(static_cast<bool>(result), "budgeted models remain decodable");
+        return result ? result.value() : nullptr;
+    };
+    auto a = load("a.alo");
+    if (!a) return;
+    const auto size = eawr::assets::payload_capacity(*a).total_bytes();
+    expect(size > 0 && a->bones.size() == 1 && a->bones.front().name == "ROOT",
+        "budget fixture has real decoded capacity and unchanged bone data");
+    cache.set_model_cache_budget(size * 2);
+    auto b = load("b.alo");
+    std::weak_ptr<const eawr::assets::Model> old_b = b;
+    b.reset();
+    expect(load("a.alo").get() == a.get(), "a cache hit refreshes recency");
+    auto c = load("c.alo");
+    expect(old_b.expired(), "least recently used model releases when no caller owns it");
+    auto stats = cache.model_stats();
+    expect(stats.cache_retained_bytes == size * 2 && stats.cache_evictions == 1
+        && stats.capacity.total_bytes() == size * 2, "byte budget counts current live models exactly once");
+    cache.set_model_cache_budget(0);
+    stats = cache.model_stats();
+    expect(stats.cache_retained_bytes == 0 && stats.capacity.total_bytes() == size * 2,
+        "budget trimming preserves externally owned payload and reports it honestly");
+    expect(load("a.alo").get() == a.get() && cache.model_stats().unique_loads == 3,
+        "an evicted shared owner still supplies the canonical identity without another decode");
+    std::weak_ptr<const eawr::assets::Model> old_a = a;
+    a.reset();
+    expect(old_a.expired(), "weak identity indexing does not retain released payload");
+    a = load("a.alo");
+    expect(a && a->bones.front().name == "ROOT" && cache.model_stats().unique_loads == 4,
+        "a later first spawn re-decodes after all owners release a model");
+    c.reset();
+    std::weak_ptr<const eawr::assets::Model> raw_lifetime;
+    {
+        eawr::scene::VfsAssetCache raw_owner(filesystem);
+        const auto* raw = raw_owner.model("data/art/models/c.alo");
+        auto shared = load("c.alo");
+        raw_lifetime = shared;
+        shared.reset();
+        cache.set_model_cache_budget(0);
+        expect(raw && raw->bones.front().name == "ROOT" && !raw_lifetime.expired(),
+            "raw model pointers survive eviction until their wrapper is destroyed");
+    }
+    expect(raw_lifetime.expired(), "destroying a raw-pointer wrapper releases its pin");
+    cache.set_model_cache_budget(size - 1);
+    auto oversized = load("b.alo");
+    expect(oversized && cache.model_stats().cache_retained_bytes == 0,
+        "an oversized asset is usable without exceeding cache retention or rejecting the asset");
+    cache.set_model_cache_budget(0);
+    std::array<std::shared_ptr<const eawr::assets::Model>, 16> results;
+    const auto before = cache.model_stats().unique_loads;
+    std::vector<std::jthread> threads;
+    for (std::size_t index = 0; index < results.size(); ++index) threads.emplace_back([&, index] {
+        eawr::scene::VfsAssetCache other(filesystem);
+        auto result = other.shared_model("data/art/models/c.alo");
+        if (result) results[index] = result.value();
+    });
+    threads.clear();
+    expect(results.front() && std::all_of(results.begin(), results.end(), [&](const auto& item) {
+        return item.get() == results.front().get();
+    }) && cache.model_stats().unique_loads == before + 1,
+        "concurrent callers share one fully published decode even with retention disabled");
+    results.fill(nullptr);
+    expect(cache.model_stats().capacity.total_bytes() == size * 2,
+        "live capacity drops when concurrent aliases release their final owner");
+    expect(cache.model_stats().budget_replay.empty(), "budget replay does no work while the owner census is off");
+    eawr::scene::VfsAssetCache::enable_owner_census(filesystem);
+    for (const auto name : {"a.alo", "b.alo", "a.alo", "c.alo", "b.alo", "a.alo"}) load(name);
+    const auto replay = cache.model_stats().budget_replay;
+    expect(replay.size() == 5 && replay.front().budget_bytes == (128ULL << 20U)
+        && std::all_of(replay.begin(), replay.end(), [](const auto& item) { return item.decodes == 3; }),
+        "budget replay counts one decode per distinct model when every budget holds the working set");
+}
+
 void missing_material_effect_contracts() {
     using eawr::scene::missing_material_effect;
     Assets assets;
@@ -31,6 +323,7 @@ void missing_material_effect_contracts() {
 } // namespace
 
 void selector_contracts() {
+    texture_name_contracts();
     expect(eawr::scene::legacy_selectors().size() == 22, "the selector table matches the accepted legacy list");
     const auto* alpha = eawr::scene::find_legacy_selector("MeshAlpha.fx");
     expect(alpha != nullptr && alpha->transparent && alpha->technique == "sph_t1",
@@ -140,6 +433,8 @@ void selector_contracts() {
 }
 
 void static_mesh_state_contracts() {
+    shared_model_cache_contracts();
+    model_cache_budget_contracts();
     missing_material_effect_contracts();
     {
         eawr::assets::Model attached;

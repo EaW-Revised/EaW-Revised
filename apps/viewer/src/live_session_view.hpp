@@ -14,7 +14,7 @@
 #include "battle_scoring.hpp"
 #include "debris_props.hpp"
 #include "space_environment.hpp"
-#include "space_populate.hpp"
+#include "battle_scene.hpp"
 
 #include "eawr/core/result.hpp"
 #include "eawr/data/xml.hpp"
@@ -22,9 +22,9 @@
 #include "eawr/platform/tactical_feed.hpp"
 #include "eawr/presentation/animation/unit_clips.hpp"
 #include "eawr/presentation/effects/light_effect.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
 #include "eawr/presentation/ui/battle_messages.hpp"
 #include "eawr/presentation/ui/battle_results.hpp"
@@ -80,12 +80,19 @@ class BattleSource;
 //
 // `--eawr-live-reveal on` also works with `--eawr-live-session m2` (a viewer debug aid, #80): it
 // draws every instance regardless of the local player's fog there too, but presentation-only
-// (space::interpolate_units' `reveal`), never by touching the m2 session's sensor content, so the
+// (live::interpolate_units' `reveal`), never by touching the m2 session's sensor content, so the
 // live AI's decisions, the commands it issues and the session's headless hashes are unaffected.
 // Selection and order input still read TacticalSnapshot ownership, not the reveal, so a revealed
 // enemy cannot be selected or ordered.
 class LiveSessionView final {
 public:
+    [[nodiscard]] std::shared_ptr<const sim::tactical::LandTerrain> land_terrain() const {
+        return land_content_ ? land_content_->land_terrain : nullptr;
+    }
+    [[nodiscard]] bool finished_successfully() const noexcept {
+        return finished_ && finish_status_ == "stopped" && simulation_error_.empty() && headless_equal_.value_or(true);
+    }
+    void prepare_land_models(const vfs::Vfs& files, const data::Catalog& catalog) { prepare_clips(files, catalog); }
     using PreparedBattle = live_session::PreparedBattle;
     [[nodiscard]] std::shared_ptr<const PreparedBattle> prepared_battle() const;
     // #76 for the command bar (#454, docs/behaviour/foc-ability-buttons.md): the ability state of a
@@ -198,7 +205,7 @@ public:
     // the placed ships that draw its units. False with `failure` set otherwise.
     [[nodiscard]] bool prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, std::string_view map_path,
                                std::string& failure);
-    [[nodiscard]] const std::vector<SpacePopulation::Options::PlacedShip>& placed_ships() const noexcept {
+    [[nodiscard]] const std::vector<BattleScene::PlacedUnit>& placed_ships() const noexcept {
         return placed_ships_;
     }
     [[nodiscard]] const std::vector<std::uint32_t>& session_records() const noexcept { return session_records_; }
@@ -348,24 +355,25 @@ public:
     // One presentation frame: poses the population's live ships and says whether to capture.
     // After a simulation failure it keeps the last poses and carries the error instead. A unit
     // the session destroyed is replaced by its death clone playing its death clip (#81).
-    [[nodiscard]] core::Result<SpaceLiveUpdate> frame(SpacePopulation& population, GodotRenderer& renderer,
+    [[nodiscard]] core::Result<BattleScene::Update> frame(BattleScene& population, GodotRenderer& renderer,
                                                       double delta);
     // #421: where death clone `ship` stands at presented tick `tick` and its death clip's frame
     // there, as frame() draws it. Nullopt when the ship is no clone frame() shows, or when at
     // that tick it had not appeared yet or had faded out. `death` is empty for a clone whose clip
     // did not start (it keeps its pose).
     using CloneFrame = live_session::CloneFrame;
-    [[nodiscard]] std::optional<CloneFrame> clone_frame(const SpacePopulation& population, std::size_t ship,
+    [[nodiscard]] std::optional<CloneFrame> clone_frame(const BattleScene& population, std::size_t ship,
                                                         double tick) const;
     // #429: retires the ships of the clones frame() stopped drawing. The map mode calls it once
     // the unit emitters have run the frame's samples, a stall's catch-up included, in which such
     // a clone may still have stood; frame() calls it first in case the last frame did not.
-    void retire_clones(SpacePopulation& population, GodotRenderer& renderer,
+    void retire_clones(BattleScene& population, GodotRenderer& renderer,
         const std::function<bool(std::size_t)>& terminal_ready = {});
     // Stops the session, checks its hashes against a headless run of its recording and writes
     // the requested hash and replay files. Idempotent.
     void finish();
     [[nodiscard]] std::vector<std::uint8_t> finished_replay_bytes(std::string& error);
+    [[nodiscard]] std::vector<std::uint8_t> finished_session_replay_bytes(std::string& error);
     // #615: once the simulation thread failed, writes the session's replay through the failed
     // tick beside Godot's log, so the failure replays headless. Once per session.
     void save_failure_replay();
@@ -388,6 +396,9 @@ public:
     };
     void trace_frames(bool enabled) noexcept { trace_frames_ = enabled; }
     [[nodiscard]] double bookkeeping_ms() const noexcept { return bookkeeping_ms_; }
+    [[nodiscard]] std::size_t frame_slots_grown() const noexcept { return arrival_slots_.frame_grown; }
+    [[nodiscard]] double slot_growth_ms() const noexcept { return arrival_slots_.growth_ms; }
+    [[nodiscard]] bool warm_campaign_slots(BattleScene&, GodotRenderer&);
     [[nodiscard]] double pose_ms() const noexcept { return pose_ms_; }
     [[nodiscard]] double opacity_ms() const noexcept { return opacity_ms_; }
     [[nodiscard]] double tick_wait_ms() const noexcept { return tick_wait_ms_; }
@@ -431,6 +442,9 @@ public:
     [[nodiscard]] ui::BuildOptionState build_menu_state(const sim::tactical::BuildOption& option) const;
     // The local player's faction ID in the setup (the station menus' key), or nothing.
     [[nodiscard]] std::optional<sim::tactical::FactionId> local_faction_id() const noexcept;
+    // The menu a selected producer offers the local buyer. WPR-33/WPR-22: an ordinary (allied) producer
+    // lists its OWNER's faction menu, as the session's build gate does; construction pads list the builder's.
+    [[nodiscard]] const sim::tactical::StationMenu* producer_menu(const sim::tactical::TacticalInstance& instance) const noexcept;
     [[nodiscard]] bool hardpoint_repair_allowed(sim::EntityId station, std::uint32_t hardpoint) const;
     bool repair_hardpoint(sim::EntityId station, std::uint32_t hardpoint);
     bool buy(sim::EntityId station, sim::tactical::TypeId type);
@@ -461,6 +475,14 @@ public:
     [[nodiscard]] bool placement_valid() const noexcept { return preview_valid_ && reinforcement_allowed(); }
     using EconomyRequests = live_session::EconomyRequests;
     [[nodiscard]] const EconomyRequests& economy_requests() const noexcept { return economy_requests_; }
+    // Opt-in diagnostic registration; borrows components through the final frame.
+    void memory_capacity_probe(std::function<diagnostics::MemoryCapacity()> probe) {
+        memory_capacity_probe_ = std::move(probe);
+    }
+    void owner_census_probe(std::function<void(diagnostics::OwnerCensus&)> probe) {
+        owner_census_probe_ = std::move(probe);
+    }
+    void capture_memory_capacity_post_load(const BattleScene& population);
     // The unit and combat tables the session runs with (prepare() loaded them).
     [[nodiscard]] const units::UnitTables* tables() const noexcept { return tables_ ? &*tables_ : nullptr; }
     // WDF-05: the space map's box whose low corner starts the fighter grids; the world origin without content.
@@ -502,12 +524,12 @@ private:
         const std::optional<std::uint64_t>& lost_through);
     void index_frame_construction(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest);
     std::optional<core::Diagnostic> remember_frame_fog(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
         const std::vector<sim::EntityId>& visible_now,
         const std::vector<sim::EntityId>& drawn_now,
         std::vector<sim::EntityId>& immediate,
-        std::vector<space::FogGhosts::Observation>& observations);
+        std::vector<live::FogGhosts::Observation>& observations);
     void advance_frame_visibility(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
         const std::vector<sim::EntityId>& alive_now,
         const std::vector<sim::EntityId>& drawn_now,
@@ -516,43 +538,43 @@ private:
         const std::vector<sim::EntityId>& drawn_now,
         std::vector<sim::EntityId>& fading_entities);
     void bind_frame_units(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        const std::vector<space::LiveUnitPose>& poses,
-        const std::vector<space::LiveUnitPose>& spinning,
+        const std::vector<live::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& spinning,
         const std::vector<sim::EntityId>& visible_now);
-    std::optional<core::Diagnostic> compose_frame_units(SpacePopulation& population,
-        const std::vector<space::LiveUnitPose>& poses,
-        const std::vector<space::LiveUnitPose>& spinning,
-        std::vector<SpacePopulation::LivePose>& live,
-        std::vector<SpacePopulation::LiveClipPose>& clip_poses);
-    void compose_frame_wrecks(SpacePopulation& population,
+    std::optional<core::Diagnostic> compose_frame_units(BattleScene& population,
+        const std::vector<live::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& spinning,
+        std::vector<BattleScene::LivePose>& live,
+        std::vector<BattleScene::LiveClipPose>& clip_poses);
+    void compose_frame_wrecks(BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live,
-        std::vector<SpacePopulation::LiveClipPose>& clip_poses);
+        std::vector<BattleScene::LivePose>& live,
+        std::vector<BattleScene::LiveClipPose>& clip_poses);
     void compose_frame_projectiles(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& previous,
         const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live);
+        std::vector<BattleScene::LivePose>& live);
     std::optional<core::Diagnostic> compose_frame_preview(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        std::vector<SpacePopulation::LivePose>& live);
+        std::vector<BattleScene::LivePose>& live);
     void compose_frame_beacons(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        std::vector<SpacePopulation::LivePose>& live);
+        std::vector<BattleScene::LivePose>& live);
     void apply_frame_opacity(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        const std::vector<space::LiveUnitPose>& poses,
+        const std::vector<live::LiveUnitPose>& poses,
         std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
-    void apply_frame_shield_flashes(SpacePopulation& population,
+    void apply_frame_shield_flashes(BattleScene& population,
         GodotRenderer& renderer,
         const std::map<sim::EntityId, std::array<float, 3>>& visual_scales);
     void publish_frame_instances(const std::shared_ptr<const sim::tactical::TacticalSnapshot>& latest,
-        SpacePopulation& population,
+        BattleScene& population,
         GodotRenderer& renderer,
-        const std::vector<space::FogGhosts::Observation>& observations,
-        SpaceLiveUpdate& update);
-    std::optional<core::Diagnostic> schedule_frame_capture(SpaceLiveUpdate& update);
+        const std::vector<live::FogGhosts::Observation>& observations,
+        BattleScene::Update& update);
+    std::optional<core::Diagnostic> schedule_frame_capture(BattleScene::Update& update);
 
     void write_report_identity(std::ostream& output) const;
     void write_report_carrier_riders(std::ostream& output) const;
@@ -563,6 +585,15 @@ private:
     void write_report_slots(std::ostream& output) const;
     void write_report_squadrons(std::ostream& output) const;
     void write_report_frame_progress_and_visibility(std::ostream& output) const;
+    void capture_memory_capacity(const BattleScene& population);
+    void capture_memory_capacity_600(const BattleScene& population);
+    [[nodiscard]] std::string memory_capacity_snapshot(const BattleScene& population,
+        const char* boundary, double presented_tick, std::uint64_t snapshot_tick, bool include_owner_census) const;
+    std::string memory_capacity_report_;
+    std::string memory_capacity_600_report_;
+    std::string memory_capacity_post_load_report_;
+    std::function<diagnostics::MemoryCapacity()> memory_capacity_probe_;
+    std::function<void(diagnostics::OwnerCensus&)> owner_census_probe_;
     void write_report_fog(std::ostream& output) const;
     void write_report_battle_start(std::ostream& output) const;
     void write_report_time_controls(std::ostream& output) const;
@@ -594,6 +625,9 @@ private:
     // #459: hands the time panel's state to the session (pause, target rate).
     void apply_time();
 
+    [[nodiscard]] bool prepare_land(const vfs::Vfs&, const data::Catalog&, std::string_view, std::string&);
+    void bind_land_roster(const platform::LiveSession&);
+    std::optional<sim::tactical::TacticalContent> land_content_;
     Options options_;
     std::optional<battle::BattleStart> start_;
     // #79: the FoC AI beside the world (m2 with the AI on), and the players it runs.
@@ -622,7 +656,7 @@ private:
     std::unique_ptr<ui::CommandSink> input_sink_;
     std::string recovery_input_feedback_;
     std::shared_ptr<platform::TacticalFeed> session_;
-    std::vector<SpacePopulation::Options::PlacedShip> placed_ships_;
+    std::vector<BattleScene::PlacedUnit> placed_ships_;
     std::vector<std::uint32_t> session_records_;
     std::vector<sim::EntityId> unfogged_map_props_;
     std::vector<sim::EntityId> draw_visibility_;
@@ -658,8 +692,8 @@ private:
     // Frame and interpolation metadata are informational only.
     using DrawDigestRow = live_session::DrawDigestRow;
     std::vector<DrawDigestRow> draw_digest_rows_;
-    void record_draw_digest(const std::vector<SpacePopulation::LivePose>& drawn,
-                            const std::vector<SpacePopulation::LiveClipPose>& clips, std::uint64_t tick);
+    void record_draw_digest(const std::vector<BattleScene::LivePose>& drawn,
+                            const std::vector<BattleScene::LiveClipPose>& clips, std::uint64_t tick);
     [[nodiscard]] std::string draw_digest_report() const;
     // #3957: the live units of (owner, type) that found no launch slot, so were simulated but not drawn (report: slotless).
     std::map<std::pair<sim::tactical::PlayerId, sim::tactical::TypeId>, std::set<sim::EntityId>> slotless_hits_;
@@ -711,18 +745,18 @@ private:
     std::map<sim::tactical::PlayerId, sim::tactical::TeamId> team_of_player_;
     std::vector<VisibleUnit> visible_;
     space::SnapshotIndex snapshot_index_;
-    std::vector<space::LiveUnitPose> poses_;
-    std::vector<SpacePopulation::LivePose> live_poses_;
-    std::vector<SpacePopulation::LiveClipPose> clip_poses_;
+    std::vector<live::LiveUnitPose> poses_;
+    std::vector<BattleScene::LivePose> live_poses_;
+    std::vector<BattleScene::LiveClipPose> clip_poses_;
     const particles::StepExecutor* pose_workers_{};
     // #535: the local player's per-unit fog fade (space-fog-presentation.md FW-16 to FW-18),
     // and the ticks it has already run through (frame() may see the same tick more than once
     // while paused).
-    space::UnitFade fade_;
-    space::FogGhosts fog_ghosts_;
+    live::UnitFade fade_;
+    live::FogGhosts fog_ghosts_;
     std::map<sim::EntityId, RadarMemory> radar_memories_;
     std::vector<sim::EntityId> fog_immediate_;
-    std::vector<space::FogGhosts::Observation> fog_observations_;
+    std::vector<live::FogGhosts::Observation> fog_observations_;
     std::optional<std::array<float, 3>> neutral_fog_colour_;
     // #3076: Factions.xml `Color` / `No_Colorization_Color`, and the types' own nonzero
     // `No_Colorization_Color`. Colorization is off outside a skirmish (campaign battles).
@@ -735,8 +769,8 @@ private:
     std::vector<std::string> fog_ghost_rows_;
     std::map<sim::EntityId, std::tuple<bool, bool, std::size_t>> fog_ghost_logged_states_;
     std::uint64_t fog_ghost_logged_tick_{std::numeric_limits<std::uint64_t>::max()};
-    std::map<sim::EntityId, space::NebulaBlend> nebula_blends_;
-    std::map<sim::EntityId, space::StealthBlend> stealth_blends_;
+    std::map<sim::EntityId, live::NebulaBlend> nebula_blends_;
+    std::map<sim::EntityId, live::StealthBlend> stealth_blends_;
     live_session::LanTiming lan_timing_;
     std::optional<std::uint64_t> nebula_blend_tick_;
     std::uint64_t nebula_blend_missing_ticks_{};
@@ -858,7 +892,7 @@ private:
     double live_frame_ms_{};
     double session_tail_ms_{};
     double clip_pose_ms_{};
-    std::map<sim::EntityId, SpacePopulation::LivePose> last_poses_;
+    std::map<sim::EntityId, BattleScene::LivePose> last_poses_;
     // Report rows: the clips each start unit type's model has, and each clone set up.
     std::vector<std::string> unit_clip_rows_;
     std::vector<std::string> death_clone_rows_;

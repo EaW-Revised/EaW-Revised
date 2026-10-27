@@ -1,5 +1,9 @@
 #include "space_populate_internal.hpp"
+#include "eawr/assets/asset_names.hpp"
+
 #include "eawr/core/text.hpp"
+
+#include <algorithm>
 
 #include <cstddef>
 #include <utility>
@@ -15,6 +19,9 @@ namespace eawr::presentation::godot_backend {
 // textures it does not read itself.
 [[nodiscard]] std::string probe(scene::VfsAssetCache& cache, const std::string_view root, std::string_view name,
                                 const std::span<const std::string_view> suffixes) {
+    if (std::find(suffixes.begin(), suffixes.end(), ".dds") != suffixes.end()) {
+        return assets::resolve_texture_name(root, name, [&](const std::string_view path) { return cache.exists(path); });
+    }
     const auto space = [](const char c) { return c == ' ' || c == '\t' || c == '\r' || c == '\n'; };
     while (!name.empty() && space(name.front())) name.remove_prefix(1);
     while (!name.empty() && space(name.back())) name.remove_suffix(1);

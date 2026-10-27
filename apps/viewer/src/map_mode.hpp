@@ -120,6 +120,7 @@ public:
         // ADR-019: compose the ordinary tactical presentation over the retained child.
         std::shared_ptr<const LiveSessionView::PreparedBattle> borrowed_battle;
         std::shared_ptr<platform::TacticalFeed> borrowed_feed;
+        std::function<std::string()> shared_pause_notice{};
         sim::tactical::PlayerId borrowed_player{1};
         std::shared_ptr<LanMatch> lan;
         // MNU-41: a recording the Load Game screen chose; the live session replays it as

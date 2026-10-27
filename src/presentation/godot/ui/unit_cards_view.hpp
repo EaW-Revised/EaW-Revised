@@ -136,6 +136,8 @@ class EawrUnitCards final : public godot::Control {
 
 public:
     struct Setup final : EncyclopediaPopupStyle {
+        // Relative to the host card layer; zero preserves enclosing modal order.
+        std::int32_t tooltip_z_index{};
         std::vector<presentation::ui::HudCardSlot> slots;
         std::vector<presentation::ui::HudShellButton> borders;
         // An object type's Icon_Name and display name (Text_ID through the text DB).
@@ -202,6 +204,8 @@ protected:
 private:
     [[nodiscard]] godot::Rect2 screen(const data::ui::ReferenceRect& rect) const;
     [[nodiscard]] godot::Ref<godot::Texture2D> portrait(const std::string& type, std::string* name = nullptr) const;
+    void redraw();
+    void draw_tooltip();
     void draw_bar(const presentation::ui::HudBar& bar, std::int32_t level, double percent);
     void update_text();
     void update_popup(const Card& card);
@@ -213,6 +217,7 @@ private:
     std::uint64_t build_state_updates_{};
     std::vector<presentation::ui::CardBorder> borders_;
     std::vector<std::unique_ptr<PortraitCellRenderer>> cells_;
+    godot::Control* tooltip_layer_{};
     KitText tooltip_;
     EncyclopediaPopupRenderer popup_;
     std::uint64_t popup_content_builds_{};

@@ -6,7 +6,7 @@
 #include <optional>
 #include <vector>
 
-// Ion stun (#561, docs/behaviour/space-damage.md IS-01 to IS-09): what an ion shot leaves on the
+// Ion stun (#561, docs/behaviour/space-damage.md IS-01 to IS-10): what an ion shot leaves on the
 // unit it hits, and what the stun does to that unit's weapons and speed. Pure functions of Q24
 // values and frames: no clock, thread or host input.
 namespace eawr::sim::tactical {
@@ -15,8 +15,8 @@ namespace eawr::sim::tactical {
 // by the projectile in flight.
 struct IonStunShot {
     std::uint32_t frames{};        // trunc(Projectile_Ion_Stun_Duration x 30), at least 1
-    math::Fixed speed_reduction{}; // Projectile_Ion_Stun_Speed_Reduction_Percent, in [0, 1]
-    math::Fixed rate_reduction{};  // Projectile_Ion_Stun_Shot_Rate_Reduction_Percent, in [0, 1]
+    math::Fixed speed_reduction{}; // Projectile_Ion_Stun_Speed_Reduction_Percent, as authored
+    math::Fixed rate_reduction{};  // Projectile_Ion_Stun_Shot_Rate_Reduction_Percent, as authored (IS-10)
     bool stack{};                  // Projectile_Ion_Stun_Stack_Duration
     friend constexpr bool operator==(const IonStunShot&, const IonStunShot&) noexcept = default;
 };
@@ -32,8 +32,14 @@ struct IonStunState {
 
 inline constexpr std::uint32_t max_ion_stun_frames = 30U * 3600U;
 
+// IS-10: FoC range-checks neither reduction. Its modifier lists floor the combined total at -0.99
+// (a speed or fire-rate factor of at least 0.01) and cap nothing above, so a reduction of 1 or
+// more stuns to 0.01 and a negative one speeds up. The loader saturates an authored value at
+// +-ion_reduction_limit (ours: Q24 products must not overflow; FoC's binary32 has no such limit).
+inline constexpr std::int64_t ion_reduction_limit = 1024;
+
 // A shot's stun is valid when it lasts 1 to max_ion_stun_frames frames and both reductions are
-// in [0, 1].
+// within +-ion_reduction_limit.
 [[nodiscard]] bool valid_ion_stun(const IonStunShot& shot) noexcept;
 
 // IS-03, IS-04: the unit's stun after a hit at `frame`. A stacking shot on a unit whose stun has
@@ -43,6 +49,9 @@ inline constexpr std::uint32_t max_ion_stun_frames = 30U * 3600U;
     const std::optional<IonStunState>& current, const IonStunShot& shot, std::uint64_t frame) noexcept;
 
 [[nodiscard]] bool ion_stunned(const std::optional<IonStunState>& state, std::uint64_t frame) noexcept;
+
+// IS-10: the factor one reduction leaves: 1 minus the reduction, at least 0.01; above 1 for a negative one.
+[[nodiscard]] math::Fixed ion_reduction_factor(math::Fixed reduction) noexcept;
 
 // IS-05: the factor on the unit's maximum speed, 1 minus the speed reduction while stunned.
 [[nodiscard]] math::Fixed ion_speed_factor(const std::optional<IonStunState>& state, std::uint64_t frame) noexcept;

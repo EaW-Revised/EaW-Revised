@@ -1,7 +1,6 @@
-// #4309: the optimized execution route build is byte-identical to the all-pairs formulation it replaced.
-// The reference below is the previous build_execution_routes verbatim (renamed); the cases compare every published
-// row, the packed cost and predecessor matrices, the work counters and the refusal (code and message) on randomized
-// graphs with ties, trade lanes, unusable planets and numeric-domain overflow, and the memo reuse path.
+// #4309/#5082: compare published rows, predecessors and work against the former 16-bit all-pairs
+// formulation. Its derived words are widened at output only; its numeric refusals now build routes.
+// Also cover the widened domain, memo reuse and partition determinism.
 
 #include "../support/env.hpp"
 #include "../support/result.hpp"
@@ -142,7 +141,8 @@ core::Result<ExecutionRouteBuild> reference_build_execution_routes(const Executi
     out.edges_tested = static_cast<std::uint64_t>(n) * n; out.relaxations_tested = static_cast<std::uint64_t>(n) * n * n;
     auto paths = std::make_shared<ExecutionPathMatrix>(); paths->player = input.player;
     for (const auto& planet : input.planets) paths->nodes.push_back(planet.planet);
-    paths->costs = std::move(costs); paths->previous = std::move(previous); out.paths = std::move(paths);
+    for (const auto cost : costs) paths->costs.push_back(cost == missing_cost ? std::numeric_limits<std::uint64_t>::max()
+        : (static_cast<std::uint64_t>(cost >> 16U) << 32U) | (cost & 65535U)); paths->previous = std::move(previous); out.paths = std::move(paths);
     return Result::success(std::move(out));
 }
 } // namespace eawr::script::foc::galactic_ai::reference
@@ -221,8 +221,8 @@ void compare(const ga::ExecutionRouteInput& input, const eawr::sim::PartitionExe
     auto expected = ga::reference::reference_build_execution_routes(input, executor);
     auto actual = ga::build_execution_routes(input, executor, memo);
     if (!expected) {
-        expect(!actual && actual.error().code == expected.error().code && actual.error().message == expected.error().message, label);
-        if (!actual) {
+        expect(static_cast<bool>(actual), "former 16-bit numeric refusal builds in the widened domain");
+        {
             const auto& message = expected.error().message;
             if (message.find("edge") != std::string::npos) ++tally.refused_edge;
             else if (message.find("relaxation") != std::string::npos) ++tally.refused_relax;
@@ -305,13 +305,79 @@ void memo_contract() {
     auto fresh = ga::build_execution_routes(moved, executor);
     expect(static_cast<bool>(rebuilt) && static_cast<bool>(fresh) && describe(rebuilt.value()) == describe(fresh.value()), "moved planet rebuilds to the memo-free result");
 }
+
+void wide_contract() {
+    const auto position = [](std::int64_t x) { return eawr::sim::math::Vec3{Fixed::from_integer(x).value(), {}, {}}; };
+    std::string baseline;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        ga::ExecutionRouteInput input; input.player = 2; input.maximum_distance = Number(8000);
+        input.planets = {{1, position(0), {}, Number(8000000), {}, true},
+            {2, position(7000), {}, Number(9000000), {}, true},
+            {3, position(14000), {}, Number(10000000), {}, true},
+            {4, position(1), {}, {}, {}, false}};
+        expect(!ga::reference::reference_build_execution_routes(input, executor), "large edge exceeds both old halves");
+        auto built = ga::build_execution_routes(input, executor);
+        expect(static_cast<bool>(built), "both widened edge halves and relaxation build");
+        if (!built) continue;
+        const auto& row = built.value().rows[2];
+        expect(!row.empty && row.distance == Number(14000) && row.threat == Number(19000000)
+            && row.prefix_threat == Number(9000000), "large route decodes full and prefix costs without carry");
+        expect(built.value().paths->costs[2] == ((std::uint64_t{190000} << 32U) | 140000U)
+            && built.value().paths->previous[2] == 1, "large route keeps exact components and predecessor");
+        expect(built.value().rows[3].empty && built.value().rows[3].distance == (Number(65535) / Number(10))
+            && built.value().rows[3].threat == Number(6553500), "dense missing edge never wraps into a cheap route");
+        ga::ExecutionRoutes state; state.available = true; state.paths = built.value().paths;
+        const auto path = ga::cached_execution_path(state, 2, 1, 3);
+        expect(path && path.value().planets == std::vector<gc::PlanetId>{1, 2, 3}
+            && path.value().threat == Number(19000000), "cached path uses wide costs");
+        auto again = ga::build_execution_routes(input, executor, built.value().memo);
+        expect(again && again.value().reused && describe(again.value()) == describe(built.value()), "wide edge memo reuses exact result");
+        if (baseline.empty()) baseline = describe(built.value());
+        else expect(baseline == describe(built.value()), "wide routes identical on 1/2/4/8 workers");
+
+        // Every edge fits 16 bits, but a candidate relaxation overflows both former halves.
+        input.maximum_distance = Number(4000);
+        input.planets = {{1, position(0), {}, Number(4000000), {}, true},
+            {2, position(3500), {}, Number(4000000), {}, true},
+            {3, position(7000), {}, Number(4000000), {}, true}};
+        auto legacy = ga::reference::reference_build_execution_routes(input, executor);
+        expect(!legacy && legacy.error().message.find("relaxation") != std::string::npos, "fixture reaches the former relaxation refusal");
+        built = ga::build_execution_routes(input, executor);
+        expect(built && built.value().rows[2].distance == Number(7000) && built.value().rows[2].threat == Number(8000000),
+            "former relaxation overflow now builds an exact two-hop route");
+
+        // Largest integer threat halves whose two-way sum fits below the reserved boundary.
+        input.maximum_distance = Number(1);
+        input.planets = {{1, position(0), {}, Number(214748364700LL), {}, true},
+            {2, position(1), {}, Number(214748364700LL), {}, true}};
+        expect(static_cast<bool>(ga::build_execution_routes(input, executor)), "threat sum 2^32-2 fits exactly");
+        input.planets[1].enemy_space_power = Number(214748364800LL);
+        auto refused = ga::build_execution_routes(input, executor);
+        expect(!refused && refused.error().message.find("relaxation") != std::string::npos, "threat sum at reserved boundary refuses");
+        input.planets[1].enemy_space_power = Number(429496729500LL);
+        refused = ga::build_execution_routes(input, executor);
+        expect(!refused && refused.error().message.find("edge") != std::string::npos, "threat edge beyond widened bound refuses");
+
+        input.maximum_distance = Number(500000000);
+        input.planets = {{1, position(0), {}, {}, {}, true}, {2, position(214748352), {}, {}, {}, true}};
+        expect(static_cast<bool>(ga::build_execution_routes(input, executor)), "distance sum just below widened boundary fits");
+        input.planets[1].position = position(214748368);
+        refused = ga::build_execution_routes(input, executor);
+        expect(!refused && refused.error().message.find("relaxation") != std::string::npos, "distance half carry refuses beyond widened sum bound");
+        input.planets[1].position = position(429496736);
+        refused = ga::build_execution_routes(input, executor);
+        expect(!refused && refused.error().message.find("edge") != std::string::npos, "distance edge beyond widened bound refuses");
+    }
+}
 } // namespace
 
 int case_galactic_ai_execution_routes_equality_tests(int, char**) {
     try {
         memo_contract();
+        wide_contract();
         Tally tally;
-        for (const auto workers : {1U, 4U}) {
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter threaded(workers);
             randomized(threaded, 0x4309ULL + workers, 60, tally);
         }

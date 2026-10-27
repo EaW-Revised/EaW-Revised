@@ -90,6 +90,15 @@ class _MultiMemberSource(str):
 # Keys retain the original reader scope. Production moves extend only the
 # corresponding tuple, so a contract never searches unrelated source files.
 SOURCE_BUNDLES = {
+    "apps/viewer/src/space_populate.hpp": ("apps/viewer/src/space_populate.hpp", "apps/viewer/src/battle_scene.hpp"),
+    "apps/viewer/src/space_environment.hpp": ("apps/viewer/src/space_environment.hpp", "apps/viewer/src/battle_scene.hpp"),
+    "include/eawr/scene/space_population.hpp": ("include/eawr/scene/space_population.hpp", "include/eawr/scene/hardpoint_state.hpp"),
+    "src/presentation/space/live_units.cpp": ("src/presentation/live/live_units.cpp",),
+    "src/presentation/space/unit_fade.cpp": ("src/presentation/live/unit_fade.cpp",),
+    "src/presentation/space/projectiles.cpp": ("src/presentation/live/projectiles.cpp",),
+    "include/eawr/presentation/space/live_units.hpp": ("include/eawr/presentation/live/live_units.hpp",),
+    "include/eawr/presentation/space/unit_fade.hpp": ("include/eawr/presentation/live/unit_fade.hpp",),
+    "include/eawr/presentation/space/projectiles.hpp": ("include/eawr/presentation/live/projectiles.hpp",),
     "apps/viewer/src/galactic/galactic_mode.cpp": ("apps/viewer/src/galactic/galactic_mode.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
     "apps/viewer/src/galactic/galactic_hud.cpp": ("apps/viewer/src/galactic/galactic_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
     "apps/viewer/src/galactic/galactic_fleet_hud.cpp": ("apps/viewer/src/galactic/galactic_fleet_hud.cpp", "tests/presentation/galactic/galactic_hud_capture.cpp"),
@@ -133,6 +142,7 @@ SOURCE_BUNDLES = {
         "apps/viewer/src/live_session_view.cpp",
         "apps/viewer/src/live_session_config.cpp",
         "apps/viewer/src/live_session_prepare.cpp",
+        "apps/viewer/src/live_session_land.cpp",
         "apps/viewer/src/battle_source.cpp",
         "apps/viewer/src/battle_source_local.cpp",
         "apps/viewer/src/battle_source_replay.cpp",
@@ -167,7 +177,7 @@ SOURCE_BUNDLES = {
         "apps/viewer/src/unit_emitters_report.cpp",
         "apps/viewer/src/unit_emitters_internal.hpp",
     ),
-    "apps/viewer/src/map_mode.cpp": ("apps/viewer/src/map_mode.cpp", "apps/viewer/src/map_mode_ready.cpp", "apps/viewer/src/map_mode_ready_terrain.cpp", "apps/viewer/src/map_mode_ready_population.cpp",
+    "apps/viewer/src/map_mode.cpp": ("apps/viewer/src/map_mode.cpp", "apps/viewer/src/map_mode_ready.cpp", "apps/viewer/src/map_mode_ready_terrain.cpp", "apps/viewer/src/map_mode_ready_population.cpp", "apps/viewer/src/map_mode_land_live.cpp",
                                   "apps/viewer/src/map_mode_live.cpp", "apps/viewer/src/map_mode_camera_probe.cpp",
                                   "apps/viewer/src/map_mode_ready_internal.hpp"),
     "apps/viewer/src/map_mode_scene.cpp": ("apps/viewer/src/map_mode_scene.cpp",

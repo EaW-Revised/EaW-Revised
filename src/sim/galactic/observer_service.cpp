@@ -126,6 +126,7 @@ void GalacticSession::Impl::unpublish_surface_departures(const PlanetId planet,
 }
 
 std::optional<PlayerId> GalacticSession::Impl::intelligence_source_owner(EntityId source) const {
+    if (const auto actor = actor_records.find(source); actor != actor_records.end() && !actor->second.dead && !actor->second.delete_pending) return actor->second.owner;
     if (planets.contains(source)) return registry.get<session_detail::PlanetData>(planets.at(source)).owner;
     if (fleets.contains(source)) return registry.get<session_detail::FleetData>(fleets.at(source)).owner;
     if (const auto unit = detached_units.find(source); unit != detached_units.end()) return unit->second.owner;
@@ -275,12 +276,21 @@ core::Result<void> GalacticSession::Impl::service_discovery(const PartitionExecu
 
 void GalacticSession::Impl::execute_observer(const GameCommand& command, std::uint64_t tick,
     std::vector<GalacticEvent>& events) {
+    const auto* issuer = seat(command.key.seat);
+    if (!issuer || !issuer->active || issuer->kind != SeatKind::script) {
+        const auto& request = std::get<ObserverCommand>(command.payload);
+        events.push_back({tick, GalacticEventKind::command_rejected, command.key.seat, request.planet, command.key.sequence, request.player,
+            !issuer || !issuer->active ? GalacticRejectReason::inactive_seat : GalacticRejectReason::not_authorized});
+        return;
+    }
+    apply_observer(command, tick, events);
+}
+// Private ability service entry point; player commands cannot supply observer facts.
+void GalacticSession::Impl::apply_observer(const GameCommand& command, std::uint64_t tick,
+    std::vector<GalacticEvent>& events) {
     auto c = std::get<ObserverCommand>(command.payload);
     GalacticEvent event{tick, GalacticEventKind::command_executed, command.key.seat, c.planet, command.key.sequence, c.player, GalacticRejectReason::none};
     const auto reject = [&](GalacticRejectReason reason) { event.kind = GalacticEventKind::command_rejected; event.reason = reason; events.push_back(event); };
-    const auto* issuer = seat(command.key.seat);
-    if (!issuer || !issuer->active) return reject(GalacticRejectReason::inactive_seat);
-    if (issuer->kind != SeatKind::script) return reject(GalacticRejectReason::not_authorized);
     if (!observer) return reject(GalacticRejectReason::observer_input);
     bool termination_cleanup{};
     // WGUI-101: only owner-destroyed termination of a despawning ability skips cleanup.

@@ -3,10 +3,11 @@
 #include "live_session_view.hpp"
 #include "battle_cursor.hpp"
 #include "eawr/presentation/ui/cursors.hpp"
-#include "space_environment.hpp"
-#include "space_populate.hpp"
+#include "battle_camera.hpp"
+#include "battle_scene.hpp"
 #include "world_ui_view.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 
 #include "eawr/presentation/camera/controller.hpp"
 #include "eawr/presentation/ui/ability_buttons.hpp"
@@ -59,20 +60,29 @@ public:
 
     // An event for the world layer. True when the battle took it; the camera sees the rest.
     [[nodiscard]] bool input(const godot::Ref<godot::InputEvent>& event, LiveSessionView& live,
-                             const SpacePopulation& population, SpaceEnvironment& space);
+                             const BattleScene& population, BattleCamera& space);
     // After the view drew a frame: refreshes the pickable units, drops destroyed ones from the
     // selection, replays due --eawr-live-input gestures through the engine's input queue and
     // redraws the overlay.
-    void frame(LiveSessionView& live, const SpacePopulation& population, SpaceEnvironment& space);
+    void frame(LiveSessionView& live, const BattleScene& population, BattleCamera& space);
     // CU-10: after the live preview evaluated its placement predicate.
-    void cursor_frame(const LiveSessionView& live, const SpaceEnvironment& space, double delta, bool capture);
+    void cursor_frame(const LiveSessionView& live, const BattleCamera& space, double delta, bool capture);
     // Records pointer position ahead of GUI ownership without issuing a world action.
     void observe_pointer(const godot::Ref<godot::InputEvent>& event);
     [[nodiscard]] std::optional<ui::BattleUnit> encyclopedia_unit() const;
     // Focus loss or the pointer leaving: a drag in progress ends without selecting.
     void cancel() noexcept;
     // The report's "battle_input" member, followed by ",\n".
-    void write_report(std::ostream& output, const SpaceEnvironment& space) const;
+    void write_report(std::ostream& output, const BattleCamera& space) const;
+    // Opt-in main-thread diagnostic at the existing paused/load or frame seam.
+    void owner_census(diagnostics::OwnerCensus& output) const noexcept {
+        for (const auto& [type, shape] : pick_shapes_) {
+            if (!output.step(diagnostics::OwnerCensus::picking)) break;
+            static_cast<void>(type);
+            output.range(diagnostics::OwnerCensus::picking, &shape, sizeof(PickShape));
+            output.vector(diagnostics::OwnerCensus::picking, shape.mesh.triangles);
+        }
+    }
     // #84: what the player's gestures ask the unit responses for (FoC's GamePlayUI select, move and
     // attack acknowledgements, docs/behaviour/battle-audio.md BA-20 to BA-23), oldest first. The
     // battle audio takes them after each frame.
@@ -104,6 +114,8 @@ public:
         world_ui_->set_group_fonts(std::move(icon), std::move(bracket));
     }
     [[nodiscard]] std::span<const ui::CardUnit> card_units() const noexcept { return card_units_; }
+    // #4919: the allied structure the cards currently inspect; its card carries health only.
+    [[nodiscard]] std::optional<sim::EntityId> inspected() const noexcept { return inspect_; }
     [[nodiscard]] const ui::CardLayout& card_layout() const noexcept { return card_layout_; }
     // #944 (WHE-44): the heroes both sides show in the battle hero tray, recollected when the published
     // snapshot or the tables change (presentation only). `hero_revision` moves only when the roster does,
@@ -112,7 +124,7 @@ public:
     [[nodiscard]] const ui::HeroRoster& hero_roster() const noexcept { return hero_roster_; }
     [[nodiscard]] std::uint64_t hero_revision() const noexcept { return hero_revision_; }
     void hero_click(sim::EntityId hero, bool hostile, bool right, bool double_click,
-                    LiveSessionView& live, SpaceEnvironment& space);
+                    LiveSessionView& live, BattleCamera& space);
     // A left release on the card in `slot` (FoC's Component_Logic_Tactical_Select): Shift deselects.
     // True when the selection changed.
     bool card_click(std::size_t slot, bool shift, const LiveSessionView& live);
@@ -183,7 +195,7 @@ private:
         std::array<float, 2> end{};
         bool moved{};
     };
-    void refresh(LiveSessionView& live, const SpacePopulation& population, const SpaceEnvironment& space);
+    void refresh(LiveSessionView& live, const BattleScene& population, const BattleCamera& space);
     [[nodiscard]] std::optional<ui::PickRay> ray(float x, float y) const;
     [[nodiscard]] std::optional<std::array<float, 2>> project(const ui::Vec3f& source) const;
     [[nodiscard]] ui::ScreenRect viewport_rect() const;
@@ -193,7 +205,7 @@ private:
     [[nodiscard]] double logical_frame(const LiveSessionView& live) const;
     void left_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
     void right_release(std::array<float, 2> at, ui::Modifiers modifiers, LiveSessionView& live);
-    [[nodiscard]] bool key(std::int64_t code, ui::Modifiers modifiers, LiveSessionView& live, SpaceEnvironment& space);
+    [[nodiscard]] bool key(std::int64_t code, ui::Modifiers modifiers, LiveSessionView& live, BattleCamera& space);
     void replay(const LiveSessionView::ScriptedInput& scripted, LiveSessionView& live);
     std::uint64_t acceptance_next_tick_{120};
     unsigned acceptance_stage_{};
@@ -216,7 +228,7 @@ private:
     [[nodiscard]] bool local_order_selection(const LiveSessionView& live) const;
     void refresh_cards(const LiveSessionView& live);
     void refresh_hero_types(const units::UnitTables* tables);
-    void follow(const LiveSessionView& live, SpaceEnvironment& space);
+    void follow(const LiveSessionView& live, BattleCamera& space);
 
     godot::Node3D* host_{};
     godot::RID canvas_item_;
@@ -232,6 +244,9 @@ private:
     std::shared_ptr<const sim::tactical::TacticalSnapshot> cards_snapshot_;
     std::uint64_t cards_pending_revision_{};
     std::vector<sim::EntityId> cards_selection_;
+    // #4919: the allied structure under inspection (viewer-local; never in selection_, never sent to the sim).
+    std::optional<sim::EntityId> inspect_;
+    std::optional<sim::EntityId> cards_inspect_;
     std::size_t cards_slots_{};
     ui::CardLayout card_layout_;
     std::uint64_t card_clicks_{};
@@ -300,6 +315,10 @@ private:
     ui::CursorHistory cursor_history_;
     std::string cursor_hover_;
     const LiveSessionView* live_{};
+    const BattleScene* scene_{};
+    [[nodiscard]] std::optional<ui::Vec3f> ground_point(const ui::PickRay& ray) const {
+        return scene_ ? scene_->ground_point(ray) : std::nullopt;
+    }
     // #665 (WSU-10 to WSU-12): each type's pick volume from the unit tables, loaded once: its
     // collision mesh and its Mouse_Collide_Override_Sphere_Radius.
     struct PickShape {

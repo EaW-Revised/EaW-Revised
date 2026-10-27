@@ -1034,6 +1034,19 @@ void fresh_conversion(eawr::platform::ThreadWorkerAdapter& executor) {
     const auto pool = take(owner.publish(executor));
     expect(pool->objects.size() == 2 && pool->objects.front().type == 1001,
         "fresh admission uses current member bit while publication retains original selection identity");
+    // RGC-01/04: a current orbital representation is excluded even with ordinary original identity.
+    auto orbital = std::make_shared<eawr::units::GalacticType>(*content.types.at(1000).original);
+    orbital->behavior = {"DUMMY_ORBITAL_STRUCTURE"}; content.types.at(1000).original = orbital;
+    const auto structures = take(eawr::campaign::prepare_fresh_freestore_facts(*world.snapshot(), content, types, executor,
+        eawr::campaign::freestore_member_qualifier(std::make_shared<const ai::GalacticSelectionContent>(content)),
+        [](const ga::FreestoreObject& original) { return eawr::core::Result<gc::TypeId>::success(original.type == 1000 ? 1001 : 1000); }));
+    std::size_t orbital_count{};
+    for (const auto& row : structures) if (row.current_type == 1000) {
+        ++orbital_count;
+        expect(row.object.kind == ga::FreestoreKind::space_structure && !ga::freestore_admission(row, row.object.owner),
+            "fresh orbital structures retain their kind and cannot enter the mobile freestore");
+    }
+    expect(orbital_count == 2, "fresh orbital regression checks both owners' current representations");
 }
 std::string stock_redistribution(const eawr::vfs::Vfs& files, eawr::platform::ThreadWorkerAdapter& executor) {
     std::string trace;

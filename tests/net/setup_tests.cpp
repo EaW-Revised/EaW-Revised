@@ -160,6 +160,63 @@ void encoding() {
     for (std::size_t size = 0; size < bytes.size(); ++size)
         expect(!net::decode_setup_refusal(std::span(bytes).first(size)), "truncated refusal rejected");
 }
+void battle_domains() {
+    auto initial = setup();
+    const auto space = require(net::encode_skirmish_setup(initial));
+    expect(require(net::decode_skirmish_setup(space)).domain == tactical::BattleDomain::space,
+        "absent battle-domain extension decodes as space");
+    expect(!net::skirmish_start_refusal(initial), "space setup remains playable");
+    initial.domain = tactical::BattleDomain::land;
+    initial.skirmish->match.tactical_win_condition = "mod-land-condition";
+    const auto land = require(net::encode_skirmish_setup(initial));
+    expect(require(net::decode_skirmish_setup(land)) == initial,
+        "land domain and domain-neutral tactical win condition round trip");
+    auto selected = offer(); selected.setup = land;
+    const auto frame = require(net::encode_setup_offer(selected));
+    expect(require(net::decode_skirmish_setup(require(net::decode_setup_offer(frame)).setup)) == initial,
+        "land setup survives the complete offer envelope");
+    auto refusal = net::skirmish_start_refusal(initial);
+    expect(refusal && refusal->reason == net::SetupReason::land_unsupported,
+        "land start has a distinct typed refusal");
+    const auto refused_bytes = require(net::encode_setup_refusal(*refusal));
+    expect(require(net::decode_setup_refusal(refused_bytes)) == *refusal,
+        "reserved land refusal reason round trips");
+    auto unknown = refused_bytes; unknown[1] = 9;
+    expect(!net::decode_setup_refusal(unknown), "unknown refusal reason is malformed");
+    refusal->reason = static_cast<net::SetupReason>(9);
+    expect(!net::encode_setup_refusal(*refusal), "unknown refusal reason cannot be encoded");
+
+    // Both admission paths refuse before consulting installed content or a builder.
+    eawr::testing::FakeNetwork network(2);
+    eawr::testing::FakeTransport host_transport(network, 0), client_transport(network, 1);
+    net::DesyncMonitor host_monitor(host_transport), client_monitor(client_transport);
+    sim::InlineExecutor executor;
+    int builds{};
+    auto host_providers = providers(host_monitor, executor, identity(), false, &builds);
+    host_providers.identify = [](const auto&) -> eawr::core::Result<sim::MatchAgreement> {
+        throw std::runtime_error("land must be refused before identify");
+    };
+    auto client_providers = providers(client_monitor, executor, identity(), false, &builds);
+    client_providers.identify = host_providers.identify;
+    auto client = require(net::SetupSession::join(client_transport, std::move(client_providers)));
+    // Also exercise a remote land offer independently of the host-side gate.
+    require(host_transport.send(1, frame));
+    network.round = 1;
+    expect(!client.pump(1) && client.refusal()
+        && client.refusal()->reason == net::SetupReason::land_unsupported && builds == 0,
+        "client refuses land before identify/build");
+    auto host = net::SetupSession::host(host_transport, selected, std::move(host_providers));
+    expect(!host && host.error().code == "EAWR-NET-0308" && builds == 0,
+        "host refuses land before identify/build");
+    network.round = 2;
+    auto delivered = client_transport.poll();
+    expect(delivered && require(net::decode_setup_refusal(delivered->frame)).reason == net::SetupReason::land_unsupported,
+        "host sends its typed land refusal to the peer");
+    initial.domain = tactical::BattleDomain::space;
+    initial.skirmish->match.tactical_win_condition = setup().skirmish->match.tactical_win_condition;
+    expect(require(net::encode_skirmish_setup(initial)) == space,
+        "space has no domain extension and retains its original bytes");
+}
 void recovery_policy_encoding() {
     auto selected = offer();
     selected.recovery = {true, true, 17, 23, 45, 2U * 1024U * 1024U, 99};
@@ -231,7 +288,7 @@ void text_contracts() {
         net::SetupRefusal refusal{net::SetupReason::identity, raw, raw, {}, {}};
         expect(require(net::decode_setup_refusal(require(net::encode_setup_refusal(refusal)))) == decoded,
             "refusal encoder uses the same repair rule");
-        auto invalid_setup = setup(); invalid_setup.skirmish->match.space_win_condition = raw;
+        auto invalid_setup = setup(); invalid_setup.skirmish->match.tactical_win_condition = raw;
         expect(!net::encode_skirmish_setup(invalid_setup), "TCP setup encoder rejects malformed text");
         if (raw.find('\0') == std::string::npos) {
             const auto invalid_replay = require(tactical::write_replay({invalid_setup, 0, {}}));
@@ -242,7 +299,7 @@ void text_contracts() {
         expect(!net::decode_setup_offer(forge(encoded, selected.identity.build, raw, true)),
             "hashed build decoder rejects invalid text even with a valid offer digest");
         for (const auto& field : {std::string("test"), setup().skirmish->match.win_condition,
-                setup().skirmish->match.space_win_condition, setup().skirmish->slots[0].fleet[0]}) {
+                setup().skirmish->match.tactical_win_condition, setup().skirmish->slots[0].fleet[0]}) {
             expect(!net::decode_skirmish_setup(forge(selected.setup, field, raw, false)),
                 "TCP replay setup rejects malformed text without repair");
             expect(!net::decode_setup_offer(forge(encoded, field, raw, true)),
@@ -252,7 +309,7 @@ void text_contracts() {
     }
     const std::string unicode = "J\xC3\xBCrgen \xF0\x9F\x9A\x80";
     auto valid = setup(); valid.skirmish->map = "data/art/maps/" + unicode + ".ted";
-    valid.skirmish->match.win_condition = unicode; valid.skirmish->match.space_win_condition = unicode;
+    valid.skirmish->match.win_condition = unicode; valid.skirmish->match.tactical_win_condition = unicode;
     valid.skirmish->slots[0].fleet = {unicode};
     for (auto& domain : valid.match_identity->domains)
         if (domain.name == "map-path") domain = sim::identity_domain("map-path", valid.skirmish->map);
@@ -588,7 +645,7 @@ int main(int argc, char** argv) {
     try {
         expect(argc == 2, "diagnostic output directory required");
         const std::filesystem::path directory(argv[1]);
-        encoding(); recovery_policy_encoding(); disabled_recovery_presets(directory / "disabled-recovery"); text_contracts(); runtime_maximum_lead(); runtime_departure(directory / "departure"); agreement(directory / "agreement"); identity_refusals(directory / "identity");
+        encoding(); battle_domains(); recovery_policy_encoding(); disabled_recovery_presets(directory / "disabled-recovery"); text_contracts(); runtime_maximum_lead(); runtime_departure(directory / "departure"); agreement(directory / "agreement"); identity_refusals(directory / "identity");
         divergence(directory / "divergence"); preview_start(directory / "preview"); credential_start_gate(directory / "credential-gate");
         session_policy(directory / "policy"); provider_failure(directory / "provider");
         buffered_offer(directory / "buffer"); bad_frames(directory / "bad");

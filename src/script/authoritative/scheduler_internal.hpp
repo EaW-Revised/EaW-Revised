@@ -123,6 +123,8 @@ struct Shared {
     // Modules are pinned at creation; save/load reuse this identical identity.
     std::string manifest_digest;
     std::vector<BindingEntry> bindings;
+    // Normalised manifest modules every instance runs before its root chunk (register_prelude).
+    std::vector<std::string> preludes;
     // Handle kind -> method name -> binding index.
     std::map<std::uint32_t, std::map<std::string, int, std::less<>>> methods;
 };

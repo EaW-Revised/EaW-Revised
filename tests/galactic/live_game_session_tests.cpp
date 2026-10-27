@@ -5,6 +5,7 @@
 #include "eawr/platform/live_game_session.hpp"
 #include "eawr/platform/campaign_service_configuration.hpp"
 #include "eawr/platform/campaign_battle_view.hpp"
+#include "eawr/presentation/audio/health_warning.hpp"
 #include "eawr/sim/galactic/victory.hpp"
 
 #include <array>
@@ -1015,6 +1016,86 @@ void child_untimed_input_after_drain() {
     }
 }
 
+void child_health_warning_publication() {
+    namespace tactical = eawr::sim::tactical;
+    namespace campaign = eawr::campaign;
+    namespace audio = eawr::presentation::audio;
+    std::vector<std::vector<tactical::DamageChange>> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        const auto initial = setup();
+        auto game = campaign::GameSession::create(initial).value();
+        campaign::ConflictRecord entry;
+        entry.id = game.galaxy().next_entity_id(); entry.planet = initial.planets.front().id;
+        entry.invader = 1; entry.defender = 2;
+        entry.tactical.content_identity = initial.content_identity;
+        entry.tactical.first_free_entity_id = entry.id + 1;
+        entry.tactical.players = {{1, 1, 1, 1}, {2, 2, 2, 1}};
+        tactical::TacticalContent content;
+        for (const auto owner : {1U, 2U}) {
+            const auto fleet = std::find_if(initial.fleets.begin(), initial.fleets.end(),
+                [owner](const auto& row) { return row.owner == owner; });
+            const auto member = fleet->members.front();
+            entry.forces.push_back({member.id, member.type, owner, fleet->id});
+            tactical::UnitState unit;
+            unit.entity_id = member.id; unit.type_id = member.type; unit.owner = owner;
+            entry.tactical.units.push_back(unit);
+            if (std::none_of(content.durability.profiles.begin(), content.durability.profiles.end(),
+                [type = member.type](const auto& row) { return row.type_id == type; })) {
+                tactical::DurabilityProfile hull; hull.type_id = member.type;
+                hull.max_hull = Fixed::from_integer(100).value();
+                content.durability.profiles.push_back(hull);
+            }
+        }
+        std::sort(content.durability.profiles.begin(), content.durability.profiles.end(),
+            [](const auto& a, const auto& b) { return a.type_id < b.type_id; });
+        for (const auto& seat : initial.seats) if (seat.player <= 2) entry.seats.push_back({seat.seat_id, seat.player});
+        LiveGameSession::Options options;
+        options.workers = workers; options.pacing = LiveGameSession::Pacing::driven;
+        options.entries.push_back({1, entry, content, campaign::ScriptRequirement::none});
+        auto started = LiveGameSession::start(initial, options);
+        expect(bool(started), "SND-33: campaign health-warning fixture starts");
+        if (!started) continue;
+        auto& live = *started.value();
+        live.advance_to(2);
+        expect(live.wait_for(2, 5s), "campaign health-warning child reaches readiness");
+        auto feed = live.battle_feed(entry.id, {1});
+        expect(bool(feed), "campaign health-warning observer binds the real child feed");
+        if (!feed) { live.stop(); continue; }
+        const auto target = entry.forces.front();
+        feed->command_source([id = target.id](const std::uint64_t tick) {
+            if (tick != 0) return std::vector<tactical::PlayerCommand>{};
+            return std::vector<tactical::PlayerCommand>{{{tick, 1, 1}, {id},
+                tactical::DamagePayload{Fixed::from_integer(75).value()}}};
+        });
+        feed->set_paused(false); live.battle_ready(entry.id);
+        live.advance_to(4);
+        expect(live.wait_for(4, 5s), "campaign child completes the surviving damage delivery");
+        live.stop();
+        const auto published = feed->events_after(0, feed->completed_tick());
+        std::vector<tactical::DamageChange> changes;
+        for (const auto& tick : published.ticks)
+            changes.insert(changes.end(), tick.damage_changes.begin(), tick.damage_changes.end());
+        expect(changes.size() == 1, "campaign lifecycle and live journal forward one immutable damage fact");
+        if (changes.size() == 1) {
+            const auto& change = changes.front();
+            expect(change.target == tactical::DamageIdentity{target.id, target.type, 1}
+                && change.hull_before == Fixed::from_integer(100).value()
+                && change.hull_after == Fixed::from_integer(25).value(), "campaign fact retains target identity and exact hull crossing");
+            const audio::SfxEvent low, critical;
+            const audio::HealthWarningCues cues{&low, &critical, nullptr, nullptr};
+            const auto before = static_cast<double>(change.hull_before.raw()) / static_cast<double>(change.max_hull.raw());
+            const auto after = static_cast<double>(change.hull_after.raw()) / static_cast<double>(change.max_hull.raw());
+            expect(audio::health_warning_cue(before, after, 0.5, 0.1, change.target.owner == 1,
+                false, cues, {}) == &low, "real campaign feed selects the local owner's authored low warning");
+        }
+        reference.push_back(changes);
+        expect(reference.back() == reference.front(), "campaign damage publication agrees on 1/2/4/8 workers");
+        const auto replayed = eawr::platform::headless_tick_hashes(feed->record(), content);
+        expect(replayed && replayed.value() == feed->tick_hashes(), "campaign journal forwarding leaves standalone child replay hashes unchanged");
+        feed->stop();
+    }
+}
+
 void child_readiness_and_return() {
     namespace tactical = eawr::sim::tactical;
     namespace campaign = eawr::campaign;
@@ -1401,6 +1482,7 @@ int case_galactic_live_game_session_tests() {
     pause_and_sequences(LiveGameSession::Pacing::real_time);
     resume_and_failure();
     child_untimed_input_after_drain();
+    child_health_warning_publication();
     child_readiness_and_return();
     repeated_child_lifetimes();
     loading_failure_latch();

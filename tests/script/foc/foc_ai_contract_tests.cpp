@@ -871,6 +871,8 @@ void stock_slave_i(const std::filesystem::path& root);
 void stock_sundered_heart(const std::filesystem::path& root);
 void stock_missile_shield(const std::filesystem::path& root);
 void stock_script_admission(const std::filesystem::path& root);
+void script_evaluator_contracts();
+void object_build_contracts();
 
 
 void expect(bool condition, const std::string& message) {
@@ -1469,6 +1471,18 @@ void player_ai_admission_contract() {
 
 void scoring_startup_contract() {
     using Scoring = eawr::platform::BattleScoring;
+    {
+        // PR-C1/C2 (#4992): AaW authors <Build_Cost_Credits />; an empty or TBD scoring value skips
+        // the key (the caller keeps Max_Squad_Size 10 and build cost 0), other text must parse.
+        const auto empty = eawr::platform::scoring_decimal("");
+        const auto spaces = eawr::platform::scoring_decimal("  ");
+        const auto tbd = eawr::platform::scoring_decimal("TBD");
+        const auto value = eawr::platform::scoring_decimal(" 425 ");
+        const auto garbage = eawr::platform::scoring_decimal("ten");
+        expect(empty && !empty.value() && spaces && !spaces.value() && tbd && !tbd.value(), "PR-C1/C2: empty or TBD scoring values are skipped");
+        expect(value && value.value() && value.value()->raw() == 425 * eawr::sim::math::Fixed::scale, "an authored scoring value parses");
+        expect(!garbage, "a non-numeric scoring value still fails");
+    }
     const auto scorer = [](std::string definitions, std::string service) {
         auth::ModuleManifest manifest;
         expect(manifest.add("data/scripts/miscellaneous/OpeningProbe.lua",
@@ -2272,11 +2286,14 @@ int main(int argc, char** argv) {
     std::setlocale(LC_CTYPE, saved_locale.c_str());
     if (argc == 2) {
         const std::string mode = argv[1];
-        if (mode == "--spending-pad-states") spending_pad_states();
+        if (mode == "--producer-census") production_lifecycle();
+        else if (mode == "--spending-pad-states") spending_pad_states();
         else if (mode == "--spending-wallet") spending_wallet_reservations();
         else if (mode == "--spending-pad-refunds") spending_pad_refunds();
         else if (mode == "--reachable-target") { reachable_target_contract(); find_target_reach_contract(); }
         else if (mode == "--installed-galactic-freestore") installed_galactic_freestore();
+        else if (mode == "--script-evaluators") script_evaluator_contracts();
+        else if (mode == "--object-build") object_build_contracts();
         else if (mode == "--player-streams") tactical_player_streams();
         else if (mode == "--pool-retirement") retiring_pool_reservations();
         else return 2;

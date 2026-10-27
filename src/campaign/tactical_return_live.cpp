@@ -53,7 +53,8 @@ core::Result<std::shared_ptr<StartingForceInputs>> rebuild_starting_force_inputs
         if (!original) return fail<std::shared_ptr<StartingForceInputs>>("stock due hero original binding is absent");
         starting->types.types.push_back(*original);
         starting->bindings.push_back({row.type, original->name});
-        starting->runtime_types.push_back({row.type, row.skips_combat, row.always_spawn_in_orbit, {}});
+        // WGM-38/163: a placed company or hero keeps the authored automatic ability state its nested creation row carries.
+        starting->runtime_types.push_back({row.type, row.skips_combat, row.always_spawn_in_orbit, row.abilities});
         if (original->name == "Galactic_Squadron") starting->squadron_type = row.type;
     }
     for (const auto& relation : creation.relations)
@@ -89,7 +90,7 @@ core::Result<StockTacticalReturnServices> prepare_stock_tactical_return(const vf
         return at == constants.value().root.children.end() ? fail<Fixed>("missing " + std::string(tag)) : number(*at);
     };
     const auto hero = read("Default_Hero_Respawn_Time"), factor = read("Space_Retreat_Attrition_Factor"), seconds = read("Space_Retreat_Allowed_Countdown_Seconds");
-    if (!hero || !factor || !seconds || hero.value().raw() <= 0) return fail<StockTacticalReturnServices>("required return constants are unavailable");
+    if (!hero || !factor || !seconds) return fail<StockTacticalReturnServices>("required return constants are unavailable");
     auto lockout = frames(seconds.value()); if (!lockout) return core::Result<StockTacticalReturnServices>::failure(lockout.error());
     auto input = std::make_shared<Inputs>(Inputs{catalog, plan, hero.value(), factor.value(), lockout.value()});
     StockTacticalReturnServices services;
@@ -130,11 +131,20 @@ core::Result<StockTacticalReturnServices> prepare_stock_tactical_return(const vf
             if (!faction) return core::Result<void>::failure(faction.error());
             const auto* countdown = faction.value().value("Space_Retreat_Countdown_Seconds");
             const auto* playable = faction.value().value("Is_Playable");
-            if (!countdown || !playable) return fail<void>("faction retreat countdown/playability is absent");
-            auto authored = number(countdown->value); if (!authored) return core::Result<void>::failure(authored.error());
-            auto duration = frames(authored.value()); if (!duration) return core::Result<void>::failure(duration.error());
-            data::tag_trace::used(playable->value);
-            config.rules.players.push_back({player, duration.value(), data::retail::boolean(playable->value.raw_text).value_or(false), !conflict.tutorial});
+            // WR-86: faction content starts with 15.99 seconds; XML overrides it.
+            auto faction_seconds = Fixed::from_ratio(1599, 100).value();
+            if (countdown) {
+                auto authored = number(countdown->value); if (!authored) return core::Result<void>::failure(authored.error());
+                faction_seconds = authored.value();
+            }
+            auto duration = frames(faction_seconds); if (!duration) return core::Result<void>::failure(duration.error());
+            bool can_retreat = false;
+            if (playable) {
+                data::tag_trace::used(playable->value);
+                can_retreat = data::retail::boolean(playable->value.raw_text).value_or(false);
+            }
+            // WR-87: playability gates requests in retreat_eligibility, never battle admission.
+            config.rules.players.push_back({player, duration.value(), can_retreat, !conflict.tutorial});
         }
         std::sort(config.rules.players.begin(), config.rules.players.end(), [](const auto& a, const auto& b) { return a.player < b.player; });
         for (const auto& force : conflict.forces) {

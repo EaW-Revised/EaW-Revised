@@ -47,8 +47,11 @@ namespace eawr::sim::tactical {
 core::Result<std::vector<std::uint8_t>> TacticalSession::save_checkpoint_state() const {
     try {
         checkpoint_detail::Writer out;
-        out(std::uint32_t{9U}); // Includes retained squadron destination hardpoints.
         auto live = impl_->sorted_live();
+        out.fire_range_bonuses = std::any_of(live.begin(), live.end(), [](const auto& unit) {
+            return unit.upgrade_bonuses[6].raw() != 0;
+        });
+        out(std::uint32_t{out.fire_range_bonuses ? 10U : 9U});
         checkpoint_detail::Access::state(out, std::as_const(*impl_));
         out(live);
         out(checkpoint_detail::Access::visibility(*impl_));
@@ -72,7 +75,8 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         checkpoint_detail::Reader in(bytes);
         std::uint32_t version{};
         in(version);
-        if (version != (9U)) throw checkpoint_detail::Invalid("unsupported child state domain");
+        if (version != 9U && version != 10U) throw checkpoint_detail::Invalid("unsupported child state domain");
+        in.fire_range_bonuses = version == 10U;
         const auto cursors = impl_->last_submitted;
         checkpoint_detail::Access::state(in, *impl_);
         if (impl_->last_submitted != cursors) throw checkpoint_detail::Invalid("command cursors disagree with sealed log");
@@ -87,6 +91,9 @@ core::Result<void> TacticalSession::load_checkpoint_state(const std::span<const 
         }
         std::vector<LiveUnit> live;
         in(live);
+        if (in.fire_range_bonuses && std::none_of(live.begin(), live.end(), [](const auto& unit) {
+                return unit.upgrade_bonuses[6].raw() != 0;
+            })) throw checkpoint_detail::Invalid("noncanonical empty fire-range domain");
         checkpoint_detail::Access::PublishedVisibility visibility;
         in(visibility);
         if (impl_->completed_tick > max_ticks || live.size() > max_units) throw checkpoint_detail::Invalid("state exceeds tactical limits");
@@ -368,6 +375,10 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
         if (unit.abilities) {
             instance.stealth_on = unit.abilities->stealth_on;
             instance.stealth_invisible = stealth_invisible(*unit.abilities, now, abilities.find(unit.state.type_id));
+            if (const auto* profile = abilities.find(unit.state.type_id)) {
+                if (const auto rocket = ability_slot(*profile, AbilityKind::rocket_attack))
+                    instance.rocket_attack = unit.abilities->slots[*rocket].active;
+            }
         }
         instance.in_asteroid_field = unit.asteroid_contact.has_value();
         instance.in_nebula = unit.nebula && unit.nebula->present;
@@ -388,10 +399,13 @@ TacticalInstance TacticalSession::Impl::instance_for(const LiveUnit& unit, const
                 }
                 if (!weapon.manual || profile == nullptr) continue;
                 const auto& manual = *weapon.manual;
-                instance.manual_weapons.push_back({profile->weapons[index].hardpoint, manual.target,
+                auto& views = profile->weapons[index].requires_manual_target
+                    ? instance.manual_weapons : instance.hardpoint_turrets;
+                views.push_back({profile->weapons[index].hardpoint, manual.target,
                     manual.requesting_player, manual.assigned_frame, manual.yaw, manual.pitch,
-                    weapon.countdown, weapon.pulses_left, !unit.durability || weapon_enabled(
-                        *health_profile(unit), *unit.durability, profile->weapons[index].hardpoint),
+                    weapon.countdown, weapon.pulses_left, profile->weapons[index].fires_in_mode(instance.rocket_attack)
+                        && (!unit.durability || weapon_enabled(
+                            *health_profile(unit), *unit.durability, profile->weapons[index].hardpoint)),
                     manual_admission_profiles.at({unit.state.type_id, profile->weapons[index].hardpoint})});
             }
         }
@@ -497,6 +511,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const Partition
                 }
             }
             encoded_units[partition] = std::move(bytes);
+            if (land) encode_land_partition(partition);
             for (auto it = craft_ranges[partition]; it != craft_ranges[partition + 1]; ++it)
                 append_craft(craft_parts[partition], it->first, it->second);
             for (auto it = mind_ranges[partition]; it != mind_ranges[partition + 1]; ++it)
@@ -542,6 +557,7 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         if (encoding) for (const auto buffers : {&encoding->crafts, &encoding->minds, &encoding->projectiles,
                 &encoding->abilities, &encoding->trees, &encoding->projectile_trees})
             for (const auto& part : *buffers) capacity += part.size();
+        if (land) capacity += land->canonical_size_hint;
         bytes.reserve(capacity);
         bytes.insert(bytes.end(), state_magic.begin(), state_magic.end());
         sim::detail::append_u32(bytes, tactical_state_encoding_version);
@@ -633,6 +649,10 @@ std::vector<std::uint8_t> TacticalSession::Impl::canonical_bytes(const std::span
         append_canonical_waypoints_state(bytes, units, counts);
         append_canonical_beacons_state(bytes);
         append_canonical_order_history_state(bytes, units, counts);
+        if (land) {
+            const auto state = land_bytes(encoding != nullptr);
+            bytes.insert(bytes.end(), state.begin(), state.end());
+        }
         return bytes;
     }
 

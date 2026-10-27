@@ -58,7 +58,7 @@ RULE_IN_TEXT = re.compile(r"(?<![A-Za-z0-9-])[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*-\d+[a
 AREAS = ("movement", "combat", "fighters", "ai", "presentation", "economy", "data")
 BASES = ("auto", "reviewed")
 ROW_FIELDS = {"applied", "area", "basis", "classes", "evidence", "missing_types", "note", "status", "tag", "ticket",
-              "trace", "engine_default", "no_targets", "scene"}
+              "trace", "engine_default", "inventory_profile", "no_targets", "scene"}
 NO_TARGET_FIELDS = {"types", "status", "evidence"}
 UNIT_KINDS = {"station", "ship", "squadron", "craft"}
 TRACES = ("unrecorded",)
@@ -135,7 +135,8 @@ def is_attribute(path: str) -> bool:
     return "/@" in path
 
 
-def load_universe(inventory: dict[str, Any], profile: str = "foc") -> dict[tuple[str, str], UniverseRow]:
+def load_universe(inventory: dict[str, Any], profile: str = "foc", *,
+                  registry: dict[str, Any] | None = None) -> dict[tuple[str, str], UniverseRow]:
     """The (class, tag) pairs of the inventory's profile, keyed by their ASCII-folded spelling: every attribute and
     every element that has no element below it (a container carries no value of its own)."""
     normalised: dict[str, tuple[str, str, int, int, str]] = {}
@@ -170,6 +171,22 @@ def load_universe(inventory: dict[str, Any], profile: str = "foc") -> dict[tuple
         row.usage += usage
         row.files = max(row.files, files)
         row.object_types.update(types.split(","))
+    # Explicit mod claims extend coverage only with pairs actually authored in
+    # that inventory profile. A typo or removed pair fails rather than bypassing coverage.
+    profile_pairs: dict[str, dict[tuple[str, str], UniverseRow]] = {}
+    for row in (registry or {}).get("rows", []):
+        source_profile = row.get("inventory_profile")
+        if not isinstance(source_profile, str) or not source_profile or source_profile == profile:
+            continue
+        if source_profile not in profile_pairs:
+            profile_pairs[source_profile] = load_universe(inventory, source_profile)
+        authored = profile_pairs[source_profile]
+        for object_class in row.get("classes", []):
+            key = pair_key(object_class, row.get("tag", ""))
+            if key not in authored:
+                raise RegistryError(f"{object_class}/{row.get('tag', '')}: not authored in inventory profile {source_profile!r}")
+            if key not in pairs:
+                pairs[key] = authored[key]
     return pairs
 
 
@@ -393,6 +410,10 @@ def registry_problems(registry: dict[str, Any], universe: dict[tuple[str, str], 
         unknown = set(row) - ROW_FIELDS
         if unknown:
             problems.append(f"{where}: unknown fields {sorted(unknown)}")
+        if "inventory_profile" in row and (not isinstance(row["inventory_profile"], str)
+                                           or not row["inventory_profile"]
+                                           or row["inventory_profile"] == "foc"):
+            problems.append(f"{where}: inventory_profile must name a non-stock inventory profile")
         for object_class in classes:
             key = pair_key(object_class, tag)
             if key in seen:
@@ -687,7 +708,7 @@ def load_inventory(path: Path) -> dict[str, Any]:
 
 def gate_problems(statuses: Path | Sequence[Path], inventory: Path, root: Path | None) -> tuple[list[str], dict[str, Any], dict]:
     registry = load_registry(statuses)
-    universe = load_universe(load_inventory(inventory))
+    universe = load_universe(load_inventory(inventory), registry=registry)
     problems = registry_problems(registry, universe, root)
     shards = registry_shards(statuses)
     roots = [statuses] if isinstance(statuses, Path) else statuses
@@ -790,7 +811,7 @@ def check_data_command(args: argparse.Namespace) -> int:
 
 def render_command(args: argparse.Namespace) -> int:
     registry = load_registry(args.statuses)
-    universe = load_universe(load_inventory(args.inventory))
+    universe = load_universe(load_inventory(args.inventory), registry=registry)
     problems = registry_problems(registry, universe, None)
     if problems:
         print_problems(problems)

@@ -1001,6 +1001,11 @@ void authored_selection_contracts() {
     selected = select();
     expect(selected.size() == 2 && selected[0].enemy == galactic::PlayerId{2} && selected[1].enemy == galactic::PlayerId{1},
         "inactive players/controllers cannot acquire AI or enemy contexts");
+    ai_data.players.at("QUIETPLAYER").difficulty.clear();
+    ai_data.players.at("QUIETPLAYER").difficulty.emplace("HARD", "MOD_QUIET_ADJUSTMENT");
+    selected = select();
+    expect(selected.size() == 2 && selected[0].difficulty == "HARD" && selected[1].difficulty == "HARD",
+        "CGS-07 a player type that authors another adjustment for the chosen level plays that level");
     const auto plan = must(cp::plan_campaign_setup(data, {}, campaign.name, options));
     expect(!cp::select_live_galactic_ai_players(data, plan, ai_data, "Missing_Adjustment"),
         "missing difficulty mapping refuses instead of assuming Normal");

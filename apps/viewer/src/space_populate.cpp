@@ -107,42 +107,90 @@ void SpacePopulation::rebuild_piece_index() {
     });
 }
 
-void SpacePopulation::refresh_instances() {
+void SpacePopulation::refresh_instances(const particles::StepExecutor* workers) {
     FrameTimer timer(trace_frames_ ? &refresh_ms_ : nullptr);
     instances_.clear();
     std::uint64_t shells = 0;
     std::uint64_t cloaks = 0;
     attachment_marks_.clear();
-    for (const GatedInstance& piece : pieces_) {
-        if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) continue;
-        if (piece.live && piece.alternate && *piece.alternate != live_alternates_[*piece.live]) continue;
-        if (piece.shield) {
-            if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) continue;
-            ++shells;
+    if (!workers) {
+        for (const GatedInstance& piece : pieces_) {
+            if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) continue;
+            if (piece.live && piece.alternate && *piece.alternate != live_alternates_[*piece.live]) continue;
+            if (piece.shield) {
+                if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) continue;
+                ++shells;
+            }
+            // WST-12: the cloak swaps the hull and hardpoints for the STEALTH sub-object.
+            const bool cloaked = piece.live && *piece.live < live_stealth_.size() && live_stealth_[*piece.live];
+            if (piece.cloak) {
+                if (!cloaked) continue;
+                ++shells;
+                ++cloaks;
+            }
+            if (piece.cloak_hidden && cloaked) continue;
+            if (piece.blast_charged) {
+                const auto& shown = *piece.blast_charged ? live_blast_charged_ : live_blast_charging_;
+                if (!piece.live || *piece.live >= shown.size() || !shown[*piece.live]) continue;
+                ++blast_meshes_shown_[*piece.blast_charged ? "charged" : "buildup"];
+            }
+            if (piece.gate) {
+                const HardpointGate& gate = *piece.gate;
+                const scene::HardpointArt art = scene::hardpoint_art(hardpoint_states_[gate.decision][gate.hardpoint]);
+                const bool visible = gate.art == HardpointGate::Art::attached_model ? art.attached_model
+                    : gate.art == HardpointGate::Art::damage_decal ? art.damage_decal
+                    : hardpoint_states_[gate.decision][gate.hardpoint] != scene::HardpointState::destroyed;
+                if (!visible) continue;
+                if (gate.art == HardpointGate::Art::attached_model) attachment_marks_.mark(gate.decision, gate.hardpoint);
+            }
+            instances_.push_back(piece.instance);
         }
-        // WST-12: the cloak swaps the hull and hardpoints for the STEALTH sub-object.
-        const bool cloaked = piece.live && *piece.live < live_stealth_.size() && live_stealth_[*piece.live];
-        if (piece.cloak) {
-            if (!cloaked) continue;
-            ++shells;
-            ++cloaks;
+    } else {
+        piece_counts_.assign(pieces_.size(), 0);
+        auto& counts = piece_counts_;
+        const auto visible = [&](const std::size_t index) {
+            const auto& piece = pieces_[index];
+            if (piece.live && *piece.live < live_shown_.size() && !live_shown_[*piece.live]) return false;
+            if (piece.live && piece.alternate && *piece.alternate != live_alternates_[*piece.live]) return false;
+            if (piece.shield) {
+                if (!piece.live || *piece.live >= live_defend_.size() || !live_defend_[*piece.live]) return false;
+                counts[index] |= 1;
+            }
+            // WST-12: the cloak swaps the hull and hardpoints for the STEALTH sub-object.
+            const bool cloaked = piece.live && *piece.live < live_stealth_.size() && live_stealth_[*piece.live];
+            if (piece.cloak) {
+                if (!cloaked) return false;
+                counts[index] |= 2;
+            }
+            if (piece.cloak_hidden && cloaked) return false;
+            if (piece.blast_charged) {
+                const auto& shown = *piece.blast_charged ? live_blast_charged_ : live_blast_charging_;
+                if (!piece.live || *piece.live >= shown.size() || !shown[*piece.live]) return false;
+                counts[index] |= *piece.blast_charged ? 4 : 8;
+            }
+            if (piece.gate) {
+                const HardpointGate& gate = *piece.gate;
+                const scene::HardpointArt art = scene::hardpoint_art(hardpoint_states_[gate.decision][gate.hardpoint]);
+                const bool gate_visible = gate.art == HardpointGate::Art::attached_model ? art.attached_model
+                    : gate.art == HardpointGate::Art::damage_decal ? art.damage_decal
+                    : hardpoint_states_[gate.decision][gate.hardpoint] != scene::HardpointState::destroyed;
+                if (!gate_visible) return false;
+            }
+            return true;
+        };
+        if (!space::prepare_population_visibility(pieces_.size(), piece_visibility_, workers, visible))
+            static_cast<void>(space::prepare_population_visibility(pieces_.size(), piece_visibility_, nullptr, visible));
+        for (std::size_t index = 0; index < pieces_.size(); ++index) {
+            if (counts[index] & 1) ++shells;
+            if (counts[index] & 2) { ++shells; ++cloaks; }
+            if (counts[index] & 4) ++blast_meshes_shown_["charged"];
+            if (counts[index] & 8) ++blast_meshes_shown_["buildup"];
+            if (!piece_visibility_[index]) continue;
+            const auto& piece = pieces_[index];
+            if (piece.gate && piece.gate->art == HardpointGate::Art::attached_model)
+                attachment_marks_.mark(piece.gate->decision, piece.gate->hardpoint);
+            instances_.push_back(piece.instance);
         }
-        if (piece.cloak_hidden && cloaked) continue;
-        if (piece.blast_charged) {
-            const auto& shown = *piece.blast_charged ? live_blast_charged_ : live_blast_charging_;
-            if (!piece.live || *piece.live >= shown.size() || !shown[*piece.live]) continue;
-            ++blast_meshes_shown_[*piece.blast_charged ? "charged" : "buildup"];
-        }
-        if (piece.gate) {
-            const HardpointGate& gate = *piece.gate;
-            const scene::HardpointArt art = scene::hardpoint_art(hardpoint_states_[gate.decision][gate.hardpoint]);
-            const bool visible = gate.art == HardpointGate::Art::attached_model ? art.attached_model
-                : gate.art == HardpointGate::Art::damage_decal ? art.damage_decal
-                : hardpoint_states_[gate.decision][gate.hardpoint] != scene::HardpointState::destroyed;
-            if (!visible) continue;
-            if (gate.art == HardpointGate::Art::attached_model) attachment_marks_.mark(gate.decision, gate.hardpoint);
-        }
-        instances_.push_back(piece.instance);
     }
     instance_count_ = instances_.size() - shells;
     attachments_drawn_ = attachment_marks_.count();

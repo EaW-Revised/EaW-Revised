@@ -14,6 +14,7 @@
 #include "../support/result.hpp"
 #include "galactic_support.hpp"
 #include "galactic_ai_markup.hpp"
+#include "ai_unattended_input.hpp"
 #include "eawr/campaign/live_setup.hpp"
 #include "eawr/campaign/live_conflict.hpp"
 #include "eawr/campaign/space_entry.hpp"
@@ -164,9 +165,10 @@ std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
     };
     sample();
     eawr::script::authoritative::ManagedHandleWork cost;
-    std::uint64_t measured_services{}, maximum_census{}, maximum_objects{}, maximum_edges{}, maximum_entries{}, last_service{};
+    std::uint64_t measured_services{}, maximum_census{}, maximum_objects{}, maximum_edges{}, maximum_entries{}, last_service{}, answered_inputs{};
     while (root.game()->galaxy().clock().galactic_frame < frames) {
         if (root.game()->completed_tick() >= frames * 4) throw std::runtime_error("markup drift probe reached synchronization guard before requested galactic duration");
+        if (galactic_campaign_input::unattended_human_input(*root.game())) ++answered_inputs;
         must(root.game()->step(*executor));
         if (auto* bridge = root.game()->galactic_scripts()) {
             const auto& scheduler = bridge->ai_scheduler();
@@ -190,7 +192,7 @@ std::string run(const eawr::vfs::Vfs& files, const eawr::data::Catalog& catalog,
         << '\t' << cost.objects << '\t' << cost.edges << '\t' << cost.entries << '\t' << maximum_objects << '\t' << maximum_edges
         << '\t' << maximum_entries << '\t' << cost.censuses << '\t' << cost.released << '\n';
     std::cout << "markup census workers=" << workers << " frames=" << frames << " services=" << measured_services
-        << " total_ns=" << cost.nanoseconds << " scheduler_ns=" << cost.service_nanoseconds << " max_ns=" << maximum_census
+        << " answered_inputs=" << answered_inputs << " total_ns=" << cost.nanoseconds << " scheduler_ns=" << cost.service_nanoseconds << " max_ns=" << maximum_census
         << " objects=" << cost.objects << " edges=" << cost.edges << " entries=" << cost.entries
         << " max_objects=" << maximum_objects << " max_edges=" << maximum_edges << " max_entries=" << maximum_entries
         << " censuses=" << cost.censuses << " released=" << cost.released << '\n';

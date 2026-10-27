@@ -2,7 +2,7 @@
 
 #include "checkpoint_access_internal.hpp"
 
-// Child-state v7 / raw domain 9 field order. Changes require a section version change.
+// Raw domain 9 retains six bonus slots; domain 10 includes WFR-01's nonzero fire range.
 namespace eawr::sim::tactical::checkpoint_detail {
 
 template <> struct Fields<AbilitySlot> {
@@ -223,7 +223,10 @@ template <> struct Fields<IonStunState> {
 
 template <> struct Fields<session_detail::LiveUnit> {
     template <class A, class T> static void apply(A& a, T& v) {
-        a(v.state, v.durability, v.motion, v.speed, v.roll, v.combat, v.formation, v.abilities, v.approach, v.ion_stun, v.arrival_vulnerable_until, v.upgrade_bonuses, v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
+        a(v.state, v.durability, v.motion, v.speed, v.roll, v.combat, v.formation, v.abilities, v.approach, v.ion_stun, v.arrival_vulnerable_until);
+        for (std::size_t slot = 0; slot < 6; ++slot) a(v.upgrade_bonuses[slot]);
+        if (a.fire_range_bonuses) a(v.upgrade_bonuses[6]);
+        a(v.upgraded_durability, v.asteroid_contact, v.nebula, v.corrupt, v.waypoints, v.garrison_unit, v.sighting, v.position_history);
     }
 };
 

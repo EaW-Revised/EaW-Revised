@@ -5,9 +5,10 @@
 #include "eawr/core/load_profile.hpp"
 #include "eawr/platform/live_ai.hpp"
 #include "eawr/presentation/ui/production.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include <set>
 #include <algorithm>
+#include <iostream>
 #include <utility>
 
 namespace eawr::presentation::godot_backend {
@@ -82,11 +83,23 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
     for (const battle::StartPlayer& player : start.value().players) {
         if (player.lobby && player.human) humans.push_back(player.player.player_id);
     }
-    auto content = skirmish::session_content(*tables, humans);
+    // #4589: FoC loads a game with a bad object in it; a bad unit type is skipped and reported here.
+    std::vector<core::Diagnostic> skipped;
+    auto content = skirmish::session_content(*tables, humans, {}, units::ContentErrors::skip_object, &skipped);
+    for (const auto& warning : skipped) {
+        std::cerr << "EAWR live session content: " << core::format_diagnostic(warning) << std::endl;
+    }
     if (!content) {
         failure = "live session content: " + core::format_diagnostic(content.error());
         return false;
     }
+    // #4589: a skipped type that the start places fails the start; the skip set binds into the match identity.
+    if (auto placed = skirmish::refuse_skipped_starts(start.value(), skipped); !placed) {
+        failure = "live session start: " + core::format_diagnostic(placed.error());
+        return false;
+    }
+    const auto skipped_types = skirmish::skipped_type_ids(skipped);
+    skirmish::bind_skipped_types(start.value(), skipped_types);
     if (auto bound = skirmish::bind_difficulty(content.value(), start.value(), inputs.value()); !bound) {
         failure = "live session difficulty: " + core::format_diagnostic(bound.error());
         return false;
@@ -145,6 +158,11 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
         return false;
     }
     economy_ = std::move(economy).value();
+    {
+        std::vector<std::string> dropped;
+        skirmish::drop_skipped_menu_options(economy_, skipped_types, &dropped);
+        for (const auto& line : dropped) std::cerr << "EAWR live session content: " << line << std::endl;
+    }
     auto preview_colours = ui::reinforcement_colours(filesystem);
     if (!preview_colours) {
         failure = "reinforcement preview colours: " + core::format_diagnostic(preview_colours.error());
@@ -189,7 +207,7 @@ bool BattleSourceState::prepare_local(const vfs::Vfs& filesystem, const data::Ca
             // draw independently of sensor contact, including placed derelict hulls.
             auto object = catalog.resolve(unit.type, data::Category::game_object);
             if (!object) { failure = core::format_diagnostic(object.error()); return false; }
-            if (!space::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
+            if (!live::map_prop_fog_bound(tag_text(object.value(), "Behavior"),
                                            tag_text(object.value(), "SpaceBehavior"))) {
                 unfogged_map_props_.push_back(unit.state.entity_id);
             }

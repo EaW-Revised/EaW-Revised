@@ -61,7 +61,7 @@ inline tactical::TacticalSetup setup() {
     metadata.match.credits = units(5000); metadata.match.start_tech = 1; metadata.match.max_tech = 5;
     metadata.match.game_timer = 123; metadata.match.win_integer = 3; metadata.match.win_float = units(2);
     metadata.match.auto_resolve = 1; metadata.match.allow_random_events = true;
-    metadata.match.win_condition = "conquest"; metadata.match.space_win_condition = "starbase";
+    metadata.match.win_condition = "conquest"; metadata.match.tactical_win_condition = "starbase";
     metadata.slots = {{1, true, 2, {"fleet-a"}}, {2, true, 4, {"fleet-b"}}, {3, false, 1, {"fleet-ai"}}};
     value.skirmish = metadata;
     value.match_identity = identity().content;

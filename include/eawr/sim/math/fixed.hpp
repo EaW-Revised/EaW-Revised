@@ -132,7 +132,6 @@ inline constexpr std::string_view negative_square_root = "EAWR-MATH-0003";
 inline constexpr std::string_view malformed_decimal = "EAWR-MATH-0004";
 inline constexpr std::string_view decimal_resource_limit = "EAWR-MATH-0005";
 inline constexpr std::string_view zero_normalization = "EAWR-MATH-0006";
-inline constexpr std::string_view undefined_angle = "EAWR-MATH-0007";
 inline constexpr std::string_view non_unit_quaternion = "EAWR-MATH-0008";
 } // namespace diagnostic_codes
 

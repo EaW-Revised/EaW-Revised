@@ -35,7 +35,11 @@ PROJECT_LICENSE_FILES = {"LICENSE": ROOT / "LICENSE", "THIRD_PARTY_NOTICES.md": 
 
 PINNED_GODOT_VERSION = "4.7.2-stable"
 PINNED_GODOT_BUILD = "ed1daf0bf"
-PINNED_GODOT_IDENTITY = f"4.7.2.stable.official.{PINNED_GODOT_BUILD}"
+# The shipped runtime is the EAWR fork build (third_party/godot/README.md); the stock official exe still exports and probes.
+PINNED_GODOT_FORK_COMMIT = "fad06b579"
+PINNED_GODOT_IDENTITY = f"4.7.2.stable.eawr.{PINNED_GODOT_FORK_COMMIT}"
+OFFICIAL_GODOT_IDENTITY = f"4.7.2.stable.official.{PINNED_GODOT_BUILD}"
+ACCEPTED_GODOT_IDENTITIES = (PINNED_GODOT_IDENTITY, OFFICIAL_GODOT_IDENTITY)
 GODOT_VERSION_TIMEOUT_SECONDS = 10
 MAX_GODOT_VERSION_OUTPUT = 4096
 
@@ -69,6 +73,20 @@ REQUIRED_PCK_ENTRIES = {
     # Project-authored, non-retail camera bindings (P1-09) packed by the
     # preset's config/*.json include filter.
     "config/camera-bindings.json",
+    "config/coruscant-duel-camera.xml",
+    "config/coruscant-empire-live-session-camera.xml",
+    "config/coruscant-hero-beams-camera.xml",
+    "config/coruscant-hero-targets-camera.xml",
+    "config/coruscant-live-session-camera.xml",
+    "config/coruscant-space-map-camera.xml",
+    "config/map-camera-bindings.json",
+    "config/map-camera-free-bindings.json",
+    "config/map-camera-free.xml",
+    "config/map-camera.xml",
+    "config/naboo-map-camera.xml",
+    "config/space-live-camera-bindings.json",
+    "config/space-map-camera-bindings.json",
+    "config/space-map-camera.xml",
     "eawr_viewer.gdextension",
     "main.tscn.remap",
     "project.binary",
@@ -141,13 +159,13 @@ def validate_godot_identity(godot: Path) -> tuple[str, str]:
     if result.returncode:
         raise ValueError(f"Godot --version exited {result.returncode} for {godot}")
     identities = [line.strip() for line in output.splitlines() if line.strip()]
-    if PINNED_GODOT_IDENTITY not in identities:
+    identity = next((line for line in identities if line in ACCEPTED_GODOT_IDENTITIES), None)
+    if identity is None:
         observed = identities[0] if identities else "<no version output>"
         raise ValueError(
             f"Godot executable does not report pinned identity "
-            f"{PINNED_GODOT_IDENTITY!r}; observed {observed!r}"
+            f"{PINNED_GODOT_IDENTITY!r} (or the official {OFFICIAL_GODOT_IDENTITY!r}); observed {observed!r}"
         )
-    identity = next(line for line in identities if line == PINNED_GODOT_IDENTITY)
     version = _version_from_identity(identity)
     if version != PINNED_GODOT_VERSION:
         raise ValueError(
@@ -173,7 +191,7 @@ def verify_smoke_engine_version(smoke: dict[str, Any], expected_version: str) ->
         normalized = value.strip()
         if normalized.startswith("Godot "):
             normalized = normalized[len("Godot "):].strip()
-        if normalized not in {expected_version, PINNED_GODOT_IDENTITY}:
+        if normalized not in {expected_version, *ACCEPTED_GODOT_IDENTITIES}:
             raise ValueError(
                 f"smoke receipt {field} does not match pinned Godot version "
                 f"{expected_version!r}: observed {value!r}"
@@ -260,22 +278,8 @@ def bundle_licenses(package: Path) -> None:
         shutil.copyfile(cached_license(item), target / item["name"])
 
 
-def validate_package(package: Path, spec: dict[str, str], template: Path) -> dict[str, Any]:
-    executable = package / spec["executable"]
-    extension = package / spec["extension"]
-    pck = package / f"{executable.stem}.pck"
-    expected_files = {executable.name, extension.name, pck.name}
-    actual_files = {path.name for path in package.iterdir() if path.is_file()}
-    actual_dirs = {path.name for path in package.iterdir() if path.is_dir()}
-    if actual_files != expected_files or actual_dirs != {LICENSES_DIR}:
-        raise ValueError(
-            f"package file set mismatch: files={sorted(actual_files)}, dirs={sorted(actual_dirs)}"
-        )
-    licenses = package / LICENSES_DIR
-    actual_licenses = {path.name for path in licenses.iterdir()}
-    if actual_licenses != expected_license_names():
-        raise ValueError(f"package licence set mismatch: {sorted(actual_licenses)}")
-    entries = pck_entries(pck)
+def validate_pck_entries(entries: list[str]) -> None:
+    """Require the public project resources and reject every unlisted or private asset."""
     missing = sorted(REQUIRED_PCK_ENTRIES - set(entries))
     if missing:
         raise ValueError(f"PCK is missing required public resources: {missing}")
@@ -297,6 +301,25 @@ def validate_package(package: Path, spec: dict[str, str], template: Path) -> dic
     )
     if forbidden:
         raise ValueError(f"PCK contains forbidden generated/private candidates: {forbidden}")
+
+
+def validate_package(package: Path, spec: dict[str, str], template: Path) -> dict[str, Any]:
+    executable = package / spec["executable"]
+    extension = package / spec["extension"]
+    pck = package / f"{executable.stem}.pck"
+    expected_files = {executable.name, extension.name, pck.name}
+    actual_files = {path.name for path in package.iterdir() if path.is_file()}
+    actual_dirs = {path.name for path in package.iterdir() if path.is_dir()}
+    if actual_files != expected_files or actual_dirs != {LICENSES_DIR}:
+        raise ValueError(
+            f"package file set mismatch: files={sorted(actual_files)}, dirs={sorted(actual_dirs)}"
+        )
+    licenses = package / LICENSES_DIR
+    actual_licenses = {path.name for path in licenses.iterdir()}
+    if actual_licenses != expected_license_names():
+        raise ValueError(f"package licence set mismatch: {sorted(actual_licenses)}")
+    entries = pck_entries(pck)
+    validate_pck_entries(entries)
     return {
         "package_files": sorted(actual_files),
         "pck_entries": entries,

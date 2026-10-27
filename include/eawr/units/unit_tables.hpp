@@ -4,6 +4,7 @@
 #include "eawr/units/unit_tables_abilities.hpp"
 #include "eawr/units/unit_tables_spawner.hpp"
 #include "eawr/units/unit_tables_galactic.hpp"
+#include "eawr/units/land_companies.hpp"
 #include "eawr/units/unit_tables_presentation.hpp"
 
 #include "eawr/assets/assets.hpp"
@@ -90,7 +91,7 @@ struct UnitType final {
     std::uint32_t tech_level{};
     std::uint32_t base_level{}; // SAE-02: Base_Level on live stations
     std::vector<std::uint32_t> previous_base_levels{}; // SAE-02: resolved Prev_Level_Base chain, AI-only
-    std::optional<Fixed> space_fow_reveal_range; // the type's own range (#68); used only with `reveal`
+    std::optional<Fixed> fow_reveal_range; // the type's own range (#68); used only with `reveal`
     bool force_sensitive{}; // WAB-54: Is_Force_Sensitive
     bool reveal{}; // REVEAL in its Behavior or SpaceBehavior list (#271)
     Fixed dense_fow_multiplier{Fixed::from_raw(Fixed::scale / 2)};
@@ -115,7 +116,7 @@ struct UnitType final {
     std::optional<CollisionBounds> collision; // collidable meshes of its model (#74)
     // #536: the model's collidable meshes, then each hardpoint's attached model's, placed at its
     // attachment bone; and Collision_Box_Modifier (a value above 1 adds the sphere of DG-37).
-    std::vector<CollisionMesh> collision_meshes;
+    std::vector<CollisionMesh> collision_meshes; // immutable indexed geometry shared by table copies
     std::optional<Fixed> collision_box_modifier;
     // #665 (WSU-10, WSU-12): Mouse_Collide_Override_Sphere_Radius, the pick sphere a pointer ray
     // hits when it misses the collision meshes. Presentation only: the content identity leaves it out.
@@ -179,6 +180,12 @@ struct UnitType final {
     std::optional<Fixed> spin_away_time;
     // #409: Out_Of_Combat_Defense_Adjustment, a craft's defense while idle or approaching (DG-26).
     std::optional<Fixed> out_of_combat_defense;
+    // LS shoot PR 1 (land bodies only): Collidable_By_Projectile_Dead and the death presentation rows
+    // (Death_Clone entries as authored, Death_Fade_Time, Death_Persistence_Duration).
+    bool dead_projectile_collision{};
+    std::vector<std::string> death_clones;
+    std::optional<Fixed> death_fade_time;
+    std::optional<Fixed> death_persistence_duration;
     Production production; // #530
     // WBP-01..19: live capture content, and the separate UC replacement path.
     bool capture_point{};
@@ -244,6 +251,8 @@ struct UnitType final {
     // RP-09: the projectile a station creates at its position when a retreat destroys it.
     std::string retreat_self_destruct{};
     std::uint32_t retreat_self_destruct_index{no_index};
+    std::uint32_t max_squad_size{10}; // FL-06: debug-build default; positive authored team maximum
+    bool creates_team{}; // PG-08: first member's Create_Team guards the tactical power clamp
     bool operator==(const UnitType&) const = default;
 };
 
@@ -276,6 +285,7 @@ struct InputFile final {
 };
 
 struct UnitTables final {
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space}; // BF-2: which variant of the domain tags was read
     bool campaign_scene{}; // opt-in identity for GC-only scene metadata
     bool campaign_multiplayer{}; // WGCH-65: tactical bounty table selection
     std::vector<CampaignAbilityLock> campaign_ability_locks;
@@ -283,6 +293,9 @@ struct UnitTables final {
     std::optional<Fixed> pad_ai_build_multiplier; // WBP-15: difficulty data, only with live capture content
     std::vector<std::uint64_t> pad_neutral_factions; // WHZ-51: authored Is_Neutral, sorted faction type CRCs
     std::vector<UnitType> units; // pinned types, then craft, in first-reference order
+    std::vector<LandCompany> land_companies; // L2a (#1450): land company objects of a land load, in first-reference order
+    std::vector<LandTraversalDefinition> land_movement_classes;
+    std::vector<LandStaticObject> land_static_objects;
     std::vector<ObstacleType> obstacles; // pinned_m2_obstacles order (#71)
     std::vector<Projectile> projectiles;
     std::vector<TargetingPrioritySet> priority_sets;
@@ -303,6 +316,7 @@ using ModelLookup = std::function<const assets::Model*(std::string_view logical_
 using FileDigest = std::function<std::string(std::string_view logical_path)>;
 
 struct LoadInput final {
+    sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space}; // BF-2 (#3779): selects the domain tag variants
     bool campaign_scene{}; // GC extensions are never decoded by ordinary skirmish loads
     const data::Catalog* catalog{};
     const vfs::Vfs* filesystem{}; // targeting priority sets and gameconstants.xml
@@ -319,10 +333,17 @@ struct LoadInput final {
 // gap becomes an Unresolved row instead.
 [[nodiscard]] core::Result<UnitTables> load_unit_tables(const LoadInput& input);
 
+// Land-only scene/proxy decoding without combat, model or company expansion.
+[[nodiscard]] UnitTables load_land_static_tables(const data::Catalog&, std::span<const std::string> types,
+    ModelLookup model = {}, FileDigest digest = {});
+
 // The replay content identity of loaded tables: SHA-256 of their canonical
 // encoding (docs/unit-data.md). It changes when any loaded value changes and
 // ignores host paths, source layers and file bytes the tables do not read.
 [[nodiscard]] std::array<std::uint8_t, 32> content_identity(const UnitTables& tables);
+// DG-36: prepared coordinate extrema admit usable collision without walking triangles;
+// invalid geometry retains the original first-coordinate refusal text and order.
+[[nodiscard]] std::optional<std::string> collision_capability_error(const UnitType& unit);
 [[nodiscard]] std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables);
 
 // The durability table of loaded tables (#72, docs/behaviour/space-hardpoints.md): one profile
@@ -330,7 +351,10 @@ struct LoadInput final {
 // name (assets::object_type_crc) and sorted by it. Health is scaled by
 // Object_Max_Health_Multiplier_Space. Fails when a scalar it needs is missing, a destroyable
 // hardpoint has no Health, two types share a type ID or validate_durability rejects the table.
-[[nodiscard]] core::Result<sim::tactical::DurabilityTable> durability_table(const UnitTables& tables);
+// FoC has no health cap (SKI-64): a scaled hull above sim::tactical::max_durability_health is held
+// at that bound and, when `notes` is given, reported there once per type as a warning.
+[[nodiscard]] core::Result<sim::tactical::DurabilityTable> durability_table(const UnitTables& tables,
+    std::vector<core::Diagnostic>* notes = nullptr);
 
 // The damage and armor type names the tables use, lower case and sorted: the indices of the
 // damage rules' armor table (#74). Both durability_table and combat_table index by it.
@@ -374,22 +398,31 @@ struct SpawnPolicy final {
 // (Corvette, Frigate, Capital or SuperCapital; 1 otherwise). The rules are 360 /
 // MaxRotationsSpace and XYExpansionDistanceSpace. Fails when a scalar it needs is missing, two
 // types share a type ID or validate_motion rejects the table. Craft fly with the squadron
-// locomotor (#75) and have no profile.
+// locomotor (#75) and have no profile. Static footprints without a locomotor or profile
+// emit one informational diagnostic per type when notes is supplied.
 // The resulting squadrons.spawners and campaign_spawners are the shared arrival
-// roster: skirmish uses starting squadrons only; campaign includes authored
-// reserves, single ships and each owner's selected tech tier (WGT-10, WSL-16).
+// roster: skirmish uses starting squadrons and ships; campaign also includes authored
+// reserves and each owner's selected tech tier (WGT-10, WSL-04/16a).
 [[nodiscard]] core::Result<sim::tactical::MotionTable> motion_table(
-    const UnitTables& tables, const SpawnPolicy& spawn_policy = {});
+    const UnitTables& tables, const SpawnPolicy& spawn_policy = {},
+    std::vector<core::Diagnostic>* notes = nullptr);
 
+// What a content error in one object does to its table (#4589, docs/unit-data.md "Content errors").
+// strict: the table is refused (our CI and data checks). skip_object: FoC's way, the object's rows
+// are left out and reported, and only a battle that places it fails.
+enum class ContentErrors : std::uint8_t { strict, skip_object };
 // The combat table of loaded tables (#73, docs/behaviour/space-weapon-fire.md): one profile per
 // station, ship and craft, keyed like durability_table, with its CategoryMask bits,
 // Targeting_Max_Attack_Distance, weapon hardpoints (Fire_* tags; recharge in truncated
 // hundredths of a second, pulse delay in truncated frames), its object weapon (Projectile_Types,
 // ranged by Targeting_Max_Attack_Distance), its target bones and hardpoint positions (scaled by
 // Scale_Factor), and each used Targeting_Priority_Set resolved by attack_priority against every
-// such type. Fails when a Fire_Category_Restrictions name is unknown, two types share a type ID
-// or validate_combat rejects the table.
-[[nodiscard]] core::Result<sim::tactical::CombatTable> combat_table(const UnitTables& tables);
+// such type. A Fire_Category_Restrictions name outside the category dictionary adds no bit (ML-53; the
+// loader reports it in `unresolved`). Fails when two types share a type ID
+// or validate_combat rejects the table. Under skip_object a type whose rows fail is left out and
+// appended to `skipped` (its message names the type) instead.
+[[nodiscard]] core::Result<sim::tactical::CombatTable> combat_table(const UnitTables& tables,
+    ContentErrors policy = ContentErrors::strict, std::vector<core::Diagnostic>* skipped = nullptr);
 
 // The ability table of loaded tables (#76, docs/behaviour/space-abilities.md AB-01 to AB-04): one
 // profile per station, ship and craft type that authors a modelled Unit_Ability (DEFEND, TURBO,
@@ -403,7 +436,8 @@ struct SpawnPolicy final {
 [[nodiscard]] core::Result<sim::tactical::AbilityTable> ability_table(
     const UnitTables& tables, std::span<const sim::tactical::PlayerId> humans = {},
     bool (*allowed)(std::string_view unit, std::string_view ability) = nullptr,
-    bool default_autofire = true);
+    bool default_autofire = true, ContentErrors policy = ContentErrors::strict,
+    std::vector<core::Diagnostic>* skipped = nullptr);
 // Whether a type runs the PowerToShields object script (`Lua_Script`), whose DEFEND rule the
 // ability table's stand-in carries (AB-41).
 [[nodiscard]] bool runs_defend_script(const UnitType& type) noexcept;

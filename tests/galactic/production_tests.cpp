@@ -15,7 +15,8 @@ int case_galactic_production_tests(int argc, char** argv) {
             ground_structure_sale(); unit_sale(); return failures == 0 ? 0 : 1;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--retained-census") {
-            census_campaign_retained_counts(); return failures == 0 ? 0 : 1;
+            census_admission(); census_campaign_retained_counts(); census_container_and_capacity();
+            census_rounding_and_data(); census_corpus_checkpoint(); return failures == 0 ? 0 : 1;
         }
         if (argc == 3 && std::string_view(argv[1]) == "--write-corpus") { write_corpus(argv[2]); return 0; }
         else if (argc != 2) throw std::runtime_error("expected <fixtures directory> or --write-corpus <new directory>");

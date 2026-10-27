@@ -246,6 +246,8 @@ void build_unit_cards(HudState& state, const vfs::Vfs& filesystem, const data::u
                            + (state.card_face.face.empty() ? std::string("the engine font") : state.card_face.face));
         }
         EawrUnitCards::Setup cards;
+        // UI-12: every tactical hover source draws above the HUD's panel plane.
+        cards.tooltip_z_index = 1;
         cards.slots = state.shell.card_slots;
         cards.borders = state.shell.card_borders;
         cards.texture = [&state](const std::string& name) { return state.command_texture(name, "unit card"); };
@@ -583,6 +585,7 @@ void build_battle_overlay(HudState& state, const vfs::Vfs& filesystem, const dat
                 context.text_owner = lookup;
                 context.boxes = {skin.get(), &theme, lookup.get(), build_theme(theme, *textures, *fonts), size};
                 context.recorder = state.replay_writer;
+                context.session_recorder = state.session_replay_writer;
                 auto* screen = memnew(EawrSaveReplayScreen);
                 if (!screen->open(*state.overlay, std::move(context))) {
                     state.warn("EAWR-UI-0321", screen->failure());

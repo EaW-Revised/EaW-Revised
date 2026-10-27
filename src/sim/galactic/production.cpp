@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <string>
 
 namespace eawr::sim::galactic {
 namespace {
@@ -215,10 +216,29 @@ core::Result<std::int64_t> GalacticSession::increment_technology(PlayerId id) {
 }
 
 core::Result<std::uint64_t> production_frames(Fixed seconds) {
-    // Bound before multiplying the Q24 value; zero durations are valid (WGEP-18/61).
-    if (seconds.raw() < 0 || seconds.raw() > static_cast<std::int64_t>(galactic_max_ticks) * Fixed::scale / galactic_frames_per_second)
+    // Split before multiplication: the full unsigned source-second range fits a frame count.
+    if (seconds.raw() < 0)
         return core::Result<std::uint64_t>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production duration out of range"));
-    return core::Result<std::uint64_t>::success(static_cast<std::uint64_t>(seconds.raw() * galactic_frames_per_second / Fixed::scale));
+    return core::Result<std::uint64_t>::success(static_cast<std::uint64_t>(seconds.raw() / Fixed::scale) * galactic_frames_per_second
+        + static_cast<std::uint64_t>(seconds.raw() % Fixed::scale) * galactic_frames_per_second / Fixed::scale);
+}
+
+math::Fixed production_product(Fixed left, Fixed right) {
+    Fixed result;
+    if (math::try_multiply(left, right, result)) return result;
+    return Fixed::from_raw((left.raw() < 0) != (right.raw() < 0)
+        ? -std::numeric_limits<std::int64_t>::max() : std::numeric_limits<std::int64_t>::max());
+}
+
+math::Fixed production_price(Fixed price) {
+    if (price.raw() > 0 && price.raw() < Fixed::scale) return one;
+    const auto whole = price.raw() / Fixed::scale;
+    const auto remainder = price.raw() % Fixed::scale;
+    const auto rounded = whole + (remainder >= Fixed::scale / 2 ? 1 : remainder <= -Fixed::scale / 2 ? -1 : 0);
+    // A rounded endpoint can exceed the fixed range by less than one credit.
+    return Fixed::from_raw(std::clamp(rounded,
+        std::numeric_limits<std::int64_t>::min() / Fixed::scale,
+        std::numeric_limits<std::int64_t>::max() / Fixed::scale) * Fixed::scale);
 }
 
 namespace {
@@ -241,8 +261,10 @@ core::Result<ProductionOffer> prepare_offer(const ProductionOffer& original, con
         corruption_time = corruption_fixture::production_factor(p->benefits, active, p->time[0], p->time[1]);
         // Stock basis providers already include their uncorrupted factor. A zero
         // basis cannot be inverted: retain the named raw-production-basis seam.
-        auto price = math::divide(corruption_price, p->benefits ? one : p->price[0]);
-        auto time = math::divide(corruption_time, p->benefits ? one : p->time[0]);
+        const auto price_basis = p->benefits ? one : p->price[0];
+        const auto time_basis = p->benefits ? one : p->time[0];
+        auto price = corruption_price == price_basis ? core::Result<Fixed>::success(one) : math::divide(corruption_price, price_basis);
+        auto time = corruption_time == time_basis ? core::Result<Fixed>::success(one) : math::divide(corruption_time, time_basis);
         if (!price || !time) return core::Result<ProductionOffer>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "raw-production-basis seam: zero uncorrupted factor"));
         corruption_price = price.value(); corruption_time = corruption->tutorial ? one : time.value();
     }
@@ -255,29 +277,20 @@ core::Result<ProductionOffer> prepare_offer(const ProductionOffer& original, con
         auto price = multiplier(true);
         auto time = multiplier(false);
         if (!price || !time) return core::Result<ProductionOffer>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production offer adjustment failed"));
-        auto cost = math::multiply(basis->price, price.value());
-        auto seconds = math::multiply(basis->seconds, time.value());
-        if (cost) cost = math::multiply(cost.value(), corruption_price);
-        if (cost) cost = math::multiply(cost.value(), technology_price); // WGEP-29/30: before the one rounding step
-        if (seconds) seconds = math::multiply(seconds.value(), corruption_time);
+        auto cost = production_product(basis->price, price.value());
+        auto seconds = production_product(basis->seconds, time.value());
+        cost = production_product(cost, corruption_price);
+        cost = production_product(cost, technology_price); // WGEP-29/30: before the one rounding step
+        seconds = production_product(seconds, corruption_time);
         // Negative time is retained by the reducer; queue admission diagnoses it.
-        if (!cost || !seconds || cost.value().raw() < 0 || !production_frames(seconds.value()))
-            return core::Result<ProductionOffer>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production offer adjustment failed"));
-        if (cost.value().raw() > (std::int64_t{1} << 48)) return core::Result<ProductionOffer>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "production offer adjustment failed"));
-        const auto raw_cost = cost.value().raw();
-        adjusted.price = raw_cost > 0 && raw_cost < Fixed::scale ? one
-            : Fixed::from_integer((raw_cost + Fixed::scale / 2) / Fixed::scale).value();
-        adjusted.seconds = seconds.value();
+        adjusted.price = production_price(cost);
+        adjusted.seconds = seconds;
     } else if (corruption) {
-        auto cost = math::multiply(original.price, corruption_price);
-        if (cost) cost = math::multiply(cost.value(), technology_price);
-        auto seconds = math::multiply(original.seconds, corruption_time);
-        if (!cost || !seconds || cost.value().raw() < 0 || cost.value().raw() > (std::int64_t{1} << 48) || !production_frames(seconds.value()))
-            return core::Result<ProductionOffer>::failure(detail::diagnostic(diagnostic_codes::invalid_setup, "invalid corruption production adjustment"));
-        const auto raw = cost.value().raw();
-        adjusted.price = raw > 0 && raw < Fixed::scale ? one
-            : Fixed::from_integer((raw + Fixed::scale / 2) / Fixed::scale).value();
-        adjusted.seconds = seconds.value();
+        auto cost = production_product(original.price, corruption_price);
+        cost = production_product(cost, technology_price);
+        auto seconds = production_product(original.seconds, corruption_time);
+        adjusted.price = production_price(cost);
+        adjusted.seconds = seconds;
     }
     return core::Result<ProductionOffer>::success(std::move(adjusted));
 }
@@ -457,7 +470,7 @@ ProductionAdmission queried_admission(const ProductionAdmissionInputs& inputs,
         ? std::binary_search(registered->affiliated_players.begin(), registered->affiliated_players.end(), player.player)
         : type->affiliated;
     if (!affiliated || type->cinematic
-        || !type->direct_build_allowed || type->price < one) return (ProductionAdmission::unavailable);
+        || !type->direct_build_allowed || type->price < one || type->seconds.raw() < 0) return (ProductionAdmission::unavailable);
     if (!eligibility_only && !player.human) return (ProductionAdmission::unsupported_payment);
     if (!eligibility_only && !player.pay_as_you_go && type->price.trunc_to_integer() > account.credits.trunc_to_integer()) return (ProductionAdmission::credits);
     if (type->kind == ProductionKind::technology && (account.current_tech != type->tech || type->target_tech > account.maximum_tech)) return (ProductionAdmission::tech);
@@ -578,8 +591,8 @@ core::Result<void> validate_production(const GalacticSetup& setup) {
     }
     for (std::size_t i = 0; i < p.players.size(); ++i) {
         const auto& row = p.players[i];
-        if (row.player != setup.players[i].player_id || row.population_capacity.raw() < 0 || row.population_used.raw() < 0
-            || row.population_capacity.raw() > (std::int64_t{1} << 48) || row.population_used.raw() > (std::int64_t{1} << 48)
+        if (row.player != setup.players[i].player_id || row.population_used.raw() < 0
+            || row.population_used.raw() > (std::int64_t{1} << 48)
             || !ordered(row.counts, [](const auto& count) { return count.type; })
             || !ordered(row.locked, [](auto id) { return id; }) || !ordered(row.unlocked, [](auto id) { return id; }))
             return invalid("invalid player census/lock table");
@@ -621,8 +634,8 @@ core::Result<void> validate_production(const GalacticSetup& setup) {
         if (total_offers > galactic_max_objects) return invalid("offer table exceeds resource bound");
         for (const auto& type : row.offers) {
             if (type.type == 0 || static_cast<unsigned>(type.domain) > 1 || static_cast<unsigned>(type.kind) > 3
-                || type.price.raw() < 0 || type.price.raw() > (std::int64_t{1} << 48) || type.price.raw() % Fixed::scale != 0
-                || type.population.raw() < 0 || type.population.raw() > (std::int64_t{1} << 40) || !production_frames(type.seconds)
+                || type.price.raw() % Fixed::scale != 0
+                || type.population.raw() < 0 || type.population.raw() > (std::int64_t{1} << 40)
                 || type.tech < 0 || type.tech > std::numeric_limits<std::int32_t>::max()
                 || type.target_tech < 0 || type.target_tech > std::numeric_limits<std::int32_t>::max()
                 || type.required_ground_level < 0 || type.required_ground_level > 5 || type.required_space_level < 0 || type.required_space_level > 5
@@ -639,7 +652,7 @@ core::Result<void> validate_production(const GalacticSetup& setup) {
                     [&](const auto& row) { return row.type == type.type
                         && (row.role == NestedCreationRole::company || row.role == NestedCreationRole::squadron); });
                 if (found == setup.fleet_control->types.end() || (found->requires_live_children && !nested))
-                    return invalid("orbital result requires supported original fleet traits");
+                    return invalid("orbital result requires supported original fleet traits (type " + std::to_string(type.type) + ")");
             }
         }
     }
@@ -718,9 +731,9 @@ core::Result<void> validate_census(const GalacticSetup& setup) {
         || !ordered(census.types, [](const auto& row) { return row.type; })
         || !ordered(census.objects, [](const auto& row) { return row.id; })) return invalid("invalid census tables");
     for (const auto& row : census.types) if (row.type == 0 || row.population.raw() < 0
-        || row.population.raw() > (std::int64_t{1} << 40) || row.additional_capacity < 0
-        || row.additional_capacity > 65536 || row.sale_policy > 2
-        || row.authored_price.raw() < 0)
+        || row.population.raw() > (std::int64_t{1} << 40)
+        || row.additional_capacity < std::numeric_limits<std::int32_t>::min()
+        || row.additional_capacity > std::numeric_limits<std::int32_t>::max() || row.sale_policy > 2)
         return invalid("census type outside arithmetic bounds");
     if (!census_member_order(census)) return invalid("census members require a bounded ordered acyclic type graph");
     for (const auto& type : census.types) {
@@ -1291,7 +1304,10 @@ void GalacticSession::Impl::execute_object_sale(const GameCommand& command, std:
         player->population_used = std::max(Fixed{}, math::subtract(player->population_used, type->population).value());
         if (std::erase_if(production_originals, [&](const auto& row) { return row.id == object->id; }))
             published_production_originals.reset();
+        const bool special = object->kind == ProductionKind::structure && object->domain == ProductionDomain::ground;
         planet->objects.erase(object); --live_object_count;
+        // WGM-188: removing a ground special refreshes the ground base level.
+        if (special) refresh_ground_base_level(static_cast<std::size_t>(planet - production->planets.begin()));
     }
     account.credits = balance.value();
     invalidate_income_inputs();
@@ -1701,6 +1717,8 @@ core::Result<void> GalacticSession::Impl::service_production(const PartitionExec
                         planet.objects.push_back({id, type->type, finished.builder, paid(finished), type->domain, type->kind});
                     } else {
                         planet.objects.push_back({id, type->type, finished.builder, paid(finished), type->domain, type->kind}); ++live_object_count;
+                        // WGS-93: a completed ground special raises the planet's ground base level on the spot.
+                        if (type->kind == ProductionKind::structure && type->domain == ProductionDomain::ground) refresh_ground_base_level(producers[i]);
                     }
                 }
                 invalidate_income_inputs(); // an economic object may have entered the live roster

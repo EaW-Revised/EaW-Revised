@@ -42,6 +42,10 @@ struct CampaignSetupOptions {
     // #3768: multiplayer human sides, their leads and every faction's controller (AI configuration bytes). Copied
     // into the galaxy setup and sealed into the campaign identity; absent for single player, whose identity is unchanged.
     std::optional<sim::galactic::SeatControlSetup> seat_control;
+    // WGM-07 deviation: which fleet commands a player pause admits. Absent means the mode default: single
+    // player and co-op admit them, a versus lobby keeps retail's refusal. The lobby host's choice (a later
+    // wire field) arrives here.
+    std::optional<sim::galactic::PausePolicy> pause_policy;
 };
 struct CampaignLocation {
     std::string original_type;
@@ -105,6 +109,9 @@ public:
     [[nodiscard]] std::span<const CampaignTech> tech() const noexcept { return tech_; }
     [[nodiscard]] std::span<const CampaignHero> multiplayer_heroes() const noexcept { return heroes_; }
     [[nodiscard]] std::string_view campaign_name() const noexcept { return campaign_name_; }
+    // The authored route names of galaxy().routes, one per route in graph order. A campaign route that was left out
+    // of the graph (CGS-06) has no entry here.
+    [[nodiscard]] std::span<const std::string> route_names() const noexcept { return route_names_; }
     [[nodiscard]] sim::EntityId first_free_entity_id() const noexcept { return first_free_; }
 private:
     CampaignSetupPlan() = default;
@@ -121,6 +128,7 @@ private:
     std::optional<sim::math::Fixed> observer_reveal_delay_;
     std::optional<bool> observer_auto_reveal_;
     std::string campaign_name_;
+    std::vector<std::string> route_names_;
     sim::EntityId first_free_{};
     std::vector<CampaignLocation> locations_;
     std::vector<StartingForceRequest> forces_;
@@ -141,6 +149,26 @@ private:
 // balances through campaign setup. Difficulty is an explicit XML record name.
 // Placement/control and tech side-effect providers remain WGS-U08 seams; the
 // returned layout retains neutral ownership until those services initialize it.
+// Object type names the campaign's starting forces and special production record, in authored order and
+// without repeats. Pass them to units::galactic_type_table as
+// always_include so that a type with no tracked galactic tag still resolves (CGS-05).
+[[nodiscard]] std::vector<std::string> campaign_referenced_types(const data::galactic::GalacticData&, std::string_view campaign);
+
+// False when the type is a company without an authored transport or members, or a company or squadron whose
+// transport or member names (or the members' own) resolve to no type in the table: FoC cannot create it (CGS-08).
+[[nodiscard]] bool campaign_type_creatable(const units::GalacticTypeTable&, std::string_view name);
+
+// A type's Required_Special_Structures as AND groups of OR alternatives, with the debug build's positional rule for a null
+// (unresolved) name (CGS-07, RGC-09): a null entry that leads a chain is skipped and the next entry leads it; a null
+// alternative inside a chain led by a known type satisfies the chain, which is dropped. Skipped names are listed in
+// `ignored` for a diagnostic. A malformed OR chain is refused.
+struct StructureRequirements {
+    std::vector<std::vector<sim::galactic::TypeId>> groups;
+    std::vector<std::string> ignored;
+};
+[[nodiscard]] core::Result<StructureRequirements> resolve_structure_requirements(
+    std::string_view authored, const std::function<sim::galactic::TypeId(std::string_view)>& identity);
+
 [[nodiscard]] core::Result<CampaignSetupPlan> plan_live_campaign_setup(
     const vfs::Vfs&, const data::galactic::GalacticData&, const units::GalacticTypeTable&,
     std::string_view campaign, CampaignSetupOptions, std::string_view difficulty);

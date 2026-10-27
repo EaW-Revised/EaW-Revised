@@ -152,6 +152,19 @@ void container_record_and_land() {
     a = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
     expect(a.land_invaders == f.roster.invader_entries, "WAR-56 raid destination keeps invasion-list landing order");
 }
+// WAR-60/87: the bounty service sees the application once, after lethal delivery and before the ownership return.
+void bounty_service_order() {
+    const auto f = fixture(); const auto a = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
+    std::vector<std::string> order; std::vector<AutoResolveDeath> seen;
+    AutoResolveOutcomeServices services;
+    services.war_u04_lethal_effects = [&](auto&, auto) { order.push_back("damage"); return eawr::core::Result<void>::success(); };
+    services.bounty = [&](auto&, const auto& application) { order.push_back("bounty"); seen = application.deaths; return eawr::core::Result<void>::success(); };
+    auto game = take(GameSession::create(f.setup)); game.set_auto_resolve_outcome_services(services);
+    check(game.stage_auto_resolve_outcome(a));
+    eawr::platform::ThreadWorkerAdapter workers(1); (void)take(game.step(workers));
+    expect(order == std::vector<std::string>{"damage", "bounty"} && seen == a.deaths,
+        "WAR-60 the bounty service runs once after lethal delivery with the ordered death list");
+}
 void session_replay_checkpoint(const std::string& corpus_path) {
     const auto f = fixture(); const auto application = take(plan_auto_resolve_outcome(f.conflict, f.roster, f.outcome, f.inputs));
     std::ifstream input(corpus_path, std::ios::binary);
@@ -336,7 +349,7 @@ int case_galactic_auto_resolve_outcome_tests(int argc, char** argv) {
             return 0;
         }
         if (argc != 2) throw std::runtime_error("expected outcome corpus path");
-        planning_and_encoding(); container_record_and_land(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
+        planning_and_encoding(); container_record_and_land(); bounty_service_order(); session_replay_checkpoint(argv[1]); ring_and_failed_callback(); surface_retreat_before_cleanup();
     }
     catch (const std::exception& error) { expect(false, error.what()); }
     return galactic_test::failures ? 1 : 0;

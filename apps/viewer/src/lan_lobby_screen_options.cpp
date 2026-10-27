@@ -1,6 +1,29 @@
 #include "lan_lobby_screen_internal.hpp"
 
 namespace eawr::presentation::godot_backend {
+// Scripted GUI contract: edit the actual dialog controls and use the normal modal buttons.
+bool EawrLanLobby::action_options(const std::string& argument,
+                                 bool (*number)(const std::string&, std::uint32_t&)) {
+    if (!impl_->host || state_->options_panel == nullptr) return false;
+    if (argument == "open") { handle_button("IDC_SELECT_OPTIONS"); return state_->editing.has_value(); }
+    if (!state_->editing) return false;
+    if (argument.starts_with("credits=")) {
+        std::uint32_t value{};
+        const auto* gadget = find_gadget(*state_->options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER");
+        auto* slider = gadget != nullptr ? cast<EawrUiSlider>(gadget->control) : nullptr;
+        if (slider == nullptr || !number(argument.substr(8), value)) return false;
+        slider->set_value(static_cast<double>(value));
+        process_options();
+        return true;
+    }
+    process_options();
+    if (argument == "accept") handle_button("EAWR_OPT_ACCEPT");
+    else if (argument == "cancel") handle_button("EAWR_OPT_CANCEL");
+    else if (argument == "defaults") handle_button("EAWR_OPT_DEFAULTS");
+    else return false;
+    return true;
+}
+
 void EawrLanLobby::open_host_options() {
     if (resources_->dialogs->script.find(host_dialog) == nullptr) return;
     page_ = Page::host_options;
@@ -138,19 +161,10 @@ void EawrLanLobby::build_options_overlay() {
     for (const char* id : {"IDC_SKIRMISH_CREDITS_TEXT", "IDC_SKIRMISH_CREDITS_SLIDER", "IDC_SKIRMISH_CREDITS_VALUE"})
         if (auto* control = control_of(id)) control->set_visible(credits_shown);
     if (credits_shown) {
-        const String reason = text(std::string(model::setup_notice(model::SetupNotice::credits_not_applied)));
         slider->set_min(static_cast<double>(resources.credits_bounds->minimum));
         slider->set_max(static_cast<double>(resources.credits_bounds->maximum));
         slider->set_step(0.0);
-        slider->set_forced_states(KitState::disabled, KitState::disabled);
-        slider->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
-        slider->set_tooltip_text(reason);
-        auto* cover = memnew(Control);
-        cover->set_position(slider->get_position());
-        cover->set_size(slider->get_size());
-        cover->set_mouse_filter(Control::MOUSE_FILTER_STOP);
-        cover->set_tooltip_text(reason);
-        built.frame->add_child(cover);
+        slider->set_button_step(model::setup_credits_button_step({resources.credits_bounds->minimum, resources.credits_bounds->maximum}));
     }
     // The transparent panel only takes the pointer, so the staging behind stays inert while the dialog is up.
     auto* panel = memnew(ColorRect);
@@ -182,14 +196,19 @@ void EawrLanLobby::show_options_values() {
     state.opt_units->set_pressed_no_signal(value.free_starting_units);
     state.opt_super->set_pressed_no_signal(value.allow_superweapons);
     if (state.opt_win != nullptr) {
-        const auto index = model::setup_win_condition_index(value.space_win_condition);
+        const auto index = model::setup_win_condition_index(value.tactical_win_condition);
         state.opt_win->select(index ? static_cast<int>(*index) : -1);
     }
     if (const auto* gadget = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER");
         gadget != nullptr && resources_->credits_bounds) {
         const auto shown = model::setup_credits_clamp({resources_->credits_bounds->minimum, resources_->credits_bounds->maximum},
                                                       value.credits.trunc_to_integer());
-        if (auto* slider = cast<EawrUiSlider>(gadget->control)) slider->set_value_no_signal(static_cast<double>(shown));
+        if (auto* slider = cast<EawrUiSlider>(gadget->control)) {
+            slider->set_value_no_signal(static_cast<double>(shown));
+            state.shown_credits = slider->get_value();
+            state.credits_revision = slider->edit_revision();
+            state.editing->value.credits = sim::math::Fixed::from_integer(shown).value();
+        }
         if (const auto* label = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_VALUE"))
             if (auto* caption = cast<EawrUiLabel>(label->control)) caption->set_text(text(std::to_string(shown)));
     }
@@ -218,12 +237,26 @@ void EawrLanLobby::process_options() {
     edit.value.allow_heroes = state.opt_heroes->is_pressed();
     edit.value.free_starting_units = state.opt_units->is_pressed();
     edit.value.allow_superweapons = state.opt_super->is_pressed();
+    if (const auto* gadget = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_SLIDER");
+        gadget != nullptr && resources_->credits_bounds) {
+        if (auto* slider = cast<EawrUiSlider>(gadget->control); slider != nullptr
+            && (slider->get_value() != state.shown_credits || slider->edit_revision() != state.credits_revision)) {
+            state.shown_credits = slider->get_value();
+            state.credits_revision = slider->edit_revision();
+            const auto& bounds = *resources_->credits_bounds;
+            const auto chosen = model::setup_credits_edit({bounds.minimum, bounds.maximum}, state.shown_credits);
+            edit.value.credits = sim::math::Fixed::from_integer(chosen).value();
+            edit.custom = true;
+            if (const auto* label = find_gadget(*state.options_dialog, "IDC_SKIRMISH_CREDITS_VALUE"))
+                if (auto* caption = cast<EawrUiLabel>(label->control)) caption->set_text(text(std::to_string(chosen)));
+        }
+    }
     if (state.opt_win != nullptr && state.opt_win->is_visible_in_tree()) {
         const int picked = state.opt_win->get_selected();
         const auto choices = model::setup_win_conditions();
-        const auto current = model::setup_win_condition_index(edit.value.space_win_condition);
+        const auto current = model::setup_win_condition_index(edit.value.tactical_win_condition);
         if (picked >= 0 && static_cast<std::size_t>(picked) < choices.size() && (!current || static_cast<int>(*current) != picked)) {
-            edit.value.space_win_condition = std::string(choices[static_cast<std::size_t>(picked)].name);
+            edit.value.tactical_win_condition = std::string(choices[static_cast<std::size_t>(picked)].name);
             edit.custom = true;
         }
     }

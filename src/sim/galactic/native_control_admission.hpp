@@ -4,6 +4,7 @@
 
 #include "eawr/sim/galactic/control.hpp"
 #include "encoding.hpp"
+#include "paused_admission.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -107,10 +108,10 @@ core::Result<GalacticSession::NativeFleetReceipt> launch_native_surface_units(Ow
 }
 
 template<class Owner> GalacticRejectReason validate_native_landing(Owner& native_owner,
-    PlayerId player, FleetId id, PlanetId planet, bool pending_local_conflict) {
+    PlayerId player, FleetId id, PlanetId planet, bool pending_local_conflict, PausedKind kind) {
     if (std::none_of(native_owner.seats.begin(), native_owner.seats.end(), [&](const auto& row) { return row.player == player && row.active; })) return GalacticRejectReason::inactive_seat;
     if (!native_owner.control || !native_owner.setup.fleet_control) return GalacticRejectReason::unknown_subject;
-    if (native_owner.clock.pause_depth) return GalacticRejectReason::paused;
+    if (owner_paused_refusal(native_owner, kind, pending_local_conflict, native_human_issuer(native_owner, player))) return GalacticRejectReason::paused;
     const auto humans = std::count_if(native_owner.seats.begin(), native_owner.seats.end(), [](const auto& row) { return row.kind == SeatKind::human; });
     const auto& gates = native_owner.setup.fleet_control->gates;
     if (humans == 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech)) return GalacticRejectReason::movement_blocked;
@@ -135,7 +136,7 @@ template<class Owner> core::Result<GalacticSession::NativeInvasionReceipt> admit
     const bool raid = fleet_at != native_owner.fleets.end()
         && native_owner.registry.template get<session_detail::FleetData>(fleet_at->second).raid_destination == planet;
     if (native_owner.failed || (!raid && !native_owner.native_invasions_enabled && !native_owner.native_applying)) return native_control_error<NativeInvasionReceipt>("native invasion requires its campaign conflict owner");
-    if (const auto reason = validate_native_landing(native_owner, player, id, planet, pending_local_conflict); reason != GalacticRejectReason::none) return Result::success({false, 0, false, reason});
+    if (const auto reason = validate_native_landing(native_owner, player, id, planet, pending_local_conflict, PausedKind::invasion); reason != GalacticRejectReason::none) return Result::success({false, 0, false, reason});
     const auto& fleet = native_owner.registry.template get<session_detail::FleetData>(fleet_at->second);
     NativeInvasion request; request.invader = player; request.fleet = id; request.planet = planet;
     const auto retain = [&](const FleetMember& member) {
@@ -189,7 +190,8 @@ core::Result<NativeLandingAdmission> land_native_transports_rows(Owner& native_o
         return native_control_error<NativeLandingAdmission>("native landing requires its live control owner");
     if (std::none_of(native_owner.seats.begin(), native_owner.seats.end(), [&](const auto& seat) { return seat.player == player && seat.active; }))
         return Result::success({{false, id, GalacticRejectReason::inactive_seat}, false});
-    if (native_owner.clock.pause_depth) return Result::success({{false, id, GalacticRejectReason::paused}, false});
+    if (owner_paused_refusal(native_owner, PausedKind::surface_deploy, pending_local_conflict, native_human_issuer(native_owner, player)))
+        return Result::success({{false, id, GalacticRejectReason::paused}, false});
     const auto humans = std::count_if(native_owner.seats.begin(), native_owner.seats.end(), [](const auto& seat) { return seat.kind == SeatKind::human; });
     const auto& gates = native_owner.setup.fleet_control->gates;
     if (humans == 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech))
@@ -248,7 +250,8 @@ core::Result<NativeActorLandingAdmission> land_native_transport_rows(Owner& nati
     GalacticSession::NativeTransportLandingReceipt receipt{{false, actor}, false};
     const auto humans = std::count_if(native_owner.seats.begin(), native_owner.seats.end(), [](const auto& seat) { return seat.kind == SeatKind::human; });
     const auto& gates = native_owner.setup.fleet_control->gates;
-    if (native_owner.clock.pause_depth || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech))) {
+    if (owner_paused_refusal(native_owner, PausedKind::surface_deploy, pending_local_conflict, native_human_issuer(native_owner, player))
+        || (humans <= 1 && pending_local_conflict && (gates.queued_campaign_conflict || gates.active_speech))) {
         receipt.event.reason = GalacticRejectReason::paused; return Result::success({receipt, false});
     }
     const auto actual = native_owner.actor_records.find(actor);

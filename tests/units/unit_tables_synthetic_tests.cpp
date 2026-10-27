@@ -77,6 +77,61 @@ void space_population() {
 }
 
 void ship_suitability_content() {
+    {
+        // Raw identity/picking/capability inputs stay in model order and model space;
+        // combat consumers share the same scaled, turned tree built from those inputs.
+        eawr::units::UnitTables tables;
+        eawr::units::UnitType type;
+        type.id = "Shared_Collision_Target";
+        type.scale_factor = Fixed::from_raw(raw(2) + raw(1) / 2);
+        // point() accepts raw fixed values; these fixtures use whole model-space units.
+        type.collision = eawr::units::CollisionBounds{point(raw(-3), raw(-4), raw(-5)), point(raw(6), raw(7), raw(8))};
+        type.collision_meshes = {{"hull", eawr::units::no_index,
+            eawr::units::IndexedCollisionTriangles{
+                {point(raw(1), raw(2), raw(3)), point(raw(4), raw(2), raw(3)), point(raw(1), raw(5), raw(3))}, {{0, 1, 2}}}},
+            {"shield", 0, eawr::units::IndexedCollisionTriangles{
+                {point(raw(-1), raw(-2), raw(-3)), point(raw(-4), raw(-2), raw(-3)), point(raw(-1), raw(-5), raw(-3))}, {{0, 1, 2}}}}};
+        tables.units.push_back(type);
+        const auto identity = eawr::units::content_identity(tables);
+        const auto converted = eawr::units::combat_table(tables);
+        expect(static_cast<bool>(converted), "DG-36: shared collision fixture binds");
+        if (converted) {
+            auto retained = converted.value();
+            const auto& original = converted.value().profiles[0];
+            const auto& copy = retained.profiles[0];
+            expect(original.meshes.size() == type.collision_meshes.size(), "DG-36: all raw meshes survive binding");
+            // Hand-computed 2.5 scale and quarter turn: (1,2,3), (4,2,3), (1,5,3).
+            const eawr::sim::tactical::CollisionTriangle literal{
+                {Fixed::from_raw(raw(-5)), Fixed::from_raw(raw(5) / 2), Fixed::from_raw(raw(15) / 2)},
+                {Fixed::from_raw(raw(-5)), Fixed::from_raw(raw(10)), Fixed::from_raw(raw(15) / 2)},
+                {Fixed::from_raw(raw(-25) / 2), Fixed::from_raw(raw(5) / 2), Fixed::from_raw(raw(15) / 2)}};
+            expect(original.meshes[0].triangles[0] == literal && copy.meshes[0].triangles[0] == literal,
+                "DG-36: both placed owners match literal expected fixed-point corners");
+            for (std::size_t mesh = 0; mesh < original.meshes.size(); ++mesh) {
+                std::vector<eawr::sim::tactical::CollisionTriangle> expected;
+                for (const auto& raw_triangle : type.collision_meshes[mesh].triangles) {
+                    std::array<Vec3, 3> placed{};
+                    for (std::size_t corner = 0; corner < 3; ++corner) {
+                        const auto& p = raw_triangle[corner];
+                        const auto scale = *type.scale_factor;
+                        placed[corner] = {Fixed::from_raw(-eawr::sim::math::multiply(p.y, scale).value().raw()),
+                            eawr::sim::math::multiply(p.x, scale).value(), eawr::sim::math::multiply(p.z, scale).value()};
+                    }
+                    expected.push_back({placed[0], placed[1], placed[2]});
+                }
+                const auto reference = eawr::sim::tactical::collision_mesh(std::move(expected),
+                    eawr::sim::tactical::no_hardpoint, mesh == 0 ? eawr::sim::tactical::no_hardpoint : 0, mesh == 1);
+                expect(original.meshes[mesh] == reference && copy.meshes[mesh] == reference,
+                    "DG-36: copied consumers retain exact scaled/turned triangles, tree and routing");
+                expect(copy.meshes[mesh].triangles.data() == original.meshes[mesh].triangles.data()
+                    && copy.meshes[mesh].nodes.data() == original.meshes[mesh].nodes.data(),
+                    "DG-36: placed collision buffers have one allocation across content copies");
+            }
+        }
+        expect(tables.units[0].collision_meshes == type.collision_meshes
+            && eawr::units::content_identity(tables) == identity,
+            "DG-36: binding/copying preserves raw geometry and its exact content identity");
+    }
     // WWP-21: combat geometry does not depend on Space_Layer or movement constants.
     for (const auto kind : {UnitKind::ship, UnitKind::craft, UnitKind::squadron}) {
         for (int source = 0; source < 6; ++source) {
@@ -395,6 +450,51 @@ void living_collision_admission() {
 
 // AU-82 boolean and spawned-pair parsing. M2 single/list inheritance remains unchanged.
 void retail_value_rules() {
+    // FM-10: absent and short offset lists are valid; motion binds their missing slots to zero.
+    for (const auto value : {"0", "-1", "2.5", "2147483648", "broken"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string opening = "<Squadron Name=\"Test_Squadron\">";
+        xml.insert(xml.find(opening) + opening.size(), "<Max_Squad_Size>" + std::string(value) + "</Max_Squad_Size>");
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables && !loaded.tables->find("Test_Squadron")
+            && loaded.tables->find("Test_Frigate"), "FL-06: invalid maximum skips only its authored type");
+        expect(loaded.tables && has_row(loaded.tables->unresolved, "Test_Squadron", "Max_Squad_Size"),
+            "FL-06: invalid maximum names the type and tag in its diagnostic");
+    }
+    for (const std::size_t offset_count : {0U, 176U, 186U}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto begin = xml.find("<Squadron Name=\"Test_Squadron\">");
+        const auto first = xml.find("  <Squadron_Units>", begin);
+        const auto last = xml.find("  <Unit_Abilities_Data", first);
+        std::string authored = "<Max_Squad_Size>200</Max_Squad_Size>";
+        for (std::size_t index = 0; index < 186; ++index)
+            authored += "<Squadron_Units>Test_Fighter</Squadron_Units>";
+        for (std::size_t index = 0; index < offset_count; ++index)
+            authored += "<Squadron_Offsets>30,15,1</Squadron_Offsets>";
+        expect(first < last && last != std::string::npos, "FM-10: synthetic squadron range exists");
+        if (first >= last || last == std::string::npos) continue;
+        xml.replace(first, last - first, authored);
+        write_fixture(tree.root, xml);
+        const auto loaded = load(tree.root, models(-40.0F));
+        const auto* squadron = loaded.tables ? loaded.tables->find("Test_Squadron") : nullptr;
+        expect(squadron && squadron->max_squad_size == 200 && squadron->members.size() == 186, "FL-02: all 186 authored craft load");
+        if (!squadron) continue;
+        expect(!has_row(loaded.tables->unresolved, "Test_Squadron", "Squadron_Offsets"),
+            "FM-10: missing offsets do not produce unresolved data");
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        expect(static_cast<bool>(motion), "FM-10: large rosters with short or absent offsets bind motion");
+        if (!motion) continue;
+        const auto* bound = motion.value().squadrons.find_squadron(eawr::assets::object_type_crc("Test_Squadron"));
+        expect(bound && bound->max_squad_size == 200 && bound->members.size() == 186 && bound->offsets.size() == 186,
+            "FM-10: normalized motion contains every craft and offset");
+        if (!bound) continue;
+        for (std::size_t index = 0; index < bound->offsets.size(); ++index)
+            expect(bound->offsets[index] == (index < offset_count ? point(raw(30), raw(15), raw(1)) : Vec3{}),
+                "FM-10: authored offsets survive and each missing offset is zero");
+    }
     for (const auto style : {std::string_view{}, std::string_view{"Space_Automatic"}, std::string_view{"User_Input"}}) {
         TempTree tree;
         auto xml = units_xml("3600", "Unit_Select_Test");
@@ -472,7 +572,8 @@ void retail_value_rules() {
             scenery.footprint.collision_x = Fixed::from_raw(raw(1));
             scenery.footprint.collision_y = Fixed::from_raw(raw(1));
             tables.obstacles.push_back(scenery);
-            const auto motion = eawr::units::motion_table(tables);
+            std::vector<eawr::core::Diagnostic> notes;
+            const auto motion = eawr::units::motion_table(tables, {}, &notes);
             expect(static_cast<bool>(motion), "ML-24: zero-radius static scenery binds motion");
             if (motion) {
                 const auto id = eawr::assets::object_type_crc(scenery.id);
@@ -483,6 +584,35 @@ void retail_value_rules() {
                     "ML-24: a scenery layer adds neither collision radius nor obstacle/motion participation");
                 expect(static_cast<bool>(eawr::sim::tactical::validate_motion(motion.value())),
                     "ML-24: zero-radius static scenery bypasses destination-search rings");
+                expect(std::count_if(notes.begin(), notes.end(), [&](const auto& note) {
+                    return note.code == eawr::units::diagnostic_codes::motion
+                        && note.severity == eawr::core::Severity::info
+                        && note.message.find(std::to_string(id)) != std::string::npos;
+                }) == 1, "static non-mover emits one informational load note");
+                eawr::sim::tactical::TacticalSetup setup;
+                setup.seed = 1;
+                setup.content_identity.fill(1);
+                setup.players = {{1, 1, 1, eawr::sim::tactical::player_flag_commandable}};
+                setup.units = {{1, id, 1, {}, eawr::sim::math::identity_quat(), {}}};
+                auto session = eawr::sim::tactical::TacticalSession::create(setup, {}, {}, motion.value());
+                expect(static_cast<bool>(session), "zero-radius StaticObject starts a tactical session");
+                if (session) {
+                    eawr::sim::tactical::PlayerCommand move{{0, 1, 0}, {1},
+                        eawr::sim::tactical::MovePayload{{Fixed::from_raw(raw(100)), {}, {}}}};
+                    expect(static_cast<bool>(session.value().submit(move)), "static prop move command submits safely");
+                    expect(static_cast<bool>(session.value().step(eawr::sim::InlineExecutor{})),
+                        "zero-radius StaticObject session advances after a move command");
+                    expect(!session.value().motion_state(1)
+                        && session.value().unit_state(1)->position == Vec3{},
+                        "profile-less static prop never enters path planning or moves");
+                }
+                // No explicit obstacle radius: retain the tiny model fallback that triggered the refusal.
+                tables.obstacles.back().footprint.obstacle_radius.reset();
+                tables.obstacles.back().footprint.collision_x = Fixed::from_raw(1);
+                tables.obstacles.back().footprint.collision_y = Fixed::from_raw(1);
+                expect(static_cast<bool>(eawr::units::motion_table(tables)),
+                    "tiny static model fallback without a locomotor bypasses search validation");
+                tables.obstacles.back() = scenery;
                 tables.obstacles.back().scale_factor = Fixed::from_raw(raw(2));
                 tables.obstacles.back().footprint.custom_soft_radius = Fixed::from_raw(raw(40));
                 tables.obstacles.back().footprint.custom_hard_x = Fixed::from_raw(raw(12));
@@ -497,8 +627,8 @@ void retail_value_rules() {
                     "ML-24: scenery retains the custom hard pair times scale");
                 tables.obstacles.back() = scenery;
                 tables.obstacles.back().footprint.space_obstacle = true;
-                expect(!eawr::units::motion_table(tables),
-                    "ML-24: SPACE_OBSTACLE retains the model fallback and its small-radius rejection");
+                expect(static_cast<bool>(eawr::units::motion_table(tables)),
+                    "static SPACE_OBSTACLE retains its model fallback without becoming a search subject");
             }
         }
     }

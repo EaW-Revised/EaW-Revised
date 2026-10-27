@@ -2,6 +2,7 @@
 #include "eawr/presentation/godot/renderer.hpp"
 #include "eawr/presentation/space/environment_scene.hpp"
 #include "eawr/presentation/skin_pose.hpp"
+#include "eawr/presentation/render_churn.hpp"
 
 #include "diagnostic_buffer.hpp"
 #include "fog_adapter.hpp"
@@ -18,10 +19,13 @@
 #include "upload_identity.hpp"
 #include "upload_identity_pool.hpp"
 #include "texture_budget.hpp"
+#include "model_recipe.hpp"
+#include "texture_recipe.hpp"
 #include "resource_residency.hpp"
 #include "upload_winding.hpp"
 
 #include <godot_cpp/classes/global_constants.hpp>
+#include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
@@ -95,8 +99,13 @@ public:
     const std::vector<ReflectedUniform>& uniforms, const std::vector<std::string>& tokens);
 
 class GodotRenderer::Impl final {
+    friend class GodotRenderer;
+    friend struct detail::ModelRecipeProbe;
+    friend struct detail::RecipeMemoryProbe;
 public:
     using FogSelection = GodotRenderer::FogSelection;
+    void set_texture_loader(detail::TextureLoader loader) { texture_loader_ = std::move(loader); }
+    void set_model_loader(detail::ModelLoader loader) { model_loader_ = std::move(loader); }
 
     enum class MaterialUpload { success, shader_compile_failed, refused, failed };
     // Why upload_material refused a compiled shader (MaterialUpload::refused).
@@ -108,9 +117,9 @@ public:
 
     struct Resource final {
         struct Recipe final {
-            assets::Model model;
-            std::shared_ptr<const assets::Texture> texture;
-            std::vector<std::pair<std::string, std::shared_ptr<const assets::Texture>>> bindings;
+            detail::ModelRecipe model;
+            std::shared_ptr<detail::TextureRecipe> texture;
+            std::vector<std::pair<std::string, std::shared_ptr<detail::TextureRecipe>>> bindings;
         };
         RID mesh;
         RID texture;
@@ -178,6 +187,11 @@ public:
         Transform3D object_transform;
         detail::PlacedPiece placement; // #888: what it last sent, and the submit that carried it
         bool visible{true};
+        bool reserved_proxy{};
+        std::uint64_t category_submit_frame{~std::uint64_t{0}};
+        std::uint64_t category_surfaces{};
+        render_categories::Role category_role{render_categories::Role::unknown};
+        mutable bool category_casts{true};
     };
 
     struct PendingPose final {
@@ -193,7 +207,31 @@ public:
         }
     };
 
+    [[nodiscard]] core::Result<void> bind_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
+        const Resource& resource,
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared);
+    [[nodiscard]] core::Result<void> set_prepared_skin_pose(sim::EntityId entity_id, sim::AssetId asset_id,
+        std::shared_ptr<const SkinPosePalette<Transform3D>> prepared) {
+        if (!prepared) return failure(diagnostic_codes::invalid_skin_pose,
+            "skin pose contains a non-finite palette matrix");
+        const auto resource = resources_.find(asset_id);
+        if (resource == resources_.end()) return failure(diagnostic_codes::missing_asset,
+            "cannot bind a skin pose to missing renderer asset " + std::to_string(asset_id));
+        if (!resource->second.skinned || prepared->palette.size() != resource->second.bone_count)
+            return failure(diagnostic_codes::invalid_skin_pose,
+                "skin pose bone count does not match the uploaded skinned asset");
+        return bind_skin_pose(entity_id, asset_id, resource->second, std::move(prepared));
+    }
     explicit Impl(Node3D& owner, std::shared_ptr<GodotShaderCache> shaders, bool attach_scene);
+    std::unordered_map<sim::EntityId, render_categories::Role> category_roles_;
+    render_categories::Source category_source_{this, [](const void* owner, render_categories::Sample& sample) {
+        const auto& self = *static_cast<const Impl*>(owner);
+        for (const auto& [entity, instance] : self.instances_) {
+            static_cast<void>(entity);
+            sample.record(instance.category_role, instance.category_submit_frame == sample.frame,
+                instance.category_casts, instance.category_surfaces);
+        }
+    }, [](const void* owner) { return static_cast<std::uint64_t>(static_cast<const Impl*>(owner)->viewport_.get_id()); }};
     bool attach_scene_{true};
 
     ~Impl();
@@ -241,10 +279,11 @@ public:
 
     [[nodiscard]] core::Result<void> upload(
         const sim::AssetId asset_id,
-        const assets::Model& model,
+        const ModelView& model,
         const assets::Texture& texture,
         const MaterialDescription& description,
-        const std::span<const GodotRenderer::BindingTexture> binding_textures = {});
+        const std::span<const GodotRenderer::BindingTexture> binding_textures = {},
+        ModelUpload retained_model = {});
 
     [[nodiscard]] core::Result<void> retain(const sim::AssetId asset_id);
 
@@ -287,6 +326,8 @@ public:
     void copy_instance_pose(sim::EntityId source, sim::EntityId target, float light_factor);
     void forget_instance_pose(sim::EntityId entity_id);
     [[nodiscard]] std::vector<std::uint8_t> skin_geometry_bones(sim::AssetId asset_id) const;
+    // Borrowed until the next renderer mutation on this thread; join workers before mutation.
+    [[nodiscard]] std::span<const std::uint8_t> skin_geometry_bones_view(sim::AssetId asset_id) const;
     void apply_unit_opacity(RenderingServer& rendering, sim::EntityId entity_id, const Instance& instance) const;
 
     [[nodiscard]] std::vector<GodotRenderer::SkinBindingEvidence> skin_bindings() const;
@@ -307,6 +348,8 @@ public:
     [[nodiscard]] std::vector<GodotRenderer::InstanceEvidence> instance_evidence() const;
     [[nodiscard]] std::optional<std::array<float, 12>> bone_evidence(sim::EntityId entity, std::int32_t bone) const;
     void set_instance_visible(sim::EntityId entity, bool visible);
+    void set_render_category(sim::EntityId entity_id, render_categories::Role role);
+    void write_churn_census(std::ostream& output) const;
 
     void set_camera(const FixedCamera& camera);
 
@@ -386,6 +429,8 @@ private:
     // item (one pool reference) is appended to `items`.
     [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const assets::Texture& source, RID& target,
         std::vector<detail::GpuItem>& items);
+    [[nodiscard]] bool acquire_texture(RenderingServer& rendering, const detail::TextureRecipe& recipe, RID& target,
+        std::vector<detail::GpuItem>& items);
     void release_texture(RenderingServer& rendering, const detail::GpuItem& item);
     // `drop` top mips are left out (GM-04); 0 uploads the whole stored chain.
     [[nodiscard]] static RID create_texture(RenderingServer& rendering, const assets::Texture& source,
@@ -428,12 +473,12 @@ private:
 
     // With authored_binormals every vertex also carries its binormal as
     // CUSTOM0 coefficients (legacy::binormal_coefficients).
-    [[nodiscard]] bool upload_mesh(RenderingServer& rendering, const assets::Model& source, Resource& target,
+    [[nodiscard]] bool upload_mesh(RenderingServer& rendering, const ModelView& source, Resource& target,
         bool authored_binormals = false, bool resident = true);
     [[nodiscard]] bool admit_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void evict_resource(RenderingServer& rendering, sim::AssetId asset, Resource& resource);
     void reconcile_residency(RenderingServer& rendering, std::span<const sim::RenderInstance> instances);
-    std::shared_ptr<const assets::Texture> keep_texture(const assets::Texture& texture);
+    std::shared_ptr<detail::TextureRecipe> keep_texture(const assets::Texture& texture);
 
     [[nodiscard]] static bool shared_name(const std::string& value) {
         return value.starts_with("shared:");
@@ -481,6 +526,17 @@ private:
     std::size_t shadow_variant_failures_{};
     detail::ResourceLeaseLedger leases_;
     std::unordered_map<sim::EntityId, Instance> instances_;
+    struct ProxyReservations {
+        PayloadBudget fallback;
+        PresentationBudget* budget{&fallback};
+        std::unordered_map<sim::EntityId, std::size_t> charges;
+        ~ProxyReservations() {
+            for (const auto& [entity, bytes] : charges) {
+                static_cast<void>(entity);
+                budget->release(ResourceKind::gpu_proxy, bytes);
+            }
+        }
+    } proxy_;
     std::unordered_map<sim::EntityId, PendingPose> skin_poses_;
     std::vector<std::uint8_t> skin_changes_;
     SkinPoseWork skin_work_{};
@@ -515,7 +571,12 @@ private:
     std::optional<FogRuntime> fog_;
     // Keep the eager frame state at its original offsets. Fitting submits only read the flag.
     detail::ResourceResidency residency_;
-    std::map<std::pair<std::uint64_t, std::uint64_t>, std::weak_ptr<const assets::Texture>> texture_recipes_;
+    std::map<std::pair<std::uint64_t, std::uint64_t>, std::weak_ptr<detail::TextureRecipe>> texture_recipes_;
+    detail::TextureLoader texture_loader_;
+    detail::ModelLoader model_loader_;
+    detail::ModelRecipe::Batch admission_model_;
+    detail::ModelRecipeStats model_stats_;
+    std::size_t model_reload_failures_{};
 };
 
 } // namespace eawr::presentation::godot_backend

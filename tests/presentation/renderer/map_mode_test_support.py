@@ -112,7 +112,7 @@ class MapModeRunner:
         executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
         self.assertTrue(executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary")
         completed = subprocess.run(
-            [executable, "--path", str(ROOT / "apps/viewer/project"), "--",
+            [executable, "--render-thread", "safe", "--path", str(ROOT / "apps/viewer/project"), "--",
              "--eawr-map", logical_path,
              "--eawr-game-root", str(game_root),
              "--eawr-report", str(report), *extra],

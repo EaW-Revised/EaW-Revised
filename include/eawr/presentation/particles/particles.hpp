@@ -293,7 +293,12 @@ public:
     [[nodiscard]] std::span<const EmitterCapacity> emitter_capacities() const { return capacities_; }
     // Reserved vector payload, excluding immutable definitions/mesh and allocator overhead.
     [[nodiscard]] std::size_t reserved_memory_bytes() const;
+    [[nodiscard]] static core::Result<std::size_t> planned_memory_bytes(
+        const SystemDefinition& definition, std::span<const EmitterCapacity> capacities);
+    // Reuse an identical immutable layout without releasing its vector storage.
+    void reset(std::uint32_t seed);
     [[nodiscard]] std::size_t total_dropped() const { return total_dropped_; }
+    [[nodiscard]] std::size_t emitter_dropped(std::size_t index) const { return emitters_[index].dropped; }
     [[nodiscard]] std::size_t live_child_instances() const;
 
     // Source ParticleSystemInstance::Detach with leave-particles set: every
@@ -324,6 +329,7 @@ private:
         bool frozen{};
         std::size_t next_slot{};
         std::size_t live{};
+        std::size_t dropped{};
         std::vector<std::size_t> free_slots{};
         // PS-53: RGBA byte caches are built once, independently of live slots.
         std::array<std::array<std::uint8_t, 32>, 4> color_cache{};
@@ -374,6 +380,7 @@ private:
     bool dynamic_settings_{};
     std::vector<std::uint8_t> enabled_;
     std::vector<EmitterState> emitters_;
+    std::vector<std::uint8_t> initial_active_;
     std::vector<std::vector<std::size_t>> children_;
     std::vector<Particle> particles_;
     std::vector<EmitterCapacity> capacities_;

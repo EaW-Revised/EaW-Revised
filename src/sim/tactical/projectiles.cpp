@@ -269,6 +269,12 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
         projectile.step = math::Vec3{q.take(math::multiply(delta.x, scale)), q.take(math::multiply(delta.y, scale)),
             q.take(math::multiply(delta.z, scale))};
     }
+    // RFL-15: a rocket's creation facing is the shot's launch direction (its straight leg, RFL-12).
+    const bool launched = profile.flight && profile.flight->kind == FlightKind::rocket && shot.launch != math::Vec3{};
+    if (launched) {
+        projectile.step = math::Vec3{q.take(math::multiply(shot.launch.x, profile.speed)),
+            q.take(math::multiply(shot.launch.y, profile.speed)), q.take(math::multiply(shot.launch.z, profile.speed))};
+    }
     // DG-23: travel includes the target's soft radius and the origin-to-aim height difference.
     projectile.max_travel = q.take(math::add(q.take(math::add(profile.max_travel, target_radius)), absolute(delta.z)));
     if (profile.flight) {
@@ -285,7 +291,7 @@ core::Result<Projectile> launch_projectile(const CombatEvent& shot, const ShotPr
     // MS-02: a homing projectile faces the aim point and holds its target.
     if (profile.homing || profile.turn_rate.raw() > 0) {
         motion_detail::Calc calc;
-        const auto facing = facing_toward(calc, shot.origin, shot.aim);
+        const auto facing = launched ? facing_toward(calc, {}, shot.launch) : facing_toward(calc, shot.origin, shot.aim);
         projectile.homing = profile.homing;
         projectile.locked = profile.homing && shot.target != invalid_entity_id;
         projectile.turn_rate = profile.turn_rate;
@@ -407,11 +413,31 @@ core::Result<RedirectReaction> redirect_blaster_reaction(const Projectile& origi
 }
 
 core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Projectile& projectile,
-    ProjectileScratch& scratch, MeshCollisionWork* const mesh_work) {
+    ProjectileScratch& scratch, MeshCollisionWork* const mesh_work, const RocketPathPolicy* path_policy) {
     Arithmetic q;
     ProjectileStep result;
     result.projectile = projectile;
     result.from = projectile.position;
+    const auto terminal_refusal = [&](core::Diagnostic error) {
+        // RFL-09: no invented collision segment, and no partially rebuilt route.
+        result.projectile = projectile;
+        result.projectile.travelled = q.take(math::add(projectile.travelled, projectile.speed));
+        result.expired = true;
+        result.expiry_reason = ProjectileExpiryReason::rocket_path_exhausted;
+        result.path_diagnostic = std::move(error);
+        if (q.error) return core::Result<ProjectileStep>::failure(*q.error);
+        return core::Result<ProjectileStep>::success(std::move(result));
+    };
+    const RocketPathPolicy policy = path_policy ? *path_policy : RocketPathPolicy{};
+    const auto note_estimate = [&](const RocketPathWork& work) {
+        if (work.midpoint_estimates && !result.path_diagnostic) result.path_diagnostic = diagnostic(
+            diagnostic_codes::resource_limit, "rocket type "
+            + (projectile.profile_key ? std::to_string(projectile.profile_key->type) : std::string("unbound"))
+            + " projectile " + std::to_string(projectile.id)
+            + ": Q24 midpoint nonprogress; two-chord estimates " + std::to_string(work.midpoint_estimates)
+            + ", observed controls " + std::to_string(work.control_points)
+            + ", arc visits " + std::to_string(work.arc_visits));
+    };
     if (projectile.explosion_requested) {
         result.expired = true;
         result.expiry_reason = ProjectileExpiryReason::explicit_request;
@@ -429,8 +455,13 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
         if (flight.profile.kind == FlightKind::rocket) {
             if (!flight.path_initialized) {
                 CombatRandom random(world.seed, world.frame, projectile.id, rocket_path_slot);
-                auto prepared = prepare_rocket_path(result.projectile, &random);
-                if (!prepared) return core::Result<ProjectileStep>::failure(prepared.error());
+                RocketPathWork work;
+                auto prepared = prepare_rocket_path(result.projectile, &random, &work, policy);
+                if (!prepared) {
+                    if (prepared.error().code == diagnostic_codes::resource_limit) return terminal_refusal(prepared.error());
+                    return core::Result<ProjectileStep>::failure(prepared.error());
+                }
+                note_estimate(work);
             }
             flight.path_distance = q.take(math::add(flight.path_distance, projectile.speed));
             auto point = rocket_point(flight, flight.path_distance);
@@ -484,8 +515,10 @@ core::Result<ProjectileStep> step_projectile(const CombatWorld& world, const Pro
                 || strictly_within_range(projectile.position, source.position, source.radius(), RangeMetric::spatial)) continue;
             // RFL-07: entry is inclusive at both ends; each source keeps registration order.
             // The current point is already chosen, while the new route serves later frames.
-            auto repathed = repath_rocket(result.projectile, source.position, projectile.step);
-            if (!repathed) return core::Result<ProjectileStep>::failure(repathed.error());
+            RocketPathWork work;
+            auto repathed = repath_rocket(result.projectile, source.position, projectile.step, &work, policy);
+            if (!repathed) return terminal_refusal(repathed.error());
+            note_estimate(work);
         }
     } else {
         const auto& registry = world.projectile_defences;

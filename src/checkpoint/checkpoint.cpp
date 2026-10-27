@@ -90,6 +90,7 @@ std::string_view section_name(const std::uint16_t id) noexcept {
     case SectionId::galactic_abilities: return "galactic-abilities";
     case SectionId::campaign_scoring: return "campaign-scoring";
     case SectionId::galactic_owner: return "galactic-owner";
+    case SectionId::land_state: return "land-state";
     case SectionId::presentation_hints: return "presentation-hints";
     case SectionId::campaign_identity: return "campaign-identity";
     }

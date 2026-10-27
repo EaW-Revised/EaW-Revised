@@ -1030,16 +1030,10 @@ void installed(bool garrison_only, bool population_only, bool commander_only, bo
     record.seats = {{{1}, 1}, {{2}, 2}};
     for (const auto& fleet : setup.fleets) for (const auto& member : fleet.members) record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
     std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
-    expect(provider->available(record), "an unreachable story rocket prototype does not disable supported battles");
-    auto unsupported = record;
-    unsupported.forces.push_back({800, type_id("UM06_EclipseDefensePad"), 2, 11});
-    const auto availability = provider->availability(unsupported);
-    expect(!availability && availability.error().code == tt::diagnostic_codes::invalid_setup
-        && availability.error().message.find("RFL-03/05, #1760") != std::string::npos && !provider->available(unsupported),
-        "availability returns the cached reachable rocket refusal with its native diagnostic code");
-    const auto refused = provider->resolve(unsupported, *galaxy.snapshot(), 901);
-    expect(!refused && refused.error().message.find("RFL-03/05, #1760") != std::string::npos,
-        "a battle that can spawn the unsupported rocket refuses through the named flight seam");
+    expect(provider->available(record), "an unreachable story rocket prototype does not alter supported battles");
+    auto seeded = record;
+    seeded.forces.push_back({800, type_id("UM06_EclipseDefensePad"), 2, 11});
+    expect(provider->available(seeded), "RFL-03: a reachable stock seeded rocket profile is now available in GC");
     auto resolved = take(provider->resolve(record, *galaxy.snapshot(), 901));
     expect(std::count_if(resolved.conflict.forces.begin(), resolved.conflict.forces.end(), [](const auto& force) {
         return force.id >= 500 && force.id < 516 && force.role == campaign::ForceRole::rider;

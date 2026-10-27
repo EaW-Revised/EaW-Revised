@@ -20,6 +20,7 @@ FOV and pose unchanged (tests/presentation/camera/controller_main.cpp,
 test_viewport_aspect). These checks are structural and run everywhere.
 """
 
+import configparser
 import pathlib
 import re
 import unittest
@@ -36,6 +37,13 @@ def source_texts() -> dict[str, str]:
 
 
 class ViewportAspect(unittest.TestCase):
+    def test_shader_instance_buffer_covers_large_mod_fleets(self):
+        settings = configparser.ConfigParser(comment_prefixes=(";",))
+        # Godot permits config_version before the first section; INI parsers require one.
+        settings.read_string("[project]\n" + (PROJECT / "project.godot").read_text(encoding="utf-8"))
+        self.assertEqual(settings.getint("rendering", "limits/global_shader_variables/buffer_size"), 262144,
+                         "large mod fleets must not exhaust the shader instance-uniform buffer")
+
     def test_sources_are_found(self):
         names = source_texts()
         self.assertIn("src/presentation/godot/renderer.cpp", names)

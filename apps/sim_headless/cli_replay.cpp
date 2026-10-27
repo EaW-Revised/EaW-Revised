@@ -350,7 +350,9 @@ int run_replay(const std::optional<Options>& options) {
         tactical_version == eawr::sim::tactical::replay_format_version
         || tactical_version == eawr::sim::tactical::replay_format_version_squadrons
         || tactical_version == eawr::sim::tactical::replay_format_version_extensions
-        || tactical_version == eawr::sim::tactical::replay_format_version_squadron_extensions) {
+        || tactical_version == eawr::sim::tactical::replay_format_version_squadron_extensions
+        || tactical_version == eawr::sim::tactical::replay_format_version_native
+        || tactical_version == eawr::sim::tactical::replay_format_version_squadron_native) {
         if (!options->trace_path.empty()) {
             return report_argument_error("--trace-out requires a replay-v1 input");
         }

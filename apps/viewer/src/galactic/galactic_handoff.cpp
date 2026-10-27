@@ -1,6 +1,7 @@
 #include "galactic_mode_internal.hpp"
 #include "eawr/battle/start.hpp"
 #include "campaign_loading_hud.hpp"
+#include "space_proof_route.hpp"
 
 #include "eawr/campaign/conflict_entry.hpp"
 #include "eawr/core/diagnostic.hpp"
@@ -154,28 +155,23 @@ bool GalacticMode::State::service_space_cycle_proof() {
                 return true;
             }
             game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
-                sim::galactic::MoveFleet{target->id, {target->orbit, proof_merge_destination}, {}}, {}});
+                sim::galactic::MoveFleet{target->id, proof_move_path, {}}, {}});
             proof_move_submitted = true;
             capture_space_cycle_stage("galaxy");
         }
-        for (const auto& fleet : fleets) {
-            if (proof_move_submitted) break;
-            if (fleet.owner != galaxy->local.player || fleet.members.empty() || fleet.motion.transit) continue;
-            for (const auto& route : frame.latest->routes()) {
-                if (route.from != fleet.orbit && route.to != fleet.orbit) continue;
-                const auto destination = route.from == fleet.orbit ? route.to : route.from;
-                const auto planet = std::find_if(planets.begin(), planets.end(),
-                    [&](const auto& row) { return row.id == destination; });
-                if (planet == planets.end() || planet->owner == fleet.owner || planet->owner == neutral_owner) continue;
-                // Existing opposing orbital forces make this a played space
-                // conflict rather than an unopposed ownership capture.
-                if (std::none_of(fleets.begin(), fleets.end(), [&](const auto& other) {
-                    return other.owner != fleet.owner && other.owner != neutral_owner
-                        && other.orbit == destination && !other.members.empty();
-                })) continue;
+        if (!proof_move_submitted) if (const auto selected = galactic_view::space_proof_route(
+            *frame.latest, galaxy->local.player, neutral_owner)) {
+            const auto chosen = std::find_if(fleets.begin(), fleets.end(),
+                [&](const auto& fleet) { return fleet.id == selected->fleet; });
+            if (chosen != fleets.end()) {
+                const auto& fleet = *chosen;
+                proof_move_path = selected->path;
+                std::string route_log = "EAWR campaign proof: selected fleet=" + std::to_string(fleet.id) + " path=";
+                for (const auto planet : proof_move_path)
+                    route_log += (planet == proof_move_path.front() ? "" : "->") + std::to_string(planet);
+                UtilityFunctions::print(String::utf8(route_log.c_str()));
                 if (options.space_cycle_proof == "win" || options.space_cycle_proof == "retreat") {
                     proof_merge_target = fleet.id;
-                    proof_merge_destination = destination;
                     proof_merge_frame = frames;
                     for (const auto& other : fleets) {
                         if (other.owner != fleet.owner || other.orbit != fleet.orbit || other.motion.transit) continue;
@@ -190,16 +186,14 @@ bool GalacticMode::State::service_space_cycle_proof() {
                     return true;
                 }
                 game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat},
-                    sim::galactic::MoveFleet{fleet.id, {fleet.orbit, destination}, {}}, {}});
+                    sim::galactic::MoveFleet{fleet.id, proof_move_path, {}}, {}});
                 proof_move_submitted = true;
                 for (const auto& member : fleet.members) proof_original_members.push_back(member.id);
                 capture_space_cycle_stage("galaxy");
-                break;
             }
-            if (proof_move_submitted) break;
         }
         if (!proof_move_submitted) {
-            failure = "Space cycle proof found no hostile authored fleet route";
+            failure = "Space cycle proof found no reachable hostile space defender";
             // Dump the start state so a missing precondition is diagnosable from the report alone.
             failure += " (session_tick=" + std::to_string(frame.session_tick) + " seat_player=" + std::to_string(galaxy->local.player);
             for (const auto& fleet : fleets)
@@ -477,6 +471,7 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         }
         presented_conflict = frame.conflict;
         conflict = frame.conflict->id;
+        handoff_requested = true;
         if (briefing_conflict != conflict) {
             briefing_conflict = conflict; briefing_done = briefing_accepted = intro_requested = false;
             briefing_movie.clear();
@@ -558,6 +553,12 @@ bool GalacticMode::State::process_battle_transition(double delta) {
         const bool begin_barrier = map.loading_begin_barrier;
         map.borrowed_battle = prepared; map.borrowed_feed = feed;
         map.borrowed_player = seat->player;
+        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
+            const auto view = match->view();
+            if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};
+            const auto at = std::find_if(players.begin(), players.end(), [&](const auto& player) { return player.seat == view.clock_actor; });
+            return "Paused by " + (at != players.end() ? at->player : "Player " + std::to_string(view.clock_actor.value));
+        };
         map.report_path = options.report_path.parent_path() / "tactical.json";
         map.lighting = "sh"; map.shadows = "on"; map.environment = "map";
         feed_lifetime = feed;
@@ -824,6 +825,12 @@ bool GalacticMode::State::process_handoff(double delta) {
         map.borrowed_battle = prepared;
         map.borrowed_feed = feed;
         map.borrowed_player = battle_player;
+        if (options.lan_match) map.shared_pause_notice = [match = options.lan_match, players = options.lan_players] {
+            const auto view = match->view();
+            if (!view.clock_paused || !galactic_lan_gameplay_enabled(view)) return std::string{};
+            const auto at = std::find_if(players.begin(), players.end(), [&](const auto& player) { return player.seat == view.clock_actor; });
+            return "Paused by " + (at != players.end() ? at->player : "Player " + std::to_string(view.clock_actor.value));
+        };
         map.report_path = options.report_path.parent_path() / "tactical.json";
         map.lighting = "sh";
         map.shadows = "on";

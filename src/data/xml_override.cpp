@@ -163,7 +163,7 @@ core::Result<Catalog> with_overrides(const Catalog& catalog, const std::span<con
         member_definitions.push_back(replaced == overlay->replaced.end()
             ? &catalog.impl_->definitions[index] : &replaced->second);
     }
-    derive_member_flags(member_definitions, overlay->member_flags, overlay->member_flags_issue);
+    derive_member_flags(member_definitions, overlay->member_flags, overlay->member_flags_issue, overlay->member_roster_notes);
     result.overlay_ = std::move(overlay);
     return Made::success(std::move(result));
 }

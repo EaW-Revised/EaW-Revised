@@ -374,7 +374,7 @@ std::map<std::string, eawr::assets::Model> models(const float engine_x) {
 }
 
 Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets,
-    const std::string_view difficulty) {
+    const std::string_view difficulty, const eawr::sim::tactical::BattleDomain domain) {
     Loaded result;
     const std::array mounts{eawr::vfs::MountSpec{"base", root, "data", {}}};
     auto mounted = eawr::vfs::Vfs::mount(mounts);
@@ -386,6 +386,7 @@ Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr:
     eawr::units::LoadInput input;
     input.catalog = &catalog.value().catalog;
     input.difficulty = difficulty;
+    input.domain = domain;
     input.filesystem = &mounted.value();
     input.model = [&](const std::string_view path) -> const eawr::assets::Model* {
         const auto found = assets.find(std::string(path));

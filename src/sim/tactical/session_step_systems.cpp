@@ -416,6 +416,14 @@ core::Result<void> session_detail::Tick::commit_environmental_hits(std::vector<L
         const auto applied = apply_hit(*profile, *damage_rules, *unit.durability, hit, tick);
         if (!applied) return core::Result<void>::failure(applied.error());
         impl_->track_damage(unit, hull, shields);
+        const auto previous_changes = damage_changes_.size();
+        record_damage_change(unit, hull);
+        if (damage_changes_.size() > previous_changes && hit.source != invalid_entity_id) {
+            const auto source = std::lower_bound(inputs.begin(), inputs.end(), hit.source,
+                [](const LiveUnit& candidate, const EntityId sought) { return candidate.state.entity_id < sought; });
+            if (source != inputs.end() && source->state.entity_id == hit.source)
+                damage_changes_.back().source = DamageIdentity{source->state.entity_id, source->state.type_id, source->state.owner};
+        }
         impl_->end_depleted_defend(unit, tick, applied.value().storm_shield_branch);
         asteroid_impacts[index].push_back({id, hit, applied.value()});
         if (applied.value().damage.destroyed_hardpoint)

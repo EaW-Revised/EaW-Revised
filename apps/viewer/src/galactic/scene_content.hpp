@@ -44,7 +44,7 @@ struct ProductionArt final {
     // Tactical_Health: ranks the best ship of a fleet stack icon (GHUDL-16).
     std::optional<float> max_health;
     // WGUI-72..74: what the fleet panels need to type an enemy group (hero masking); ordinary ships are not heroes.
-    bool hero{}, named_hero{}, force_sensitive{};
+    bool hero{}, named_hero{}, force_sensitive{}, generic_hero{};
     // The shared content's population (negative usage), for the fleet
     // encyclopedia header total (WGUI-166).
     std::int32_t population{};
@@ -99,6 +99,12 @@ struct SceneContent final {
 [[nodiscard]] const StubPlanet* initial_home(const SceneContent& content, PlayerId player);
 [[nodiscard]] sim::galactic::TypeId home_leader_type(const SceneContent&, PlayerId,
     const std::map<sim::galactic::TypeId, std::string>& type_names);
+
+// A match whose roster numbers its players (the multiplayer lobby numbers only the campaign's factions) must not
+// be drawn with the scene's own numbering: the scene counts every faction of the catalog, so the same id can be a
+// different faction. Re-keys the players, faction appearances, homes and leaders, and the owners of the scene's
+// planets, fleets and seats, to the roster's ids; a roster faction without a drawable Color is dropped (#4575).
+void rebind_players(SceneContent& content, const std::vector<std::pair<PlayerId, std::string>>& roster);
 
 // Uses validated tables for locations/positions, effective catalog layers for
 // object presentation, and the validated document loader for constants.

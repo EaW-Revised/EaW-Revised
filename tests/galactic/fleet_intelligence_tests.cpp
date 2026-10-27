@@ -116,10 +116,14 @@ void live_actor_masking() {
     auto hidden = project(snapshot(k, true, 2, 2, records), 1, traits(), 8);
     expect(hidden.cards.size() == 2 && hidden.presence.size() == 2,
         "live all-stealth enemy remains hidden despite major hero intelligence; allies remain visible");
+    expect(std::all_of(hidden.cards.begin(), hidden.cards.end(), [](const auto& card) { return card.all_stealth; }),
+        "WGUI-92: every published card of an all-stealth fleet carries the stealth overlay flag");
     (*records)[1].abilities.combat_skip = false; k.major_stealth = false;
     const auto mixed = project(snapshot(k, true, 2, 2, records), 1, traits(), 8);
     expect(mixed.cards.size() == 3 && !mixed.cards[1].groups[1].type,
         "one live ordinary member admits mixed fleet while live stealth hero details remain masked");
+    expect(std::any_of(mixed.cards.begin(), mixed.cards.end(), [](const auto& card) { return !card.all_stealth; }),
+        "WGUI-92: a fleet with one non-stealth member shows no stealth overlay");
     (*records)[2].abilities.combat_skip = false;
     const auto ordinary = project(snapshot(k, true, 2, 2, records), 1, traits(), 8);
     expect(ordinary.cards[1].groups[1].type == 200,

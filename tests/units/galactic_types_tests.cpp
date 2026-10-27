@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -32,12 +33,13 @@ void override_free_identity() {
     eawr::units::GalacticType unchanged;
     unchanged.name = "Unchanged"; unchanged.object_class = "SpaceUnit";
     eawr::units::GalacticTypeTable table; table.types.push_back(unchanged);
-    // Independent v6 fixture digest: no space override was authored.
+    // Independent v6 fixture digest: no space override was authored. Re-pinned for the
+    // Piracy_Value_Credits field added to the identity (#b92e9cbcf, WGM-150): one more absent-optional byte.
     constexpr std::array<std::uint8_t, 32> baseline{
-        0xe0, 0x68, 0x3d, 0x7b, 0x87, 0x73, 0x3e, 0x97,
-        0x7f, 0x9c, 0x3e, 0x76, 0xa0, 0x62, 0xe8, 0x44,
-        0xd0, 0x76, 0x14, 0x2c, 0x4f, 0xb5, 0xff, 0x89,
-        0x03, 0x6e, 0x17, 0xb3, 0x50, 0x2d, 0xe7, 0x29};
+        0xf2, 0xc9, 0x71, 0xcb, 0xe7, 0xfc, 0xb6, 0x25,
+        0x11, 0x03, 0xeb, 0xb7, 0xd2, 0xe8, 0x63, 0x21,
+        0xeb, 0x1d, 0xa9, 0x59, 0xa1, 0x73, 0x22, 0x81,
+        0xc8, 0x33, 0x46, 0xd9, 0x03, 0x76, 0x9c, 0x06};
     const auto current = eawr::units::galactic_content_identity(table);
     expect(current == baseline, "WR-85 v6 content identity matches the reviewed fixture bytes");
     table.types.front().space_override_population_value = Fixed{};
@@ -123,22 +125,65 @@ void member_timeline() {
     const auto invalid = eawr::data::with_overrides(catalog, overrides);
     expect(static_cast<bool>(invalid), "member perturbation overlay loads");
     if (invalid) {
+        // EAWR recovery policy under RGC-154: an undefined roster member is skipped per slot and reported; the timeline stays
+        // available, so every type keeps its flags and the owner is unchanged. The debug build's behaviour is undefined here.
         const auto value = invalid.value().member_flags("Base");
-        expect(!value && value.error().code == eawr::data::diagnostic_codes::member_timeline_unavailable,
-            "unresolved roster asserts become a named unavailable timeline seam");
-        const auto unavailable = eawr::units::galactic_type_table(invalid.value());
-        const auto* marker = unavailable.find("Marker");
-        expect(marker && !marker->ground_company_member && !marker->squadron_member,
-            "unavailable timeline is not a fabricated false");
+        expect(value && !value.value().ground_company_member && value.value().squadron_member,
+            "an undefined roster member does not make the member timeline unavailable");
+        const auto& notes = invalid.value().member_roster_notes();
+        expect(notes.size() == 1 && notes[0].owner == "Marker" && notes[0].tag == "Company_Units" && notes[0].slot == 0
+            && notes[0].name == "Missing", "the skipped slot is reported with owner, roster, slot and name");
+        expect(catalog.member_roster_notes().empty(), "the override does not report into the shared load");
+        const auto recovered = eawr::units::galactic_type_table(invalid.value());
+        const auto* marker = recovered.find("Marker");
+        expect(marker && marker->ground_company_member == false && marker->squadron_member == false,
+            "the owner keeps real flags after a skipped slot");
+        expect(std::any_of(recovered.issues.begin(), recovered.issues.end(), [](const auto& issue) {
+            return issue.owner == "Marker" && issue.tag == "Company_Units" && issue.reason.find("slot 0") != std::string::npos
+                && issue.reason.find("Missing") != std::string::npos; }), "the type table lists the skipped slot as an issue");
+        const std::array more{eawr::data::ValueOverride{"Marker", "Company_Units", {"Base Ghost Pending"}}};
+        const auto middle = eawr::data::with_overrides(catalog, more);
+        expect(middle && middle.value().member_roster_notes().size() == 1 && middle.value().member_roster_notes()[0].slot == 1
+            && middle.value().member_flags("Pending") && middle.value().member_flags("Pending").value().ground_company_member
+            && middle.value().member_flags("Base").value().ground_company_member,
+            "siblings of a skipped middle slot are still marked");
     }
     check("Base", true, true); // override does not mutate the shared load
 
-    for (const auto& change : {
-            eawr::data::ValueOverride{"Early", "Variant_Of_Existing_Type", {"Missing"}},
-            eawr::data::ValueOverride{"Base", "Variant_Of_Existing_Type", {"Early"}}}) {
-        const std::array changes{change};
-        const auto unresolved = eawr::data::with_overrides(catalog, changes);
-        expect(unresolved && !unresolved.value().member_flags("Base"), "missing/cyclic base cannot qualify member flags");
+    // RGC-180..187: a duplicate game-object name does not abort the member pass; the duplicate keeps its own slot. Roster
+    // references resolve to the same entry catalog lookups answer (the strongest layer's, then the last registered one;
+    // the debug build's first-registered rule is the follow-up #3741).
+    write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>A.xml</File><File>Dup.xml</File></Game_Object_Files>");
+    write(root / "XML/Dup.xml", R"xml(<Types>
+      <GroundUnit Name="Twin"/>
+      <GroundUnit Name="Twin"/>
+      <GroundCompany Name="Holder"><Company_Units>Twin</Company_Units></GroundCompany>
+      <GroundUnit Name="Selfie"><Variant_Of_Existing_Type>Selfie</Variant_Of_Existing_Type></GroundUnit>
+    </Types>)xml");
+    const auto duplicate_filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(duplicate_filesystem), "duplicate-name fixture mounts");
+    if (duplicate_filesystem) {
+        const auto duplicated = eawr::data::load_catalog(duplicate_filesystem.value(), eawr::data::Profile::foc);
+        expect(duplicated && duplicated.value().catalog.member_flags("Base")
+            && duplicated.value().catalog.member_flags("Twin") && duplicated.value().catalog.member_flags("Holder")
+            && duplicated.value().catalog.member_flags("Selfie"),
+            "a duplicate name and a variant naming itself as base keep the member timeline available for every type");
+        // Pinned (#3741): the roster reference marks the entry that lookups answer, here the last registered duplicate.
+        expect(duplicated && duplicated.value().catalog.member_flags("Twin")
+            && duplicated.value().catalog.member_flags("Twin").value().ground_company_member,
+            "a roster reference marks the duplicate that catalog lookups answer");
+    }
+
+    {
+        // CGS-13: a variant whose base is absent keeps its own tags and never completes; that alone leaves the timeline available.
+        const std::array missing{eawr::data::ValueOverride{"Early", "Variant_Of_Existing_Type", {"Missing"}}};
+        const auto unresolved = eawr::data::with_overrides(catalog, missing);
+        expect(unresolved && unresolved.value().member_flags("Base") && unresolved.value().member_flags("Early")
+            && unresolved.value().member_flags("EarlyChain"), "a variant with an absent base does not make the member timeline unavailable");
+        // A cyclic chain still cannot qualify.
+        const std::array cycle{eawr::data::ValueOverride{"Base", "Variant_Of_Existing_Type", {"Early"}}};
+        const auto cyclic = eawr::data::with_overrides(catalog, cycle);
+        expect(cyclic && !cyclic.value().member_flags("Base"), "a cyclic base cannot qualify member flags");
     }
 
     std::string registry = "<Game_Object_Files>";
@@ -155,6 +200,85 @@ void member_timeline() {
     if (!chain_filesystem) return;
     const auto long_chain = eawr::data::load_catalog(chain_filesystem.value(), eawr::data::Profile::foc);
     expect(long_chain && !long_chain.value().catalog.member_flags("Type0"), "ten-pass limit refuses incomplete chains");
+}
+
+// A normal cross-layer override: the base layer defines Shared, a stronger layer redefines it in another file. The stronger
+// layer's roster must drive the member flags, never the base layer's (the duplicate rule is not a first-layer-wins rule).
+void member_timeline_cross_layer() {
+    const auto stamp = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto base_root = std::filesystem::temp_directory_path() / ("eawr-member-base-" + stamp);
+    const auto mod_root = std::filesystem::temp_directory_path() / ("eawr-member-mod-" + stamp);
+    std::filesystem::create_directories(base_root / "XML");
+    std::filesystem::create_directories(mod_root / "XML");
+    struct Cleanup { std::filesystem::path a, b; ~Cleanup() { eawr::testing::remove_temp_directory(a); eawr::testing::remove_temp_directory(b); } }
+        cleanup{base_root, mod_root};
+    write(base_root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write(base_root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write(base_root / "XML/FactionFiles.xml", "<Faction_Files/>");
+    write(base_root / "XML/CampaignFiles.xml", "<Campaign_Files/>");
+    write(base_root / "XML/SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write(base_root / "XML/Objects.xml", R"xml(<Types>
+      <GroundUnit Name="OnlyBase"/>
+      <GroundUnit Name="OnlyTop"/>
+      <GroundCompany Name="Shared"><Company_Units>OnlyBase</Company_Units></GroundCompany>
+    </Types>)xml");
+    write(mod_root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File><File>Override.xml</File></Game_Object_Files>");
+    write(mod_root / "XML/Override.xml", R"xml(<Types>
+      <GroundCompany Name="Shared"><Company_Units>OnlyTop</Company_Units></GroundCompany>
+    </Types>)xml");
+    // Mounts are supplied highest-precedence first.
+    const std::array mounts{eawr::vfs::MountSpec{"mod", mod_root, "data", {}}, eawr::vfs::MountSpec{"base", base_root, "data", {}}};
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "cross-layer fixture mounts");
+    if (!filesystem) return;
+    const auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(loaded), "cross-layer fixture loads");
+    if (!loaded) return;
+    const auto& catalog = loaded.value().catalog;
+    const auto top = catalog.member_flags("OnlyTop");
+    const auto bottom = catalog.member_flags("OnlyBase");
+    expect(top && top.value().ground_company_member && bottom && !bottom.value().ground_company_member,
+        "a stronger layer's redefinition decides the member flags, not the base layer's");
+}
+
+void retail_numeric_families() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("eawr-retail-gc-numbers-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "XML");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
+    write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write(root / "XML/HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write(root / "XML/FactionFiles.xml", "<Faction_Files/>");
+    write(root / "XML/CampaignFiles.xml", "<Campaign_Files/>");
+    write(root / "XML/SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write(root / "XML/Objects.xml", R"xml(<Types>
+      <SpaceUnit Name="Fraction"><Hyperspace_Speed>-1.25tail</Hyperspace_Speed><Build_Cost_Credits>-2.9</Build_Cost_Credits><Build_Time_Seconds>2.9</Build_Time_Seconds></SpaceUnit>
+      <SpaceUnit Name="Negative"><Hyperspace_Speed>-2</Hyperspace_Speed><Build_Cost_Credits>-1</Build_Cost_Credits><Build_Time_Seconds>-1</Build_Time_Seconds></SpaceUnit>
+      <SpaceUnit Name="Text"><Hyperspace_Speed>nonsense</Hyperspace_Speed><Build_Cost_Credits>text</Build_Cost_Credits><Build_Time_Seconds>text</Build_Time_Seconds></SpaceUnit>
+      <SpaceUnit Name="Overflow"><Hyperspace_Speed>1e99</Hyperspace_Speed><Build_Cost_Credits>9999999999999999999999</Build_Cost_Credits><Build_Time_Seconds>-99999999999999999</Build_Time_Seconds></SpaceUnit>
+      <SpaceUnit Name="Empty"><Variant_Of_Existing_Type>Negative</Variant_Of_Existing_Type><Build_Cost_Credits/><Build_Time_Seconds>TBD</Build_Time_Seconds></SpaceUnit>
+    </Types>)xml");
+    const std::array mounts{eawr::vfs::MountSpec{"test", root, "data", {}}};
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::foc).value();
+    const auto table = eawr::units::galactic_type_table(catalog.catalog);
+    const auto fraction = eawr::units::resolve_initial_galactic_type(table, "Fraction").value();
+    const auto negative = eawr::units::resolve_initial_galactic_type(table, "Negative").value();
+    const auto text = eawr::units::resolve_initial_galactic_type(table, "Text").value();
+    const auto overflow = eawr::units::resolve_initial_galactic_type(table, "Overflow").value();
+    const auto empty = eawr::units::resolve_initial_galactic_type(table, "Empty").value();
+    expect(fraction.hyperspace_speed == Fixed::from_ratio(-5, 4).value()
+        && fraction.build_cost_credits == Fixed::from_integer(-2).value()
+        && fraction.build_time_seconds == Fixed::from_integer(2).value(), "float fractions retained; integer price/time stop at decimal point");
+    expect(negative.hyperspace_speed == Fixed::from_integer(-2).value()
+        && negative.build_cost_credits == Fixed::from_integer(-1).value()
+        && negative.build_time_seconds == Fixed::from_integer(4294967295LL).value(), "negative sign retained or unsigned-reinterpreted by parser kind");
+    expect(text.hyperspace_speed == Fixed{} && text.build_cost_credits == Fixed{} && text.build_time_seconds == Fixed{}, "text is numeric zero, never a missing-value load error");
+    expect(overflow.hyperspace_speed == Fixed::from_raw(std::numeric_limits<std::int64_t>::max())
+        && overflow.build_cost_credits == Fixed::from_integer(2147483647).value()
+        && overflow.build_time_seconds == Fixed::from_integer(2147483648LL).value(), "integer overflow saturates before unsigned reinterpretation; float overflow uses representable endpoint");
+    expect(empty.build_cost_credits == negative.build_cost_credits && empty.build_time_seconds == negative.build_time_seconds,
+        "empty and TBD keep inherited values");
 }
 
 void synthetic() {
@@ -293,7 +417,7 @@ void synthetic() {
         "WAR-84 first nonempty variant squadron occurrence replaces inherited membership");
     expect(flight && flight->company_transport == "Variant", "WGEP-78 original company transport loads and inherits");
     const auto* bad = table.find("Bad");
-    expect(bad && !bad->build_cost_credits && !bad->squadron_capacity, "invalid numeric values stay absent");
+    expect(bad && bad->build_cost_credits == Fixed{} && !bad->squadron_capacity, "text cost follows integer zero while invalid capacity stays absent");
     expect(carrier && carrier->required_special_structures == "Factory | Research", "preserve production prerequisite group grammar");
     bool trailing = false, unknown = false, dangling = false;
     for (const auto& row : table.issues) {
@@ -348,6 +472,12 @@ void credit_halt_authoring() {
         </Galactic_Sabotage_Ability></Abilities></HeroUnit>
       <HeroUnit Name="No_Duration"><Abilities SubObjectList="Yes"><Galactic_Sabotage_Ability Name="Open_Sabotage">
         <Can_Halt_Credit_Production>Yes</Can_Halt_Credit_Production></Galactic_Sabotage_Ability></Abilities></HeroUnit>
+      <GenericHeroUnit Name="Mod_Scout"><Abilities SubObjectList="Yes">
+        <System_Spy_Ability Name="Mod_Scout_Spy"><Initially_Enabled>No</Initially_Enabled>
+        <Activation_Style>Ground_Activated</Activation_Style><Causes_Despawn>Yes</Causes_Despawn>
+        <See_Fleet_Contents>Yes</See_Fleet_Contents><Duration_In_Secs>17</Duration_In_Secs>
+        </System_Spy_Ability></Abilities></GenericHeroUnit>
+      <GenericHeroUnit Name="Scout_Variant"><Variant_Of_Existing_Type>Mod_Scout</Variant_Of_Existing_Type></GenericHeroUnit>
       <Planet Name="Arbitrary_Network"><Galactic_Position>0,0,0</Galactic_Position><Behavior>PLANET</Behavior>
         <Galactic_Influence_Range>23</Galactic_Influence_Range><Abilities SubObjectList="Yes">
         <System_Spy_Ability Name="Mod_Network"><Initially_Enabled>Yes</Initially_Enabled>
@@ -385,6 +515,15 @@ void credit_halt_authoring() {
     const auto open = find("No_Duration");
     expect(open != table.types.end() && open->credit_halt == std::optional<bool>(true) && !open->credit_halt_seconds,
         "an absent duration stays absent for the setup to qualify");
+    for (const auto name : {"Mod_Scout", "Scout_Variant"}) {
+        const auto scout = find(name);
+        expect(scout != table.types.end() && scout->system_spies.size() == 1
+            && scout->system_spies[0].activation_style == "Ground_Activated"
+            && scout->system_spies[0].duration == Fixed::from_integer(17).value()
+            && scout->system_spies[0].mask == 64U && scout->system_spies[0].causes_despawn
+            && !scout->system_spies[0].initially_enabled,
+            "unit and inherited variant retain authored ground-spy flags without a planet-class gate");
+    }
     const auto renamed = find("Renamed_Network");
     const auto authored = find("Arbitrary_Network");
     expect(authored != table.types.end() && authored->system_spies.size() == 1
@@ -403,6 +542,48 @@ void credit_halt_authoring() {
         expect(planet && planet->system_spies.size() == 1 && planet->system_spies[0].mask == (64U | 32768U)
             && planet->system_spies[0].influence_range == Fixed{}, "galactic and economic loaders share the same effective spy profile");
     }
+}
+void gambling_authoring() {
+    const auto root = std::filesystem::temp_directory_path() /
+        ("eawr-gambling-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(root / "XML");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{root};
+    write(root / "XML/GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    for (const auto& [file, element] : {std::pair{"HardpointDataFiles", "Hard_Point_Files"},
+            std::pair{"FactionFiles", "Faction_Files"}, std::pair{"CampaignFiles", "Campaign_Files"}, std::pair{"SFXEventFiles", "SFXEvent_Files"}})
+        write(root / (std::string("XML/") + file + ".xml"), std::string("<") + element + "/>");
+    // AaW Ground_Cantina_* authors a positive minimum; stock arenas author -0.20.
+    write(root / "XML/Objects.xml", R"xml(<GameObjectData>
+      <SpecialStructure Name="Cantina"><Abilities SubObjectList="Yes"><Planet_Income_Gambling_Ability Name="Bet">
+        <Evaluation_Interval_In_Secs>30.0</Evaluation_Interval_In_Secs><Min_Income_Modifier>0.05</Min_Income_Modifier>
+        <Max_Income_Modifier>0.80</Max_Income_Modifier><Chance_To_Win>0.80</Chance_To_Win>
+      </Planet_Income_Gambling_Ability></Abilities></SpecialStructure>
+      <SpecialStructure Name="Arena"><Abilities SubObjectList="Yes"><Planet_Income_Gambling_Ability Name="Bet">
+        <Evaluation_Interval_In_Secs>-1</Evaluation_Interval_In_Secs><Min_Income_Modifier>-0.20</Min_Income_Modifier>
+        <Max_Income_Modifier>-5.0</Max_Income_Modifier><Chance_To_Win>1.5</Chance_To_Win>
+      </Planet_Income_Gambling_Ability></Abilities></SpecialStructure>
+    </GameObjectData>)xml");
+    const std::array mounts{eawr::vfs::MountSpec{"test", root, "data", {}}};
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts);
+    expect(static_cast<bool>(filesystem), "gambling fixture mounts"); if (!filesystem) return;
+    const auto catalog = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+    expect(static_cast<bool>(catalog), "gambling fixture loads"); if (!catalog) return;
+    const auto table = eawr::units::galactic_economic_table(catalog.value().catalog);
+    const auto row = [&](std::string_view name) -> const eawr::units::GalacticEconomicType& {
+        const auto at = std::find_if(table.types.begin(), table.types.end(), [&](const auto& value) { return value.name == name; });
+        if (at == table.types.end()) throw std::runtime_error("missing gambling fixture " + std::string(name));
+        return *at;
+    };
+    const auto& cantina = row("Cantina");
+    expect(cantina.gambling && cantina.gambling_minimum == Fixed{} && cantina.gambling_maximum == Fixed::from_decimal("0.80").value()
+        && cantina.gambling_chance == Fixed::from_decimal("0.80").value(), "WGEP-11: a minimum above 0 resets to 0, the rest stays");
+    const auto& arena = row("Arena");
+    expect(arena.gambling_minimum == Fixed::from_decimal("-0.20").value() && arena.gambling_maximum == Fixed{}
+        && arena.gambling_chance == Fixed{} && arena.gambling_interval == Fixed{},
+        "WGEP-11: a negative maximum or interval and a chance above 1 reset to 0");
+    const auto reported = std::count_if(table.issues.begin(), table.issues.end(), [](const auto& issue) {
+        return (issue.owner == "Cantina" || issue.owner == "Arena") && issue.reason.find("reset to 0") != std::string::npos; });
+    expect(reported == 4, "each reset is reported");
 }
 void technology_price_authoring() {
     const auto root = std::filesystem::temp_directory_path() /
@@ -537,8 +718,8 @@ int main(const int argc, char** argv) {
         if (!root || root->empty()) return 77;
         installed();
     } else if (argc == 1) {
-        override_free_identity(); production_domain(); synthetic(); member_timeline();
-        credit_halt_authoring(); technology_price_authoring();
+        override_free_identity(); production_domain(); retail_numeric_families(); synthetic(); member_timeline(); member_timeline_cross_layer();
+        credit_halt_authoring(); technology_price_authoring(); gambling_authoring();
     } else return 2;
     return failures == 0 ? 0 : 1;
 }

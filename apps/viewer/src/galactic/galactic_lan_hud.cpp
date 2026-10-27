@@ -49,7 +49,7 @@ void GalacticMode::State::service_lan_hud() {
             button->set_text(captions[i]);
             button->set_size({112, 32});
             button->set_focus_mode(godot::Control::FOCUS_NONE);
-            button->set_tooltip_text("Shared clock: 2 pause/speed changes per 45 session seconds per player; resume always allowed");
+            button->set_tooltip_text("Shared clock: pause and resume do not count against the speed budget (1 s double-press debounce); speed changes are limited to 6 per 45 session seconds per player");
             button->connect("pressed", callable_mp(action, &EawrOverlayButton::activate));
             action->add_child(button);
             layer->add_child(action);

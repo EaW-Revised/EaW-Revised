@@ -7,8 +7,8 @@
 #include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -382,7 +382,7 @@ namespace {
 bool LiveSessionView::parse_argument(const std::string_view name, const std::optional<std::string>& value,
                                      Options& options, bool& value_used, std::string& error) {
     value_used = false;
-    if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-")) return false;
+    if (name.substr(0, 12) != "--eawr-live-" && !name.starts_with("--eawr-skirmish-") && name != "--eawr-land-bindings") return false;
     if (!value) {
         error = "missing value for " + std::string(name);
         return true;
@@ -394,11 +394,13 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
             error = "--eawr-live-session expects m2, skirmish, replay or melee";
         }
         options.fixture = text;
+    } else if (name == "--eawr-land-bindings") {
+        options.land_bindings = ViewerPath{text}.native();
     } else if (name == "--eawr-live-lan-test") {
-        if (text != "waiting" && text != "desync" && text != "result" && text != "result_join" && text != "loss"
+        if (text != "waiting" && text != "paused" && text != "desync" && text != "result" && text != "result_join" && text != "loss"
             && text != "barrier" && text != "peer_left" && text != "failed_peer" && text != "reconnecting" && text != "resyncing" && text != "held" && text != "catching_up" && text != "proving"
             && text != "desync_paused" && text != "recovered" && text != "recovery_failed" && text != "rejoin_failed" && text != "recovery_barrier" && text != "recovery_disabled") {
-            error = "--eawr-live-lan-test expects waiting, desync, result, result_join, loss, barrier, peer_left, failed_peer, reconnecting or resyncing";
+            error = "--eawr-live-lan-test expects waiting, paused, desync, result, result_join, loss, barrier, peer_left, failed_peer, reconnecting or resyncing";
         } else { options.lan = make_fake_lan_match(text); options.begin_barrier = false; }
     } else if (name == "--eawr-skirmish-map") {
         options.skirmish.map = lower_path(text);
@@ -496,6 +498,14 @@ bool LiveSessionView::parse_argument(const std::string_view name, const std::opt
         const auto slots = parse_u64(text);
         if (!slots || *slots == 0 || *slots > 64) error = "--eawr-live-purchase-slots expects 1 to 64";
         else options.purchase_slots = static_cast<std::uint32_t>(*slots);
+    } else if (name == "--eawr-live-warm-launches") {
+        const auto warm = parse_u64(text);
+        if (!warm || *warm > 256) error = "--eawr-live-warm-launches expects 0 to 256";
+        else options.warm_launches = static_cast<std::uint32_t>(*warm);
+    } else if (name == "--eawr-live-arrival-budget") {
+        const auto budget = parse_u64(text);
+        if (!budget || *budget == 0 || *budget > 256) error = "--eawr-live-arrival-budget expects 1 to 256";
+        else options.arrival_slot_budget = static_cast<std::uint32_t>(*budget);
     } else if (name == "--eawr-live-late-orders") {
         if (text != "on" && text != "off") error = "--eawr-live-late-orders expects on or off";
         options.late_orders = text == "on";

@@ -124,7 +124,7 @@ void GalacticMode::State::update_fleet_route_preview() {
         || !map_input.gates.galactic || !map_input.gates.hud_enabled || !map_input.gates.world_allowed()
         || map_input.gates.tutorial_locked || map_input.gates.action_menu || map_input.gates.selection_locked
         || retreat_dialog_open || (battle_dialog && battle_dialog->visible())
-        || published_snapshot->clock().pause_depth) { clear(); return; }
+        || !pause_allows(presentation::GalacticPausedAction::fleet_move)) { clear(); return; }
     const auto fleets = published_snapshot->fleets();
     const auto source = std::find_if(fleets.begin(), fleets.end(), [this](const auto& row) { return row.id == dragged_fleet; });
     if (source == fleets.end() || source->owner != galaxy->local.player || !source->orbit || source->motion.transit) {
@@ -183,7 +183,7 @@ void GalacticMode::State::update_fleet_route_preview() {
             ++fleet_preview_searches;
             const auto planets = input_planets();
             const auto intent = galactic_view::fleet_destination_intent(*published_snapshot,
-                galaxy->local.player, dragged_fleet, destination, planets);
+                galaxy->local.player, dragged_fleet, destination, planets, dragged_stack);
             fleet_preview_path = intent && intent->kind == galactic_view::DropKind::move
                 ? intent->path : std::vector<sim::galactic::PlanetId>{};
         }
@@ -384,7 +384,15 @@ bool GalacticMode::State::update_routes() {
         if (!line) continue;
         const Vector3 a = point(line->a), b = point(line->b);
         const Vector3 side = (b - a).normalized().cross(eye - (a + b) * 0.5F).normalized();
-        batches[route_styles->fleet_texture].push_back(quad(a, b, side, {line->colour.r, line->colour.g, line->colour.b, 1.0F}));
+        // Startup draws the metadata markers before the first live publication.
+        const auto fleets = displayed_snapshot ? displayed_snapshot->fleets() : std::span<const sim::galactic::Fleet>{};
+        const auto fleet = std::lower_bound(fleets.begin(), fleets.end(), marker.fleet,
+            [](const auto& row, auto id) { return row.id < id; });
+        const bool ready = displayed_snapshot && fleet != fleets.end() && fleet->id == marker.fleet
+            && presentation::galactic_departure_ready(*displayed_snapshot, *fleet);
+        const float shade = ready ? 0.55F : 1.0F;
+        batches[route_styles->fleet_texture].push_back(quad(a, b, side,
+            {line->colour.r * shade, line->colour.g * shade, line->colour.b * shade, 1.0F}));
         ++fleet_line_quads;
     }
     // GHUD-S80: full planet-centre hops, width 2, neutral opaque additive tint.

@@ -1,3 +1,4 @@
+#include "eawr/units/domain_tags.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include "eawr/core/sha256.hpp"
@@ -86,6 +87,11 @@ void encode(Encoder& out, const Weapon& weapon) {
     });
     out.flag(weapon.opportunity_fire_when_targeting);
     out.flag(weapon.opportunity_fire_when_idle);
+    if (!weapon.fire_in_rocket_mode || !weapon.fire_in_normal_mode) {
+        out.text("weapon-attack-modes-v1");
+        out.flag(weapon.fire_in_rocket_mode);
+        out.flag(weapon.fire_in_normal_mode);
+    }
     if (weapon.appearance_delay_frames.value_or(0) != 0) {
         out.text("APPEARANCE-DELAY-v1");
         out.u32(*weapon.appearance_delay_frames);
@@ -121,14 +127,20 @@ void encode(Encoder& out, const Hardpoint& hardpoint) {
     encode(out, hardpoint.attachment);
     encode(out, hardpoint.fire_a);
     encode(out, hardpoint.fire_b);
+    if (hardpoint.randomize_between_fire_bones) out.text("FIRE-BONE-BOX-v1");
     out.text(hardpoint.special_ability_name);
     out.fixed(hardpoint.fighter_bay_flyout_distance);
     out.vec3(hardpoint.bay_axis);
-    if (hardpoint.requires_manual_target) {
-        out.text("MANUAL-TARGET-v1");
-        out.text("MANUAL-CANNON-v1");
-        out.fixed(hardpoint.manual_cooldown_seconds);
-        out.flag(hardpoint.manual_is_turret);
+    if (hardpoint.requires_manual_target || hardpoint.manual_is_turret) {
+        if (hardpoint.requires_manual_target) {
+            out.text("MANUAL-TARGET-v1");
+            out.text("MANUAL-CANNON-v1");
+            out.fixed(hardpoint.manual_cooldown_seconds);
+            out.flag(hardpoint.manual_is_turret);
+        } else {
+            // HPT-06: ordinary turret mechanics also bind replay/checkpoint content.
+            out.text("HARDPOINT-TURRET-v1");
+        }
         if (hardpoint.manual_is_turret) {
             encode(out, hardpoint.manual_turret);
             encode(out, hardpoint.manual_barrel);
@@ -213,7 +225,7 @@ void encode(Encoder& out, const UnitType& unit) {
     out.texts(unit.property_flags);
     out.u64(unit.property_bits);
     out.fixed(unit.ai_combat_power);
-    out.fixed(unit.space_fow_reveal_range);
+    out.fixed(unit.fow_reveal_range);
     out.flag(unit.reveal);
     if (unit.dense_fow_multiplier.raw() != Fixed::scale / 2 || unit.multisample_fow
         || unit.fog_box_offset != Vec3{} || unit.team_dense_fow_multiplier.raw() != Fixed::scale / 2) {
@@ -253,9 +265,10 @@ void encode(Encoder& out, const UnitType& unit) {
     out.each(unit.collision_meshes, [&](const CollisionMesh& mesh) {
         out.text(mesh.name);
         out.u32(mesh.hardpoint);
-        out.each(mesh.triangles, [&](const std::array<Vec3, 3>& triangle) {
+        out.u32(static_cast<std::uint32_t>(mesh.triangles.size()));
+        for (const auto triangle : mesh.triangles) {
             for (const auto& corner : triangle) out.vec3(corner);
-        });
+        }
     });
     out.fixed(unit.collision_box_modifier);
     out.each(unit.hardpoints, [&](const Hardpoint& hardpoint) { encode(out, hardpoint); });
@@ -297,6 +310,10 @@ void encode(Encoder& out, const UnitType& unit) {
             out.fixed(modifier.value);
         });
         out.flag(ability.supports_autofire);
+        if (ability.targeting_max_attack_distance && ability.targeting_max_attack_distance->raw() > 0) {
+            out.text("ability-targeting-range-v1");
+            out.fixed(ability.targeting_max_attack_distance);
+        }
         if (ability.disable_movement) {
             out.text("deployment-lock-v1"); out.flag(true);
         }
@@ -309,6 +326,14 @@ void encode(Encoder& out, const UnitType& unit) {
         if (!ability.spawned_object.empty()) {
             out.text("hero-spawn-v1"); out.text(ability.spawned_object); out.u32(ability.spawned_projectile_index);
             out.fixed(ability.bomb_countdown_seconds); out.fixed(ability.effective_radius); out.fixed(ability.target_position_z_offset);
+        }
+        // WHE-61: domain-separate recoverable null-spawn semantics, including an omitted tag.
+        // Valid stock spawn encodings keep their existing bytes.
+        if (ability.spawned_projectile_index == no_index
+            && (ability.type == "HARMONIC_BOMB" || ability.type == "WEAKEN_ENEMY"
+                || ability.type == "SELF_DESTRUCT" || ability.type == "FOW_REVEAL_PING")) {
+            out.text("unresolved-ability-spawn-v1");
+            out.text(ability.spawned_object);
         }
         if (ability.type == "CONCENTRATE_FIRE" || ability.type == "ENERGY_WEAPON" || ability.type == "TRACTOR_BEAM") {
             out.text("concentrate-fire-v1");
@@ -337,6 +362,10 @@ void encode(Encoder& out, const UnitType& unit) {
         out.text(ability.type);
         out.fixed(ability.recharge_seconds);
         out.flag(ability.supports_autofire);
+        if (ability.targeting_max_attack_distance && ability.targeting_max_attack_distance->raw() > 0) {
+            out.text("ability-targeting-range-v1");
+            out.fixed(ability.targeting_max_attack_distance);
+        }
         out.text(ability.projectile_override);
         out.u32(ability.projectile_index);
     });
@@ -354,6 +383,11 @@ void encode(Encoder& out, const UnitType& unit) {
         out.u32(member.craft_index);
         out.vec3(member.offset);
     });
+    // FL-06: only a maximum that changes grouping contributes new content bytes.
+    if (unit.members.size() > unit.max_squad_size) {
+        out.text("squad-team-maximum-v1");
+        out.u32(unit.max_squad_size);
+    }
     out.text(unit.lua_script);
     out.fixed(unit.strafe_distance);
     out.fixed(unit.guard_chase_range);
@@ -414,7 +448,9 @@ void encode(Encoder& out, const UnitType& unit) {
         out.u32(bonus.stacking_category);
         out.texts(bonus.types);
         out.texts(bonus.categories);
-        for (const auto percentage : bonus.percentages) out.fixed(percentage);
+        // The fire-range slot is hashed only when authored, so tables without it keep their identity.
+        for (std::size_t slot = 0; slot < 6; ++slot) out.fixed(bonus.percentages[slot]);
+        if (bonus.percentages[6].raw() != 0) out.fixed(bonus.percentages[6]);
     });
     out.fixed(unit.follow_distance);
 }
@@ -647,6 +683,7 @@ void encode_projectile_hero_extensions(Encoder& out, const UnitTables& tables) {
             const auto& cluster = *unit.cluster_bomb;
             out.text(cluster.name); out.text(cluster.bomb_type); out.u8(static_cast<std::uint8_t>(cluster.style));
             out.u32(cluster.projectile_index); out.u32(cluster.count); out.fixed(cluster.detonation_seconds);
+            if (cluster.projectile_index == no_index) out.text("unresolved-cluster-spawn-v1");
         });
     }
     if (std::any_of(tables.projectiles.begin(), tables.projectiles.end(), [](const Projectile& shot) { return shot.reveal_range.has_value(); })) {
@@ -948,6 +985,84 @@ std::vector<std::uint8_t> canonical_encoding(const UnitTables& tables) {
     encode_projectile_hero_extensions(out, tables);
     encode_special_ability_extensions(out, tables);
     encode_production_campaign_extensions(out, tables);
+    // BF-2: a land table binds its domain as a trailing record; space tables keep their bytes.
+    if (tables.domain != sim::tactical::BattleDomain::space) {
+        out.text("land-domain-variants-v1");
+        out.u32(static_cast<std::uint32_t>(tables.domain));
+    }
+    // L2a: land company profiles bind as a trailing record only when a land load produced some.
+    if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_companies.empty()) {
+        out.text("land-companies-v3");
+        out.text("land-tail-format-2");
+        out.each(tables.land_companies, [&](const LandCompany& company) {
+            out.text(company.id);
+            out.text(company.xml_type);
+            out.text(company.transport);
+            out.flag(company.direct_object);
+            out.flag(company.max_squad_size.has_value());
+            out.u32(company.max_squad_size.value_or(0));
+            out.text(company.team_type);
+            out.flag(company.team_type_authored);
+            out.text(company.team_locomotor); out.fixed(company.team_formation_spacing);
+            out.fixed(company.team_max_speed);
+            out.fixed(company.formation_spacing);
+            out.each(company.locomotion, [&](const LandLocomotionData& value) {
+                out.fixed(value.acceleration); out.fixed(value.deceleration);
+                out.fixed(value.rate_of_turn); out.fixed(value.stopped_rate_of_turn);
+                out.fixed(value.scale_factor); out.fixed(value.soft_radius);
+                out.fixed(value.hard_x); out.fixed(value.hard_y);
+                out.fixed(value.collision_x); out.fixed(value.collision_y);
+                out.fixed(value.formation_spacing); out.u8(static_cast<std::uint8_t>(value.collision_class));
+                out.flag(value.walk_transition); out.flag(value.has_pre_turn_animation);
+            });
+            out.each(company.members, [&](const LandCompanyMember& member) {
+                out.text(member.type);
+                out.u8(static_cast<std::uint8_t>(member.kind));
+                out.text(member.locomotor);
+                out.text(member.movement_class);
+                out.flag(member.create_team);
+                out.flag(member.named_hero);
+                out.flag(member.generic_hero);
+                out.flag(member.stay_in_transport);
+                out.text(member.unique_ground_unit);
+                out.fixed(member.max_speed);
+            });
+        });
+    }
+    if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_movement_classes.empty()) {
+        out.text("land-movement-classes-v1");
+        out.each(tables.land_movement_classes, [&](const LandTraversalDefinition& value) {
+            out.text(value.name);
+            out.each(value.passabilities, [&](const std::string& name) { out.text(name); });
+        });
+    }
+    if (tables.domain == sim::tactical::BattleDomain::land && !tables.land_static_objects.empty()) {
+        out.text("land-static-objects-v2");
+        out.each(tables.land_static_objects, [&](const LandStaticObject& row) {
+            out.text(row.id); out.text(row.xml_type); out.text(row.proxy_type); out.flag(row.land_obstacle);
+            out.fixed(row.width); out.fixed(row.height); out.fixed(row.x_offset); out.fixed(row.y_offset);
+            out.flag(row.fine_tune.has_value()); out.flag(row.fine_tune.value_or(false));
+            out.text(row.secondary_passability); out.text(row.override_passability);
+            out.each(row.behaviors, [&](const std::string& behavior) { out.text(behavior); });
+            out.text(row.model_path); out.fixed(row.scale_factor); out.flag(row.model_present);
+            out.flag(row.collision_bounds.has_value());
+            if (row.collision_bounds) { out.vec3(row.collision_bounds->min); out.vec3(row.collision_bounds->max); }
+            out.each(row.collision_meshes, [&](const CollisionMesh& mesh) {
+                out.text(mesh.name);
+                out.u32(static_cast<std::uint32_t>(mesh.triangles.size()));
+                for (const auto& triangle : mesh.triangles)
+                    for (const auto& corner : triangle) out.vec3(corner);
+            });
+        });
+    }
+    // LS shoot PR 1: the rows of a land body that the core unit encoding does not carry. Space tables never write it.
+    if (tables.domain == sim::tactical::BattleDomain::land && !tables.units.empty()) {
+        out.text("land-combat-rows-v1");
+        out.each(tables.units, [&](const UnitType& unit) {
+            out.text(unit.id); out.flag(unit.dead_projectile_collision);
+            out.texts(unit.death_clones); out.fixed(unit.death_fade_time); out.fixed(unit.death_persistence_duration);
+        });
+    }
     return out.take();
 }
 

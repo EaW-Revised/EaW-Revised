@@ -62,7 +62,7 @@ std::optional<SpawnDecision> service_spawner(const SpawnerProfile& profile, Spaw
     const auto start = entry_draw.uniform(0, count - 1);
     std::optional<SpawnDecision> decision;
     for (std::uint32_t step = 0; step < count; ++step) {
-        const auto index = (start + step) % count;
+        const auto index = static_cast<std::uint32_t>((std::uint64_t{start} + step) % count);
         if (!eligible(index)) continue;
         auto& entry = state.entries[index];
         if (entry.remaining > 0) --entry.remaining;

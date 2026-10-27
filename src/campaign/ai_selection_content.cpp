@@ -44,6 +44,11 @@ FreestoreMemberQualifier freestore_member_qualifier(std::shared_ptr<const ai::Ga
         }
         core::Diagnostic error; error.code = "galactic-ai.freestore-member";
         error.message = "current type requires completed loaded member flags (WGA-363/364)";
+        if (content) {
+            const auto found = content->types.find(type);
+            error.message += ": type " + std::to_string(type) + (found == content->types.end() ? " is not in the selection content"
+                : " " + found->second.name + (found->second.original ? " has no member flags" : " has no loaded original"));
+        }
         return core::Result<bool>::failure(std::move(error));
     };
 }
@@ -69,7 +74,7 @@ core::Result<std::vector<script::foc::galactic_ai::FreestoreFacts>> prepare_fres
             Traits row; row.value.type = id; row.value.transport = has("TRANSPORT"); row.hero = authored.value.hero;
             if (has("FLEET")) row.value.kind = ga::FreestoreKind::fleet;
             else if (has("DUMMY_GROUND_STRUCTURE") || has("DUMMY_GROUND_BASE")) row.value.kind = ga::FreestoreKind::ground_structure;
-            else if (has("DUMMY_SPACE_STRUCTURE") || has("DUMMY_STAR_BASE")) row.value.kind = ga::FreestoreKind::space_structure;
+            else if (has("DUMMY_ORBITAL_STRUCTURE") || has("DUMMY_STAR_BASE")) row.value.kind = ga::FreestoreKind::space_structure;
             inventory.emplace(id, row); traits.push_back(row.value);
         }
         const auto presence = required(ga::copy_freestore(snapshot, traits, executor));
@@ -142,9 +147,13 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
         const auto all_types = units::galactic_type_table(catalog, true);
         std::map<std::string, gc::TypeId, std::less<>> identities;
         for (const auto& binding : bindings) identities.emplace(ai::upper_case(binding.original_type), binding.id);
-        const auto identity = [&](std::string_view name) {
+        // CGS-07: a name that resolves to no bound type is a null reference; it is reported and left out.
+        const auto identity = [&](std::string_view name, std::string_view where) -> std::optional<gc::TypeId> {
             const auto at = identities.find(ai::upper_case(name));
-            if (at == identities.end()) throw std::runtime_error("unbound selection type " + std::string(name));
+            if (at == identities.end()) {
+                out->unresolved_names.push_back(std::string(where) + ": " + std::string(name));
+                return std::nullopt;
+            }
             return at->second;
         };
         const auto bits = [&](std::string_view names) {
@@ -173,7 +182,7 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             const auto garrison = text(object, "Garrison_Category");
             row.garrison_categories = bits(garrison.empty() ? "Capital" : garrison);
             row.value.hero = row.named_hero || flag(object, "Is_Generic_Hero") || row.special_weapon;
-            row.value.structure = behaves(source, "DUMMY_GROUND_STRUCTURE") || behaves(source, "DUMMY_SPACE_STRUCTURE");
+            row.value.structure = behaves(source, "DUMMY_GROUND_STRUCTURE") || behaves(source, "DUMMY_ORBITAL_STRUCTURE");
             row.value.channel = units::built_on_ground(source) ? gc::ProductionDomain::ground : gc::ProductionDomain::space;
             row.hyperspace_capable = source.hyperspace_capable.value(); row.initially_locked = flag(object, "Build_Initially_Locked");
             row.hyperspace_speed = script::numeric::from_fixed(source.hyperspace_speed.value());
@@ -203,7 +212,8 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             row.value.build_seconds = script::numeric::from_fixed(source.build_time_seconds.value_or(sim::math::Fixed{}));
             row.value.population = script::numeric::from_fixed(source.population_value.value_or(sim::math::Fixed{}));
             row.value.tech = static_cast<std::uint32_t>(std::max<std::int64_t>(source.tech_level.value_or(0), 0));
-            for (const auto& name : source.required_orbiting_units) row.required_orbiting.push_back(identity(name));
+            for (const auto& name : source.required_orbiting_units)
+                if (const auto id = identity(name, source.name + " Required_Orbiting_Units")) row.required_orbiting.push_back(*id);
             row.required_planets = source.required_planets;
             script::foc::AiType type; type.type_id = binding.id; type.name = row.name;
             const auto* tactical_type = vocabulary.find(source.name);
@@ -239,7 +249,8 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
             const auto object = required(catalog.resolve(location.original_type, data::Category::game_object));
             ai::GalacticSelectionContentPlanet row; row.terrain = text(object, "Terrain");
             row.restricted_categories = bits(text(object, "Planet_Restricted_Unit_Categories"));
-            for (const auto& name : ai::split_names(text(object, "Planet_Restricted_Unit_Types"), ", |\t\r\n")) row.restricted_types.push_back(identity(name));
+            for (const auto& name : ai::split_names(text(object, "Planet_Restricted_Unit_Types"), ", |\t\r\n"))
+                if (const auto id = identity(name, location.original_type + " Planet_Restricted_Unit_Types")) row.restricted_types.push_back(*id);
             // WGA-272/279: copied base list, then each ordered occurrence
             // appends one pair. Omission is the qualified constructor-empty list.
             std::vector<const data::Definition*> layers;
@@ -260,7 +271,9 @@ core::Result<std::shared_ptr<const script::foc::ai::GalacticSelectionContent>> p
                 std::int32_t power{};
                 const auto decoded = std::from_chars(number.data(), number.data() + number.size(), power);
                 if (decoded.ec == std::errc::result_out_of_range) throw std::runtime_error("indigenous power overflow admission unqualified");
-                ai::GalacticIndigenousPotential potential; potential.type = identity(tokens[0]);
+                const auto potential_type = identity(tokens[0], location.original_type + " Potential_Indigenous_Power");
+                if (!potential_type) continue;
+                ai::GalacticIndigenousPotential potential; potential.type = *potential_type;
                 const auto metrics = std::find_if(out->ai.types.begin(), out->ai.types.end(), [&](const auto& type) { return type.type_id == potential.type; });
                 if (metrics == out->ai.types.end()) throw std::runtime_error("indigenous original categories unavailable");
                 potential.categories = metrics->category_bits; potential.power = ai::to_single(ai::real(power));

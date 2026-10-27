@@ -80,11 +80,13 @@ core::Result<MaterializedPlanCatalog> materialize_plan_catalog(const detail::Hos
                 else if (name == "REQUIREUNIQUESTAGE") options.unique_stage = true;
                 else if (name == "REQUIREMATCHINGSTAGE") options.matching_stage = true;
                 else if (!name.empty() && name.front() == '-') {
-                    for (const auto& excluded : split_names(name.substr(1), "|")) {
-                        const auto type = host.types_by_name.find(upper_case(trimmed(excluded)));
-                        if (type == host.types_by_name.end()) return Result::failure(invalid(source.name + ": unresolved excluded original type " + excluded));
-                        options.excluded_types.push_back(type->second->type_id);
-                    }
+                    // RGC-61: the remainder is one type lookup, not a split list. A defined type is excluded; an undefined name
+                    // is ignored (the debug build logs nothing; this load lists it).
+                    const auto remainder = trimmed(trimmed(text.substr(0, text.find('='))).substr(1)); // authored spelling
+                    const auto type = host.types_by_name.find(upper_case(remainder));
+                    if (type != host.types_by_name.end()) options.excluded_types.push_back(type->second->type_id);
+                    else out.diagnostics.push_back(source.name + ": " + force.name + " excludes unknown type " + remainder
+                        + "; the exclusion is ignored (RGC-61)");
                 }
                 declarations.push_back(Value::text(declaration));
             }
@@ -97,9 +99,16 @@ core::Result<MaterializedPlanCatalog> materialize_plan_catalog(const detail::Hos
             optional_value(source.failure_adjust), optional_value(source.minimum_contrast), optional_value(source.maximum_contrast),
             Value{std::move(required)}, optional_value(source.allow_special_weapons)};
         std::vector<std::string> notes;
-        auto plan = build_plan(host, source.name, source.module, values, notes);
+        auto plan = build_plan(host, source.name, source.module, values, notes, true);
         if (!plan) return Result::failure(plan.error());
-        if (!notes.empty()) return Result::failure(invalid(source.name + ": " + notes.front()));
+        // RGC-62: an undefined inclusion name is logged and skipped, and a row left with no possible type is removed at
+        // parse time; any other note still refuses the plan.
+        constexpr std::string_view unknown_type = "unknown type ", unknown_required = "unknown required category ";
+        for (const auto& note : notes) {
+            if (note.starts_with(unknown_type)) out.diagnostics.push_back(source.name + ": " + note + "; the name is skipped (RGC-62)");
+            else if (note.starts_with(unknown_required)) out.diagnostics.push_back(source.name + ": " + note + "; the entry is skipped (RGC-162)");
+            else return Result::failure(invalid(source.name + ": " + note));
+        }
         plan.value().galactic_contrast_qualified = true;
         for (const auto& [enemy, friendly] : source.contrast) {
             const auto category = host.setup.content.categories.find(enemy);

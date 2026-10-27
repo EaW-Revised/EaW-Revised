@@ -168,6 +168,7 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             const auto skip = snapshot.fleet_combat_skip(fleet.id);
             resolved = bool(skip); nonstealth = skip && !skip.value();
         }
+        const bool fleet_stealth = resolved && !nonstealth && !fleet.members.empty();
         const bool visible = allied || (resolved && nonstealth);
         if (visible && (allied || knowledge.fleet_presence)) presence.emplace_back(fleet.orbit, fleet.owner);
         if (!visible || (!allied && !knowledge.fleet_count)) continue;
@@ -181,11 +182,12 @@ FleetIntelligence observed_fleets(const GalacticSnapshot& snapshot,
             auto& scan = scans[merged->second];
             auto& card = output.cards[scan.card];
             card.count += fleet.members.size();
+            card.all_stealth = card.all_stealth && fleet_stealth;
             scan_members(card, scan, fleet);
             continue;
         }
         ObservedFleet card{fleet.id, fleet.orbit, fleet.owner, fleet.orbit_slot,
-            local, fleet.members.size(), {}, {}};
+            local, fleet.members.size(), {}, {}, fleet_stealth};
         // WGUI-29/42: count awareness alone publishes no fleet identity/slot.
         if (!allied && !knowledge.fleet_contents) { card.fleet.reset(); card.orbit_slot.reset(); }
         scans.push_back({output.cards.size(), allied, &knowledge, {}, false});

@@ -2,6 +2,7 @@
 #include "../../src/sim/tactical/session_store_abilities.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +16,143 @@
 #include <vector>
 
 namespace ability_tests {
+
+void test_rocket_attack() {
+    using Kind = tactical::AbilityKind;
+    using Action = tactical::AbilityAction;
+    expect(tactical::ability_kind("rocket_attack") == Kind::rocket_attack
+        && tactical::to_string(Kind::rocket_attack) == "ROCKET_ATTACK", "WRA-01: modal kind binds by name");
+    tactical::AbilityProfile rocket;
+    rocket.kind = Kind::rocket_attack;
+    rocket.expiration_frames = 60;
+    rocket.recharge_frames = 90;
+    rocket.supports_autofire = true;
+    rocket.targeting_max_attack_distance = units(800);
+    auto holder = unit_of(corvette_type, rocket);
+    auto timer = tactical::initial_abilities(holder, true);
+    expect(timer.slots.front().autofire && !timer.slots.front().active,
+        "WRA-04: creation preference arms the toggle without activating the mode");
+    expect(!tactical::ability_attack_distance(holder, timer), "WRA-03: inactive range is absent");
+    expect(tactical::activate_ability(rocket, timer.slots.front(), open_gate, 10).changed,
+        "WRA-01: ready mode activates");
+    expect(tactical::ability_attack_distance(holder, timer) == units(800), "WRA-03: active range applies");
+    expect(tactical::deactivate_ability(rocket, timer.slots.front(), 30).changed
+        && timer.slots.front().ready_tick == 60, "WRA-01: one third of the duration gives one third recharge");
+    auto untimed = rocket;
+    untimed.expiration_frames = 0;
+    auto untimed_state = tactical::initial_abilities(unit_of(corvette_type, untimed));
+    expect(tactical::activate_ability(untimed, untimed_state.slots.front(), open_gate, 0).changed
+        && untimed_state.slots.front().expires_tick == 0
+        && tactical::deactivate_ability(untimed, untimed_state.slots.front(), 500).changed
+        && untimed_state.slots.front().ready_tick == 0, "WRA-01: untimed stock-style mode cancels without recharge");
+    for (const auto range : {std::optional<Fixed>{}, std::optional<Fixed>{Fixed{}}, std::optional<Fixed>{units(-1)}}) {
+        holder.abilities.front().targeting_max_attack_distance = range;
+        timer.slots.front().active = true;
+        expect(!tactical::ability_attack_distance(holder, timer), "WRA-03: missing/nonpositive range leaves ordinary reach");
+    }
+    holder.abilities.front() = rocket;
+    holder.abilities.push_back(rocket);
+    holder.abilities.back().targeting_max_attack_distance = units(900);
+    timer = tactical::initial_abilities(holder);
+    timer.slots[0].active = true; timer.slots[1].active = true;
+    expect(tactical::ability_attack_distance(holder, timer) == units(800), "WRA-03: authored active range precedence");
+    holder.abilities.resize(1);
+    tactical::AbilityTable ability_data;
+    ability_data.profiles = {holder}; ability_data.humans = {1}; ability_data.autofire_defaults = {1};
+    tactical::CombatProfile ship;
+    ship.type_id = corvette_type; ship.category_bits = 1; ship.max_attack_distance = units(200);
+    tactical::ShotProfile shot;
+    shot.damage = units(1); shot.damage_type = 0; shot.speed = units(40); shot.max_travel = units(1500);
+    for (std::uint32_t index = 0; index < 4; ++index) {
+        tactical::WeaponProfile weapon;
+        weapon.hardpoint = index; weapon.range = units(1000); weapon.shot = shot;
+        weapon.min_recharge_hundredths = 10; weapon.max_recharge_hundredths = 10;
+        weapon.pulse_count = 3; weapon.pulse_delay_frames = 2;
+        weapon.cone_width = units(180); weapon.cone_height = units(180);
+        weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+        weapon.fire_in_normal_mode = index == 0 || index == 2;
+        weapon.fire_in_rocket_mode = index == 1 || index == 2;
+        ship.hardpoints.push_back({index, {}, true});
+        ship.weapons.push_back(weapon);
+    }
+    tactical::CombatProfile target; target.type_id = plain_type; target.category_bits = 1;
+    const std::vector<tactical::SensorProfile> sensors{{corvette_type, units(2000)}};
+    for (const unsigned scenario : {0U, 1U, 2U}) {
+        auto start = setup();
+        start.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+            {3, plain_type, 2, at(scenario == 0 ? 80 : 600, 0), math::identity_quat(), {}}};
+        tactical::CombatTable combat; combat.profiles = {ship, target};
+        if (scenario == 2) for (auto& weapon : combat.profiles[0].weapons) weapon.range = units(500);
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            auto created = tactical::TacticalSession::create(start, sensors, durability(), {}, std::nullopt,
+                combat, {}, ability_data);
+            expect(static_cast<bool>(created), "WRA-01: standalone modal holder session binds");
+            if (!created) continue;
+            auto session = std::move(created).value();
+            if (scenario == 0) expect(static_cast<bool>(session.submit(command(0, 1, 0, 1,
+                tactical::AttackPayload{3}))), "WRA-02: nearby ordinary attack submits");
+            expect(static_cast<bool>(session.submit(command(5, 1, 5, 1,
+                tactical::AbilityPayload{Kind::rocket_attack, Action::autofire_off}))), "WRA-04: toggle off submits");
+            expect(static_cast<bool>(session.submit(command(10, 1, 10, 1,
+                tactical::AbilityPayload{Kind::rocket_attack, Action::autofire_on}))), "WRA-04: toggle on submits");
+            for (const auto tick : {30U, 95U, 180U})
+                expect(static_cast<bool>(session.submit(command(tick, 1, tick, 1,
+                    tactical::AbilityPayload{Kind::rocket_attack, Action::activate}))), "WRA-01: modal command submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::array<std::size_t, 4> normal{}, active{};
+            std::size_t before{}, after{};
+            std::vector<std::string> hashes;
+            for (std::uint64_t tick = 0; tick < 250; ++tick) {
+                // The documented targeting phase reads the mode before late commands/expiry.
+                const auto firing_state = session.ability_state(1);
+                const bool firing_rocket = firing_state && firing_state->slots.front().active;
+                const auto frame = session.step(executor);
+                expect(static_cast<bool>(frame), "WRA-01: modal session step succeeds");
+                if (!frame) break;
+                hashes.push_back(frame.value().state_sha256 + frame.value().snapshot->sha256());
+                const auto state = session.ability_state(1);
+                expect(state.has_value(), "WRA-01: holder keeps ability state");
+                if (!state) break;
+                const auto& slot = state->slots.front();
+                if (tick == 5) expect(!slot.autofire && !slot.active, "WRA-04: toggle off stores the preference only");
+                if (tick == 10) expect(slot.autofire && !slot.active, "WRA-04: toggle on stores the preference only");
+                if (tick == 20) expect(slot.autofire && !slot.active, "WRA-04: armed toggle never self-activates");
+                if (scenario != 0 && (tick == 20 || tick == 89)) {
+                    const auto target_state = session.combat_state(1);
+                    expect(target_state && target_state->attack_target == (tick == 20 ? eawr::sim::invalid_entity_id : 3U),
+                        "WRA-03: the parent acquires the distant target only while its targeting range is expanded");
+                }
+                if (tick == 30) expect(slot.active && slot.expires_tick == 90, "WRA-01: duration starts at activation");
+                if (tick == 90) expect(!slot.active && slot.ready_tick == 180, "WRA-01: expiry begins full recharge");
+                if (tick == 95) expect(!slot.active && slot.ready_tick == 180, "WRA-01: recharge activation is refused");
+                if (tick == 180) expect(slot.active, "WRA-01: exact ready boundary admits activation");
+                for (const auto& event : frame.value().snapshot->combat_events()) {
+                    if (event.shooter != 1 || event.kind != tactical::CombatEventKind::weapon_fired) continue;
+                    expect(event.weapon < 4, "WRA-02: known hardpoint fires");
+                    if (event.weapon >= 4) continue;
+                    ++(firing_rocket ? active : normal)[event.weapon];
+                    if (tick < 30) ++before;
+                    if (tick >= 90 && tick < 180) ++after;
+                }
+            }
+            expect(normal[1] == 0 && active[0] == 0 && normal[3] == 0 && active[3] == 0,
+                "WRA-02: normal-only, rocket-only and disabled hardpoints obey the current mode, including pending pulses");
+            if (scenario == 0) expect(before > 0 && after > 0 && normal[0] > 0 && normal[2] > 0
+                && active[1] > 0 && active[2] > 0, "WRA-02: normal fire resumes through expiration/recharge");
+            if (scenario == 1) expect(active[1] > 0 && active[2] > 0,
+                "WRA-02/03: hardpoint opportunity fire retains its independent firing range");
+            if (scenario == 2) expect(before == 0 && active[1] == 0 && active[2] == 0,
+                "WRA-03: ability range never overrides hardpoint firing range");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "WRA-01/02/03: state and snapshots agree on 1/2/4/8 workers");
+            const auto encoded = tactical::write_replay(session.record());
+            const auto parsed = encoded ? tactical::parse_replay(encoded.value())
+                : eawr::core::Result<tactical::TacticalReplay>::failure({});
+            expect(parsed && parsed.value() == session.record(), "WRA-01: rocket commands round-trip in replay");
+        }
+    }
+}
 
 namespace {
 
@@ -316,6 +454,108 @@ void test_impact_shooter_bonus() {
                     : "EUS-16: contact uses current bonus once, removed shooter contributes none, current defense survives");
             if (reference.empty()) reference = hashes;
             else expect(reference == hashes, "EUS-16: impact bonus hashes agree at 1/2/4/8 workers");
+        }
+    }
+}
+
+
+void test_fire_range_bonus() {
+    // WFR-01: Combat_Bonus Fire_Range_Bonus_Percentage scales a hardpoint weapon's fire range
+    // (the sum of the per-category winners); the object weapon's targeting range is untouched.
+    // Targeting reaches 1200 in every case, so only the fire gate separates the outcomes.
+    for (const unsigned scenario : {0U, 1U, 2U, 3U, 4U, 5U}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto health = durability();
+            for (auto& row : health.profiles) { row.max_shields = {}; row.shield_refresh = {}; row.hardpoints.clear(); }
+            tactical::CombatProfile shooter;
+            shooter.type_id = corvette_type; shooter.max_attack_distance = units(1200);
+            tactical::WeaponProfile weapon;
+            weapon.range = units(700); weapon.pulse_count = 1;
+            if (scenario != 4) weapon.hardpoint = 0;
+            weapon.cone_width = units(175); weapon.cone_height = units(160);
+            weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+            weapon.shot = tactical::ShotProfile{units(10), 0, units(25), units(1500), true, true, {}};
+            shooter.weapons = {weapon};
+            tactical::CombatProfile target;
+            target.type_id = frigate_type;
+            target.collision = tactical::CollisionBox{at(-10, -10, -10), at(10, 10, 10)};
+            tactical::CombatProfile provider; provider.type_id = plain_type;
+            tactical::CombatTable combat; combat.profiles = {shooter, target, provider};
+            tactical::EconomyRules economy;
+            // 0.15 and 0.05 share category 0 (the larger wins: x1.15); 0.10 in category 1 adds (x1.25).
+            tactical::CommandBonusProfile first;
+            first.type = plain_type; first.bonus.applicable = {corvette_type};
+            first.bonus.percentages[6] = decimal("0.15");
+            tactical::CommandBonusProfile second = first;
+            second.slot = 1; second.bonus.percentages[6] = decimal("0.05");
+            tactical::CommandBonusProfile third = first;
+            third.slot = 2; third.bonus.stacking_category = 1; third.bonus.percentages[6] = decimal("0.10");
+            if (scenario == 2 || scenario == 5) economy.command_bonuses = {first, second};
+            else if (scenario == 3) economy.command_bonuses = {first, second, third};
+            else if (scenario != 0) economy.command_bonuses = {first};
+            auto initial = setup();
+            // 790 is beyond 700 and within 805 (x1.15); 860 is beyond 805 and within 875 (x1.25).
+            // 820 distinguishes the category winner (805) from incorrectly summing both (840).
+            const auto distance = scenario == 5 ? 820 : scenario == 3 ? 860 : 790;
+            initial.units = {{1, corvette_type, 1, at(0, 0), math::identity_quat(), {}},
+                {2, frigate_type, 2, at(distance, 0), math::identity_quat(), {}}};
+            if (scenario != 0) initial.units.push_back({3, plain_type, 1, at(3000, 0), math::identity_quat(), {}});
+            auto created = tactical::TacticalSession::create(initial,
+                std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
+                health, {}, std::nullopt, combat, {}, {}, economy);
+            expect(static_cast<bool>(created), "WFR-01: fire range fixture creates");
+            if (!created) { std::cerr << created.error().message << '\n'; continue; }
+            auto world = std::move(created).value();
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, tactical::AttackPayload{2}))),
+                "WFR-01: attack order submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            unsigned hits = 0;
+            std::optional<tactical::TacticalSession> restored;
+            for (unsigned frame = 0; frame < 80; ++frame) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "WFR-01: fire range step succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                for (const auto& event : step.value().snapshot->combat_events())
+                    if (event.kind == tactical::CombatEventKind::projectile_hit) ++hits;
+                if (restored) {
+                    const auto resumed = restored->step(executor);
+                    expect(resumed && resumed.value().state_sha256 == step.value().state_sha256,
+                        "WFR-01: checkpoint continuation agrees at 1/2/4/8 workers");
+                }
+                if (frame == 1) {
+                    const auto checkpoint = world.save_checkpoint_state();
+                    const auto domain = scenario == 0 ? 9U : 10U;
+                    expect(checkpoint && checkpoint.value().size() >= 4
+                        && checkpoint.value()[0] == domain && checkpoint.value()[1] == 0
+                        && checkpoint.value()[2] == 0 && checkpoint.value()[3] == 0,
+                        "WFR-01: zero range retains domain 9; nonzero range selects domain 10");
+                    auto fresh = tactical::TacticalSession::from_replay(world.record(),
+                        std::vector<tactical::SensorProfile>{{corvette_type, units(1500)}, {frigate_type, units(1500)}},
+                        health, {}, std::nullopt, combat, {}, {}, economy);
+                    expect(checkpoint && fresh, "WFR-01: saved session and checkpoint factory succeed");
+                    if (checkpoint && fresh) {
+                        restored.emplace(std::move(fresh).value());
+                        const auto loaded = restored->load_checkpoint_state(checkpoint.value());
+                        expect(static_cast<bool>(loaded), "WFR-01: checkpoint loads both range domains");
+                        if (!loaded) { restored.reset(); continue; }
+                        const auto recaptured = restored->save_checkpoint_state();
+                        expect(recaptured && recaptured.value() == checkpoint.value(),
+                            "WFR-01: checkpoint round-trip preserves canonical bytes");
+                    }
+                }
+            }
+            // 0: no bonus, 1: x1.15 hardpoint weapon, 2: same-category winner only, 3: categories add,
+            // 4: the object weapon ignores the bonus; 5: the category winner cannot reach 820.
+            const bool fired = scenario == 1 || scenario == 2 || scenario == 3;
+            expect((hits > 0) == fired, scenario == 0 ? "WFR-01: no bonus leaves the target out of fire range"
+                : scenario == 4 ? "WFR-01: the object weapon's range is not scaled"
+                : scenario == 5 ? "WFR-01: same-category bonuses take the largest rather than their sum"
+                : "WFR-01: the fire-range bonus extends the hardpoint weapon's reach");
+            if (reference.empty()) reference = hashes;
+            else expect(reference == hashes, "WFR-01: fire range hashes agree at 1/2/4/8 workers");
         }
     }
 }
@@ -1301,6 +1541,65 @@ void test_mc30_proximity_sample() {
 
 void test_spawned_hero_abilities() {
     using K = tactical::AbilityKind;
+    for (const auto kind : {K::harmonic_bomb, K::weaken_enemy, K::cluster_bomb, K::fow_reveal_ping}) {
+        std::vector<std::string> reference;
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            auto initial = setup();
+            initial.units = {{1, plain_type, 1, at(0, 0), math::identity_quat(), {}}};
+            tactical::AbilityProfile missing;
+            missing.kind = kind; missing.recharge_frames = 20; missing.unresolved_spawn = "Missing_Object";
+            auto holder = unit_of(plain_type, missing);
+            holder.abilities.push_back(turbo());
+            tactical::AbilityTable table; table.profiles = {holder};
+            auto created = tactical::TacticalSession::create(initial, {}, durability(), {}, std::nullopt, {}, {}, table);
+            expect(static_cast<bool>(created), "WHE-61: null-spawn session binds");
+            if (!created) continue;
+            auto world = std::move(created).value();
+            tactical::AbilityPayload input{kind, tactical::AbilityAction::activate};
+            if (kind == K::weaken_enemy || kind == K::fow_reveal_ping) input.position = at(0, 0);
+            expect(static_cast<bool>(world.submit(command(0, 1, 0, 1, input))), "WHE-61: null-spawn command submits");
+            expect(static_cast<bool>(world.submit(command(1, 1, 1, 1, input))), "WHE-61: cooldown probe submits");
+            expect(static_cast<bool>(world.submit(command(1, 1, 2, 1,
+                tactical::AbilityPayload{K::turbo, tactical::AbilityAction::activate}))), "WHE-61: sibling submits");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (unsigned tick = 0; tick < 3; ++tick) {
+                const auto step = world.step(executor);
+                expect(static_cast<bool>(step), "WHE-61: null-spawn tick succeeds");
+                if (!step) break;
+                hashes.push_back(step.value().state_sha256);
+                expect(step.value().snapshot->ability_spawns().empty(), "WHE-61: null spawn creates no object");
+                const auto state = world.ability_state(1);
+                expect(state && state->slots.front().started_tick == 0 && state->slots.front().ready_tick == 20,
+                    "WHE-61: ordinary recharge survives missing spawn");
+                if (tick == 1) expect(state && state->slots[1].active, "WHE-61: sibling ability still works");
+                const auto rejects = std::count_if(step.value().snapshot->events().begin(), step.value().snapshot->events().end(), [](const auto& event) {
+                    return event.kind == tactical::EventKind::order_rejected;
+                });
+                expect(rejects == (tick == 1 ? 1 : 0), "WHE-61: success then ordinary cooldown rejection");
+            }
+            const auto checkpoint = world.save_checkpoint_state();
+            auto restored = tactical::TacticalSession::from_replay(world.record(), {}, durability(), {}, std::nullopt, {}, {}, table);
+            expect(checkpoint && restored, "WHE-61: null-spawn checkpoint fixture binds the same content");
+            if (checkpoint && restored) {
+                expect(static_cast<bool>(restored.value().load_checkpoint_state(checkpoint.value())),
+                    "WHE-61: null-spawn slots restore without a legacy reader");
+                const auto saved = restored.value().save_checkpoint_state();
+                expect(saved && saved.value() == checkpoint.value(), "WHE-61: checkpoint state round-trips exactly");
+                const auto a = world.step(executor), b = restored.value().step(executor);
+                expect(a && b && a.value().state_sha256 == b.value().state_sha256,
+                    "WHE-61: checkpoint continuation preserves recharge and sibling state");
+            }
+            const auto record = world.record();
+            const auto encoded = tactical::write_replay(record);
+            const auto parsed = encoded ? tactical::parse_replay(encoded.value())
+                : eawr::core::Result<tactical::TacticalReplay>::failure({});
+            expect(parsed && parsed.value() == record, "WHE-61: null-spawn command record round-trips");
+            if (reference.empty()) reference = hashes;
+            else expect(hashes == reference, "WHE-61: null-spawn commands match on 1/2/4/8 workers");
+        }
+    }
+
     for (const auto kind : {K::harmonic_bomb, K::weaken_enemy}) for (const bool zero : {false, true}) {
         std::vector<std::string> reference;
         for (const auto workers : {1U, 2U, 4U, 8U}) {

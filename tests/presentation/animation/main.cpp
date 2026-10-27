@@ -1,11 +1,14 @@
 #include "../../support/check.hpp"
 #include "../../support/self_test.hpp"
 #include "eawr/presentation/animation/animation.hpp"
+#include "eawr/presentation/animation/player_share.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -654,12 +657,102 @@ void test_sample_position() {
 }
 } // namespace
 
+// pf-mem-9: one shared bind Player per model key; poses stay byte-identical to an independent Player's.
+void test_player_share() {
+    assets::Model model; model.bones = {bone("root", -1), bone("hand", 0, 2.0F)};
+    assets::Model other; other.bones = {bone("root", -1)};
+    playback::PlayerShare share;
+    const auto first = share.bind("ships/a.alo", model);
+    const auto second = share.bind("ships/a.alo", model);
+    const auto third = share.bind("ships/b.alo", other);
+    expect(first && first == second, "one model key shares one Player by address");
+    expect(third && third != first && share.size() == 2U, "another model key gets its own Player");
+    assets::Model broken; broken.bones = {bone("root", 5)};
+    expect(!share.bind("ships/broken.alo", broken) && share.size() == 2U, "a failed create is not cached");
+    const auto independent = playback::Player::create(model);
+    if (!first || !independent) return;
+    const auto shared_pose = first->sample({});
+    const auto own_pose = independent.value().sample({});
+    expect(shared_pose && own_pose && shared_pose.value().bones.size() == own_pose.value().bones.size()
+        && std::memcmp(shared_pose.value().bones.data(), own_pose.value().bones.data(),
+            own_pose.value().bones.size() * sizeof(playback::BonePose)) == 0,
+        "a shared Player samples byte-identical bone poses");
+    // Two bindings sharing the Player each keep their own pose storage.
+    auto pose_a = first->sample({}); auto pose_b = second->sample({});
+    expect(pose_a && pose_b && pose_a.value().bones.data() != pose_b.value().bones.data(), "poses are per binding");
+    // The census reaches the shared Player twice but counts it once.
+    diagnostics::OwnerCensus census(1U << 10, 1U << 4);
+    first->owner_census(census); second->owner_census(census);
+    const auto& parts = census.player_parts();
+    expect(parts.references == 2U && parts.players == 1U && parts.bones == 2U && parts.bone_bytes > 0U,
+        "census counts a shared Player once and reports references separately");
+    share.clear();
+    expect(share.size() == 0U && first->bone_count() == 2U, "clear() keeps held Players alive");
+}
+
+namespace {
+// pf-anim-elide: a channel whose stored frames are bit-equal keeps one value; poses stay byte-identical to the
+// per-frame layout. Clip B differs from clip A only in its last stored frame (never sampled below), which turns
+// every channel non-constant, so A takes the elided path and B the full per-frame path over the same sampled values.
+assets::Animation elide_clip(const bool vary_last_frame) {
+    assets::Animation value;
+    value.source.logical_path = vary_last_frame ? "elide_full.ala" : "elide_const.ala";
+    value.stored_frame_count = 6; value.playable_frame_count = 4;
+    value.frames_per_second = 1.0F; value.duration_seconds = 4.0F;
+    for (std::uint32_t index = 0; index < 2U; ++index) {
+        assets::AnimationTrack item = track(index, index == 0U ? "root" : "hand");
+        item.samples.clear();
+        for (std::uint32_t frame = 0; frame < 6U; ++frame) {
+            const float moving = index == 0U ? static_cast<float>(frame) * 1.5F + 0.25F : 3.0F;
+            assets::AnimationSample sample{{moving, 2.0F, -1.0F}, {1.0F, 1.5F, 1.0F},
+                {0.0F, 0.70710678F, 0.0F, 0.70710678F}, true};
+            if (vary_last_frame && frame == 5U) {
+                sample.translation.y += 1.0F; sample.scale.x += 0.5F; sample.rotation.x = 0.1F; sample.visible = false;
+            }
+            item.samples.push_back(sample);
+        }
+        value.tracks.push_back(std::move(item));
+    }
+    return value;
+}
+
+void test_channel_elision() {
+    assets::Model model; model.bones = {bone("root", -1), bone("hand", 0, 2.0F)};
+    const assets::Animation constant_clip = elide_clip(false), full_clip = elide_clip(true);
+    const auto elided = playback::Player::create(model, &constant_clip);
+    const auto full = playback::Player::create(model, &full_clip);
+    expect(elided && full, "elision clips create");
+    if (!elided || !full) return;
+    bool identical = true;
+    for (int step = 0; step <= 28; ++step) {
+        const playback::SampleRequest request{static_cast<float>(step) * 0.125F, playback::PlaybackMode::loop, 0.0F};
+        const auto left = elided.value().sample(request), right = full.value().sample(request);
+        identical = identical && left && right && left.value().bones.size() == right.value().bones.size()
+            && std::memcmp(left.value().bones.data(), right.value().bones.data(),
+                right.value().bones.size() * sizeof(playback::BonePose)) == 0;
+    }
+    expect(identical, "elided channels sample byte-identical poses to the per-frame layout");
+    diagnostics::OwnerCensus census_a(1U << 10, 1U << 4), census_b(1U << 10, 1U << 4);
+    elided.value().owner_census(census_a); full.value().owner_census(census_b);
+    const auto& a = census_a.player_parts();
+    const auto& b = census_b.player_parts();
+    expect(a.tracks == 2U && a.constant_translation == 1U && a.constant_scale == 2U && a.constant_rotation == 2U
+        && a.constant_visible == 2U, "census counts constant channels per track");
+    expect(b.constant_translation == 0U && b.constant_scale == 0U && b.constant_rotation == 0U
+        && b.constant_visible == 0U, "a varying last frame defeats every elision");
+    expect(a.unelided_sample_bytes == b.unelided_sample_bytes
+        && a.unelided_sample_bytes == 12U * sizeof(assets::AnimationSample)
+        && a.sample_bytes < b.sample_bytes, "elision stores fewer sample bytes than the per-frame layout");
+}
+} // namespace
+
 int main() {
     if (!eawr::testing::support_contract_self_test()) {
         std::cerr << "FAIL: shared check/require self-test\n";
         return 1;
     }
     test_sample_position();
+    test_channel_elision();
     test_rigid_vertex_to_bind();
     test_rigid_instance_routes();
     test_bind_identity_and_missing_tracks();
@@ -670,6 +763,7 @@ int main() {
     test_supported_intermediate_bind_blend();
     test_unsupported_intermediate_bind_blend();
     test_attachment_pose_origin();
+    test_player_share();
     if (failures != 0) return EXIT_FAILURE;
     std::cout << "animation CPU contracts passed\n";
     return EXIT_SUCCESS;

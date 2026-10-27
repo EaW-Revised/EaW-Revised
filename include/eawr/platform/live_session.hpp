@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/sim/tactical/abilities.hpp"
@@ -119,6 +121,7 @@ struct LiveTickEvents {
     std::vector<sim::tactical::AsteroidImpact> asteroid_impacts;
     std::vector<LiveBaseAttack> base_attacks{};
     std::vector<LiveHardpointLoss> hardpoint_losses{};
+    std::vector<sim::tactical::DamageChange> damage_changes{};
 };
 
 // What events_after() hands back: the ticks with presented events in (after, through], oldest
@@ -165,7 +168,8 @@ public:
     // come in completed-tick order.
     void record(const sim::tactical::TacticalSnapshot& snapshot,
         std::span<const sim::tactical::AsteroidImpact> asteroid_impacts = {},
-        std::span<const sim::tactical::TypeId> base_types = {});
+        std::span<const sim::tactical::TypeId> base_types = {},
+        std::span<const sim::tactical::DamageChange> damage_changes = {});
     // The kept ticks in (after, through], and the newest dropped tick in that range, if any.
     [[nodiscard]] LiveEvents after(std::uint64_t after, std::uint64_t through) const;
     [[nodiscard]] std::size_t bytes() const noexcept { return bytes_; }
@@ -206,6 +210,8 @@ struct LiveStepContext {
     std::function<core::Result<void>()> activate{};
     // World hash of the completed tick without the script/AI part; empty = state_hash() is already cheap.
     std::function<std::string()> world_hash{};
+    // TP-MP01: agreed control boundaries may advance while the world is held.
+    std::function<void()> rebase_pacing{};
 };
 using LiveStepDriver = std::function<core::Result<bool>(
     LiveStepContext&, std::span<const sim::tactical::PlayerCommand>, std::uint64_t now_ms)>;
@@ -266,6 +272,9 @@ public:
         // commands join the replay; the tick hashes stay the world's.
         std::shared_ptr<const LiveScripts> scripts{};
         LiveStepDriver step_driver{};
+        // TP-MP04: playback-only admission of a recorded session journal. The
+        // world commands still come exclusively from the ordinary replay source.
+        LiveStepDriver recorded_step_driver{};
         // #494: the player whose fog cells each kept tick carries (fog_at()); none keeps no fog history.
         std::optional<sim::tactical::PlayerId> fog_player{};
         // WBF-05/10: publish tick zero while presentation finishes loading. This
@@ -343,6 +352,8 @@ public:
     [[nodiscard]] bool wait_for(std::uint64_t tick, std::chrono::milliseconds timeout) const;
 
     [[nodiscard]] LiveFrame frame() const;
+    // Immutable startup membership of land members and their commandable squad roots.
+    [[nodiscard]] std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept;
     // A kept snapshot of that completed tick, or null.
     [[nodiscard]] std::shared_ptr<const sim::tactical::TacticalSnapshot> snapshot_at(std::uint64_t tick) const;
     // #494: Options::fog_player's cells after that kept tick, or null (no fog_player, a session
@@ -362,6 +373,8 @@ public:
     // unit orders were rejected, in the order they happened.
     [[nodiscard]] std::vector<core::Diagnostic> rejected_orders() const;
     [[nodiscard]] std::size_t worker_count() const noexcept;
+    // Diagnostic const query serialized with stepping by the existing session mutex.
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     // The scripts' load and diagnostics so far; empty without scripts.
     [[nodiscard]] LiveScriptReport script_report() const;
 

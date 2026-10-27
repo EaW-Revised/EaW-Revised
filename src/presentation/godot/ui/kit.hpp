@@ -206,6 +206,8 @@ class EawrUiSlider final : public godot::Range {
 public:
     EawrUiSlider();
     void set_forced_states(KitState minus, KitState plus);
+    // A button increment independent of Range's value rounding (WSS-25).
+    void set_button_step(double value) noexcept { button_step_ = value; }
     void set_dialog_sound(std::function<void(std::string_view)> sound) { dialog_sound_ = std::move(sound); }
     [[nodiscard]] std::uint64_t edit_revision() const noexcept { return edit_revision_; }
     void _draw() override;
@@ -230,6 +232,7 @@ private:
     Part hovered_{Part::none};
     Part held_{Part::none};
     std::uint64_t edit_revision_{}; // actual GUI gestures, including unchanged endpoints
+    double button_step_{};
 };
 
 // Progress bar (msctls_progress32): Progress_Bar_Left, Middle_On up to the

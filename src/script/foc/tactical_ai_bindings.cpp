@@ -358,7 +358,8 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         };
     };
     const auto object = [&](std::string_view name, Binding binding) {
-        if (name == "Fire_Special_Weapon" || name == "Get_Build_Pad_Contents" || name == "Can_Move") binding = guard_dynamic_read(name, std::move(binding));
+        if (name == "Fire_Special_Weapon" || name == "Get_Build_Pad_Contents" || name == "Can_Move" || name == "Build")
+            binding = guard_dynamic_read(name, std::move(binding));
         if (auto added = scripts.register_method(handle_game_object, name, std::move(binding)); !added) errors.push_back(added.error());
     };
     const auto player = [&](std::string_view name, Binding binding) {
@@ -799,6 +800,65 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const auto child = pad->second.constructed != 0 ? pad->second.constructed : pad->second.under_construction;
         return child != 0 ? one(handle(handle_game_object, child)) : none();
     });
+    // EXP-E01 GameObject.Build(type[, check]): the object form of Build, on a build pad. One or two
+    // arguments; the type is a name or a type handle, the optional Boolean adds the owner's faction-menu
+    // and allow-construction checks (refusal answers false). The receiver needs build-pad behaviour and
+    // neither an under-construction nor a completed child. It starts construction for the receiver's
+    // owner with the local-debit and start-feedback flags false (WBP-09): no debit here. The mod's own
+    // money adjustment (Give_Money after Build) and the TaskForce reservation (WBP-47/48) are the only
+    // charges, so a started build is never charged twice. A malformed call, an occupied or cooling pad
+    // and a start that cannot happen report an error and answer nil.
+    object("Build", [host](BindingContext& context, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto refuse = [&](const std::string& message) -> core::Result<ValueList> {
+            context.report(authoritative::codes::script_error, "GameObject.Build -- " + message);
+            return none();
+        };
+        if (arguments.size() < 2 || arguments.size() > 3) return refuse("invalid number of parameters. Expected 1 or 2");
+        const ViewUnit* pad = live_object(*host, arguments[0]);
+        if (pad == nullptr) return refuse("the receiver is not a live object");
+        const AiType* type = nullptr;
+        if (const std::string* name = as_text(arguments[1])) {
+            const auto found = host->types_by_name.find(upper(*name));
+            if (found != host->types_by_name.end()) type = found->second;
+        } else if (const Handle* typed = as_handle(arguments[1], handle_type)) {
+            type = host->type(static_cast<tactical::TypeId>(typed->id));
+        }
+        if (type == nullptr) return refuse("parameter 1 is not a valid game object type");
+        bool checked = false;
+        if (arguments.size() == 3) {
+            const bool* flag = std::get_if<bool>(&arguments[2].data);
+            if (flag == nullptr) return refuse("parameter 2 is not a boolean");
+            checked = *flag;
+        }
+        if (!host->ai_world || !host->view) return refuse("no tactical world is hosted");
+        const auto& world = *host->ai_world;
+        const auto* profile = world.economy().pads.point(pad->type);
+        if (profile == nullptr || !profile->build_pad) return refuse("the receiver has no build behavior");
+        const auto state = world.pads().find(pad->id);
+        if (state == world.pads().end()) return refuse("the receiver has no build-pad state");
+        if (state->second.under_construction != 0 || state->second.constructed != 0
+            || host->queued_pad_starts.contains(pad->id))
+            return refuse("the pad already holds, or has just been given, an under-construction or completed structure");
+        const tactical::PlayerId owner = pad->owner;
+        const auto* option = world.build_option(owner, pad->id, type->type_id);
+        if (checked) {
+            // The wrapper's refusal is an answer, not an error.
+            if (option == nullptr || !option->available || !world.construction_allowed(owner, pad->id)) return one(boolean(false));
+        }
+        // True means the start will happen: the same acceptance the pad order meets in the simulation
+        // (menu entry and availability even for the unchecked form, under-construction behavior, the roster
+        // gate, the cooldown, the owner's fog). Anything the order would reject is an error and nil here.
+        if (option == nullptr || !option->available) return refuse("the type is not available on the owner's faction menu");
+        if (world.economy().pads.child(type->type_id) == nullptr) return refuse("the type has no under-construction behavior");
+        if (world.economy().disabled_types.contains(type->type_id)) return refuse("the type is disabled in this match");
+        if (host->view->tick < state->second.cooldown_until) return refuse("the pad is not ready for new construction");
+        if (object_fogged(*host->view, *pad, owner)) return refuse("the pad is not revealed to its owner");
+        if (!host->ai(owner)) return refuse("GameObject.Build is hosted for AI-owned pads; the owner has no AI");
+        context.issue_command(std::string(verb_pad_build), {number(LuaNumber(static_cast<std::int64_t>(owner))),
+            arguments[0], handle(handle_type, type->type_id)});
+        host->queued_pad_starts.insert(pad->id);
+        return one(boolean(true));
+    });
     // SOS-16, WSD-10: a squadron craft's parent is its live team container; any
     // other space object has none (debug build: the parent-container query).
     object("Get_Parent_Object", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
@@ -813,6 +873,12 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
 
     player("Get_ID", [](BindingContext&, const ValueList& arguments) {
         return one(number(LuaNumber(static_cast<std::int64_t>(std::get<Handle>(arguments[0].data).id))));
+    });
+    // RGC-126: the stored player name is a string, including when it is empty.
+    player("Get_Name", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const auto found = host->players.find(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
+        if (found == host->players.end()) return none();
+        return one(Value::text(found->second->name));
     });
     player("Get_Faction_Name", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const auto found = host->players.find(static_cast<tactical::PlayerId>(std::get<Handle>(arguments[0].data).id));
@@ -881,8 +947,24 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         if (host->ai_world && host->ai_world->goal_mode() == "GALACTIC")
             return context.apply_immediate("galactic.give_money", arguments);
         const auto amount = numeric::to_fixed(std::get<LuaNumber>(arguments[1].data));
-        if (!amount || amount.value().raw() <= 0) return fail("Give_Money expects positive credits");
+        if (!amount) return fail("Give_Money expects a credit amount in range");
         const auto player = std::get<Handle>(arguments[0].data).id;
+        if (amount.value().raw() < 0) {
+            // WGA-100: a negative amount is a debit with no affordability test, floored at zero credits.
+            // It runs as the AI's accounting debit (WBP-47/48 path), clamped to the balance left after the
+            // wallet changes queued earlier in this barrier (the simulation refuses a debit above the balance).
+            if (host->in_object_turn) return fail("object turn dynamic-read tripwire: Give_Money");
+            auto& queued = host->queued_wallet[static_cast<tactical::PlayerId>(player)];
+            const auto balance = host->credits(static_cast<tactical::PlayerId>(player)).raw() + queued;
+            const auto debit = std::min(balance, -amount.value().raw());
+            if (debit <= 0) return none();
+            queued -= debit;
+            context.issue_command(std::string(verb_reservation_debit), {number(LuaNumber(static_cast<std::int64_t>(player))),
+                handle(handle_game_object, 0), number(numeric::from_fixed(math::Fixed::from_raw(debit)))});
+            return none();
+        }
+        if (amount.value().raw() == 0) return fail("Give_Money expects positive credits");
+        if (!host->in_object_turn) host->queued_wallet[static_cast<tactical::PlayerId>(player)] += amount.value().raw();
         context.issue_command(std::string(verb_credit_grant), {number(LuaNumber(static_cast<std::int64_t>(player))),
             handle(handle_game_object, 0), arguments[1]});
         return none();
@@ -891,6 +973,13 @@ void register_methods(ScriptScheduler& scripts, const HostPtr& host, std::vector
         const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
         if (found == nullptr) return none();
         return one(Value::text(found->name));
+    });
+    type("Get_Build_Cost", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
+        const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);
+        if (found == nullptr) return none();
+        // RGC-125: generic tactical cost (WAS-26), without a producer's effective price.
+        if (!found->tactical_cost) return fail("Get_Build_Cost: generic tactical cost metadata unavailable");
+        return one(number(numeric::from_fixed(*found->tactical_cost)));
     });
     type("Get_Max_Range", [host](BindingContext&, const ValueList& arguments) -> core::Result<ValueList> {
         const AiType* found = host->type(std::get<Handle>(arguments[0].data).id);

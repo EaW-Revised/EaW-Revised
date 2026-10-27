@@ -294,7 +294,9 @@ void effects() {
     submit(game, 7, overflow); (void)take(game.step(executor));
     expect(game.snapshot()->observer()->records[3] == before && game.snapshot()->events().front().reason == gc::GalacticRejectReason::observer_input, "overflowing source expiry leaves target source/memory state unchanged");
     submit(game, 8, second, {1}); (void)take(game.step(executor));
-    expect(game.snapshot()->events().front().reason == gc::GalacticRejectReason::not_authorized, "human cannot fabricate observer facts");
+    const auto& denied = game.snapshot()->events().front();
+    expect(denied.reason == gc::GalacticRejectReason::not_authorized && denied.subject == second.planet && denied.value == second.player,
+        "human cannot fabricate observer facts; refusal retains the requested planet and player");
     auto transfer = effect(gc::ObserverAction::transfer, 132); transfer.planet = 1; transfer.previous_player = 1; transfer.player = 2;
     transfer.source.source = 1; transfer.duration = f(-1); transfer.influence_range = f(10);
     submit(game, 9, transfer); (void)take(game.step(executor));

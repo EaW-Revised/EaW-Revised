@@ -219,6 +219,7 @@ private:
 // snapshot or serialized into replay input.
 class MapParticleProvider final {
 public:
+    void owner_census(diagnostics::OwnerCensus& output) const;
     MapParticleProvider(Node3D& host, const vfs::Vfs& filesystem,
         GodotRenderer* renderer = nullptr, FogMode* fog = nullptr);
 

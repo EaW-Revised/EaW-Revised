@@ -21,7 +21,7 @@ namespace eawr::sim::tactical {
 inline constexpr std::size_t max_curve_points = 64;
 inline constexpr std::uint32_t max_damage_types = 1024;
 // Multipliers and curve values are bounded so every product of the pipeline stays in Q24: a
-// projectile's damage (at most max_durability_health) times the curve value times an armor
+// projectile's damage (at most max_hit_damage) times the curve value times an armor
 // multiplier is at most 2^36, below Q24's 2^39. FoC's own data stays far inside (armor
 // multipliers up to 10, curve values up to 1).
 inline constexpr std::int64_t max_damage_multiplier = 256;
@@ -87,6 +87,21 @@ struct HitOutcome {
     bool storm_shield_branch{}; // WHZ-32: branch feedback/cancellation, independent of absorption
 };
 
+// WCC-54: immutable damage-delivery facts for presentation. No audio dependency,
+// event number, canonical state, replay encoding or checkpoint storage.
+struct DamageIdentity {
+    EntityId unit{};
+    TypeId type_id{};
+    PlayerId owner{};
+    friend bool operator==(const DamageIdentity&, const DamageIdentity&) noexcept = default;
+};
+struct DamageChange {
+    DamageIdentity target{};
+    std::optional<DamageIdentity> source{};
+    math::Fixed hull_before{}, hull_after{}, max_hull{};
+    friend bool operator==(const DamageChange&, const DamageChange&) noexcept = default;
+};
+
 // Ordered environmental feedback, outside canonical state and replay hashes.
 struct AsteroidImpact {
     EntityId target{};
@@ -95,7 +110,7 @@ struct AsteroidImpact {
 };
 
 // Applies one hit at `frame` (DG-01 to DG-11, DG-20). Needs the table's damage rules; a
-// projectile hit's amount is in [0, max_durability_health] like a validated projectile's damage.
+// projectile hit's amount is in [0, max_hit_damage] like a validated projectile's damage.
 [[nodiscard]] core::Result<HitOutcome> apply_hit(const DurabilityProfile& profile, const DamageRules& rules,
     DurabilityState& state, const Hit& hit, std::uint64_t frame);
 class CombatRandom;

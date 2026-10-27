@@ -151,14 +151,16 @@ std::size_t LiveEventLog::record_bytes(const LiveTickEvents& record) noexcept {
         + record.combat_events.size() * sizeof(tactical::CombatEvent)
         + record.asteroid_impacts.size() * sizeof(tactical::AsteroidImpact)
         + record.base_attacks.size() * sizeof(LiveBaseAttack)
-        + record.hardpoint_losses.size() * sizeof(LiveHardpointLoss);
+        + record.hardpoint_losses.size() * sizeof(LiveHardpointLoss)
+        + record.damage_changes.size() * sizeof(tactical::DamageChange);
     for (const auto& loss : record.hardpoint_losses) bytes += loss.standing.size() * sizeof(std::uint32_t);
     return bytes;
 }
 
 void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std::span<const tactical::AsteroidImpact> asteroid_impacts,
-    const std::span<const tactical::TypeId> base_types) {
+    const std::span<const tactical::TypeId> base_types, const std::span<const tactical::DamageChange> damage_changes) {
     LiveTickEvents kept{snapshot.completed_tick(), {}, {}, {asteroid_impacts.begin(), asteroid_impacts.end()}, {}, {}};
+    kept.damage_changes.assign(damage_changes.begin(), damage_changes.end());
     bool ability_input = false;
     for (const tactical::Event& event : snapshot.events()) {
         if (presented(event)) kept.events.push_back(event);
@@ -226,7 +228,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
     ability_due_ticks_.erase(ability_due_ticks_.begin(), ability_due_ticks_.upper_bound(tick));
     // WHE-63: accepted instant commands likewise need their frame retained, without
     // adding an authoritative event or scanning every unit for presentation state.
-    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty() || !kept.base_attacks.empty()) {
+    if (ability_input || ability_due || !kept.events.empty() || !kept.combat_events.empty() || !kept.asteroid_impacts.empty() || !kept.base_attacks.empty() || !kept.damage_changes.empty()) {
         if (record_bytes(kept) > bounds_.bytes) {
             // Larger than the whole bound: dropped at once, the older ticks kept.
             if (!dropped_from_) dropped_from_ = kept.tick;
@@ -234,6 +236,7 @@ void LiveEventLog::record(const tactical::TacticalSnapshot& snapshot, const std:
         } else {
             kept.events.shrink_to_fit();
             kept.combat_events.shrink_to_fit();
+            kept.damage_changes.shrink_to_fit();
             kept.asteroid_impacts.shrink_to_fit();
             kept.base_attacks.shrink_to_fit();
             kept.hardpoint_losses.shrink_to_fit();
@@ -293,6 +296,10 @@ public:
             });
         }
         options_.event_history = std::max(options_.event_history, options_.history);
+        if (const auto* movement = world().land_movement()) {
+            for (const auto& member : movement->members())
+                land_roster_.emplace_back(member.object, movement->squads()[member.squad].object);
+        }
         const auto zero = world().snapshot();
         history_.push_front(zero);
         if (auto fog = capture_fog()) fog_history_.push_front(std::move(fog));
@@ -379,6 +386,8 @@ public:
             return frame_.latest->completed_tick() >= tick || failure_ || stopping_;
         }) && frame_.latest->completed_tick() >= tick;
     }
+
+    std::span<const std::pair<sim::EntityId, sim::EntityId>> land_roster() const noexcept { return land_roster_; }
 
     LiveFrame frame() const {
         const std::lock_guard lock(mutex_);
@@ -474,6 +483,15 @@ public:
         std::unique_lock lock(session_mutex_, std::defer_lock);
         { core::tick_profile::Scope wait("ui.lock.failure-record"); lock.lock(); }
         return world().record_through_next_tick();
+    }
+
+    diagnostics::MemoryCapacity memory_capacity() const {
+        std::lock_guard lock(session_mutex_);
+        auto result = world().memory_capacity();
+        if (scripted_) result.append(scripted_->memory_capacity());
+        else result.add("lua", "vm_gc_kib_bytes_lower_bound", 0, 0);
+        result.add("sim", "completed_tick", 0, world().completed_tick());
+        return result;
     }
 
     LiveScriptReport script_report() const {
@@ -748,6 +766,7 @@ private:
                         return tactical::write_replay(replay);
                     }, [this](std::uint32_t rate) { set_target_rate(rate); }};
                 // Same value state_hash() starts from; the scripts are only hashed for exchanged rows.
+                context.rebase_pacing = [this] { const std::lock_guard lock(mutex_); rebase_ = true; };
                 context.world_hash = [&] { return driver_tick ? driver_tick->state_hash.get() : world().state_sha256(); };
                 context.rebuild = [this, &executor, &driver_lock] {
                     driver_lock.unlock();
@@ -802,7 +821,7 @@ private:
                     fog_history_.push_front(std::move(fog));
                     if (fog_history_.size() > options_.history) fog_history_.pop_back();
                 }
-                event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts, options_.base_attack_types);
+                event_log_.record(*tick.value().snapshot, tick.value().asteroid_impacts, options_.base_attack_types, tick.value().damage_changes);
                 // #558: presentation-only wall-clock cost, never read by the simulation.
                 // #957: a scripted tick's AI step and Lua service are their own phases; "step" is the rest.
                 LiveTickCost cost{tick.value().completed_tick, step_ms + fog_ms, {{"step", step_ms}, {"fog", fog_ms}}};
@@ -958,6 +977,7 @@ private:
 
     std::unique_lock<std::mutex>* active_driver_lock_{};
     std::vector<tactical::PlayerCommand> driver_input_;
+    std::vector<std::pair<sim::EntityId, sim::EntityId>> land_roster_;
     std::optional<tactical::TacticalSession> session_;
     std::unique_ptr<script::authoritative::ScriptedTacticalSession> scripted_;
     // Scripted mode: the commands for the next step, submitted by it; the scripts' report.
@@ -1048,6 +1068,12 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start_impl(
             return StartResult::failure(std::move(error));
         }
     }
+    if (!replay && options.recorded_step_driver) {
+        core::Diagnostic error; error.code = "EAWR-PLATFORM-0600";
+        error.message = "A recorded session driver requires replay playback.";
+        return StartResult::failure(std::move(error));
+    }
+    if (replay) options.step_driver = std::move(options.recorded_step_driver);
     // Retain the same initializer for recovery as for the original start. Replay
     // input is owned here, so a caller may release its parsed file after start().
     const auto recording = replay ? std::make_shared<const tactical::TacticalReplay>(*replay) : nullptr;
@@ -1058,10 +1084,12 @@ core::Result<std::unique_ptr<LiveSession>> LiveSession::start_impl(
             // recording's future keys, just as in an ordinary live session.
             auto initial = *recording;
             initial.commands.clear();
+            if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::from_replay(initial, rules);
             return tactical::TacticalSession::from_replay(initial,
                 rules.sensors, rules.durability, rules.motion, rules.fog, rules.combat,
                 rules.victory, rules.abilities, rules.economy, rules.map_box);
         }
+        if (setup.domain == tactical::BattleDomain::land) return tactical::TacticalSession::create(setup, rules);
         return tactical::TacticalSession::create(setup, rules.sensors, rules.durability, rules.motion,
             rules.fog, rules.combat, rules.victory, rules.abilities, rules.economy, rules.map_box);
     };
@@ -1127,6 +1155,18 @@ core::Result<std::vector<std::string>> headless_tick_hashes(
 
 core::Result<std::vector<std::string>> headless_tick_hashes(
     const tactical::TacticalReplay& replay, const tactical::TacticalContent& content) {
+    if (replay.setup.domain == tactical::BattleDomain::land) {
+        using Result = core::Result<std::vector<std::string>>;
+        auto session = tactical::TacticalSession::from_replay(replay, content);
+        if (!session) return Result::failure(session.error());
+        std::vector<std::string> hashes;
+        while (session.value().completed_tick() < replay.final_tick_count) {
+            auto tick = session.value().step(sim::InlineExecutor{});
+            if (!tick) return Result::failure(tick.error());
+            hashes.push_back(std::move(tick.value().state_sha256));
+        }
+        return Result::success(std::move(hashes));
+    }
     return headless_tick_hashes(replay, content.sensors, content.durability, content.motion, content.combat,
         content.victory, content.fog, content.abilities, content.economy, content.map_box);
 }
@@ -1146,6 +1186,7 @@ bool LiveSession::wait_for(const std::uint64_t tick, const std::chrono::millisec
     return impl_->wait_for(tick, timeout);
 }
 LiveFrame LiveSession::frame() const { return impl_->frame(); }
+std::span<const std::pair<sim::EntityId, sim::EntityId>> LiveSession::land_roster() const noexcept { return impl_->land_roster(); }
 std::optional<bool> LiveSession::reinforcement_point(const tactical::PlayerId player, const tactical::TypeId type,
     const sim::math::Vec3& point, const std::optional<sim::math::Fixed> facing_yaw) const {
     return impl_->reinforcement_point(player, type, point, facing_yaw);
@@ -1168,6 +1209,7 @@ std::vector<LiveTickCost> LiveSession::tick_costs_after(const std::uint64_t afte
 std::optional<core::Diagnostic> LiveSession::failure() const { return impl_->failure(); }
 std::vector<core::Diagnostic> LiveSession::rejected_orders() const { return impl_->rejected_orders(); }
 std::size_t LiveSession::worker_count() const noexcept { return impl_->worker_count(); }
+diagnostics::MemoryCapacity LiveSession::memory_capacity() const { return impl_->memory_capacity(); }
 LiveScriptReport LiveSession::script_report() const { return impl_->script_report(); }
 void LiveSession::stop() { impl_->stop(); }
 std::vector<std::string> LiveSession::tick_hashes() const { return impl_->tick_hashes(); }

@@ -22,7 +22,7 @@ from tools.common.eawr_python_helpers import sha256_file as sha256
 CASES = (
     "accessible", "inaccessible", "known", "masked", "known-zero", "discovered-only",
     "production", "production-unlocks", "capture-live", "fleet-count", "fleet-heroes",
-    "fleet-transit", "fleet-drag-xwing-mixed", "fleet-drag-home", "ground-count",
+    "fleet-transit", "fleet-drag-xwing-mixed", "fleet-drag-home", "fleet-drag-stealth", "ground-count",
     "ground-structures", "orbit-extra", "orbit-level-3", "theft", "neutralization",
     "hack", "hack-live", "market", "corruption-clean", "destruction-contested",
     "battle-choice", "battle-refusal", "battle-observer", "battle-progress", "battle-single",

@@ -3,6 +3,14 @@
 # ROOT_ONLY lists preserve the root build's existing additional units.
 
 set(EAWR_SIM_SOURCES
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_terrain.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_path.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_path_service.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_placement.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_movement.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/land_contacts.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/tactical/session_land_checkpoint.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fog.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/replay.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/snapshot.cpp"

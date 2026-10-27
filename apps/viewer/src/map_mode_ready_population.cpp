@@ -70,7 +70,9 @@ bool MapMode::State::prepare_live_population(Node3D& host, const assets::Map& ma
     state.particle_workers = std::make_unique<ParticleWorkers>(state.live_options.particle_workers.value_or(
         ParticleWorkers::default_count(platform::ThreadWorkerAdapter::hardware_worker_count())));
     state.debris_props = std::make_unique<DebrisProps>(host, *state.filesystem, *state.catalog);
-    state.live_session->set_pose_workers(state.particle_workers.get());
+    // One participant uses the retained serial pose path, without worker staging.
+    state.live_session->set_pose_workers(
+        state.particle_workers->count() > 1 ? state.particle_workers.get() : nullptr);
     state.debris_props->set_workers(state.particle_workers.get());
     if (auto detail = state.debris_props->set_particle_detail(state.live_options.particle_detail); !detail)
         return state.fail_ready(core::format_diagnostic(detail.error()));
@@ -166,6 +168,11 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                 return core::Result<SpacePopulateResult>::failure({.code = "EAWR-VIEWER-SPACE-POPULATE",
                                                                     .message = failure});
             }
+            if (live_session && !live_session->warm_campaign_slots(*population, context.renderer)) {
+                const std::string failure = population->failure();
+                population->release(context.renderer);
+                return core::Result<SpacePopulateResult>::failure({.code = "EAWR-VIEWER-SPACE-POPULATE", .message = failure});
+            }
             if (emitters) {
                 core::load_profile::Scope prepare_emitters(core::load_profile::Phase::particles);
                 emitters->prepare_assets(*population);
@@ -202,6 +209,35 @@ SpacePopulateHook MapMode::State::make_population_hook() {
             };
             if (live_session) {
                 if (!map_state->options.attract) result.render_clock = &live_session->render_clock();
+                // State owns these borrowed components through the final frame; release never invokes the probe.
+                if (MemoryAttribution::enabled()) {
+                    live_session->memory_capacity_probe([sound, fog, map_state] {
+                    diagnostics::MemoryCapacity result;
+                    if (sound) result.append(sound->memory_capacity());
+                    if (fog) result.append(fog->memory_capacity());
+                    if (map_state->hud) result.append(map_state->hud->memory_capacity());
+                    return result;
+                    });
+                    live_session->owner_census_probe([emitters, map_state, renderer = &context.renderer](diagnostics::OwnerCensus& output) {
+                        scene::VfsAssetCache(*map_state->filesystem).owner_census(output);
+                        renderer->owner_census(output);
+                        if (map_state->battle) map_state->battle->owner_census(output);
+                        if (map_state->space) map_state->space->owner_census(output);
+                        if (map_state->particles) map_state->particles->owner_census(output);
+                        if (emitters) emitters->owner_census(output);
+                        for (const auto& player : map_state->unit_clips) {
+                            if (!output.step(diagnostics::OwnerCensus::animation)) break;
+                            if (player) player->owner_census(output);
+                        }
+                        for (const auto& clip : map_state->attached_owners.clips) {
+                            if (!output.step(diagnostics::OwnerCensus::animation)) break;
+                            if (clip.player) clip.player->owner_census(output);
+                        }
+                        // XML can own far more distinct small ranges than the other
+                        // families. Let it consume the remaining bounded slots last.
+                        if (map_state->catalog) map_state->catalog->owner_census(output);
+                    });
+                }
                 // The session starts once its units are composed (#80).
                 std::string live_failure;
                 live_session->trace_frames(map_state->perf_trace.has_value());
@@ -210,6 +246,9 @@ SpacePopulateHook MapMode::State::make_population_hook() {
                     return core::Result<SpacePopulateResult>::failure(
                         {.code = "EAWR-VIEWER-LIVE-SESSION", .message = live_failure});
                 }
+                // start() keeps standalone admission paused at tick 0 until the existing loading gate.
+                // The probe never changes that gate or samples an already running borrowed feed.
+                live_session->capture_memory_capacity_post_load(*population);
                 // The rig's live-quit driver waits for this line before it lets the battle run.
                 godot::UtilityFunctions::print("EAWR live session started");
                 result.live = [population, live_session, effects, debris, emitters, sound, fog,
@@ -606,6 +645,12 @@ bool MapMode::State::ready_space(Node3D& host, const assets::Map& map,
             state.failure = state.space->failure();
             if (!state.failure.empty()) godot::UtilityFunctions::printerr(godot::String::utf8(state.failure.c_str()));
         }
+        // Keep initial-load sharing, then release models without active owners.
+        if (ready && MemoryAttribution::enabled())
+            MemoryAttribution::load_mark("pre_trim", scene::VfsAssetCache(*state.filesystem).model_stats().cache_retained_bytes);
+        if (ready) scene::VfsAssetCache(*state.filesystem).set_model_cache_budget(128ULL * 1024 * 1024);
+        if (ready && MemoryAttribution::enabled())
+            MemoryAttribution::load_mark("post_trim", scene::VfsAssetCache(*state.filesystem).model_stats().cache_retained_bytes);
         startup_trace.ready();
         return ready;
     }

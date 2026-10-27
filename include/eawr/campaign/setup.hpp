@@ -58,6 +58,12 @@ struct StartingForcePlacement {
     sim::galactic::TypeId starbase_type{};
     std::optional<sim::galactic::ControlBase> ground_base;
     std::vector<sim::math::Fixed> special_control;
+    // A level-one starbase clears the planet's space special structures (CGS-10); `special_control` then holds the
+    // political control of the structures that remain.
+    bool clear_space_structures{};
+    // Space structures an earlier part of the same additional-creation chain placed and a later level-one base cleared:
+    // they keep their allocation (and original-metadata row) but never reach the production list or the census.
+    std::vector<sim::EntityId> cleared_structures;
     sim::EntityId primary{}; // WGM-135: additional results never replace the primary placement.
 };
 // Existing persistent subsystem models, prepared before the force pass. Production
@@ -89,6 +95,8 @@ struct CampaignCreditCap {
 // Tech side effects, scene production and hero creation use their owning services. Influence,
 // plots/AI and object linking remain follow-up work (#1149).
 struct CampaignSetupServices {
+    // What preparation found wrong in the data and went on without (CGS-05..07); never part of setup identity.
+    std::vector<core::Diagnostic> load_diagnostics;
     std::function<core::Result<sim::galactic::GalacticAbilitySetup>(const CampaignSetupPlan&,
         const sim::galactic::GalacticSetup&)> ability_host;
     std::function<core::Result<sim::galactic::EconomyCorruptionState>(const CampaignSetupPlan&,

@@ -10,12 +10,22 @@ project(
 include(CTest)
 
 option(EAWR_WARNINGS_AS_ERRORS "Treat warnings in EAWR project code as errors" ON)
+option(EAWR_ENABLE_SHADER_BRIDGE_GATE "Build the external-DLL shader bridge experiment" OFF)
+if(EAWR_ENABLE_SHADER_BRIDGE_GATE)
+    add_subdirectory(tools/shader_bridge_gate)
+endif()
+# Land skirmish (#3776 L3): the skirmish setup and LAN lobby list land maps and start a land battle. OFF in
+# release builds, so the shipped setup screen stays byte-identical; ON only in the dev-land preset or with -D.
+option(EAWR_ENABLE_LAND_SKIRMISH "Offer land maps in the skirmish setup and LAN lobby" OFF)
+if(EAWR_ENABLE_LAND_SKIRMISH)
+    add_compile_definitions(EAWR_LAND_SKIRMISH=1)
+endif()
 option(EAWR_ENABLE_SIM_BOUNDARY_CHECK "Run the compiler-backed simulation boundary checks" ON)
 option(EAWR_INJECT_PROJECT_WARNING "Inject a deliberate project warning for CI verification" OFF)
 set(EAWR_EXPECTED_ARCH "" CACHE STRING "Expected host architecture: x64 or arm64")
 # Debug information in optimised MSVC and clang-cl builds, for profiling (path_bench --melee --profile,
 # docs/worker-offload.md#benchmarks-and-profiles). It changes no generated code.
-option(EAWR_DEBUG_SYMBOLS "Emit debug information (PDBs) in optimised Windows builds" OFF)
+option(EAWR_DEBUG_SYMBOLS "Emit PDBs for shipped Windows binaries" OFF)
 
 if(EAWR_EXPECTED_ARCH)
     string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" EAWR_SYSTEM_PROCESSOR_LOWER)
@@ -41,10 +51,7 @@ include(EawrReserveGuard)
 # An MSVC that drops the guard in front of a shift crashes the first Lua state (legacy #3930, #1287).
 include(EawrMsvcGuard)
 
-if(EAWR_DEBUG_SYMBOLS AND MSVC)
-    add_compile_options(/Z7)
-    add_link_options(/DEBUG /OPT:REF /OPT:ICF)
-endif()
+include(EawrSymbols)
 
 add_subdirectory(src/core)
 add_subdirectory(src/sim)
@@ -65,6 +72,7 @@ add_subdirectory(src/skirmish)
 add_subdirectory(src/platform/net)
 add_subdirectory(src/checkpoint)
 add_subdirectory(src/campaign)
+add_subdirectory(src/mods)
 add_subdirectory(apps/sim_headless)
 add_subdirectory(apps/sim_bench)
 add_subdirectory(apps/gc_bench)
@@ -80,12 +88,33 @@ add_subdirectory(apps/hud_movie_prepare)
 if(WIN32)
     # EAWR.exe, the first-run launcher of the player package (#3962).
     add_subdirectory(apps/launcher)
+    # eawr_mods_service, the mod manager's stdio service. Portable code; Windows-only until the Linux launch
+    # loop needs it and a Linux build covers it.
+    add_subdirectory(apps/mods_service)
+    add_subdirectory(apps/mods_loadcheck)
 endif()
 if(EAWR_ENABLE_RELAY)
     add_subdirectory(apps/relay_server)
     if(EAWR_ENABLE_GNS)
         add_subdirectory(apps/online_test)
     endif()
+endif()
+
+# These tools are shipped by tools/release/package_release.py (TOOLS). The player
+# launcher ships separately. Keep private retention on exactly these targets.
+if(MSVC)
+    set(EAWR_SYMBOL_TARGETS sim_headless sim_bench path_bench asset_scan asset_validate
+        xml_scan scene_scan sky_scan unit_scan script_smoke hud_movie_prepare)
+    if(WIN32)
+        list(APPEND EAWR_SYMBOL_TARGETS eawr_launcher)
+    endif()
+    set(EAWR_SYMBOL_INPUTS "")
+    foreach(target IN LISTS EAWR_SYMBOL_TARGETS)
+        eawr_target_symbols(${target})
+        string(APPEND EAWR_SYMBOL_INPUTS "$<TARGET_FILE:${target}>\n")
+    endforeach()
+    file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/eawr-symbol-inputs-$<CONFIG>.txt"
+        CONTENT "$<$<BOOL:${EAWR_DEBUG_SYMBOLS}>:${EAWR_SYMBOL_INPUTS}>")
 endif()
 
 if(BUILD_TESTING)
@@ -98,6 +127,7 @@ if(BUILD_TESTING)
         add_subdirectory(tests/online_test)
     endif()
     add_subdirectory(tests/vfs)
+    add_subdirectory(tests/mods)
     add_subdirectory(tests/math)
     add_subdirectory(tests/inventory)
     add_subdirectory(tests/assets)
@@ -110,6 +140,7 @@ if(BUILD_TESTING)
     add_subdirectory(tests/ci)
     if(WIN32)
         add_subdirectory(apps/launcher/tests)
+        add_subdirectory(tests/mods_service)
     endif()
     add_subdirectory(tests/presentation/particles)
     add_subdirectory(tests/presentation/animation)

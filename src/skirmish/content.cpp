@@ -11,24 +11,146 @@ namespace eawr::skirmish {
 
 core::Result<SessionContent> session_content(
     const units::UnitTables& tables, const std::span<const sim::tactical::PlayerId> humans,
-    const units::SpawnPolicy& spawn_policy) {
+    const units::SpawnPolicy& spawn_policy, const units::ContentErrors errors,
+    std::vector<core::Diagnostic>* const skipped) {
     using ContentResult = core::Result<SessionContent>;
     SessionContent content;
     content.sensors = sensor_table(tables);
-    auto durability = units::durability_table(tables);
+    auto durability = units::durability_table(tables, skipped);
     if (!durability) return ContentResult::failure(durability.error());
     content.durability = std::move(durability).value();
-    auto motion = units::motion_table(tables, spawn_policy);
+    auto motion = units::motion_table(tables, spawn_policy, skipped);
     if (!motion) return ContentResult::failure(motion.error());
     content.motion = std::move(motion).value();
-    auto combat = units::combat_table(tables);
+    auto combat = units::combat_table(tables, errors, skipped);
     if (!combat) return ContentResult::failure(combat.error());
     content.combat = std::move(combat).value();
     auto abilities = units::ability_table(tables, humans,
-        [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); });
+        [](std::string_view unit, std::string_view ability) { return roster_ability_reason(unit, ability).empty(); },
+        true, errors, skipped);
     if (!abilities) return ContentResult::failure(abilities.error());
     content.abilities = std::move(abilities).value();
     return ContentResult::success(std::move(content));
+}
+
+namespace {
+
+constexpr std::string_view skipped_prefix = "skipped unit type ";
+
+// The type name inside a skip diagnostic ("skipped unit type 'ID': why"), or empty for another message.
+std::string skipped_name(const core::Diagnostic& diagnostic) {
+    const std::string_view message = diagnostic.message;
+    const auto at = message.find(skipped_prefix);
+    if (at == std::string_view::npos) return {};
+    auto rest = message.substr(at + skipped_prefix.size());
+    if (rest.empty() || rest.front() != '\'') return {};
+    rest.remove_prefix(1);
+    const auto end = rest.find('\'');
+    return end == std::string_view::npos ? std::string{} : std::string(rest.substr(0, end));
+}
+
+core::Diagnostic skip_refusal(const std::string& what, const std::string& type, const core::Diagnostic& why) {
+    core::Diagnostic diagnostic;
+    diagnostic.code = std::string(diagnostic_codes::input);
+    diagnostic.message = what + " places unit type '" + type + "', which this content skipped (#4589): " + why.message;
+    return diagnostic;
+}
+
+} // namespace
+
+std::vector<std::string> skipped_type_ids(const std::span<const core::Diagnostic> skipped) {
+    std::vector<std::string> ids;
+    for (const auto& diagnostic : skipped) {
+        auto name = skipped_name(diagnostic);
+        if (!name.empty()) ids.push_back(std::move(name));
+    }
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    return ids;
+}
+
+std::vector<std::string> skipped_type_ids_of(const units::UnitTables& tables) {
+    std::vector<core::Diagnostic> skipped;
+    (void)units::combat_table(tables, units::ContentErrors::skip_object, &skipped);
+    (void)units::ability_table(tables, {}, nullptr, true, units::ContentErrors::skip_object, &skipped);
+    return skipped_type_ids(skipped);
+}
+
+core::Result<void> refuse_skipped_starts(const SkirmishStart& start, const std::span<const core::Diagnostic> skipped) {
+    const auto why = [&](const std::string& type) -> const core::Diagnostic* {
+        for (const auto& diagnostic : skipped) {
+            if (detail::iequals(skipped_name(diagnostic), type)) return &diagnostic;
+        }
+        return nullptr;
+    };
+    const auto check = [&](const std::string& what, const std::string& type) -> std::optional<core::Diagnostic> {
+        if (type.empty()) return std::nullopt;
+        if (const auto* found = why(type)) return skip_refusal(what, type, *found);
+        return std::nullopt;
+    };
+    if (skipped.empty()) return core::Result<void>::success();
+    for (const auto& unit : start.units) {
+        const auto what = "starting unit " + std::to_string(unit.state.entity_id) + " (record " + std::to_string(unit.record) + ")";
+        if (auto refusal = check(what, unit.type)) return core::Result<void>::failure(std::move(*refusal));
+        if (auto refusal = check(what + "'s craft", unit.craft_type)) return core::Result<void>::failure(std::move(*refusal));
+    }
+    for (const auto& launch : start.launches) {
+        if (auto refusal = check("the launch of spawner " + launch.spawner_type, launch.squadron)) {
+            return core::Result<void>::failure(std::move(*refusal));
+        }
+    }
+    return core::Result<void>::success();
+}
+
+core::Result<void> refuse_skipped_setup(const sim::tactical::TacticalSetup& setup, const std::span<const core::Diagnostic> skipped) {
+    if (skipped.empty()) return core::Result<void>::success();
+    for (const auto& diagnostic : skipped) {
+        const auto name = skipped_name(diagnostic);
+        if (name.empty()) continue;
+        const auto type = battle::type_id(name);
+        for (const auto& unit : setup.units) {
+            if (unit.type_id == type) {
+                return core::Result<void>::failure(skip_refusal("the recorded unit " + std::to_string(unit.entity_id), name, diagnostic));
+            }
+        }
+    }
+    return core::Result<void>::success();
+}
+
+std::size_t drop_skipped_menu_options(sim::tactical::EconomyRules& rules, const std::span<const std::string> skipped,
+    std::vector<std::string>* const log) {
+    if (skipped.empty()) return 0;
+    std::vector<sim::tactical::TypeId> types;
+    for (const auto& id : skipped) types.push_back(battle::type_id(id));
+    std::sort(types.begin(), types.end());
+    std::size_t removed = 0;
+    for (auto& menu : rules.menus) {
+        const auto drop = std::remove_if(menu.options.begin(), menu.options.end(), [&](const auto& option) {
+            return std::binary_search(types.begin(), types.end(), option.type);
+        });
+        for (auto it = drop; it != menu.options.end(); ++it) {
+            if (log != nullptr) {
+                log->push_back("build menu of station type " + std::to_string(menu.station) + ": entry " + std::to_string(it->type)
+                    + " removed, its unit type was skipped (#4589)");
+            }
+        }
+        removed += static_cast<std::size_t>(menu.options.end() - drop);
+        menu.options.erase(drop, menu.options.end());
+    }
+    return removed;
+}
+
+void bind_skipped_types(SkirmishStart& start, const std::span<const std::string> skipped) {
+    if (skipped.empty()) return;
+    std::string joined;
+    for (const auto& type : skipped) joined += type + "\n";
+    const auto bind = [&](sim::MatchIdentity& identity) {
+        std::erase_if(identity.domains, [](const auto& domain) { return domain.name == "skipped-types"; });
+        identity.domains.push_back(sim::identity_domain("skipped-types", joined));
+        identity = sim::compute_match_identity(std::move(identity));
+    };
+    bind(start.identity);
+    if (start.setup.match_identity) bind(*start.setup.match_identity);
 }
 
 namespace detail {

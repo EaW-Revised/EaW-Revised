@@ -1,11 +1,13 @@
 #include "eawr/assets/map.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/text.hpp"
+#include "eawr/units/domain_tags.hpp"
 #include "eawr/units/unit_tables.hpp"
 
 #include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 // The #72 durability table: the unit tables' hull, hardpoint and repair values in the
 // shape the tactical session binds (docs/behaviour/space-hardpoints.md, HD-01 to HD-05).
@@ -112,7 +114,8 @@ DamageTypeIndex damage_type_index(const UnitTables& tables) {
     return index;
 }
 
-core::Result<tactical::DurabilityTable> durability_table(const UnitTables& tables) {
+core::Result<tactical::DurabilityTable> durability_table(const UnitTables& tables,
+    std::vector<core::Diagnostic>* const notes) {
     using Result = core::Result<tactical::DurabilityTable>;
     const auto scalar = [&tables](const std::string_view tag) -> std::optional<Fixed> {
         for (const auto& constant : tables.constants.scalars) {
@@ -120,7 +123,7 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
         }
         return std::nullopt;
     };
-    const auto multiplier = scalar("Object_Max_Health_Multiplier_Space");
+    const auto multiplier = scalar(domain_tag(tables.domain, DomainTag::health_multiplier));
     const auto constraint = scalar("Hull_Vs_Hard_Points_Health_Constraint");
     const auto engines = scalar("Engines_Disabled_Speed_Modifier");
     const auto damaged = scalar("Health_Low_Percent_Threshold");
@@ -199,11 +202,26 @@ core::Result<tactical::DurabilityTable> durability_table(const UnitTables& table
     table.damage = std::move(damage);
     for (const auto& unit : tables.units) {
         if (!unit.hull) continue; // squadrons, and hulls the scan already reports as unresolved
+        // SKI-25: a Tactical_Health of 0 or less builds no durability row (Empire_Gate_Large_Dest
+        // authors 0 in FoC and in mods that copy it), as the land reader already skips it.
+        if (unit.hull->raw() <= 0) continue;
         tactical::DurabilityProfile profile;
         profile.type_id = assets::object_type_crc(unit.id);
         auto hull = scaled(*unit.hull, unit.id + " hull");
         if (!hull) return Result::failure(hull.error());
         profile.max_hull = hull.value();
+        // SKI-64: FoC has no health cap; hold a hull above the simulation bound at the bound.
+        const auto bound = Fixed::from_raw(tactical::max_durability_health * Fixed::scale);
+        if (profile.max_hull > bound) {
+            if (notes != nullptr) {
+                auto note = failure(unit.id + " hull " + std::to_string(profile.max_hull.trunc_to_integer())
+                    + " is above the simulation bound " + std::to_string(tactical::max_durability_health)
+                    + "; the bound is used (SKI-64)");
+                note.severity = core::Severity::warning;
+                notes->push_back(std::move(note));
+            }
+            profile.max_hull = bound;
+        }
         profile.max_speed = unit.movement.max_speed;
         profile.destroyed_with_hardpoints = unit.destroyed_with_hardpoints;
         // DG-06: only a SHIELDED type has a shield; Shield_Points is not scaled by the health multiplier.

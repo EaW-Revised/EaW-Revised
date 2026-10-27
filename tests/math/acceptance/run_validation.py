@@ -34,7 +34,6 @@ NEG_SQRT = "EAWR-MATH-0003"
 MALFORMED = "EAWR-MATH-0004"
 DECIMAL_LIMIT = "EAWR-MATH-0005"
 ZERO_NORM = "EAWR-MATH-0006"
-UNDEFINED_ANGLE = "EAWR-MATH-0007"
 NON_UNIT = "EAWR-MATH-0008"
 
 # Keep the acceptance mutation fixtures aligned with the comparator's public
@@ -325,7 +324,7 @@ def make_cases() -> list[tuple[str, int | list[int] | str]]:
         add(op, values, OVERFLOW)
     add("div", [1, 0], DIVZERO)
     add("sqrt", [-1], NEG_SQRT)
-    add("atan2", [0, 0], UNDEFINED_ANGLE)
+    add("atan2", [0, 0], 0)  # FM-27: no planar part uses zero heading.
     add("norm2", [0, 0], ZERO_NORM)
     add("norm3", [0, 0, 0], ZERO_NORM)
     add("norm4", [0, 0, 0, 0], ZERO_NORM)
@@ -444,7 +443,7 @@ def make_cases() -> list[tuple[str, int | list[int] | str]]:
         if x == 0 and y == 0: x = 1
         pairs.append((y, x))
     for y, x in pairs:
-        expected = UNDEFINED_ANGLE if (x == 0 and y == 0) else mp_atan2_raw(y, x)
+        expected = mp_atan2_raw(y, x)
         add("atan2", [y, x], expected)
     return cases
 

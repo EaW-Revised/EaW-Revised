@@ -4,13 +4,20 @@
 // panning stays inside the WGUI-58 box.
 #include "galactic/galaxy_snapshot_stub.hpp"
 #include "galactic/galaxy_view.hpp"
+#include "eawr/presentation/ui/fleet_pathfinder.hpp"
 #include "galactic/corruption_visuals.hpp"
 #include "../presentation/galactic/fleet_hud_fixture.hpp"
 #include "galactic/galactic_reveal.hpp"
 #include "galactic/map_input.hpp"
 #include "galactic/native_ai_flag.hpp"
 #include "galactic/planet_hud.hpp"
+#include "galactic/ground_stack.hpp"
+#include "eawr/sim/galactic/ground_intelligence.hpp"
+#include "eawr/sim/galactic/session.hpp"
+#include "eawr/platform/sim_workers.hpp"
+#include "../presentation/galactic/ground_hud_fixture.hpp"
 #include "eawr/platform/live_game_session.hpp"
+#include "eawr/presentation/galactic_pause.hpp"
 
 #ifdef NDEBUG
 #undef NDEBUG
@@ -27,6 +34,282 @@ using namespace eawr::viewer::galactic;
 namespace {
 
 [[nodiscard]] bool same(float a, float b);
+
+void ggs_02_known_ground_counts_and_ggs_04_local_launches() {
+    namespace gc = eawr::sim::galactic;
+    for (const auto fixture : {"ground-contents", "ground-count", "ground-foreign", "ground-inaccessible"}) {
+        auto setup = synthetic_live_setup();
+        std::vector<gc::FleetDisplayType> traits;
+        std::vector<gc::FleetDisplayVisibility> visibility;
+        std::map<gc::TypeId, std::string> names;
+        configure_ground_fixture(setup, 1, fixture, traits, visibility, names);
+        const gc::GalacticSnapshot snapshot(0, {}, setup.players, setup.planets, setup.routes, setup.fleets,
+            {}, {}, setup.fleet_control, {}, {}, {}, {}, {}, setup.control, {}, {}, setup.observer);
+        const auto before = snapshot.canonical_bytes();
+        const auto stack = ground_stack(snapshot, 1, 101, 6);
+        assert(!ground_stack(snapshot, 1, 999, 6));
+        assert(!ground_stack(snapshot, 99, 101, 6));
+        assert(!ground_stack(snapshot, 1, 102, 6)); // Empty surface never draws a stack.
+        if (std::string_view(fixture) == "ground-inaccessible") { assert(!stack); continue; }
+        assert(stack && stack->count == 2 && stack->texture == 1); // Pending deletion omitted.
+        if (std::string_view(fixture) == "ground-count") {
+            // GGS-02 permits a known enemy count. GGS-03 withholds its typed contents;
+            // GGS-04 never turns this count-only enemy badge into a local launch source.
+            assert(!stack->contents_known && stack->companies.empty());
+            assert(stack->contents.size() == 1 && !stack->contents.front().type);
+            assert(ground_stack_units(*stack).empty());
+        } else if (std::string_view(fixture) == "ground-foreign") {
+            assert(stack->contents_known && ground_stack_units(*stack).empty());
+        } else {
+            assert(stack->contents_known && stack->contents.size() == 1 && stack->contents[0].count == 2);
+            const auto units = ground_stack_units(*stack);
+            assert((units == std::vector<ObjectId>{8001, 8002}));
+            const auto launch = ground_stack_launch(snapshot, 1, 101, units, 601, 0);
+            assert(launch && launch->kind == DropKind::launch && launch->members == units && launch->target == 601);
+            MapInput input;
+            const std::vector<InputPlanet> planets{{101, {}, 1, true}, {102, {}, 1, true}};
+            const auto order = input.command(*launch, planets);
+            assert(order && std::holds_alternative<gc::LaunchFromSurface>(*order));
+            assert(std::get<gc::LaunchFromSurface>(*order).units == units);
+            assert(ground_stack_launch(snapshot, 1, 101, units, 0, 2));
+            assert(!ground_stack_launch(snapshot, 1, 102, units, 0, 0));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 999, 0));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 601, 1));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 0, 3));
+            assert(!ground_stack_launch(snapshot, 1, 101, std::vector<ObjectId>{8001, 8001}, 0, 0));
+            assert(!ground_stack_launch(snapshot, 1, 101, std::vector<ObjectId>{8001, 8003}, 0, 0));
+            const auto travel = ground_stack_launch(snapshot, 1, 101, units, 0, 2, {101, 102}, std::uint8_t{1});
+            assert(travel && travel->path.back() == 102 && travel->destination_slot == 1);
+            const auto move = input.command(*travel, planets);
+            assert(move && std::holds_alternative<gc::LaunchFleet>(*move));
+            assert(std::get<gc::LaunchFleet>(*move).units == units);
+            const auto transfer = ground_stack_launch(snapshot, 1, 101, units, 0, 2, {101, 102}, {}, true);
+            assert(transfer && transfer->land_on_arrival);
+            const auto combined = input.command(*transfer, planets);
+            assert(combined && std::holds_alternative<gc::TransferSurface>(*combined));
+            assert((std::get<gc::TransferSurface>(*combined) == gc::TransferSurface{units, {101, 102}}));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 0, 2, {}, {}, true));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 0, 2, {101, 102}, std::uint8_t{1}, true));
+            assert(!ground_stack_launch(snapshot, 1, 101, units, 0, 2, {101, 999}, {}, true));
+        }
+        assert(snapshot.canonical_bytes() == before);
+    }
+}
+
+void ggs_09_native_fixture_qualifies_all_live_combat_queries() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    configure_synthetic_hud_clock(setup);
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-representative", traits, visibility, names);
+    auto created = gc::GalacticSession::create(setup);
+    assert(created);
+    const auto snapshot = created.value().snapshot();
+    for (const auto& fleet : snapshot->fleets()) {
+        assert(snapshot->fleet_combat_skip(fleet.id));
+        for (const auto& member : fleet.members) assert(snapshot->actor_combat_skip(member.id));
+    }
+    for (const auto& planet : snapshot->control()->planets)
+        for (const auto& force : planet.landed) assert(snapshot->actor_combat_skip(force.id));
+    const auto stack = ground_stack(*snapshot, 1, 101, 6);
+    assert(stack && stack->count == 2 && !stack->contents_known && stack->companies.empty());
+}
+
+// GGS-09: count-only art is a narrow permission, never a typed contents row.
+void ggs_09_sanitized_ground_representatives() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    std::vector<gc::FleetDisplayType> fleet_traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_ground_fixture(setup, 1, "ground-count", fleet_traits, visibility, names);
+    // Synthetic mod faction IDs deliberately share neither stock names nor ordinals.
+    for (auto& player : setup.players) player.faction_id = player.player_id == 2 ? 707U : 909U;
+    auto movement = std::make_shared<gc::MovementSetup>();
+    movement->contents = {{8001, {{8102, 2002}, {8101, 2001}, {8103, 2003}}},
+        {8002, {{8201, 2004}}}};
+    auto actors = std::make_shared<std::vector<gc::CensusObject>>();
+    actors->push_back({8001, 1000, 2, 101, 101, false, false, 1000});
+    actors->push_back({8002, 1000, 2, 101, 101, false, false, 1000});
+    actors->push_back({8101, 2001, 2, 101, 8001, false, false, 2001});
+    actors->push_back({8102, 2002, 2, 101, 8001, false, false, 2002});
+    actors->push_back({8103, 2003, 2, 101, 8001, false, true, 2003});
+    actors->push_back({8201, 2004, 2, 101, 8002, false, false, 2004});
+    std::map<gc::TypeId, gc::GroundDisplayType> traits{
+        {1000, {1, false, false, true, 25}},
+        {2001, {100, false, false, true, 25}},
+        {2002, {200, false, false, true, 25}},
+        {2003, {900, true, false, true, 0}},
+        {2004, {150, false, false, true, 25}}};
+    const auto display_traits = [&](gc::TypeId type) -> std::optional<gc::GroundDisplayType> {
+        const auto at = traits.find(type);
+        return at == traits.end() ? std::nullopt : std::optional{at->second};
+    };
+    const auto snapshot = [&] {
+        gc::NativeSnapshotChanges changes;
+        changes.movement = movement; changes.actors = actors;
+        auto base = std::make_shared<const gc::GalacticSnapshot>(0, gc::GalacticClock{}, setup.players,
+            setup.planets, setup.routes, setup.fleets, std::vector<gc::GalacticEvent>{},
+            std::nullopt, setup.fleet_control, nullptr, std::nullopt, std::vector<gc::Seat>{},
+            std::nullopt, std::nullopt, setup.control, std::vector<gc::PoliticalControlEffect>{},
+            std::vector<gc::PopulationTotal>{}, setup.observer);
+        return gc::GalacticSnapshot::native_view(base, std::move(changes));
+    };
+    const auto check = [&](gc::TypeId strongest, std::optional<gc::TypeId> hero) {
+        const auto published = snapshot();
+        const auto before = published->canonical_bytes();
+        const auto rows = gc::observed_ground_display(*published, 1, display_traits);
+        assert(rows.size() == 1 && rows.front().count == 2 && rows.front().owner == 2);
+        assert(rows.front().strongest == strongest && rows.front().hero == hero);
+        assert(rows.front().image(false) == strongest);
+        assert(rows.front().image(true) == (hero ? hero : std::optional{strongest}));
+        const auto stack = ground_stack(*published, 1, 101, 6);
+        assert(stack && !stack->contents_known && stack->companies.empty());
+        assert(stack->contents.size() == 1 && !stack->contents.front().type);
+        assert(ground_stack_units(*stack).empty());
+        assert(gc::observed_ground_display(*published, 2, display_traits).empty());
+        assert(gc::observed_ground_display(*published, 99, display_traits).empty());
+        assert(published->canonical_bytes() == before);
+        return rows;
+    };
+    // A copied membership without its live actor row cannot disclose its type.
+    const auto unpublished = actors->at(3);
+    actors->erase(actors->begin() + 3);
+    check(2004, {});
+    actors->insert(actors->begin() + 3, unpublished);
+    const auto roots_and_payload = *actors;
+    actors->clear();
+    const auto count_only = gc::observed_ground_display(*snapshot(), 1, display_traits);
+    assert(count_only.size() == 1 && count_only.front().count == 2);
+    assert(!count_only.front().strongest && !count_only.front().hero);
+    *actors = roots_and_payload;
+    const auto expected = check(2002, {}); // Live payload health, ignoring deleted high-health hero.
+    const auto immutable = snapshot();
+    const auto canonical = immutable->canonical_bytes();
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        std::vector<std::vector<gc::ObservedGroundDisplay>> results(16);
+        assert(pool.execute(results.size(), [&](std::size_t index) {
+            results[index] = gc::observed_ground_display(*immutable, 1, display_traits);
+        }));
+        for (const auto& result : results) assert(result == expected);
+        assert(immutable->canonical_bytes() == canonical);
+    }
+    traits[2001].named_hero = true; traits[2001].hero_rank = 9;
+    traits[2004].named_hero = true; traits[2004].hero_rank = 2;
+    check(2004, 2004); // First transport's named hero takes its hero branch, not its heavy payload.
+    traits[2001].health = 250;
+    check(2001, 2004); // Filter preference differs from the health winner.
+    traits[2004].hero_rank = 9;
+    check(2001, 2001); // Equal rank retains the first transport's hero.
+    traits[2004].health = 250;
+    check(2004, 2001); // Equal hero health replaces, independently of rank.
+    traits[2002].named_hero = true; traits[2002].hero_rank = 20;
+    check(2004, 2004); // Within a transport membership order, not actor ID/rank, chooses the named hero.
+    traits[2002].named_hero = false;
+    traits[2001].named_hero = traits[2004].named_hero = false;
+    traits[1000].generic_hero = true; traits[1000].health = 300;
+    check(1000, 1000);
+    traits[1000].generic_hero = false;
+    traits[3000] = {400, true, false, true, -3};
+    actors->push_back({8301, 3000, 2, 101, 8101, false, false, 3000});
+    movement->contents.push_back({8101, {{8301, 3000}}});
+    check(3000, 3000); // Recursively contained named hero, not a template member.
+    actors->back().delete_pending = true;
+    check(2001, {}); // Deleted nested hero is excluded; ordinary equal health retains first.
+    (*actors)[0].combat_role = gc::ActorCombatRole::ordinary;
+    (*actors)[0].current_type = 4000;
+    traits[4000] = {500, false, false, true, 25};
+    check(4000, {}); // Direct ordinary actors use their current type, not original company art.
+    (*actors)[0].combat_role = gc::ActorCombatRole::fleet;
+    check(1000, {}); // A fleet container's health branch uses its original type.
+    for (auto& player : setup.observer->players) player.default_intelligence = 0;
+    for (auto& row : setup.observer->records) row.mask = 0;
+    assert(gc::observed_ground_display(*snapshot(), 1, display_traits).empty());
+    for (auto& player : setup.observer->players) player.default_intelligence = gc::bit(gc::Intelligence::ground_count);
+    for (auto& row : setup.observer->records) row.mask = gc::bit(gc::Intelligence::ground_count);
+    for (auto& row : setup.control->planets) row.surface_accessible = false;
+    assert(gc::observed_ground_display(*snapshot(), 1, display_traits).empty());
+}
+
+void pause_preview_matches_published_policy_and_holds() {
+    namespace gc = eawr::sim::galactic;
+    using Action = eawr::presentation::GalacticPausedAction;
+    const auto setup = synthetic_live_setup();
+    for (unsigned mask = 0; mask != 8; ++mask) for (const auto depth : {0U, 1U, 2U}) {
+        gc::FleetControlSetup control;
+        control.pause = {mask & 1 ? gc::PausedAdmission::admit : gc::PausedAdmission::refuse,
+            mask & 2 ? gc::PausedAdmission::admit : gc::PausedAdmission::refuse,
+            mask & 4 ? gc::PausedAdmission::admit : gc::PausedAdmission::refuse};
+        gc::GalacticClock clock; clock.pause_depth = depth;
+        const std::vector<gc::Seat> seats{{gc::SeatId{1}, 1}, {gc::SeatId{2}, 1, gc::SeatKind::ai},
+            {gc::SeatId{3}, 1, gc::SeatKind::human, 0, false}};
+        const gc::GalacticSnapshot snapshot(0, clock, setup.players, setup.planets, setup.routes,
+            setup.fleets, {}, {}, control, {}, {}, seats);
+        const auto before = snapshot.canonical_bytes();
+        for (const bool hold : {false, true}) for (unsigned kind = 0; kind != 4; ++kind) {
+            const auto action = static_cast<Action>(kind);
+            const bool expected = depth == 0 || (!hold && kind < 3 && (mask & (1U << kind)));
+            assert(eawr::presentation::galactic_pause_allows(snapshot, gc::SeatId{1}, action, hold) == expected);
+            for (const auto issuer : {2U, 3U, 99U})
+                assert(eawr::presentation::galactic_pause_allows(snapshot, gc::SeatId{issuer}, action, hold) == (depth == 0));
+        }
+        assert(snapshot.canonical_bytes() == before); // Presentation never writes replay state.
+    }
+    gc::GalacticClock clock; clock.pause_depth = 1;
+    const gc::GalacticSnapshot no_control(0, clock, setup.players, setup.planets, setup.routes, setup.fleets, {});
+    assert(!eawr::presentation::galactic_pause_allows(no_control, gc::SeatId{1}, Action::fleet_move, false));
+}
+
+void paused_departure_is_transit_at_route_start_until_resume() {
+    namespace gc = eawr::sim::galactic;
+    auto setup = synthetic_live_setup();
+    std::vector<gc::FleetDisplayType> traits;
+    std::vector<gc::FleetDisplayVisibility> visibility;
+    std::map<gc::TypeId, std::string> names;
+    configure_fleet_hud_fixture(setup, 1, "fleet-drag", traits, visibility, names);
+    setup.fleet_control->pause = gc::PausePolicy::admit_all();
+    eawr::platform::LiveGameSession::Options options;
+    options.pacing = eawr::platform::LiveGameSession::Pacing::driven;
+    auto started = eawr::platform::LiveGameSession::start(setup, options);
+    assert(started);
+    auto game = std::move(started).value();
+    const auto submit = [&](auto order, std::uint64_t tick) {
+        game->submit(eawr::platform::LiveGameOrder{gc::SeatId{1}, order, {}});
+        game->advance_to(tick);
+        assert(game->wait_for(tick, std::chrono::seconds(5)));
+    };
+    submit(gc::PauseGalaxy{}, 1);
+    submit(gc::MoveFleet{601, {101,102}, std::nullopt}, 2);
+    assert(game->rejected_orders().empty());
+    const auto paused = game->frame().latest;
+    const auto fleet = std::find_if(paused->fleets().begin(), paused->fleets().end(), [](const auto& row) { return row.id == 601; });
+    assert(fleet != paused->fleets().end() && !fleet->orbit && fleet->motion.transit);
+    assert(eawr::presentation::galactic_departure_ready(*paused, *fleet));
+    assert(paused->clock().galactic_frame == 0);
+    const auto view = build_live_view(*paused, synthetic_galaxy(), 1, synthetic_neutral_owner,
+        {}, {visibility, {}, false});
+    assert(view.view);
+    const auto marker = std::find_if(view.view->fleets.begin(), view.view->fleets.end(), [](const auto& row) { return row.fleet == 601; });
+    assert(marker != view.view->fleets.end() && marker->transit && !marker->planet && marker->destination == 102);
+    submit(gc::ResumeGalaxy{}, 3);
+    // WGM-29 may spend the first service setting its heading, without translation.
+    game->advance_to(4);
+    assert(game->wait_for(4, std::chrono::seconds(5)));
+    const auto resumed = game->frame().latest;
+    const auto moving = std::find_if(resumed->fleets().begin(), resumed->fleets().end(), [](const auto& row) { return row.id == 601; });
+    assert(moving != resumed->fleets().end());
+    assert(!eawr::presentation::galactic_departure_ready(*resumed, *moving));
+    assert(moving->motion.position != fleet->motion.position);
+    submit(gc::PauseGalaxy{}, 5);
+    const auto repaused = game->frame().latest;
+    const auto underway = std::find_if(repaused->fleets().begin(), repaused->fleets().end(), [](const auto& row) { return row.id == 601; });
+    assert(underway != repaused->fleets().end());
+    assert(!eawr::presentation::galactic_departure_ready(*repaused, *underway));
+    game->stop();
+}
 
 void planet_bonus_metadata_survives_view_projection() {
     auto metadata = synthetic_galaxy();
@@ -478,8 +761,8 @@ void galaxy_reveal_is_a_draw_only_omniscient_view() {
         if (fleet.owner != 1 || fleet.motion.transit) continue;
         ++local_fleets;
         for (const auto& planet : command_planets) {
-            const auto from_truth = fleet_destination_intent(*truth, 1, fleet.id, planet.id, command_planets);
-            const auto from_reveal = fleet_destination_intent(*revealed, 1, fleet.id, planet.id, command_planets);
+            const auto from_truth = fleet_destination_intent(*truth, 1, fleet.id, planet.id, command_planets, {});
+            const auto from_reveal = fleet_destination_intent(*revealed, 1, fleet.id, planet.id, command_planets, {});
             assert(from_truth.has_value() == from_reveal.has_value());
             if (from_truth) assert(from_truth->kind == from_reveal->kind && from_truth->planet == from_reveal->planet
                 && from_truth->path == from_reveal->path);
@@ -840,7 +1123,62 @@ void native_ai_is_on_by_default_and_off_disables_it() {
 
 } // namespace
 
+void pathfinder_slot_contracts() {
+    namespace gc = eawr::sim::galactic;
+    namespace ui = eawr::presentation::ui;
+    gc::FleetControlSetup control;
+    control.types = {{10, false, true, false, true}, {11, false, true, false, false}, {12, true, true, false, true}};
+    std::vector<gc::Fleet> fleets{{1, 1, 101, {{20,10}, {21,10}, {22,11}, {23,12}}, 0}, {2, 2, 101, {{30,10}}, 1}};
+    std::vector<gc::Seat> seats{{eawr::sim::SeatId{1}, 1}};
+    gc::GalacticClock clock;
+    const auto snapshot = [&] { return gc::GalacticSnapshot(0, clock, {}, {}, {}, fleets, {}, {}, control, {}, {}, seats); };
+    const auto order = [&](gc::FleetId fleet, eawr::sim::EntityId member) { return ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, fleet, member); };
+    const std::array<std::uint8_t, 1> slots{0};
+    assert(!ui::fleet_pathfinder(snapshot(), 1, 101, slots));
+    assert(order(1,20) && order(1,23) && order(1,0));
+    assert(!order(1,22) && !order(1,999) && !order(2,30) && !order(999,0));
+    seats[0].active = false; assert(!order(1,20)); seats[0].active = true;
+    seats[0].kind = gc::SeatKind::ai; assert(!order(1,20)); seats[0].kind = gc::SeatKind::human;
+    fleets[0].motion.transit.emplace(); assert(!order(1,20) && !order(1,0)); fleets[0].motion.transit.reset();
+    fleets[0].orbit = 0; assert(!order(1,20)); fleets[0].orbit = 101;
+    clock.pause_depth = 1; assert(!order(1,20));
+    control.pause = gc::PausePolicy::admit_all(); assert(order(1,20));
+    assert(!ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, 1, 20, true));
+    clock.pause_depth = 0;
+    control.gates.queued_campaign_conflict = true;
+    assert(!ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, 1, 20, false, true));
+    assert(!ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, 1, 0, false, true));
+    control.gates.queued_campaign_conflict = false; control.gates.active_speech = true;
+    assert(!ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, 1, 20, true, true));
+    seats.push_back({eawr::sim::SeatId{2}, 1});
+    assert(ui::fleet_pathfinder_order(snapshot(), eawr::sim::SeatId{1}, 1, 20, true, true));
+    seats.pop_back(); control.gates.active_speech = false;
+    fleets[0].members[0].pathfinder = true;
+    const auto shown = snapshot(); const auto before = shown.canonical_bytes();
+    const auto selected = ui::fleet_pathfinder(shown, 1, 101, slots);
+    assert(selected && selected->fleet == 1 && selected->member.id == 20);
+    assert(!ui::fleet_pathfinder(shown, 2, 101, slots) && !ui::fleet_pathfinder(shown, 1, 102, slots));
+    gc::ObservedFleet card; card.local = true; card.owner = 1; card.planet = 101; card.orbit_slot = std::uint8_t{0}; card.count = 4;
+    gc::ObservedFleetGroup group; group.count = 2; group.type = 10; group.representative = 20; group.fleet = 1;
+    card.groups.push_back(group);
+    ui::separate_pathfinder(card, shown, 20, {});
+    assert(card.count == 4 && card.groups.size() == 1 && card.groups[0].count == 1 && card.groups[0].representative == 21);
+    card.orbit_slot.reset(); card.groups = {group};
+    const std::array<std::pair<eawr::sim::EntityId, std::int64_t>, 1> remembered{{{20, 7}}};
+    ui::separate_pathfinder(card, shown, 20, remembered, slots);
+    assert(card.groups[0].count == 1 && card.groups[0].representative == 21);
+    assert(shown.canonical_bytes() == before); // UI-07: view/offer/packing leave publication bytes unchanged.
+    fleets[0].members[0].pathfinder = false;
+    assert(!ui::fleet_pathfinder(snapshot(), 1, 101, slots));
+}
+
 int main() {
+    ggs_02_known_ground_counts_and_ggs_04_local_launches();
+    ggs_09_sanitized_ground_representatives();
+    ggs_09_native_fixture_qualifies_all_live_combat_queries();
+    pause_preview_matches_published_policy_and_holds();
+    paused_departure_is_transit_at_route_start_until_resume();
+    pathfinder_slot_contracts();
     native_ai_is_on_by_default_and_off_disables_it();
     planet_bonus_metadata_survives_view_projection();
     corruption_attachment_edges_and_events_follow_admitted_facts();

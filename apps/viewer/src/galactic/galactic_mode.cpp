@@ -1,3 +1,4 @@
+#include "../viewer_profile_arguments.hpp"
 #include "live_battle_bounty.hpp"
 #include "galactic_mode_internal.hpp"
 #include "capture_viewport.hpp"
@@ -12,7 +13,9 @@
 #include "settings_store.hpp"
 
 #include "eawr/campaign/setup_plan.hpp"
+#include "eawr/core/build_identity.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/core/gc_load_trace.hpp"
 #include "eawr/core/text.hpp"
 
 #include <godot_cpp/classes/input_event_key.hpp>
@@ -92,12 +95,15 @@ bool GalacticMode::State::build_view() {
     galaxy_setup = galactic_view::synthetic_live_setup();
     if (options.hud_provider && !options.hud_provider->configure_scene(*this, snapshot)) return false;
     if (filesystem) {
+        std::optional<core::gc_load::Scope> step(std::in_place, "gc.build_view.catalog");
         auto loaded = data::load_catalog_strict(*filesystem, profile == "remake" ? data::Profile::remake
             : (profile == "foc" ? data::Profile::foc : data::Profile::eaw));
         if (!loaded) { failure = core::format_diagnostic(loaded.error()); return false; }
+        step.emplace("gc.build_view.galactic_data");
         auto tables = data::galactic::load_galactic_data(*filesystem, loaded.value().catalog);
         if (!tables) { failure = core::format_diagnostic(tables.error()); return false; }
         const bool synthetic = options.campaign == galactic_view::synthetic_campaign;
+        step.emplace("gc.build_view.art_and_scene");
         auto text = data::ui::load_language_text_database(*filesystem, "english");
         production_art = galactic_view::load_production_art(loaded.value().catalog, text ? &text.value() : nullptr);
         if (synthetic && tables.value().campaigns.empty()) { failure = "no campaign provides galactic art settings"; return false; }
@@ -117,9 +123,17 @@ bool GalacticMode::State::build_view() {
         auto scene = galactic_view::load_scene_content(*filesystem, loaded.value().catalog, tables.value(),
             synthetic ? tables.value().campaigns.front().name : options.campaign, multiplayer_observer_faction);
         if (!scene) { failure = core::format_diagnostic(scene.error()); return false; }
+        step.reset();
         content.emplace(std::move(scene.value()));
         if (synthetic) { content->art.clear(); content->snapshot = snapshot; content->route_styles.clear(); }
         else {
+            // #4575: an online match numbers its players by the lobby roster, not by the catalog's faction order.
+            if (options.lan_start) {
+                std::vector<std::pair<galactic_view::PlayerId, std::string>> roster;
+                for (const auto& binding : options.lan_start->plan->player_bindings())
+                    roster.emplace_back(binding.player.player_id, binding.faction);
+                galactic_view::rebind_players(*content, roster);
+            }
             snapshot = content->snapshot;
             campaign::CampaignSetupOptions setup_options;
             if (options.all_ai_capture) setup_options.forced_seed = options.capture_seed.value_or(1);
@@ -154,7 +168,8 @@ bool GalacticMode::State::build_view() {
             for (const auto& seat : snapshot.seats) setup_options.seats.push_back({sim::SeatId{seat.id}, seat.player,
                 seat.human && !options.all_ai_capture ? sim::SeatKind::human : sim::SeatKind::ai, seat.id, seat.active,
                 seat.human && !options.all_ai_capture ? seat.player : 0});
-            const auto types = units::galactic_type_table(loaded.value().catalog);
+            const auto referenced_types = campaign::campaign_referenced_types(tables.value(), options.campaign);
+            const auto types = units::galactic_type_table(loaded.value().catalog, false, referenced_types);
             std::vector<std::string> type_names;
             for (const auto& type : types.types) type_names.push_back(type.name);
             std::sort(type_names.begin(), type_names.end());
@@ -169,6 +184,7 @@ bool GalacticMode::State::build_view() {
             setup_options.solo_reference_human = observer->player;
             // SK-42/WGEP-16: the preview selects the authored Normal difficulty.
             if (!options.lan_start) {
+                const core::gc_load::Scope prepare("gc.build_view.sp_campaign_prepare");
                 auto created = platform::PreparedLiveCampaign::create(filesystem, loaded.value().catalog,
                     tables.value(), types, options.campaign, setup_options, difficulty, options.native_ai || options.all_ai_capture);
                 if (!created) { failure = core::format_diagnostic(created.error()); return false; }
@@ -456,6 +472,7 @@ bool GalacticMode::State::refresh_game() {
     }
     if (frame.summary_closed && frame.summary_closed_seat == sim::SeatId{galaxy->local.seat})
         (void)galactic_view::acknowledge_battle_summary(acknowledged_battle_summary, frame, frame.summary_closed);
+    published_system_hold = bool(frame.pending_conflict) || frame.summary_hold != 0 || bool(frame.battle);
     published_hero_returns = frame.hero_returns;
     if (frame.latest == published_snapshot) return true;
     // #3931: with the reveal on, every presentation reader gets the omniscient draw view of this publication.
@@ -796,7 +813,7 @@ bool GalacticMode::requested() {
 
 GalacticMode::Options GalacticMode::from_command_line() {
     Options options;
-    const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    const PackedStringArray arguments = viewer_profile_arguments();
     for (int64_t index = 0; index + 1 < arguments.size(); ++index) {
         const std::string argument = utf8(arguments[index]);
         const std::string value = utf8(arguments[index + 1]);
@@ -907,7 +924,16 @@ bool GalacticMode::ready(Node3D& host) {
     // Let start_game submit the requested pause before displaying its publication;
     // pre-setting paused would make the toggle guard suppress that command.
     state.paused = false;
-    if (!state.resolve_restore_save() || !state.mount() || !state.build_view() || !state.load_camera_constants()) return fail();
+    // A single-player load has no Start press to anchor on; its origin is the entry of this scene.
+    core::gc_load::trace.begin(state.options.lan_start ? "mp_unanchored" : "sp", !state.options.lan_start);
+    core::gc_load::trace.mark("scene_ready_begin");
+    const auto timed = [](const std::string_view name, auto&& step) {
+        const core::gc_load::Scope scope(name);
+        return step();
+    };
+    if (!state.resolve_restore_save() || !timed("gc.mount", [&] { return state.mount(); })
+        || !timed("gc.build_view", [&] { return state.build_view(); })
+        || !timed("gc.camera_constants", [&] { return state.load_camera_constants(); })) return fail();
     if (state.restore_campaign) {
         // The save's seat must still command the faction it was saved by (mods may rename either).
         const auto& expected = state.restore_campaign->faction;
@@ -972,7 +998,9 @@ bool GalacticMode::ready(Node3D& host) {
     state.galaxy_viewport->set_update_mode(SubViewport::UPDATE_ALWAYS);
     state.galaxy_host = memnew(Node3D);
     state.galaxy_viewport->add_child(state.galaxy_host);
-    if (!state.build_scenes() || !state.upload_models() || !state.build_overlay() || !state.build_routes() || !state.build_hud()) return fail();
+    if (!timed("gc.build_scenes", [&] { return state.build_scenes(); }) || !timed("gc.upload_models", [&] { return state.upload_models(); })
+        || !timed("gc.build_overlay", [&] { return state.build_overlay(); }) || !timed("gc.build_routes", [&] { return state.build_routes(); })
+        || !timed("gc.build_hud", [&] { return state.build_hud(); })) return fail();
     if (state.options.focus_planet != 0) {
         const auto selected = std::find_if(state.galaxy->planets.begin(), state.galaxy->planets.end(),
             [&](const auto& planet) { return planet.id == state.options.focus_planet; });
@@ -998,7 +1026,7 @@ bool GalacticMode::ready(Node3D& host) {
     if (!state.advance_animation(0.0)) return fail();
     if (state.options.synthetic_battle) {
         if (!state.prepare_handoff()) return fail();
-    } else if (!state.start_game({})) return fail();
+    } else if (!timed("gc.start_game", [&] { return state.start_game({}); })) return fail();
     const vfs::Vfs* audio_filesystem = state.battle_content ? state.battle_content->filesystem.get()
         : (state.filesystem ? &*state.filesystem : nullptr);
     if (audio_filesystem && state.audio_catalog) {
@@ -1109,6 +1137,11 @@ void GalacticMode::State::service_lan_acceptance_battle() {
 
 std::optional<int> GalacticMode::process(const double delta) {
     State& state = *state_;
+    // The first frame is drawn once the second process call runs; one log line per load.
+    if (state.load_trace_frames < 2 && ++state.load_trace_frames == 2) {
+        if (const auto line = core::gc_load::trace.finish(core::build_identity()))
+            UtilityFunctions::print(String::utf8(line->c_str()));
+    }
     if (state.completed) return std::nullopt;
     if (!state.options.lan_acceptance_directory.empty() && state.options.lan_match
         && state.options.lan_match->view().phase == GalacticLanPhase::ended) {
@@ -1248,9 +1281,9 @@ std::optional<int> GalacticMode::process(const double delta) {
             const auto& event = published.event;
             if (event.kind == Kind::production_started && event.producer == sim::SeatId{state.galaxy->local.seat})
                 state.local_builds.insert(event.sequence);
-            // WGP-181: an accepted local move order; a rejected order or a paused galaxy is silent.
+            // WGP-181 / WGM-07 policy: confirm accepted local moves, including paused departures.
             if (event.kind == Kind::movement_begin && event.producer == sim::SeatId{state.galaxy->local.seat}
-                && !state.paused && audio_snapshot) {
+                && audio_snapshot) {
                 const auto fleets = audio_snapshot->fleets();
                 const auto fleet = std::find_if(fleets.begin(), fleets.end(), [&](const auto& row) { return row.id == event.subject; });
                 if (fleet != fleets.end()) {
@@ -1511,16 +1544,16 @@ void GalacticMode::input(const Ref<InputEvent>& event) {
             const auto position = button->get_position();
             if (const auto* picked = state.picked_planet(position.x, position.y)) {
                 const auto planets = state.input_planets();
+                // #3072: a selected whole card moves every fleet of its slot as one stack.
+                std::vector<galactic_view::ObjectId> stack;
+                if (!state.selected_fleet_member && !state.tactical && !state.loading && state.game)
+                    for (const auto& fleet : state.published_snapshot->fleets())
+                        if (fleet.id == state.selected_fleet) {
+                            const std::array slots{fleet.orbit_slot};
+                            stack = galactic_view::stack_fleets(*state.published_snapshot, state.galaxy->local.player, fleet.orbit, slots);
+                        }
                 if (const auto intent = galactic_view::fleet_destination_intent(*state.published_snapshot,
-                        state.galaxy->local.player, state.selected_fleet, picked->id, planets)) {
-                    // #3072: a selected whole card moves every fleet of its slot as one stack.
-                    std::vector<galactic_view::ObjectId> stack;
-                    if (!state.selected_fleet_member && !state.tactical && !state.loading && state.game)
-                        for (const auto& fleet : state.published_snapshot->fleets())
-                            if (fleet.id == state.selected_fleet) {
-                                const std::array slots{fleet.orbit_slot};
-                                stack = galactic_view::stack_fleets(*state.published_snapshot, state.galaxy->local.player, fleet.orbit, slots);
-                            }
+                        state.galaxy->local.player, state.selected_fleet, picked->id, planets, stack)) {
                     if (stack.size() > 1 ? state.submit_fleet_stack(*intent, stack) : widget_drop(*intent)) {
                         state.scrolling = state.map_input.held_scroll = false;
                         state.pointer_warp.reset();
@@ -1650,12 +1683,7 @@ void GalacticMode::State::select_hero(const sim::galactic::TypeId type, const bo
 
 bool GalacticMode::widget_drop(const galactic_view::DropIntent& intent) {
     if (!state_->galaxy || !state_->game || state_->tactical || state_->loading) return false;
-    const auto planets = state_->input_planets();
-    const auto command = state_->map_input.command(intent, planets);
-    if (!command) return false;
-    state_->game->submit(platform::LiveGameOrder{sim::SeatId{state_->galaxy->local.seat}, *command, {}});
-    ++state_->submitted_orders;
-    return true;
+    return state_->submit_fleet_stack(intent, {});
 }
 
 bool GalacticMode::choose_battle(const std::uint64_t conflict, const bool tactical) {

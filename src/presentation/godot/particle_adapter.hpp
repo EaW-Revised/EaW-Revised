@@ -1,8 +1,10 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "particle_submission_cache.hpp"
 #include "eawr/presentation/particles/render.hpp"
 #include "eawr/presentation/renderer.hpp"
+#include "eawr/presentation/render_churn.hpp"
 
 #include <array>
 #include <cstddef>
@@ -54,6 +56,8 @@ public:
     // Caller-owned name remains alive until the immediately following spawn ends.
     // Used only by the opt-in backend spawn diagnostic.
     void set_spawn_context(std::string_view effect, std::uint64_t tick) noexcept;
+    // Construction-time provenance for diagnostics only; ordinary particles are the default.
+    void set_churn_owner(render_churn::Owner owner) noexcept;
     // Population-time hidden, empty emitters pin shared textures/shaders. Runtime
     // instances retain ordinary creation order. Oversized/refused plans fall back.
     [[nodiscard]] bool prewarm_emitter(const particles::EmitterRenderPlan& plan);
@@ -149,6 +153,7 @@ public:
         std::uint64_t streams{};
         std::uint64_t uploads{};
         std::uint64_t replacements{};
+        detail::ParticleCallCounts bounds_calls, visibility_calls;
         double conversion_ms{};
         double submission_ms{};
         double retirement_ms{};

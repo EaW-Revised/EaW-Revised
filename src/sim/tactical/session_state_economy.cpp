@@ -117,7 +117,7 @@ void TacticalSession::Impl::append_canonical_arrival_defence_state(std::vector<s
 }
 
 void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uint8_t>& bytes, const std::span<const LiveUnit> units, const CanonicalCounts* counts) const {
-        // WPR-02/22/51/52: UPGD v1, coordinator-reserved. Omitted for empty upgrade state.
+        // WPR-02/22/51/52: UPGD v1, or v2 with nonzero WFR-01 range. Omitted for empty state.
         const auto modified = [](const LiveUnit& unit) {
             return unit.upgrade_bonuses != CombatBonuses{} || (unit.durability
                 && (std::any_of(unit.durability->disabled.begin(), unit.durability->disabled.end(), [](const bool value) { return value; })
@@ -136,7 +136,10 @@ void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uin
         if (modified_count != 0 || account_count != 0) {
             constexpr std::array<std::uint8_t, 4> tag{'U', 'P', 'G', 'D'};
             bytes.insert(bytes.end(), tag.begin(), tag.end());
-            sim::detail::append_u32(bytes, 1); sim::detail::append_u32(bytes, 0);
+            const bool fire_range = std::any_of(units.begin(), units.end(), [](const auto& unit) {
+                return unit.upgrade_bonuses[6].raw() != 0;
+            });
+            sim::detail::append_u32(bytes, fire_range ? 2U : 1U); sim::detail::append_u32(bytes, 0);
             sim::detail::append_u64(bytes, static_cast<std::uint64_t>(account_count));
             for (const auto& account : ledgers) {
                 if (!account_state(account)) continue;
@@ -155,7 +158,9 @@ void TacticalSession::Impl::append_canonical_upgrades_state(std::vector<std::uin
             for (const auto& unit : units) {
                 if (!modified(unit)) continue;
                 sim::detail::append_u64(bytes, unit.state.entity_id);
-                for (const auto percentage : unit.upgrade_bonuses) append_fixed(bytes, percentage);
+                // UPGD v2 includes all seven slots; zero-range sessions keep the six-slot v1 bytes.
+                for (std::size_t slot = 0; slot < 6; ++slot) append_fixed(bytes, unit.upgrade_bonuses[slot]);
+                if (fire_range) append_fixed(bytes, unit.upgrade_bonuses[6]);
                 sim::detail::append_u64(bytes, unit.durability ? unit.durability->hardpoints.size() : 0);
                 if (!unit.durability) continue;
                 for (std::size_t slot = 0; slot < unit.durability->hardpoints.size(); ++slot) {

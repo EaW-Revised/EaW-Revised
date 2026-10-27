@@ -130,7 +130,7 @@ bool decode_row(Reader& in, ProductionOffer& v) {
         && decode_row(in, v.slicer_unlockable)
         && rows(in, v.required_structures)
         && rows(in, v.required_orbiting_units)
-        && decode_row(in, v.authored_price) && v.authored_price.raw() >= 0
+        && decode_row(in, v.authored_price)
         && decode_row(in, v.sellable);
 }
 void encode_row(std::vector<std::uint8_t>& bytes, const ProductionEntry& v) {

@@ -1,5 +1,6 @@
 #pragma once
 #include "eawr/core/gc_profile.hpp"
+#include "eawr/diagnostics/gc_memory.hpp"
 
 #include "eawr/core/record_digest.hpp"
 
@@ -51,6 +52,8 @@ struct GalacticPlanetFacts {
     std::optional<std::vector<GalacticIndigenousPotential>> indigenous_potential;
     bool retains_residual_influence{true}; // authored planet type flag (default true, as the constructor default)
 };
+// `type` 0 is a null reference: the authored name resolves to no type (RGC-22). The row keeps it, so tier selection still
+// sees the row (RGC-23), and the force readers skip it (RGC-24).
 struct GalacticForceSpawn { tactical::TypeId type{}; std::int32_t count{}; };
 struct GalacticObjectTraits { bool hero{}, named_hero{}; };
 struct GalacticForceType {
@@ -121,6 +124,9 @@ struct GalacticPerceptionSetup {
     std::map<std::string, Real, std::less<>> cache_intervals;
     std::vector<GalacticForceType> force_types;
     std::optional<Real> maximum_fleet_distance; // authored MaximumFleetMovementDistance
+    std::optional<Real> trade_movement_factor; // WGA-490, global TradeRouteMovementFactor
+    std::optional<Real> path_maximum_distance; // WGA-490 raw binary32 authoring for path weights
+    bool path_coefficients_requested{}; // loaded equations, never a mod/file-name allowlist
     std::optional<Real> maximum_political_control; // authored MaximumPoliticalControl, WGA-475 divisor
     std::vector<GalacticEconomyType> economy_types; // WGEP-149: supplied in registration order
     bool economy_types_complete{};
@@ -128,6 +134,7 @@ struct GalacticPerceptionSetup {
     std::optional<bool> is_story_campaign; // WGA-423: immutable authored campaign state.
     std::map<tactical::PlayerId, GalacticMarkupHints> markup_hints;
     std::vector<std::string> markup_diagnostics;
+    std::vector<std::string> spawn_diagnostics; // starting-spawn names that resolve to no type, kept as null references
 };
 struct GalacticExecutionRoute {
     tactical::PlayerId player{};
@@ -232,6 +239,27 @@ struct GalacticConnectivity {
     // deadline. Synthetic callers may continue to supply the flat rows above.
     std::map<tactical::PlayerId, std::shared_ptr<const std::vector<GalacticExecutionRoute>>> player_routes{};
 };
+
+// WGA-490/491: copied allegiance and geometry for one player's path coefficients.
+// This graph is independent of execution's packed force/threat matrix.
+struct PathCoefficientPlanet {
+    galactic::PlanetId planet{};
+    math::Vec3 position;
+    bool allied{};
+    friend bool operator==(const PathCoefficientPlanet&, const PathCoefficientPlanet&) = default;
+};
+struct PathCoefficientInput {
+    std::vector<PathCoefficientPlanet> planets; // retained object-query order
+    std::vector<std::pair<galactic::PlanetId, galactic::PlanetId>> trades;
+    Real maximum_distance{}, trade_movement_factor{};
+    bool internal{};
+};
+struct PathCoefficient {
+    galactic::PlanetId planet{};
+    Real value{};
+};
+[[nodiscard]] core::Result<std::vector<PathCoefficient>> build_path_coefficients(const PathCoefficientInput&,
+    std::vector<std::string>* diagnostics = nullptr);
 
 // Full context/binding equality, not a hash alone (WGA-65).
 struct GalacticCacheKey {
@@ -546,6 +574,9 @@ public:
     // production offers or perception caches, and does not advance gameplay.
     [[nodiscard]] core::Result<void> publish_execution_routes(bool available, std::uint64_t revision,
         std::vector<GalacticExecutionRoute>);
+    // WGA-493 project seam; retail publication cadence remains unqualified (#4786).
+    [[nodiscard]] core::Result<void> publish_path_coefficients(const sim::PartitionExecutor&, bool force = false);
+    [[nodiscard]] std::vector<std::string> take_path_coefficient_diagnostics() { return std::exchange(path_coefficient_diagnostics_, {}); }
     [[nodiscard]] core::Result<void> publish_execution_route_generations(bool available, std::uint64_t revision,
         std::map<tactical::PlayerId, std::shared_ptr<const std::vector<GalacticExecutionRoute>>>);
     // nullopt: production-site relation not supplied; false: known nonmember.
@@ -613,6 +644,8 @@ public:
     [[nodiscard]] bool check_story_flag(tactical::PlayerId, galactic::PlanetId, std::string_view, bool clear);
     // WGA-65: refresh existing bindings on gain AND loss, before recording hidden.
     void visibility_changed(tactical::PlayerId, galactic::PlanetId, bool visible, std::uint32_t mask = 0);
+
+    void memory_inventory(diagnostics::GcMemory&) const;
 
 private:
     [[nodiscard]] core::Result<void> bind_publication_impl(std::shared_ptr<const galactic::GalacticSnapshot>,
@@ -721,6 +754,12 @@ private:
         const PreparedProducerOffers&, std::uint32_t logical_fps, tactical::PlayerId,
         galactic::PlanetId, std::span<const galactic::TypeId>, bool first_allowed, const sim::PartitionExecutor&);
     std::uint64_t perception_period_{300};
+    struct PathCoefficientMemo {
+        std::array<PathCoefficientInput, 2> inputs;
+        std::array<std::map<galactic::PlanetId, Real>, 2> values;
+    };
+    std::map<tactical::PlayerId, PathCoefficientMemo> path_coefficients_; // derived; rebuilt at initialization/load
+    std::vector<std::string> path_coefficient_diagnostics_;
     std::shared_ptr<const sim::PartitionExecutor> read_workers_;
     std::function<const sim::PartitionExecutor*()> producer_executor_;
     tactical::EconomyRules economy_;

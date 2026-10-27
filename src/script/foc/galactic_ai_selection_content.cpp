@@ -202,7 +202,7 @@ core::Result<std::vector<GalacticSelectionGarrison>> proposal_garrisons(
     const auto planet = content.planets.find(target);
     if (target && planet == content.planets.end()) return Result::failure(unavailable("proposal garrison target terrain is unavailable"));
     std::vector<GalacticSelectionGarrison> out;
-    const auto append = [&](std::string_view name) -> core::Result<void> {
+    const auto append = [&](std::string_view name, const bool null_reference_skipped) -> core::Result<void> {
         const auto canonical = upper_case(name);
         const ContentTypeRow* unit{};
         if (prepared) {
@@ -217,6 +217,8 @@ core::Result<std::vector<GalacticSelectionGarrison>> proposal_garrisons(
                 [&](const auto& row) { return row.second.name == canonical; });
             if (found != content.types.end()) unit = &*found;
         }
+        // RGC-24: a starting-spawn name that resolves to no type is a null entry; the proposal expansion adds nothing for it.
+        if (!unit && null_reference_skipped) return core::Result<void>::success();
         if (!unit) return core::Result<void>::failure(unavailable("proposal garrison type is unbound: " + canonical));
         const Real* combat_power{};
         if (prepared) {
@@ -244,10 +246,10 @@ core::Result<std::vector<GalacticSelectionGarrison>> proposal_garrisons(
         const auto first = std::find_if(spawned.begin(), spawned.end(),
             [&](const auto& row) { return upper_case(row.type) == upper_case(spawn.type); });
         for (std::int32_t count = 0; count < first->count; ++count)
-            if (const auto added = append(spawn.type); !added) return Result::failure(added.error());
+            if (const auto added = append(spawn.type, true); !added) return Result::failure(added.error());
     }
     for (const auto& escort : source->second.space_escorts)
-        if (const auto added = append(escort); !added) return Result::failure(added.error());
+        if (const auto added = append(escort, false); !added) return Result::failure(added.error());
     return Result::success(std::move(out));
 }
 }
@@ -297,8 +299,12 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             out->contrast = contrast.value(); out->unscaled_domain_totals = true;
         }
         out->minimum_cost = authored->second.minimum_cost.value_or(Real{}); out->maximum_cost = Real{}; // No authored maximum-plan-cost global is applied.
-        for (const auto& force : authored->second.forces)
+        bool hero_attachment{};
+        for (std::size_t index = 0; index < authored->second.forces.size(); ++index) {
+            const auto& force = authored->second.forces[index];
             out->attachment_allowed.emplace_back(!force.deny_heroes, !force.deny_special_weapons && plan.allow_special_weapons);
+            if (index < plan.taskforces.size() && !plan.taskforces[index].teams.empty()) hero_attachment |= !force.deny_heroes;
+        }
         const auto account = std::find_if(state->player_economy()->players.begin(), state->player_economy()->players.end(), [&](const auto& row) { return row.player == player; });
         if (account == state->player_economy()->players.end()) return Result::failure(unavailable("stock selection player account missing"));
         out->player_tech = static_cast<std::uint32_t>(account->current_tech);
@@ -378,9 +384,12 @@ GalacticSelectionProvider stock_selection_provider(std::shared_ptr<const Galacti
             if (original == content->types.end()) return Result::failure(unavailable("stock proposal original type missing"));
             const auto& source = original->second;
             auto facts = source.value; facts.survival_type = source.survival_type;
-            // WGA-489: a generic hero candidate whose type authors no object script is an ordinary unit (no hero stage,
-            // no hero gates). Named heroes keep the hero stage whatever they author.
+            // WGA-489: unscripted generic heroes are ordinary candidates;
+            // named/scripted heroes qualify for the permitted attachment path.
             facts.hero = galactic_hero_stage_applies(facts.hero, source.named_hero, source.special_weapon, !source.lua_script.empty() || source.member_script);
+            // HA-01/HA-04: a denied extra hero attach leaves an authored team
+            // ordinary, with neutral hero weight and no object-script cost/escort gates.
+            if (!source.special_weapon && !hero_attachment) facts.hero = false;
             // WGA-482: both base kinds use target admission/quotes, without
             // the special-structure instance and slot checks.
             facts.base = source.starbase || source.ground_base;

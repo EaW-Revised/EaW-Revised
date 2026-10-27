@@ -109,12 +109,25 @@ Existing starts continue to apply SK-01 to SK-24 and SC-01/SC-02.
   from the shared human/AI purchase menus and authoritative build admission
   (WSS-29/30). Free starting units off omits the faction default roster for
   human and AI players, while explicit fixture fleets remain separate (WSS-28).
-  Credits, tech, timer, random events and autoresolve fields are retained
-  in the copy; their consumers remain with G6. The credits slider bounds are the
+  Tech, timer, random events and autoresolve fields are retained
+  in the copy; their remaining consumers belong to G6. The credits slider bounds are the
   data's `Min_Skirmish_Credits` and `Max_Skirmish_Credits`; the slider shows the
   copy's authored credits clamped into those bounds without rounding to an edit bucket,
-  including in-range off-grid mod values, and stays disabled, with its reason as a tooltip, until the
-  start applies the selected credits (WSS-25). The win-condition list offers the
+  including in-range off-grid mod values. User edits round the offset from the minimum to a whole
+  credit, then select the next 1000-credit bucket (WSS-25). The bucket size is an engine rule;
+  the authored range supplies the arrow count, `floor((max-min)/1000)+1`. Arrows advance by
+  the range divided by that count minus one; track drags remain continuous. A final bucket
+  can exceed a mod's maximum when its range is not a multiple of 1000; retain that result.
+  Accept grants the selected amount directly to each occupied human or AI lobby account,
+  including teammates without a spawn marker (WSS-52/54). Faction purchase budgets, free
+  starting forces and AI income multipliers do not replace it. The host publishes the whole
+  match record through canonical lobby options; guests display it and ready that revision.
+  The authenticated startup setup and replay header already retain its exact fixed-point value.
+  `EAWR-MATCH-OPTIONS-1` remains the separate live-speed input. Debug-build trackbar refresh,
+  readback, arrow handler and network initial allocation were rechecked in
+  `out/research/sk-5043/*.txt`. WSS-52 remainder: appended nonplayable faction players
+  still have no economy ledgers; this existing gap is separate from the lobby-account grant
+  (legacy EAWR-5045), including for mods with additional TED players. The win-condition list offers the
   two space conditions (WSS-31) and the chosen one is the start's victory
   condition (`FixtureOptions::victory_condition`); text naming neither leaves the
   data's default. The debug build fills the list in order: all enemy units, then

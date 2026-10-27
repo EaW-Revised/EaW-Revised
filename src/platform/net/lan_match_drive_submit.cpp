@@ -23,18 +23,29 @@ std::optional<DriverResult> TcpLanMatch::drive_submit(platform::LiveStepContext&
             const auto frontier = session.next_seal();
             auto submitted = session.submit([&](sim::SeatCommandKey key) {
                 return net::encode_tactical_input(key, binding, {command.units, command.payload});
-            }, command.key.tick);
+            }, adapter_->session_epoch(command.key.tick));
             if (!submitted) {
                 if (submitted.error().code == net::session_errors::admission) { discard_command(command); continue; }
                 set_failure(submitted.error()); return DriverResult::failure(submitted.error());
             }
             std::function<void(std::uint64_t, std::uint64_t)> observer;
             { const std::lock_guard lock(input_epoch_mutex_); observer = submission_observer_; }
-            if (observer) observer(command.key.sequence, submitted.value().tick);
+            if (observer) observer(command.key.sequence, adapter_->world_boundary(submitted.value().tick));
             if (trace_) trace_->submitted(submitted.value(), command_kind(command.payload), context.completed_tick(), frontier,
                 command.key.sequence, command.key.tick);
         }
         queued_.clear();
+        std::vector<bool> pause_requests;
+        { const std::lock_guard lock(mutex_); pause_requests.swap(pause_requests_); }
+        for (const bool pause : pause_requests) {
+            auto submitted = session.submit([pause](sim::SeatCommandKey) { return net::encode_match_pause(pause); });
+            if (!submitted) {
+                if (submitted.error().code == net::session_errors::admission) {
+                    const std::lock_guard lock(mutex_); view_.input_feedback = "The pause request was cancelled because synchronization changed."; continue;
+                }
+                return DriverResult::failure(submitted.error());
+            }
+        }
         std::vector<net::MatchOptions> speed_requests;
         { const std::lock_guard lock(mutex_); speed_requests.swap(speed_requests_); }
         for (const auto options : speed_requests) {

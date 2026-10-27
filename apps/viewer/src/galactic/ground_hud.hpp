@@ -57,6 +57,7 @@ struct GroundHudState {
     bool drag_sound{}, layout_dirty{};
     std::vector<viewer::galactic::ObjectId> last_launch_units;
     std::vector<viewer::galactic::ObjectId> last_launch_path;
+    bool last_launch_land{};
     viewer::galactic::ObjectId last_launch_target{};
     std::uint8_t last_launch_slot{};
 };

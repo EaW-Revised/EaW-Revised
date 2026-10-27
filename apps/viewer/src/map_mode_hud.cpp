@@ -9,6 +9,7 @@
 
 #include "battle_content.hpp"
 #include "map_mode_internal.hpp"
+#include "memory_attribution.hpp"
 #include "viewer_path.hpp"
 #include "ui/kit.hpp"
 
@@ -322,7 +323,8 @@ bool MapMode::State::build_hud(Node3D& host, const std::optional<std::string>& c
     if (live_session) {
         LiveSessionView* live = live_session.get();
         // BE-06: LAN currently has no replay-permission setting; assume allowed.
-        hud->set_replay_writer(live->multiplayer(), [live](std::string& error) { return live->finished_replay_bytes(error); });
+        hud->set_replay_writer(live->multiplayer(), [live](std::string& error) { return live->finished_replay_bytes(error); },
+            [live](std::string& error) { return live->finished_session_replay_bytes(error); });
         hud->set_movie_handler([this] { if (space) set_movie_mode(!space->live_camera_movie()); });
         hud->set_time_handlers({[live] { live->press_pause(); }, [live] { live->press_fast_forward(); },
                                 [live] { live->resume(); }, [live] { live->quit(); }});
@@ -592,7 +594,8 @@ void MapMode::State::sync_production() {
     }
     view.notifications = live.reinforcement_notifications();
     view.notification_seconds = live.reinforcement_notification_tick() / sim::tactical::logical_frames_per_second;
-    view.reinforcement_allowed = live.reinforcement_allowed() && overview_ui.tactical_shell;
+    // Land reinforcement drops are not wired yet: the pane stays inert there.
+    view.reinforcement_allowed = live.reinforcement_allowed() && overview_ui.tactical_shell && !land_population;
     view.tactical_population.clear();
     if (!view.reinforcement_allowed && battle->placing()) battle->cancel();
     if (const sim::tactical::EconomyView* economy = live.local_economy()) {
@@ -1024,6 +1027,7 @@ void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
         : std::make_shared<const BattleContent>(BattleContent{filesystem, catalog, profile, layers});
     screen_options.map_path = options.map_path;
     screen_options.context_name = map.context_name;
+    if (live_options.land) screen_options.battle = presentation::ui::LoadingBattle::land;
     if (!screen->build(host, std::move(screen_options))) {
         // The battle still starts, behind the HUD's own Begin (WBF-10), and the report says why.
         loading_failure = screen->failure();
@@ -1035,6 +1039,10 @@ void MapMode::State::open_loading_screen(Node3D& host, const assets::Map& map) {
 
 void MapMode::State::load_report(const std::size_t stage, const std::uint64_t done, const std::uint64_t total) {
     load_progress.report(stage, done, total);
+    if (done == total && MemoryAttribution::enabled()) {
+        const std::string label = "stage" + std::to_string(stage);
+        MemoryAttribution::load_mark(label.c_str(), filesystem ? scene::VfsAssetCache(*filesystem).model_stats().cache_retained_bytes : 0);
+    }
     if (loading != nullptr) loading->report(load_progress);
 }
 
@@ -1070,9 +1078,13 @@ void MapMode::State::sync_battle_hud() {
         hud->set_beacon(battle->beacon_enabled(*live_session), battle->beacon_targeting());
     }
     hud->set_begin(live_session->phase() == LiveSessionView::Phase::ready && (loading == nullptr || !loading->shown()));
-    hud->set_time_view({time.paused(), time.state() == presentation::ui::TimeState::fast_forward,
-                        running && !live_session->multiplayer() && time.pause_enabled(), running && !live_session->multiplayer() && time.fast_forward_enabled(),
+    const auto child_pause_notice = options.shared_pause_notice ? options.shared_pause_notice() : std::string{};
+    hud->set_time_view({time.paused() && (!options.shared_pause_notice || !child_pause_notice.empty()) && (!live_session->multiplayer() || lan_gameplay_enabled(live_session->lan_view())), time.state() == presentation::ui::TimeState::fast_forward,
+                        running && time.pause_enabled(), running && !live_session->multiplayer() && !options.shared_pause_notice && time.fast_forward_enabled(),
                         live_session->multiplayer(), time.speed_step()});
+    const auto pause_view = live_session->lan_view();
+    const bool shared_pause = live_session->multiplayer() && pause_view.clock_paused && lan_gameplay_enabled(pause_view);
+    hud->set_pause_notice(options.shared_pause_notice ? child_pause_notice : (shared_pause ? "Paused by " + pause_view.pause_name : ""));
     if (live_session->multiplayer()) {
         if (!lan_overlay) {
             auto* layer = memnew(CanvasLayer); layer->set_layer(40); perf_host->add_child(layer);

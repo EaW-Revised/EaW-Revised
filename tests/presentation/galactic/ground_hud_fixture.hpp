@@ -14,14 +14,15 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
     // structures. The production helper resets the fleet and observer tables, so it runs first.
     const bool structures = name.starts_with("ground-structures");
     const bool sale_units = name == "ground-unit-sale";
-    if (structures || sale_units) configure_synthetic_hud_production(setup,local);
+    if (structures || sale_units || name == "ground-representative") configure_synthetic_hud_production(setup,local);
     configure_fleet_hud_fixture(setup,local,"fleet-drag",traits,visibility,names);
     const auto enemy = local == 1 ? 2U : 1U;
+    const bool representative = name == "ground-representative";
     // The hidden-structures variant is the opponent's planet: a local owner always knows its structures.
-    const auto owner = name == "ground-count" || name == "ground-foreign" || name == "ground-structures-hidden" ? enemy : local;
+    const auto owner = (name == "ground-count" || representative) || name == "ground-foreign" || name == "ground-structures-hidden" ? enemy : local;
     std::erase_if(setup.fleets, [local](const auto& row) { return row.owner != local; });
     setup.fleet_control->types[0].transport = true;
-    if (name == "ground-launch-move") {
+    if (name == "ground-launch-move" || name == "ground-transfer") {
         setup.planets[1].position = setup.planets[0].position;
         setup.planets[1].position.x = sim::math::Fixed::from_raw(setup.planets[0].position.x.raw()
             + 4 * sim::math::Fixed::scale);
@@ -31,6 +32,7 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         for (auto& type : setup.movement->types) if (type.type == 1000) type.transport = true;
         for (const auto id : {7001ULL, 7002ULL, 7004ULL, 8001ULL, 8002ULL, 8003ULL})
             setup.movement->contents.push_back({id, {}});
+        if (name == "ground-transfer") setup.movement->contents.push_back({8004, {}});
     }
     names[1000] = "Stormtrooper_Team";
     setup.control.emplace(); auto& control = *setup.control;
@@ -47,6 +49,7 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         g::ControlPlanet p; p.planet = planet.id; p.type = planet.id;
         p.surface_accessible = name != "ground-inaccessible";
         if (planet.id == 101) { planet.owner = owner; p.landed = {{8001,1000,owner},{8002,1000,owner},{8003,1000,owner}}; }
+        if (name == "ground-transfer" && planet.id == 102) { planet.owner = owner; p.landed = {{8004,1000,owner}}; }
         control.planets.push_back(p);
     }
     for (const auto& route : setup.routes) control.routes.push_back({route.id,{}});
@@ -56,6 +59,11 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         planet.allegiance = planet.target_owner = planet.ground_owner = planet.space_owner = owner;
         planet.current_owner = planet.current_controller = owner;
         planet.landed_transports = {{8001,owner,false,false},{8002,owner,false,false},{8003,owner,true,false}};
+    }
+    if (name == "ground-transfer") for (auto& planet : setup.observer->planets) if (planet.planet == 102) {
+        planet.allegiance = planet.target_owner = planet.ground_owner = planet.space_owner = owner;
+        planet.current_owner = planet.current_controller = owner;
+        planet.landed_transports = {{8004,owner,false,false}};
     }
     if (structures) {
         // Five land positions, three built: two of the planet owner's, one owned by the other side.
@@ -90,9 +98,39 @@ inline void configure_ground_fixture(sim::galactic::GalacticSetup& setup,
         std::sort(setup.census->objects.begin(), setup.census->objects.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         for (auto& row : setup.production->planets) row.ground_occupier = row.target_owner;
     }
+    if (representative) {
+        // GGS-09: populated enemy payload, with only size permission. The named
+        // hero's portrait may represent the stack; its identity is never a cell.
+        names[1001] = "AT_AT_Walker";
+        names[1003] = "Darth_Vader";
+        setup.census->objects = {
+            {8001, 1000, owner, 101, 101, false, false, 1000, 0, g::ActorCombatRole::transport},
+            {8002, 1000, owner, 101, 101, false, false, 1000, 0, g::ActorCombatRole::transport},
+            {8101, 1001, owner, 101, 8001, false, false, 1001, 0, g::ActorCombatRole::ordinary},
+            {8201, 1003, owner, 101, 8002, false, false, 1003, 0, g::ActorCombatRole::ordinary}};
+        // A census publication also enables combat-skip queries for every
+        // live orbit/surface identity; the fixture must qualify those actors.
+        setup.census->objects.push_back({8003, 1000, owner, 101, 101, false, true, 1000,
+            0, g::ActorCombatRole::transport});
+        for (const auto& fleet : setup.fleets) for (const auto& member : fleet.members)
+            setup.census->objects.push_back({member.id, member.type, fleet.owner, fleet.orbit, fleet.id,
+                false, false, member.type, 0, member.type == 1000
+                    ? g::ActorCombatRole::transport : g::ActorCombatRole::ordinary});
+        std::sort(setup.census->objects.begin(), setup.census->objects.end(),
+            [](const auto& a, const auto& b) { return a.id < b.id; });
+        if (!setup.movement) setup.movement.emplace();
+        for (auto& type : setup.movement->types) if (type.type == 1000) type.transport = true;
+        for (const auto& fleet : setup.fleets) for (const auto& member : fleet.members)
+            if (member.type == 1000) setup.movement->contents.push_back({member.id, {}});
+        setup.movement->contents.push_back({8001, {{8101, 1001}}});
+        setup.movement->contents.push_back({8002, {{8201, 1003}}});
+        setup.movement->contents.push_back({8003, {}});
+        std::sort(setup.movement->contents.begin(), setup.movement->contents.end(),
+            [](const auto& a, const auto& b) { return a.container < b.container; });
+    }
     const auto mask = g::bit(g::Intelligence::ground_count) | g::bit(g::Intelligence::ownership)
         | g::bit(g::Intelligence::fleet_presence) | g::bit(g::Intelligence::fleet_count)
-        | (name == "ground-count" ? 0U : g::bit(g::Intelligence::ground_contents))
+        | ((name == "ground-count" || representative) ? 0U : g::bit(g::Intelligence::ground_contents))
         | (structures && name != "ground-structures-hidden" ? g::bit(g::Intelligence::structures) : 0U);
     for (auto& player : setup.observer->players) player.default_intelligence = mask;
     for (auto& row : setup.observer->records) row.mask = mask;

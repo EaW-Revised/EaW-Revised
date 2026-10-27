@@ -349,7 +349,7 @@ ROCKET gets a straight flight. `hardpoint_types` in `unit_tables_decode.hpp` / `
 `unit_combat.cpp`, `HardpointType` and `unit_durability.cpp::role` omit SPECIAL. The priority-name
 list and UI reticle do recognize Weapon_Special; that is not executable weapon support.
 `src/units/unit_abilities.cpp::ability_table` and the tactical ability-kind dispatch do not model
-BARRAGE/BLAST. `src/presentation/space/projectiles.cpp` does not supply missing simulation inputs.
+BARRAGE/BLAST. `src/presentation/live/projectiles.cpp` does not supply missing simulation inputs.
 
 The rule-table verdicts exhaust all 40 rules. The following groups give implementation size and
 ticket ownership; overlapping rules are deliberately listed at their data/interface seams.

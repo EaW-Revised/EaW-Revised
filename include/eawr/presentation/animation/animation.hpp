@@ -12,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+namespace eawr::diagnostics { class OwnerCensus; }
 namespace eawr::presentation::animation {
 
 // Matrices are column-major and multiply column vectors.  Asset matrices are
@@ -129,6 +130,7 @@ public:
     // origin rule attachment() applies. A default/hand-built pose is not.
     [[nodiscard]] bool sampled(const Pose& pose) const noexcept;
     [[nodiscard]] std::size_t bone_count() const noexcept;
+    void owner_census(diagnostics::OwnerCensus& output) const noexcept;
     // UA-05: append a procedural local bone transform and rebuild descendants in caller storage.
     [[nodiscard]] core::Result<void> apply_bone_transform(Pose& pose, std::size_t bone, const Matrix& transform) const;
 
@@ -165,6 +167,7 @@ private:
     float frames_per_second_{};
     float duration_seconds_{};
     std::uint32_t playable_frames_{};
+    std::uint32_t stored_frames_{};
 };
 
 } // namespace eawr::presentation::animation

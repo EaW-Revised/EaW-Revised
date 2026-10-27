@@ -31,7 +31,7 @@ core::Result<GalaxyModel> build_campaign_galaxy(const data::galactic::GalacticDa
     if (initial_owner == 0 || first_free == 0 || count >= std::numeric_limits<sim::EntityId>::max() - first_free)
         return invalid(campaign, "invalid initial owner or allocator frontier");
     const auto* maximum = data.constant("MaximumFleetMovementDistance");
-    if (!maximum || !maximum->number || maximum->number->raw() < 0)
+    if (!maximum || !maximum->number)
         return invalid(campaign, "missing or invalid MaximumFleetMovementDistance");
     GalaxyModel result;
     result.next_id = first_free;
@@ -62,10 +62,17 @@ core::Result<GalaxyModel> build_campaign_galaxy(const data::galactic::GalacticDa
     std::set<std::pair<sim::galactic::PlanetId, sim::galactic::PlanetId>> linked_pairs;
     for (const auto& name : campaign.trade_routes) {
         const auto* route = data.trade_route(name);
-        if (!route)
-            return invalid(campaign, "missing trade route " + name);
-        if (!data.planet(route->point_a) || !data.planet(route->point_b))
-            return invalid(campaign, "unknown route endpoint type: " + name);
+        // CGS-06: debug build, campaign load: a route name that resolves to no route is reported and left out of the
+        // campaign's routes; loading continues.
+        if (!route) {
+            warn("campaign_unknown_trade_route", "Trade_Routes names unknown route " + name + "; it is left out (CGS-06)");
+            continue;
+        }
+        // WGS-182/183: no link without both live endpoint types; an endpoint that is no planet type is never live.
+        if (!data.planet(route->point_a) || !data.planet(route->point_b)) {
+            warn("campaign_route_unknown_endpoint", "skipped route " + name + ": an endpoint is not a planet type");
+            continue;
+        }
         // WGS-182/183: no link without both live endpoint types. Variants do not alias
         // their parent type. Keep skipped definitions in content identity, not graph IDs.
         const auto a = ids.find(key(route->point_a)); const auto b = ids.find(key(route->point_b));

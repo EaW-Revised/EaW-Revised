@@ -285,8 +285,8 @@ struct EngineContractAccess {
             "WGA-482 ground-base selection publishes the target's actual cost and time");
         {
             // WGA-489 through the stock provider: a generic hero company that authors no object script is an ordinary
-            // unit (no hero stage); a named hero keeps the hero stage, scripted or not. The Empire/Rebel plans that
-            // list named heroes (Remove_Corruption) therefore see the same hero candidates as before.
+            // unit (no hero stage); a named hero keeps the stage only while hero attachment is allowed.
+            // HA-01/HA-04 keep an explicitly requested hero ordinary when extra attachment is denied.
             const auto find_type = [&](std::string_view name) {
                 const auto at = std::find_if(content.types.begin(), content.types.end(), [&](const auto& row) { return row.second.name == name; });
                 expect(at != content.types.end(), "WGA-489 installed hero company type is bound");
@@ -311,6 +311,28 @@ struct EngineContractAccess {
                 && !hero_facts->types.at(saboteur).hero && !hero_facts->types.at(smuggler).hero && hero_facts->types.at(mothma).hero
                 && hero_facts->types.at(fleet_empire).hero && hero_facts->types.at(fleet_rebel).hero,
                 "WGA-489 stock provider: generic heroes with no company or member script skip the hero stage; named heroes and member-scripted fleet commanders keep it");
+        }
+        {
+            const auto rebel_plan = std::find_if(e.plans_.begin(), e.plans_.end(),
+                [](const auto& row) { return row.name == "REBELADVANCETECHPLAN"; });
+            const auto droids = std::find_if(content.types.begin(), content.types.end(),
+                [](const auto& row) { return row.second.name == "DROIDS_TEAM"; });
+            expect(rebel_plan != e.plans_.end() && droids != content.types.end() && droids->second.named_hero,
+                "HA-01 installed Rebel tech plan names the actual named droid hero team");
+            const auto& constraints = owner.selection_plans->constraints.at(rebel_plan->name);
+            expect(constraints.forces.size() == 1 && constraints.forces.front().deny_heroes
+                && rebel_plan->taskforces.size() == 1 && rebel_plan->taskforces.front().teams.size() == 1
+                && rebel_plan->taskforces.front().teams.front().types == std::vector<gc::TypeId>{droids->first},
+                "stock Rebel tech plan explicitly requires Droids_Team while denying extra hero attachment");
+            const auto no_extra_heroes = [](auto, auto, const auto&) {
+                return core::Result<std::vector<GalacticSelectionObject>>::success({});
+            };
+            const auto denied = stock_selection_provider(owner.selection_content, owner.selection_plans, owner.world, owner.engine,
+                [&galaxy] { return galaxy.snapshot(); }, {}, no_extra_heroes);
+            const auto rebel_facts = must(denied(owner.empire, 0, e.data_.goals.at("ADVANCE_TECH_REBEL"), *rebel_plan));
+            expect(rebel_facts->complete && !rebel_facts->attachment_allowed.front().first && rebel_facts->types.contains(droids->first)
+                && !rebel_facts->types.at(droids->first).hero && rebel_facts->types.at(droids->first).hero_weight == Real{},
+                "HA-01/HA-04 actual Droids_Team retains its declared proposal with neutral hero weight and no hero-owner dependency");
         }
         return std::to_string(expected) + ":" + std::to_string(base.target_cost->repr) + ":" + std::to_string(base.target_build_seconds->repr)
             + ":" + std::to_string(ground->first) + ":" + std::to_string(ground_base.target_cost.has_value());
@@ -449,6 +471,16 @@ int main(int argc, char** argv) {
         const auto planned = must(cp::plan_live_campaign_setup(fs, data, types, campaign_name, options, "Normal_Default"));
         const auto services = must(cp::prepare_live_campaign_services(fs, loaded.catalog, data, types, planned, "Normal_Default"));
         const auto content = must(cp::prepare_ai_selection_content(fs, loaded.catalog, data, types, planned));
+        std::size_t orbital_types{};
+        for (const auto& [id, type] : content->types) {
+            (void)id;
+            if (!type.original || std::find(type.original->behavior.begin(), type.original->behavior.end(),
+                "DUMMY_ORBITAL_STRUCTURE") == type.original->behavior.end()) continue;
+            ++orbital_types;
+            expect(type.value.structure && type.value.channel == gc::ProductionDomain::space,
+                "RGC-01/04 stock orbital types take the AI targeted space-structure selection path");
+        }
+        expect(orbital_types > 0, "stock selection regression exercises authored orbital structures");
         const auto station = std::find_if(content->types.begin(), content->types.end(),
             [](const auto& row) { return row.second.starbase && row.second.next_base; });
         expect(station != content->types.end(), "installed station chain available for missing-link boundary");
@@ -526,11 +558,21 @@ int main(int argc, char** argv) {
         for (std::size_t row = 0; row < boundary.size(); ++row)
             expect(boundary[row].type == content->types.begin()->first && boundary[row].power == ai::real(expected_powers[row]),
                 "original bound type preserves atoi decimal-prefix/no-digit/multiple-sign semantics");
-        for (const auto& invalid : {std::string("UNRESOLVED_INDIGENOUS_TYPE 5"), original_type.name + " 2147483648"}) {
+        {
+            // CGS-07: an unbound type name is a null reference; it is reported and the row is left out, not refused.
+            const auto unresolved_catalog = must(eawr::data::with_overrides(loaded.catalog,
+                std::array{eawr::data::ValueOverride{location->original_type, "Potential_Indigenous_Power", {std::string("UNRESOLVED_INDIGENOUS_TYPE 5")}}}));
+            const auto unresolved = must(cp::prepare_ai_selection_content(fs, unresolved_catalog, data, types, planned));
+            expect(unresolved->planets.at(empty_planet->first).indigenous_potential.empty()
+                    && std::any_of(unresolved->unresolved_names.begin(), unresolved->unresolved_names.end(),
+                        [](const auto& line) { return line.ends_with(": UNRESOLVED_INDIGENOUS_TYPE"); }),
+                "unresolved indigenous type is reported and adds no synthetic row");
+        }
+        {
             const auto rejected_catalog = must(eawr::data::with_overrides(loaded.catalog,
-                std::array{eawr::data::ValueOverride{location->original_type, "Potential_Indigenous_Power", {invalid}}}));
+                std::array{eawr::data::ValueOverride{location->original_type, "Potential_Indigenous_Power", {original_type.name + " 2147483648"}}}));
             expect(!cp::prepare_ai_selection_content(fs, rejected_catalog, data, types, planned),
-                "unresolved type and out-of-range mod admission refuse without synthetic rows");
+                "out-of-range mod admission refuses without synthetic rows");
         }
         const auto identity = eawr::core::sha256_hex(std::span<const std::uint8_t>{});
         std::string baseline;

@@ -254,6 +254,65 @@ void box_eligibility_and_icons() {
         && selection.units() == std::vector<sim::EntityId>{5}, "WSU-15: type selection filters decorations and half-open edges");
 }
 
+// #4919 (deliberate deviation): an allied structure is inspected, never selected. The selection
+// admission keys on `own`, so the inspect flag gives no click, double click, box, Ctrl or select-all
+// entry, while own structures and enemies behave as before.
+void allied_inspect_is_not_selection() {
+    auto ally = unit(40, 90, false, {0.0F, 0.0F, 0.0F}, std::array<float, 2>{50.0F, 50.0F});
+    ally.locomotion = false;
+    ally.allied_inspectable = true;
+    auto own = unit(41, 90, true, {20.0F, 0.0F, 0.0F}, std::array<float, 2>{60.0F, 60.0F});
+    own.locomotion = false;
+    auto enemy = unit(42, 91, false, {40.0F, 0.0F, 0.0F}, std::array<float, 2>{70.0F, 70.0F}, true);
+    enemy.locomotion = false;
+    const std::array units{ally, own, enemy};
+    const ui::ScreenRect area{0.0F, 0.0F, 200.0F, 200.0F};
+    ui::Selection selection;
+    expect(!selection.click(ally.entity, {}, units, area) && selection.empty(),
+        "#4919: a click never selects an allied structure");
+    expect(!selection.click(ally.entity, ui::Modifiers{true, false, false}, units, area)
+        && !selection.click(ally.entity, ui::Modifiers{false, true, false}, units, area) && selection.empty(),
+        "#4919: Shift and Ctrl clicks do not select it either");
+    expect(!selection.double_click(ally.entity, units, area) && selection.empty(),
+        "#4919: a double click does not select it or its type");
+    expect(!selection.box({0.0F, 0.0F, 55.0F, 55.0F}, false, units, {}) && selection.empty(),
+        "#4919: a box never takes it");
+    expect(selection.all(std::array{ally, enemy}) == false && selection.empty(), "#4919: select-all skips it");
+    expect(selection.click(own.entity, {}, units, area) && selection.units() == std::vector<sim::EntityId>{41},
+        "#4919: an own structure still selects");
+    expect(!selection.click(enemy.entity, {}, units, area) && selection.units() == std::vector<sim::EntityId>{41},
+        "#4919: an enemy structure is unchanged");
+    expect(ui::right_click(ui::OrderMode::none, &ally, false) == ui::RightClick::nothing,
+        "#4919: a right click on an allied structure still orders nothing");
+
+    // The derivation: alliance and ownership only.
+    ui::BattleUnit base;
+    base.locomotion = false;
+    expect(ui::allied_inspectable(base, true) && !ui::allied_inspectable(base, false),
+        "#4919: an allied static structure is inspectable, a non-ally is not");
+    auto mutated = [&](auto change) { auto copy = base; change(copy); return ui::allied_inspectable(copy, true); };
+    expect(!mutated([](ui::BattleUnit& u) { u.own = true; }) && !mutated([](ui::BattleUnit& u) { u.hostile = true; })
+        && !mutated([](ui::BattleUnit& u) { u.neutral = true; }) && !mutated([](ui::BattleUnit& u) { u.locomotion = true; })
+        && !mutated([](ui::BattleUnit& u) { u.decoration = true; }) && !mutated([](ui::BattleUnit& u) { u.part = 7; }),
+        "#4919: own, hostile, neutral, mobile, decoration and squadron-part units are never inspected");
+
+    // The click branch: a plain click on the flagged unit only.
+    ui::BattleUnit marked = ally;
+    marked.allied_inspectable = true;
+    const std::array marked_units{marked, own, enemy};
+    expect(ui::inspect_click(marked_units, marked.entity, false, {}) == &marked_units[0],
+        "#4919: a plain click on an allied structure inspects it");
+    expect(ui::inspect_click(marked_units, marked.entity, true, {}) == nullptr
+        && ui::inspect_click(marked_units, marked.entity, false, ui::Modifiers{true, false, false}) == nullptr
+        && ui::inspect_click(marked_units, marked.entity, false, ui::Modifiers{false, true, false}) == nullptr
+        && ui::inspect_click(marked_units, marked.entity, false, ui::Modifiers{false, false, true}) == nullptr
+        && ui::inspect_click(marked_units, std::nullopt, false, {}) == nullptr
+        && ui::inspect_click(marked_units, own.entity, false, {}) == nullptr
+        && ui::inspect_click(marked_units, enemy.entity, false, {}) == nullptr
+        && ui::inspect_click(marked_units, 999, false, {}) == nullptr,
+        "#4919: armed mode, modifiers, empty space, own, enemy and unknown picks never inspect");
+}
+
 void select_all() {
     auto units = fleet();
     units[4].mouse_sensitive = false; // keyboard selection needs no pointer contact
@@ -1323,6 +1382,7 @@ int main() {
     squadrons();
     clicks_and_boxes();
     box_eligibility_and_icons();
+    allied_inspect_is_not_selection();
     select_all();
     control_groups();
     overview();

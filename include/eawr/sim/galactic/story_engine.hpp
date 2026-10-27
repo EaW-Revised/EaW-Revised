@@ -40,6 +40,7 @@ inline constexpr int max_trigger_depth = 128;           // recursion guard: depe
 // as authored (WST-05), event and reward type names are kept exactly as written (WST-08).
 struct EventDef {
     std::string name;
+    std::string authored_name; // the name as written: the spelling the sub-plot's Lua event table is keyed by (WST-55)
     std::string type, reward_type;
     std::array<std::vector<std::string>, token_slots_event> params;
     std::array<std::vector<std::string>, token_slots_reward> reward_params;
@@ -113,6 +114,14 @@ struct Triggered {
     friend bool operator==(const Triggered&, const Triggered&) = default;
 };
 
+// WST-20 (3): a triggered event of a sub-plot with an attached script asks the Lua story host to call the
+// script's `Story_Event_Trigger(name)` before the reward record exists. `subplot` indexes definitions().
+struct ScriptCall {
+    std::size_t subplot{};
+    std::string event; // authored spelling
+    friend bool operator==(const ScriptCall&, const ScriptCall&) = default;
+};
+
 struct Config {
     // WST-14: outside solo and skirmish games only `Multiplayer` events are evaluated.
     bool solo{true};
@@ -135,6 +144,8 @@ public:
     [[nodiscard]] core::Result<void> service(math::Fixed time_seconds, bool paused);
     // The triggers since the last call, in order.
     [[nodiscard]] std::vector<Triggered> take_triggered();
+    // The Lua callbacks the triggers since the last call asked for, in trigger order (WST-20 (3)).
+    [[nodiscard]] std::vector<ScriptCall> take_script_calls();
 
     [[nodiscard]] const State& state() const noexcept;
     [[nodiscard]] core::Result<void> restore(State state);

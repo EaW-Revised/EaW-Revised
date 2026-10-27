@@ -22,6 +22,7 @@
 #include <functional>
 #include <ios>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -29,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -1443,15 +1445,28 @@ void movement_query_projection() {
 
 void mod_ai_calls() {
     World world;
+    world.host->setup.players[1].name = "Admiral Test";
     world.view->players.push_back({3, 2, 2});
     world.host->setup.players.push_back(foc::AiPlayer{3, "ALLY", false, true, ""});
     world.host->players.clear();
     for (const auto& player : world.host->setup.players) world.host->players.emplace(player.player, &player);
     world.host->setup.content.types.front().combat_power = ai::real(16777216);
     world.host->setup.content.types.front().property_bits = 2;
+    world.host->setup.content.types.front().tactical_cost = eawr::sim::math::Fixed::from_integer(1234).value();
     world.host->setup.content.properties = {{"FIRST", 1}, {"SECOND", 2}};
     auto small = world.host->setup.content.types.front(); small.type_id = 2; small.name = "SMALL"; small.combat_power = ai::real(1);
+    small.tactical_cost = eawr::sim::math::Fixed{};
     world.host->setup.content.types.push_back(small);
+    auto missing_cost = small; missing_cost.type_id = 3; missing_cost.name = "MISSING_COST";
+    missing_cost.tactical_cost.reset();
+    missing_cost.category_bits = 0; missing_cost.property_bits = 0;
+    world.host->setup.content.types.push_back(missing_cost);
+    using CatalogNames = std::vector<std::pair<std::string, eawr::sim::tactical::TypeId>>;
+    world.host->setup.content.catalog_types = std::make_shared<const CatalogNames>(CatalogNames{
+        {"CATALOG_ONLY", 4}, {"EMPIRE_STAR_BASE_1", 777}});
+    world.host->setup.content.categories.emplace("ALL", std::numeric_limits<std::uint64_t>::max());
+    world.host->setup.content.categories.emplace("ALL32", 0xffffffffULL);
+    world.host->setup.content.properties.emplace("PROP_ALL", std::numeric_limits<std::uint64_t>::max());
     world.host->types.clear(); world.host->types_by_name.clear();
     for (const auto& type : world.host->setup.content.types) {
         world.host->types.emplace(type.type_id, &type); world.host->types_by_name.emplace(type.name, &type);
@@ -1464,6 +1479,15 @@ void mod_ai_calls() {
     auth::ModuleManifest manifest;
     expect(manifest.add("CALLS.LUA", R"LUA(
         function Block(tf) tf.Block_Goal_Proposal() end
+        function PlayerName(player)
+            stored_name = player.Get_Name()
+        end
+        function AlliedAfterName(object, player)
+            -- Exercise the name-to-log-to-alliance path used by Shared/Util.lua.
+            logged_name = tostring(player.Get_Name())
+            stored_faction = player.Get_Faction_Name()
+            allied_after_name = object.Get_Owner().Is_Ally(player)
+        end
         function Unblock(tf) tf.Unblock_Goal_Proposal() end
         function SkippedOverride(object)
             skipped_no_result = object.Set_Targeting_Priorities('Custom_Set') == nil
@@ -1484,10 +1508,42 @@ void mod_ai_calls() {
             ally_enemy = object.Get_Owner().Is_Ally(Find_Player('REBEL'))
             own_count = table.getn(Find_All_Objects_Of_Type(object.Get_Owner(), 'CORVETTE'))
             total_count = table.getn(Find_All_Objects_Of_Type('CORVETTE'))
+            local owner = object.Get_Owner()
+            local forward = Find_All_Objects_Of_Type(owner, 'CORVETTE')
+            local reverse = Find_All_Objects_Of_Type('CORVETTE', owner)
+            same_order = table.getn(forward) == table.getn(reverse)
+            for i, found in ipairs(forward) do
+                same_order = same_order and found == reverse[i]
+            end
+            player_only = table.getn(Find_All_Objects_Of_Type(owner))
+            exact_type = table.getn(Find_All_Objects_Of_Type(object.Get_Type(), owner))
+            combined = table.getn(Find_All_Objects_Of_Type('Second', 'CORVETTE', owner, object.Get_Type()))
+            absent = table.getn(Find_All_Objects_Of_Type('First', owner))
+            catalog_absent = table.getn(Find_All_Objects_Of_Type('Empire_Star_Base_1', owner))
+            generic_cost = object.Get_Type().Get_Build_Cost()
+            zero_cost = Find_Object_Type('SMALL').Get_Build_Cost()
             category_union = object.Is_Category('Fighter | Corvette')
             category_absent = object.Is_Category('Fighter')
             property_union = object.Has_Property('First | Second')
         end
+        function SentinelQuery(object)
+            local owner = object.Get_Owner()
+            all_owner = table.getn(Find_All_Objects_Of_Type('ALL', owner))
+            plain_owner = table.getn(Find_All_Objects_Of_Type(owner))
+            all_then_category = table.getn(Find_All_Objects_Of_Type('ALL', 'CORVETTE', owner))
+            all_properties = table.getn(Find_All_Objects_Of_Type('PROP_ALL', owner))
+            all_then_property = table.getn(Find_All_Objects_Of_Type('PROP_ALL', 'Second', owner))
+            finite_mask = table.getn(Find_All_Objects_Of_Type('ALL32', owner))
+            catalog_live = table.getn(Find_All_Objects_Of_Type('CATALOG_ONLY', owner))
+        end
+        function LateCategoryAllQuery() Find_All_Objects_Of_Type('CORVETTE', 'ALL', Find_Player('EMPIRE')) end
+        function LatePropertyAllQuery() Find_All_Objects_Of_Type('First', 'PROP_ALL', Find_Player('EMPIRE')) end
+        function AllOnlyQuery() Find_All_Objects_Of_Type('ALL') end
+        function PropertyOnlyQuery() Find_All_Objects_Of_Type('PROP_ALL') end
+        function InvalidQuery() Find_All_Objects_Of_Type('UNDEFINED_FILTER') end
+        function EmptyQuery() Find_All_Objects_Of_Type() end
+        function DuplicateQuery() Find_All_Objects_Of_Type('CORVETTE', 'CORVETTE') end
+        function MissingCost() Find_Object_Type('MISSING_COST').Get_Build_Cost() end
     )LUA").has_value(), "EX-53/54/55: call fixture enters manifest");
     auto scripts = auth::ScriptScheduler::create({}, std::move(manifest));
     expect(scripts.has_value(), "EX-53/54/55: call scheduler starts"); if (!scripts) return;
@@ -1512,6 +1568,26 @@ void mod_ai_calls() {
         if (report) expect(engine.after_service(report.value()).has_value(), "EX-55: ordered proposal effect commits");
     };
     const auto force = [](std::uint64_t id) { return auth::Value{auth::Handle{ai::handle_taskforce, id}}; };
+    const auto player_handle = [](std::uint64_t id) { return auth::Value{auth::Handle{foc::handle_player, id}}; };
+    const auto object_handle = auth::Value{auth::Handle{foc::handle_game_object, 10}};
+    for (const auto& [id, name, faction] : {std::tuple{2U, "Admiral Test", "EMPIRE"}, std::tuple{3U, "", "ALLY"}}) {
+        invoke(1, "AlliedAfterName", {object_handle, player_handle(id)});
+        const auto logged = scripts.value().read_global(1, "logged_name");
+        const auto stored_faction = scripts.value().read_global(1, "stored_faction");
+        const auto allied = scripts.value().read_global(1, "allied_after_name");
+        expect(logged && logged.value() && std::get_if<std::string>(&logged.value()->data)
+            && std::get<std::string>(logged.value()->data) == name,
+            "RGC-126: name logging accepts distinct and empty stored names without aborting the caller");
+        expect(stored_faction && stored_faction.value() && std::get_if<std::string>(&stored_faction.value()->data)
+            && std::get<std::string>(stored_faction.value()->data) == faction,
+            "RGC-126: the faction query stays independent of the stored name");
+        expect(allied && allied.value() && std::get_if<bool>(&allied.value()->data)
+            && std::get<bool>(allied.value()->data), "RGC-126: alliance evaluation continues after player-name logging");
+    }
+    invoke(1, "PlayerName", {player_handle(99)});
+    const auto absent_name = scripts.value().read_global(1, "stored_name");
+    expect(absent_name && absent_name.value() && std::holds_alternative<std::monostate>(absent_name.value()->data),
+        "RGC-126: an unavailable player returns no name");
     invoke(1, "Block", {force(1)}); invoke(1, "Block", {force(1)}); invoke(2, "Block", {force(2)});
     expect(ai::EngineContractAccess::player(engine, 2)->proposal_blocks == 3, "EX-55: repeated and independent holders are counted");
     invoke(1, "Unblock", {force(1)});
@@ -1543,6 +1619,46 @@ void mod_ai_calls() {
     expect(own && own.value() && std::get<Real>(own.value()->data) == ai::real(3)
         && total && total.value() && std::get<Real>(total.value()->data) == ai::real(4),
         "AI-16: player-first object lookup preserves ownership and category matching");
+    for (const auto& [name, expected] : {std::pair{"player_only", 3}, {"exact_type", 1},
+            {"combined", 1}, {"absent", 0}, {"catalog_absent", 0}, {"generic_cost", 1234}, {"zero_cost", 0}}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected),
+            "RGC-112: owner, exact type, property and category filters intersect; generic cost reads type data");
+    }
+    const auto same_order = scripts.value().read_global(1, "same_order");
+    expect(same_order && same_order.value() && std::get<bool>(same_order.value()->data),
+        "RGC-112/113: either argument order returns the same objects in manager traversal order");
+    std::uint64_t invalid_instance = 3;
+    extra.id = 14; extra.owner = 2; extra.type = 3; world.view->units.push_back(extra);
+    extra.id = 15; extra.type = 4; world.view->units.push_back(extra);
+    invoke(1, "SentinelQuery", {auth::Value{auth::Handle{foc::handle_game_object, 10}}});
+    for (const auto& [name, expected] : {std::pair{"all_owner", 5}, {"plain_owner", 5}, {"all_then_category", 3},
+            {"all_properties", 5}, {"all_then_property", 3}, {"finite_mask", 3}, {"catalog_live", 1}}) {
+        const auto value = scripts.value().read_global(1, name);
+        expect(value && value.value() && std::get<Real>(value.value()->data) == ai::real(expected),
+            "RGC-112: sentinel-first replacement and metadata-free owner queries retain live ID matches");
+    }
+    for (const char* query : {"InvalidQuery", "EmptyQuery", "DuplicateQuery", "MissingCost",
+            "AllOnlyQuery", "PropertyOnlyQuery", "LateCategoryAllQuery", "LatePropertyAllQuery"}) {
+        expect(scripts.value().create_instance(invalid_instance, "CALLS.LUA").has_value(),
+            "RGC-112: each failing query has an independent instance");
+        auth::ScriptEvent event;
+        event.key = {scripts.value().completed_tick() + 1, foc::producer_foc_engine, invalid_instance, sequence++};
+        event.target = invalid_instance++; event.kind = auth::ScriptEvent::Kind::call; event.name = query;
+        expect(scripts.value().submit_event(std::move(event)).has_value(), "RGC-112: invalid query queues");
+        const auto report = scripts.value().service(executor);
+        expect(report && report.value().diagnostics.size() == 1,
+            "RGC-112/125: invalid filters and unavailable cost metadata report a Lua error");
+        if (std::string_view(query) == "InvalidQuery" && report && !report.value().diagnostics.empty())
+            expect(report.value().diagnostics.front().message.find("argument 1 'UNDEFINED_FILTER'") != std::string::npos,
+                "RGC-112: rejected filters identify the argument and authored name");
+        if (report && !report.value().diagnostics.empty()) {
+            const std::string_view late_filter = std::string_view(query) == "LateCategoryAllQuery" ? "argument 2 'ALL'"
+                : std::string_view(query) == "LatePropertyAllQuery" ? "argument 2 'PROP_ALL'" : "";
+            if (!late_filter.empty()) expect(report.value().diagnostics.front().message.find(late_filter) != std::string::npos,
+                "RGC-112: a finite mask prevents decoding a later sentinel in the same namespace");
+        }
+    }
     expect(category_union && category_union.value() && std::get<bool>(category_union.value()->data)
         && category_absent && category_absent.value() && !std::get<bool>(category_absent.value()->data)
         && property_union && property_union.value() && std::get<bool>(property_union.value()->data),
@@ -1610,6 +1726,64 @@ void taskforce_definitions() {
     }
     expect(tf.minimum_size == 3 && tf.escort, "PL-11: keywords");
     expect(definition.allow_free_store && definition.allow_engaged && !definition.ignore_target, "PL-12: flag defaults");
+
+    // PL-11/20: registration is independent of loaded battle metadata.
+    using CatalogNames = std::vector<std::pair<std::string, eawr::sim::tactical::TypeId>>;
+    world.host->setup.content.catalog_types = std::make_shared<const CatalogNames>(CatalogNames{
+        {"CORVETTE", 90}, {"CRAFT_A", 3}, {"FRIGATE_A", 99}, {"REGISTERED_A", 80}, {"REGISTERED_B", 70}});
+    const auto parse = [&](std::string row, bool drop) {
+        globals[1] = auth::Value{std::vector<auth::Value>{auth::Value{std::vector<auth::Value>{
+            auth::Value::text("MainForce"), auth::Value::text(std::move(row))}}}};
+        notes.clear();
+        return ai::build_plan(*world.host, "registered", "registered.lua", globals, notes, drop);
+    };
+    for (const bool drop : {false, true}) {
+        const auto registered = parse("Registered_A | Frigate_A | Registered_B | registered_a | FRIGATE_A = 1", drop);
+        expect(registered && notes.empty(), "PL-11: registered names outside the battle closure resolve without diagnostics");
+        if (registered) {
+            expect(registered.value().taskforces.front().teams.size() == 1
+                && registered.value().taskforces.front().teams.front().types
+                    == std::vector<eawr::sim::tactical::TypeId>{80, 2, 70},
+                "PL-20: mixed loaded/catalog names retain authored order and dedup; loaded metadata wins");
+        }
+        const auto collision = parse("Corvette = 1", drop);
+        expect(collision && collision.value().taskforces.front().teams.size() == 1
+            && collision.value().taskforces.front().teams.front().types == std::vector<eawr::sim::tactical::TypeId>{1},
+            "PL-11: a category wins over a registered type of the same name");
+        const auto member = parse("Craft_A = 1", drop);
+        expect(member && member.value().taskforces.front().teams.empty() && notes.empty(),
+            "PL-11: catalog fallback cannot bypass the loaded craft exclusion");
+        const auto undefined = parse("Undefined = 1", drop);
+        expect(undefined && notes == std::vector<std::string>{"unknown type Undefined in MainForce"},
+            "PL-11: truly undefined names retain their diagnostic");
+        if (undefined) {
+            const auto& teams = undefined.value().taskforces.front().teams;
+            expect(drop ? teams.empty() : teams.size() == 1 && teams.front().types.empty(),
+                "PL-11: undefined names retain the caller's unresolved-row policy");
+        }
+    }
+    const auto absent = parse("Registered_A = 1", false);
+    expect(absent && !world.host->type(80) && !world.host->types_by_name.contains("REGISTERED_A")
+        && world.host->setup.content.types.size() == 3,
+        "PL-11: resolving registration does not manufacture combat/craft metadata");
+    if (!absent) return;
+    // Even a live view row with the registered ID cannot bypass the metadata gate.
+    ai::ViewUnit unavailable;
+    unavailable.id = 90;
+    unavailable.type = 80;
+    unavailable.owner = 2;
+    world.view->units.push_back(unavailable);
+    for (const bool allow_store : {false, true}) {
+        auto candidate = absent.value();
+        candidate.allow_free_store = allow_store;
+        ai::Engine engine(world.host, {}, {candidate});
+        world.host->engine = &engine;
+        ai::PlayerAi player;
+        player.player = 2;
+        ai::PotentialPlan potential;
+        expect(!ai::EngineContractAccess::selection(engine, player, potential, 67) && potential.units.empty(),
+            "PL-11: catalog-only metadata admits neither phantom production nor a live free-store row");
+    }
 }
 
 

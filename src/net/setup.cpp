@@ -55,7 +55,7 @@ bool valid_setup_text(const sim::tactical::TacticalSetup& setup) {
     const auto valid = [](std::string_view value) { return sanitize_lan_text(value, 1024) == value; };
     const auto& metadata = *setup.skirmish;
     if (!valid(metadata.map) || !valid(metadata.map_sha256) || !valid(metadata.match.win_condition)
-        || !valid(metadata.match.space_win_condition)) return false;
+        || !valid(metadata.match.tactical_win_condition)) return false;
     for (const auto& slot : metadata.slots)
         for (const auto& name : slot.fleet) if (!valid(name)) return false;
     return true;
@@ -161,6 +161,12 @@ core::Diagnostic SetupRefusal::diagnostic() const {
     }
     return result;
 }
+std::optional<SetupRefusal> skirmish_start_refusal(const sim::tactical::TacticalSetup& setup) {
+    if (setup.domain == sim::tactical::BattleDomain::land)
+        return SetupRefusal{SetupReason::land_unsupported, "land",
+            "Land tactical multiplayer is not available yet.", {}, {}};
+    return {};
+}
 core::Result<Bytes> encode_skirmish_setup(const sim::tactical::TacticalSetup& setup) {
     if (!valid_setup_text(setup))
         return error<Bytes>(SetupReason::options, "skirmish setup requires SKSU metadata with valid UTF-8 text");
@@ -248,7 +254,7 @@ core::Result<Bytes> encode_setup_refusal(const SetupRefusal& input) {
     auto refusal = input;
     refusal.domain = sanitize_lan_text(refusal.domain, 128);
     refusal.message = sanitize_lan_text(refusal.message, 1024);
-    if (static_cast<unsigned>(refusal.reason) > 7 || refusal.domain.size() > 128
+    if (static_cast<unsigned>(refusal.reason) > static_cast<unsigned>(SetupReason::land_unsupported) || refusal.domain.size() > 128
         || refusal.message.empty() || refusal.message.size() > 1024
         || (refusal.reason == SetupReason::tick_zero
             ? (!(refusal.local_hash.empty() && refusal.remote_hash.empty())
@@ -262,7 +268,8 @@ core::Result<Bytes> encode_setup_refusal(const SetupRefusal& input) {
     return core::Result<Bytes>::success(std::move(bytes));
 }
 core::Result<SetupRefusal> decode_setup_refusal(std::span<const std::uint8_t> frame) {
-    if (frame.size() < 2 || frame.size() > 1408 || frame[0] != setup_refuse_kind || frame[1] > 7)
+    if (frame.size() < 2 || frame.size() > 1408 || frame[0] != setup_refuse_kind
+        || frame[1] > static_cast<unsigned>(SetupReason::land_unsupported))
         return error<SetupRefusal>(SetupReason::malformed, "invalid refusal envelope");
     SetupRefusal refusal{static_cast<SetupReason>(frame[1]), {}, {}, {}, {}};
     Reader reader{frame.subspan(2)};
@@ -373,6 +380,11 @@ struct SetupRuntime final : SessionMonitor, MessageTransport {
         if (offer.seats.size() != transport->peer_count()) return fail(SetupReason::options, "offer roster differs from transport");
         if (offer.final_tick_count != options.session.final_tick_count)
             return fail(SetupReason::options, "local final tick count differs from agreed setup");
+        if (offer.domain == tactical_setup_domain) {
+            auto setup = decode_skirmish_setup(offer.setup);
+            if (!setup) return fail(SetupReason::malformed, setup.error().message);
+            if (auto rejected = skirmish_start_refusal(setup.value())) return refuse(std::move(*rejected));
+        }
         auto local = providers.identify(offer);
         if (!local) return fail(SetupReason::local_build, local.error().message);
         if (auto valid = sim::validate_match_identity(local.value().content); !valid)

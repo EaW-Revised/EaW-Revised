@@ -30,9 +30,6 @@ constexpr std::uint32_t entry_slot = 0xfffe0002U;
 constexpr std::uint32_t bay_slot = 0xfffe0003U;
 
 constexpr std::uint64_t service_interval = 30; // SPAWN_SQUADRON's service interval base (FL-01)
-constexpr std::size_t max_members = 64;
-constexpr std::size_t max_entries = 64;
-constexpr std::size_t max_bays = 255;
 
 template <typename T>
 [[nodiscard]] const T* find_by_type(const std::vector<T>& rows, const TypeId type_id) noexcept {

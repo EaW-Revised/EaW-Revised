@@ -3,8 +3,6 @@
 #include <algorithm>
 #include <bit>
 #include <cstdlib>
-#include <iomanip>
-#include <sstream>
 #include <string_view>
 
 // Only the qualified x86-64 route is enabled. Other targets, including ARM,
@@ -263,12 +261,13 @@ std::string sha256_hex(const std::span<const std::uint8_t> bytes) {
 
 std::string sha256_hex(const std::span<const std::uint8_t> bytes, const Sha256Backend backend) {
     const auto digest = sha256(bytes, backend);
-    std::ostringstream output;
-    output << std::hex << std::setfill('0');
-    for (const auto byte : digest) {
-        output << std::setw(2) << static_cast<unsigned>(byte);
+    constexpr char digits[] = "0123456789abcdef";
+    std::string output(digest.size() * 2, '\0');
+    for (std::size_t index = 0; index < digest.size(); ++index) {
+        output[index * 2] = digits[digest[index] >> 4U];
+        output[index * 2 + 1] = digits[digest[index] & 15U];
     }
-    return output.str();
+    return output;
 }
 
 } // namespace eawr::core

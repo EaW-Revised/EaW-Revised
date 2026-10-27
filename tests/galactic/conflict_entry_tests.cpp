@@ -113,6 +113,57 @@ void native_content_selection() {
     expect(!campaign::native_scene_tables(raw, exact, {}), "native replay rejects the wrong campaign multiplayer mode");
 }
 
+void native_rocket_selection() {
+    auto raw = synthetic_tables(); raw.campaign_scene = true;
+    // Renamed fleet, purchased unit and squadron craft expose all route profiles transitively.
+    raw.units[0].production.buildable_campaign = {{"Custom_Faction", {"Station", "Squadron"}}};
+    for (auto& member : raw.units[2].members) member.craft_index = 3;
+    const std::array<std::array<int, 5>, 12> routes{{{{400, 5, 300, 20000, 1}}, {{800, 5, 400, 20000, 1}},
+        {{400, 180, 120, 3000, 1}}, {{400, 5, 300, 20000, 0}}, {{1000, 0, 10000, 500, 1}},
+        {{1000, 0, 10000, 950, 1}}, {{200, 0, 20000, 17500, 1}}, {{200, 0, 20000, 3000, 1}},
+        {{200, 0, 20000, 6000, 1}}, {{200, 10, 500, 1800, 0}}, {{250, 150, 150, 1800, 0}},
+        {{800, 250, 400, 9000, 1}}}};
+    for (std::size_t i = 0; i < routes.size(); ++i) {
+        units::Projectile p; p.id = "Route_" + std::to_string(i); p.category = "ROCKET";
+        p.rocket_curve_distance = whole(routes[i][0]); p.rocket_curve_offset = whole(routes[i][1]);
+        p.rocket_straight_distance = whole(routes[i][2]); p.max_flight_distance = whole(routes[i][3]);
+        p.explode_at_target_radius = routes[i][4] != 0;
+        raw.projectiles.push_back(p);
+    }
+    for (const auto index : {0U, 1U, 3U}) {
+        raw.units[index].weapon.emplace(); raw.units[index].weapon->projectile_index = index == 3 ? 2 : index;
+    }
+    units::Hardpoint launcher; launcher.id = "Custom_Rocket_Launcher"; launcher.weapon = raw.units[1].weapon;
+    raw.units[1].hardpoints.push_back(launcher); raw.units[1].weapon.reset();
+    for (std::uint32_t i = 3; i < routes.size(); ++i) raw.units[0].death_projectile_indices.push_back(i);
+    auto unreachable = raw.projectiles.front(); unreachable.id = "Unreachable_Bad_Route";
+    unreachable.rocket_curve_distance = Fixed{}; raw.projectiles.push_back(unreachable);
+    units::LoadInput source; source.types = {"Ship"};
+    auto scene = campaign::native_scene_selection(source, raw); scene.battle_types = {"Ship"};
+    const auto selected = campaign::native_scene_tables(raw, scene, {});
+    expect(selected && selected.value().projectiles.size() == routes.size(),
+        "RFL-03/05: GC admits every reachable seeded and extended route and excludes unrelated invalid prototypes");
+    if (selected) {
+        const auto* station = selected.value().find("Station");
+        expect(station && !station->hardpoints.empty() && station->hardpoints.front().weapon
+            && selected.value().projectiles[station->hardpoints.front().weapon->projectile_index].id == "Route_1",
+            "GC follows and rebinds the unit-to-hardpoint-to-rocket leg");
+    }
+    if (selected) for (const auto& p : raw.projectiles) {
+        if (p.id == unreachable.id) continue;
+        const auto at = std::find_if(selected.value().projectiles.begin(), selected.value().projectiles.end(),
+            [&](const auto& candidate) { return candidate.id == p.id; });
+        expect(at != selected.value().projectiles.end() && *at == p, "reachable rocket route values survive GC projection");
+    }
+    raw.projectiles[0].rocket_curve_distance = Fixed{};
+    raw.projectiles[2].rocket_curve_distance = whole(-1);
+    const auto invalid = campaign::native_scene_tables(raw, scene, {});
+    expect(!invalid && invalid.error().message.find("Route_0") != std::string::npos
+        && invalid.error().message.find("Route_2") != std::string::npos
+        && invalid.error().message.find(unreachable.id) == std::string::npos,
+        "GC route guard reports every failing reachable projectile together");
+}
+
 void queued_pending_alerts() {
     namespace gc = sim::galactic;
     const auto setup = gc::synthetic_galaxy({7, 2, 2, 1, 1, false});
@@ -925,6 +976,6 @@ int main(const int argc, char** argv) {
         return galactic_test::failures == 0 ? 0 : 1;
     }
     if (argc == 3 || argc == 4) return export_installed(argv[1], argv[2], argc == 4 ? argv[3] : "");
-    contracts(); queued_pending_alerts(); native_content_selection(); battle_choice_admission();
+    contracts(); queued_pending_alerts(); native_content_selection(); native_rocket_selection(); battle_choice_admission();
     return galactic_test::failures == 0 ? 0 : 1;
 }

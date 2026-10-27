@@ -29,6 +29,6 @@ struct LiveAi {
 [[nodiscard]] core::Result<LiveAi> live_ai(const skirmish::SkirmishStart& start, const skirmish::StartInputs& inputs,
     const units::UnitTables& tables, const vfs::Vfs& files,
     std::shared_ptr<const BattleScoring> scoring = {},
-    std::shared_ptr<script::foc::AiJournal> journal = {});
+    std::shared_ptr<script::foc::AiJournal> journal = {}, bool trace_proposals = false);
 
 } // namespace eawr::platform

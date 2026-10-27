@@ -160,6 +160,21 @@ the directions a ship turns toward ([space weapon fire A-06](behaviour/space-wea
 collidable meshes (each mesh's bounds placed by its bone's bind frame, then scaled and turned like
 the points); a model without collidable meshes gives none.
 
+## Content errors (legacy EAWR-4589)
+
+FoC loads a game with a bad object in it. Ours follows suit where it can: `combat_table` takes a
+`ContentErrors` policy. `strict` (the default, used by our CI, `unit_scan` and the tests) refuses the whole table on
+the first unit type that fails. `skip_object` (the viewer's live and replay sessions) leaves that type out of the
+table, appends a diagnostic to the caller's `skipped` list (`skipped unit type '<id>': <reason>`; the viewer prints
+each to the log as `EAWR live session content: ...`) and builds the rest, so only a battle that places the type fails.
+A value FoC accepts is never an error in either mode (ion stun reductions: IS-10 in
+[space damage](behaviour/space-damage.md)); a magnitude beyond the saturation limit (+-1024) is clamped there, with a warning in a
+`skip_object` load and silently in a `strict` one. A start or recording that places a skipped type fails with a diagnostic naming
+the type, the build menus drop skipped types, and the skip set joins the match identity (`skipped-types` domain), so peers and
+replays with another skip set refuse each other. `ability_table` follows the same rule per type (legacy EAWR-4666): each type is checked with
+`validate_ability_profile`, so one bad ability entry skips that type and not the whole table. The other tables (durability, motion) and
+the whole-table `validate_combat` are still all-or-nothing; the Republic at War scan (legacy EAWR-4589) lists what they refuse.
+
 ## Damage rules
 
 `units::durability_table` binds the damage rules: the shield recharge interval in frames,
@@ -179,7 +194,7 @@ object weapon its projectile's `Projectile_Energy_Per_Shot` ([space damage](beha
 (the kinds of AB-02, AB-03 and [the ability walk](behaviour/walks/abilities.md), including `HUNT`
 and the Y-wing team's `ION_CANNON_SHOT`) its `Expiration_Seconds` and `Recharge_Seconds` truncated
 to frames, `Supports_Autofire` and the ten `Mod_Multiplier` kinds of AB-26 to AB-29 (1 when not
-authored), and whether it runs `ObjectScript_PowerToShields` with `DEFEND` (AB-41). Squadron
+authored; a type keeps every ability it authors, one per kind, (legacy EAWR-4666); a kind authored twice keeps its last entry, because FoC fills one object slot per kind in authored order (debug build), and the load warns), and whether it runs `ObjectScript_PowerToShields` with `DEFEND` (AB-41). Squadron
 types are skipped (their craft's data acts, AB-15), except a team container's own ion shot and
 buzz droids. A kind the table does not model is skipped, and so is an ability that authors any
 `Mod_Multiplier` name outside those ten or a nested handler it needs but lacks; the skip is
@@ -318,6 +333,14 @@ just before the nested special-ability extension. The tactical AI's `Is_Hero` re
 flag (WTA-36). FoC's pinned M2 tables load the space-mode Ion Cannon and Hypervelocity
 Gun, which author it, so their identity includes this extension.
 
+Tables load for a battle domain (`LoadInput.domain`, default space; BF-2). One selector
+(`include/eawr/units/domain_tags.hpp`) maps a stem to the domain's XML spelling: the reveal range
+(`Space_FOW_Reveal_Range` / `Land_FOW_Reveal_Range`), the layer (`Space_Layer`; land authors none), the
+speed and health constants (`Object_Max_*_Multiplier_Space` / `_Land`) and the always-on activation
+style (`Space_Automatic` / `Ground_Automatic`). A land table ends its encoding with a
+`land-domain-variants-v1` record holding the domain; a space table writes nothing, so its identity is
+unchanged.
+
 Unresolved rows, notes, input files, source layers and host paths are not encoded.
 Relocating an install, or editing a tag the tables do not read, leaves the identity
 unchanged. Any loaded value, bone position or missing field changes it. M2 replays put
@@ -369,3 +392,53 @@ only their content-identity bytes changed. The independent M2 setup decoder
 computes the resulting tick-zero hash. The lifecycle state uses PADS version 2
 for cooldown starts and pending due-frame batches, as specified in
 [the replay format](replay-format.md).
+
+## Land companies L2a (legacy EAWR-1450)
+
+A table loaded with the land battle domain decodes every `*Company` object it is asked for into
+`UnitTables::land_companies` (include/eawr/units/land_companies.hpp), in first-reference order. A space
+load never reads them and its content identity is unchanged: the `land-companies-v1` record trails the
+encoding only when a land load produced profiles. The profile keeps:
+
+- the ordered `Company_Units` members, repeats kept (LC-01, LC-04). With no member list the company is a
+  direct object and its one member is the company object. Each member carries its object kind
+  (infantry, vehicle, hero, structure, other: from the authored class, hero flags and `MovementClass`,
+  never from name lists), its first authored `*_LOCOMOTOR` behaviour as the per-member locomotor class,
+  `Create_Team`, hero flags, `Unique_Ground_Unit` and `Max_Speed`;
+- `Max_Squad_Size`, a whole number of at least 1 or refused, and left absent when unauthored;
+- the team type (`Create_Team_Type` on the company, else on the first member) resolved with its
+  `Max_Speed` as the team speed source (LC-06). An unauthored type is the generic team fallback and stays
+  empty in the profile.
+
+A member, team type or size that does not resolve leaves an unresolved row and the company out of the
+table. `plan_land_company` expands a profile to its ordered members with the source company and groups the
+created members into squads of at most `Max_Squad_Size` (LC-02, LC-03). A `created` mask marks failed
+members; the survivors keep their order and regroup among themselves (LC-01). When a team forms but the
+size is unauthored the plan holds one squad and reports `squad_size_authored = false`; retail's value for
+that case is not established. `land_kind_route` is the LC-05 dispatch row per object kind. Tactical
+creation, placement (LC-13, LC-43) and movement are later work.
+
+### Land combat rows (LS shoot PR 1)
+
+A land table also loads each company member (the company pulls its members in) and each damageable static
+map object as a `UnitType` through `load_land_body`. A ground class, a movement class, or an object that
+authors `Land_Model_Name` and no `Space_Model_Name` takes this route; the domain selector names the model
+tag (`DomainTag::model_name`: `Space_Model_Name` / `Land_Model_Name`). The body reads, all optional, the
+rows a land object authors on itself: `Tactical_Health` (a non-positive value leaves no durability row),
+`Shield_Points`, `Armor_Type`, `Shield_Armor_Type`, `Damage_Type`; `Projectile_Types` (first kept),
+`Projectile_Damage` (a positive value replaces the projectile row's damage), the recharge, pulse count and
+pulse delay, `Targeting_Fire_Inaccuracy`, the cone and muzzle rows; `Targeting_Priority_Set`, the max/min
+attack distance, stickiness, the three chase ranges and `Ranged_Target_Z_Adjust`; `Collidable_By_Projectile_Living`
+and `_Dead`; the footprint and model collision; and the death presentation rows (`Death_Clone`,
+`Death_Fade_Time`, `Death_Persistence_Duration`). Projectile rows load by name like the space ones. No
+hardpoints, turret poses, abilities or production are read for land. The land table encoding ends with a
+`land-combat-rows-v1` record for the rows the core unit encoding lacks; space tables write nothing.
+
+`build_land_bindings` turns the loaded rows into `LandStartBindings::durability` and `::combat` (the same
+`durability_table` and `combat_table` the space start uses, with the land health multiplier), and
+`build_land_start` places them in `TacticalContent`. A table without a damageable or armed type binds empty
+tables. `LandContentInputs::content_errors` defaults to `skip_object`: a type with a bad combat row is left
+out and named in the binding notes. The land step does not read the tables yet, so there is no behaviour
+change; the `land-content` identity domain is version 2 and the adapter fingerprint `land-content-adapter-v4`.
+A caller that wants the map's statics in the combat tables passes their names in `LoadInput::obstacles`
+(`read_land_start_inputs` returns them in `static_tables`).

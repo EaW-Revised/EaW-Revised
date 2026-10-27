@@ -170,7 +170,8 @@ void SpacePopulation::write_report(std::ostream& output) const {
             if (!binding.applied || !binding.muzzle) continue;
             const auto frame = sim::math::compose(*live_transforms_[ship], binding.attachment_frame);
             if (!frame) continue;
-            const auto& muzzle = binding.pose.bones[*binding.muzzle].model_asset;
+            const auto& palette = binding.parent_model ? parent_hardpoint_turret_bindings_[ship]->pose : binding.pose;
+            const auto& muzzle = palette.bones[*binding.muzzle].model_asset;
             output << (first_turret ? "" : ", ") << "{\"entity\": " << options_.placed_ships[ship].live_entity
                    << ", \"hardpoint\": " << hardpoint
                    << ", \"yaw\": " << static_cast<double>(binding.applied->yaw.raw()) / sim::math::Fixed::scale

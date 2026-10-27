@@ -85,6 +85,7 @@ enum class GalacticRejectReason : std::uint8_t {
     movement_blocked = 13, // coordinator-reserved
     victory_unavailable = 20, // coordinator-reserved
     production_admission = 14, // value: ProductionAdmission
+    insufficient_credits = 15, // the mover cannot pay the bribe admission cost of the path (WGM-84)
     observer_input = 18, // invalid source, clock or supplied observer facts
 };
 

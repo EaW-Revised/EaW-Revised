@@ -282,6 +282,7 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
             (definition_.emitters[child].creator_id==39||definition_.emitters[child].creator_id==40))
             children_[parent].push_back(child);
     }
+    for (const auto& emitter : emitters_) initial_active_.push_back(static_cast<std::uint8_t>(emitter.active));
     capacities_=emitter_capacity_plan(definition_,mesh_vertex_count_,max_particles_);
     std::size_t reserved{};
     for(std::size_t index=0;index<capacities_.size();++index){
@@ -313,6 +314,29 @@ CpuSystem::CpuSystem(SystemDefinition definition,const std::uint32_t seed,const 
         for(std::size_t submesh=0;submesh<mesh_binding_->geometry.submeshes.size();++submesh)
             for(std::size_t vertex=0;vertex<mesh_binding_->geometry.submeshes[submesh].vertices.size();++vertex)
                 mesh_vertices_.push_back({submesh,vertex});
+    }
+}
+
+void CpuSystem::reset(const std::uint32_t seed) {
+    particles_.clear(); events_.clear(); child_instances_.clear(); disturbances_.clear();
+    next_particle_id_ = next_instance_id_ = 1;
+    random_state_ = seed ? seed : 1U; total_dropped_ = 0; time_ = 0;
+    detached_ = prerolled_ = origin_set_ = dynamic_settings_ = false;
+    dynamic_size_ = dynamic_energy_ = 1.0F;
+    origin_ = previous_origin_ = sampled_origin_ = update_origin_start_ = emitter_velocity_ = wind_ = {};
+    basis_ = previous_basis_ = sampled_basis_ = update_basis_start_ = {};
+    update_before_ = update_delta_ = inherited_speed_limit_ = 0;
+    phase_ms_ = {}; detail_ = {};
+    std::fill(enabled_.begin(), enabled_.end(), std::uint8_t{1});
+    std::fill(emitter_start_.begin(), emitter_start_.end(), 0.0F);
+    std::fill(schedules_before_.begin(), schedules_before_.end(), ScheduleState{});
+    for (std::size_t index = 0; index < emitters_.size(); ++index) {
+        auto& state = emitters_[index];
+        state.next_spawn = definition_.emitters[index].start_delay;
+        state.active = initial_active_[index] != 0;
+        state.started = state.frozen = false;
+        state.submesh = state.vertex = state.next_slot = state.live = 0;
+        state.elapsed = 0; state.dropped = 0; state.free_slots.clear();
     }
 }
 
@@ -349,6 +373,36 @@ std::size_t CpuSystem::reserved_memory_bytes() const {
         +child_instances_.capacity()*sizeof(ChildInstance);
     for(const auto& emitter:emitters_)bytes+=emitter.free_slots.capacity()*sizeof(std::size_t);
     return bytes;
+}
+
+core::Result<std::size_t> CpuSystem::planned_memory_bytes(
+    const SystemDefinition& definition, const std::span<const EmitterCapacity> capacities) {
+    std::size_t bytes{}, reserved{}, parents{}, links{};
+    const auto add = [&](const std::size_t count, const std::size_t width) {
+        if (count > (std::numeric_limits<std::size_t>::max() - bytes) / width) return false;
+        bytes += count * width; return true;
+    };
+    for (const auto& capacity : capacities) {
+        if (capacity.reserved > std::numeric_limits<std::size_t>::max() - reserved) return
+            core::Result<std::size_t>::failure({std::string(diagnostic_codes::limit), core::Severity::error,
+                "effect payload arithmetic overflow", {}, {}, {}, {}});
+        reserved += capacity.reserved;
+    }
+    for (std::size_t index = 0; index < capacities.size(); ++index) {
+        bool has_children = false;
+        for (const auto& emitter : definition.emitters) {
+            if (emitter.parent_emitter != index || (emitter.creator_id != 39 && emitter.creator_id != 40)) continue;
+            has_children = true;
+            if (emitter.creator_id == 39) links += std::min(std::min<std::size_t>(reserved, 65536U) - links,
+                capacities[index].reserved);
+        }
+        if (has_children) parents += capacities[index].reserved;
+    }
+    if (!add(reserved, sizeof(Particle)) || !add(reserved, sizeof(std::size_t))
+        || !add(parents, 2U * sizeof(ParentEvent)) || !add(links, sizeof(ChildInstance)))
+        return core::Result<std::size_t>::failure({std::string(diagnostic_codes::limit), core::Severity::error,
+            "effect payload arithmetic overflow", {}, {}, {}, {}});
+    return core::Result<std::size_t>::success(bytes);
 }
 
 bool CpuSystem::emitter_enabled(const std::size_t index) const noexcept{
@@ -704,6 +758,7 @@ void CpuSystem::spawn_batch(const std::size_t index,const float spawn_time,const
     }
     const std::size_t dropped=count-spawn_count;
     saturating_add(stats.dropped_at_capacity,dropped);saturating_add(total_dropped_,dropped);
+    saturating_add(state.dropped, dropped);
 }
 
 void CpuSystem::process_events(std::vector<ParentEvent>& events,AdvanceStats& stats){

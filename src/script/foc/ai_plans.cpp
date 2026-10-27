@@ -32,7 +32,8 @@ std::optional<std::int64_t> whole(std::string_view text) {
 // PL-11: "X = a, b" (minimum a, maximum b; b 0 means a), "X = a" and "X = p%"; X is a keyword,
 // a '|' list of categories (every type of those categories that is not a squadron member or a
 // star base) or a '|' list of type names.
-core::Result<void> parse_entry(const Host& host, std::string_view text, TaskForceDef& taskforce, std::vector<std::string>& notes) {
+core::Result<void> parse_entry(const Host& host, std::string_view text, TaskForceDef& taskforce, std::vector<std::string>& notes,
+    const bool drop_unresolved_rows) {
     const std::size_t equals = text.find('=');
     const std::string left = trimmed(text.substr(0, equals));
     std::int64_t minimum = 0;
@@ -99,31 +100,40 @@ core::Result<void> parse_entry(const Host& host, std::string_view text, TaskForc
         }
     } else {
         for (const std::string& name : names) {
-            const auto found = host.types_by_name.find(upper_case(name));
-            if (found == host.types_by_name.end()) {
+            const auto type_key = upper_case(name);
+            const auto found = host.types_by_name.find(type_key);
+            std::optional<tactical::TypeId> id;
+            if (found != host.types_by_name.end()) {
+                if (found->second->craft) continue;
+                id = found->second->type_id;
+            } else if (const auto& catalog = host.setup.content.catalog_types) {
+                const auto registered = std::lower_bound(catalog->begin(), catalog->end(), type_key,
+                    [](const auto& entry, const std::string& value) { return entry.first < value; });
+                if (registered != catalog->end() && registered->first == type_key) id = registered->second;
+            }
+            if (!id) {
                 notes.push_back("unknown type " + name + " in " + taskforce.name);
                 unloaded = true;
                 continue;
             }
-            if (found->second->craft) continue;
             // PL-20: the proposal list keeps the authored order, so equal weights resolve to the first
             // name written, as the original's unit enumeration lists them; an id (name hash) order
             // would pick among equals arbitrarily.
-            if (std::find(team.types.begin(), team.types.end(), found->second->type_id) == team.types.end())
-                team.types.push_back(found->second->type_id);
+            if (std::find(team.types.begin(), team.types.end(), *id) == team.types.end())
+                team.types.push_back(*id);
         }
     }
     // A team with no possible type is dropped. The host loads only the M2 types, but every category
     // and type name the FoC space plans use has FoC types (PL-11), so a team naming only types
     // outside the M2 set stays, and no unit can fill it.
-    if (!team.types.empty() || (categories && bits != 0) || unloaded) taskforce.teams.push_back(std::move(team));
+    if (!team.types.empty() || (!drop_unresolved_rows && ((categories && bits != 0) || unloaded))) taskforce.teams.push_back(std::move(team));
     return core::Result<void>::success();
 }
 
 } // namespace
 
 core::Result<PlanDef> build_plan(const Host& host, std::string name, std::string module, const authoritative::ValueList& globals,
-    std::vector<std::string>& notes) {
+    std::vector<std::string>& notes, const bool drop_unresolved_rows) {
     using PlanResult = core::Result<PlanDef>;
     const auto invalid = [&](std::string message) {
         core::Diagnostic diagnostic;
@@ -151,7 +161,7 @@ core::Result<PlanDef> build_plan(const Host& host, std::string name, std::string
         taskforce.name = *tf_name;
         for (std::size_t index = 1; index < table->size(); ++index) {
             if (const auto* text = std::get_if<std::string>(&(*table)[index].data)) {
-                if (auto parsed = parse_entry(host, *text, taskforce, notes); !parsed) return PlanResult::failure(parsed.error());
+                if (auto parsed = parse_entry(host, *text, taskforce, notes, drop_unresolved_rows); !parsed) return PlanResult::failure(parsed.error());
             } else {
                 notes.push_back(taskforce.name + ": a table entry is not hosted");
             }

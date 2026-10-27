@@ -7,6 +7,7 @@
 #include <godot_cpp/classes/time.hpp>
 #include <godot_cpp/classes/canvas_item_material.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/variant/callable_method_pointer.hpp>
 #include <godot_cpp/variant/packed_color_array.hpp>
 #include <godot_cpp/variant/packed_vector2_array.hpp>
 #include <godot_cpp/variant/transform2d.hpp>
@@ -128,13 +129,24 @@ void EncyclopediaPopupRenderer::clear() {
 EawrUnitCards::~EawrUnitCards() = default;
 void EawrUnitCards::setup(Setup setup) {
     setup_ = std::move(setup);
-    popup_.initialize(*this);
+    if (!tooltip_layer_) {
+        // UI-12: all tactical hover sources share a layer above every HUD panel.
+        // Keep it under the card owner for transforms, visibility and lifetime.
+        tooltip_layer_ = memnew(Control);
+        tooltip_layer_->set_name("HudTooltipLayer");
+        tooltip_layer_->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        tooltip_layer_->set_z_as_relative(true);
+        add_child(tooltip_layer_);
+        tooltip_layer_->connect("draw", callable_mp(this, &EawrUnitCards::draw_tooltip));
+    }
+    tooltip_layer_->set_z_index(setup_.tooltip_z_index);
+    popup_.initialize(*tooltip_layer_);
     timing_ = setup_.timing.value_or(model::EncyclopediaTiming{});
     serviced_at_ = now();
     cells_.clear();
     for (std::size_t index = 0; index < setup_.slots.size(); ++index) cells_.push_back(std::make_unique<PortraitCellRenderer>());
     set_process(true);
-    queue_redraw();
+    redraw();
 }
 
 void EawrUnitCards::show(std::vector<Card> cards, std::vector<model::CardBorder> borders) {
@@ -168,7 +180,7 @@ void EawrUnitCards::show(std::vector<Card> cards, std::vector<model::CardBorder>
         }
     }
     update_text();
-    queue_redraw();
+    redraw();
 }
 
 Rect2 EawrUnitCards::screen(const data::ui::ReferenceRect& rect) const {
@@ -205,7 +217,7 @@ bool EawrUnitCards::update_build_states(const std::span<const model::BuildButton
         card.cooldown_progress = button.cooldown_progress;
     }
     if (text_changed) update_text();
-    queue_redraw();
+    redraw();
     return true;
 }
 
@@ -228,7 +240,7 @@ void EawrUnitCards::set_external_hover(const std::uint64_t identity, std::option
     if (content && shown_external_ && external_identity_ == identity) {
         shown_external_content_ = content;
         update_text();
-        queue_redraw();
+        redraw();
     }
     if (!content && shown_external_) {
         timing_.shown = 0;
@@ -237,7 +249,7 @@ void EawrUnitCards::set_external_hover(const std::uint64_t identity, std::option
         shown_card_.reset();
         shown_external_ = false;
         update_text();
-        queue_redraw();
+        redraw();
     }
     external_identity_ = content ? identity : 0;
     external_content_ = std::move(content);
@@ -271,7 +283,7 @@ void EawrUnitCards::_gui_input(const Ref<InputEvent>& event) {
             if (tooltip_shown_) {
                 tooltip_shown_ = false;
                 update_text();
-                queue_redraw();
+                redraw();
             }
         }
         return;
@@ -299,7 +311,7 @@ void EawrUnitCards::_gui_input(const Ref<InputEvent>& event) {
 void EawrUnitCards::_notification(const int what) {
     if (what == NOTIFICATION_RESIZED) {
         update_text();
-        queue_redraw();
+        redraw();
     } else if (what == NOTIFICATION_MOUSE_EXIT) {
         hovered_.reset();
         // CARD-18: the shared timer owns minimum display and fade-out.
@@ -307,7 +319,7 @@ void EawrUnitCards::_notification(const int what) {
         if (get_size() != laid_out_) {
             laid_out_ = get_size();
             update_text();
-            queue_redraw();
+            redraw();
         }
         if (!setup_.timing) return;
         const auto card = std::find_if(cards_.begin(), cards_.end(), [&](const Card& value) { return hovered_ && value.slot == *hovered_; });
@@ -332,7 +344,7 @@ void EawrUnitCards::_notification(const int what) {
         if (old != timing_.shown) update_text();
         if (old != timing_.shown || alpha != timing_.alpha) {
             popup_.popup_text_owner_->set_modulate(Color(1, 1, 1, static_cast<float>(timing_.alpha)));
-            queue_redraw();
+            redraw();
         }
     }
 }
@@ -383,7 +395,7 @@ void EawrUnitCards::update_text() {
         const Card* card = &*shown_card_;
         if (setup_.name) {
             if (!card->pad && setup_.encyclopedia) {
-                tooltip_.draw(*this, style, String(), Rect2(), HORIZONTAL_ALIGNMENT_LEFT, false, false, 1.0F, 1.0F);
+                tooltip_.draw(*tooltip_layer_, style, String(), Rect2(), HORIZONTAL_ALIGNMENT_LEFT, false, false, 1.0F, 1.0F);
                 update_popup(*card);
                 return;
             }
@@ -421,7 +433,7 @@ void EawrUnitCards::update_text() {
             } else if (!card->disabled_reason.empty()) tooltip_rect_ = screen({62.0F, 391.0F, 650.0F, 100.0F});
         }
     }
-    tooltip_.draw(*this, style, name, tooltip_rect_, HORIZONTAL_ALIGNMENT_CENTER, true, true, 1.0F, 1.0F);
+    tooltip_.draw(*tooltip_layer_, style, name, tooltip_rect_, HORIZONTAL_ALIGNMENT_CENTER, true, true, 1.0F, 1.0F);
 }
 
 void EawrUnitCards::update_popup(const Card& card) {
@@ -623,7 +635,6 @@ void EawrUnitCards::draw_bar(const model::HudBar& bar, const std::int32_t level,
 }
 
 void EawrUnitCards::_draw() {
-    if (popup_.popup_glow_item_.is_valid()) RenderingServer::get_singleton()->canvas_item_clear(popup_.popup_glow_item_);
     if (!setup_.placement || !setup_.texture) return;
     // Borders first (Base_Layer 2), then the cards (4) and their bars (5).
     for (const model::CardBorder& border : borders_) {
@@ -672,8 +683,19 @@ void EawrUnitCards::_draw() {
             draw_bar(*look.shield, level, *card.shield);
         }
     }
-    popup_.draw(*this, setup_, static_cast<float>(setup_.placement().scale), static_cast<float>(timing_.alpha));
-    if (!popup_.popup_rect_.has_area() && tooltip_rect_.has_area()) draw_rect(tooltip_rect_, Color(0.0F, 0.0F, 0.0F, 0.75F));
+}
+
+void EawrUnitCards::redraw() {
+    queue_redraw();
+    if (tooltip_layer_) tooltip_layer_->queue_redraw();
+}
+
+void EawrUnitCards::draw_tooltip() {
+    if (popup_.popup_glow_item_.is_valid()) RenderingServer::get_singleton()->canvas_item_clear(popup_.popup_glow_item_);
+    if (!setup_.placement || !setup_.texture) return;
+    popup_.draw(*tooltip_layer_, setup_, static_cast<float>(setup_.placement().scale), static_cast<float>(timing_.alpha));
+    if (!popup_.popup_rect_.has_area() && tooltip_rect_.has_area())
+        tooltip_layer_->draw_rect(tooltip_rect_, Color(0.0F, 0.0F, 0.0F, 0.75F));
 }
 
 void EncyclopediaPopupRenderer::draw(Control& owner, const EncyclopediaPopupStyle& setup,

@@ -1,4 +1,5 @@
 #include "eawr/campaign/space_entry.hpp"
+#include "eawr/campaign/conflict_policy.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/script/authoritative/clock_rng.hpp"
 #include "eawr/sim/math/trig.hpp"
@@ -70,6 +71,31 @@ core::Result<std::vector<sim::EntityId>> select_initial_force_ids(const Conflict
         roster.push_back(&*at);
     }
     for (const auto& force : record.forces) if (std::find(roster.begin(), roster.end(), &force) == roster.end()) roster.push_back(&force);
+    // WGT-06/40: ordinary attacks request explicit flags; a story preferred type
+    // is a separate selector. Defenders always retain their normal split.
+    if (side.player == record.invader && (input.preferred_pathfinder_type || (input.use_pathfinder && !input.pathfinders.empty()))) {
+        const std::set<sim::EntityId> pathfinders(input.pathfinders.begin(), input.pathfinders.end());
+        std::vector<AdmissionForce> candidates;
+        bool selected_pathfinder = false;
+        for (const auto* row : roster) {
+            if (row->owner != side.player || row->id == record.station || row->role == ForceRole::escort) continue;
+            const auto* type = type_of(input, row->type);
+            if (!type || type->population < Fixed{}) return fail<std::vector<sim::EntityId>>("missing type or negative population");
+            if (!type->space_allowed) continue;
+            AdmissionForce force; force.force = *row; force.population = type->population;
+            force.transport = type->transport; force.superweapon = type->superweapon;
+            force.pathfinder = pathfinders.contains(row->id);
+            selected_pathfinder = selected_pathfinder || (input.preferred_pathfinder_type
+                ? row->type == *input.preferred_pathfinder_type : force.pathfinder);
+            candidates.push_back(force);
+        }
+        if (selected_pathfinder) {
+            auto split = select_conflict_forces(candidates, side.cap, input.preferred_pathfinder_type, input.use_pathfinder);
+            if (!split) return core::Result<std::vector<sim::EntityId>>::failure(split.error());
+            for (const auto& force : split.value().initial) selected.push_back(force.id);
+            return core::Result<std::vector<sim::EntityId>>::success(std::move(selected));
+        }
+    }
     for (const auto* row : roster) {
         const auto& force = *row;
         if (force.owner != side.player || force.id == record.station || force.role == ForceRole::escort) continue;
@@ -214,7 +240,9 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
     plan.marker_draws = random.draws();
     if (stations.empty()) { plan.conflict.station = 0; plan.conflict.station_type = 0; }
     if (record.station_level && !stations.empty()) {
-        if (!usable(*stations[station_index])) return fail<void>("invalid station marker pose");
+        const auto& source = *stations[station_index];
+        if (!source.position || !source.orientation_degrees)
+            return fail<void>("invalid station marker pose: " + input.map.map + " record " + std::to_string(source.record));
         const auto* station = type_of(input, input.station_galactic_type);
         if (!station || station->tactical != input.station_type || !input.map.tables->find(station->tactical)
             || input.map.tables->find(station->tactical)->kind != units::UnitKind::station)
@@ -224,6 +252,18 @@ core::Result<void> SpaceEntryPreparation::place_station_and_structures() {
             plan.conflict.station = *id; plan.conflict.station_type = station->galactic;
             append(*station, station_side(record), stations[station_index]->record, *id, true);
         } else plan.placements.push_back({record.station, stations[station_index]->record, true, ++creation});
+        if (!usable(source)) {
+            // WGT-09 / R-ROT-01..03: the station copies the marker's full facing.
+            // The shared fleet builder stages yaw; restore the authored pose before form-up.
+            auto pose = source;
+            pose.layer_z_adjust.reset(); // Only the created station's type supplies its height.
+            plan.fixed_poses.emplace_back(plan.conflict.station, std::move(pose));
+            const auto marker = std::find_if(plan.map.placements.begin(), plan.map.placements.end(), [&](const auto& p) {
+                return p.marker && p.record == source.record;
+            });
+            if (marker == plan.map.placements.end()) return fail<void>("selected station marker is absent from staged map");
+            marker->orientation_degrees->x = {}; marker->orientation_degrees->y = {};
+        }
     }
     auto orbitals = markers(input.map, "Orbital Special Structure Position");
     const bool has_specific = std::any_of(input.map.placements.begin(), input.map.placements.end(), [](const auto& p) {

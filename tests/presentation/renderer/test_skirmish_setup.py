@@ -2,6 +2,7 @@
 
 import csv
 import json
+import math
 import os
 import re
 import shutil
@@ -421,6 +422,21 @@ class SkirmishSetupGpu(unittest.TestCase):
     def test_staging_columns_keep_authored_rectangles_and_advanced_dialog(self):
         """#3167: the player columns keep the resource's rectangles, the row list and the advanced
         dialog (credits slider, win condition) draw, and each state is captured for the eye check."""
+        def credit_edits(log, low, high, default):
+            shown = min(high, max(low, default))
+            increment = (high - low) / max(1, int(high - low) // 1000)
+            def bucket(value):
+                offset = math.floor(min(high, max(low, value)) - low + 0.5)
+                return low + ((offset + 999) // 1000) * 1000
+            expected = {"plus": bucket(shown + increment), "cancelled": shown,
+                        "minus": bucket(shown - increment), "accepted": bucket(shown - increment),
+                        "defaults": shown}
+            for action, value in expected.items():
+                found = re.search(r"EAWR setup credit edit: " + action + r" value=(\d+) custom=(true|false)", log)
+                self.assertIsNotNone(found, log[-5000:])
+                self.assertEqual(int(found.group(1)), value, action)
+                self.assertEqual(found.group(2), "false" if action in ("cancelled", "defaults") else "true", action)
+
         with tempfile.TemporaryDirectory(prefix="setup-layout-") as temporary:
             output = Path(os.environ.get("EAWR_SETUP_EYECHECK", temporary)).resolve()
             output.mkdir(parents=True, exist_ok=True)
@@ -460,22 +476,30 @@ class SkirmishSetupGpu(unittest.TestCase):
                            for kind in ("NAME", "FACTION", "COLOR", "TEAM")]
                 for left, right in zip(columns, columns[1:]):
                     self.assertGreaterEqual(right[0] - (left[0] + left[2]), 2.0, "row %d columns touch" % row)
-            # The advanced dialog: the disabled credits slider displays the authored value, is
-            # disabled with its reason, and the win condition offers the two space choices.
+            # The credit slider preserves the authored value and accepts user edits.
+            buttons = re.search(r"EAWR slider buttons: default=([0-9.]+) range=([0-9.]+) override=([0-9.]+)", result.stdout)
+            self.assertIsNotNone(buttons, result.stdout[-5000:])
+            self.assertEqual(tuple(float(value) for value in buttons.groups()), (55, 52, 58))
             for name in ("IDC_SKIRMISH_CREDITS_SLIDER", "IDC_SKIRMISH_CREDITS_VALUE", "IDC_WIN_CONDITION_COMBO"):
                 self.assertIn(name, options)
                 self.assertTrue(options[name][2], name)
                 authored, actual, _ = options[name]
                 self.assertTrue(all(abs(a - b) <= 0.75 for a, b in zip(authored, actual)), (name, authored, actual))
             credits = re.search(r"EAWR setup credits: min=" + number + " max=" + number + " step=" + number
-                                + " value=" + number + " caption=" + number + " enabled=(\d)", result.stdout)
+                                + " value=" + number + " caption=" + number + r" enabled=(\d)", result.stdout)
             self.assertIsNotNone(credits, result.stdout[-3000:])
             low, high, step, value = (float(credits.group(i)) for i in range(1, 5))
             self.assertLess(low, high)
             self.assertEqual(step, 0.0, "displaying data must not round it to a slider-edit bucket")
             self.assertTrue(low <= value <= high, (low, value, high))
             self.assertEqual(float(credits.group(5)), value)
-            self.assertEqual(credits.group(6), "0", "the credits slider is disabled until a battle applies it")
+            self.assertEqual(credits.group(6), "1", "selected starting credits are editable")
+            credit_edits(result.stdout, low, high, value)
+            factions = re.search(r"EAWR setup factions: count=(\d+) items=(.*)", result.stdout)
+            self.assertIsNotNone(factions, result.stdout[-3000:])
+            # Stock FoC lists exactly its three playable factions.
+            self.assertEqual(int(factions.group(1)), 3)
+            self.assertEqual(int(factions.group(1)), len(factions.group(2).strip().split("|")))
             slots = re.findall(r"EAWR setup slot (\d+): active=(\d) faction=(.*?) team=(.*)", result.stdout)
             open_rows = [row for row in slots if row[1] == "0"]
             self.assertTrue(open_rows, result.stdout[-6000:])
@@ -499,8 +523,11 @@ class SkirmishSetupGpu(unittest.TestCase):
             from tools.inventory.corpus import Corpus
             constants = ET.fromstring(Corpus(os.environ["EAWR_EAW_GAME_ROOT"]).read_effective(
                 "foc", "data/xml/gameconstants.xml").data)
-            authored = int(low) + 501
-            self.assertLess(authored, high)
+            mod_low, mod_high = int(low) + 250, int(high) + 750
+            authored = mod_low + 501
+            self.assertLess(authored, mod_high)
+            constants.find(".//Min_Skirmish_Credits").text = str(mod_low)
+            constants.find(".//Max_Skirmish_Credits").text = str(mod_high)
             node = constants.find(".//MP_Default_Credits")
             self.assertIsNotNone(node)
             node.text = str(authored)
@@ -519,17 +546,21 @@ class SkirmishSetupGpu(unittest.TestCase):
                                     text=True, timeout=240)
             (output / "modded.log").write_text(modded.stdout, encoding="utf-8")
             self.assertEqual(modded.returncode, 0, modded.stdout[-6000:])
-            mod_credits = re.search(r"EAWR setup credits: .* value=" + number + " caption=" + number
-                                    + r" enabled=0", modded.stdout)
+            mod_credits = re.search(r"EAWR setup credits: min=" + number + " max=" + number + " step=" + number
+                                    + " value=" + number + " caption=" + number
+                                    + r" enabled=1", modded.stdout)
             self.assertIsNotNone(mod_credits, modded.stdout[-6000:])
-            self.assertEqual(float(mod_credits.group(1)), authored)
-            self.assertEqual(float(mod_credits.group(2)), authored)
+            self.assertEqual(tuple(float(mod_credits.group(i)) for i in (1, 2)), (mod_low, mod_high))
+            self.assertEqual(float(mod_credits.group(3)), 0.0)
+            self.assertEqual(float(mod_credits.group(4)), authored)
+            self.assertEqual(float(mod_credits.group(5)), authored)
+            credit_edits(modded.stdout, mod_low, mod_high, authored)
             scale = re.search(r"EAWR setup popup scale: " + number + " combo=" + number, modded.stdout)
             self.assertIsNotNone(scale, modded.stdout[-6000:])
             self.assertGreater(float(scale.group(2)), 1.0)
             self.assertAlmostEqual(float(scale.group(1)), float(scale.group(2)), places=3)
 
-            node.text = str(int(high) + 500)
+            node.text = str(mod_high + 500)
             ET.ElementTree(constants).write(xml / "GameConstants.xml", encoding="utf-8")
             bounded_capture = output / "bounded.png"
             command[command.index("--eawr-capture") + 1] = str(bounded_capture)
@@ -538,11 +569,34 @@ class SkirmishSetupGpu(unittest.TestCase):
             (output / "bounded.log").write_text(bounded.stdout, encoding="utf-8")
             self.assertEqual(bounded.returncode, 0, bounded.stdout[-6000:])
             bound_credits = re.search(r"EAWR setup credits: .* value=" + number + " caption=" + number
-                                      + r" enabled=0", bounded.stdout)
+                                      + r" enabled=1", bounded.stdout)
             self.assertIsNotNone(bound_credits, bounded.stdout[-6000:])
-            self.assertEqual(float(bound_credits.group(1)), high)
-            self.assertEqual(float(bound_credits.group(2)), high)
+            self.assertEqual(float(bound_credits.group(1)), mod_high)
+            self.assertEqual(float(bound_credits.group(2)), mod_high)
+            credit_edits(bounded.stdout, mod_low, mod_high, mod_high)
             self.assertGreater((output / "bounded.options.png").stat().st_size, 10000)
+
+    @unittest.skipUnless(os.environ.get("EAWR_REMAKE_MOD_ROOT"), "requires the Remake mod")
+    def test_remake_chain_lists_every_playable_faction(self):
+        """#4660: the mounted Remake chain offers 4+ playable factions, not the three station-candidate ones."""
+        with tempfile.TemporaryDirectory(prefix="setup-factions-") as temporary:
+            output = Path(os.environ.get("EAWR_SETUP_EYECHECK", temporary)).resolve()
+            output.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run([
+                os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+                "--path", str(ROOT / "apps/viewer/project"), "--", "--eawr-skirmish-setup",
+                "--eawr-setup-test", "--eawr-setup-layout-test", "--eawr-profile", "remake",
+                "--eawr-mod-root", os.environ["EAWR_REMAKE_MOD_ROOT"],
+                "--eawr-game-root", os.environ["EAWR_EAW_GAME_ROOT"],
+                "--eawr-capture", str(output / "remake-factions.png"), "--eawr-font-cache",
+                os.environ.get("EAWR_FONT_CACHE", str(ROOT / "out/fonts")), "--eawr-audio", "off"],
+                cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=240)
+            (output / "remake-factions.log").write_text(result.stdout, encoding="utf-8")
+            self.assertEqual(result.returncode, 0, result.stdout[-6000:])
+            factions = re.search(r"EAWR setup factions: count=(\d+) items=(.*)", result.stdout)
+            self.assertIsNotNone(factions, result.stdout[-3000:])
+            self.assertGreaterEqual(int(factions.group(1)), 4, factions.group(2))
+            self.assertEqual(int(factions.group(1)), len(factions.group(2).strip().split("|")))
 
     def test_nondefault_policy_replay_binds_recorded_purchase_content(self):
         with tempfile.TemporaryDirectory(prefix="replay-policy-") as temporary:

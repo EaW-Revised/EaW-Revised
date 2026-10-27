@@ -38,9 +38,9 @@ namespace skirmish_start_test_support {
 
 
 // The tick-zero state hash of the committed m2-start replay (FoC data, fixture seed 67).
-constexpr std::string_view m2_tick_zero_state = "38a8d8870dc82ea2e435b7ca5d6a568caa7603b0f2b88e5ddb031068b2908854";
+constexpr std::string_view m2_tick_zero_state = "0b96c50559c347dfe1f8b46b39a59f440242f1435b0f27b7310849010f8b9ffe";
 // docs/unit-data.md: the FoC fleet's unit-table identity, the replay's content identity.
-constexpr std::string_view m2_content_identity = "b0cbd796a46c6ae654ebcb18453feea16b9859fa1467e596295883f021549d74";
+constexpr std::string_view m2_content_identity = "3699901176efbf94b172a5e7d6e5dfd939e99198a9b5f58921dcbffe69e07b89";
 
 eawr::testing::Checker local_checker;
 int& failures = local_checker.failures;

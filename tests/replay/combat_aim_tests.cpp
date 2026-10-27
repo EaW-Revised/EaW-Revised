@@ -1,5 +1,7 @@
 #include "combat_support.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
+#include "../../src/sim/tactical/combat_algorithms.hpp"
+#include "../../src/units/unit_turret_frame.hpp"
 
 #include <algorithm>
 #include <array>
@@ -15,6 +17,128 @@
 #include <vector>
 
 namespace combat_test_support {
+
+void test_randomized_fire_bones() {
+    namespace detail = tactical::detail;
+    detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners; world.relationships = relationships; world.seed = 777; world.frame = 11;
+    tactical::CombatProfile source, victim;
+    // An aimed hardpoint bypasses the earlier R-10 aim search, reaching the late cone gate.
+    victim.hardpoints.push_back({0, at(0, 0), true});
+    auto gun = ion();
+    gun.cone_width = gun.cone_height = units(360);
+    gun.randomize_between_fire_bones = true;
+    gun.fire_a = at(-8, 2, -4); gun.fire_b = at(9, -7, 6);
+    source.weapons = {gun};
+    tactical::CombatState state;
+    state.attack_target = 2; state.direct = true;
+    state.weapons.resize(1); state.weapons[0].pulses_left = 2;
+    detail::CombatUnit self, target;
+    self.id = 1; self.owner = self.team = 1; self.profile = &source; self.combat = &state;
+    // A 90-degree world rotation makes the X/Y draw-order error observable.
+    self.transform = math::identity_matrix();
+    self.transform.rows[0] = {Fixed{}, units(-1), Fixed{}, units(20)};
+    self.transform.rows[1] = {units(1), Fixed{}, Fixed{}, units(30)};
+    target.id = 2; target.owner = target.team = 2; target.visible_to = 1; target.profile = &victim;
+    target.position = target.previous_position = at(200, 30);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    world.units = {self, target};
+    expect(tactical::WeaponProfile{}.randomize_between_fire_bones, "WWP-22: profile default is randomized");
+    for (const bool reversed : {false, true}) {
+        source.weapons[0] = gun;
+        if (reversed) std::swap(source.weapons[0].fire_a, source.weapons[0].fire_b);
+        const auto step = detail::step_combat(world, world.units.front());
+        expect(step && step.value().events.size() == 1, "WWP-22: a randomized hardpoint fires");
+        if (!step || step.value().events.empty()) return;
+        const auto a = math::transform_point(self.transform, gun.fire_a).value();
+        const auto b = math::transform_point(self.transform, gun.fire_b).value();
+        tactical::CombatRandom expected(world.seed, world.frame, 1, 0);
+        const auto axis = [&](const Fixed low, const Fixed high) {
+            const auto fraction = Fixed::from_ratio(expected.uniform(0, 32767), 32767).value();
+            return math::add(low, math::multiply(math::subtract(high, low).value(), fraction).value()).value();
+        };
+        const auto x = axis(std::min(a.x, b.x), std::max(a.x, b.x));
+        const auto y = axis(std::min(a.y, b.y), std::max(a.y, b.y));
+        const auto z = axis(std::min(a.z, b.z), std::max(a.z, b.z));
+        expect(step.value().events.front().origin == math::Vec3{x, y, z},
+            "WWP-22: world box uses ordered X/Y/Z draws, including reversed endpoints");
+        expect(step.value().events.front().origin != a && step.value().events.front().origin != b,
+            "WWP-22: sampling can leave both endpoint positions");
+    }
+    const auto draws = [&](const bool randomized, const bool second, const bool equal,
+                           const bool outside, const bool reject_cone) {
+        source.weapons[0] = gun;
+        auto& weapon = source.weapons[0];
+        weapon.randomize_between_fire_bones = randomized; weapon.has_fire_b = second;
+        if (equal) weapon.fire_b = weapon.fire_a;
+        if (outside) weapon.range = units(1);
+        if (reject_cone) weapon.cone_width = weapon.cone_height = Fixed{};
+        tactical::CombatRandom random(world.seed, world.frame, 1, 0);
+        detail::combat_detail::UnitCombat service(world, world.units.front());
+        const bool fired = service.attempt(0, 2, random);
+        expect(fired == (!outside && !reject_cone), "WWP-22: early range and late cone gates retain admission");
+        return random.draws();
+    };
+    expect(draws(true, true, false, false, false) == 3, "WWP-22: one sample uses three draws");
+    expect(draws(true, true, true, false, false) == 3, "WWP-22: coincident endpoints still use three draws");
+    expect(draws(false, true, false, false, false) == 1, "WWP-22: explicit false retains one endpoint draw");
+    expect(draws(true, false, false, false, false) == 0, "WWP-22: absent B keeps A without draws");
+    expect(draws(false, false, false, false, false) == 0, "WWP-22: false without B keeps A without draws");
+    expect(draws(true, true, false, true, false) == 0, "WWP-22: range rejection precedes muzzle draws");
+    expect(draws(true, true, false, false, true) == 3, "WWP-22: late cone rejection follows muzzle draws");
+    victim.hardpoints.clear();
+    expect(draws(true, true, false, false, true) == 0,
+        "WWP-19/R-10: no acceptable aim point rejects before muzzle selection");
+    victim.hardpoints.push_back({0, at(0, 0), true});
+    source.weapons[0] = gun;
+    state.weapons[0].pulses_left = 1;
+    const auto recharged = detail::step_combat(world, world.units.front());
+    tactical::CombatRandom recharge_random(world.seed, world.frame, 1, 0);
+    for (unsigned axis = 0; axis < 3; ++axis) static_cast<void>(recharge_random.uniform(0, 32767));
+    const auto hundredths = recharge_random.uniform(gun.min_recharge_hundredths, gun.max_recharge_hundredths);
+    expect(recharged && recharged.value().state.weapons[0].countdown == hundredths * 30U / 100U,
+        "WWP-22: burst recharge follows the three muzzle draws on the existing key");
+    state.weapons[0].pulses_left = 2;
+    source.weapons[0].randomize_between_fire_bones = false;
+    const auto endpoint = detail::step_combat(world, world.units.front());
+    tactical::CombatRandom endpoint_random(world.seed, world.frame, 1, 0);
+    const auto selected = endpoint_random.uniform(0, 99) >= 50U ? gun.fire_b : gun.fire_a;
+    expect(endpoint && endpoint.value().events.size() == 1
+        && endpoint.value().events.front().origin == math::transform_point(self.transform, selected).value(),
+        "WWP-22: explicit false retains the original endpoint and transform bytes");
+
+    // Multiple pulses and entities exercise the partitioned session and ordered commits.
+    auto content = table();
+    auto& weapon = content.profiles.front().weapons.front();
+    weapon = gun; weapon.pulse_delay_frames = 1;
+    weapon.min_recharge_hundredths = weapon.max_recharge_hundredths = 1;
+    const auto initial = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, bomber_type, 2, at(200, 0)), unit(3, shooter_type, 1, at(0, 20))});
+    std::vector<std::string> reference;
+    for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+        auto value = session(initial, content);
+        expect(static_cast<bool>(value.submit({{0, 1, 1}, {1, 3}, tactical::AttackPayload{2}})),
+            "WWP-22: randomized pulse fixture receives an order");
+        eawr::platform::ThreadWorkerAdapter executor(workers);
+        std::vector<std::string> hashes;
+        std::vector<math::Vec3> origins;
+        for (unsigned tick = 0; tick < 24; ++tick) {
+            const auto step = value.step(executor);
+            expect(static_cast<bool>(step), "WWP-22: partitioned pulse step succeeds");
+            if (!step) return;
+            hashes.push_back(step.value().state_sha256 + step.value().snapshot->sha256());
+            for (const auto& event : step.value().snapshot->combat_events())
+                if (event.shooter == 1 && event.kind == tactical::CombatEventKind::weapon_fired)
+                    origins.push_back(event.origin);
+        }
+        expect(origins.size() > 2 && origins[0] != origins[1], "WWP-22: each pulse takes a fresh sample");
+        if (reference.empty()) reference = hashes;
+        else expect(hashes == reference, "WWP-22: randomized fire is identical on 1/2/4/8 workers");
+    }
+}
 
 void test_zero_cone() {
     // W-07: an unauthored (zero) Fire_Cone_Width/Height on a fixed hardpoint accepts only a point
@@ -344,6 +468,267 @@ void test_object_turret() {
     }
 }
 
+void test_hardpoint_turret() {
+    tactical::detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners; world.relationships = relationships;
+    tactical::CombatProfile source, victim;
+    auto gun = ion();
+    gun.fire_a = at(0, -10); gun.has_fire_b = false;
+    gun.cone_width = units(20); gun.cone_height = units(1);
+    gun.pulse_count = 1; gun.manual_turret_required = true;
+    auto& authored = gun.manual_turret.emplace();
+    authored.axes = {at(0, -1), at(1, 0), at(0, 0, 1)};
+    authored.coordinate_axes = {at(1, 0), at(0, 1), at(0, 0, 1)};
+    authored.speed = units(5); authored.yaw_extent = units(180); authored.pitch_extent = units(30);
+    auto validation = table();
+    validation.profiles.front().weapons = {gun};
+    expect(static_cast<bool>(tactical::validate_combat(validation)),
+        "HPT-C01: an ordinary turret with its mechanical flag is valid");
+    validation.profiles.front().weapons.front().manual_turret_required = false;
+    expect(static_cast<bool>(tactical::validate_combat(validation)),
+        "inert turret geometry without either mechanical flag is legal");
+    auto inert = table();
+    inert.profiles.front().weapons.front().manual_turret = authored;
+    auto ordinary = table();
+    const auto fixture = setup({unit(1, shooter_type, 1, at(0, 0)),
+        unit(2, bomber_type, 2, at(300, 0), true)});
+    const eawr::platform::ThreadWorkerAdapter executor(1);
+    auto inert_session = session(fixture, inert);
+    auto ordinary_session = session(fixture, ordinary);
+    bool fired = false;
+    for (unsigned tick = 0; tick < 150; ++tick) {
+        const auto left = inert_session.step(executor);
+        const auto right = ordinary_session.step(executor);
+        expect(left && right, "inert turret and ordinary weapon sessions step");
+        if (!left || !right) break;
+        expect(left.value().state_sha256 == right.value().state_sha256
+            && left.value().snapshot->sha256() == right.value().snapshot->sha256(),
+            "inert turret preserves ordinary firing, canonical state and snapshots");
+        for (const auto& event : left.value().snapshot->combat_events())
+            fired = fired || event.kind == tactical::CombatEventKind::weapon_fired;
+    }
+    expect(fired, "weapon with inert authored turret fires as an ordinary weapon");
+    auto mechanical = table();
+    mechanical.profiles.front().weapons = {gun};
+    auto sheared = mechanical;
+    auto& frame = *sheared.profiles.front().weapons.front().manual_turret;
+    for (auto* axes : {&frame.coordinate_axes, &frame.axes}) {
+        const auto& x = (*axes)[0];
+        auto& y = (*axes)[1];
+        y = {Fixed::from_raw(y.x.raw() + x.x.raw() / 1024),
+            Fixed::from_raw(y.y.raw() + x.y.raw() / 1024),
+            Fixed::from_raw(y.z.raw() + x.z.raw() / 1024)};
+        y = math::normalize(y).value();
+        const auto corrected = eawr::units::detail::condition_turret_frame(*axes);
+        expect(corrected && corrected.value(), "HPT-09: second-band frame is conditioned");
+    }
+    expect(frame == *mechanical.profiles.front().weapons.front().manual_turret,
+        "HPT-09: invented sheared frame recovers the same axes and authored angles");
+    auto corrected_session = session(fixture, sheared);
+    auto mechanical_session = session(fixture, mechanical);
+    // Give both side-facing turrets the same directed target so they turn and fire.
+    for (auto* live : {&corrected_session, &mechanical_session})
+        expect(static_cast<bool>(live->submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+            "HPT-09: matched directed attack queues for both turret sessions");
+    fired = false;
+    for (unsigned tick = 0; tick < 150; ++tick) {
+        const auto left = corrected_session.step(executor);
+        const auto right = mechanical_session.step(executor);
+        expect(left && right, "HPT-09: corrected and orthonormal turret sessions step");
+        if (!left || !right) break;
+        expect(left.value().state_sha256 == right.value().state_sha256
+            && left.value().snapshot->sha256() == right.value().snapshot->sha256(),
+            "HPT-09: corrected turret aims/fires with identical directions, state and snapshot hashes");
+        for (const auto& event : left.value().snapshot->combat_events())
+            fired = fired || event.kind == tactical::CombatEventKind::weapon_fired;
+    }
+    expect(fired, "HPT-09: corrected ordinary turret fires");
+    auto within_tolerance = authored.coordinate_axes;
+    within_tolerance[1].x = Fixed::from_raw(tactical::frame_tolerance_raw / 2);
+    within_tolerance[1] = math::normalize(within_tolerance[1]).value();
+    const auto unchanged = within_tolerance;
+    const auto preserved = eawr::units::detail::condition_turret_frame(within_tolerance);
+    expect(preserved && !preserved.value() && within_tolerance == unchanged,
+        "HPT-09: original tolerance band is retained byte-for-byte");
+    auto malformed = inert;
+    malformed.profiles.front().weapons.front().manual_turret->axes = {};
+    expect(!tactical::validate_combat(malformed), "inert turret still rejects invalid axes");
+    malformed = inert;
+    malformed.profiles.front().weapons.front().manual_turret->coordinate_pivot.x = units(tactical::max_combat_distance + 1);
+    expect(!tactical::validate_combat(malformed), "inert turret still rejects out-of-bounds geometry");
+    validation.profiles.front().weapons.front().requires_manual_target = true;
+    expect(static_cast<bool>(tactical::validate_combat(validation)),
+        "HPT-C01: manual-only turret geometry retains its existing admission");
+    source.weapons = {gun};
+    auto state = tactical::initial_combat(source, 1, 0, 1);
+    state.attack_target = 2; state.direct = true;
+    tactical::detail::CombatUnit self, target;
+    self.id = 1; self.owner = self.team = 1; self.profile = &source; self.combat = &state;
+    self.transform = math::identity_matrix();
+    target.id = 2; target.owner = target.team = 2; target.visible_to = 1; target.profile = &victim;
+    target.position = target.previous_position = at(300, 0);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    world.units = {self, target};
+    const auto step = [&]() {
+        ++world.frame;
+        state.weapons[0].countdown = 0; state.weapons[0].pulses_left = 1;
+        auto result = tactical::detail::step_combat(world, world.units.front());
+        expect(static_cast<bool>(result), "HPT-C01: ordinary hardpoint step succeeds");
+        if (result) state = result.value().state;
+        return result;
+    };
+    auto first = step();
+    expect(first && first.value().events.empty() && state.weapons[0].manual->yaw == units(10),
+        "HPT-C01: old pose gates the shot; authored speed advances yaw through two steps");
+    for (unsigned tick = 1; tick < 8; ++tick) {
+        auto result = step();
+        if (tick < 7) expect(result && result.value().events.empty(), "HPT-C01: unaligned turret holds fire");
+    }
+    expect(state.weapons[0].manual->yaw == units(80), "HPT-C01: ordinary yaw is rate limited per admitted tick");
+    const auto cone = step();
+    expect(cone && !cone.value().events.empty() && cone.value().events.back().origin.x.raw() > 0,
+        "HPT-C02: full-width cone fires before exact alignment, using the posed muzzle");
+    for (const int extent : {800, 999}) {
+        auto wide = mechanical;
+        auto& weapon = wide.profiles.front().weapons.front();
+        weapon.manual_turret->yaw_extent = units(extent);
+        weapon.manual_turret->pitch_extent = units(extent);
+        expect(static_cast<bool>(tactical::validate_combat(wide)),
+            "HPT-10: ordinary multi-turn runtime profile validates");
+        auto wide_session = session(fixture, wide);
+        expect(static_cast<bool>(wide_session.submit({{0, 1, 0}, {1}, tactical::AttackPayload{2}})),
+            "HPT-10: ordinary multi-turn session creates and admits a directed attack");
+        expect(static_cast<bool>(wide_session.step(executor)), "HPT-10: multi-turn session steps");
+        weapon.requires_manual_target = true;
+        expect(!tactical::validate_combat(wide), "HPT-10: manual multi-turn runtime profile refuses");
+        source.weapons[0].manual_turret->yaw_extent = units(extent);
+        source.weapons[0].manual_turret->pitch_extent = units(extent);
+        source.weapons[0].manual_turret->offset = at(0, 13, 13);
+        const auto aimed = step();
+        expect(aimed && !aimed.value().events.empty()
+            && state.weapons[0].manual->desired_yaw == units(90)
+            && state.weapons[0].manual->desired_pitch == Fixed{},
+            "HPT-10: multi-turn extents admit fire and retain wrapped desire without clamp or offset");
+    }
+    source.weapons[0].manual_turret->offset = {};
+    source.weapons[0].manual_turret->pitch_extent = units(30);
+    source.weapons[0].manual_turret->yaw_extent = units(45);
+    const auto outside = step();
+    expect(outside && outside.value().events.empty() && state.weapons[0].manual->desired_yaw == units(45),
+        "HPT-C03: out-of-arc directed target never fires and desire clamps");
+    source.weapons[0].manual_turret->yaw_extent = units(180);
+    source.weapons[0].manual_turret->offset.z = units(13);
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(90), "HPT-C04: 180-degree extent omits offset/clamp");
+    source.weapons[0].manual_turret->yaw_extent = {};
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(90), "HPT-C04: zero extent does not clamp desire");
+    source.weapons[0].manual_turret->yaw_extent = units(-1);
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(90), "HPT-C04: negative extent does not clamp desire");
+    source.weapons[0].manual_turret->yaw_extent = units(180);
+    state.direct = false; state.attack_target = 0;
+    state.weapons[0].manual->target = 0; state.weapons[0].opportunity.target = 0;
+    source.weapons[0].opportunity_when_idle = false;
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(13), "HPT-C04: no reference returns toward offset");
+    source.weapons[0].manual_turret->offset = at(0, 270, 270);
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(270)
+        && state.weapons[0].manual->desired_pitch == units(270),
+        "HPT-C04: no-reference offsets retain authored values before the asymmetric stepping rule");
+    source.weapons[0].manual_turret->offset = at(0, 0, 13);
+    state.weapons[0].manual->target = 2;
+    (void)step();
+    expect(state.weapons[0].manual->desired_yaw == units(90), "HPT-C05: retained last-fired reference supplies aim");
+    auto other = target;
+    other.id = 3; other.position = other.previous_position = at(0, 300);
+    other.transform = math::to_matrix(math::identity_quat(), other.position).value();
+    world.units.push_back(other);
+    state.direct = true; state.attack_target = 2;
+    state.weapons[0].opportunity.target = 3;
+    state.weapons[0].countdown = 50;
+    source.weapons[0].manual_turret->yaw_extent = units(45);
+    auto fallback = tactical::detail::step_combat(world, world.units.front());
+    expect(fallback && fallback.value().state.weapons[0].manual->desired_yaw == units(58),
+        "HPT-C05: last-fired reference replaces opportunity after directed arc rejection");
+    state.weapons[0].manual->target = 0;
+    auto opportunity = tactical::detail::step_combat(world, world.units.front());
+    expect(opportunity && opportunity.value().state.weapons[0].manual->desired_yaw == units(-32),
+        "HPT-C05: opportunity reference supplies clamped desire without a last-fired reference");
+    state.direct = false; state.attack_target = 0;
+    source.weapons[0].manual_turret->yaw_extent = units(180);
+    state.weapons[0].manual->target = 0;
+    state.weapons[0].opportunity.target = 2;
+    state.weapons[0].countdown = 50;
+    auto held = tactical::detail::step_combat(world, world.units.front());
+    expect(held && held.value().state.weapons[0].manual->desired_yaw == units(90),
+        "HPT-C05: opportunity reference supplies aim during weapon recharge");
+    for (const int extent : {180, 800, 999}) {
+        source.weapons[0].manual_turret->yaw_extent = units(extent);
+        source.weapons[0].manual_turret->pitch_extent = units(extent);
+        state.weapons[0].manual->yaw = units(179);
+        state.weapons[0].manual->desired_yaw = units(-179);
+        source.weapons[0].manual_turret->offset.z = units(-179);
+        state.weapons[0].opportunity.target = 0;
+        auto wrapped = tactical::detail::step_combat(world, world.units.front());
+        expect(wrapped && wrapped.value().state.weapons[0].manual->yaw == units(179),
+            "HPT-C04/HPT-10: linear and wrapped residual yaw steps cancel with multi-turn extents too");
+    }
+    tactical::DurabilityProfile durability;
+    durability.hardpoints.push_back({});
+    durability.hardpoints[0].max_health = units(100);
+    durability.hardpoints[0].destroyable = true;
+    tactical::DurabilityState health;
+    health.hardpoints.push_back({});
+    world.units[0].durability_profile = &durability; world.units[0].durability = &health;
+    const auto destroyed = tactical::detail::step_combat(world, world.units.front());
+    expect(destroyed && destroyed.value().state.weapons[0].manual->yaw == state.weapons[0].manual->yaw,
+        "HPT-C06: destroyed turret freezes mechanical state");
+    world.units[0].durability_profile = nullptr; world.units[0].durability = nullptr;
+    source.weapons[0].manual_turret.reset();
+    expect(step().value().events.empty(), "HPT-C06: required missing bone profile cannot fire");
+
+    // A multi-capital fixture exercises authoritative state, snapshots, checkpoints and worker partitioning.
+    auto content = table();
+    auto& shooter = content.profiles.front();
+    gun.min_recharge_hundredths = gun.max_recharge_hundredths = 100;
+    gun.opportunity_when_idle = gun.opportunity_when_targeting = false;
+    shooter.weapons.assign(12, gun);
+    for (std::uint32_t index = 0; index < shooter.weapons.size(); ++index) shooter.weapons[index].hardpoint = index;
+    std::vector<tactical::UnitState> units_in;
+    for (unsigned id = 1; id <= 4; ++id) units_in.push_back(unit(id, shooter_type, 1, at(0, static_cast<int>(id) * 10)));
+    units_in.push_back(unit(20, bomber_type, 2, at(300, 0)));
+    std::vector<std::string> hashes;
+    for (const unsigned workers : {1U, 2U, 4U, 8U}) {
+        auto live = session(setup(units_in), content);
+        expect(static_cast<bool>(live.submit({{0, 1, 0}, {1, 2, 3, 4}, tactical::AttackPayload{20}})),
+            "HPT-C07: capital fixture accepts ordinary attack");
+        const eawr::platform::ThreadWorkerAdapter pool(workers);
+        for (unsigned tick = 0; tick < 8; ++tick) expect(static_cast<bool>(live.step(pool)), "HPT-C07: turret session steps");
+        const auto& pose = live.snapshot()->instances().front();
+        expect(pose.manual_weapons.empty() && pose.hardpoint_turrets.size() == 12 && pose.hardpoint_turrets.front().yaw.raw() != 0,
+            "HPT-C07: ordinary poses publish separately from commandable manual guns");
+        const auto saved = live.save_checkpoint_state();
+        auto fresh = tactical::TacticalSession::from_replay(live.record(), sensors(), {}, {}, std::nullopt, content);
+        expect(saved && fresh, "HPT-C07: checkpoint and replay session create");
+        if (!saved || !fresh) return;
+        auto restored = std::move(fresh.value());
+        expect(static_cast<bool>(restored.load_checkpoint_state(saved.value())), "HPT-C07: turret checkpoint loads");
+        expect(restored.canonical_state_bytes() == live.canonical_state_bytes(), "HPT-C07: checkpoint retains angles/references");
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            const auto a = live.step(pool), b = restored.step(pool);
+            expect(a && b && a.value().state_sha256 == b.value().state_sha256, "HPT-C07: restored continuation equals live");
+            if (!a) return;
+            if (workers == 1) hashes.push_back(a.value().state_sha256);
+            else expect(hashes[tick] == a.value().state_sha256, "HPT-C07: 1/2/4/8 worker hashes equal");
+        }
+    }
+}
+
 void test_fire_bone_pole() {
     // W-07 (#384): a point on the fire bone's z axis has no planar part; FoC's facing gives it yaw 0
     // and pitch 90 degrees instead of an undefined atan2 (research WA-14). A frame like
@@ -552,6 +937,109 @@ void test_unit_weapon_targeting_and_muzzles() {
         expect(event && event->target == nearest[shot],
             "WWP-49: the team container resolves to the craft nearest the muzzle in turn");
     }
+}
+
+// RFL-15 (#4986): a ROCKET shot carries its firing bone's x axis, turned into the world by the unit's
+// rotation, as its launch direction; the aim stays the scattered point. A rocket muzzle without a bone
+// frame leaves along the unit's facing, a hardpoint rocket along Fire_Bone_A's x axis, and any other
+// shot carries no launch direction.
+void test_rocket_launch_axis() {
+    tactical::detail::CombatWorld world;
+    const std::vector<tactical::Player> owners{{1, 1, 1, tactical::player_flag_commandable},
+        {2, 2, 2, tactical::player_flag_commandable}};
+    const std::vector<tactical::SnapshotPlayer> relationships{{1, 1, false}, {2, 2, false}};
+    world.players = owners;
+    world.relationships = relationships;
+    world.seed = 4986;
+    tactical::FlightProfile rocket;
+    rocket.kind = tactical::FlightKind::rocket;
+    rocket.target_radius = true;
+    rocket.authored_distance = units(5000);
+    rocket.curve_distance = units(800);
+    rocket.curve_offset = units(5);
+    rocket.straight_distance = units(400);
+    tactical::CombatProfile shooter_profile;
+    auto weapon = ion();
+    weapon.hardpoint = tactical::object_weapon;
+    weapon.cone_width = weapon.cone_height = units(300);
+    weapon.range = units(4250);
+    weapon.has_fire_b = false;
+    weapon.fire_a = {};
+    weapon.pulse_count = 1;
+    weapon.muzzles = {at(10, 70), at(10, -70), at(-2, 80)};
+    // 0.342 / 0.940: 70 degrees off the bow, outward on each flank; the third bone has no frame.
+    const auto part = [](const std::int64_t thousandths) { return Fixed::from_raw(thousandths * one / 1000); };
+    const auto side = math::normalize(math::Vec3{part(342), part(940), {}}).value();
+    const auto other = math::normalize(math::Vec3{part(342), part(-940), {}}).value();
+    weapon.muzzle_axes = {side, other, {}};
+    weapon.shot.emplace();
+    weapon.shot->speed = units(25);
+    weapon.shot->max_travel = units(5000);
+    weapon.shot->flight = rocket;
+    shooter_profile.weapons = {weapon};
+    tactical::CombatProfile target_profile;
+    tactical::CombatState state;
+    state.weapons.resize(1);
+    tactical::detail::CombatUnit self;
+    self.id = 1;
+    self.owner = self.team = 1;
+    self.profile = &shooter_profile;
+    self.combat = &state;
+    // The shooter faces +y: a 90-degree yaw about z.
+    const auto half = Fixed::from_raw(11863283); // cos 45 = sin 45, Q24
+    self.transform = math::to_matrix(math::normalize(math::Quat{{}, {}, half, half}).value(), {}).value();
+    tactical::detail::CombatUnit target;
+    target.id = 2;
+    target.owner = target.team = 2;
+    target.visible_to = 1;
+    target.position = target.previous_position = at(0, 3000);
+    target.transform = math::to_matrix(math::identity_quat(), target.position).value();
+    target.profile = &target_profile;
+    world.units = {self, target};
+    const auto shoot = [&](const std::uint64_t frame) -> std::optional<tactical::CombatEvent> {
+        state.attack_target = 2;
+        state.direct = true;
+        state.weapons[0].countdown = 0;
+        state.weapons[0].pulses_left = 1;
+        world.frame = frame;
+        const auto step = tactical::detail::step_combat(world, world.units.front());
+        expect(static_cast<bool>(step), "RFL-15: the rocket weapon's step succeeds");
+        if (!step) return std::nullopt;
+        state = step.value().state;
+        if (step.value().events.empty()) return std::nullopt;
+        return step.value().events.front();
+    };
+    const auto near = [](const math::Vec3& a, const math::Vec3& b) {
+        return std::llabs(a.x.raw() - b.x.raw()) < one / 1000 && std::llabs(a.y.raw() - b.y.raw()) < one / 1000
+            && std::llabs(a.z.raw() - b.z.raw()) < one / 1000;
+    };
+    const auto turned = [&](const math::Vec3& v) { return math::Vec3{Fixed::from_raw(-v.y.raw()), v.x, v.z}; };
+    const auto first = shoot(100);
+    expect(first && near(first->launch, turned(side)), "RFL-15: a rocket leaves along its muzzle bone's x axis, rotated with the unit");
+    expect(first && first->aim == at(0, 3000), "RFL-15: the aim stays the target point (no scatter here)");
+    expect(first && first->origin == math::transform_point(self.transform, at(10, 70)).value(),
+        "RFL-15: the muzzle position is unchanged");
+    const auto second = shoot(101);
+    expect(second && near(second->launch, turned(other)), "RFL-15: the next muzzle's own axis (the other flank)");
+    const auto third = shoot(102);
+    expect(third && near(third->launch, at(0, 1)), "RFL-15: a muzzle without a bone frame leaves along the unit's facing");
+    // A rocket weapon without muzzles also leaves along the unit's facing.
+    shooter_profile.weapons[0].muzzles.clear();
+    shooter_profile.weapons[0].muzzle_axes.clear();
+    const auto bare = shoot(103);
+    expect(bare && near(bare->launch, at(0, 1)), "RFL-15: an object rocket without muzzle bones leaves along the unit's facing");
+    // A hardpoint rocket leaves along Fire_Bone_A's x axis.
+    auto hardpoint = shooter_profile.weapons[0];
+    hardpoint.hardpoint = 0;
+    hardpoint.fire_a = at(5, 2);
+    hardpoint.fire_axes = std::array<math::Vec3, 3>{other, math::normalize(math::Vec3{part(940), part(342), {}}).value(), at(0, 0, 1)};
+    shooter_profile.weapons[0] = hardpoint;
+    const auto fixed = shoot(104);
+    expect(fixed && near(fixed->launch, turned(other)), "RFL-15: a hardpoint rocket leaves along Fire_Bone_A's x axis");
+    // Any other shot carries no launch direction (DG-22: it leaves toward its aim).
+    shooter_profile.weapons[0].shot->flight.reset();
+    const auto laser = shoot(105);
+    expect(laser && laser->launch == math::Vec3{}, "RFL-15: a non-rocket shot carries no launch direction");
 }
 
 // W-10 (#409): a shot leads a moving target to the point where a projectile meets it.

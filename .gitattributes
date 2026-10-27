@@ -44,3 +44,5 @@ tests/galactic/fixtures/production-corpus/*.eawr-gcreplay binary
 *.cmd text eol=crlf
 # git apply reads this patch on Windows checkouts as well: keep it LF.
 tools/viewer_hash/viewer-hook.patch text eol=lf
+# The mods service contract test compares its recorded transcripts byte for byte; the launcher repo copies them.
+tests/mods_service/transcripts/*.jsonl text eol=lf

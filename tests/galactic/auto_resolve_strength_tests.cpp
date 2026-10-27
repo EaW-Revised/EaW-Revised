@@ -41,9 +41,11 @@ struct TemporaryXml {
         }
         std::ofstream registry(root / "XML/GameObjectFiles.xml");
         registry << "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>";
+        // Carrier's first Tech_0 spawn names no type (RGC-26): every expectation below must hold with that null entry skipped.
         std::ofstream objects(root / "XML/Objects.xml");
         objects << R"xml(<GameObjectData>
           <SpaceUnit Name="Carrier"><AI_Combat_Power>100</AI_Combat_Power><CategoryMask>Frigate | Fighter</CategoryMask>
+            <Starting_Spawned_Units_Tech_0>Undefined_Garrison, 9</Starting_Spawned_Units_Tech_0>
             <Starting_Spawned_Units_Tech_0>Scout, 2</Starting_Spawned_Units_Tech_0>
             <Starting_Spawned_Units_Tech_0>BombSquad, 1</Starting_Spawned_Units_Tech_0>
             <Starting_Spawned_Units_Tech_1>Scout, 3</Starting_Spawned_Units_Tech_1></SpaceUnit>

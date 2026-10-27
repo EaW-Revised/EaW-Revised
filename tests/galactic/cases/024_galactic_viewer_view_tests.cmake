@@ -6,6 +6,6 @@ eawr_add_test_case(
         "${PROJECT_SOURCE_DIR}/apps/viewer/src/galactic/planet_hud.cpp"
     INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/include"
         "${PROJECT_SOURCE_DIR}/apps/viewer/src"
-    LIBS eawr::sim_galactic eawr::platform
+    LIBS eawr::sim_galactic eawr::platform eawr::presentation eawr::ui_model
     TESTS galactic_viewer_view_contracts
 )

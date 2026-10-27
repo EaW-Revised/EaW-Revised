@@ -293,24 +293,43 @@ void test_team_attack() {
 }
 
 void test_placed_idle_hold() {
-    // A valid rotation can have no planar heading. Initialization must not
-    // dereference the failed yaw result; zero is the deterministic project fallback.
-    {
-        tactical::TacticalSetup setup;
-        setup.seed = seed;
-        setup.players = players();
-        setup.units = {unit(10, squadron_b, empire, at(0, 0)), unit(11, craft_type, empire, at(0, 0))};
-        const auto half = Fixed::from_raw(one / 2);
-        setup.units[1].rotation = {half, half, Fixed::from_raw(-one / 2), half};
-        expect(!tactical::yaw_degrees(setup.units[1].rotation), "vertical craft rotation has no planar yaw");
-        setup.squadrons = {{10, {11}}};
-        auto table = motion();
-        table.squadrons.spawners.clear();
-        auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table);
-        expect(static_cast<bool>(created), "placed vertical craft initializes without an unchecked yaw read");
-        if (created) {
-            const auto flight = created.value().craft_state(11);
-            expect(flight && flight->yaw == Fixed{}, "placed vertical craft uses the deterministic zero heading");
+    // FM-27: exact vertical +X axes, without a rounded sin/cos construction.
+    // Exercise both signs through initialization and the partitioned motion step.
+    for (const std::int64_t sign : {-1, 1}) {
+        std::vector<std::string> reference;
+        for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
+            tactical::TacticalSetup setup;
+            setup.seed = seed;
+            setup.players = players();
+            setup.units = {unit(10, squadron_b, empire, at(0, 0)), unit(11, craft_type, empire, at(0, 0))};
+            const auto half = Fixed::from_raw(one / 2);
+            const math::Quat vertical{half, Fixed::from_raw(sign * one / 2), Fixed::from_raw(-sign * one / 2), half};
+            setup.units[0].rotation = vertical;
+            setup.units[1].rotation = vertical;
+            const auto matrix = math::to_matrix(vertical, {});
+            expect(matrix && matrix.value().rows[0][0] == Fixed{} && matrix.value().rows[1][0] == Fixed{}
+                && matrix.value().rows[2][0] == units(-sign), "FM-27: fixture forward axis is exactly vertical");
+            const auto yaw = tactical::yaw_degrees(vertical);
+            expect(yaw && yaw.value() == Fixed{}, "FM-27: either vertical rotation has exact zero yaw");
+            setup.squadrons = {{10, {11}}};
+            auto table = motion();
+            table.squadrons.spawners.clear();
+            auto created = tactical::TacticalSession::create(setup, sensors(), durability(), table);
+            expect(static_cast<bool>(created), "placed vertical craft initializes without an unchecked yaw read");
+            if (!created) return;
+            auto session = std::move(created).value();
+            const auto flight = session.craft_state(11);
+            expect(flight && flight->yaw == Fixed{}, "FM-27: placed vertical craft initializes with zero heading");
+            const eawr::platform::ThreadWorkerAdapter executor(workers);
+            std::vector<std::string> hashes;
+            for (int frame = 0; frame < 8; ++frame) {
+                const auto step = session.step(executor);
+                expect(static_cast<bool>(step), "FM-27: vertical squadron and craft advance without a heading abort");
+                if (!step) return;
+                hashes.push_back(step.value().state_sha256);
+            }
+            if (workers == 1) reference = hashes;
+            else expect(hashes == reference, "FM-27: vertical motion agrees on 1/2/4/8 workers");
         }
     }
     std::optional<math::Vec3> anchor;

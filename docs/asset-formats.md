@@ -241,7 +241,7 @@ decimal fraction it spells. The clip position is kept in whole
 exact frame, like `Player::sample_tick`. Retail's later random idle variants
 (`Idle_Anim_01` and up, chosen by the IDLE behaviour) are not modelled.
 
-## DDS, TGA and BMP
+## DDS, TGA, BMP, PNG and JPEG
 
 DDS accepts the 124-byte legacy header and these portable layouts: BC1/DXT1, BC2/DXT3,
 BC3/DXT5, 24-bit BGR, 32-bit RGBA/BGRA, L8 and A8. A DX10 extension is accepted for a
@@ -265,10 +265,18 @@ headers/compression, invalid dimensions, offsets, truncated payloads and inconsi
 file/image sizes fail with named asset diagnostics. BMP and TGA have a texture-only
 67,108,864-pixel budget (8192 squared); other asset element limits are unchanged.
 
-The reader identifies BMP/DDS/TGA by bytes rather than trusting the suffix. This admits real
+ML-52: PNG and JPEG decode from memory to a single tightly packed RGBA8 mip with top-left
+origin. PNG retains authored alpha (including grayscale alpha); RGB/grayscale images
+without alpha and JPEG receive opaque alpha. Dimensions are inspected before decoding
+and share the 67,108,864-pixel budget. The pinned stb_image dependency enables only these
+two additional formats; it does not replace the existing BMP/DDS/TGA readers.
+
+The reader identifies BMP/DDS/TGA/PNG/JPEG by bytes rather than trusting the suffix. This admits real
 BMP bytes with a `.tga` name (RaW/FotR command-bar pages) and
-TGA bytes with a `.dds` name but rejects PNG bytes and metadata sidecars carrying texture
-suffixes. Standard TGA 2.0 extension/developer areas are bounded through the footer
+TGA bytes with a `.dds` name, PNG bytes with a `.tga` name, and authored PNG/JPEG pages.
+Metadata sidecars carrying texture suffixes remain rejected. Name candidates and optional
+defaults are the separate ML-40 acquisition contract; a found file's decode failure does
+not trigger another candidate here. Standard TGA 2.0 extension/developer areas are bounded through the footer
 offsets. Two encountered exporter files omit the footer's terminal NUL; the otherwise
 well-bounded 25-byte variant is accepted with a notice rather than silently normalized.
 

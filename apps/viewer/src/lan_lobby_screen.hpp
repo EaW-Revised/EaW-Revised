@@ -25,6 +25,7 @@
 #include "eawr/net/tcp_transport.hpp"
 #include "eawr/presentation/ui/lan_lobby.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/sim/galactic/mp_lobby_catalog.hpp"
 #include "eawr/skirmish/setup.hpp"
 
 #include <godot_cpp/classes/canvas_layer.hpp>
@@ -82,6 +83,7 @@ public:
         std::uint32_t player_colour{};
         // Quiet runs (captures and tests) do not ask for sounds.
         bool silent{};
+        sim::tactical::BattleDomain domain{sim::tactical::BattleDomain::space};
     };
 
     // What the screen shows, for the report and the GPU case.
@@ -111,6 +113,8 @@ public:
         std::string drawn_map;
         std::vector<std::string> disabled_maps; // Host map paths disabled and not selectable in the drawn list.
         std::vector<std::string> settings;
+        std::vector<std::string> campaigns;  // a Galactic Conquest room's drawn campaign list (the host's choices)
+        std::string campaign_description;    // the drawn description of the selected campaign
         bool preview_visible{}, settings_read_only{};
         std::string start_caption;
         std::string start_reason;
@@ -134,6 +138,10 @@ public:
         std::vector<std::string> locked;     // names of the rooms drawn with the lock
         std::vector<std::string> connections; // the curated per-seat online connection list
         bool connections_open{};
+        bool options_open{}, credits_custom{}, credits_enabled{};
+        std::int64_t credits{}, credits_min{}, credits_max{};
+        double credits_position{};
+        std::string credits_caption;
     };
 
     EawrLanLobby();
@@ -217,6 +225,8 @@ private:
     void configure_galactic_content();
     [[nodiscard]] std::optional<std::string> host_galactic_game();
     void refresh_galactic_staging();
+    void refresh_galactic_preview(Impl& impl, PageState& state, Resources& resources,
+                                  const sim::galactic::MpLobbyCampaign* campaign);
     void refresh_galactic_roster(Impl& impl, PageState& state, Resources& resources, const LanView& view,
                                  const std::optional<LanLobbyState>& room,
                                  std::vector<presentation::ui::StagingRow>& rows, std::size_t dialog_rows);
@@ -248,6 +258,7 @@ private:
                        bool (*number)(const std::string&, std::uint32_t&));
     bool action_humans(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
     bool action_host_dropdown(const std::string& argument);
+    bool action_options(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
     bool action_staging_dropdown(const std::string& argument, bool (*number)(const std::string&, std::uint32_t&));
     bool action_host(Impl& impl, const std::string& argument);
     bool action_join(Impl& impl, const std::string& argument);

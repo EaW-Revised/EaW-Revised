@@ -20,6 +20,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include "../support/temp_dir.hpp"
+#include "../../src/sim/galactic/observer_internal.hpp"
 #include <map>
 #include <utility>
 
@@ -123,6 +126,44 @@ cp::CampaignSetupServices services(std::vector<std::string>& trace) {
 cp::CampaignSetupPlan plan(std::string_view name = "Ordinary", gc::PlayerId human = 1) {
     return cp::plan_campaign_setup(data(), types(), name, options(human)).value();
 }
+void signed_loader_campaign() {
+    expect(gc::observer_detail::nearby({}, {f(4), {}, {}}, f(-5))
+        && !gc::observer_detail::nearby({}, {f(5), {}, {}}, f(-5)),
+        "WGUI-04 negative observer range uses magnitude and retains strict squared-distance boundary");
+    const auto directory = std::filesystem::temp_directory_path() /
+        ("eawr-signed-campaign-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory / "XML");
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+    const auto write = [&](std::string_view file, std::string_view xml) { std::ofstream out(directory / "XML" / file); out << xml; };
+    write("GameObjectFiles.xml", "<Game_Object_Files><File>Objects.xml</File></Game_Object_Files>");
+    write("HardpointDataFiles.xml", "<Hard_Point_Files/>");
+    write("FactionFiles.xml", "<Faction_Files/>"); write("CampaignFiles.xml", "<Campaign_Files/>");
+    write("SFXEventFiles.xml", "<SFXEvent_Files/>");
+    write("Objects.xml", R"xml(<Types>
+      <SpaceUnit Name="Ship"><Hyperspace_Speed>-2</Hyperspace_Speed><Build_Cost_Credits>-1</Build_Cost_Credits><Build_Time_Seconds>-1</Build_Time_Seconds><Build_Requires_Initial_Placement>Yes</Build_Requires_Initial_Placement></SpaceUnit>
+      <StarBase Name="Base"><Hyperspace_Speed>0</Hyperspace_Speed></StarBase>
+    </Types>)xml");
+    const std::vector mounts{eawr::vfs::MountSpec{"fixture", directory, "data", {}}};
+    const auto filesystem = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(filesystem, eawr::data::Profile::foc).value();
+    const auto loaded_types = eawr::units::galactic_type_table(catalog.catalog);
+    auto signed_data = data();
+    signed_data.constants.front().number = f(-1);
+    std::string reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto planned = cp::plan_campaign_setup(signed_data, loaded_types, "Ordinary", options()).value();
+        expect(planned.original_type(7)->build_cost_credits == f(-1)
+            && planned.original_type(7)->build_time_seconds == f(4294967295LL), "retail values survive XML loader and campaign planning");
+        std::vector<std::string> trace;
+        auto campaign = cp::CampaignRoot::create(planned, services(trace)).value();
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        static_cast<void>(campaign.game()->step(executor).value());
+        const auto hash = campaign.game()->state_sha256();
+        if (reference.empty()) reference = hash;
+        else expect(hash == reference, "signed XML fixture loads and steps the campaign equally on 1/2/4/8 workers");
+    }
+}
+
 void full_initial_control() {
     std::vector<std::string> trace;
     auto live = services(trace);
@@ -259,6 +300,47 @@ void planning() {
     expect(p.galaxy().campaign_identity != inactive.value().galaxy().campaign_identity, "active owner selection joins root identity");
     input = data(); input.constants.pop_back();
     expect(!cp::plan_campaign_setup(input, types(), "Ordinary", options()), "missing fiscal input refuses instead of stock literal");
+}
+void pause_policy_defaults() {
+    const auto make = [](const cp::CampaignSetupOptions& opts) {
+        return cp::plan_campaign_setup(data(), types(), "Ordinary", opts).value();
+    };
+    auto opts = options();
+    const auto single = make(opts);
+    expect(single.galaxy().fleet_control->pause == gc::PausePolicy::admit_all(), "single-player pause policy defaults to admit");
+    opts.mode = cp::CampaignSetupMode::multiplayer;
+    expect(make(opts).galaxy().fleet_control->pause == gc::PausePolicy{}, "unspecified multiplayer pause policy defaults to refuse");
+    opts.seat_control.emplace();
+    opts.seat_control->teams = {{1, {1}, false}};
+    opts.seat_control->controllers = {{1, gc::FactionControl::human}, {2, gc::FactionControl::ai},
+        {3, gc::FactionControl::ai}, {4, gc::FactionControl::ai}};
+    const auto coop = make(opts);
+    expect(coop.galaxy().fleet_control->pause == gc::PausePolicy::admit_all(), "one-team co-op pause policy defaults to admit");
+    opts.seats[1].kind = gc::SeatKind::human; opts.seats[1].human_side_id = 2;
+    opts.seat_control->teams.push_back({2, {2}, false});
+    opts.seat_control->controllers[1].kind = gc::FactionControl::human;
+    const auto versus = make(opts);
+    expect(versus.galaxy().fleet_control->pause == gc::PausePolicy{}, "versus pause policy defaults to refuse");
+    for (auto scenario : {options(), opts}) {
+        const auto implicit = make(scenario);
+        scenario.pause_policy = implicit.galaxy().fleet_control->pause;
+        const auto explicit_default = make(scenario);
+        expect(explicit_default.galaxy().fleet_control->pause == implicit.galaxy().fleet_control->pause
+            && explicit_default.galaxy().campaign_identity != implicit.galaxy().campaign_identity,
+            "explicit policy seals an identity contribution even when it equals the mode default");
+        for (const auto policy : {gc::PausePolicy{gc::PausedAdmission::admit, gc::PausedAdmission::refuse, gc::PausedAdmission::refuse},
+                 gc::PausePolicy{gc::PausedAdmission::refuse, gc::PausedAdmission::admit, gc::PausedAdmission::refuse},
+                 gc::PausePolicy{gc::PausedAdmission::refuse, gc::PausedAdmission::refuse, gc::PausedAdmission::admit}}) {
+            scenario.pause_policy = policy;
+            const auto changed = make(scenario);
+            expect(changed.galaxy().fleet_control->pause == policy
+                && changed.galaxy().campaign_identity != explicit_default.galaxy().campaign_identity,
+                "explicit per-kind override applies and joins the campaign identity");
+        }
+        scenario.pause_policy.reset();
+        expect(make(scenario).galaxy().campaign_identity == implicit.galaxy().campaign_identity,
+            "absent policy keeps the implicit campaign identity without an explicit-policy contribution");
+    }
 }
 void order_and_parity() {
     std::vector<std::string> trace;
@@ -743,6 +825,6 @@ void installed() {
 }
 } // namespace
 int case_galactic_campaign_setup_tests(int argc, const char* const[]) {
-    if (argc > 1) installed(); else { full_initial_control(); victory_authoring_contracts(); planning(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
+    if (argc > 1) installed(); else { signed_loader_campaign(); full_initial_control(); victory_authoring_contracts(); planning(); pause_policy_defaults(); order_and_parity(); observer_start(); layout_observer(); provider_refusals(); retained_parent(); }
     return galactic_test::failures == 0 ? 0 : 1;
 }

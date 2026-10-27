@@ -1090,6 +1090,7 @@ void installed() {
     auto campaign = cp::CampaignRoot::create(plan, live).value();
     auto host = std::make_shared<foc::detail::Host>();
     std::vector<ga::FreestoreType> traits;
+    gc::TypeId orbital_type{};
     auto input = std::make_shared<ga::FreestoreInput>();
     for (const auto& binding : plan.type_bindings()) {
         const auto* type = plan.original_type(binding.id); if (!type) continue;
@@ -1097,7 +1098,8 @@ void installed() {
         ga::FreestoreType row; row.type = binding.id; row.transport = behaves("TRANSPORT");
         if (behaves("FLEET")) row.kind = ga::FreestoreKind::fleet;
         else if (behaves("DUMMY_GROUND_STRUCTURE") || behaves("DUMMY_GROUND_BASE")) row.kind = ga::FreestoreKind::ground_structure;
-        else if (behaves("DUMMY_STAR_BASE")) row.kind = ga::FreestoreKind::space_structure;
+        else if (behaves("DUMMY_ORBITAL_STRUCTURE") || behaves("DUMMY_STAR_BASE")) row.kind = ga::FreestoreKind::space_structure;
+        if (behaves("DUMMY_ORBITAL_STRUCTURE")) orbital_type = binding.id;
         traits.push_back(row); input->types_by_name.emplace(foc::detail::upper(type->name), binding.id);
     }
     gc::PlayerId player{};
@@ -1110,6 +1112,19 @@ void installed() {
     std::string baseline;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         eawr::platform::ThreadWorkerAdapter executor(workers);
+        // RGC-04: exercise a real stock orbital trait in a nonempty copied pool.
+        expect(orbital_type != 0, "installed freestore regression has an authored orbital type");
+        auto orbital_setup = gc::synthetic_galaxy({42, 2, 2, 1, 1, true, false});
+        auto& orbital_member = orbital_setup.fleets.front().members.front();
+        orbital_member.type = orbital_type;
+        const auto orbital_actor = orbital_member.id;
+        auto orbital_world = take(gc::GalacticSession::create(orbital_setup));
+        const auto orbital_pool = take(ga::copy_freestore(*orbital_world.snapshot(), traits, executor));
+        const auto orbital = std::find_if(orbital_pool.objects.begin(), orbital_pool.objects.end(),
+            [&](const auto& row) { return row.id == orbital_actor; });
+        expect(orbital != orbital_pool.objects.end() && orbital->kind == ga::FreestoreKind::space_structure
+            && !ga::freestore_eligible(*orbital, orbital->owner),
+            "copied stock orbital structures cannot be counted as mobile freestore units");
         input->pool = std::make_shared<ga::FreestorePool>(ga::copy_freestore(*campaign.game()->galaxy().snapshot(), traits, executor).value());
         std::int64_t ships = 0, ground = 0;
         for (const auto& row : input->pool->objects) if (ga::freestore_eligible(row, player)) { if (row.transport) ++ground; else ++ships; }

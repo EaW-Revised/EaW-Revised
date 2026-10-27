@@ -118,6 +118,22 @@ private:
     std::size_t count_{};
 };
 
+// Evaluate immutable visibility inputs on disjoint ranges. Publication still walks
+// the original piece order, so filtering never changes draw or diagnostic order.
+template<class Visible>
+[[nodiscard]] bool prepare_population_visibility(const std::size_t count,
+    std::vector<std::uint8_t>& shown, const particles::StepExecutor* executor, const Visible& visible) {
+    shown.resize(count);
+    constexpr std::size_t batch_size = 64;
+    const auto batch = [&](const std::size_t task) {
+        const auto end = std::min(count, (task + 1) * batch_size);
+        for (std::size_t index = task * batch_size; index < end; ++index) shown[index] = visible(index);
+    };
+    if (executor && count >= 256) return executor->run((count + batch_size - 1) / batch_size, batch);
+    for (std::size_t task = 0; task < (count + batch_size - 1) / batch_size; ++task) batch(task);
+    return true;
+}
+
 // No renderer calls on workers. Each task reads immutable ship transforms and
 // writes only its piece's transform and byte-sized error slot. Exact Q24 is kept
 // for attachments, hardpoints, emitter anchors and pick volumes as well as hulls.

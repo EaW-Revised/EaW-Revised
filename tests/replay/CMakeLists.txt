@@ -65,6 +65,7 @@ add_executable(tactical_ability_tests ability_tests.cpp
     ability_support_tests.cpp)
 target_link_libraries(tactical_ability_tests PRIVATE eawr::sim eawr::platform)
 target_compile_features(tactical_ability_tests PRIVATE cxx_std_20)
+add_test(NAME tactical_mod_loadability_contracts COMMAND tactical_ability_tests --mod-loadability)
 eawr_target_project_warnings(tactical_ability_tests)
 add_test(
     NAME tactical_ability_contracts
@@ -292,6 +293,12 @@ foreach(workers IN ITEMS 1 2 4)
             --workers ${workers}
         VERBATIM)
 endforeach()
+add_executable(tactical_health_warning_tests health_warning_tests.cpp)
+target_link_libraries(tactical_health_warning_tests PRIVATE eawr::sim eawr::platform)
+target_compile_features(tactical_health_warning_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(tactical_health_warning_tests)
+add_test(NAME tactical_health_warning_contracts COMMAND tactical_health_warning_tests)
+
 add_executable(tactical_damage_tests
     damage_tests.cpp
     damage_shields_tests.cpp

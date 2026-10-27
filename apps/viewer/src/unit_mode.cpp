@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "eawr/core/ascii.hpp"
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/core/json_text.hpp"
@@ -496,7 +497,7 @@ bool UnitMode::requested() {
 
 UnitMode::Options UnitMode::from_command_line() {
     Options options;
-    const PackedStringArray arguments = OS::get_singleton()->get_cmdline_user_args();
+    const PackedStringArray arguments = viewer_profile_arguments();
     for (int64_t index = 0; index + 1 < arguments.size(); ++index) {
         const std::string argument = utf8(arguments[index]);
         const std::string value = utf8(arguments[index + 1]);

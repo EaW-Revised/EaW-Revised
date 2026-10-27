@@ -14,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "presentation/rende
 from viewer_mode_sources import SOURCE_BUNDLES, source_text  # noqa: E402
 
 EXCLUDED = {
+    "eawr::units::LandCompanyMember": {
+        "stay_in_transport": "immutable unit-table creation admission; transport members are refused before runtime land state exists",
+    },
     "eawr::sim::tactical::session_detail::LiveUnit": {
         "placement_cache": "derived transform cache rebuilt from position and rotation",
         "banked_placement_cache": "derived banked transform cache rebuilt from heading and roll",
@@ -32,7 +35,8 @@ OWNER_EXCLUSIONS = {
     "eawr::sim::galactic::GalacticSession::Impl": {
         "immutable setup encoded by the recording codec": "setup",
         "registry objects encoded by the world object sections": "registry planets routes fleets",
-        "runtime callbacks rebound by the caller": "ability_consumption_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
+        "runtime callbacks rebound by the caller": "ability_consumption_handler ground_ability_story_handler conflict_tail control_handler corruption_completion_handler corruption_mission_handler corruption_result_handler credit_notification_handler hasher movement_access_provider native_actor_changes_handler native_movement_listener native_production_handler native_production_outcome_handler native_replayers planet_ruins_story_handler technology_notice_handler timeline_service",
+        "synchronous consumption guard, zero at every checkpoint barrier": "consuming_spy",
         "derived service inputs and indexes rebuilt on load": "ability_input_generation ability_work conflict_requests_enabled conflict_tail_outer_timer control_stealth_generation control_stealth_inputs economy_input_generation gathered_income_inputs graph income_control_generation income_edges income_forecast_cache income_gather_generation income_input_generation income_modifier_generation income_modifiers income_source_candidates movement_access_generation native_invasion_transport_count native_invasions_enabled observer_input_generation observer_neighbours    published_actor_records   published_economy_input_generation   published_production published_production_generation  published_production_originals published_sale_types snapshot technology_price_expiry victory_tail_deferred  production_generation",
         "derived hash caches and host diagnostics": "cached_hash cached_hash_present digests dirty production_offer_hashes discovery_records discovery_targets income_forecast_rebuilds income_modifier_rebuilds income_sources_gathered observer_projection_records population_objects population_producers production_entries production_offer_rebuilds production_producers verify_cached_hash",
         "local per-player publication caches rebuilt on demand, never serialized": "view_publications",
@@ -42,14 +46,16 @@ OWNER_EXCLUSIONS = {
         "runtime callbacks rebound by the caller (feedback)": "feedback_notice_handler",
         "admitted History service owner rebound by the scripted adapter": "history_service_deferred",
         "unhealthy or in-flight state cannot reach a save barrier": "failed native_applying",
+        "transient nested surface-launch admission guard, active only while native_applying forbids saves": "launch_leg",
+        "system pause hold derived from conflict, summary and child ownership and rebound on load": "system_hold",
         "applied native journal history is carried by the recording section; the owner keeps only its length (#4058)": "native_effects",
         "prebattle autosave admission window derived by the conflict owner each step, never saved (#2524)": "prebattle_autosave_window",
     },
     "eawr::campaign::GameSession::Impl": {
         "serialized separately by world, script, child and return owner codecs": "galaxy scripts child staged return_state live_hero_returns native_ai story_engine",
         "runtime callbacks rebound by the caller": "auto_progress auto_resolver auto_state_reader auto_state_writer auto_withdraw child_tech conflict_gate control_observer corruption_mission_service hasher hero_placement hero_resolver hero_structures layers outcome_services pending_alert story_handler story_rewards technology_handler vote_progress",
-        "immutable content lookup tables rebound on load": "story_factions story_planets",
-        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index story_notes story_notices story_reported story_triggers",
+        "immutable content lookup tables rebound on load": "story_factions story_planets story_scripts",
+        "transient outcome and publication history": "latest_auto_outcome latest_context latest_result outcome_history outcome_record_index entry_notes story_notes story_notices story_reported story_triggers",
         "host-side diagnostic oracle trace session id": "native_oracle_session",
         "history rebase scheduled by a save or load and applied at the next step; a recapture before it sees the saved window (#4058)": "scheduled_base",
         "unhealthy or reconstruction-only state cannot reach a save barrier": "failure reconstructing_native_notices restoring_child",
@@ -66,6 +72,7 @@ FIELD_SCOPE = "eawr::sim::tactical::checkpoint_detail"
 FIELD_SOURCES = {
     "src/sim/tactical/checkpoint_fields_internal.hpp": FIELD_SCOPE,
     "src/sim/tactical/checkpoint_access_internal.hpp": FIELD_SCOPE,
+    "src/sim/tactical/land_checkpoint_fields_internal.hpp": FIELD_SCOPE,
     "src/sim/galactic/checkpoint_fields_internal.hpp": "eawr::sim::galactic::checkpoint_detail",
     "src/sim/galactic/checkpoint_commands_internal.hpp": "eawr::sim::galactic::checkpoint_detail",
     "src/campaign/checkpoint_fields_internal.hpp": "eawr::sim::galactic::checkpoint_detail",
@@ -149,6 +156,7 @@ def inventory(overrides):
     # State types may move across simulation headers; discover the whole tree.
     files = sorted((root / "include/eawr/sim").rglob("*.hpp"))
     files += sorted((root / "src/sim").rglob("*.hpp"))
+    files += [root / "include/eawr/units/land_companies.hpp"]
     for tree in ("include/eawr/campaign", "src/campaign", "include/eawr/script/authoritative", "include/eawr/script/numeric"):
         files += sorted((root / tree).rglob("*.hpp"))
     files += [root / member for path in OWNERS for member in SOURCE_BUNDLES.get(path, (path,))]

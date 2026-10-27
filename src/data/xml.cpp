@@ -1,5 +1,6 @@
 #include "eawr/core/load_profile.hpp"
 #include "xml_internal.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 #include <atomic>
 #include <unordered_map>
 #include <unordered_set>
@@ -14,6 +15,105 @@ Catalog::Catalog(Catalog&&) noexcept = default;
 Catalog& Catalog::operator=(Catalog&&) noexcept = default;
 Catalog::Catalog(const Catalog&) = default;
 Catalog& Catalog::operator=(const Catalog&) = default;
+
+namespace {
+using Census = diagnostics::OwnerCensus;
+void census_source(Census& output, const Census::Group group, const SourceLocation& source) noexcept {
+    output.string(group, source.logical_path);
+    output.string(group, source.source_id);
+    output.string(group, source.layer_id);
+}
+void census_node(Census& output, const Census::Group group, const XmlNode& node, unsigned depth = 0) noexcept {
+    if (!output.step(group)) return;
+    if (depth == 64) { output.incomplete(group); return; }
+    output.string(group, node.name);
+    output.string(group, node.raw_text);
+    census_source(output, group, node.source);
+    if (node.schema_ref) output.string(group, *node.schema_ref);
+    output.vector(group, node.attributes);
+    for (const auto& attribute : node.attributes) {
+        if (!output.step(group)) break;
+        output.string(group, attribute.name);
+        output.string(group, attribute.value);
+        census_source(output, group, attribute.source);
+        if (attribute.schema_ref) output.string(group, *attribute.schema_ref);
+    }
+    output.vector(group, node.children);
+    for (const auto& child : node.children) {
+        if (!output.step(group)) break;
+        census_node(output, group, child, depth + 1);
+    }
+}
+void census_definition(Census& output, const Definition& definition) noexcept {
+    output.string(Census::xml_definitions, definition.id);
+    output.string(Census::xml_definitions, definition.type_name);
+    output.string(Census::xml_definitions, definition.schema_type_name);
+    census_node(output, Census::xml_definitions, definition.root);
+}
+void census_resolved(Census& output, const std::unordered_map<std::string, EffectiveObject>& cache) noexcept {
+    for (const auto& entry : cache) {
+        const auto& [key, object] = entry;
+        if (!output.step(Census::xml_resolved)) break;
+        output.range(Census::xml_resolved, &entry, sizeof(entry));
+        output.string(Census::xml_resolved, key);
+        output.string(Census::xml_resolved, object.object_id);
+        output.string(Census::xml_resolved, object.type_name);
+        output.vector(Census::xml_resolved, object.chain);
+        for (const auto& name : object.chain) {
+            if (!output.step(Census::xml_resolved)) break;
+            output.string(Census::xml_resolved, name);
+        }
+        output.vector(Census::xml_resolved, object.values);
+        for (const auto& value : object.values) {
+            if (!output.step(Census::xml_resolved)) break;
+            census_node(output, Census::xml_resolved, value.value);
+            output.string(Census::xml_resolved, value.source_object_id);
+            if (value.displaced_value) census_node(output, Census::xml_resolved, *value.displaced_value);
+            if (value.inherited_real) {
+                census_node(output, Census::xml_resolved, value.inherited_real->value);
+                output.string(Census::xml_resolved, value.inherited_real->source_object_id);
+            }
+        }
+    }
+}
+}
+
+void Catalog::owner_census(diagnostics::OwnerCensus& output) const {
+    if (!impl_) return;
+    if (output.range(Census::xml_definitions, impl_.get(), sizeof(Impl))) {
+        output.vector(Census::xml_definitions, impl_->definitions);
+        for (const auto& definition : impl_->definitions) {
+            if (!output.step(Census::xml_definitions)) break;
+            census_definition(output, definition);
+        }
+        for (const auto& entry : impl_->by_id) {
+            const auto& [key, indexes] = entry;
+            if (!output.step(Census::xml_definitions)) break;
+            output.range(Census::xml_definitions, &entry, sizeof(entry));
+            output.string(Census::xml_definitions, key);
+            output.vector(Census::xml_definitions, indexes);
+        }
+        for (const auto& entry : impl_->winners) {
+            const auto& [key, index] = entry;
+            if (!output.step(Census::xml_definitions)) break;
+            static_cast<void>(index);
+            output.range(Census::xml_definitions, &entry, sizeof(entry));
+            output.string(Census::xml_definitions, key);
+        }
+        std::lock_guard lock(impl_->cache_mutex);
+        census_resolved(output, impl_->resolve_cache);
+    }
+    if (overlay_ && output.range(Census::xml_definitions, overlay_.get(), sizeof(Overlay))) {
+        for (const auto& [index, definition] : overlay_->replaced) {
+            if (!output.step(Census::xml_definitions)) break;
+            static_cast<void>(index);
+            output.range(Census::xml_definitions, &definition, sizeof(Definition));
+            census_definition(output, definition);
+        }
+        std::lock_guard lock(overlay_->cache_mutex);
+        census_resolved(output, overlay_->resolve_cache);
+    }
+}
 
 std::uint64_t Catalog::generation() const noexcept {
     if (overlay_) return overlay_->generation;
@@ -302,7 +402,7 @@ core::Result<LoadResult> load_catalog(
     std::vector<const Definition*> member_definitions;
     member_definitions.reserve(impl->definitions.size());
     for (const auto& definition : impl->definitions) member_definitions.push_back(&definition);
-    derive_member_flags(member_definitions, impl->member_flags, impl->member_flags_issue);
+    derive_member_flags(member_definitions, impl->member_flags, impl->member_flags_issue, impl->member_roster_notes);
     return core::Result<LoadResult>::success(LoadResult{Catalog(std::move(impl)), std::move(diagnostics), std::move(health)});
 }
 

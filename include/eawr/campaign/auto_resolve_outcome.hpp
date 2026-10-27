@@ -55,6 +55,10 @@ struct AutoResolveOutcomeServices {
     std::function<core::Result<void>(sim::galactic::GalacticSession&, const AutoResolveOutcomeApplication&)> control;
     // WGM-61/62/63 owns destinations and normal movement; no teleport or guessed tie.
     std::function<core::Result<void>(sim::galactic::GalacticSession&, const AutoResolveOutcomeApplication&)> retreat;
+    // WAR-60 branch (b): pays the final-blow players of the ordinary deaths (a.deaths and the lethal closure
+    // of each) as credits, before any ownership return. Branch (a), the explicit bounty-collection switch,
+    // allied payout and sub-one rounding stay documented seams (legacy #4911).
+    std::function<core::Result<void>(sim::galactic::GalacticSession&, const AutoResolveOutcomeApplication&)> bounty;
     // WAR-47/48/55/59: structures, victory parameter 5, learning, cleanup and story consumers.
     std::function<core::Result<void>(sim::galactic::GalacticSession&, const AutoResolveOutcomeApplication&)> effects;
 };

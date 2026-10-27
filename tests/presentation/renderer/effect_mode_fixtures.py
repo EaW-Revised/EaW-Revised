@@ -346,7 +346,7 @@ def _run(game_root: pathlib.Path, logical_path: str, report: pathlib.Path,
          mod_root: str | None = None, extra=()) -> tuple[dict, subprocess.CompletedProcess]:
     executable = os.environ.get("EAWR_GODOT_EXECUTABLE")
     assert executable, "EAWR_GODOT_EXECUTABLE must name the pinned Godot binary"
-    command = [executable, "--path", str(ROOT / "apps/viewer/project"), "--",
+    command = [executable, "--render-thread", "safe", "--path", str(ROOT / "apps/viewer/project"), "--",
                "--eawr-effect", logical_path, "--eawr-game-root", str(game_root),
                "--eawr-report", str(report), *extra]
     if mod_root:

@@ -825,6 +825,16 @@ hashes (each is a faster way to the same result, or work moved off the critical 
 - The viewer reuses same-size particle surfaces ([measurements](#particle-surface-reuse-2026-10-04)); emitter bone placement, projectile stream preparation and death-clone proxy posing retain serial work. Remaining preparation cost stays on the performance follow-up (legacy EAWR-1261).
 
 
+### Trace without render-time queries (`--eawr-perf-no-render-timing`)
+
+`render_cpu_ms` and `render_gpu_ms` come from `viewport_get_measured_render_time_cpu/gpu`. With the Separate render thread
+(`--render-thread separate`) each call makes the engine synchronize with the render thread, and the engine warns
+"causing RenderingServer synchronizations on every frame": a Separate trace taken with them records the stall, not the
+thread model (PF engine-2: frame_ms 133 ms against 4.5 ms in Safe on the same run). Add `--eawr-perf-no-render-timing` to
+`--eawr-perf-trace` to skip both queries and to never request the root viewport's measurement; the two columns stay in the header and
+are empty (not measured). This is the only place in the viewer that calls those two queries. Without the flag the trace is
+unchanged.
+
 ### Particle registry fine timings (legacy EAWR-3193)
 
 `--eawr-particle-stream-reference` (developer switch, same trace) turns the per-emitter

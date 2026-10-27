@@ -162,6 +162,11 @@ std::string garrison_fact_contracts() {
     expect(!ai::galactic_proposal_garrisons(content, 100, 3, 999), "missing target terrain refuses");
     content.types.at(100).space_escorts.push_back("UNBOUND");
     expect(!ai::galactic_proposal_garrisons(content, 100, 3, 10), "unbound authored escort refuses the whole fact result");
+    content.types.at(100).space_escorts.pop_back();
+    original->starting_spawned_units[1].insert(original->starting_spawned_units[1].begin(), {"Missing", 5});
+    const auto with_null = ai::galactic_proposal_garrisons(content, 100, 3, 10);
+    expect(with_null && with_null.value().size() == rows.size(),
+        "RGC-24: a starting-spawn name that resolves to no type is a null entry and adds nothing to the expansion");
     return trace;
 }
 std::shared_ptr<ai::GalacticSelectionContent> indexed_selection_content() {
@@ -289,6 +294,15 @@ std::string indexed_selection_contract(const eawr::sim::PartitionExecutor& execu
     expect(after.allowed_site_unowned == before.allowed_site_unowned, "the fixture planet is owned by the selecting player");
     expect(after.allowed_site_reads - before.allowed_site_reads == 2 && after.allowed_site_reuses - before.allowed_site_reuses == 1,
         "allowed-producer flags are read once per completed input and reused by a second provider on it; a new publication reads again");
+    plans->constraints.at(plan.name).forces.front().deny_heroes = true;
+    refuse_hero = true;
+    const auto reads_before_denial = hero_reads;
+    const auto denied_hero = must(provider(1, 10, goal, plan));
+    expect(denied_hero->complete && !denied_hero->types.at(100).hero
+        && denied_hero->types.at(100).hero_weight == ai::Real{} && hero_reads == reads_before_denial,
+        "HA-01/HA-04 denied extra attach keeps an explicit named team ordinary without calling its failing hero provider");
+    plans->constraints.at(plan.name).forces.front().deny_heroes = false;
+    refuse_hero = false;
     refuse_freestore = true;
     const auto free_failure = provider(1, 10, goal, plan);
     expect(!free_failure && free_failure.error().code == "TEST-FREESTORE-LIVE", "new freestore refusal remains live");
@@ -621,6 +635,19 @@ std::string frontier_rebind_contract(const eawr::sim::PartitionExecutor& executo
 }
 int main() {
     try {
+        {
+            eawr::platform::ThreadWorkerAdapter executor(1);
+            auto session = must(gc::GalacticSession::create(setup()));
+            Owner owner(session, executor);
+            auto missing = data();
+            missing.function_sets["FUNCTIONS"] = {{"GOAL", "Positive"}, {"GOAL", "MissingEquation"}};
+            ai::Engine engine(owner.host, std::move(missing), std::vector{definition()});
+            const std::array selected{ga::PlayerSelection{1, "FIXTURE", "NORMAL", {}, {}}};
+            const auto result = engine.begin_galactic_barrier(*owner.world, {}, owner.scripts,
+                owner.sequence, selected, &executor);
+            // #4937: a function set with an entry whose equation never loaded is not registered, as in retail (named by galactic_ai::unresolved_goal_equations), not a startup failure.
+            expect(static_cast<bool>(result), "a missing selected goal equation skips its function set instead of refusing startup");
+        }
         staging_contracts();
         goal_reach_index_contracts();
         shared_planet_list_contracts();
@@ -639,7 +666,7 @@ int main() {
         std::array<std::string, 24> assembly_baselines;
         std::string frontier_baseline;
         std::string sparse_force_baseline;
-        std::string indexed_selection_baseline;
+        std::string indexed_selection_baseline, named_team_baseline;
         for (const auto count : {1U, 2U, 4U, 8U}) {
             eawr::platform::ThreadWorkerAdapter executor(count);
             const auto prepared_content_trace = indexed_selection_contract(executor);
@@ -829,16 +856,51 @@ int main() {
                     "WGA-482 negative raw base time wins over a mobile candidate with positive excess despite appearing second");
             }
             {
-                // WGA-489: a generic unscripted hero is an ordinary unit, so it is selected although its force denies hero
-                // attach; a hero that keeps the hero stage still honours the denial.
+                // HA-01/HA-04: an explicit named team stays ordinary when extra hero attach
+                // is denied. Poisoned attach-only facts cannot veto it or change its RNG/state.
                 for (const auto stage : {false, true}) {
                     auto hero_session = must(gc::GalacticSession::create(setup())); Owner hero(hero_session, executor);
                     auto& facts = hero.facts->types.at(100);
-                    facts.hero = stage; facts.hero_containment_allowed = true;
+                    facts.hero = stage; facts.hero_containment_allowed = false;
+                    facts.hero_weight = ai::real(-1000); facts.escort_weight = ai::real(-1000);
+                    facts.hero_minimum_cost = ai::real(5000); facts.hero_maximum_cost = ai::real(1);
                     hero.facts->attachment_allowed = {{false, false}};
                     must(hero.engine->allocate_galactic_goal(1, 0, hero.engine->target_of_object(10)->id));
-                    expect(ai::EngineContractAccess::selected_reservation(*hero.engine) == !stage,
-                        "WGA-489 a hero denied by its force is vetoed only while it keeps the hero stage");
+                    expect(ai::EngineContractAccess::selected_reservation(*hero.engine),
+                        "HA-01/HA-04 explicit named hero teams ignore extra-attach denial and use neutral hero weight");
+                    const auto& potential = *ai::EngineContractAccess::player(*hero.engine).proposed.front().potential;
+                    expect(potential.units == std::vector<gc::TypeId>{100}, "explicit named team fills its required slot");
+                    ai::GoalStateContributor saved(hero.engine, eawr::core::sha256_hex(std::span<const std::uint8_t>{}));
+                    const auto trace = must(saved.state_hash()) + must(hero.actions->state_hash());
+                    if (named_team_baseline.empty()) named_team_baseline = trace;
+                    else expect(trace == named_team_baseline,
+                        "denied attach is identical to ordinary selection, including RNG and complete native state on 1/2/4/8 workers");
+                }
+                {
+                    auto allowed_session = must(gc::GalacticSession::create(setup())); Owner allowed(allowed_session, executor);
+                    auto& facts = allowed.facts->types.at(100); facts.hero = true;
+                    facts.hero_containment_allowed = false;
+                    allowed.facts->attachment_allowed = {{true, false}};
+                    must(allowed.engine->allocate_galactic_goal(1, 0, allowed.engine->target_of_object(10)->id));
+                    expect(!ai::EngineContractAccess::selected_reservation(*allowed.engine),
+                        "HA-03 allowed hero attachment still enforces the qualified hero admission gates");
+                }
+                {
+                    auto configured = setup(); configured.fleets = {{30, 1, 10, {{31, 101}}}};
+                    configured.fleet_control->types.push_back({101, false, true, false});
+                    auto extra_session = must(gc::GalacticSession::create(configured)); Owner extra(extra_session, executor, true);
+                    ai::EngineContractAccess::staging_fixture(*extra.engine);
+                    auto extra_type = extra.facts->types.at(100); extra_type.hero = true;
+                    extra_type.hero_containment_allowed = true; extra_type.hero_weight = ai::real(1000);
+                    extra.facts->types.emplace(101, extra_type);
+                    extra.facts->freestore.push_back({31, {}, false, 101, false});
+                    extra.facts->attachment_allowed = {{false, false}};
+                    expect(extra.host->view->find(31) && extra.host->view->find(31)->owner == 1,
+                        "extra-attach regression supplies a live owned hero candidate");
+                    must(extra.engine->allocate_galactic_goal(1, 0, extra.engine->target_of_object(10)->id));
+                    expect(ai::EngineContractAccess::selected_reservation(*extra.engine)
+                        && ai::EngineContractAccess::player(*extra.engine).proposed.front().potential->units == std::vector<gc::TypeId>{100},
+                        "HA-01 denied extra hero does not join a team that never names it");
                 }
                 expect(foc::ai::galactic_hero_stage_applies(true, false, false, true)
                     && !foc::ai::galactic_hero_stage_applies(true, false, false, false)

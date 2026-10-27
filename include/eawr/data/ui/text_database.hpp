@@ -65,6 +65,8 @@ public:
     explicit TextLookup(const TextDatabase& database) noexcept : database_(&database) {}
 
     [[nodiscard]] std::u16string text(std::string_view key);
+    // Whether the key resolves (database or built-in text), without recording a diagnostic.
+    [[nodiscard]] bool contains(std::string_view key) const noexcept;
     [[nodiscard]] const std::vector<core::Diagnostic>& diagnostics() const noexcept {
         return diagnostics_;
     }

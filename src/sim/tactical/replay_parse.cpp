@@ -19,7 +19,7 @@ core::Result<TacticalReplay> parse_replay(
     }
 
     Reader reader(bytes);
-    std::uint16_t header_size{};
+    std::uint32_t header_size{};
     std::uint32_t header_reserved{}, player_count{};
     std::uint64_t unit_count{}, command_count{};
     bool extensions{}, squadrons{};
@@ -33,6 +33,10 @@ core::Result<TacticalReplay> parse_replay(
     if (auto section = parse_header_extensions(bytes, reader, logical_path, replay, header_size, extensions, disabled_garrisons, carriers, object_turn_count); !section) {
         return core::Result<TacticalReplay>::failure(section.error());
     }
+    const auto format = peek_replay_format_version(bytes);
+    const bool wide_header = format == replay_format_version_native || format == replay_format_version_squadron_native;
+    if (wide_header != replay.setup.native_scene.has_value())
+        return fail<Parsed>(diagnostic_codes::malformed, "native replay format requires native scene metadata", logical_path);
     if (auto section = validate_header_counts(logical_path, replay, header_reserved, player_count, unit_count, command_count, squadrons); !section) {
         return core::Result<TacticalReplay>::failure(section.error());
     }

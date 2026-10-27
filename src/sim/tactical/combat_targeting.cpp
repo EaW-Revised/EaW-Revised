@@ -1,6 +1,7 @@
 #include "combat_algorithms.hpp"
 
 #include <cassert>
+#include <limits>
 
 namespace eawr::sim::tactical {
 using detail::combat_detail::one_raw;
@@ -212,8 +213,8 @@ core::Result<math::Fixed> projectile_target_radius(const CombatWorld& world,
     const CombatUnit& shooter, const CombatUnit* target) {
     auto radius = target != nullptr ? target_soft_radius(world.motion, *target) : math::Fixed{};
     // WWP-27: a craft contributes its own radius and its team's, except for a melee shooter.
-    const bool melee = shooter.profile != nullptr && shooter.profile->max_attack_distance
-        && world.table != nullptr && *shooter.profile->max_attack_distance <= world.table->melee_cutoff;
+    const bool melee = shooter.profile != nullptr && shooter.attack_distance()
+        && world.table != nullptr && *shooter.attack_distance() <= world.table->melee_cutoff;
     if (target != nullptr && !melee) {
         const auto parent_id = world.container_of(target->id);
         if (parent_id != target->id) {
@@ -324,8 +325,17 @@ const CombatUnit* CombatWorld::random_member(const CombatUnit* target, CombatRan
 
 std::vector<EntityId> CombatWorld::candidates(const math::Vec3& centre, const math::Fixed half, const PlayerId owner) const {
     if (collection == nullptr) return index.box(centre, math::Vec3{half, half, half}, owner);
-    const auto low = [&](const math::Fixed value) { return math::Fixed::from_raw(value.raw() - half.raw()); };
-    const auto high = [&](const math::Fixed value) { return math::Fixed::from_raw(value.raw() + half.raw()); };
+    if (half.raw() < 0) return {};
+    // Clip only internal cull endpoints to the representable coordinate domain.
+    // The gameplay range itself remains the full authored scalar.
+    const auto low = [&](const math::Fixed value) {
+        constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
+        return math::Fixed::from_raw(value.raw() < minimum + half.raw() ? minimum : value.raw() - half.raw());
+    };
+    const auto high = [&](const math::Fixed value) {
+        constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
+        return math::Fixed::from_raw(value.raw() > maximum - half.raw() ? maximum : value.raw() + half.raw());
+    };
     return collection->collect(owner, CullBox{{low(centre.x), low(centre.y), low(centre.z)},
         {high(centre.x), high(centre.y), high(centre.z)}});
 }
@@ -345,7 +355,7 @@ core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUn
     if (formation.unbounded || within_range(anchor, target.position, divert, RangeMetric::planar))
         return core::Result<bool>::success(true);
     const auto* leader = formation.leader;
-    if (leader == nullptr || leader->profile == nullptr || !leader->profile->max_attack_distance)
+    if (leader == nullptr || leader->profile == nullptr || !leader->attack_distance())
         return core::Result<bool>::success(false);
     // WMV-17: test attack reach from the allowance circle, using the formation's leader.
     motion_detail::Calc calc;
@@ -355,7 +365,7 @@ core::Result<bool> formation_can_attack(const CombatWorld& world, const CombatUn
     const math::Vec3 edge{calc.add(anchor.x, calc.mul(direction.value().x, divert)),
         calc.add(anchor.y, calc.mul(direction.value().y, divert)), anchor.z};
     if (!calc.ok()) return core::Result<bool>::failure(calc.error("formation attack admission"));
-    auto reach = target_attack_distance(world.motion, target, edge, *leader->profile->max_attack_distance, false);
+    auto reach = target_attack_distance(world.motion, target, edge, *leader->attack_distance(), false);
     if (!reach) return core::Result<bool>::failure(reach.error());
     return core::Result<bool>::success(within_range(edge, target.position, reach.value(), RangeMetric::planar));
 }
@@ -366,9 +376,9 @@ core::Result<CombatState> finish_squadron_target(const CombatWorld& world, const
         || state.attack_target == formation_target) return core::Result<CombatState>::success(std::move(state));
     const auto* target = world.find(state.attack_target);
     bool in_reach = false;
-    if (target != nullptr && unit.profile != nullptr && unit.profile->max_attack_distance) {
+    if (target != nullptr && unit.profile != nullptr && unit.attack_distance()) {
         // WDF-14: reach reads the held container's position and extent, not an aimed member.
-        auto reach = target_attack_distance(world.motion, *target, unit.position, *unit.profile->max_attack_distance, false);
+        auto reach = target_attack_distance(world.motion, *target, unit.position, *unit.attack_distance(), false);
         if (!reach) return core::Result<CombatState>::failure(reach.error());
         in_reach = within_range(unit.position, target->position, reach.value(), RangeMetric::planar);
     }
@@ -391,7 +401,7 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
     // WSQ-41 reads the eligible hostile base before autonomous targeting. Native escort
     // destinations are excluded; the model's object attack-move also uses escort mode,
     // distinguished by its retained diversion kind. Scan priority does not veto adoption.
-    if (!state_.direct && formation != nullptr && formation->present && profile_.max_attack_distance) {
+    if (!state_.direct && formation != nullptr && formation->present && unit_.attack_distance()) {
         const auto* base = world_.find(formation->base_attack_target);
         if (base != nullptr && base->profile != nullptr && hostile(*base) && !base->in_limbo
             && (!base->durability || base->durability->hull.raw() > 0)
@@ -405,7 +415,7 @@ CombatState UnitCombat::target_state(const math::Fixed divert, const EntityId fo
                     ? ordered_aim_point(world_.table, &profile_, *base, unit_.position, hardpoint->hardpoint)
                     : base->position;
                 const auto reach = take(target_attack_distance(world_.motion, *base, unit_.position,
-                    *profile_.max_attack_distance, hardpoint != nullptr));
+                    *unit_.attack_distance(), hardpoint != nullptr));
                 // Invalid arithmetic asserts in debug; release keeps the input state without scanning.
                 if (error_) {
                     assert(!error_ && "formation adoption range arithmetic failed");
@@ -436,9 +446,9 @@ void UnitCombat::point_object_turret_target() {
         if (!target || !hostile(*target)) { turret.target = invalid_entity_id; continue; }
         turret.target = target->id;
         // FC-60: retained range loss holds the last pose; only target clear starts FC-61 idle.
-        if (!profile_.max_attack_distance) continue;
+        if (!unit_.attack_distance()) continue;
         const auto reach = take(target_attack_distance(world_.motion, *target, unit_.position,
-            *profile_.max_attack_distance, has_aim_hardpoint(*target)));
+            *unit_.attack_distance(), has_aim_hardpoint(*target)));
         if (!within_range(unit_.position, target->position, reach, RangeMetric::planar)) continue;
         if (profile_.min_attack_distance.raw() > 0 && within_range(unit_.position, target->position,
                 math::Fixed::from_raw(profile_.min_attack_distance.raw() - 1), RangeMetric::planar)) continue;
@@ -452,12 +462,12 @@ void UnitCombat::point_object_turret_target() {
 }
 
 [[nodiscard]] math::Fixed UnitCombat::member_attack_reach(const CombatUnit& target, const math::Vec3& from) {
-    return take(target_attack_distance(world_.motion, target, from, *profile_.max_attack_distance, false));
+    return take(target_attack_distance(world_.motion, target, from, *unit_.attack_distance(), false));
 }
 
 [[nodiscard]] bool UnitCombat::in_attack_range(const CombatUnit& target) {
-        if (!profile_.max_attack_distance) return false;
-        if (within_range(unit_.position, target.position, *profile_.max_attack_distance, RangeMetric::planar)) return true;
+        if (!unit_.attack_distance()) return false;
+        if (within_range(unit_.position, target.position, *unit_.attack_distance(), RangeMetric::planar)) return true;
         return within_range(unit_.position, target.position, member_attack_reach(target, unit_.position), RangeMetric::planar);
     }
 
@@ -487,14 +497,14 @@ void UnitCombat::point_object_turret_target() {
         const bool own_held = (formation_context_ == nullptr || !formation_context_->present)
             && target.id == state_.attack_target;
         result.suitable = own_held || formation_held || in_attack_range(target);
-        if (!result.suitable && diversion_anchor_ && profile_.max_attack_distance && formation_context_ != nullptr
+        if (!result.suitable && diversion_anchor_ && unit_.attack_distance() && formation_context_ != nullptr
             && formation_context_->present && formation_context_->allows_divert) {
             result.suitable = take(formation_can_attack(world_, target, scan_divert_, *diversion_anchor_, *formation_context_));
-        } else if (!result.suitable && diversion_anchor_ && profile_.max_attack_distance && formation_context_ == nullptr) {
-            const auto reach = math::Fixed::from_raw(profile_.max_attack_distance->raw() + scan_divert_.raw());
+        } else if (!result.suitable && diversion_anchor_ && unit_.attack_distance() && formation_context_ == nullptr) {
+            const auto reach = take(math::add(*unit_.attack_distance(), scan_divert_));
             result.suitable = within_range(*diversion_anchor_, target.position, reach, RangeMetric::planar)
                 || within_range(*diversion_anchor_, target.position,
-                    math::Fixed::from_raw(member_attack_reach(target, *diversion_anchor_).raw() + scan_divert_.raw()), RangeMetric::planar);
+                    take(math::add(member_attack_reach(target, *diversion_anchor_), scan_divert_)), RangeMetric::planar);
         }
         return result;
     }
@@ -570,9 +580,10 @@ core::Result<CombatState> UnitCombat::retaliation_state(const CombatUnit& attack
         CombatRandom random(world_.seed, world_.frame, unit_.id, ship_slot);
         state_.next_scan_frame = world_.frame + logical_frames_per_second
             + random.uniform(0, logical_frames_per_second / 2U);
-        if (!profile_.max_attack_distance || profile_.max_attack_distance->raw() <= 0) return {nullptr, std::nullopt};
+        if (!unit_.attack_distance() || unit_.attack_distance()->raw() <= 0) return {nullptr, std::nullopt};
         // WSQ-42: a member's formation contributes the diversion allowance to its own scan.
-        const auto range = math::Fixed::from_raw(profile_.max_attack_distance->raw() + scan_divert_.raw());
+        const auto range = take(math::add(*unit_.attack_distance(), scan_divert_));
+        if (error_) return {nullptr, std::nullopt};
         const auto count = world_.players.size();
         auto index = static_cast<std::size_t>(random.uniform(0, static_cast<std::uint32_t>(count - 1U)));
         const CombatUnit* found = nullptr;
@@ -672,7 +683,7 @@ void UnitCombat::ship_target() {
         // WSQ-42/43: squadron members were prepared and shared before the firing phase.
         // Keep FT-07's clear above: a move/stop can remove the team's target between scans.
         if (unit_.target_prepared) return;
-        if (!profile_.max_attack_distance) return;
+        if (!unit_.attack_distance()) return;
         if (state_.attack_target == invalid_entity_id) {
             const auto [found, found_priority] = scan();
             static_cast<void>(found_priority);

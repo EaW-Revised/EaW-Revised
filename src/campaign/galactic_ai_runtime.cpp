@@ -1,4 +1,5 @@
 #include "galactic_ai_runtime.hpp"
+#include "eawr/campaign/story_plots.hpp"
 #include "eawr/core/gc_profile.hpp"
 #include "../script/foc/galactic_ai.hpp"
 #include "eawr/script/foc/galactic_ai_pass.hpp"
@@ -346,12 +347,18 @@ public:
         gc_profile::Scope profile_scope(gc_profile::Phase::publish_routes);
         const auto lifecycle = manager.lock();
         if (lifecycle) world->set_perception_period(lifecycle->service_periods()[static_cast<std::size_t>(ga::Service::perception)]);
-        return world->bind_publication(galaxy->snapshot(), route_publication(), executor, galaxy->completed_tick(), galaxy->next_entity_id(),
+        auto bound = world->bind_publication(galaxy->snapshot(), route_publication(), executor, galaxy->completed_tick(), galaxy->next_entity_id(),
             lifecycle && lifecycle->perception_due(galaxy->completed_tick()));
+        for (auto& note : world->take_path_coefficient_diagnostics()) setup->load_diagnostics.push_back(std::move(note));
+        return bound;
     }
-    core::Result<void> publish_refreshed_routes() {
+    core::Result<void> publish_refreshed_routes(const sim::PartitionExecutor& executor) {
         const auto published = route_publication();
-        return world->publish_execution_route_generations(published->execution_available, published->revision, published->player_routes);
+        auto routes_published = world->publish_execution_route_generations(published->execution_available, published->revision, published->player_routes);
+        if (!routes_published) return routes_published;
+        auto coefficients = world->publish_path_coefficients(executor);
+        for (auto& note : world->take_path_coefficient_diagnostics()) setup->load_diagnostics.push_back(std::move(note));
+        return coefficients;
     }
     core::Result<std::shared_ptr<const ai::GalacticConnectivity>> prepare_connectivity(
         const ga::gc::GalacticSession& parent, const sim::PartitionExecutor& executor) {
@@ -482,7 +489,7 @@ public:
         if (auto replaced = execution->replace_retained(std::move(state)); !replaced) return replaced;
         routes[player] = std::move(staged);
         if (prepared != path_tables.end()) path_tables.erase(prepared);
-        return publish_refreshed_routes();
+        return publish_refreshed_routes(executor);
     }
 
     core::Result<std::vector<ai::EvaluatedFundingTemplate>> evaluate(ga::gc::PlayerId player, const ga::TemplatePolicy& policy) {
@@ -847,14 +854,14 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
         }
         const auto type = loaded.players.find(ai::upper_case(player_type));
         if (type == loaded.players.end()) return absent<std::vector<ga::PlayerSelection>>("authored AI player type");
-        bool mapped = false;
         for (const auto& [candidate, adjustment] : type->second.difficulty) if (adjustment == authored_adjustment) {
             if (!level.empty() && level != candidate)
                 return absent<std::vector<ga::PlayerSelection>>("unambiguous authored difficulty level");
             level = candidate;
-            mapped = true;
         }
-        if (!mapped) return absent<std::vector<ga::PlayerSelection>>("authored difficulty level");
+        // The level is one setting for every AI player; each type maps it to its own adjustment (a mod's minor and
+        // story players author their own names), so a type that does not author the chosen adjustment still plays at
+        // the chosen level. It is applied to all players below, once the level is known.
         ga::PlayerSelection player{id, std::string(player_type), level, {}, human_player};
         // WGA-431: prefer a human enemy, otherwise the last non-rogue
         // enemy in player order. Relations are directional (WGS-85).
@@ -869,6 +876,8 @@ core::Result<std::vector<ga::PlayerSelection>> select_live_galactic_ai_players(
         }
         selected.push_back(std::move(player));
     }
+    if (level.empty() && !selected.empty()) return absent<std::vector<ga::PlayerSelection>>("authored difficulty level");
+    for (auto& player : selected) player.difficulty = level;
     return core::Result<std::vector<ga::PlayerSelection>>::success(std::move(selected));
 }
 
@@ -904,20 +913,60 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
                 out->lifecycle.xml_paths.push_back(asset.canonical_path);
             }
         }
+        // AI-16: every mounted AI directory participates, including templates whose owning
+        // files are not in the initial closure. Successful equation parsing is not a discovery gate.
+        for (const auto folder : {"perceptualequations", "goalfunctions", "goals", "templates"})
+            for (const auto& asset : require(files.enumerate(std::string("data/xml/ai/") + folder, ".xml")))
+                if (!out->lifecycle.xml.contains(asset.canonical_path))
+                    out->lifecycle.xml.emplace(asset.canonical_path, read(asset.canonical_path));
+        for (auto& line : ga::include_mounted_ai_files(out->lifecycle))
+            out->load_diagnostics.push_back("galactic AI file skipped: " + std::move(line));
         const auto loaded = require(ga::load_data(out->lifecycle));
         if (!authored_difficulty.empty()) {
             if (!out->lifecycle.players.empty()) return absent<std::shared_ptr<const GalacticAiRuntimeSetup>>("one player selection source");
             out->lifecycle.players = require(select_live_galactic_ai_players(data, plan, loaded, authored_difficulty));
         }
+        for (auto& line : ga::unresolved_goal_equations(loaded, out->lifecycle.players))
+            out->load_diagnostics.push_back(std::move(line)); // #4937: the engine skips their function sets instead of refusing startup
         for (const auto& asset : require(files.enumerate("data/scripts", ".lua"))) {
             const auto& path = asset.canonical_path;
             if (path.starts_with("data/scripts/library/") || path.starts_with("data/scripts/freestore/")
-                || (path.starts_with("data/scripts/ai/") && path.substr(16).find('/') == std::string::npos)) out->modules.emplace(path, read(path));
+                || ai::galactic_goals::plan_directory_index(path)) out->modules.emplace(path, read(path));
         }
-        out->plans = require(ai::galactic_goals::load_plan_catalog({}, out->modules));
+        out->multiplayer = plan.mode() == CampaignSetupMode::multiplayer;
+        // WST-91/92: all loaded factions, all registered players, and only the recorded canonical observer.
+        for (const auto& faction : data.factions) out->story_players.factions.push_back(faction.name);
+        for (const auto& binding : plan.player_bindings())
+            out->story_players.players.push_back({binding.player.player_id, binding.faction});
+        out->story_players.local_player = plan.solo_reference_human();
+        {
+            // The scripts follow the plots: a campaign whose plots cannot be listed here simply runs none.
+            auto plots = load_story_plots(files, data, plan);
+            if (!plots) out->load_diagnostics.push_back("story script: plots not listed: " + plots.error().message);
+            const std::vector<sim::galactic::story::SubPlotDef> none;
+            out->story_scripts = require(GalacticStoryScripts::load(files, plots ? std::span<const sim::galactic::story::SubPlotDef>(plots.value().subplots) : std::span<const sim::galactic::story::SubPlotDef>(none)));
+            for (const auto& line : out->story_scripts->notes()) out->load_diagnostics.push_back("story script: " + line);
+        }
+        // RGC-163: the plan files of all five directories are read; one registry serves every mode, so a plan joins the galactic
+        // catalog when it names a galactic goal type (the first directory keeps every plan that loads). Keep the frozen
+        // module inventory: an admitted plan can require a helper at definition time or later, including computed paths.
+        out->plans = require(ai::galactic_goals::load_plan_catalog({}, out->modules, [&](const auto& definition) {
+            return std::any_of(definition.goals.begin(), definition.goals.end(), [&](const auto& name) {
+                const auto goal = loaded.goals.find(name);
+                return goal != loaded.goals.end() && goal->second.mode == "GALACTIC";
+            });
+        }));
+        for (const auto& line : out->plans.pause_differences) out->load_diagnostics.push_back("galactic AI plan: " + line);
+        for (const auto& line : out->plans.item_diagnostics) out->load_diagnostics.push_back("galactic AI plan: " + line);
+        for (const auto& line : out->plans.skipped_plans) out->load_diagnostics.push_back("galactic AI plan skipped: " + line);
         auto& perception = out->perception;
         if (out->lifecycle.players.empty()) return absent<std::shared_ptr<const GalacticAiRuntimeSetup>>("selected stock players");
         perception = *require(prepare_ai_perception_content(files, data, plan, *out->content, out->lifecycle.players.front().difficulty));
+        for (const auto* token : {"FRIENDLYINTERNALCONNECTIVITY", "FRIENDLYEXTERNALCONNECTIVITY", "ENEMYINTERNALCONNECTIVITY", "ENEMYEXTERNALCONNECTIVITY"})
+            perception.path_coefficients_requested |= loaded.equations.uses_lookup({"VARIABLE_TARGET", token});
+        if (perception.path_coefficients_requested && !perception.trade_movement_factor)
+            out->load_diagnostics.push_back("galactic path coefficients unavailable: TradeRouteMovementFactor has no numeric owner");
+        for (const auto& line : perception.spawn_diagnostics) out->load_diagnostics.push_back("galactic AI spawn: " + line);
         if (plan.galaxy().seed != perception.seed) return absent<std::shared_ptr<const GalacticAiRuntimeSetup>>("qualified 32-bit AI seed");
         perception.uses_fog = uses_fog;
         for (auto& player : perception.players) {
@@ -934,7 +983,7 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
                 out->route_z_adjust.emplace(location.planet->id, *z);
             } else out->route_z_adjust.emplace(location.planet->id, ai::Real{}); // WGA-257: shared original-type constructor default
         }
-        std::string fingerprint = "eawr-galactic-runtime-content-v3";
+        std::string fingerprint = "eawr-galactic-runtime-content-v4";
         const auto field = [&](std::string_view value) { fingerprint += std::to_string(value.size()) + ":"; fingerprint += value; };
         const auto node = [&](auto&& self, const data::XmlNode& value) -> void {
             field(value.name); field(value.raw_text); field(std::to_string(value.attributes.size()));
@@ -949,6 +998,16 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
         }
         for (const auto& [path, bytes] : out->lifecycle.xml) { field(path); field(bytes); }
         for (const auto& [path, bytes] : out->modules) { field(path); field(bytes); }
+        field(out->story_scripts->fingerprint());
+        if (!out->story_scripts->entries().empty()) {
+            field("story-player-lookup-v1");
+            field(std::to_string(out->story_players.factions.size()));
+            for (const auto& faction : out->story_players.factions) field(faction);
+            field(std::to_string(out->story_players.players.size()));
+            for (const auto& player : out->story_players.players) { field(std::to_string(player.id)); field(player.faction); }
+            field(out->story_players.local_player ? std::to_string(*out->story_players.local_player) : "no-local-player");
+        }
+        if (out->multiplayer) field("multiplayer-story-random");
         for (const auto& registry : catalog.registry_files()) if (registry.loaded && registry.input_sha256) { field(registry.included_path); field(*registry.input_sha256); }
         field(plan.campaign_name()); field(uses_fog ? "fog" : "visible");
         field(perception.is_story_campaign ? (*perception.is_story_campaign ? "story" : "ordinary") : "story-unavailable");
@@ -979,7 +1038,8 @@ core::Result<std::shared_ptr<const GalacticAiRuntimeSetup>> prepare_stock_galact
 }
 
 core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galactic_ai_runtime(
-    std::shared_ptr<const GalacticAiRuntimeSetup> setup, GalacticAiRuntimeProviders providers, GalacticAiRuntimeBirth birth) {
+    std::shared_ptr<const GalacticAiRuntimeSetup> setup, GalacticAiRuntimeProviders providers, GalacticAiRuntimeBirth birth,
+    std::vector<std::string>* plan_diagnostics) {
     using Prepared = checkpoint::GameLoadOptions::PreparedGalacticScripts;
     using Result = core::Result<Prepared>;
     if (!setup || !setup->executor || !setup->content) return absent<Prepared>("campaign content/executor");
@@ -1016,6 +1076,7 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
         for (const auto& player : host.setup.players) host.players.emplace(player.player, &player);
         auto materialized = ai::galactic_goals::materialize_plan_catalog(host, input.plans);
         if (!materialized) return Result::failure(materialized.error());
+        if (plan_diagnostics) *plan_diagnostics = materialized.value().diagnostics;
         runtime->plans = std::make_shared<const ai::galactic_goals::MaterializedPlanCatalog>(std::move(materialized).value());
         runtime->world = std::make_shared<ai::GalacticWorld>(input.perception); host.ai_world = runtime->world;
         runtime->world->enable_live_deltas(input.lifecycle.service_periods[static_cast<std::size_t>(ga::Service::perception)], input.executor);
@@ -1062,7 +1123,10 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 auto owner = weak.lock(); return owner && owner->actions ? owner->actions->freestore_owner().lock() : nullptr;
             }); !registered) return Result::failure(registered.error());
         }
-        auto story = auth::ScriptScheduler::create(config, {}); if (!story) return Result::failure(story.error());
+        // WST-53: sub-plot scripts live in the story scheduler; a campaign whose plots name none keeps it empty. (`setup` was moved into the runtime above.)
+        auto story = runtime->setup->story_scripts ? create_galactic_story_scheduler(*runtime->setup->story_scripts, config,
+            runtime->setup->multiplayer, runtime->setup->story_players) : auth::ScriptScheduler::create(config, {});
+        if (!story) return Result::failure(story.error());
         auto install = [runtime, birth](GameSession& game) -> core::Result<void> {
             if (!game.galactic_scripts()) return absent<void>("reconstructed galactic schedulers");
             runtime->world->bind_timeline_reader(game.active_timeline_reader());
@@ -1071,6 +1135,15 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
                 *reader = runtime->child_timeline_factory(mode);
             runtime->pending_child_timelines.clear();
             runtime->active_scripts = &game.galactic_scripts()->ai_scheduler();
+            if (runtime->setup->story_scripts && !runtime->setup->story_scripts->entries().empty()) {
+                game.bind_story_scripts(runtime->setup->story_scripts);
+                if (birth == GalacticAiRuntimeBirth::fresh_campaign) {
+                    std::vector<std::string> started;
+                    if (auto begun = start_galactic_story_scripts(game.galactic_scripts()->story_scheduler(), *runtime->setup->story_scripts, started); !begun)
+                        return begun;
+                    for (auto& line : started) runtime->setup->load_diagnostics.push_back("story script: " + std::move(line));
+                }
+            }
             const auto weak = std::weak_ptr<Runtime>(runtime);
             auto digest_work = std::make_shared<GalacticAiDigestWork>();
             GalacticAiStateAdapter measure;
@@ -1220,12 +1293,16 @@ core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts> prepare_galac
             const auto manager = runtime->manager.lock();
             if (!manager) return absent<void>("retained manager");
             if (auto bound = game.galactic_scripts()->set_ai_engine(std::make_shared<ScriptEngine>(runtime, manager)); !bound) return bound;
-            if (runtime->providers.observe) runtime->providers.observe({runtime->engine, runtime->world, runtime->actions, installed.value(), std::move(digest_work), manager,
-                runtime->child_scripts.parent_queries, runtime->funding,
-                [weak](auto player, auto frame, const auto& executor) -> core::Result<void> {
-                    const auto owner = weak.lock();
-                    return owner ? owner->prepare_path_table(player, frame, executor) : absent<void>("path-table prepass owner");
-                }});
+            if (runtime->providers.observe || runtime->providers.watch) {
+                GalacticAiRuntimeView view{runtime->engine, runtime->world, runtime->actions, installed.value(), std::move(digest_work), manager,
+                    runtime->child_scripts.parent_queries, runtime->funding,
+                    [weak](auto player, auto frame, const auto& executor) -> core::Result<void> {
+                        const auto owner = weak.lock();
+                        return owner ? owner->prepare_path_table(player, frame, executor) : absent<void>("path-table prepass owner");
+                    }};
+                if (runtime->providers.watch) runtime->providers.watch(view);
+                if (runtime->providers.observe) runtime->providers.observe(std::move(view));
+            }
             return core::Result<void>::success();
         };
         return Result::success({{std::move(scripts).value(), std::move(story).value()}, std::move(install),
@@ -1237,8 +1314,11 @@ core::Result<void> configure_galactic_ai_runtime(platform::CampaignServiceConfig
     // Preparation checks capability presence now, before replacing configuration.
     if (!make_providers) return absent<void>("fresh runtime provider factory");
     auto providers = make_providers(); if (!providers) return core::Result<void>::failure(providers.error());
-    auto checked = prepare_galactic_ai_runtime(setup, std::move(providers).value());
+    std::vector<std::string> plan_diagnostics;
+    auto checked = prepare_galactic_ai_runtime(setup, std::move(providers).value(), GalacticAiRuntimeBirth::fresh_campaign, &plan_diagnostics);
     if (!checked) return core::Result<void>::failure(checked.error());
+    // What the plan materialization skipped is reported once, from this check; later fresh prepares do not repeat it.
+    for (const auto& line : plan_diagnostics) setup->load_diagnostics.push_back("galactic AI plan: " + line);
     const auto prepare = [setup = std::move(setup), make_providers](GalacticAiRuntimeBirth birth) {
         auto fresh = make_providers();
         if (!fresh) return core::Result<checkpoint::GameLoadOptions::PreparedGalacticScripts>::failure(fresh.error());

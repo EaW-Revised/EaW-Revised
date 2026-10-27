@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 // #455 (P2 gap 4, #83): the tactical space minimap of the command bar (docs/behaviour/foc-minimap.md).
 // Engine-free and presentation only: it reads what the local player sees in the newest snapshot and
 // where the camera looks. A left press or drag on it only moves the camera; a right click hands a
@@ -44,6 +46,8 @@ struct MinimapSettings {
     bool guide_rectangle{};                         // Space_Is_Guide_Rectangle
     bool colorize_selected{true};                   // Radar_Colorize_Selected_Units
     data::ui::Rgba8 selected{209, 255, 209, 255};   // xml-fallback: Radar_Selected_Units_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
+    bool colorize_enemy{};                          // Radar_Colorize_Multiplayer_Enemy (stock No)
+    data::ui::Rgba8 enemy{255, 0, 0, 255};          // xml-fallback: Radar_Multiplayer_Enemy_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
     data::ui::Rgba8 nebula{255, 255, 255, 64};     // xml-fallback: Nebula_Effect_Color, WHZ-71; load: src/presentation/ui/minimap.cpp#minimap_settings
     data::ui::Rgba8 field{103, 130, 139, 127};     // xml-fallback: Space_Asteroid_Field_Color, WHZ-72; load: src/presentation/ui/minimap.cpp#minimap_settings
     data::ui::Rgba8 field_border{174, 171, 200, 127}; // xml-fallback: Space_Asteroid_Field_Border_Color; load: src/presentation/ui/minimap.cpp#minimap_settings
@@ -275,6 +279,12 @@ public:
     [[nodiscard]] std::uint32_t next_row() const noexcept { return next_row_; }
     // Texels of the shown layer that are fogged.
     [[nodiscard]] std::size_t fogged() const noexcept;
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const noexcept {
+        diagnostics::MemoryCapacity result;
+        result.vector("minimap_fog", "front_rgba", front_);
+        result.vector("minimap_fog", "back_rgba", back_);
+        return result;
+    }
 
 private:
     bool advance(const MinimapExtents& extents, const std::function<bool(double, double)>& revealed,

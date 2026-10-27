@@ -14,12 +14,15 @@ core::Diagnostic invalid(std::string message) {
 auto key(const ai::GalacticExecutionRoute& row) { return std::tuple{row.player, row.source, row.candidate}; }
 bool finite(Number value) { return (value.repr & 0x7ff0000000000000ULL) != 0x7ff0000000000000ULL; }
 Number single_add(Number a, Number b) { return ai::to_single(a + b); }
-constexpr auto missing_cost = std::numeric_limits<std::uint32_t>::max();
-bool safe_sum(std::uint32_t a, std::uint32_t b) {
-    return (a & 65535U) + (b & 65535U) < 65535U && (a >> 16U) + (b >> 16U) < 65535U;
+using Cost = std::uint64_t;
+constexpr Cost half_mask = std::numeric_limits<std::uint32_t>::max();
+constexpr auto missing_cost = std::numeric_limits<Cost>::max();
+bool safe_sum(Cost a, Cost b) {
+    return (a & half_mask) + (b & half_mask) < half_mask && (a >> 32U) + (b >> 32U) < half_mask;
 }
-Number decoded_distance(std::uint32_t cost) { return ai::to_single(Number(cost & 65535U) / Number(10)); }
-Number decoded_threat(std::uint32_t cost) { return ai::to_single(Number((cost >> 16U) * 100U)); }
+// The missing-route DTO is a sourced fallback, independent of the internal word width (WGA-386).
+Number decoded_distance(Cost cost) { return ai::to_single(Number(cost == missing_cost ? 65535U : cost & half_mask) / Number(10)); }
+Number decoded_threat(Cost cost) { return ai::to_single(Number(cost == missing_cost ? 6553500U : (cost >> 32U) * 100U)); }
 }
 core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInput& input,
     const sim::PartitionExecutor& executor, const std::shared_ptr<const ExecutionBuildMemo>& memo) {
@@ -39,7 +42,7 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
             return Result::failure(invalid("unqualified execution trade-route endpoints or speed"));
         trades.try_emplace({route.from, route.to}, speed); trades.try_emplace({route.to, route.from}, speed);
     }
-    std::vector<std::uint32_t> costs(n * n, missing_cost);
+    std::vector<Cost> costs(n * n, missing_cost);
     std::vector<std::size_t> previous(n * n, n);
     std::vector<std::uint8_t> invalid_rows(n);
     // The pairwise packed distances depend on positions, layer adjustments, usability, trade lanes and the limit but
@@ -71,8 +74,8 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
                     else if (distance > ai::to_single(input.maximum_distance)) continue;
                     const auto scaled_distance = ai::to_single(distance * Number(10));
                     const auto integer_distance = ai::truncate(scaled_distance);
-                    fresh->distance[source * n + dest] = integer_distance < 0 || integer_distance >= 65535
-                        ? ExecutionGeometry::out_of_range : static_cast<std::int32_t>(integer_distance);
+                    fresh->distance[source * n + dest] = integer_distance < 0 || static_cast<std::uint64_t>(integer_distance) >= half_mask
+                        ? ExecutionGeometry::out_of_range : integer_distance;
                 }
             });
             if (!measured) return Result::failure(measured.error());
@@ -81,13 +84,13 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
     }
     // Force belongs to the entered planet alone. Debug-build assertions do not define a normal-game recovery:
     // refuse invalid inputs instead of advertising clamping as parity.
-    std::vector<std::uint32_t> entered_threat(n); std::vector<std::uint8_t> entered_valid(n);
+    std::vector<Cost> entered_threat(n); std::vector<std::uint8_t> entered_valid(n);
     for (std::size_t dest = 0; dest < n; ++dest) {
         const auto& b = input.planets[dest];
         const auto force = b.enemy_space_power + b.nonallied_starbase_power;
         const auto integer_force = ai::truncate(force);
-        entered_valid[dest] = finite(force) && !(integer_force < 0 || static_cast<std::uint64_t>(integer_force) / 100 >= 65535);
-        if (entered_valid[dest]) entered_threat[dest] = static_cast<std::uint32_t>(integer_force) / 100U << 16U;
+        entered_valid[dest] = finite(force) && !(integer_force < 0 || static_cast<std::uint64_t>(integer_force) / 100 >= half_mask);
+        if (entered_valid[dest]) entered_threat[dest] = static_cast<Cost>(integer_force) / 100U << 32U;
     }
     auto staged = executor.execute_phase("galactic-ai-execution-edges", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, n);
@@ -98,7 +101,7 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
             const auto distance = distances[index];
             if (distance == ExecutionGeometry::no_edge) continue;
             if (distance == ExecutionGeometry::out_of_range || !entered_valid[dest]) { invalid_rows[source] = 1; continue; }
-            costs[index] = entered_threat[dest] | static_cast<std::uint32_t>(distance);
+            costs[index] = entered_threat[dest] | static_cast<Cost>(distance);
             previous[index] = source;
         }
     });
@@ -123,24 +126,32 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
     // column entries are both finite can improve, and some pair overflows a half of
     // the packed cost exactly when the largest finite row entry plus the largest
     // finite column entry does, so the domain check is linear per stage.
-    std::vector<std::uint32_t> into(n), from(n);
+    // With n planets and largest entering components T and D, a simple retained path has at most n-1
+    // edges: its halves are bounded by (n-1)*T and (n-1)*D. A relaxation joins two such paths, so
+    // 2*(n-1)*T and 2*(n-1)*D below 2^32-1 suffice for every stage. Rather than reject graphs whose
+    // coarse bound is too large, qualify the actual finite maxima below, in 64-bit arithmetic.
+    // Each half-sum is at most 2*(2^32-2), exactly representable here. Refusing sums >=2^32-1
+    // reserves the missing sentinel and proves no low-half carry or whole-word overflow occurs.
+    // Integer ordering is therefore lexicographic (threat, distance), identical in the old domain.
+    // Reconstruction checks its actual prefix+edge sums under the same bound.
+    std::vector<Cost> into(n), from(n);
     std::vector<std::size_t> predecessor(n), reachable;
     for (std::size_t intermediate = 0; intermediate < n; ++intermediate) {
-        std::uint32_t into_low = 0, into_high = 0, from_low = 0, from_high = 0;
+        Cost into_low = 0, into_high = 0, from_low = 0, from_high = 0;
         std::size_t into_others = 0;
         reachable.clear();
         for (std::size_t i = 0; i < n; ++i) {
             into[i] = costs[i * n + intermediate]; from[i] = costs[intermediate * n + i]; predecessor[i] = previous[intermediate * n + i];
             if (into[i] != missing_cost) {
-                into_low = std::max(into_low, into[i] & 65535U); into_high = std::max(into_high, into[i] >> 16U);
+                into_low = std::max(into_low, into[i] & half_mask); into_high = std::max(into_high, into[i] >> 32U);
                 if (i != intermediate) ++into_others;
             }
             if (from[i] != missing_cost) {
-                from_low = std::max(from_low, from[i] & 65535U); from_high = std::max(from_high, from[i] >> 16U);
+                from_low = std::max(from_low, from[i] & half_mask); from_high = std::max(from_high, from[i] >> 32U);
                 if (i != intermediate) reachable.push_back(i);
             }
         }
-        if (into_low + from_low >= 65535U || into_high + from_high >= 65535U)
+        if (into_low + from_low >= half_mask || into_high + from_high >= half_mask)
             return Result::failure(invalid("execution packed relaxation exceeds the qualified numeric domain"));
         // The intermediate's own row and column never improve (zero diagonal), so one without others is a no-op.
         if (!into_others || reachable.empty()) continue;
@@ -152,13 +163,14 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
                 const std::uint64_t base = into[source];
                 auto* cost_row = costs.data() + source * n; auto* previous_row = previous.data() + source * n;
                 if (dense) {
-                    // A missing column entry makes the 64-bit sum at least 2^32 - 1, which never beats a stored cost.
                     for (std::size_t dest = 0; dest < n; ++dest) {
+                        // The all-ones sentinel must never participate in 64-bit addition.
+                        if (from[dest] == missing_cost) continue;
                         const auto candidate = base + from[dest];
-                        if (candidate < cost_row[dest]) { cost_row[dest] = static_cast<std::uint32_t>(candidate); previous_row[dest] = predecessor[dest]; }
+                        if (candidate < cost_row[dest]) { cost_row[dest] = candidate; previous_row[dest] = predecessor[dest]; }
                     }
                 } else for (const auto dest : reachable) {
-                    const auto candidate = static_cast<std::uint32_t>(base + from[dest]);
+                    const auto candidate = base + from[dest];
                     if (candidate < cost_row[dest]) { cost_row[dest] = candidate; previous_row[dest] = predecessor[dest]; }
                 }
             }
@@ -172,13 +184,13 @@ core::Result<ExecutionRouteBuild> build_execution_routes(const ExecutionRouteInp
     staged = executor.execute_phase("galactic-ai-execution-decode", sim::tick_partition_count, [&](std::size_t part) {
         const auto range = sim::partition_range(part, n);
         enum : std::uint8_t { unknown, walking, done };
-        std::vector<std::uint32_t> full(n); std::vector<std::uint8_t> state(n); std::vector<std::size_t> chain;
+        std::vector<Cost> full(n); std::vector<std::uint8_t> state(n); std::vector<std::size_t> chain;
         for (auto source = range.begin; source < range.end; ++source) {
             std::fill(state.begin(), state.end(), std::uint8_t{unknown}); state[source] = done; full[source] = 0;
             const auto* parent = previous.data() + source * n;
             for (std::size_t dest = 0; dest < n; ++dest) {
                 auto& row = out.rows[source * n + dest]; row.player = input.player; row.source = input.planets[source].planet; row.candidate = input.planets[dest].planet;
-                std::uint32_t total = 0, prefix = 0;
+                Cost total = 0, prefix = 0;
                 if (source != dest) {
                     if (parent[dest] == n) { row.empty = true; total = prefix = missing_cost; }
                     else {
@@ -258,7 +270,7 @@ core::Result<ExecutionPath> cached_execution_path(const ExecutionRoutes& state, 
     if (current != start && matrix.previous[start * n + current] == n) {
         out.threat = decoded_threat(missing_cost); return Result::success(std::move(out));
     }
-    std::uint32_t full{}; out.planets.push_back(destination);
+    Cost full{}; out.planets.push_back(destination);
     while (current != start && out.planets.size() <= n) {
         const auto before = matrix.previous[start * n + current];
         if (before >= n || matrix.costs[before * n + current] == missing_cost || !safe_sum(full, matrix.costs[before * n + current]))

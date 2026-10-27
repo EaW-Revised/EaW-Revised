@@ -211,7 +211,8 @@ in order:
   all-enabled default).
 - Seven int64 values: Q24 credits, start tech, max tech, game timer, win integer,
   auto resolve, Q24 win float. The five integral match fields must fit int32.
-- Win condition and space win condition as strings.
+- Win condition and tactical win condition as strings. The second field is
+  domain-neutral; its position and encoding are unchanged for space setups.
 - Uint32 lobby victory condition (1 starbase, 2 all enemy units), then uint32 slot count.
 - Each slot: uint32 player ID, uint32 control word (bit 0: human; bits 1-2: the AI level of a
   non-human slot, 0 Normal, 1 Easy, 2 Hard; a human slot carries level 0, and the other values are
@@ -756,6 +757,9 @@ a moving target as the saved run did.
 completed upgrade lifetime counts or held objects, and every unit has zero bonuses
 and no disabled or repairing hardpoints. Ordinary unit completions and initial
 nonzero tech do not emit it; sessions without upgrades keep their prior byte layout.
+WFR-01 selects block version 2 when any live unit has a nonzero fire-range bonus;
+every encoded unit then has seven bonus values, with fire range last. Otherwise
+the block retains version 1 and its exact six-slot bytes.
 It contains uint64 account count, then accounts in ascending player order:
 uint32 player and tech level, uint64 lifetime count, then pairs of uint64 type and
 completed-build count in ascending type order; uint64 held count, then uint64
@@ -1297,6 +1301,12 @@ sorted canonical paths, each encoded as uint32 byte length, path bytes, then
 SHA-256 of the effective file bytes. Mount paths and provenance are excluded.
 Unused XML/Lua changes can therefore require a new agreement too.
 
+A recording that follows only a content change (a pin or fixture regeneration) may differ from the committed
+bytes in the header content digest (bytes 72 up to, not including, 104) and in the MTID tail: the `units` domain
+digest followed by the body's trailing SHA-256, 64 bytes (m2-start: bytes 1158 up to, not including, 1222, so
+1158..1221 inclusive). `tools/offload/replay_identity.py` computes these spans; the pin and record-installed
+tools refuse any other difference.
+
 Playback compares local domains after resolving the recorded fleet's full unit
 closure, before activating the session. `EAWR-MATCH-0001` names the first differing
 domain; the same comparison accepts additional named/versioned campaign and story
@@ -1395,8 +1405,18 @@ the original obstacle roots, and the battle's reachable type roots. Each vector 
 `u32 count`; each name has a `u16 byte length` followed by its UTF-8 bytes. The original
 loader order is retained. Names are nonempty, fit their u16 byte length, contain no NUL, and
 are unique ignoring ASCII case within each vector. The record requires a native map,
-a shared allocator boundary, nonempty source and battle type vectors, and fits the
-existing 65535-byte replay header limit. Unknown versions/flags, oversized counts,
+a shared allocator boundary, and nonempty source and battle type vectors.
+
+Native-scene replays use format 6 (no squadron table) or 7 (with squadrons), even for
+small metadata. At offset 10 the total header length is u32; subsequent fixed-header
+fields shift by two bytes, ending at offset 106. The extension count follows there.
+Tag 15 uses `u16 tag, u32 body length`; other tags keep `u16 tag, u16 body length`.
+Formats 2/3/4/5 remain canonical only for recordings without native-scene metadata;
+old native-scene framing is rejected. Both wide lengths must fit the existing 256 MiB
+whole-file resource limit, which includes the remaining header and replay tables.
+Individual names and other extension bodies still have a u16 length; oversized narrow
+bodies are refused with the extension tag and actual size before encoding. Refusals report the actual body/header size.
+Unknown versions/flags, oversized counts,
 duplicate names, truncation and trailing bytes are rejected.
 
 Standalone loading reads the original campaign profiles from the mounted data, narrows

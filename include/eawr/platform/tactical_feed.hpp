@@ -46,6 +46,10 @@ public:
     [[nodiscard]] virtual std::optional<core::Diagnostic> failure() const = 0;
     [[nodiscard]] virtual std::vector<core::Diagnostic> rejected_orders() const = 0;
     [[nodiscard]] virtual std::size_t worker_count() const noexcept = 0;
+    // Unsupported borrowed feeds explicitly report an incomplete inventory.
+    [[nodiscard]] virtual diagnostics::MemoryCapacity memory_capacity() const {
+        diagnostics::MemoryCapacity result; result.complete = false; return result;
+    }
     [[nodiscard]] virtual LiveScriptReport script_report() const = 0;
     virtual void stop() = 0;
     [[nodiscard]] virtual std::vector<std::string> tick_hashes() const = 0;
@@ -85,6 +89,7 @@ public:
     std::optional<core::Diagnostic> failure() const override { return session_->failure(); }
     std::vector<core::Diagnostic> rejected_orders() const override { return session_->rejected_orders(); }
     std::size_t worker_count() const noexcept override { return session_->worker_count(); }
+    diagnostics::MemoryCapacity memory_capacity() const override { return session_->memory_capacity(); }
     LiveScriptReport script_report() const override { return session_->script_report(); }
     void stop() override { session_->stop(); }
     std::vector<std::string> tick_hashes() const override { return session_->tick_hashes(); }

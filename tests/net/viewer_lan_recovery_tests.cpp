@@ -396,7 +396,8 @@ void loopback(bool abrupt, bool departed_ahead, bool closed_before_launch, int f
             if (!speed_sent && worlds[0].completed_tick() >= 45 && worlds[1].completed_tick() >= 45) {
                 expect(host->request_speed(0) && join->request_speed(4), "both humans request shared speed");
                 if (!speed_during_departure)
-                    expect(host->request_speed(1) && !host->request_speed(2), "third local change in window is refused");
+                    expect(host->request_speed(1) && host->request_speed(2) && host->request_speed(3) && host->request_speed(4) && host->request_speed(1)
+                        && !host->request_speed(2), "seventh local change in window is refused");
                 expect(!host->request_speed(5), "invalid speed refused locally");
                 expect(host->view().options.tactical_speed == 2 && join->view().options.tactical_speed == 2,
                     "request cannot mutate local pacing before future admission");

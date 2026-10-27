@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "eawr/core/diagnostic.hpp"
 #include "eawr/data/xml.hpp"
 
@@ -111,6 +113,16 @@ public:
     [[nodiscard]] bool changed() const noexcept { return changed_; }
     // Deterministic work budget: texels visited by blur/presentation, excluding unchanged frames.
     [[nodiscard]] std::uint64_t presented_cells() const noexcept { return presented_cells_; }
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const noexcept {
+        diagnostics::MemoryCapacity result;
+        result.vector("world_fog", "fade_values", values_);
+        result.vector("world_fog", "held", held_);
+        result.vector("world_fog", "intensities", intensities_);
+        result.vector("world_fog", "next_intensities", next_intensities_);
+        result.vector("world_fog", "blurred", blurred_);
+        result.vector("world_fog", "rgba_texels", texels_);
+        return result;
+    }
 
 private:
     template <typename ReadCell>

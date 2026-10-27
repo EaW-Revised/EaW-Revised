@@ -23,9 +23,9 @@ import sys
 import tempfile
 
 FIXTURE = "m2-start.eawr-replay"
-FIXTURE_SHA256 = "671507c662ea6daf6d8a13da2ae8b70565ae4cec188cec871eec11e42edfe193"
-TICK_ZERO_STATE = "38a8d8870dc82ea2e435b7ca5d6a568caa7603b0f2b88e5ddb031068b2908854"
-CONTENT_IDENTITY = "b0cbd796a46c6ae654ebcb18453feea16b9859fa1467e596295883f021549d74"
+FIXTURE_SHA256 = "f3df4e4e5b636e51fb5b564b88bd3d6b142e939c4f64d774a9f374e99246ca55"
+TICK_ZERO_STATE = "0b96c50559c347dfe1f8b46b39a59f440242f1435b0f27b7310849010f8b9ffe"
+CONTENT_IDENTITY = "3699901176efbf94b172a5e7d6e5dfd939e99198a9b5f58921dcbffe69e07b89"
 FINAL_TICKS = 30
 
 
@@ -311,7 +311,26 @@ def check_arguments(program: str, fixtures: pathlib.Path, work: pathlib.Path) ->
                                            str(work / "r.eawr-replay")),
         "census of a v1 replay": ("--replay", v1, "--hash-out", str(work / "h.csv"), "--census-out",
                                   str(work / "a.json")),
+        # #4589: --map names a mod start's map, so it needs both --skirmish and --mod-root.
+        "map without a mod root": ("--skirmish", "m2", "--game-root", str(work), "--census-out",
+                                   str(work / "a.json"), "--map", "Some_Map"),
+        "map without skirmish": ("--replay", replay, "--hash-out", str(work / "h.csv"), "--mod-root", str(work),
+                                 "--map", "Some_Map"),
+        "empty map": ("--skirmish", "m2", "--game-root", str(work), "--census-out", str(work / "a.json"),
+                      "--mod-root", str(work), "--map", ""),
         "census on the replay": ("--replay", replay, "--hash-out", str(work / "h.csv"), "--census-out", replay),
+        "AI report without ticks": ("--skirmish", "m2", "--game-root", str(work),
+                                    "--ai-report-out", str(work / "ai.json")),
+        "AI report with zero ticks": ("--skirmish", "m2", "--game-root", str(work),
+                                      "--ai-report-out", str(work / "ai.json"), "--ticks", "0"),
+        "AI report without skirmish": ("--replay", replay, "--hash-out", str(work / "h.csv"),
+                                       "--ai-report-out", str(work / "ai.json"), "--ticks", "3"),
+        "AI report aliases hashes": ("--skirmish", "m2", "--game-root", str(work),
+                                     "--ai-report-out", str(work / "ai.json"), "--ticks", "3",
+                                     "--hash-out", str(work / "ai.json")),
+        "AI report with rejected tag trace": ("--skirmish", "m2", "--game-root", str(work),
+                                            "--ai-report-out", str(work / "ai.json"), "--ticks", "3",
+                                            "--tag-trace-out", str(work / "tags.json")),
     }
     for label, arguments in cases.items():
         completed = run(program, *arguments)

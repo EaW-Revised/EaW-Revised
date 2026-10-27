@@ -41,7 +41,7 @@ struct MotionRules {
     // tables built by hand.
     std::uint32_t reevaluation_frames{10};
     math::Fixed guard_range{math::Fixed::from_raw(750 * math::Fixed::scale)};
-    std::uint32_t max_waypoints{}; // HCB-58: MaxWaypointsPerPath; unset synthetic tables cannot queue.
+    std::uint32_t max_waypoints{}; // HCB-58: MaxWaypointsPerPath, any 32-bit value (-1 wraps to unlimited); unset synthetic tables cannot queue.
     friend constexpr bool operator==(const MotionRules&, const MotionRules&) noexcept = default;
 };
 

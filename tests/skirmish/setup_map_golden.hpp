@@ -29,7 +29,7 @@ public:
     void put(const MatchOptions& v) {
         put(v.allow_heroes); put(v.allow_superweapons); put(v.free_starting_units); put(v.pre_built_base);
         put(v.allow_random_events); put(v.credits); put(v.start_tech); put(v.max_tech); put(v.game_timer);
-        put(v.win_integer); put(v.auto_resolve); put(v.win_float); put(v.win_condition); put(v.space_win_condition);
+        put(v.win_integer); put(v.auto_resolve); put(v.win_float); put(v.win_condition); put(v.tactical_win_condition);
     }
     void put(const LobbySlot& v) { put(v.slot); put(v.faction); put(v.team); put(v.human); put(v.fleet); put(v.colour_index); }
     void put(const PlacedForces& v) { put(v.ai); }
@@ -142,5 +142,25 @@ inline void write_team_corpus(const std::filesystem::path& directory, const std:
         "<DesiredSpaceFOWCellSize>80</DesiredSpaceFOWCellSize><SpaceFOWRegrowTime>4</SpaceFOWRegrowTime>";
     for(const auto suffix:{"Blue","Red","Green","Orange","Cyan","Purple","Yellow","Gray","Eight"})out<<"<MP_Color_"<<suffix<<">1,2,3</MP_Color_"<<suffix<<">";
     out<<"</GameConstants>";
+}
+// Separate admission corpus: keep the frozen golden corpus and its pins unchanged.
+inline void write_playable_candidate_corpus(const std::filesystem::path& directory) {
+    write_team_corpus(directory);
+    std::ofstream(directory / "xml/factions.xml") << "<Factions>"
+        "<Faction Name=\"Rebel\"><Is_Playable>yes</Is_Playable></Faction>"
+        "<Faction Name=\"Empire\"><Is_Playable>yes</Is_Playable></Faction>"
+        "<Faction Name=\"Additional_Fleet\"><Is_Playable>yes</Is_Playable></Faction>"
+        "<Faction Name=\"Pirates\"><Is_Playable>no</Is_Playable><Create_Player_In_Multiplayer_Games>yes</Create_Player_In_Multiplayer_Games></Faction>"
+        "</Factions>";
+    std::ofstream objects(directory / "xml/markers.xml");
+    objects << "<Objects>";
+    for (const auto name : {"Team_00_Space_Station", "Team_01_Space_Station", "Team_00_Spawn_Point_Marker", "Team_01_Spawn_Point_Marker"})
+        objects << "<Marker Name=\"" << name << "\"><Is_Marker>yes</Is_Marker>"
+            "<Marker_For_Specific_Object_Type>Fixture_Rebel,Fixture_Empire,Fixture_Extra,Fixture_Pirate,Fixture_Unknown</Marker_For_Specific_Object_Type></Marker>";
+    objects << "<StarBase Name=\"Fixture_Rebel\"><Affiliation>rEbEl</Affiliation></StarBase>"
+        "<StarBase Name=\"Fixture_Empire\"><Affiliation>EMPIRE</Affiliation></StarBase>"
+        "<StarBase Name=\"Fixture_Extra\"><Affiliation>Additional_Fleet</Affiliation></StarBase>"
+        "<StarBase Name=\"Fixture_Pirate\"><Affiliation>Pirates</Affiliation></StarBase>"
+        "<StarBase Name=\"Fixture_Unknown\"><Affiliation>Not_A_Faction</Affiliation></StarBase></Objects>";
 }
 } // namespace setup_map_golden

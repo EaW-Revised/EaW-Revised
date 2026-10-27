@@ -85,8 +85,11 @@ struct Build {
     }
 };
 
-// The segment test works on 1/32 units in the unit's frame: coordinates below 2^13 units stay
-// below 2^18, so every product of the triangle test fits in 64 bits.
+// DG-36: mesh coordinates normalize to <= 2^17, endpoints to <= 2^18.
+// Edges are <= 2^18, delta <= 2^19, and (start-a) <= 3*2^17.
+// Each determinant is a sum of six triple products, bounded by
+// 6*(3*2^17)*2^19*2^18 < 2^59. Box fraction products are < 2^40.
+// The adaptive quantum preserves these bounds through exponent 6 (2^18 units).
 constexpr int grid_shift = math::Fixed::fractional_bits - 5;
 constexpr std::int64_t max_local = std::int64_t{2 * max_mesh_extent} << 5;
 
@@ -103,6 +106,22 @@ struct Point {
 
 [[nodiscard]] Point grid(const math::Vec3& value) noexcept {
     return {grid(value.x.raw()), grid(value.y.raw()), grid(value.z.raw())};
+}
+template <bool Base>
+[[nodiscard]] Point mesh_grid(const math::Vec3& value, const std::uint8_t exponent) noexcept {
+    if constexpr (Base) {
+        return grid(value);
+    } else {
+        const auto shift = grid_shift + exponent;
+        const auto half = std::uint64_t{1} << (shift - 1);
+        const auto rounded = [=](const Fixed coordinate) {
+            const auto raw = coordinate.raw();
+            const auto magnitude = raw >= 0 ? static_cast<std::uint64_t>(raw) : std::uint64_t{0} - static_cast<std::uint64_t>(raw);
+            const auto result = static_cast<std::int64_t>((magnitude + half) >> shift);
+            return raw >= 0 ? result : -result;
+        };
+        return {rounded(value.x), rounded(value.y), rounded(value.z)};
+    }
 }
 [[nodiscard]] Point minus(const Point& a, const Point& b) noexcept { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
 [[nodiscard]] Point cross(const Point& a, const Point& b) noexcept {
@@ -202,6 +221,20 @@ struct Fraction {
 
 } // namespace
 
+std::uint8_t collision_grid_exponent(const CollisionBox& bounds) noexcept {
+    std::int64_t limit = max_mesh_extent * Fixed::scale;
+    for (std::uint8_t exponent = 0; exponent <= 6; ++exponent, limit *= 2) {
+        bool fits = true;
+        for (const auto* point : {&bounds.min, &bounds.max})
+            for (std::size_t axis = 0; axis < 3; ++axis) {
+                const auto raw = component(*point, axis);
+                fits = fits && raw >= -limit && raw <= limit;
+            }
+        if (fits) return exponent;
+    }
+    return 7; // outside the checked domain; validate_combat supplies the diagnostic
+}
+
 CollisionMesh collision_mesh(std::vector<CollisionTriangle> triangles, const std::uint32_t hardpoint,
     const std::uint32_t source_hardpoint, const bool shield) {
     CollisionMesh mesh;
@@ -216,12 +249,18 @@ CollisionMesh collision_mesh(std::vector<CollisionTriangle> triangles, const std
     build.nodes.emplace_back();
     build.split(0, 0, static_cast<std::uint32_t>(build.source.size()));
     mesh.nodes = std::move(build.nodes);
-    mesh.triangles.reserve(build.order.size());
-    for (const auto index : build.order) mesh.triangles.push_back(build.source[index]);
+    mesh.grid_exponent = collision_grid_exponent({mesh.nodes[0].min, mesh.nodes[0].max});
+    std::vector<CollisionTriangle> ordered;
+    ordered.reserve(build.order.size());
+    for (const auto index : build.order) ordered.push_back(build.source[index]);
+    mesh.triangles = std::move(ordered);
     return mesh;
 }
 
-core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const CollisionMesh> meshes,
+namespace {
+
+// DG-36: preserve the complete original query kernel for all existing admitted content.
+core::Result<std::optional<MeshHit>> constant_grid_segment_hits(std::span<const CollisionMesh> meshes,
     const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
     const math::Vec3& to, MeshCollisionWork* work) {
     using Out = core::Result<std::optional<MeshHit>>;
@@ -264,10 +303,12 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
     for (std::size_t index = 0; index < meshes.size(); ++index) {
         const auto& mesh = meshes[index];
         if (mesh.nodes.empty() || !enabled(index)) continue;
+        const auto* const nodes = mesh.nodes.data();
+        const auto* const triangles = mesh.triangles.data();
         if (work != nullptr) ++work->meshes;
         stack.assign(1, 0);
         while (!stack.empty()) {
-            const auto& node = mesh.nodes[stack.back()];
+            const auto& node = nodes[stack.back()];
             stack.pop_back();
             if (work != nullptr) ++work->boxes;
             if (!meets_box(start, delta, grid(node.min), grid(node.max))) continue;
@@ -277,7 +318,7 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
                 continue;
             }
             for (std::uint32_t t = node.first; t < node.first + node.count; ++t) {
-                const auto& triangle = mesh.triangles[t];
+                const auto& triangle = triangles[t];
                 if (work != nullptr) ++work->triangles;
                 const auto hit = meets_triangle(start, delta, grid(triangle.a), grid(triangle.b), grid(triangle.c));
                 // The first along the segment; on a tie the earlier mesh, then the triangle met first.
@@ -290,6 +331,106 @@ core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const Collisi
     }
     if (!best) return Out::success(std::nullopt);
     return Out::success(MeshHit{to_fixed(*best), best_mesh});
+}
+
+core::Result<std::optional<MeshHit>> adaptive_grid_segment_hits(std::span<const CollisionMesh> meshes,
+    const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
+    const math::Vec3& to, MeshCollisionWork* work) {
+    using Out = core::Result<std::optional<MeshHit>>;
+    const auto& m = transform.rows;
+    const math::Vec3 origin{m[0][3], m[1][3], m[2][3]};
+    std::optional<core::Diagnostic> error;
+    // Model-space coordinates: the rotation's columns are the model axes in the world.
+    const auto local = [&](const math::Vec3& point) {
+        const auto sub = [&](const Fixed a, const Fixed b) {
+            auto value = math::subtract(a, b);
+            if (!value) {
+                if (!error) error = value.error();
+                return Fixed{};
+            }
+            return value.value();
+        };
+        const math::Vec3 delta{sub(point.x, origin.x), sub(point.y, origin.y), sub(point.z, origin.z)};
+        std::array<Fixed, 3> result{};
+        for (std::size_t column = 0; column < 3; ++column) {
+            auto value = math::dot(math::Vec3{m[0][column], m[1][column], m[2][column]}, delta);
+            if (!value) {
+                if (!error) error = value.error();
+            } else {
+                result[column] = value.value();
+            }
+        }
+        return math::Vec3{result[0], result[1], result[2]};
+    };
+    const auto local_start = local(from);
+    const auto local_end = local(to);
+    if (error) return Out::failure(*error);
+    Point start, end, delta;
+    std::uint8_t cached_exponent = 255;
+    bool within = false;
+    std::optional<Fraction> best;
+    std::size_t best_mesh = 0;
+    std::vector<std::uint32_t> stack;
+    for (std::size_t index = 0; index < meshes.size(); ++index) {
+        const auto& mesh = meshes[index];
+        if (mesh.nodes.empty() || !enabled(index)) continue;
+        // A malformed cache must never reach an unchecked shift.
+        if (mesh.grid_exponent > 6) continue;
+        const auto* const nodes = mesh.nodes.data();
+        const auto* const triangles = mesh.triangles.data();
+        const auto visit = [&]<bool Base>() {
+            const auto quantize = [&](const math::Vec3& point) { return mesh_grid<Base>(point, mesh.grid_exponent); };
+            if (cached_exponent != mesh.grid_exponent) {
+                // Reuse endpoint rounding while consecutive admitted meshes share a grid.
+                start = quantize(local_start);
+                end = quantize(local_end);
+                delta = minus(end, start);
+                within = true;
+                for (const auto value : {start.x, start.y, start.z, end.x, end.y, end.z})
+                    within = within && value >= -max_local && value <= max_local;
+                cached_exponent = mesh.grid_exponent;
+            }
+            if (!within) return;
+            if (work != nullptr) ++work->meshes;
+            stack.assign(1, 0);
+            while (!stack.empty()) {
+                const auto& node = nodes[stack.back()];
+                stack.pop_back();
+                if (work != nullptr) ++work->boxes;
+                if (!meets_box(start, delta, quantize(node.min), quantize(node.max))) continue;
+                if (node.count == 0) {
+                    stack.push_back(node.second);
+                    stack.push_back(node.first);
+                    continue;
+                }
+                for (std::uint32_t t = node.first; t < node.first + node.count; ++t) {
+                    const auto& triangle = triangles[t];
+                    if (work != nullptr) ++work->triangles;
+                    const auto hit = meets_triangle(start, delta, quantize(triangle.a), quantize(triangle.b), quantize(triangle.c));
+                    // The first along the segment; on a tie the earlier mesh, then the triangle met first.
+                    if (hit && (!best || less(*hit, *best))) {
+                        best = hit;
+                        best_mesh = index;
+                    }
+                }
+            }
+        };
+        if (mesh.grid_exponent == 0) visit.template operator()<true>();
+        else visit.template operator()<false>();
+    }
+    if (!best) return Out::success(std::nullopt);
+    return Out::success(MeshHit{to_fixed(*best), best_mesh});
+}
+
+} // namespace
+
+core::Result<std::optional<MeshHit>> segment_hits_meshes(std::span<const CollisionMesh> meshes,
+    const std::function<bool(std::size_t)>& enabled, const math::Mat3x4& transform, const math::Vec3& from,
+    const math::Vec3& to, MeshCollisionWork* work) {
+    // One exponent comparison per mesh; the old kernel has no adaptive traversal branches.
+    if (std::all_of(meshes.begin(), meshes.end(), [](const CollisionMesh& mesh) { return mesh.grid_exponent == 0; }))
+        return constant_grid_segment_hits(meshes, enabled, transform, from, to, work);
+    return adaptive_grid_segment_hits(meshes, enabled, transform, from, to, work);
 }
 
 } // namespace eawr::sim::tactical

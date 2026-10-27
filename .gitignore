@@ -37,3 +37,8 @@ tools/watchdog/config.local.json
 
 # Per-machine preview launcher paths (tools/preview/preview.local.example.json)
 tools/preview/preview.local.json
+
+# Local pool overlay (tools/offload/pool.py); never committed
+pool-overlay*.json
+pool-overlay*.bak
+pool-overlay.log.jsonl

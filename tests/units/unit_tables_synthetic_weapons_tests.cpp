@@ -1,5 +1,6 @@
 #include "unit_tables_support.hpp"
 #include "unit_tables_synthetic_fixtures.hpp"
+#include "eawr/skirmish/start.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -11,6 +12,180 @@
 #include <vector>
 
 namespace unit_tables_test_support {
+void randomized_fire_bone_loading() {
+    std::optional<eawr::units::UnitTables> defaults;
+    for (const std::string value : {"", "Yes", "No", "invalid", "TBD"}) {
+        TempTree tree;
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        std::string points{hardpoints_xml};
+        if (!value.empty()) points.insert(points.find("</HardPoint>"),
+            "<Randomize_Between_Fire_Bones>" + value + "</Randomize_Between_Fire_Bones>");
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WWP-22: authored fire-bone fixture loads");
+        if (!loaded.tables) continue;
+        const auto* type = loaded.tables->find("Test_Frigate");
+        expect(type && !type->hardpoints.empty(), "WWP-22: fixture has an ordinary hardpoint");
+        if (!type || type->hardpoints.empty()) continue;
+        // AU-82: nonempty tokens use the retail first-character rule; TBD is absent.
+        const bool randomized = value != "No" && value != "invalid";
+        expect(type->hardpoints.front().randomize_between_fire_bones == randomized,
+            "WWP-22: absent and explicit true use the retail default; false opts out");
+        auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "WWP-22: authored data binds to the combat profile");
+        if (combat) {
+            const auto* profile = combat.value().find(eawr::assets::object_type_crc("Test_Frigate"));
+            expect(profile && !profile->weapons.empty()
+                && profile->weapons.front().randomize_between_fire_bones == randomized,
+                "WWP-22: profile retains the validated flag");
+        }
+        if (value.empty()) defaults = *loaded.tables;
+        if (defaults && (value == "No" || value == "Yes"))
+            expect((eawr::units::content_identity(*defaults) == eawr::units::content_identity(*loaded.tables))
+                    == (value == "Yes"), "WWP-22: semantic flag value binds replay content identity");
+        if (value == "invalid")
+            expect(!has_row(loaded.tables->unresolved, "HP_Test_Laser", "Randomize_Between_Fire_Bones"),
+                "AU-82: a noncanonical false token is accepted by the retail boolean rule");
+        if (value == "TBD")
+            expect(!has_row(loaded.tables->unresolved, "HP_Test_Laser", "Randomize_Between_Fire_Bones"),
+                "ML-24/WWP-22: a placeholder retains the default without a diagnostic");
+    }
+}
+
+void unknown_inaccuracy_categories() {
+    for (const std::string tag : {"Fire_Inaccuracy_Distance", "Targeting_Fire_Inaccuracy"}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string rows = "<" + tag + "> fIgHtEr|Bomber, 7 </" + tag + ">"
+            "<" + tag + "> SpaceStructure, 15 </" + tag + ">"
+            "<" + tag + "> Fighter|SpaceStructure, 19 </" + tag + ">"
+            "<" + tag + "> Corvette, 3 </" + tag + ">";
+        std::string points{hardpoints_xml};
+        if (tag == "Fire_Inaccuracy_Distance") {
+            const auto first = points.find("<Fire_Inaccuracy_Distance>");
+            const auto last = points.rfind("</Fire_Inaccuracy_Distance>");
+            points.replace(first, last + std::string_view{"</Fire_Inaccuracy_Distance>"}.size() - first, rows);
+        } else {
+            const std::string marker = "<SpaceUnit Name=\"Test_Fighter\">";
+            xml.insert(xml.find(marker) + marker.size(), rows);
+        }
+        write_fixture(tree.root, xml);
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "ML-51: an unknown inaccuracy category retains the object");
+        if (!loaded.tables) continue;
+        const auto& tables = *loaded.tables;
+        const auto* unit = tables.find(tag == "Fire_Inaccuracy_Distance" ? "Test_Frigate" : "Test_Fighter");
+        if (!unit) { expect(false, "ML-51: fixture owner remains loaded"); continue; }
+        const auto& selected = tag == "Fire_Inaccuracy_Distance" ? unit->hardpoints.front().weapon : unit->weapon;
+        expect(selected.has_value(), "ML-51: fixture weapon remains loaded");
+        if (!selected) continue;
+        const auto* weapon = &*selected;
+        expect(weapon->inaccuracy.size() == 2 && weapon->inaccuracy[0].distance == Fixed::from_raw(raw(7))
+                && weapon->inaccuracy[1].distance == Fixed::from_raw(raw(3)),
+            "ML-51: case-insensitive valid rows preserve order and values around the omitted unknown");
+        expect(has_row(tables.unresolved, tag == "Fire_Inaccuracy_Distance" ? "HP_Test_Laser" : "Test_Fighter",
+                tag, "SpaceStructure"), "ML-51: unknown names remain visible to strict stock-data checks");
+        expect(has_row(tables.unresolved, tag == "Fire_Inaccuracy_Distance" ? "HP_Test_Laser" : "Test_Fighter",
+                tag, "Fighter|SpaceStructure"), "ML-51: any unknown member diagnoses and omits the whole mask");
+        auto combat = eawr::units::combat_table(tables);
+        expect(static_cast<bool>(combat), "ML-51: an unknown row does not refuse the combat table");
+        if (!combat) continue;
+        const auto* profile = combat.value().find(eawr::assets::object_type_crc(unit->id));
+        expect(profile && !profile->weapons.empty() && profile->weapons.front().shot
+                && profile->weapons.front().shot->inaccuracy.size() == 2
+                && profile->weapons.front().shot->inaccuracy[0].category_bits == 3,
+            "ML-51: valid compact category masks OR their bits and both surviving rows reach the firing profile");
+        auto direct = tables;
+        for (auto& type : direct.units) {
+            if (type.weapon) type.weapon->inaccuracy.push_back({"UnknownSyntheticCategory", Fixed::from_raw(raw(99))});
+            for (auto& hardpoint : type.hardpoints)
+                if (hardpoint.weapon) hardpoint.weapon->inaccuracy.push_back({"UnknownSyntheticCategory", Fixed::from_raw(raw(99))});
+        }
+        expect(static_cast<bool>(eawr::units::combat_table(direct)),
+            "ML-51: directly supplied tables also omit unknown inaccuracy categories");
+        // Names are drawn from the loaded dictionary, including names absent from stock data.
+        direct.categories.push_back({"UnknownSyntheticCategory", 0x400});
+        auto custom = eawr::units::combat_table(direct);
+        expect(static_cast<bool>(custom), "ML-51: a mod-defined category binds without a fixed name list");
+        if (custom) {
+            const auto* custom_profile = custom.value().find(eawr::assets::object_type_crc(unit->id));
+            expect(custom_profile && !custom_profile->weapons.empty() && custom_profile->weapons.front().shot
+                    && !custom_profile->weapons.front().shot->inaccuracy.empty()
+                    && custom_profile->weapons.front().shot->inaccuracy.back().category_bits == 0x400,
+                "ML-51: a newly defined category retains its authored scatter mask");
+        }
+        for (auto& type : direct.units)
+            for (auto& hardpoint : type.hardpoints)
+                if (hardpoint.weapon) hardpoint.weapon->category_restrictions = {"AnotherUnknownCategory"};
+        expect(static_cast<bool>(eawr::units::combat_table(direct)),
+            "ML-53: a directly supplied unknown Fire_Category_Restrictions name no longer refuses the table");
+    }
+}
+
+void unknown_restriction_categories() {
+    TempTree tree;
+    auto points = std::string{hardpoints_xml};
+    const std::string rows = "<Fire_Category_Restrictions> fIgHtEr, Vehicle_AI, Bomber, vehicle_ai </Fire_Category_Restrictions>";
+    points.insert(points.find("<Fire_Inaccuracy_Distance>"), rows);
+    write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+    write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+    const auto loaded = load(tree.root, models(-40.0F));
+    expect(loaded.tables.has_value(), "ML-53: an unknown Fire_Category_Restrictions name retains the object");
+    if (!loaded.tables) return;
+    const auto& tables = *loaded.tables;
+    expect(has_row(tables.unresolved, "HP_Test_Laser", "Fire_Category_Restrictions", "Vehicle_AI"),
+        "ML-53: the unknown name stays visible to strict stock-data checks");
+    expect(std::any_of(tables.unresolved.begin(), tables.unresolved.end(), [](const eawr::units::Unresolved& row) {
+        return row.owner == "HP_Test_Laser" && row.field == "Fire_Category_Restrictions"
+            && row.reason == "unknown category; name ignored (ML-53)";
+    }), "ML-53: the unresolved row carries the reason text");
+    expect(std::count_if(tables.unresolved.begin(), tables.unresolved.end(), [](const eawr::units::Unresolved& row) {
+        return row.owner == "HP_Test_Laser" && row.field == "Fire_Category_Restrictions";
+    }) == 1, "ML-53: a repeated unknown name is reported once per owner");
+    const auto bit = [&](const std::string_view name) {
+        for (const auto& entry : tables.categories) if (entry.name == name) return entry.value;
+        return std::uint64_t{0};
+    };
+    // Categories-first ordering guard: names resolve at hardpoint parse, so "fIgHtEr" and "Bomber" only keep their
+    // bits below if the category dictionary is loaded before the hardpoints; a reordered loader zeroes the mask.
+    auto combat = eawr::units::combat_table(tables);
+    expect(static_cast<bool>(combat), "ML-53: the combat table binds with an unknown restriction name");
+    if (!combat) return;
+    const auto* unit = tables.find("Test_Frigate");
+    const auto* profile = unit ? combat.value().find(eawr::assets::object_type_crc(unit->id)) : nullptr;
+    expect(profile && !profile->weapons.empty()
+            && profile->weapons.front().category_restrictions == (bit("Fighter") | bit("Bomber")),
+        "ML-53: known names keep their bits, the unknown name adds none");
+}
+
+// ML-53: an empty list and a list of only unknown names both load, restrict nothing and (for the second) report each name.
+void restriction_list_edges() {
+    for (const bool unknown : {false, true}) {
+        TempTree tree;
+        auto points = std::string{hardpoints_xml};
+        const std::string rows = unknown
+            ? "<Fire_Category_Restrictions> Nope_One, nope_two </Fire_Category_Restrictions>"
+            : "<Fire_Category_Restrictions> </Fire_Category_Restrictions>";
+        points.insert(points.find("<Fire_Inaccuracy_Distance>"), rows);
+        write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "ML-53: an empty or all-unknown restriction list retains the object");
+        if (!loaded.tables) return;
+        const auto count = std::count_if(loaded.tables->unresolved.begin(), loaded.tables->unresolved.end(),
+            [](const eawr::units::Unresolved& row) { return row.field == "Fire_Category_Restrictions"; });
+        expect(count == (unknown ? 2 : 0), "ML-53: each distinct unknown name is reported, an empty list reports none");
+        auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "ML-53: the combat table binds");
+        if (!combat) return;
+        const auto* unit = loaded.tables->find("Test_Frigate");
+        const auto* profile = unit ? combat.value().find(eawr::assets::object_type_crc(unit->id)) : nullptr;
+        expect(profile && !profile->weapons.empty() && profile->weapons.front().category_restrictions == 0,
+            "ML-53: no restriction bits remain");
+    }
+}
+
 void print_rows(const std::string_view label, const std::vector<eawr::units::Unresolved>& rows) {
     for (const auto& row : rows) {
         std::cout << "  " << label << ' ' << row.owner << ' ' << row.field << " '" << row.value << "': " << row.reason << '\n';
@@ -55,6 +230,100 @@ void mass_driver_type() {
 }
 
 void hero_company_tables() {
+    for (const auto hero_class : {std::string_view{"HeroUnit"}, std::string_view{"GenericHeroUnit"}}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const auto station = xml.find("<StarBase Name=\"Skirmish_Test_Base\">");
+        xml.insert(xml.find('>', station) + 1,
+            "<Tactical_Buildable_Objects_Multiplayer>Rebel, Capital_Hero, Fighter_Hero, Fighter_Company, Ground_Hero"
+            "</Tactical_Buildable_Objects_Multiplayer>");
+        const std::string purchase =
+            "<Tactical_Build_Cost_Multiplayer>100</Tactical_Build_Cost_Multiplayer>"
+            "<Tactical_Build_Time_Seconds>1</Tactical_Build_Time_Seconds>"
+            "<Tactical_Production_Queue>Tactical_Units</Tactical_Production_Queue>"
+            "<Build_Limit_Current_Per_Player>1</Build_Limit_Current_Per_Player>"
+            "<Build_Limit_Lifetime_Per_Player>-1</Build_Limit_Lifetime_Per_Player>";
+        const std::string open = "<" + std::string(hero_class) + " Name=\"";
+        const std::string close = "</" + std::string(hero_class) + ">";
+        xml.insert(xml.rfind("</"),
+            open + "Capital_Hero_Base\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+            "<Is_Named_Hero>yes</Is_Named_Hero><CategoryMask>Capital</CategoryMask>" + purchase + close
+            + open + "Capital_Hero\"><Variant_Of_Existing_Type>Capital_Hero_Base</Variant_Of_Existing_Type>" + close
+            + open + "Fighter_Hero\"><Variant_Of_Existing_Type>Test_Fighter</Variant_Of_Existing_Type>"
+            "<Is_Named_Hero>yes</Is_Named_Hero><SpaceBehavior>FIGHTER_LOCOMOTOR, TARGETING, REVEAL</SpaceBehavior>"
+            + purchase + close
+            + "<HeroCompany Name=\"Fighter_Company\"><Affiliation>Rebel</Affiliation><Is_Named_Hero>yes</Is_Named_Hero>"
+            "<Company_Transport_Unit>Test_Fighter</Company_Transport_Unit><Company_Units>Ground_Hero</Company_Units>"
+            + purchase + "</HeroCompany>"
+            + open + "Ground_Hero\"><Variant_Of_Existing_Type>Test_Frigate</Variant_Of_Existing_Type>"
+            "<Is_Named_Hero>yes</Is_Named_Hero><SpaceBehavior>REVEAL</SpaceBehavior>" + purchase + close);
+        write_fixture(tree.root, xml);
+        write(tree.root / "XML" / "FactionFiles.xml", "<Faction_Files><File>hero_factions.xml</File></Faction_Files>");
+        write(tree.root / "XML" / "hero_factions.xml", "<Factions><Faction Name=\"Rebel\" /></Factions>");
+        const auto loaded = load(tree.root, models(-40.0F));
+        expect(loaded.tables.has_value(), "WPR-33: standalone capital and fighter hero XML loads");
+        if (!loaded.tables) continue;
+        const auto* capital = loaded.tables->find("Capital_Hero");
+        const auto* fighter = loaded.tables->find("Fighter_Hero");
+        const auto* rider = loaded.tables->find("Ground_Hero");
+        const auto* company = loaded.tables->find("Fighter_Company");
+        expect(capital && capital->hull == Fixed::from_raw(raw(3600)) && capital->kind == UnitKind::ship
+            && !capital->hardpoints.empty() && capital->named_hero,
+            "WHE-SQ-02: inherited standalone hero keeps its ship hull, weapons and hero identity without SpaceHero category");
+        expect(fighter && fighter->hull == Fixed::from_raw(raw(60)) && fighter->kind == UnitKind::craft,
+            "WHE-SQ-02: directly purchased fighter hero keeps its fighter body");
+        expect(rider && !rider->hull && company && company->deployed_space_type == "Test_Fighter"
+            && company->creates_carried_heroes,
+            "WHE-07/49: hero without a space locomotor remains carried even with an inherited model and health");
+        namespace t = eawr::sim::tactical;
+        namespace sk = eawr::skirmish;
+        const auto motion = eawr::units::motion_table(*loaded.tables);
+        const auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(motion && combat && motion.value().find(sk::type_id("Capital_Hero"))
+            && motion.value().squadrons.find_craft(sk::type_id("Fighter_Hero"))
+            && combat.value().find(sk::type_id("Capital_Hero")) && combat.value().find(sk::type_id("Fighter_Hero")),
+            "WHE-SQ-02: both standalone hero bodies bind usable motion and combat profiles");
+        sk::SkirmishStart start;
+        start.setup.players = {{1, 1, sk::faction_id("Rebel"), 1}};
+        start.setup.units = {{1, sk::type_id("Skirmish_Test_Base"), 1, {}, eawr::sim::math::identity_quat(), {}}};
+        auto economy = sk::economy_rules(start, {}, *loaded.tables);
+        expect(static_cast<bool>(economy), "WPR-33: paired capital/fighter hero menu binds");
+        if (!economy) continue;
+        for (const auto& menu : economy.value().menus) if (menu.station == sk::type_id("Skirmish_Test_Base")) {
+            for (const auto name : {"Capital_Hero", "Fighter_Hero", "Fighter_Company", "Ground_Hero"}) {
+                const auto* option = menu.find(sk::type_id(name));
+                const bool expected = std::string_view{name} != "Ground_Hero";
+                expect(option && option->available == expected,
+                    "WPR-33: only deployable bodies and the existing company conversion are purchasable");
+                std::cout << "hero-purchase " << hero_class << ' ' << name << " available="
+                    << (option && option->available) << '\n';
+            }
+        }
+        economy.value().income.clear();
+        economy.value().players = {{1, Fixed::from_raw(raw(10000)), 100, false, {}}};
+        auto session = t::TacticalSession::create(start.setup, {}, {}, {}, {}, {}, {}, {}, economy.value());
+        expect(static_cast<bool>(session), "WPR-33: hero purchase session creates");
+        if (!session) { std::cerr << session.error().message << '\n'; continue; }
+        std::uint64_t sequence{};
+        for (const auto name : {"Capital_Hero", "Capital_Hero", "Fighter_Hero", "Fighter_Company", "Ground_Hero"}) {
+            expect(static_cast<bool>(session.value().submit({{0, 1, sequence++}, {1}, t::BuyPayload{sk::type_id(name)}})),
+                "WPR-33: hero purchase request submits");
+        }
+        const eawr::sim::InlineExecutor executor;
+        for (unsigned frame = 0; frame < 95; ++frame) {
+            const auto stepped = session.value().step(executor);
+            expect(static_cast<bool>(stepped), "WPR-33: paired hero purchases complete");
+            if (!stepped) break;
+        }
+        const auto ledgers = session.value().ledgers();
+        expect(ledgers.size() == 1 && ledgers.front().credits == Fixed::from_raw(raw(9700))
+            && ledgers.front().pool.size() == 3,
+            "WPR-33: both body kinds and fighter company are paid and pooled; duplicate limit and carried-body refusal remain");
+        if (ledgers.size() == 1) for (const auto name : {"Capital_Hero", "Fighter_Hero", "Fighter_Company"}) {
+            expect(std::count(ledgers.front().pool.begin(), ledgers.front().pool.end(), sk::type_id(name)) == 1,
+                "WPR-33: each eligible hero purchase completes once under its logical identity");
+        }
+    }
     for (const auto& [base_tag, variant_tag, expected] : {
         std::tuple{std::string{}, std::string{}, true},
         std::tuple{std::string{"<Is_Homogeneous>yes</Is_Homogeneous>"}, std::string{}, true},
@@ -336,6 +605,238 @@ void rocket_variant_inputs() {
         && accepted_craft->weapons[0].shot->flight->straight_distance == Fixed::from_raw(raw(120))
         && accepted_craft->weapons[0].shot->flight->authored_distance == Fixed::from_raw(raw(3000)),
         "RFL-02/03/05: accepted loader profile retains all authored route values");
+
+    // ML-54: an absent rocket path input takes the object-type default, each one independently.
+    for (const bool all : {true, false}) {
+        TempTree defaulted_tree;
+        auto defaulted = xml;
+        const auto erase = [&](const std::string& tag) {
+            const auto begin = defaulted.find("<" + tag + ">");
+            const auto close = "</" + tag + ">";
+            const auto end = defaulted.find(close, begin);
+            if (begin == std::string::npos || end == std::string::npos) { expect(false, "ML-54: fixture tag " + tag); return; }
+            defaulted.erase(begin, end + close.size() - begin);
+        };
+        erase("Projectile_Rocket_Curve_Offset");
+        if (all) {
+            erase("Projectile_Rocket_Curve_Distance");
+            erase("Projectile_Rocket_Straight_Distance");
+        }
+        write_fixture(defaulted_tree.root, defaulted);
+        const auto defaulted_loaded = load(defaulted_tree.root, models(-40.0F));
+        expect(defaulted_loaded.tables.has_value(), "ML-54: a rocket without path inputs loads");
+        if (!defaulted_loaded.tables) continue;
+        std::vector<eawr::core::Diagnostic> notes;
+        const auto bound = eawr::units::combat_table(*defaulted_loaded.tables, eawr::units::ContentErrors::skip_object, &notes);
+        expect(static_cast<bool>(bound), "ML-54: a rocket without authored path inputs binds");
+        if (!bound) continue;
+        const auto* defaulted_craft = bound.value().find(eawr::assets::object_type_crc("Test_Fighter"));
+        const auto* flight = defaulted_craft && !defaulted_craft->weapons.empty() && defaulted_craft->weapons[0].shot
+            && defaulted_craft->weapons[0].shot->flight ? &*defaulted_craft->weapons[0].shot->flight : nullptr;
+        expect(flight && flight->curve_offset == Fixed::from_raw(raw(30))
+                && flight->curve_distance == (all ? Fixed::from_raw(raw(50)) : Fixed::from_raw(raw(500)))
+                && flight->straight_distance == (all ? Fixed::from_raw(raw(40)) : Fixed::from_raw(raw(500))),
+            "ML-54: absent inputs take 40/50/30 and authored ones stay");
+        expect(std::count_if(notes.begin(), notes.end(), [](const eawr::core::Diagnostic& note) {
+            return note.message.find("(ML-54)") != std::string::npos;
+        }) == (all ? 3 : 1), "ML-54: each defaulted input warns once with the projectile id");
+    }
+}
+
+// #4589, IS-10: an ion stun reduction is not range-checked (FoC floors the factor, never refuses), and a
+// content error in one unit type is skipped in a lenient load and refused in a strict one.
+void ion_stun_content_errors() {
+    TempTree tree;
+    write_fixture(tree.root, units_xml("3600", "Unit_Select_Test"));
+    const auto loaded = load(tree.root, models(-40.0F));
+    expect(loaded.tables.has_value(), "IS-10: ion stun fixture loads");
+    if (!loaded.tables) return;
+    auto changed = *loaded.tables;
+    std::string stunner;
+    for (auto& projectile : changed.projectiles) {
+        projectile.ion_stun = true;
+        projectile.ion_stun_duration = Fixed::from_raw(raw(1));
+        projectile.ion_stun_shot_rate_reduction = Fixed::from_raw(raw(100)); // Republic at War: 100.00
+        projectile.ion_stun_speed_reduction = Fixed::from_raw(-raw(2));      // negative: faster
+        stunner = projectile.id;
+    }
+    expect(!stunner.empty(), "IS-10: fixture has projectiles");
+    auto combat = eawr::units::combat_table(changed);
+    expect(static_cast<bool>(combat), "IS-10: reductions of 100 and -2 bind (FoC range-checks neither)");
+    if (!combat) return;
+    bool found = false;
+    for (const auto& profile : combat.value().profiles) {
+        for (const auto& weapon : profile.weapons) {
+            if (!weapon.shot || !weapon.shot->ion_stun) continue;
+            found = true;
+            const auto stun = eawr::sim::tactical::ion_stun(std::nullopt, *weapon.shot->ion_stun, 10);
+            expect(eawr::sim::tactical::ion_fire_rate(stun, 11) == Fixed::from_raw((raw(1) + 50) / 100)
+                    && eawr::sim::tactical::ion_speed_factor(stun, 11) == Fixed::from_raw(raw(3)),
+                "IS-10: a reduction of 100 floors the fire rate at 0.01; -2 triples the speed");
+        }
+    }
+    expect(found, "IS-10: the stunning shot reaches a weapon");
+
+    // An authored magnitude beyond the saturation limit still binds; a lenient load says so once per projectile.
+    auto absurd = changed;
+    for (auto& projectile : absurd.projectiles) projectile.ion_stun_speed_reduction = Fixed::from_raw(raw(5000));
+    std::vector<eawr::core::Diagnostic> notes;
+    expect(static_cast<bool>(eawr::units::combat_table(absurd, eawr::units::ContentErrors::skip_object, &notes)),
+        "IS-10: a reduction beyond the saturation limit still binds");
+    expect(!notes.empty() && notes.front().severity == eawr::core::Severity::warning
+            && notes.front().message.find("saturates") != std::string::npos
+            && notes.front().message.find("skipped unit type") == std::string::npos,
+        "IS-10: saturation leaves a warning that is not a skipped type");
+
+    // One bad object: a radius stun is refused (IS-08) on every projectile.
+    for (auto& projectile : changed.projectiles) {
+        projectile.ion_stun_radius = Fixed::from_raw(raw(50));
+    }
+    expect(!eawr::units::combat_table(changed), "content errors: strict (default) refuses the table");
+    std::vector<eawr::core::Diagnostic> skipped;
+    auto lenient = eawr::units::combat_table(changed, eawr::units::ContentErrors::skip_object, &skipped);
+    expect(static_cast<bool>(lenient) && !skipped.empty(),
+        "content errors: a lenient load skips the bad types and reports them");
+    if (!lenient || skipped.empty()) return;
+    expect(skipped.front().message.find("skipped unit type") != std::string::npos
+            && skipped.front().message.find("IS-08") != std::string::npos,
+        "content errors: the report names the type and the cause");
+    expect(lenient.value().profiles.size() + skipped.size() <= changed.units.size()
+            && lenient.value().profiles.size() < combat.value().profiles.size(),
+        "content errors: a skipped type has no profile; the rest stay");
+}
+
+void hardpoint_turret_loading() {
+    for (const bool attached : {false, true}) for (const bool missing : {false, true}) {
+        TempTree tree;
+        auto xml = units_xml("3600", "Unit_Select_Test");
+        const std::string old = "HP_Test_Laser";
+        for (auto at = xml.find(old); at != std::string::npos; at = xml.find(old, at + 1))
+            xml.replace(at, old.size(), "HP_Renamed_Turret");
+        write_fixture(tree.root, xml);
+        std::string points{hardpoints_xml};
+        if (!attached) {
+            const std::string model_tag = "<Model_To_Attach>Test_Turret.alo</Model_To_Attach>";
+            points.erase(points.find(model_tag), model_tag.size());
+        }
+        points.insert(points.find("</HardPoints>"),
+            "<HardPoint Name=\"HP_Renamed_Turret\"><Variant_Of_Existing_Type>HP_Test_Laser</Variant_Of_Existing_Type>"
+            "<Is_Turret>Yes</Is_Turret><Turret_Bone_Name>Yaw_Test</Turret_Bone_Name>"
+            "<Barrel_Bone_Name>Pitch_Test</Barrel_Bone_Name><Turret_Rotate_Speed>2</Turret_Rotate_Speed>"
+            "<Turret_Rotate_Extent_Degrees>135</Turret_Rotate_Extent_Degrees>"
+            "<Turret_Elevate_Extent_Degrees>40</Turret_Elevate_Extent_Degrees>"
+            "<Turret_Rest_Angle>0, 0, 3</Turret_Rest_Angle>"
+            "<Turret_Rotation_Offset>0, 0, 7</Turret_Rotation_Offset></HardPoint>");
+        write(tree.root / "XML" / "eawr_hardpoints.xml", points);
+        auto assets = models(-40.0F);
+        auto& parent = assets.at("data/art/models/test_frigate.alo");
+        // Colliding names on the owner must never steal an attached model's binding.
+        parent.bones.push_back(bone("Yaw_Test", 0, {90, 0, 0}));
+        parent.bones.push_back(bone("Pitch_Test", 0, {91, 0, 0}));
+        parent.bones.push_back(bone("FP_F-L_00", 0, {92, 0, 0}));
+        auto& chosen = attached ? assets.at("data/art/models/test_turret.alo") : parent;
+        if (attached) {
+            chosen.bones.push_back(bone("Yaw_Test", 0, {4, 0, 0}));
+            chosen.bones.push_back(bone("Pitch_Test", 0, {5, 0, 0}));
+        }
+        if (missing) {
+            for (auto& value : chosen.bones) if (value.name == "Yaw_Test") value.name = "Missing_Yaw";
+        }
+        auto loaded = load(tree.root, assets);
+        expect(loaded.tables.has_value(), "HPT-C09: inherited renamed ordinary turret XML loads");
+        if (!loaded.tables) continue;
+        const auto* type = loaded.tables->find("Test_Frigate");
+        if (!type) continue;
+        const auto& hp = type->hardpoints.front();
+        expect(hp.manual_is_turret && !hp.requires_manual_target && hp.id == "HP_Renamed_Turret"
+            && hp.manual_rotate_speed == Fixed::from_raw(raw(2))
+            && hp.manual_yaw_extent == Fixed::from_raw(raw(135))
+            && hp.manual_pitch_extent == Fixed::from_raw(raw(40))
+            && hp.manual_rest.z == Fixed::from_raw(raw(3)) && hp.manual_offset.z == Fixed::from_raw(raw(7)),
+            "HPT-C09: ordinary turret inherits all authored angles/rate without manual-target flag");
+        expect(hp.manual_turret.position.has_value() == !missing,
+            "HPT-C10: missing required yaw bone has no fallback to the other model");
+        if (!missing) expect(hp.manual_turret.from_attached_model == attached && hp.fire_a.from_attached_model == attached,
+            "HPT-C10: turret and muzzle bind to the selected parent or attached model");
+        auto combat = eawr::units::combat_table(*loaded.tables);
+        expect(static_cast<bool>(combat), "HPT-C09: ordinary turret combat profile binds");
+        if (combat) {
+            const auto* profile = combat.value().find(eawr::assets::object_type_crc(type->id));
+            expect(profile && !profile->weapons.empty() && profile->weapons.front().manual_turret_required
+                && profile->weapons.front().manual_turret.has_value() == !missing,
+                "HPT-C10: missing binding retains required-turret admission instead of fixed fire");
+            if (!missing) {
+                for (const int extent : {800, 999}) {
+                    auto wide = *loaded.tables;
+                    auto* wide_type = const_cast<eawr::units::UnitType*>(wide.find(type->id));
+                    auto& hardpoint = wide_type->hardpoints.front();
+                    hardpoint.manual_yaw_extent = Fixed::from_raw(raw(extent));
+                    hardpoint.manual_pitch_extent = Fixed::from_raw(raw(extent));
+                    const auto bound = eawr::units::combat_table(wide);
+                    expect(static_cast<bool>(bound), "HPT-10: strict ordinary multi-turn extents bind");
+                    if (bound) {
+                        const auto* owner = bound.value().find(eawr::assets::object_type_crc(type->id));
+                        const auto& turret = owner->weapons.front().manual_turret;
+                        expect(turret && turret->yaw_extent == *hardpoint.manual_yaw_extent
+                            && turret->pitch_extent == *hardpoint.manual_pitch_extent,
+                            "HPT-10: ordinary binding preserves authored multi-turn extents");
+                        const auto state = eawr::sim::tactical::initial_combat(*owner, 1, 0, 1);
+                        expect(state.weapons.front().manual.has_value(),
+                            "HPT-10: admitted ordinary multi-turn turret creates mechanical state");
+                    }
+                    hardpoint.requires_manual_target = true;
+                    expect(!eawr::units::combat_table(wide),
+                        "HPT-10: manual-assignment multi-turn extents retain strict refusal");
+                }
+                auto sheared = *loaded.tables;
+                auto* altered = const_cast<eawr::units::UnitType*>(sheared.find(type->id));
+                // A pure Y-on-X shear corrects exactly back to this invented bind frame.
+                for (auto* bone : {&altered->hardpoints.front().attachment,
+                         &altered->hardpoints.front().manual_turret, &altered->hardpoints.front().manual_barrel}) {
+                    if (!bone->axes) continue;
+                    const auto& x = (*bone->axes)[0];
+                    auto& y = (*bone->axes)[1];
+                    y = {Fixed::from_raw(y.x.raw() + x.x.raw() / 1024),
+                        Fixed::from_raw(y.y.raw() + x.y.raw() / 1024),
+                        Fixed::from_raw(y.z.raw() + x.z.raw() / 1024)};
+                }
+                std::vector<eawr::core::Diagnostic> notes;
+                const auto corrected = eawr::units::combat_table(sheared, eawr::units::ContentErrors::strict, &notes);
+                expect(static_cast<bool>(corrected), "HPT-09: slightly sheared loaded hardpoint frames bind");
+                if (corrected) {
+                    const auto* fixed = corrected.value().find(eawr::assets::object_type_crc(type->id));
+                    expect(fixed && fixed->weapons.front().manual_turret == profile->weapons.front().manual_turret,
+                        "HPT-09: fixed-order Gram-Schmidt recovers the orthonormal articulation frame exactly");
+                }
+                expect(notes.size() == 1 && notes.front().severity == eawr::core::Severity::info
+                    && notes.front().message.find("HPT-09") != std::string::npos,
+                    "HPT-09: one named informational load note per corrected hardpoint");
+                (*altered->hardpoints.front().manual_turret.axes)[1]
+                    = (*altered->hardpoints.front().manual_turret.axes)[0];
+                const auto refused = eawr::units::combat_table(sheared);
+                expect(!refused && refused.error().message.find("HPT-09: authored turret frame shear exceeds 1/256")
+                    != std::string::npos, "HPT-09: above-limit authored frame refuses with its named safety reason");
+                auto inert = combat.value();
+                for (auto& owner : inert.profiles) for (auto& weapon : owner.weapons) {
+                    weapon.requires_manual_target = false;
+                    weapon.manual_turret_required = false;
+                }
+                expect(static_cast<bool>(eawr::sim::tactical::validate_combat(inert)),
+                    "loaded synthetic turret geometry remains legal when its consumers are disabled");
+                const auto* owner = inert.find(eawr::assets::object_type_crc(type->id));
+                if (owner) {
+                    const auto state = eawr::sim::tactical::initial_combat(*owner, 1, 0, 1);
+                    expect(!state.weapons.front().manual,
+                        "inert loaded turret geometry creates no manual or mechanical turret state");
+                }
+            }
+        }
+        auto changed = *loaded.tables;
+        auto* changed_type = const_cast<eawr::units::UnitType*>(changed.find(type->id));
+        changed_type->hardpoints.front().manual_rotate_speed = Fixed::from_raw(raw(3));
+        expect(eawr::units::content_identity(changed) != eawr::units::content_identity(*loaded.tables),
+            "HPT-C09: ordinary turret mechanics enter content identity");
+    }
 }
 
 void manual_weapon_loading() {

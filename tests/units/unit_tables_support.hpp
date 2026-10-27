@@ -47,7 +47,8 @@ eawr::assets::Bone bone(const std::string& name, const std::int32_t parent, cons
 eawr::assets::Model model(const std::string& path, std::vector<eawr::assets::Bone> bones);
 std::map<std::string, eawr::assets::Model> models(const float engine_x);
 Loaded load(const std::filesystem::path& root, const std::map<std::string, eawr::assets::Model>& assets,
-    std::string_view difficulty = "Normal_Default");
+    std::string_view difficulty = "Normal_Default",
+    eawr::sim::tactical::BattleDomain domain = eawr::sim::tactical::BattleDomain::space);
 bool has_row(const std::vector<eawr::units::Unresolved>& rows, const std::string_view owner,
              const std::string_view field, const std::string_view value = {});
 void object_weapon_defaults();
@@ -65,9 +66,11 @@ void space_population();
 void object_script_inheritance();
 void priority_rules();
 void content_identity();
+void domain_tags();
+void land_companies();
 void bind_frame_errors();
 void hunt_tables();
-void foc_fleet(bool formation_only = false);
+void foc_fleet(bool formation_only = false, bool fire_bones_only = false);
 void foc_formation_deceleration(eawr::units::LoadInput input);
 
 struct TempTree final {

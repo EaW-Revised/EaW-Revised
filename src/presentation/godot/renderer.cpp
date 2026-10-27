@@ -1,4 +1,5 @@
 #include "eawr/presentation/godot/renderer.hpp"
+#include "eawr/assets/geometry_stripped.hpp"
 
 #include "renderer_internal.hpp"
 #include "texture_budget.hpp"
@@ -38,7 +39,7 @@ namespace eawr::presentation::godot_backend {
 
 CachedShader::~CachedShader() {
     if (auto* rendering = RenderingServer::get_singleton(); rendering && shader.is_valid())
-        rendering->free_rid(shader);
+        render_churn::free_rid(*rendering, shader, render_churn::Owner::model_resource);
 }
 
 GodotShaderCache::GodotShaderCache() : impl_(std::make_unique<Impl>()) {}
@@ -96,6 +97,8 @@ GodotRenderer::Impl::~Impl() {
     if (!rendering) return;
     for (const auto& [entity, instance] : instances_) {
         static_cast<void>(entity);
+        if (instance.rid.is_valid()) render_churn::record(render_churn::owner(instance.category_role), render_churn::Event::freed);
+        if (instance.skeleton.is_valid()) render_churn::record(render_churn::owner(instance.category_role, true), render_churn::Event::freed);
         if (instance.rid.is_valid()) rendering->free_rid(instance.rid);
         if (instance.skeleton.is_valid()) rendering->free_rid(instance.skeleton);
     }
@@ -105,7 +108,7 @@ GodotRenderer::Impl::~Impl() {
     }
     for (const auto& [name, texture] : shared_textures_) {
         static_cast<void>(name);
-        if (texture.is_valid()) rendering->free_rid(texture);
+        if (texture.is_valid()) render_churn::free_rid(*rendering, texture, render_churn::Owner::model_resource);
     }
     for (const detail::GpuItem& item : shared_gpu_items_) detail::gpu_memory_ledger().remove(item);
     // Every resource released its pool references above; nothing is left
@@ -113,14 +116,14 @@ GodotRenderer::Impl::~Impl() {
     const std::uint64_t frame = drawn_frame();
     for (const auto& [key, pooled] : texture_pool_) {
         static_cast<void>(key);
-        if (pooled.rid.is_valid()) rendering->free_rid(pooled.rid);
+        if (pooled.rid.is_valid()) render_churn::free_rid(*rendering, pooled.rid, render_churn::Owner::model_resource);
         detail::texture_budget().remove(pooled.item.bytes, frame);
     }
-    if (camera_.is_valid()) rendering->free_rid(camera_);
-    if (environment_.is_valid()) rendering->free_rid(environment_);
+    if (camera_.is_valid()) render_churn::free_rid(*rendering, camera_, render_churn::Owner::scene_resource);
+    if (environment_.is_valid()) render_churn::free_rid(*rendering, environment_, render_churn::Owner::scene_resource);
     stored_output::release(*rendering, stored_compositor_);
-    if (sun_instance_.is_valid()) rendering->free_rid(sun_instance_);
-    if (sun_light_.is_valid()) rendering->free_rid(sun_light_);
+    if (sun_instance_.is_valid()) render_churn::free_rid(*rendering, sun_instance_, render_churn::Owner::scene_resource);
+    if (sun_light_.is_valid()) render_churn::free_rid(*rendering, sun_light_, render_churn::Owner::scene_resource);
 }
 
 void GodotRenderer::Impl::apply_lighting_params(RenderingServer& rendering, const RID& material) const {
@@ -202,8 +205,8 @@ void GodotRenderer::Impl::set_lighting(const GodotRenderer::LightingState& light
     if (lighting_ && ((lighting_->shadow_bias && !lighting.shadow_bias)
                       || (lighting_->shadow_normal_bias && !lighting.shadow_normal_bias)
                       || (lighting_->shadow_blur && !lighting.shadow_blur))) {
-        if (sun_instance_.is_valid()) rendering->free_rid(sun_instance_);
-        if (sun_light_.is_valid()) rendering->free_rid(sun_light_);
+        if (sun_instance_.is_valid()) render_churn::free_rid(*rendering, sun_instance_, render_churn::Owner::scene_resource);
+        if (sun_light_.is_valid()) render_churn::free_rid(*rendering, sun_light_, render_churn::Owner::scene_resource);
         sun_instance_ = RID();
         sun_light_ = RID();
     }
@@ -394,6 +397,10 @@ core::Result<void> GodotRenderer::upload(
     const assets::Model& model,
     const assets::Texture& texture,
     const MaterialDescription& material) {
+    if (assets::geometry_stripped(model)) {
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+    }
     return impl_->upload(asset_id, model, texture, material);
 }
 
@@ -403,7 +410,26 @@ core::Result<void> GodotRenderer::upload(
     const assets::Texture& texture,
     const MaterialDescription& material,
     const std::span<const BindingTexture> binding_textures) {
+    if (assets::geometry_stripped(model)) {
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+    }
     return impl_->upload(asset_id, model, texture, material, binding_textures);
+}
+
+core::Result<void> GodotRenderer::upload(
+    const sim::AssetId asset_id, const ModelUpload& model,
+    const assets::Texture& texture, const MaterialDescription& material,
+    const std::span<const BindingTexture> binding_textures) {
+    if (model.valid() && assets::geometry_stripped(model.view().original)) {
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
+            .message = "renderer upload was handed a geometry-stripped emitter metadata model"});
+    }
+    if (!model.valid()) {
+        return core::Result<void>::failure({.code = std::string(diagnostic_codes::upload_failed),
+            .message = "renderer upload has a missing model or invalid surface selection"});
+    }
+    return impl_->upload(asset_id, model.view(), texture, material, binding_textures, model);
 }
 
 core::Result<void> GodotRenderer::register_shared_texture(
@@ -463,6 +489,24 @@ core::Result<void> GodotRenderer::release(const sim::AssetId asset_id) {
 
 std::vector<ResourceReference> GodotRenderer::resources() const { return impl_->resources(); }
 
+struct GodotRenderer::PreparedSkinPose::Data final {
+    std::shared_ptr<const SkinPosePalette<Transform3D>> palette;
+};
+
+GodotRenderer::PreparedSkinPose GodotRenderer::prepare_skin_pose(
+    const std::span<const animation::BonePose> bones, SkinPoseWork* work) {
+    PreparedSkinPose result;
+    auto palette = prepare_skin_palette<Transform3D>(bones,
+        [](const animation::Matrix& matrix) { return transform_from(matrix); }, work);
+    if (palette) result.data_ = std::make_shared<const PreparedSkinPose::Data>(std::move(palette));
+    return result;
+}
+
+core::Result<void> GodotRenderer::set_prepared_skin_pose(const sim::EntityId entity_id,
+    const sim::AssetId asset_id, const PreparedSkinPose& pose) {
+    return impl_->set_prepared_skin_pose(entity_id, asset_id, pose.data_ ? pose.data_->palette : nullptr);
+}
+
 void GodotRenderer::begin_skin_batch(const bool enabled) {
     impl_->begin_skin_batch(enabled);
 }
@@ -499,6 +543,10 @@ void GodotRenderer::copy_instance_pose(const sim::EntityId source, const sim::En
 }
 void GodotRenderer::forget_instance_pose(const sim::EntityId entity_id) {
     impl_->forget_instance_pose(entity_id);
+}
+
+std::span<const std::uint8_t> GodotRenderer::skin_geometry_bones_view(const sim::AssetId asset_id) const {
+    return impl_->skin_geometry_bones_view(asset_id);
 }
 
 std::vector<std::uint8_t> GodotRenderer::skin_geometry_bones(const sim::AssetId asset_id) const {

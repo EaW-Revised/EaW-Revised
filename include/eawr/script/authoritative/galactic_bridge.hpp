@@ -23,6 +23,9 @@ namespace eawr::script::authoritative {
 
 // Coordinator-reserved: next after the engine adapter producer (16).
 inline constexpr std::uint32_t galactic_story_producer = first_simulation_producer + 1;
+// The plot engine's Story_Event_Trigger calls into sub-plot scripts (WST-20 (3), WST-55): after the pump events of the
+// same tick, so the state a call requests is entered by the next pump.
+inline constexpr std::uint32_t galactic_story_call_producer = first_simulation_producer + 2;
 
 struct GalacticOrder {
     sim::galactic::SeatId seat{};
@@ -98,11 +101,12 @@ public:
     // pure translators/engines before continuing, as for create().
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore(
         sim::galactic::GalacticSession world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved);
-    // Parent ownership transfer is transactional: failed validation retains its world. `conflict_paused` says the
-    // campaign owner holds a pending-conflict pause on this galaxy; only then may the AI host lead the frame timer.
+    // Parent ownership transfer is transactional: failed validation retains its world. `timer_held` says the
+    // campaign owner holds this galaxy's frame timer (a pending-conflict pause, a selected or staged tactical child, or
+    // the battle-summary hold); only then may the AI host lead the frame timer.
     [[nodiscard]] static core::Result<ScriptedGalacticSession> restore_preserving(
         sim::galactic::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
-        bool conflict_paused = false);
+        bool timer_held = false);
     ScriptedGalacticSession(ScriptedGalacticSession&&) noexcept;
     ScriptedGalacticSession& operator=(ScriptedGalacticSession&&) noexcept;
     ~ScriptedGalacticSession();
@@ -121,6 +125,8 @@ public:
     [[nodiscard]] const sim::galactic::GalacticSession& world() const noexcept;
     // Borrowed parent scheduler; the enclosing session owns its lifetime.
     [[nodiscard]] ScriptScheduler& ai_scheduler() noexcept;
+    // Borrowed story scheduler, for the campaign's story-script host (instances, plot-engine calls).
+    [[nodiscard]] ScriptScheduler& story_scheduler() noexcept;
     [[nodiscard]] std::uint64_t completed_tick() const noexcept;
     [[nodiscard]] std::size_t pending_script_commands() const noexcept;
     [[nodiscard]] sim::galactic::GalacticReplay record() const;
@@ -148,6 +154,9 @@ private:
 // handle kind and use register_missing_galactic_method.
 [[nodiscard]] core::Result<void> register_missing_galactic_api(
     ScriptScheduler& scripts, std::span<const std::string_view> implemented = {});
+// The inventory names register_missing_galactic_api binds when `implemented` omits them ("Table.member" for a member of
+// a global table). A host that must keep some of them out of the global namespace builds its own `implemented` from this.
+[[nodiscard]] std::span<const std::string_view> missing_galactic_api_names() noexcept;
 [[nodiscard]] core::Result<void> register_missing_galactic_method(
     ScriptScheduler& scripts, std::uint32_t handle_kind, std::string_view method);
 

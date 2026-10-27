@@ -1,6 +1,7 @@
 #include "cli_galactic.hpp"
 
 #include "cli_internal.hpp"
+#include "cli_galactic_install.hpp"
 #include "json.hpp"
 
 #include "eawr/campaign/game_session.hpp"
@@ -29,16 +30,26 @@ namespace galactic = eawr::sim::galactic;
 constexpr std::string_view usage =
     "expected --galactic-replay <file> --hash-out <file.csv> [--workers <n|hardware>], or "
     "--galactic <campaign.json> [--game-root <install>] [--ticks <n>] [--workers <n|hardware>] "
-    "with at least one of --hash-out <file.csv>, --replay-out <file>, --census-out <file.json>";
+    "with at least one of --hash-out <file.csv>, --replay-out <file>, --census-out <file.json>, or "
+    "--galactic <installed campaign name> --game-root <install> [--mod-root <leaf;parent;...>] [--ticks <n>] [--play <n>] "
+    "[--live <n> --live-ai on [--live-goals <n>] [--live-perception <equation>]] "
+    "[--workers <n|hardware>] [--census-out <report.json>] (staged start from installed data)";
 
 struct GalacticOptions {
     std::string replay_path;
     std::string campaign_path;
     std::string game_root;
+    std::string mod_root;
     std::string hash_path;
     std::string replay_out_path;
     std::string census_path;
     std::uint64_t ticks{};
+    std::uint64_t play_ticks{};
+    std::uint64_t live_ticks{};
+    bool live_ai{};
+    bool live_ai_given{};
+    std::string perception_trace;
+    std::uint64_t goals_every{}; // --live-goals: print the native AI's goals every n ticks (0 = off)
     std::size_t workers{1};
 };
 
@@ -58,6 +69,8 @@ struct GalacticOptions {
             options.campaign_path = value;
         } else if (argument == "--game-root") {
             options.game_root = value;
+        } else if (argument == "--mod-root") {
+            options.mod_root = value;
         } else if (argument == "--hash-out") {
             options.hash_path = value;
         } else if (argument == "--replay-out") {
@@ -69,6 +82,28 @@ struct GalacticOptions {
             ticks = true;
             const auto result = std::from_chars(value.data(), value.data() + value.size(), options.ticks);
             if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || options.ticks > galactic::galactic_max_ticks) {
+                return std::nullopt;
+            }
+        } else if (argument == "--play") {
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), options.play_ticks);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || options.play_ticks > galactic::galactic_max_ticks) {
+                return std::nullopt;
+            }
+        } else if (argument == "--live-ai") {
+            if (value != "on" && value != "off") return std::nullopt;
+            options.live_ai = value == "on";
+            options.live_ai_given = true;
+        } else if (argument == "--live-perception") {
+            options.perception_trace = value;
+        } else if (argument == "--live-goals") {
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), options.goals_every);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || options.goals_every == 0
+                || options.goals_every > galactic::galactic_max_ticks) {
+                return std::nullopt;
+            }
+        } else if (argument == "--live") {
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), options.live_ticks);
+            if (result.ec != std::errc{} || result.ptr != value.data() + value.size() || options.live_ticks > galactic::galactic_max_ticks) {
                 return std::nullopt;
             }
         } else if (argument == "--workers") {
@@ -86,13 +121,27 @@ struct GalacticOptions {
         }
     }
     if (options.replay_path.empty() == options.campaign_path.empty()) return std::nullopt;
+    // --play, --live and --live-ai belong to an installed campaign by name; elsewhere they would be accepted and ignored.
+    const bool installed_only = options.play_ticks || options.live_ticks || options.live_ai_given || options.goals_every || !options.perception_trace.empty();
     if (!options.replay_path.empty()) {
+        if (installed_only) return std::nullopt;
         if (options.hash_path.empty() || ticks || !options.game_root.empty() || !options.replay_out_path.empty()
             || !options.census_path.empty()) {
             return std::nullopt;
         }
         return options;
     }
+    if (std::filesystem::path(options.campaign_path).extension() != ".json") {
+        // An installed campaign by name: the staged report is its only output.
+        if (options.game_root.empty() || !options.hash_path.empty() || !options.replay_out_path.empty()) return std::nullopt;
+        // --live returns before the gameplay stage, and --live-ai only configures --live.
+        if (options.live_ticks && options.play_ticks) return std::nullopt;
+        if (options.live_ai_given && !options.live_ticks) return std::nullopt;
+        // The goal lines read the native AI, so they need the live run with the AI on.
+        if ((options.goals_every || !options.perception_trace.empty()) && !(options.live_ticks && options.live_ai)) return std::nullopt;
+        return options;
+    }
+    if (!options.mod_root.empty() || installed_only) return std::nullopt;
     if (options.hash_path.empty() && options.replay_out_path.empty() && options.census_path.empty()) return std::nullopt;
     return options;
 }
@@ -289,9 +338,19 @@ int run_galactic(const int argc, const char* const argv[]) {
 
     std::string error;
     if (std::filesystem::path(options->campaign_path).extension() != ".json") {
-        // A stock campaign name: the start from the installed game's campaign definitions arrives
-        // with the campaign session setup; until then only synthetic campaigns run.
-        return report_argument_error("only synthetic campaigns (a .json definition) run before the campaign session setup lands");
+        InstalledCampaignRequest request;
+        request.campaign = options->campaign_path;
+        request.game_root = options->game_root;
+        request.mod_root = options->mod_root;
+        request.ticks = options->ticks;
+        request.play_ticks = options->play_ticks;
+        request.live_ticks = options->live_ticks;
+        request.live_ai = options->live_ai;
+        request.goals_every = options->goals_every;
+        request.perception_trace = options->perception_trace;
+        request.workers = options->workers;
+        request.report_path = options->census_path;
+        return run_installed_campaign(request);
     }
     if (!options->game_root.empty() && !std::filesystem::is_directory(options->game_root)) {
         return report_io_error(options->game_root, "--game-root is not a directory", 3);

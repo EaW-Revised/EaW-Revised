@@ -116,7 +116,7 @@ void encode_fleet(std::vector<std::uint8_t>& bytes, const Fleet& fleet) {
     put_u32(bytes, static_cast<std::uint32_t>(fleet.members.size()));
     for (const auto& member : fleet.members) {
         put_u64(bytes, member.id);
-        put_u64(bytes, member.type);
+        put_u64(bytes, member.type); put_u8(bytes, member.pathfinder ? 1 : 0);
     }
     put_u8(bytes, fleet.raid_destination ? 1 : 0);
     if (fleet.raid_destination) put_u64(bytes, *fleet.raid_destination);
@@ -126,14 +126,17 @@ void encode_fleet_control(std::vector<std::uint8_t>& bytes, const FleetControlSe
     const std::span<const Fleet> fleets) {
     put_u8(bytes, control.gates.queued_campaign_conflict ? 1 : 0);
     put_u8(bytes, control.gates.active_speech ? 1 : 0);
+    put_u8(bytes, static_cast<std::uint8_t>(control.pause.fleet_management));
+    put_u8(bytes, static_cast<std::uint8_t>(control.pause.surface_deploy));
+    put_u8(bytes, static_cast<std::uint8_t>(control.pause.fleet_move));
     put_u32(bytes, static_cast<std::uint32_t>(control.types.size()));
     for (const auto& type : control.types) {
         put_u64(bytes, type.type); put_u8(bytes, type.transport ? 1 : 0);
-        put_u8(bytes, type.can_hyperspace_without_ability ? 1 : 0); put_u8(bytes, type.requires_live_children ? 1 : 0);
+        put_u8(bytes, type.can_hyperspace_without_ability ? 1 : 0); put_u8(bytes, type.requires_live_children ? 1 : 0); put_u8(bytes, type.space_pathfinder ? 1 : 0);
     }
     put_u32(bytes, static_cast<std::uint32_t>(control.detached_units.size()));
     for (const auto& unit : control.detached_units) {
-        put_u64(bytes, unit.member.id); put_u64(bytes, unit.member.type);
+        put_u64(bytes, unit.member.id); put_u64(bytes, unit.member.type); put_u8(bytes, unit.member.pathfinder ? 1 : 0);
         put_u32(bytes, unit.owner); put_u64(bytes, unit.planet);
     }
     put_u32(bytes, static_cast<std::uint32_t>(fleets.size()));
@@ -149,21 +152,23 @@ void encode_movement(std::vector<std::uint8_t>& bytes, const MovementSetup& s, s
         put_u64(bytes, t.type); put_i64(bytes, t.hyperspace_speed.raw()); put_i64(bytes, t.build_cost.raw()); put_u32(bytes, t.squadron_capacity);
         put_u8(bytes, t.hyperspace_eligible ? 1 : 0); put_u8(bytes, t.squadron ? 1 : 0);
         put_u8(bytes, t.fleet_container ? 1 : 0); put_u8(bytes, t.skips_combat ? 1 : 0);
+        put_i64(bytes, t.piracy_value.raw()); put_i64(bytes, t.cheap_bribe.raw()); put_i64(bytes, t.expensive_bribe.raw());
     }
     count(s.contents.size());
     for (const auto& c : s.contents) {
         put_u64(bytes, c.container); count(c.children.size());
-        for (const auto& m : c.children) { put_u64(bytes, m.id); put_u64(bytes, m.type); }
+        for (const auto& m : c.children) { put_u64(bytes, m.id); put_u64(bytes, m.type); put_u8(bytes, m.pathfinder ? 1 : 0); }
     }
     count(s.players.size());
-    for (const auto& p : s.players) { put_u32(bytes, p.player); put_i64(bytes, p.hyperspace_factor.raw()); put_i64(bytes, p.corruption_bonus.raw()); put_u8(bytes, p.benefits_from_corruption ? 1 : 0); }
+    for (const auto& p : s.players) { put_u32(bytes, p.player); put_i64(bytes, p.hyperspace_factor.raw()); put_i64(bytes, p.corruption_bonus.raw()); put_u8(bytes, p.benefits_from_corruption ? 1 : 0); put_u8(bytes, p.easily_bribed ? 1 : 0); }
     count(s.planets.size());
     for (const auto& p : s.planets) { put_u64(bytes, p.planet); put_i64(bytes, p.bounds_half_z.raw()); put_u8(bytes, p.corrupted ? 1 : 0); }
     count(s.access.size());
     for (const auto& a : s.access) { put_u32(bytes, a.player); put_u64(bytes, a.planet); put_u8(bytes, a.accessible ? 1 : 0); put_u8(bytes, a.potential_conflict ? 1 : 0); }
     count(fleets.size());
     for (const auto& f : fleets) {
-        put_u64(bytes, f.id); vec(f.motion.position); vec(f.motion.facing); put_u64(bytes, f.motion.orbit_entry); put_u8(bytes, f.motion.transit ? 1 : 0);
+        put_u64(bytes, f.id); vec(f.motion.position); vec(f.motion.facing); put_u64(bytes, f.motion.orbit_entry);
+        put_u8(bytes, f.motion.land_on_arrival ? 1 : 0); put_u8(bytes, f.motion.transit ? 1 : 0);
         if (!f.motion.transit) continue;
         const auto& t = *f.motion.transit;
         count(t.path.size()); for (const auto id : t.path) put_u64(bytes, id);
@@ -200,11 +205,11 @@ core::Result<DecodedMovement> decode_movement(std::span<const std::uint8_t> byte
     const auto flag = [&](bool& value) { std::uint8_t raw{}; if (!in.read_u8(raw) || raw > 1) return false; value = raw != 0; return true; };
     const auto count = [&](std::uint32_t& value, std::size_t width, std::size_t limit = galactic_max_objects) { return in.read_u32(value) && value <= limit && std::size_t{value} * width <= in.remaining(); };
     auto& s = out.inputs; std::uint32_t n{};
-    if (!fixed(s.mode_modifier) || !count(n, 32)) return fail();
+    if (!fixed(s.mode_modifier) || !count(n, 56)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) {
         MovementType t;
         if (!in.read_u64(t.type) || !fixed(t.hyperspace_speed) || !fixed(t.build_cost) || !in.read_u32(t.squadron_capacity)
-            || !flag(t.hyperspace_eligible) || !flag(t.squadron) || !flag(t.fleet_container) || !flag(t.skips_combat)) return fail();
+            || !flag(t.hyperspace_eligible) || !flag(t.squadron) || !flag(t.fleet_container) || !flag(t.skips_combat) || !fixed(t.piracy_value) || !fixed(t.cheap_bribe) || !fixed(t.expensive_bribe)) return fail();
         s.types.push_back(t);
     }
     if (std::adjacent_find(s.types.begin(), s.types.end(), [](const auto& a, const auto& b) {
@@ -214,22 +219,23 @@ core::Result<DecodedMovement> decode_movement(std::span<const std::uint8_t> byte
     std::size_t total_children = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         MovementContents c; std::uint32_t child_count{};
-        if (!in.read_u64(c.container) || !count(child_count, 16) || total_children + child_count > galactic_max_objects) return fail();
+        if (!in.read_u64(c.container) || !count(child_count, 17) || total_children + child_count > galactic_max_objects) return fail();
         total_children += child_count;
-        for (std::uint32_t j = 0; j < child_count; ++j) { FleetMember m; if (!in.read_u64(m.id) || !in.read_u64(m.type)) return fail(); c.children.push_back(m); }
+        for (std::uint32_t j = 0; j < child_count; ++j) { FleetMember m; if (!in.read_u64(m.id) || !in.read_u64(m.type) || !flag(m.pathfinder)) return fail(); c.children.push_back(m); }
         s.contents.push_back(std::move(c));
     }
-    if (!count(n, 21, galactic_max_players)) return fail();
-    for (std::uint32_t i = 0; i < n; ++i) { MovementPlayer p; if (!in.read_u32(p.player) || !fixed(p.hyperspace_factor) || !fixed(p.corruption_bonus) || !flag(p.benefits_from_corruption)) return fail(); s.players.push_back(p); }
+    if (!count(n, 22, galactic_max_players)) return fail();
+    for (std::uint32_t i = 0; i < n; ++i) { MovementPlayer p; if (!in.read_u32(p.player) || !fixed(p.hyperspace_factor) || !fixed(p.corruption_bonus) || !flag(p.benefits_from_corruption) || !flag(p.easily_bribed)) return fail(); s.players.push_back(p); }
     if (!count(n, 17, 4096)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) { MovementPlanet p; if (!in.read_u64(p.planet) || !fixed(p.bounds_half_z) || !flag(p.corrupted)) return fail(); s.planets.push_back(p); }
     if (!count(n, 14, galactic_max_players * 4096)) return fail();
     for (std::uint32_t i = 0; i < n; ++i) { MovementAccess a; if (!in.read_u32(a.player) || !in.read_u64(a.planet) || !flag(a.accessible) || !flag(a.potential_conflict)) return fail(); s.access.push_back(a); }
-    if (!count(n, 65)) return fail();
+    if (!count(n, 66)) return fail();
     std::size_t total_paths = 0;
     for (std::uint32_t i = 0; i < n; ++i) {
         FleetId id{}; FleetMotion m; bool presence{};
-        if (!in.read_u64(id) || !vec(m.position) || !vec(m.facing) || !in.read_u64(m.orbit_entry) || !flag(presence)) return fail();
+        if (!in.read_u64(id) || !vec(m.position) || !vec(m.facing) || !in.read_u64(m.orbit_entry)
+            || !flag(m.land_on_arrival) || !flag(presence)) return fail();
         if (presence) {
             m.transit.emplace(); auto& t = *m.transit; std::uint32_t path{}, packed{};
             if (!count(path, 8, 4096) || path < 2 || total_paths + path > galactic_max_objects) return fail();

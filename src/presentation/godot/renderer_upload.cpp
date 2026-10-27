@@ -1,14 +1,84 @@
 #include "eawr/core/load_profile.hpp"
+#include "eawr/diagnostics/owner_census.hpp"
 #include "renderer_upload_internal.hpp"
 #include "vram_probe.hpp"
 
 namespace eawr::presentation::godot_backend {
+namespace detail {
+struct RecipeMemoryProbe final {
+    static void census(const GodotRenderer::Impl& impl, diagnostics::OwnerCensus& output) noexcept {
+        for (const auto& [asset, resource] : impl.resources_) {
+            if (!output.step(diagnostics::OwnerCensus::model_vertices)) { output.models_incomplete(); break; }
+            static_cast<void>(asset);
+            if (resource.recipe) output.model(resource.recipe->model.retained(), diagnostics::OwnerCensus::renderer);
+        }
+    }
+    static assets::RetainedPayload read(const GodotRenderer::Impl& impl) {
+        assets::PayloadProbe probe;
+        for (const auto& [entity, bytes] : impl.proxy_.charges) {
+            static_cast<void>(bytes);
+            if (impl.instances_.contains(entity))
+                probe.result.proxy_payload_bytes += sizeof(GodotRenderer::Impl::Instance);
+            const auto pose = impl.skin_poses_.find(entity);
+            if (pose != impl.skin_poses_.end()) {
+                probe.result.proxy_payload_bytes += sizeof(GodotRenderer::Impl::PendingPose)
+                    + assets::vector_capacity_bytes(pose->second.palette)
+                    + assets::vector_capacity_bytes(pose->second.model_transforms);
+            }
+        }
+        for (const auto& [asset, resource] : impl.resources_) {
+            static_cast<void>(asset);
+            if (!resource.recipe) continue;
+            ++probe.result.recipes;
+            probe.model(resource.recipe->model.retained());
+            probe.texture(resource.recipe->texture->retained());
+            for (const auto& binding : resource.recipe->bindings) probe.texture(binding.second->retained());
+        }
+        return probe.result;
+    }
+};
+} // namespace detail
+
+void GodotRenderer::set_texture_loader(detail::TextureLoader loader) {
+    impl_->set_texture_loader(std::move(loader));
+}
+
+void GodotRenderer::set_model_loader(detail::ModelLoader loader) {
+    impl_->set_model_loader(std::move(loader));
+}
+
+std::pair<std::size_t, std::size_t> GodotRenderer::model_recipe_counts() const {
+    return impl_ ? std::pair{impl_->model_stats_.ever_released, impl_->model_stats_.ever_fallback} : std::pair<std::size_t, std::size_t>{};
+}
+
+std::size_t GodotRenderer::model_reload_failures() const { return impl_ ? impl_->model_reload_failures_ : 0; }
+
+assets::RetainedPayload GodotRenderer::recipe_memory() const {
+    return impl_ ? detail::RecipeMemoryProbe::read(*impl_) : assets::RetainedPayload{};
+}
+
+void GodotRenderer::owner_census(diagnostics::OwnerCensus& output) const {
+    // Same main-thread ownership boundary as recipe_memory and upload/release.
+    if (impl_) detail::RecipeMemoryProbe::census(*impl_, output);
+}
+
+std::function<assets::RetainedPayload()> GodotRenderer::recipe_memory_probe() const {
+    // Invoked only on the main thread, like renderer destruction. The token is
+    // destroyed before impl_, so an old startup callback never dereferences a
+    // released renderer. Capturing the stable Impl address also follows moves;
+    // its lifetime token moves alongside impl_ in the default move operations.
+    return [lifetime = std::weak_ptr<const bool>(memory_probe_lifetime_), impl = impl_.get()] {
+        return lifetime.expired() || !impl ? assets::RetainedPayload{} : detail::RecipeMemoryProbe::read(*impl);
+    };
+}
+
 [[nodiscard]] core::Result<void> GodotRenderer::Impl::upload(
     const sim::AssetId asset_id,
-    const assets::Model& model,
+    const ModelView& model,
     const assets::Texture& texture,
     const MaterialDescription& description,
-    const std::span<const GodotRenderer::BindingTexture> binding_textures) {
+    const std::span<const GodotRenderer::BindingTexture> binding_textures,
+    ModelUpload retained_model) {
     // Each per-binding texture names a distinct texture-valued binding.
     std::vector<detail::NamedTexture> named;
     for (const GodotRenderer::BindingTexture& item : binding_textures) {
@@ -71,14 +141,17 @@ namespace eawr::presentation::godot_backend {
 
     Resource resource;
     auto recipe = std::make_shared<Resource::Recipe>();
-    recipe->model = model;
+    const bool authoritative = retained_model.model != nullptr; // loader/cache model, not a derived copy
+    recipe->model = detail::ModelRecipe(authoritative ? std::move(retained_model)
+        : ModelUpload{std::make_shared<const assets::Model>(model.original), {}}, model_loader_, authoritative);
     recipe->texture = keep_texture(texture);
     for (const auto& item : binding_textures) recipe->bindings.emplace_back(item.binding, keep_texture(item.texture));
     resource.recipe = std::move(recipe);
     auto& budget = detail::texture_budget();
     if (!budget.probed()) {
-        const auto device = detail::probe_device_memory();
-        budget.set_device(device.bytes, device.source);
+        if (const auto device = detail::probe_device_memory()) {
+            budget.set_device(device->bytes, device->source);
+        }
     }
     std::uint64_t incoming{};
     std::set<std::pair<std::uint64_t, std::uint64_t>> counted;
@@ -144,6 +217,11 @@ namespace eawr::presentation::godot_backend {
     if (resource.shadow_variant_failed) ++shadow_variant_failures_;
     resource.pass = description.pass;
     resource.description = description;
+    if (resident) {
+        resource.recipe->texture->uploaded();
+        for (const auto& binding : resource.recipe->bindings) binding.second->uploaded();
+        resource.recipe->model.uploaded(model_stats_);
+    }
     resources_.emplace(asset_id, std::move(resource));
     residency_.add(asset_id, resident);
     ++upload_generation_; // #888: the kept submission order resolves assets again
@@ -169,6 +247,8 @@ namespace eawr::presentation::godot_backend {
     }
     const detail::ResourceLeaseLedger::Release disposition = leases_.release(asset_id);
     if (disposition == detail::ResourceLeaseLedger::Release::retained) {
+        render_churn::record(render_churn::Owner::model_resource, render_churn::Event::retained,
+            static_cast<std::uint64_t>(found->second.mesh.is_valid()) + static_cast<std::uint64_t>(found->second.material.is_valid()));
         return core::Result<void>::success();
     }
     // Unregister the fog consumer before any of its material RIDs is freed.
@@ -200,18 +280,35 @@ namespace eawr::presentation::godot_backend {
     return core::Result<void>::success();
 }
 
-std::shared_ptr<const assets::Texture> GodotRenderer::Impl::keep_texture(const assets::Texture& texture) {
+std::shared_ptr<detail::TextureRecipe> GodotRenderer::Impl::keep_texture(const assets::Texture& texture) {
     const auto item = detail::texture_item(texture);
     auto& entry = texture_recipes_[{item.key, item.check}];
     if (auto existing = entry.lock()) return existing;
-    auto kept = std::make_shared<const assets::Texture>(texture);
+    auto kept = std::make_shared<detail::TextureRecipe>(texture, texture_loader_, item);
     entry = kept;
     return kept;
 }
 
+bool GodotRenderer::Impl::acquire_texture(RenderingServer& rendering, const detail::TextureRecipe& recipe,
+    RID& target, std::vector<detail::GpuItem>& items) {
+    const auto& item = recipe.item();
+    if (detail::texture_sharing()) {
+        const auto found = texture_pool_.find({item.key, item.check});
+        if (found != texture_pool_.end()) {
+            ++found->second.references;
+            detail::gpu_memory_ledger().reuse(item);
+            target = found->second.rid;
+            items.push_back(item);
+            return true;
+        }
+    }
+    const auto texture = recipe.read();
+    return texture && acquire_texture(rendering, *texture, target, items);
+}
+
 bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::AssetId asset, Resource& resource) {
     if (resource.mesh.is_valid()) return true;
-    const auto& recipe = *resource.recipe;
+    auto& recipe = *resource.recipe;
     bool ready = acquire_texture(rendering, *recipe.texture, resource.texture, resource.gpu_items);
     for (const auto& [name, texture] : recipe.bindings) {
         if (!ready) break;
@@ -219,7 +316,17 @@ bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::
         ready = acquire_texture(rendering, *texture, bound, resource.gpu_items);
         if (bound.is_valid()) resource.binding_textures.emplace_back(name, bound);
     }
-    if (ready) ready = upload_mesh(rendering, recipe.model, resource, legacy::authored_binormals(resource.description));
+    std::optional<ModelUpload> model;
+    if (ready) {
+        model = recipe.model.read(admission_model_);
+        if (!model) {
+            ++model_reload_failures_;
+            fail(diagnostic_codes::upload_failed, "renderer asset " + std::to_string(asset) + " model '"
+                + recipe.model.source().logical_path + "' no longer reloads to its uploaded content digest");
+        }
+        ready = model.has_value()
+            && upload_mesh(rendering, model->view(), resource, legacy::authored_binormals(resource.description));
+    }
     if (!ready) {
         evict_resource(rendering, asset, resource);
         residency_.admission_failed(asset);
@@ -231,6 +338,9 @@ bool GodotRenderer::Impl::admit_resource(RenderingServer& rendering, const sim::
     if (const auto fog = fog_consumers_.find(asset); fog != fog_consumers_.end()) {
         if (const auto problem = attach_fog_consumer(asset, fog->second)) diagnostics_.push(*problem);
     }
+    recipe.texture->uploaded();
+    for (const auto& binding : recipe.bindings) binding.second->uploaded();
+    recipe.model.uploaded(model_stats_);
     residency_.resident(asset, true);
     ++upload_generation_;
     return true;
@@ -242,7 +352,10 @@ void GodotRenderer::Impl::evict_resource(RenderingServer& rendering, const sim::
         if (instance->second.asset_id == asset) instance = remove_instance(&rendering, instance);
         else ++instance;
     }
-    if (resource.mesh.is_valid()) rendering.free_rid(resource.mesh);
+    if (resource.mesh.is_valid()) {
+        render_churn::record(render_churn::Owner::model_resource, render_churn::Event::freed);
+        rendering.free_rid(resource.mesh);
+    }
     resource.mesh = {};
     for (const auto& item : resource.gpu_items) {
         if (item.category == detail::GpuCategory::texture) release_texture(rendering, item);
@@ -267,10 +380,14 @@ void GodotRenderer::Impl::reconcile_residency(RenderingServer& rendering,
     // Release unused resources before admitting the newly visible slots.
     for (const auto asset : changes.evict) evict_resource(rendering, asset, resources_.at(asset));
     for (const auto asset : changes.admit) static_cast<void>(admit_resource(rendering, asset, resources_.at(asset)));
+    admission_model_.clear(); // sibling surfaces share one transient decode only within this batch
 }
 
 
 void GodotRenderer::Impl::free_resource(RenderingServer& rendering, const Resource& resource) {
+    render_churn::record(render_churn::Owner::model_resource, render_churn::Event::freed,
+        static_cast<std::uint64_t>(resource.mesh.is_valid()) + static_cast<std::uint64_t>(resource.material.is_valid())
+        + static_cast<std::uint64_t>(resource.shader.is_valid() && !resource.shared_shader));
     if (resource.mesh.is_valid()) rendering.free_rid(resource.mesh);
     if (resource.material.is_valid()) rendering.free_rid(resource.material);
     if (resource.shader.is_valid() && !resource.shared_shader) rendering.free_rid(resource.shader);

@@ -10,9 +10,16 @@ add_executable(core_sha256_tests sha256_tests.cpp)
 target_link_libraries(core_sha256_tests PRIVATE eawr::core)
 target_compile_features(core_sha256_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(core_sha256_tests)
+add_executable(core_gc_load_trace_tests gc_load_trace_tests.cpp)
+target_link_libraries(core_gc_load_trace_tests PRIVATE eawr::core)
+target_compile_features(core_gc_load_trace_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(core_gc_load_trace_tests)
+add_test(NAME core_gc_load_trace_contracts COMMAND core_gc_load_trace_tests)
 add_test(NAME core_sha256_contracts COMMAND core_sha256_tests)
 add_test(NAME core_sha256_scalar_contracts COMMAND core_sha256_tests)
 set_tests_properties(core_sha256_scalar_contracts PROPERTIES ENVIRONMENT "EAWR_SHA256_BACKEND=scalar")
+add_test(NAME core_sha256_hex_microbench COMMAND core_sha256_tests --hex-benchmark)
+set_tests_properties(core_sha256_hex_microbench PROPERTIES LABELS "benchmark;batch-only" RUN_SERIAL TRUE)
 add_executable(core_sha256_live_tests sha256_live_tests.cpp)
 target_link_libraries(core_sha256_live_tests PRIVATE eawr::platform eawr::script_authoritative)
 target_compile_features(core_sha256_live_tests PRIVATE cxx_std_20)
@@ -115,24 +122,23 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
         endif()
     endif()
 
-    if(NOT WIN32)
-        # Keep the existing smoke probe on Linux.
-        set(_eawr_clang_probe "${CMAKE_CURRENT_BINARY_DIR}/sim_boundary_clang_probe.cpp")
-        file(WRITE "${_eawr_clang_probe}"
-            "#include <cstdint>\n#include <string>\n#include <vector>\nint main() { return 0; }\n"
-        )
-    endif()
+    # Probe compiler/STL compatibility with bounded input. The complete project
+    # boundary remains a CTest gate, rather than running during every configure.
+    set(_eawr_clang_probe "${CMAKE_CURRENT_BINARY_DIR}/sim_boundary_clang_probe.cpp")
+    file(WRITE "${_eawr_clang_probe}"
+        "#include <cstdint>\n#include <string>\n#include <vector>\nint main() { return 0; }\n"
+    )
     set(_eawr_sim_boundary_clangxx "")
     set(_eawr_clang_rejections "")
     foreach(_eawr_candidate IN LISTS _eawr_clang_candidates)
         if(WIN32)
-            # Validate the exact compiler-backed project check, including its
-            # AST options, project includes, and every simulation source.
+            # Exercise the boundary checker's AST options and project includes
+            # on one representative TU, alongside the small STL smoke probe.
             execute_process(
                 COMMAND "${CMAKE_COMMAND}" -E env ${_eawr_clang_toolset_env}
                     "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_sim_boundary.py"
-                    --root "${PROJECT_SOURCE_DIR}" --clang "${_eawr_candidate}" --jobs 4
-                    ${_eawr_boundary_cache_args}
+                    --root "${PROJECT_SOURCE_DIR}" --clang "${_eawr_candidate}"
+                    --files "${_eawr_clang_probe}" "src/sim/world.cpp"
                 RESULT_VARIABLE _eawr_probe_result
                 OUTPUT_VARIABLE _eawr_probe_output
                 ERROR_VARIABLE _eawr_probe_output
@@ -152,7 +158,7 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
         endif()
         if(WIN32 AND _eawr_probe_output MATCHES "simulation boundary rejected"
            AND NOT _eawr_probe_output MATCHES "SIM_BOUNDARY_COMPILE_ERROR")
-            # Clang parsed the project; the source tree itself violates the boundary.
+            # Clang parsed the probe; the source itself violates the boundary.
             message(FATAL_ERROR
                 "The simulation-boundary check ran with ${_eawr_candidate} and rejected the "
                 "source tree (not a Clang problem; fix the violation, do not set EAWR_CLANGXX):\n"
@@ -168,7 +174,7 @@ if(EAWR_ENABLE_SIM_BOUNDARY_CHECK)
     if(NOT _eawr_sim_boundary_clangxx)
         if(WIN32)
             message(FATAL_ERROR
-                "The simulation-boundary checks found no Clang that parses the project "
+                "The simulation-boundary checks found no Clang that parses the compatibility probe "
                 "with CMake's C++ standard library:${_eawr_clang_rejections}\n"
                 "Set EAWR_CLANGXX to a newer clang++ or clang-cl executable, such as the "
                 "clang++.exe of a current LLVM release."
@@ -227,6 +233,8 @@ add_test(NAME presentation_session_boundary
         --root "${PROJECT_SOURCE_DIR}")
 add_test(NAME presentation_session_boundary_fixtures
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_presentation_boundary.py")
+add_test(NAME boundary_configure_contracts
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_boundary_configure.py")
 add_test(NAME boundary_cache_contracts
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_boundary_cache.py")
 

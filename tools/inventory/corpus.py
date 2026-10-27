@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import struct
+import sys
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
@@ -109,6 +110,11 @@ def _ci_child(parent: Path, relative: str) -> Path | None:
 def _parse_manifest(layer: Layer) -> tuple[list[tuple[Path, str, str]], list[str]]:
     manifest = _ci_child(layer.data_root, "MegaFiles.xml")
     if manifest is None:
+        if layer.layer_id not in ("base", "expansion"):
+            # ML-09: a mod root need not declare archives to supply loose files.
+            print(f"EAWR-VFS-0012 [info] megafiles.xml (source {layer.layer_id}:manifest): "
+                  "mod layer has no Data/MegaFiles.xml; mounting loose files only", file=sys.stderr)
+            return [], []
         raise CorpusError(f"{layer.layer_id}: missing Data/MegaFiles.xml")
     raw = manifest.read_bytes()
     if len(raw) > MAX_MANIFEST:

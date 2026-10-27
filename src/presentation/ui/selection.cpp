@@ -224,6 +224,18 @@ RightRelease right_release(const std::optional<std::array<float, 2>> press, cons
     return drag_extent(*press, release) > minimum_drag_select_distance ? RightRelease::compass : RightRelease::click;
 }
 
+bool allied_inspectable(const BattleUnit& unit, const bool ally_of_local) noexcept {
+    return ally_of_local && !unit.neutral && !unit.own && !unit.hostile && unit.part == sim::invalid_entity_id
+        && !unit.locomotion && !unit.decoration;
+}
+
+const BattleUnit* inspect_click(const std::span<const BattleUnit> units, const std::optional<sim::EntityId> picked,
+                                const bool armed, const Modifiers modifiers) noexcept {
+    if (!picked || armed || modifiers.shift || modifiers.ctrl || modifiers.alt) return nullptr;
+    const auto found = std::find_if(units.begin(), units.end(), [&](const BattleUnit& unit) { return unit.entity == *picked; });
+    return found != units.end() && found->allied_inspectable ? &*found : nullptr;
+}
+
 RightClick right_click(const OrderMode mode, const BattleUnit* over, const bool over_selected) noexcept {
     switch (mode) {
     case OrderMode::waypoint: return RightClick::disarm;

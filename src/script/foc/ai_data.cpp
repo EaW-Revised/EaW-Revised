@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <charconv>
 #include <utility>
+#include <unordered_map>
 
 namespace eawr::script::foc::ai {
 namespace {
@@ -126,13 +127,6 @@ private:
     std::string_view text_;
     std::size_t cursor_{};
 };
-
-const std::string* find_file(const std::map<std::string, std::string, std::less<>>& xml, std::string_view path) {
-    for (const auto& [name, text] : xml) {
-        if (iequal(name, path)) return &text;
-    }
-    return nullptr;
-}
 
 std::optional<Real> number(std::string_view text) { return parse_real(trimmed(text)); }
 
@@ -273,9 +267,14 @@ core::Result<AiData> load_ai_data_files(
     const std::vector<std::string>& paths) {
     using DataResult = core::Result<AiData>;
     AiData data;
+    std::unordered_map<std::string, const std::string*> files;
+    files.reserve(xml.size());
+    // Keep the previous case-insensitive first entry in XML-map order, without scanning every file per path.
+    for (const auto& [name, text] : xml) files.emplace(upper_case(name), &text);
     std::vector<std::pair<std::string, std::string>> equation_files;
     for (const std::string& path : paths) {
-        const std::string* text = find_file(xml, path);
+        const auto at = files.find(upper_case(path));
+        const std::string* text = at == files.end() ? nullptr : at->second;
         if (text == nullptr) return DataResult::failure(error(path + ": AI XML file missing"));
         if (path.find("/perceptualequations/") != std::string::npos) {
             equation_files.emplace_back(path, *text);

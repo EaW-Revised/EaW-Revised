@@ -10,6 +10,8 @@
 // The record keeps integers (percent, steps, permille) so the text form round-trips
 // exactly and a slider's stop is the stored value.
 
+#include "eawr/presentation/ui/render_thread_setting.hpp"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -22,10 +24,6 @@
 #include "eawr/core/diagnostic.hpp"
 
 namespace eawr::presentation::ui {
-
-// The text form's first line is "eawr-settings <version>". A file of another version
-// loads as the defaults (no compatibility is kept before 1.0).
-inline constexpr std::uint32_t settings_version = 1;
 
 // The channel sliders keep FoC's 0.75; ST-A1 lowers the fresh master at the owner's request.
 inline constexpr int volume_default_percent = 75;
@@ -69,6 +67,7 @@ struct VideoSettings final {
     int window_width{800};
     int window_height{600};
     bool windowed{false};
+    RenderThreadSetting render_thread{RenderThreadSetting::separate}; // Applied at the next launch.
     bool vsync{true}; // ST-V5: owner-requested FIFO default; stored choices stay unchanged.
     // ST-P2: owner-requested render limit; 0 is Off, -1 follows the display.
     int frame_rate_limit{120};

@@ -197,6 +197,8 @@ core::Result<void> apply_auto_resolve_outcome(sim::galactic::GalacticSession& ga
     if (services.war_u04_lethal_effects) {
         auto applied = services.war_u04_lethal_effects(galaxy, a.deaths); if (!applied) return applied;
     }
+    // WAR-60/87: the kill path pays bounties during delivery, before any ownership return.
+    if (services.bounty) { auto paid = services.bounty(galaxy, a); if (!paid) return paid; }
     // WGM-186 / WAR-49/56: surface survivors leave before winning cleanup.
     // Solver damage delivery remains before this return-side retreat.
     if (a.land && a.result.retreat_player && services.retreat) { auto applied = services.retreat(galaxy, a); if (!applied) return applied; }

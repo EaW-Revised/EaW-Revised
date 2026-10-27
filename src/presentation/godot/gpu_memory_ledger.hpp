@@ -1,6 +1,7 @@
 #pragma once
 
 #include "eawr/assets/assets.hpp"
+#include "texture_mip_tail.hpp"
 
 #include <array>
 #include <atomic>
@@ -184,6 +185,7 @@ private:
         check.bytes(mip.bytes.data(), mip.bytes.size());
         bytes += mip.bytes.size();
     }
+    bytes += texture_mip_tail_bytes(texture);
     if (texture.format == assets::PixelFormat::bgr8) bytes = bytes / 3U * 4U;
     return {GpuCategory::texture, digest.value(), check.value(), bytes, block_compressed(texture.format)};
 }

@@ -22,6 +22,7 @@
 #include "eawr/battle/start.hpp"
 #include "sampler.hpp"
 
+#include "eawr/core/tick_profile.hpp"
 #include "eawr/data/xml.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/scene/scene.hpp"
@@ -228,8 +229,14 @@ public:
         const std::function<void(std::size_t)>& partition) const override {
         if (profiling) Sampler::enter_phase(phase);
         const auto start = Clock::now();
-        auto result = inner_.execute_phase(phase, partition_count, partition);
-        tick[std::string(phase)] += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        auto result = [&] {
+            // Inline callbacks belong to this barrier, not to the serial scopes around it.
+            const eawr::core::tick_profile::Pause pause;
+            return inner_.execute_phase(phase, partition_count, partition);
+        }();
+        const double elapsed = std::chrono::duration<double, std::milli>(Clock::now() - start).count();
+        if (eawr::core::tick_profile::active != nullptr) eawr::core::tick_profile::active->barriers_ms += elapsed;
+        tick[std::string(phase)] += elapsed;
         if (profiling) Sampler::enter_phase({});
         return result;
     }
@@ -291,7 +298,13 @@ struct Run {
     for (std::uint64_t tick = 0; tick < replay.final_tick_count; ++tick) {
         executor.tick.clear();
         const auto began = Clock::now();
-        auto stepped = session.step(executor);
+        eawr::core::tick_profile::Recording serial_scopes;
+        auto stepped = [&] {
+            // Write-only diagnostics (core/tick_profile.hpp): never read by the sim, so hashes are unchanged.
+            eawr::core::tick_profile::Capture capture(serial_scopes);
+            const eawr::core::tick_profile::Scope scope("serial.session");
+            return session.step(executor);
+        }();
         const auto elapsed = Clock::now() - began;
         if (!stepped) {
             std::cerr << "path_bench --melee: step " << tick + 1 << ": " << eawr::core::format_diagnostic(stepped.error()) << '\n';
@@ -301,6 +314,9 @@ struct Run {
         TickRecord record;
         record.ms = std::chrono::duration<double, std::milli>(elapsed).count();
         record.phases = executor.tick;
+        // Pure serial time per Tick::run stage (workers and nested scopes subtracted); "serial.session" is the
+        // remainder of step() outside Tick::run, "serial.tactical.tail" what Tick::run spends between its stages.
+        for (const auto& cost : serial_scopes.costs) record.phases[std::string(cost.name)] += cost.ms;
         record.units = session.units().size();
         record.squadrons = session.squadrons().size();
         for (const auto& squadron : session.squadrons()) record.craft += squadron.members.size();
@@ -366,7 +382,7 @@ struct Stats {
 [[nodiscard]] double serial_ms(const TickRecord& record) {
     double parallel = 0;
     for (const auto& [name, ms] : record.phases) {
-        if (name.starts_with("commit.")) continue; // serial detail rows may contain a named executor phase
+        if (name.starts_with("commit.") || name.starts_with("serial.")) continue; // serial detail rows may contain a named executor phase
         parallel += ms;
     }
     return std::max(0.0, record.ms - parallel);

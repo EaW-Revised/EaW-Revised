@@ -20,12 +20,18 @@
 #include "eawr/data/ui/shell_anchors.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <fstream>
+#include <regex>
+#include "../support/temp_dir.hpp"
+#include "eawr/sim/galactic/production.hpp"
+#include "eawr/campaign/planet_economy.hpp"
 #include <limits>
 #include <map>
 #include <memory>
@@ -183,7 +189,9 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
     expect(authored_tech_targets == std::vector<std::pair<std::string, std::int64_t>>{
         {"DS_Durasteel", 5}, {"DS_Primary_Hyperdrive", 2}, {"DS_Shield_Gen", 3}, {"DS_Superlaser_Core", 4}},
         "every installed stock Build_Advances_Tech_Level value parses as its numeric target");
-    bool installed_stealth_hero_fleet = false;
+    bool installed_stealth_hero_fleet = false, installed_stealth_company = false, lifecycle_checked = false;
+    unsigned droid_teams_seen{}, gate_droid_teams_seen{};
+    unsigned lifecycle_steps{};
     const bool solo_sources = protection_case == "--solo-protection-sources";
     const bool all_mp = protection_case == "--all-mp-protection-sources";
     std::vector<std::string> campaigns{"Sandbox_Equal_Footing_Underworld", "Sandbox_Equal_Footing_Rebel", "Sandbox_Equal_Footing_Empire"};
@@ -327,7 +335,7 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
                 "every authored/story/MP control source follows the placed actor");
             if (authored || protection_case == "--mp-hero-protection-live") {
                 const eawr::platform::ThreadWorkerAdapter executor(1);
-                for (unsigned tick = 0; tick < 3; ++tick) {
+                for (unsigned gate_tick = 0; gate_tick < 3; ++gate_tick) {
                     auto stepped = created.value().game()->step(executor);
                     if (!stepped) throw std::runtime_error(eawr::core::format_diagnostic(stepped.error()));
                     expect(control_sources_match(*created.value().game()->galaxy().snapshot()),
@@ -483,6 +491,68 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
         auto created = cp::CampaignRoot::create(planned.value(), services.value());
         if (!created) throw std::runtime_error(eawr::core::format_diagnostic(created.error()));
         auto campaign = std::move(created).value(); const auto& setup = campaign.game()->galaxy().setup();
+        if (name == "Sandbox_Equal_Footing_Empire") {
+            const auto probe = std::find_if(options.types.begin(), options.types.end(),
+                [](const auto& row) { return row.original_type == "Generic_Probe_Droid"; });
+            expect(probe != options.types.end() && setup.ability_host.has_value(),
+                "installed XML probe reaches the live ability-host provider");
+            if (probe == options.types.end() || !setup.ability_host)
+                throw std::runtime_error("installed probe ability host missing");
+            const auto& host = *setup.ability_host;
+            const auto profile = std::find_if(host.profiles.begin(), host.profiles.end(),
+                [&](const auto& row) { return row.type == probe->id; });
+            expect(profile != host.profiles.end() && profile->spy.has_value(),
+                "unit System_Spy_Ability survives XML economic loading into the live profile");
+            if (profile == host.profiles.end() || !profile->spy)
+                throw std::runtime_error("installed probe spy profile missing");
+            expect(profile->spy->name == "PROBE_DROID_SYSTEM_SPY" && profile->spy->initially_enabled
+                && profile->spy->causes_despawn && profile->spy->duration == eawr::sim::math::Fixed::from_integer(60).value()
+                && std::find(profile->ground_activated.begin(), profile->ground_activated.end(), gc::AbilityKind::system_spy)
+                    != profile->ground_activated.end()
+                && std::find(host.activated_spy_abilities.begin(), host.activated_spy_abilities.end(), profile->spy->name)
+                    != host.activated_spy_abilities.end(),
+                "installed probe has its enabled consuming 60-second Ground_Activated spy and authored route");
+        }
+        if (name == "Sandbox_Equal_Footing_Underworld") {
+            // CGS-21: a synthetic costless original has no force, roster or
+            // purchase route, but a planet's category time effect still selects it.
+            const auto economics = eawr::units::galactic_economic_table(catalog.catalog);
+            std::optional<gc::TypeId> source_id;
+            std::vector<std::string> categories;
+            for (const auto& profile : economics.types) {
+                if (profile.object_class != "Planet") continue;
+                const auto location = std::find_if(planned.value().locations().begin(), planned.value().locations().end(),
+                    [&](const auto& row) { return row.original_type == profile.name && row.planet.has_value(); });
+                if (location == planned.value().locations().end()) continue;
+                for (const auto& ability : profile.reductions) {
+                    if (ability.price || ability.included_categories.empty() || !ability.excluded_categories.empty()) continue;
+                    categories = ability.included_categories;
+                    const auto source_actor = std::find_if(setup.census->objects.begin(), setup.census->objects.end(),
+                        [&](const auto& row) { return row.id == location->planet->id; });
+                    if (source_actor != setup.census->objects.end()) source_id = source_actor->original_type;
+                    break;
+                }
+                if (source_id) break;
+            }
+            expect(source_id.has_value(), "installed campaign supplies a category time-reduction planet");
+            if (!source_id) throw std::runtime_error("category time-reduction source missing");
+            auto modded = types; auto modded_options = options;
+            eawr::units::GalacticType extra; extra.name = "Synthetic_Costless_Target";
+            extra.object_class = "SpaceUnit"; extra.category_mask = categories;
+            const auto extra_id = modded_options.types.back().id + 1;
+            modded.types.push_back(extra); modded_options.types.push_back({extra_id, extra.name});
+            const auto modded_plan = cp::plan_live_campaign_setup(filesystem, data, modded, name, modded_options, "Normal_Default").value();
+            const auto modded_services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, data, modded,
+                modded_plan, "Normal_Default").value();
+            const auto modded_root = cp::CampaignRoot::create(modded_plan, modded_services).value();
+            const auto& modded_setup = modded_root.game()->galaxy().setup();
+            expect(std::any_of(modded_setup.income->types.begin(), modded_setup.income->types.end(),
+                [&](const auto& profile) { return std::any_of(profile.reductions.begin(), profile.reductions.end(),
+                    [&](const auto& row) { return row.type == extra_id && !row.price; }); }),
+                "CGS-21 live selection keeps a costless original outside the creation table");
+            expect(std::none_of(modded_setup.census->objects.begin(), modded_setup.census->objects.end(),
+                [&](const auto& row) { return row.original_type == extra_id; }), "economic target selection creates no object");
+        }
         // Story-only leaders (no starting object) still carry their authored price reductions: the plot places them later.
         for (const auto* leader : {"Emperor_Palpatine", "Mon_Mothma"}) {
             const auto original = std::find_if(options.types.begin(), options.types.end(),
@@ -549,7 +619,7 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
         // The shape the other content gates would admit for direct production, so only the new gate decides.
         const auto direct_shape = [&](const eawr::units::GalacticType& type) {
             const bool role = has_behavior(type, "DUMMY_STAR_BASE") || has_behavior(type, "DUMMY_GROUND_STRUCTURE")
-                || has_behavior(type, "DUMMY_SPACE_STRUCTURE") || has_behavior(type, "DUMMY_STARSHIP")
+                || has_behavior(type, "DUMMY_ORBITAL_STRUCTURE") || has_behavior(type, "DUMMY_STARSHIP")
                 || has_behavior(type, "DUMMY_GROUND_COMPANY") || has_behavior(type, "DUMMY_SPACE_FIGHTER_SQUADRON")
                 || type.build_advances_tech_level.value_or(0) > 0;
             return role && !has_behavior(type, "DUMMY_GROUND_BASE") && !has_behavior(type, "TRANSPORT")
@@ -561,10 +631,16 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
             return nullptr;
         };
         std::set<std::string> refused_stock;
-        std::size_t kept_stock = 0;
+        std::size_t kept_stock = 0, orbital_offers = 0;
         for (const auto& location : setup.production->planets) for (const auto& row : location.offers) {
             const auto* original = planned.value().original_type(row.type);
             if (!original) continue;
+            // RGC-01/02: the orbital token selects structure admission; authored gates still apply.
+            if (has_behavior(*original, "DUMMY_ORBITAL_STRUCTURE")) {
+                ++orbital_offers;
+                expect(row.kind == gc::ProductionKind::structure && row.domain == gc::ProductionDomain::space,
+                    "orbital production offers use space-special structure slot accounting");
+            }
             const bool gate = authored_gate(*original);
             if (!gate) expect(!row.direct_build_allowed, "a type without level or role is never directly buildable");
             // Unpriced types are refused by the price gate regardless; only priced types are attributable here.
@@ -573,6 +649,7 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
             expect(row.direct_build_allowed == gate, "directly buildable shape follows the authored construction predicates");
             if (row.direct_build_allowed) ++kept_stock; else refused_stock.insert(original->name);
         }
+        expect(orbital_offers > 0, "stock production regression exercises authored orbital offers");
         // Stock heroes and their dummy variants author a cost but no level and no role.
         // Fin_Home_One is the cinematic-only variant of Home_One; the cinematic gate already refused it.
         expect(refused_stock == std::set<std::string>{"Fin_Home_One", "Home_One", "Millennium_Falcon_Ground",
@@ -646,6 +723,7 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
         // Exercise the actual installed hero constructor, including its real
         // transport/payload and automatic ability initialization, before save.
         // Keep the original root at tick zero for the startup ownership transfer.
+        auto hero_data = data;
         std::optional<cp::CampaignRoot> hero_campaign;
         eawr::checkpoint::GameLoadOptions load_options;
         eawr::sim::EntityId hero_birth_frontier{};
@@ -665,11 +743,17 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
             // Reachability comes from the authored roster, through the same
             // stock plan/services path as production; catalog-wide IDs alone
             // cannot qualify an unbuildable hero or its nested dependencies.
-            auto hero_data = data;
             const auto hero_source = std::find_if(hero_data.campaigns.begin(), hero_data.campaigns.end(),
                 [&](const auto& row) { return row.name == source->name; });
             if (hero_source == hero_data.campaigns.end()) throw std::runtime_error("stock stealth hero campaign is absent");
             hero_source->starting_forces.push_back({owner->faction, location->original_type, hero->original_type});
+            // Equal Footing does not place the droid team at tick zero. Qualify
+            // its real transport/payload through the same authored roster path.
+            const auto droid_site = std::find_if(source->starting_forces.begin(), source->starting_forces.end(),
+                [](const auto& force) { return force.faction == "Rebel"; });
+            expect(droid_site != source->starting_forces.end(), "stock droid fixture has an authored Rebel site");
+            if (droid_site == source->starting_forces.end()) throw std::runtime_error("stock droid fixture site missing");
+            hero_source->starting_forces.push_back({droid_site->faction, droid_site->location, "Droids_Team"});
             auto hero_plan = cp::plan_live_campaign_setup(filesystem, hero_data, types, name, options, "Normal_Default");
             if (!hero_plan) throw std::runtime_error(eawr::core::format_diagnostic(hero_plan.error()));
             auto hero_services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, hero_data,
@@ -799,6 +883,157 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
                 "installed fresh current representation equals the actual constructor binding");
         }
         expect(companies && squadrons, "installed fresh stock campaign proves company transport and squadron current types");
+        // WGM-38/WGM-163: a company transport skips space combat exactly when every contained actor does. The expectation
+        // derives from each member's authored initially enabled Galactic_Stealth_Ability, never from a unit name.
+        for (const auto& row : born->actor_records()) {
+            const auto binding = std::find_if(options.types.begin(), options.types.end(),
+                [&](const auto& value) { return value.id == row.original_type; });
+            if (binding == options.types.end()) continue;
+            const auto* original = types.find(binding->original_type);
+            if (!original || std::find(original->behavior.begin(), original->behavior.end(), "DUMMY_GROUND_COMPANY") == original->behavior.end()) continue;
+            bool all_members_stealth = !original->company_units.empty();
+            for (const auto& member : original->company_units) {
+                const auto* unit = types.find(member);
+                all_members_stealth = all_members_stealth && unit && std::any_of(unit->initial_stealth.begin(), unit->initial_stealth.end(),
+                    [](const auto& ability) { return ability.initially_enabled.value_or(true); });
+            }
+            // The expectation above derives from the same type table, so pin the authored stealth members of the stock
+            // Rebel droid team directly: R2-D2 and C-3PO each author an enabled Galactic_Stealth_Ability.
+            std::string lowered = binding->original_type;
+            std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (lowered == "droids_team") {
+                ++droid_teams_seen;
+                for (const auto& member : original->company_units) {
+                    const auto* unit = types.find(member);
+                    expect(unit && !unit->initial_stealth.empty(), "stock droid team member type table carries its authored Galactic_Stealth_Ability: " + member);
+                }
+                expect(all_members_stealth, "stock droid team is an all-stealth company in the type table");
+            }
+            // Name the failing input: the transport role, the contained actors and their retained stealth scalar.
+            std::size_t contained{}, contained_stealth{};
+            for (const auto& member : born->actor_records()) if (member.container == row.id) {
+                ++contained; contained_stealth += member.abilities.present && member.abilities.combat_skip;
+            }
+            expect(row.combat_role == gc::ActorCombatRole::transport, "installed company transport actor carries the transport combat role: " + binding->original_type);
+            expect(contained == original->company_units.size(), "installed company transport contains every authored member actor: " + binding->original_type);
+            if (all_members_stealth || lowered == "droids_team") expect(contained_stealth == contained,
+                "installed company members retain their authored enabled stealth scalar: " + binding->original_type);
+            const auto skip = born->actor_combat_skip(row.id);
+            expect(skip && skip.value() == (all_members_stealth || lowered == "droids_team"),
+                "installed company transport skips combat exactly when every contained member authors enabled stealth (WGM-38/163): " + binding->original_type);
+            installed_stealth_company |= all_members_stealth && skip && skip.value();
+            // The release gate prepares the same campaign with only its selected factions active (Empire, Rebel and the
+            // authored human), which is the game the AI actually plays. The droid team must keep its stealth there too.
+            if (lowered == "droids_team" && std::string_view(name) == "Sandbox_Equal_Footing_Underworld" && gate_droid_teams_seen == 0) {
+                cp::CampaignSetupOptions gate_options = options;
+                gate_options.players.clear(); gate_options.seats.clear(); gate_options.solo_reference_human.reset();
+                for (const auto& faction : data.factions) {
+                    const auto id = static_cast<gc::PlayerId>(gate_options.players.size() + 1);
+                    const bool selected_faction = faction.name == "Empire" || faction.name == "Rebel" || faction.name == source->starting_active_player;
+                    gate_options.players.push_back({{id, id, 0}, faction.name, selected_faction || !faction.is_playable.value_or(false)});
+                    if (faction.name == "Empire" || faction.name == "Rebel")
+                        gate_options.seats.push_back({gc::SeatId{id}, id, gc::SeatKind::ai, id - 1, true, 0});
+                    if (faction.name == source->starting_active_player) {
+                        gate_options.solo_reference_human = id;
+                        gate_options.seats.push_back({gc::SeatId{id}, id, gc::SeatKind::human, id - 1, true, 1});
+                    }
+                }
+                auto gate_plan = cp::plan_live_campaign_setup(filesystem, hero_data, types, name, gate_options, "Normal_Default");
+                expect(bool(gate_plan), "gate-shaped installed campaign plans");
+                if (gate_plan) {
+                    auto gate_services = cp::prepare_live_campaign_services(filesystem, catalog.catalog, hero_data, types, gate_plan.value(), "Normal_Default");
+                    expect(bool(gate_services), "gate-shaped installed campaign services prepare");
+                    if (gate_services) {
+                        auto gate_root = cp::CampaignRoot::create(gate_plan.value(), gate_services.value());
+                        expect(bool(gate_root), "gate-shaped installed campaign creates");
+                        if (gate_root) {
+                            const auto check_droids = [&](std::string_view when) {
+                                const auto gate_born = gate_root.value().game()->galaxy().snapshot();
+                                for (const auto& transport : gate_born->actor_records()) {
+                                    const auto bound = std::find_if(gate_options.types.begin(), gate_options.types.end(),
+                                        [&](const auto& value) { return value.id == transport.original_type; });
+                                    if (bound == gate_options.types.end() || bound->original_type != binding->original_type) continue;
+                                    if (when == "creation") ++gate_droid_teams_seen;
+                                    std::size_t members{}, stealthy{};
+                                    for (const auto& member : gate_born->actor_records()) if (member.container == transport.id) {
+                                        ++members; stealthy += member.abilities.present && member.abilities.combat_skip;
+                                    }
+                                    expect(members == original->company_units.size() && stealthy == members,
+                                        std::string("gate-shaped droid team members retain their authored enabled stealth scalar at ") + std::string(when));
+                                    const auto gate_skip = gate_born->actor_combat_skip(transport.id);
+                                    expect(gate_skip && gate_skip.value(), std::string("gate-shaped droid team transport skips combat at ") + std::string(when));
+                                }
+                            };
+                            check_droids("creation");
+                            const eawr::platform::ThreadWorkerAdapter gate_executor(1);
+                            for (unsigned gate_tick = 0; gate_tick < 3; ++gate_tick) {
+                                const auto gate_stepped = gate_root.value().game()->step(gate_executor);
+                                expect(bool(gate_stepped), "gate-shaped installed campaign steps");
+                                if (!gate_stepped) break;
+                            }
+                            check_droids("the third galactic tick");
+                        }
+                    }
+                }
+            }
+            // The retained stealth inputs survive the writes the AI makes to a company transport: separation from
+            // its fleet, surface landing and surface launch (all ordinary admitted native operations).
+            if (all_members_stealth && !lifecycle_checked) {
+                auto made = gc::GalacticSession::create(checkpoint_game.galaxy().setup());
+                expect(bool(made), "installed company lifecycle world creates");
+                if (made) {
+                    auto world = std::move(made).value();
+                    // Reconstruct the same fixture, then resolve its transport
+                    // by authored identity rather than borrowing a snapshot ID.
+                    const auto initial = world.snapshot();
+                    const auto actors = initial->actor_records();
+                    const auto match = std::find_if(actors.begin(), actors.end(), [&](const auto& actor) {
+                        return actor.original_type == row.original_type && actor.owner == row.owner
+                            && actor.planet == row.planet && !actor.dead && !actor.delete_pending;
+                    });
+                    expect(match != actors.end(), "installed lifecycle fixture resolves its authored company transport");
+                    if (match == actors.end()) continue;
+                    lifecycle_checked = true;
+                    const auto lifecycle_actor = match->id;
+                    const auto skips = [&](std::string_view step) {
+                        const auto value = world.snapshot()->actor_combat_skip(lifecycle_actor);
+                        expect(value && value.value(), std::string("installed stealth company transport still skips combat after ") + std::string(step));
+                    };
+                    skips("creation");
+                    gc::FleetId fleet_id{}; gc::PlayerId owner{}; gc::PlanetId orbit{}; std::size_t size{};
+                    const auto locate = [&] {
+                        fleet_id = 0;
+                        for (const auto& fleet : world.snapshot()->fleets()) for (const auto& member : fleet.members) if (member.id == lifecycle_actor) {
+                            fleet_id = fleet.id; owner = fleet.owner; orbit = fleet.orbit; size = fleet.members.size();
+                        }
+                    };
+                    locate();
+                    if (fleet_id && size > 1) {
+                        const auto removed = world.admit_native_fleet(owner, gc::RemoveFleetMembers{fleet_id, {lifecycle_actor}});
+                        bool separated = false;
+                        if (removed && removed.value().admitted) {
+                            const auto recreated = world.admit_native_fleet(owner, gc::CreateFleet{orbit, {lifecycle_actor}, 0});
+                            separated = recreated && recreated.value().admitted;
+                        }
+                        if (separated) { ++lifecycle_steps; skips("separation from its fleet"); }
+                        locate();
+                    }
+                    if (fleet_id) {
+                        const auto removed = world.admit_native_fleet(owner, gc::RemoveFleetMembers{fleet_id, {lifecycle_actor}});
+                        bool linked = false;
+                        if (removed && removed.value().admitted) {
+                            const auto landed = world.land_native_transport(owner, lifecycle_actor, orbit);
+                            linked = landed && landed.value().linked;
+                        }
+                        if (linked) {
+                            ++lifecycle_steps; skips("surface landing");
+                            const auto launched = world.launch_native_transport(owner, lifecycle_actor);
+                            if (launched && launched.value().admitted) { ++lifecycle_steps; skips("surface launch"); }
+                        }
+                    }
+                }
+            }
+        }
         std::cout << "current representations campaign=" << name << " companies=" << companies << " squadrons=" << squadrons << '\n';
         for (const auto& [original, target] : {std::pair{"DS_Primary_Hyperdrive", 2},
                 std::pair{"DS_Shield_Gen", 3}, std::pair{"DS_Superlaser_Core", 4}, std::pair{"DS_Durasteel", 5}}) {
@@ -872,6 +1107,10 @@ void installed(bool domains_only = false, bool slots_only = false, std::string_v
     }
     if (all_mp || solo_sources) return;
     expect(installed_stealth_hero_fleet, "installed automatic stealth hero has a recursively stealthed fleet");
+    expect(installed_stealth_company, "installed stock includes an all-stealth company transport that skips combat");
+    expect(droid_teams_seen > 0 && gate_droid_teams_seen > 0, "installed stock exercised the droid team in the ordinary and the gate-shaped campaign");
+    expect(lifecycle_checked && lifecycle_steps > 0, "installed company lifecycle exercised a real separation, landing or launch");
+    std::cout << "company lifecycle steps=" << lifecycle_steps << '\n';
 }
 void installed_origin_starbases() {
     const auto root = game_root();
@@ -1470,6 +1709,143 @@ void installed_unscouted_intel() {
         }
     }
 }
+// LSA-17/18: temporary XML overlays exercise the live readers and full campaign root.
+void installed_retail_production_numbers() {
+    using Fixed = eawr::sim::math::Fixed;
+    const auto root = game_root();
+    if (!root) { eawr::testing::skip_installed("SKIPPED: retail production numbers require EAWR_EAW_GAME_ROOT\n", 0, std::cout); return; }
+    std::vector<eawr::vfs::MountSpec> mounts;
+    for (const auto& [id, folder] : {std::pair{"expansion", "corruption"}, std::pair{"base", "GameData"}})
+        mounts.push_back(eawr::vfs::resolve_manifest_mount(id, std::filesystem::path(*root) / folder / "Data").value().mount);
+    const auto base = eawr::vfs::Vfs::mount(mounts).value();
+    const auto catalog = eawr::data::load_catalog(base, eawr::data::Profile::foc).value();
+    const auto text = [&](std::string_view path) {
+        const auto bytes = base.open(path).value();
+        return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    };
+    const auto constants = text("data/xml/gameconstants.xml");
+    const auto difficulty = text("data/xml/difficultyadjustments.xml");
+    std::map<std::string, std::string> faction_files;
+    for (const auto& definition : catalog.catalog.definitions()) if (definition.category == eawr::data::Category::faction
+        && definition.active && !faction_files.contains(definition.root.source.logical_path))
+        faction_files.emplace(definition.root.source.logical_path, text(definition.root.source.logical_path));
+    // CTest's working directory is the build tree; retail and mod folders are read-only inputs.
+    const auto directory = std::filesystem::current_path() / ("retail-production-numbers-"
+        + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    struct Cleanup { std::filesystem::path path; ~Cleanup() { eawr::testing::remove_temp_directory(path); } } cleanup{directory};
+    const auto write = [&](std::string_view logical, const std::string& xml) {
+        if (!logical.starts_with("data/")) throw std::runtime_error("numeric overlay requires a canonical data path");
+        const auto path = directory / std::filesystem::path(logical.substr(5));
+        std::filesystem::create_directories(path.parent_path());
+        std::ofstream out(path); out << xml;
+        if (!out) throw std::runtime_error("numeric fixture overlay write failed");
+    };
+    const auto replace = [](std::string xml, const std::string& tag, const std::string& value) {
+        const std::regex pattern("<" + tag + "\\b[^>]*>[^<]*</" + tag + "\\s*>", std::regex::icase);
+        return std::regex_replace(xml, pattern, "<" + tag + ">" + value + "</" + tag + ">");
+    };
+    const auto load = [&](unsigned family, const std::string& value) {
+        auto changed = replace(constants, "Production_Speed_Factor", family == 0 ? value : "1");
+        for (unsigned i = 0; i < 5; ++i)
+            changed = replace(std::move(changed), "Production_Speed_Mod_Base_Vs_Tech_" + std::to_string(i), family == 1 ? value : "1");
+        write("data/xml/gameconstants.xml", changed);
+        write("data/xml/difficultyadjustments.xml", replace(difficulty, "Galactic_Build_Time_Multiplier", family == 2 ? value : "1"));
+        for (const auto& [path, original] : faction_files) {
+            auto faction = replace(original, "Corruption_Galactic_Production_Price_Multipliers", (family == 3 ? value : "1") + " 0.5");
+            faction = replace(std::move(faction), "Corruption_Galactic_Production_Time_Multipliers", (family == 3 ? value : "1") + " 0.5");
+            write(path, faction);
+        }
+        auto layered = mounts;
+        layered.insert(layered.begin(), {"numeric-fixture", directory, "data", {}});
+        const auto fs = eawr::vfs::Vfs::mount(layered).value();
+        const auto loaded = eawr::data::load_catalog(fs, eawr::data::Profile::foc).value();
+        const auto data = eawr::data::galactic::load_galactic_data(fs, loaded.catalog).value();
+        const auto types = eawr::units::galactic_type_table(loaded.catalog);
+        cp::CampaignSetupOptions options; options.seed = 42;
+        for (const auto& faction : data.factions) {
+            const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+            options.players.push_back({{id, id, 0}, faction.name, true});
+            const bool human = faction.name == "Rebel";
+            if (human) options.solo_reference_human = id;
+            if (!faction.is_neutral.value_or(false)) options.seats.push_back({gc::SeatId{id}, id,
+                human ? gc::SeatKind::human : gc::SeatKind::ai, id, true, human ? id : 0});
+        }
+        std::vector<std::string> names;
+        for (const auto& type : types.types) names.push_back(type.name);
+        std::sort(names.begin(), names.end());
+        for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+        const auto plan = cp::plan_live_campaign_setup(fs, data, types, "Sandbox_Equal_Footing_Rebel", options, "Normal_Default").value();
+        auto services = cp::prepare_live_campaign_services(fs, loaded.catalog, data, types, plan, "Normal_Default");
+        if (!services) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + services.error().message);
+        auto campaign = cp::CampaignRoot::create(plan, services.value());
+        if (!campaign) throw std::runtime_error("retail numbers family=" + std::to_string(family) + " value=" + value + ": " + campaign.error().message);
+        return std::pair{campaign.value().game()->galaxy().setup(), plan};
+    };
+    const auto baseline = load(4, "1");
+    expect(baseline.first.production.has_value() && baseline.first.economy_corruption.has_value(), "numeric fixture baseline reaches full production and corruption campaign setup");
+    for (unsigned family = 0; family < 4; ++family) for (const auto value : {"-1.5", "0", "text", "2.7"}) {
+        const auto parsed = std::string_view(value) == "text" ? Fixed{} : Fixed::from_decimal(value).value();
+        const auto [setup, plan] = load(family, value);
+        expect(setup.production.has_value() && setup.economy_corruption.has_value(), "every signed/zero/text/fraction XML fixture reaches campaign load");
+        std::size_t checked{};
+        for (std::size_t i = 0; i < setup.production->planets.size(); ++i) {
+            const auto& planet = setup.production->planets[i];
+            const auto& before = baseline.first.production->planets[i];
+            const bool human = std::any_of(setup.seats.begin(), setup.seats.end(), [&](const auto& seat) {
+                return seat.player == planet.target_owner && seat.kind == gc::SeatKind::human;
+            });
+            const auto corruption = std::find_if(setup.economy_corruption->players.begin(), setup.economy_corruption->players.end(),
+                [&](const auto& row) { return row.player == planet.target_owner; });
+            for (std::size_t j = 0; j < planet.offers.size(); ++j) {
+                const auto& offer = planet.offers[j]; const auto& old = before.offers[j];
+                const auto* original = plan.original_type(offer.type);
+                if (!original || old.seconds.raw() <= 0 || original->build_time_reduced_by_multiple_factories.value_or(false)) continue;
+                bool applies = family == 0;
+                if (family == 1) applies = offer.domain == gc::ProductionDomain::space && planet.space_level > 0
+                    && planet.space_level - original->tech_level.value_or(0) - 1 >= 0;
+                if (family == 2) applies = !human;
+                if (family == 3) applies = corruption != setup.economy_corruption->players.end() && !corruption->benefits && offer.affiliated;
+                if (!applies) continue;
+                ++checked;
+                expect(offer.seconds == gc::production_product(old.seconds, parsed), "XML production factor retains its retail signed/zero/text/fraction value in the loaded offer");
+                if (family == 3) expect(offer.price == gc::production_price(gc::production_product(old.price, parsed)),
+                    "XML corruption price list first token reaches signed offer pricing");
+            }
+        }
+        expect(checked > 0, "every production factor family has an observable loaded offer");
+        if (family == 3) {
+            std::size_t vectors{};
+            for (const auto& player : setup.economy_corruption->players) if (player.playable && !player.benefits) {
+                ++vectors;
+                expect(player.price[0] == parsed && player.time[0] == parsed
+                    && player.price[1] == Fixed::from_ratio(1, 2).value() && player.time[1] == Fixed::from_ratio(1, 2).value(),
+                    "planet economy loader retains both XML float-sequence tokens");
+            }
+            expect(vectors > 0, "corruption-vector XML case checks real playable faction rows");
+        }
+        std::cout << "retail production family=" << family << " value=" << value << " offers=" << checked << " loaded=yes\n";
+    }
+    // LSA-02's economy consumer must not reintroduce a whole-number gate after the data loader.
+    // Use the baseline plan to isolate this reread from the separate faction-data parser contract.
+    for (const auto& [path, original] : faction_files)
+        write(path, replace(original, "Displayed_Tech_Level_Adjustment", "-2.7"));
+    auto layered = mounts; layered.insert(layered.begin(), {"numeric-fixture", directory, "data", {}});
+    const auto fs = eawr::vfs::Vfs::mount(layered).value();
+    const auto modified = eawr::data::load_catalog(fs, eawr::data::Profile::foc).value();
+    const auto economy = cp::prepare_corruption_economy(fs, modified.catalog, baseline.second, baseline.first).value();
+    std::size_t adjustments{};
+    for (const auto& binding : baseline.second.player_bindings()) {
+        const auto* faction = modified.catalog.find(binding.faction, eawr::data::Category::faction);
+        if (!faction || std::none_of(faction->root.children.begin(), faction->root.children.end(), [](const auto& node) {
+            return node.name == "Displayed_Tech_Level_Adjustment";
+        })) continue;
+        const auto player = std::find_if(economy.players.begin(), economy.players.end(), [&](const auto& row) { return row.player == binding.player.player_id; });
+        expect(player != economy.players.end() && player->displayed_tech_adjustment == -2,
+            "fractional faction adjustment reread uses atoi truncation instead of rejecting real XML");
+        ++adjustments;
+    }
+    expect(adjustments > 0, "fractional faction-adjustment fixture checks at least one authored real-loader row");
+}
 } // namespace
 int main(int argc, const char* const argv[]) {
 #if defined(_MSC_VER)
@@ -1483,6 +1859,7 @@ int main(int argc, const char* const argv[]) {
                 || std::string_view(argv[1]) == "--authored-protection-source"
                 || std::string_view(argv[1]) == "--solo-protection-sources"
                 || std::string_view(argv[1]) == "--all-mp-protection-sources")) installed(false, false, argv[1]);
+        else if (argc == 2 && std::string_view(argv[1]) == "--retail-production-numbers") installed_retail_production_numbers();
         else if (argc == 2 && std::string_view(argv[1]) == "--origin-starbases") installed_origin_starbases();
         else if (argc == 2 && std::string_view(argv[1]) == "--starting-tech") installed_starting_levels();
         else if (argc == 2 && std::string_view(argv[1]) == "--accepted-starting-tech") installed_starting_levels(true);

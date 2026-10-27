@@ -2,6 +2,8 @@
 #include "eawr/data/retail_values.hpp"
 
 #include <array>
+#include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -72,6 +74,21 @@ void number_contracts() {
     }
 }
 
+void integer_constant_contracts() {
+    // #4992: the C atoi read of an integer game constant: no sign or range refusal.
+    const std::pair<std::string_view, std::int32_t> cases[] = {
+        {"6", 6}, {" -1 ", -1}, {"+7", 7}, {"0", 0}, {"2.5", 2}, {"-0.5", 0}, {"65537", 65537}, {"12abc", 12},
+        {"abc", 0}, {"", 0}, {"-", 0}, {"1e3", 1}, {"0.8f", 0}, {"\t\n 42", 42}, {"2147483647", 2147483647},
+        {"2147483648", 2147483647}, {"99999999999999999999", 2147483647}, {"-2147483648", INT32_MIN},
+        {"-99999999999999999999", INT32_MIN},
+    };
+    for (const auto& [text, value] : cases) {
+        expect(retail::integer_constant(text) == value, std::string("integer constant (atoi): '") + std::string(text) + "'");
+    }
+    expect(static_cast<std::uint32_t>(retail::integer_constant("-1")) == 4294967295U,
+        "integer constant: an unsigned consumer sees -1 as 4294967295");
+}
+
 void list_contracts() {
     expect(retail::list_rule("squadron_units") == retail::ListRule::replace_by_variant_all
         && retail::list_rule("Starting_Spawned_Units_Tech_0") == retail::ListRule::append
@@ -136,10 +153,61 @@ void list_contracts() {
 
 } // namespace
 
+// LSL-P1: the retail float parse never fails; boundary values -1, 0, max, fractional, empty and junk.
+void float_contracts() {
+    using eawr::sim::math::Fixed;
+    const auto expect_float = [](const std::string_view text, const Fixed value, const bool exact) {
+        const auto parsed = retail::float_value(text);
+        expect(parsed && parsed->value == value && parsed->exact == exact, std::string("LSL-P1 float: '") + std::string(text) + "'");
+    };
+    const auto d = [](const std::string_view text) { return Fixed::from_decimal(text).value(); };
+    const auto top = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    expect_float("-1", d("-1"), true);
+    expect_float("0", Fixed{}, true);
+    expect_float("-0.4", d("-0.4"), true);
+    expect_float(".5", d("0.5"), true);
+    expect_float("9999999", d("9999999"), true);
+    expect_float("1.5f", d("1.5"), false);
+    expect_float("1,5", d("1"), false);
+    expect_float("abc", Fixed{}, false);
+    expect_float("-", Fixed{}, false);
+    expect_float("1e30", top, false);
+    expect_float("-1e30", Fixed::from_raw(-std::numeric_limits<std::int64_t>::max()), false);
+    expect_float("inf", top, false);
+    expect_float("1e-30", Fixed{}, true);
+    expect(!retail::float_value("") && !retail::float_value("  ") && !retail::float_value("TBD"),
+        "LSL-P1: a placeholder keeps the earlier or default value");
+}
+
+// LSL-P2: the retail signed integer parse truncates, saturates at 32 bits and never fails.
+void integer_contracts() {
+    const auto expect_integer = [](const std::string_view text, const std::int32_t value, const bool exact) {
+        const auto parsed = retail::integer_value(text);
+        expect(parsed && parsed->value == value && parsed->exact == exact, std::string("LSL-P2 integer: '") + std::string(text) + "'");
+    };
+    expect_integer("-1", -1, true);
+    expect_integer("0", 0, true);
+    expect_integer(" +9 ", 9, true);
+    expect_integer("2.9", 2, false);
+    expect_integer("-2.7", -2, false);
+    expect_integer("-0.5", 0, false);
+    expect_integer("1e3", 1, false);
+    expect_integer("abc", 0, false);
+    expect_integer("2147483647", 2147483647, true);
+    expect_integer("-2147483648", std::numeric_limits<std::int32_t>::min(), true);
+    expect_integer("3000000000", 2147483647, false);
+    expect_integer("-3000000000", std::numeric_limits<std::int32_t>::min(), false);
+    expect_integer("99999999999999999999", 2147483647, false);
+    expect(!retail::integer_value("") && !retail::integer_value("TBD"), "LSL-P2: a placeholder keeps the earlier or default value");
+}
+
 void retail_value_contracts() {
     placeholder_contracts();
     boolean_contracts();
     number_contracts();
+    integer_constant_contracts();
+    float_contracts();
+    integer_contracts();
     list_contracts();
 }
 

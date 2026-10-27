@@ -37,6 +37,7 @@ struct GalacticSelectionContent {
     std::optional<Real> technology_weight;
     std::optional<bool> population_check;
     std::map<tactical::PlayerId, sim::galactic::TypeId> initial_starbase_types; // WGA-481 sourced first-base lookup
+    std::vector<std::string> unresolved_names; // CGS-07: names that resolve to no bound type, skipped as null references
 };
 struct GalacticHeroSelection {
     Real target_weight{}, escort_weight{}, minimum_cost{}, maximum_cost{};

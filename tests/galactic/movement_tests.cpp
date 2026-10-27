@@ -5,6 +5,7 @@
 #include "eawr/core/gc_profile.hpp"
 #include "eawr/campaign/game_session.hpp"
 #include "eawr/campaign/fleets.hpp"
+#include "eawr/campaign/live_setup.hpp"
 #include "eawr/checkpoint/game.hpp"
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/movement.hpp"
@@ -372,8 +373,10 @@ void roundtrip_and_parity() {
     expect(gc::parse_replay(bytes).value() == r, "movement inputs and command replay roundtrip");
     for (std::size_t size = 0; size < bytes.size(); size += 17) expect(!gc::parse_replay(std::span(bytes).first(size)), "truncated movement replay refuses");
     auto invalid = r.setup; invalid.movement->access.pop_back(); expect(!gc::validate_setup(invalid), "complete movement access required");
-    invalid = r.setup; invalid.movement->players[0].hyperspace_factor = f(-1); expect(!gc::validate_setup(invalid), "negative authored factor refused");
-    invalid = r.setup; invalid.movement->types[0].hyperspace_speed = f(-1); expect(!gc::validate_setup(invalid), "negative authored speed refused");
+    invalid = r.setup; invalid.movement->players[0].hyperspace_factor = f(-1);
+    expect(bool(gc::validate_setup(invalid)) && invalid.movement->players[0].hyperspace_factor == f(-1), "negative authored factor loads unchanged; departure decides whether it can move");
+    invalid = r.setup; invalid.movement->types[0].hyperspace_speed = f(-1);
+    expect(bool(gc::validate_setup(invalid)) && invalid.movement->types[0].hyperspace_speed == f(-1), "negative authored speed loads unchanged; departure decides whether it can move");
     invalid = r.setup; invalid.movement->contents = {{20, {{21, 1}}}}; expect(!gc::validate_setup(invalid), "child identity collision refused");
     std::vector<std::string> reference;
     for (const auto workers : {1U, 2U, 4U, 8U}) {
@@ -440,6 +443,16 @@ void arrival() {
     snap = run(s, {move}, 3); expect(fleet(snap).orbit == 0 && fleet(snap).motion.transit->hop == 1, "inaccessible intermediate skipped without orbit linkage");
     s = setup(); s.movement->access[1].potential_conflict = true;
     snap = run(s, {move}, 2); expect(fleet(snap).orbit == 2 && !fleet(snap).motion.transit && event(snap, gc::GalacticEventKind::movement_conflict), "intermediate conflict stops and publishes admission seam");
+    {
+        // GST-U01 / WGM-32/104/163: a stealth-only fleet (every member skips combat) neither stops at nor fights in a
+        // hostile intermediate hop, and still arrives at its endpoint.
+        auto stealth = s; stealth.movement->types[0].skips_combat = true;
+        const auto passing = run(stealth, {move}, 3);
+        expect(fleet(passing).orbit == 0 && fleet(passing).motion.transit->hop == 1
+            && !event(passing, gc::GalacticEventKind::movement_conflict), "stealth-only fleet passes a hostile intermediate hop without a conflict");
+        const auto arrived = run(stealth, {move}, 30);
+        expect(fleet(arrived).orbit == 3 && !fleet(arrived).motion.transit, "stealth-only fleet reaches its endpoint through the hostile hop");
+    }
     s.movement->players[0].benefits_from_corruption = true;
     snap = run(s, {move}, 3); expect(fleet(snap).orbit == 0 && fleet(snap).motion.transit->hop == 1, "corruption faction suppresses intermediate conflict without testing endpoint corruption");
     s.movement->access[2].potential_conflict = true;
@@ -756,6 +769,32 @@ void adapter() {
         && built.value().types[0].squadron_capacity == 3 && built.value().types[1].build_cost == f(100)
         && built.value().types[1].hyperspace_speed == f(9)
         && built.value().players[0].corruption_bonus == f(3), "authored original-type/faction/initialized-mode inputs, no copied stock values");
+    auto signed_types = types;
+    signed_types.types[0].hyperspace_speed = f(-7);
+    signed_types.types[1].build_cost_credits = f(-1);
+    auto signed_data = data;
+    signed_data.constants[0].number = f(-5);
+    signed_data.constants[1].number = f(-3);
+    signed_data.factions[0].hyperspace_speed_factor = f(-2);
+    const auto signed_inputs = eawr::campaign::build_movement_inputs(signed_types, signed_data, bindings, players);
+    expect(signed_inputs && signed_inputs.value().types[0].hyperspace_speed == f(-7)
+        && signed_inputs.value().types[1].build_cost == f(-1) && signed_inputs.value().base_mode_modifier == f(-5)
+        && signed_inputs.value().players[0].hyperspace_factor == f(-2)
+        && signed_inputs.value().players[0].corruption_bonus == f(-3), "all signed movement authoring reaches campaign inputs unchanged");
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto config = setup();
+        config.rules.maximum_fleet_movement_distance = f(-1);
+        config.movement->mode_modifier = f(-1);
+        config.movement->types[0].hyperspace_speed = f(-2);
+        config.movement->types[1].build_cost = f(-1);
+        config.movement->players[0].hyperspace_factor = f(-1);
+        config.movement->players[0].corruption_bonus = f(-3);
+        auto game = gc::GalacticSession::create(config).value();
+        expect(bool(game.submit({{0, gc::SeatId{1}, 1}, gc::MoveFleet{10, {1, 2}, {}}})), "signed speed move reaches command admission");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        expect(bool(game.step(executor)), "signed speed campaign steps without a negative-duration or speed failure");
+        expect(!fleet(*game.snapshot()).motion.transit, "nonpositive movement factors reject departure at the consumer");
+    }
     auto omitted = data; omitted.constants.erase(omitted.constants.begin());
     expect(!eawr::campaign::build_movement_inputs(types, omitted, bindings, players), "missing initialized mode tag never defaults to one");
     types.types[0].squadron_capacity.reset(); built = eawr::campaign::build_movement_inputs(types, data, bindings, players);
@@ -797,7 +836,143 @@ void installed() {
             inputs.value().types[i].squadron_capacity == static_cast<std::uint32_t>(*original->squadron_capacity), "stock carrier movement reads original values");
     }
     std::cout << "stock movement types=" << bindings.size() << " initialized-modifier=" << inputs.value().base_mode_modifier.raw() << '\n';
+
+    // #5093: exercise the actual stock hero and live combat-skip initialization,
+    // without AI decisions or a viewer supplying movement commands.
+    namespace cp = eawr::campaign;
+    constexpr std::string_view campaign = "Sandbox_Equal_Footing_Empire";
+    auto referenced_types = cp::campaign_referenced_types(data, campaign);
+    referenced_types.push_back("Boba_Fett_Team");
+    const auto stock_types = eawr::units::galactic_type_table(catalog.catalog, false, referenced_types);
+    cp::CampaignSetupOptions options; options.seed = 42;
+    for (const auto& faction : data.factions) {
+        const auto id = static_cast<gc::PlayerId>(options.players.size() + 1);
+        const bool local = faction.name == "Empire";
+        options.players.push_back({{id, id, 0}, faction.name, true});
+        if (local) options.solo_reference_human = id;
+        if (!faction.is_neutral.value_or(false)) options.seats.push_back({{id}, id,
+            local ? gc::SeatKind::human : gc::SeatKind::ai, id - 1, true, local ? id : 0});
+    }
+    std::vector<std::string> names;
+    for (const auto& type : stock_types.types) names.push_back(type.name);
+    std::sort(names.begin(), names.end());
+    for (const auto& name : names) options.types.push_back({options.types.size() + 1, name});
+    const auto unseeded_plan = take(cp::plan_live_campaign_setup(filesystem, data, stock_types, campaign, options, "Normal_Default"));
+    const auto unseeded_services = take(cp::prepare_live_campaign_services(filesystem, catalog.catalog, data,
+        stock_types, unseeded_plan, "Normal_Default"));
+    auto unseeded_root = take(cp::CampaignRoot::create(unseeded_plan, unseeded_services));
+    const auto& owned_planets = unseeded_root.game()->galaxy().setup().planets;
+    const auto owned_planet = std::find_if(owned_planets.begin(), owned_planets.end(),
+        [&](const auto& row) { return row.owner == *options.solo_reference_human; });
+    expect(owned_planet != owned_planets.end(), "stock Empire campaign initializes an owned planet");
+    if (owned_planet == owned_planets.end()) return;
+    const auto site = std::find_if(unseeded_plan.locations().begin(), unseeded_plan.locations().end(),
+        [&](const auto& row) { return row.planet && row.planet->id == owned_planet->id; });
+    expect(site != unseeded_plan.locations().end(), "stock Empire campaign has an owned hero construction site");
+    if (site == unseeded_plan.locations().end()) return;
+    // Equal Footing has no named stealth hero. Seed the authored team through
+    // the stock constructor, which qualifies its real payload and abilities.
+    auto hero_data = data;
+    const auto source = std::find_if(hero_data.campaigns.begin(), hero_data.campaigns.end(),
+        [&](const auto& row) { return row.name == campaign; });
+    expect(source != hero_data.campaigns.end(), "stock Empire campaign source resolves");
+    if (source == hero_data.campaigns.end()) return;
+    source->starting_forces.push_back({"Empire", site->original_type, "Boba_Fett_Team"});
+    const auto plan = take(cp::plan_live_campaign_setup(filesystem, hero_data, stock_types, campaign, options, "Normal_Default"));
+    const auto services = take(cp::prepare_live_campaign_services(filesystem, catalog.catalog, hero_data, stock_types, plan, "Normal_Default"));
+    auto root_owner = take(cp::CampaignRoot::create(plan, services));
+    const auto stock = root_owner.game()->galaxy().setup();
+    const auto boba = std::find_if(options.types.begin(), options.types.end(), [](const auto& row) { return row.original_type == "Boba_Fett"; });
+    expect(boba != options.types.end(), "stock Boba type resolves"); if (boba == options.types.end()) return;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto game = take(gc::GalacticSession::create(stock));
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        const auto initial = game.snapshot();
+        const auto hero = std::find_if(initial->actor_records().begin(), initial->actor_records().end(),
+            [&](const auto& row) { return row.original_type == boba->id && row.owner == *options.solo_reference_human && !row.dead; });
+        expect(hero != initial->actor_records().end(), "stock Empire campaign contains Boba");
+        if (hero == initial->actor_records().end()) return;
+        auto member = hero->id; auto parent = hero->container; gc::FleetId id{};
+        for (std::size_t remaining = initial->actor_records().size(); parent && remaining; --remaining) {
+            if (std::any_of(initial->planets().begin(), initial->planets().end(), [&](const auto& row) { return row.id == parent; })) break;
+            const auto at = std::find_if(initial->fleets().begin(), initial->fleets().end(), [&](const auto& row) { return row.id == parent; });
+            if (at != initial->fleets().end()) { id = at->id; break; }
+            const auto actor = std::find_if(initial->actor_records().begin(), initial->actor_records().end(), [&](const auto& row) { return row.id == parent; });
+            if (actor == initial->actor_records().end()) break;
+            member = parent; parent = actor->container;
+        }
+        if (!id) {
+            const auto launched = take(game.launch_native_transport(*options.solo_reference_human, member));
+            expect(launched.admitted, "landed Boba launches through the ordinary transport owner");
+            if (!launched.admitted) return;
+            id = launched.object;
+        }
+        if (fleet(*game.snapshot(), id).members.size() > 1) {
+            const auto detached = take(game.admit_native_fleet(*options.solo_reference_human,
+                gc::TransferFleetMembers{{{id, member}}, 0, 2}, false));
+            expect(detached.admitted, "Boba separates from ordinary combatants"); if (!detached.admitted) return;
+            id = detached.object;
+        }
+        const auto skip = game.snapshot()->fleet_combat_skip(id);
+        expect(skip && skip.value(), "stock Boba fleet has live recursive combat skipping"); if (!skip || !skip.value()) return;
+        const auto origin = fleet(*game.snapshot(), id).orbit;
+        const auto maximum = stock.rules.maximum_fleet_movement_distance;
+        expect(maximum.has_value(), "stock campaign supplies its movement graph distance"); if (!maximum) return;
+        const auto graph = take(gc::PlanetGraph::build(stock.planets, stock.routes, *maximum));
+        std::vector<gc::PathPlanet> access;
+        for (const auto& planet : stock.planets) { gc::PathPlanet row; row.id = planet.id; access.push_back(row); }
+        gc::PathOptions path_options; path_options.multiplayer = true;
+        path_options.allow_neutral = path_options.allow_hostile = path_options.allow_defended = path_options.allow_bad_final = true;
+        std::vector<gc::PlanetId> path;
+        for (const auto& target : stock.planets) {
+            const auto admitted = std::find_if(stock.movement->access.begin(), stock.movement->access.end(),
+                [&](const auto& row) { return row.player == *options.solo_reference_human && row.planet == target.id; });
+            if (target.owner == *options.solo_reference_human || admitted == stock.movement->access.end()
+                || !admitted->accessible || !admitted->potential_conflict) continue;
+            auto candidate = take(gc::find_planet_path(graph, origin, target.id, access, path_options)).planets;
+            if (!candidate.empty() && (path.empty() || candidate.size() < path.size())) path = std::move(candidate);
+        }
+        expect(path.size() >= 2, "stock Boba has a reachable hostile defended destination"); if (path.size() < 2) return;
+        std::vector<std::string> hashes;
+        const auto seat = gc::SeatId{*options.solo_reference_human};
+        for (const auto sequence : {1ULL, 2ULL}) {
+            take(game.submit({{game.completed_tick(), seat, sequence}, gc::MoveFleet{id, path, {}}}));
+            (void)take(game.step(executor));
+            expect(fleet(*game.snapshot(), id).motion.transit.has_value(), "stock Boba move begins, including the second move");
+            for (unsigned tick = 0; tick < 20000 && fleet(*game.snapshot(), id).motion.transit; ++tick)
+                (void)take(game.step(executor));
+            const auto snapshot = game.snapshot(); const auto& arrived = fleet(*snapshot, id);
+            std::cout << "5093 workers=" << workers << " move=" << sequence << " fleet=" << id
+                << " orbit=" << arrived.orbit << " transit=" << bool(arrived.motion.transit)
+                << " ability_preparations=" << (game.ability_state() ? game.ability_state()->preparations.size() : 0)
+                << " raid=" << arrived.raid_destination.value_or(0) << '\n';
+            expect(arrived.orbit == path.back() && !arrived.motion.transit, "stock Boba arrives and clears transit");
+            expect(!game.ability_state() || game.ability_state()->preparations.empty(), "ordinary stealth travel leaves no pending hero mission");
+            hashes.push_back(game.state_sha256());
+            std::reverse(path.begin(), path.end());
+        }
+        if (reference.empty()) reference = hashes;
+        else expect(reference == hashes, "stock stealth round trip is identical on 1/2/4/8 workers");
+    }
 }
+void pathfinder_movement() {
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto world = gc::GalacticSession::create(setup()).value();
+        expect(bool(world.submit({{0, gc::SeatId{1}, 1}, gc::SetFleetPathfinder{10, 20}})), "movement pathfinder assigns");
+        expect(bool(world.submit({{0, gc::SeatId{1}, 2}, gc::MoveFleet{10, {1, 2}, {}}})), "pathfinder fleet receives movement");
+        expect(bool(world.submit({{0, gc::SeatId{1}, 3}, gc::SetFleetPathfinder{10, 0}})), "transit clear reaches admission");
+        const eawr::platform::ThreadWorkerAdapter executor(workers);
+        for (unsigned tick = 0; tick < 12; ++tick) {
+            auto stepped = world.step(executor);
+            expect(bool(stepped), "pathfinder fleet movement steps"); if (!stepped) return;
+            expect(fleet(*world.snapshot()).members.front().pathfinder, "pathfinder flag survives transit and arrival");
+            if (tick == 0) expect(event(*world.snapshot(), gc::GalacticEventKind::command_rejected)
+                && fleet(*world.snapshot()).motion.transit.has_value(), "in-transit slot change refuses before changing the selection");
+        }
+    }
+}
+
 } // namespace
 int case_galactic_movement_tests(int argc, const char* const argv[]) {
     try {

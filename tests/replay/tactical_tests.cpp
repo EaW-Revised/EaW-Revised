@@ -513,23 +513,115 @@ void test_native_scene_format(const std::string& fixtures) {
     invalid = replay; invalid.setup.native_scene->source_types.front() = std::string(65536, 'x');
     expect(static_cast<bool>(tactical::validate_setup(invalid.setup)), "file metadata limits never refuse a live campaign setup");
     expect(!tactical::write_replay(invalid), "native scene refuses oversized names");
+    invalid = replay;
+    invalid.setup.native_scene->source_types = {std::string(65535, 'x')};
+    expect(static_cast<bool>(tactical::write_replay(invalid)), "maximum u16 name fits wide native framing");
+    {
+        auto boundary = replay;
+        auto& roots = boundary.setup.native_scene->source_types;
+        roots.clear();
+        for (unsigned i = 0; i < 4095; ++i) {
+            auto name = std::to_string(i);
+            name.resize(65535, 'x');
+            roots.push_back(std::move(name));
+        }
+        expect(static_cast<bool>(tactical::validate_replay(boundary)), "native body below 256 MiB remains admissible");
+        auto name = std::string("4095"); name.resize(65535, 'x'); roots.push_back(std::move(name));
+        const auto refused = tactical::validate_replay(boundary);
+        const auto body_size = 20U + roots.size() * 65537U + 12U + 13U + 13U;
+        expect(!refused && refused.error().message.find(std::to_string(body_size)) != std::string::npos,
+            "body past 256 MiB refuses with its actual byte count");
+    }
+    {
+        auto narrow_body = replay;
+        narrow_body.setup.units.clear();
+        narrow_body.commands.clear();
+        for (eawr::sim::EntityId id = 1; id <= 8191; ++id) {
+            narrow_body.setup.units.push_back({id, 101, 1});
+            narrow_body.setup.units.back().garrison_enabled = false;
+        }
+        narrow_body.setup.first_free_entity_id = 8193;
+        const auto fits = tactical::write_replay(narrow_body);
+        expect(fits && tactical::parse_replay(fits.value()).value() == narrow_body,
+            "wide header retains narrow garrison body below 65535 bytes");
+        narrow_body.setup.units.push_back({8192, 101, 1});
+        narrow_body.setup.units.back().garrison_enabled = false;
+        const auto refused = tactical::write_replay(narrow_body);
+        expect(!refused && refused.error().code == tactical::diagnostic_codes::resource_limit
+            && refused.error().message.find("extension 3") != std::string::npos
+            && refused.error().message.find("65536") != std::string::npos,
+            "wide header refuses a narrow garrison body above 65535 bytes with tag and size");
+    }
+    auto large = replay;
+    for (unsigned i = 0; i < 3000; ++i)
+        large.setup.native_scene->source_types.push_back("Synthetic_Catalog_Type_" + std::to_string(i));
+    const auto large_bytes = tactical::write_replay(large);
+    expect(large_bytes && large_bytes.value().size() > 65535, "native metadata exceeds the former u16 header limit");
+    if (large_bytes) {
+        expect(large_bytes.value() == read_bytes(fixtures + "/native-large.bin"), "large native replay matches independent fixture");
+        const auto parsed = tactical::parse_replay(large_bytes.value());
+        expect(parsed && parsed.value() == large, "large native metadata round-trips without truncation");
+        if (!parsed) return;
+        expect(tactical::write_replay(parsed.value()).value() == large_bytes.value(), "large native bytes are canonical");
+        const auto expected = run_replay(replay, eawr::sim::InlineExecutor{}, false);
+        for (const auto workers : {1U, 2U, 4U, 8U}) {
+            expect(run_replay(parsed.value(), ReverseInline(workers), true) == expected,
+                "large metadata keeps simulation and snapshots equal across workers");
+            auto session = tactical::TacticalSession::from_replay(parsed.value());
+            expect(static_cast<bool>(session), "large metadata creates checkpoint session");
+            if (!session) continue;
+            expect(static_cast<bool>(session.value().step(ReverseInline(workers))), "large metadata advances before checkpoint");
+            const auto checkpoint = session.value().save_checkpoint_state();
+            expect(static_cast<bool>(checkpoint), "large native metadata saves checkpoint");
+            if (!checkpoint) continue;
+            auto restored = tactical::TacticalSession::from_replay(parsed.value());
+            expect(static_cast<bool>(restored), "large metadata creates restored session");
+            if (!restored) continue;
+            const auto loaded = restored.value().load_checkpoint_state(checkpoint.value());
+            expect(static_cast<bool>(loaded), "large metadata restores checkpoint");
+            if (!loaded) continue;
+            expect(restored.value().record().setup.native_scene == large.setup.native_scene, "checkpoint preserves every native root");
+            while (session.value().completed_tick() < large.final_tick_count) {
+                const auto a = session.value().step(ReverseInline(workers));
+                const auto b = restored.value().step(ReverseInline(workers));
+                expect(a && b && a.value().state_hash.get() == b.value().state_hash.get(), "checkpoint continuation matches across workers");
+                if (!a || !b) break;
+            }
+        }
+        auto truncated = large_bytes.value();
+        truncated[12] = 255; truncated[13] = 255;
+        expect(!tactical::parse_replay(truncated), "oversized u32 header refuses before allocation");
+    }
+    auto squadron_native = replay;
+    squadron_native.setup.units = {{1, 101, 1}, {2, 102, 1}};
+    squadron_native.setup.squadrons = {{1, {2}}};
+    squadron_native.setup.first_free_entity_id = 3;
+    squadron_native.commands.clear();
+    const auto squadron_bytes = tactical::write_replay(squadron_native);
+    expect(squadron_bytes && squadron_bytes.value()[8] == tactical::replay_format_version_squadron_native
+        && tactical::parse_replay(squadron_bytes.value()).value() == squadron_native, "wide native format retains squadron tables");
     const auto header = static_cast<std::size_t>(encoded.value()[10]) + 256U * encoded.value()[11];
-    std::size_t record = 108;
+    std::size_t record = 110;
     while (record < header && (encoded.value()[record] != tactical::replay_extension_native_scene
         || encoded.value()[record + 1] != 0)) {
         record += 4U + encoded.value()[record + 2] + 256U * encoded.value()[record + 3];
     }
     expect(record < header, "native scene extension has its reserved tag");
     if (record >= header) return;
-    auto bytes = encoded.value(); bytes[record + 4] = 2;
+    auto bytes = encoded.value(); bytes[record + 6] = 2;
     expect(!tactical::parse_replay(bytes), "native scene refuses unknown body version");
-    bytes = encoded.value(); bytes[record + 8] = 2;
+    bytes = encoded.value(); bytes[record + 10] = 2;
     expect(!tactical::parse_replay(bytes), "native scene refuses unknown flags");
     bytes = encoded.value();
-    for (std::size_t i = 0; i < 4; ++i) bytes[record + 12 + i] = 255;
+    for (std::size_t i = 0; i < 4; ++i) bytes[record + 14 + i] = 255;
     expect(!tactical::parse_replay(bytes), "native scene refuses oversized counts before allocation");
-    bytes = encoded.value(); bytes[record + 16] = 0; bytes[record + 17] = 0;
+    bytes = encoded.value(); bytes[record + 18] = 0; bytes[record + 19] = 0;
     expect(!tactical::parse_replay(bytes), "native scene refuses empty encoded names");
+    bytes = encoded.value();
+    for (unsigned i = 0; i < 4; ++i) bytes[record + 2 + i] = 255;
+    expect(!tactical::parse_replay(bytes), "native u32 length beyond file refuses before allocation");
+    bytes = encoded.value(); bytes[8] = 4;
+    expect(!tactical::parse_replay(bytes), "native framing cannot be relabeled as a narrow format");
     bytes = encoded.value(); bytes.resize(header - 1);
     expect(!tactical::parse_replay(bytes), "native scene refuses truncated header bodies");
 }
@@ -549,7 +641,7 @@ void test_skirmish_setup_format(const std::string& fixtures) {
     metadata.match.auto_resolve = -9;
     metadata.match.win_float = eawr::sim::math::Fixed::from_raw(-456);
     metadata.match.allow_random_events = true;
-    metadata.match.space_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
+    metadata.match.tactical_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
     for (const auto& player : replay.setup.players) if (player.commandable())
         metadata.slots.push_back({player.player_id, player.player_id != 1U, 2U, {"Test_Fleet"}});
     replay.setup.skirmish = metadata;
@@ -558,10 +650,37 @@ void test_skirmish_setup_format(const std::string& fixtures) {
     if (!written) return;
     const auto parsed = tactical::parse_replay(written.value());
     expect(parsed && parsed.value() == replay, "SKSU round-trips roles, map, palette, fleet and every match field");
+    auto custom = replay;
+    custom.setup.skirmish->map = "data/custommaps/recorded.ted";
+    expect(static_cast<bool>(tactical::validate_setup(custom.setup)), "custom-map SKSU passes shared setup validation for LAN handoff");
+    const auto custom_bytes = tactical::write_replay(custom);
+    expect(static_cast<bool>(custom_bytes), "custom-map SKSU encodes");
+    if (custom_bytes) {
+        const auto decoded_custom = tactical::parse_replay(custom_bytes.value());
+        expect(decoded_custom && decoded_custom.value() == custom, "custom-map SKSU round-trips the complete setup");
+        const auto map_begin = std::search(custom_bytes.value().begin(), custom_bytes.value().end(),
+            custom.setup.skirmish->map.begin(), custom.setup.skirmish->map.end());
+        expect(map_begin != custom_bytes.value().end(), "encoded SKSU contains the authored custom-map directory name");
+        if (map_begin != custom_bytes.value().end()) {
+            auto invalid_bytes = custom_bytes.value();
+            invalid_bytes[static_cast<std::size_t>(map_begin - custom_bytes.value().begin())] = 'x';
+            expect(!tactical::parse_replay(invalid_bytes), "SKSU decoder rejects a custom-map path outside the admitted directories");
+        }
+    }
+    for (const auto* invalid_path : {"data/other/recorded.ted", "data/custommaps/nested/recorded.ted",
+        "data/custommaps/../recorded.ted", "data/custommaps/nested\\recorded.ted", "data/custommaps/recorded.xml"}) {
+        auto invalid_custom = custom;
+        invalid_custom.setup.skirmish->map = invalid_path;
+        expect(!tactical::validate_setup(invalid_custom.setup) && !tactical::write_replay(invalid_custom),
+            "custom-map SKSU retains directory, nesting, traversal, separator and extension guards");
+    }
     const auto reference = run_replay(legacy, eawr::sim::InlineExecutor{}, false);
-    for (const auto workers : {1U, 2U, 4U, 8U})
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
         expect(run_replay(replay, ReverseInline(workers), true) == reference,
             "load-time metadata does not change canonical hashes, snapshots or events across workers");
+        expect(run_replay(custom, ReverseInline(workers), true) == reference,
+            "custom-map metadata preserves replay hashes, snapshots and events across workers");
+    }
     auto session = tactical::TacticalSession::from_replay(replay);
     if (session) {
         while (session.value().completed_tick() < replay.final_tick_count)
@@ -578,7 +697,7 @@ void test_skirmish_setup_format(const std::string& fixtures) {
     rejects(flags, 32, "unknown SKSU match flag rejects");
     rejects(flags + 16U, 127, "out-of-range signed tech value rejects");
     const std::size_t victory = flags + 60U + 2U + metadata.match.win_condition.size()
-        + 2U + metadata.match.space_win_condition.size();
+        + 2U + metadata.match.tactical_win_condition.size();
     rejects(victory, 3, "non-lobby victory condition rejects");
     rejects(victory + 4U, 65, "oversized SKSU slot count rejects");
     rejects(victory + 12U, 3, "human role with an AI level rejects");

@@ -35,6 +35,7 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
         hardpoint.collision_mesh = object->text("Collision_Mesh");
         hardpoint.special_ability_name = object->text("Special_Ability_Name");
         hardpoint.requires_manual_target = flag(*object, "Requires_Manual_Target_Assignment", false).value_or(false);
+        hardpoint.manual_is_turret = flag(*object, "Is_Turret", false).value_or(false);
         hardpoint.allows_special_weapon_use = flag(*object, "Allows_Special_Weapon_Use", false).value_or(false);
         hardpoint.fighter_bay_flyout_distance = object->fixed("Fighter_Bay_Flyout_Distance", report_, false);
 
@@ -51,17 +52,22 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
             attached = model_path(hardpoint.model_to_attach);
             attach_bone = bone_index(*owner->model, hardpoint.attachment.bone);
         }
-        hardpoint.fire_a = point(object->text("Fire_Bone_A"), owner, owner_id, "Fire_Bone_A", attached, attach_bone);
-        hardpoint.fire_b = point(object->text("Fire_Bone_B"), owner, owner_id, "Fire_Bone_B", attached, attach_bone);
+        const bool attached_turret = hardpoint.manual_is_turret && !hardpoint.requires_manual_target
+            && !hardpoint.model_to_attach.empty();
+        hardpoint.fire_a = point(object->text("Fire_Bone_A"), owner, owner_id, "Fire_Bone_A", attached, attach_bone, attached_turret);
+        hardpoint.fire_b = point(object->text("Fire_Bone_B"), owner, owner_id, "Fire_Bone_B", attached, attach_bone, attached_turret);
+        hardpoint.randomize_between_fire_bones = flag(*object, "Randomize_Between_Fire_Bones", false).value_or(true);
 
         if (hardpoint.requires_manual_target) {
             hardpoint.manual_cooldown_seconds = object->fixed("Manual_Hardpoint_Firing_Cooldown_Secs", report_, false);
-            hardpoint.manual_is_turret = flag(*object, "Is_Turret", false).value_or(false);
+        }
+        // HPT-01: ordinary weapon hardpoints own the same authored turret geometry.
+        {
             if (hardpoint.manual_is_turret) {
                 hardpoint.manual_turret = point(object->text("Turret_Bone_Name"), owner, owner_id,
-                    "Turret_Bone_Name", attached, attach_bone);
+                    "Turret_Bone_Name", attached, attach_bone, attached_turret);
                 hardpoint.manual_barrel = point(object->text("Barrel_Bone_Name"), owner, owner_id,
-                    "Barrel_Bone_Name", attached, attach_bone);
+                    "Barrel_Bone_Name", attached, attach_bone, attached_turret);
                 hardpoint.manual_rotate_speed = object->fixed("Turret_Rotate_Speed", report_, false);
                 hardpoint.manual_yaw_extent = object->fixed("Turret_Rotate_Extent_Degrees", report_, false);
                 hardpoint.manual_pitch_extent = object->fixed("Turret_Elevate_Extent_Degrees", report_, false);
@@ -107,11 +113,26 @@ void Loader::load_hardpoint(const std::string& id, UnitType& unit, const Frames*
             weapon.damage_type = object->text("Damage_Type");
             weapon.damage = object->fixed("Projectile_Damage", report_, false);
             weapon.category_restrictions = mask(object->text("Fire_Category_Restrictions"));
+            // ML-53: a name outside the loaded category dictionary is reported and contributes no bit.
+            for (std::size_t index = 0; index < weapon.category_restrictions.size(); ++index) {
+                const auto& name = weapon.category_restrictions[index];
+                const auto known = std::any_of(tables_.categories.begin(), tables_.categories.end(),
+                    [&](const EnumValue& value) { return iequals(value.name, name); });
+                const auto repeated = std::any_of(weapon.category_restrictions.begin(),
+                    weapon.category_restrictions.begin() + static_cast<std::ptrdiff_t>(index),
+                    [&](const std::string& earlier) { return iequals(earlier, name); });
+                if (!known && !repeated) {
+                    report_.missing(owner_id, "Fire_Category_Restrictions", name,
+                        "unknown category; name ignored (ML-53)");
+                }
+            }
             weapon.inaccuracy = inaccuracy(*object, "Fire_Inaccuracy_Distance");
             // Both default to yes in FoC's hardpoint data (#74, space-damage DG-35).
             weapon.opportunity_fire_when_targeting =
                 flag(*object, "Allow_Opportunity_Fire_When_Targeting", false).value_or(true);
             weapon.opportunity_fire_when_idle = flag(*object, "Allow_Opportunity_Fire_When_Idle", false).value_or(true);
+            weapon.fire_in_rocket_mode = flag(*object, "Fire_When_In_Rocket_Attack_Mode", false).value_or(true);
+            weapon.fire_in_normal_mode = flag(*object, "Fire_When_In_Normal_Attack_Mode", false).value_or(true);
             hardpoint.weapon = std::move(weapon);
         }
         object->note_duplicates(report_);
@@ -123,19 +144,18 @@ std::vector<SpawnEntry> Loader::spawn_list(Object& object, const std::string_vie
         for (const auto* node : object.list(tag, report_)) {
             const auto row = tokens(node->raw_text);
             // AU-82: each occurrence reads its first type and count pair only.
-            const auto value = row.size() >= 2 ? number(row[1]) : std::nullopt;
+            const auto value = row.size() >= 2
+                ? read_integer(row[1], report_, object.effective.object_id, tag) : std::nullopt;
             if (row.size() > 2) {
                 report_.note(object.effective.object_id, std::string(tag), trim(node->raw_text),
                              "only the first type and count pair of an occurrence is read (AU-82)");
             }
-            const auto whole = value ? value->raw() / Fixed::scale : 0;
-            if (!value || value->raw() % Fixed::scale != 0 || whole < std::numeric_limits<std::int32_t>::min() ||
-                whole > std::numeric_limits<std::int32_t>::max()) {
-                report_.missing(object.effective.object_id, std::string(tag), trim(node->raw_text),
-                                "expected squadron, whole count");
+            if (!value) {
+                if (row.size() < 2) report_.missing(object.effective.object_id, std::string(tag), trim(node->raw_text),
+                                "expected squadron, count");
                 continue;
             }
-            result.push_back({row[0], no_index, static_cast<std::int32_t>(whole)});
+            result.push_back({row[0], no_index, *value});
             if (enqueue_squadrons) enqueue(row[0], UnitKind::squadron);
         }
         return result;
@@ -271,7 +291,49 @@ void Loader::load_planetary_weapon(Object& object, UnitType& unit) {
     unit.weapon = std::move(weapon);
 }
 
+void Loader::read_object_weapon(Object& object, UnitType& unit, const Frames* model, const bool object_damage) {
+    const auto projectiles = tokens(object.text("Projectile_Types"));
+    if (projectiles.empty()) return;
+    if (projectiles.size() > 1) {
+        report_.note(unit.id, "Projectile_Types", object.text("Projectile_Types"), "several types; the first is loaded");
+    }
+    Weapon weapon;
+    weapon.projectile = projectiles.front();
+    want_projectile(weapon.projectile);
+    weapon.min_recharge_seconds = object.fixed("Projectile_Fire_Recharge_Seconds", report_, true);
+    weapon.max_recharge_seconds = weapon.min_recharge_seconds;
+    weapon.pulse_count = count(object, "Projectile_Fire_Pulse_Count", true);
+    weapon.pulse_delay_seconds = object.fixed("Projectile_Fire_Pulse_Delay_Seconds", report_, true);
+    weapon.damage_type = unit.damage_type;
+    // LS shoot PR 1: a land object authors its own Projectile_Damage; a positive value replaces the
+    // projectile row's damage in the shot profile (space object weapons take the row's).
+    if (object_damage) weapon.damage = object.fixed("Projectile_Damage", report_, false);
+    // DG-24: the object weapon's scatter rows are the type's Targeting_Fire_Inaccuracy; a
+    // unit's Fire_Inaccuracy_Distance (every FoC fighter authors it) feeds only hardpoints.
+    weapon.inaccuracy = inaccuracy(object, "Targeting_Fire_Inaccuracy");
+    // W-09: Fires_Forward defaults to no; absent extents default to 360/180 degrees
+    // (debug build, OW-01, OW-02). Authored extents are compared whole.
+    if (!flag(object, "Fires_Forward", false).value_or(false)) {
+        weapon.cone_width_degrees = object.fixed("Turret_Rotate_Extent_Degrees", report_, false)
+            .value_or(Fixed::from_raw(360 * Fixed::scale));
+        weapon.cone_height_degrees = object.fixed("Turret_Elevate_Extent_Degrees", report_, false)
+            .value_or(Fixed::from_raw(180 * Fixed::scale));
+    }
+    unit.weapon = std::move(weapon);
+    // WWP-47: enumerate the muzzle bones in turn; the first absent suffix ends the list, and an
+    // absent _00 leaves it empty (the shot then leaves the unit's origin). Not reported as
+    // unresolved: many object weapons author no muzzle bone.
+    const auto prefix_tokens = tokens(object.text("Muzzle_Bone_Name"));
+    const std::string prefix = prefix_tokens.empty() ? std::string{"MUZZLEA"} : prefix_tokens.front();
+    for (std::uint32_t suffix = 0; model != nullptr && suffix < 100; ++suffix) {
+        const auto name = prefix + (suffix < 10 ? "_0" : "_") + std::to_string(suffix);
+        if (!bone_index(*model->model, name)) break;
+        unit.muzzle_bones.push_back(point(name, model, unit.id, "Muzzle_Bone_Name"));
+    }
+}
+
 void Loader::load_body(Object& object, UnitType& unit) {
+        unit.creates_team = flag(object, "Create_Team", false).value_or(false);
         const bool station = unit.kind == UnitKind::station;
         // WBP-01/13/18: live space obstacles have durability and sensors, but no locomotor.
         const bool mobile = !station && !has_behavior(object, "SPACE_OBSTACLE");
@@ -331,7 +393,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
         movement.max_lift = object.fixed("Max_Lift", report_, false);
         movement.acceleration = object.fixed("OverrideAcceleration", report_, false);
         movement.deceleration = object.fixed("OverrideDeceleration", report_, false);
-        movement.space_layer = object.text("Space_Layer");
+        movement.space_layer = object.text(domain_tag(input_.domain, DomainTag::layer));
         if (input_.campaign_scene) {
             unit.campaign_ship_class = trim(object.text("Ship_Class"));
             unit.campaign_hyperspace = flag(object, "Hyperspace", false).value_or(false);
@@ -394,7 +456,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
                 previous_name = trim(previous->text("Prev_Level_Base"));
             }
         }
-        unit.space_fow_reveal_range = object.fixed("Space_FOW_Reveal_Range", report_, has_reveal(object));
+        unit.fow_reveal_range = object.fixed(domain_tag(input_.domain, DomainTag::reveal_range), report_, has_reveal(object));
         unit.reveal = has_reveal(object);
         unit.force_sensitive = flag(object, "Is_Force_Sensitive", false).value_or(false);
         unit.target_stealth_units = flag(object, "Target_Stealth_Units", false).value_or(false); // WST-07
@@ -442,42 +504,7 @@ void Loader::load_body(Object& object, UnitType& unit) {
             unit.target_bones.push_back(point(bone, model, unit.id, "Target_Bones"));
         }
 
-        const auto projectiles = tokens(object.text("Projectile_Types"));
-        if (!projectiles.empty()) {
-            if (projectiles.size() > 1) {
-                report_.note(unit.id, "Projectile_Types", object.text("Projectile_Types"), "several types; the first is loaded");
-            }
-            Weapon weapon;
-            weapon.projectile = projectiles.front();
-            want_projectile(weapon.projectile);
-            weapon.min_recharge_seconds = object.fixed("Projectile_Fire_Recharge_Seconds", report_, true);
-            weapon.max_recharge_seconds = weapon.min_recharge_seconds;
-            weapon.pulse_count = count(object, "Projectile_Fire_Pulse_Count", true);
-            weapon.pulse_delay_seconds = object.fixed("Projectile_Fire_Pulse_Delay_Seconds", report_, true);
-            weapon.damage_type = unit.damage_type;
-            // DG-24: the object weapon's scatter rows are the type's Targeting_Fire_Inaccuracy; a
-            // unit's Fire_Inaccuracy_Distance (every FoC fighter authors it) feeds only hardpoints.
-            weapon.inaccuracy = inaccuracy(object, "Targeting_Fire_Inaccuracy");
-            // W-09: Fires_Forward defaults to no; absent extents default to 360/180 degrees
-            // (debug build, OW-01, OW-02). Authored extents are compared whole.
-            if (!flag(object, "Fires_Forward", false).value_or(false)) {
-                weapon.cone_width_degrees = object.fixed("Turret_Rotate_Extent_Degrees", report_, false)
-                    .value_or(Fixed::from_raw(360 * Fixed::scale));
-                weapon.cone_height_degrees = object.fixed("Turret_Elevate_Extent_Degrees", report_, false)
-                    .value_or(Fixed::from_raw(180 * Fixed::scale));
-            }
-            unit.weapon = std::move(weapon);
-            // WWP-47: enumerate the muzzle bones in turn; the first absent suffix ends the list, and an
-            // absent _00 leaves it empty (the shot then leaves the unit's origin). Not reported as
-            // unresolved: many object weapons author no muzzle bone.
-            const auto prefix_tokens = tokens(object.text("Muzzle_Bone_Name"));
-            const std::string prefix = prefix_tokens.empty() ? std::string{"MUZZLEA"} : prefix_tokens.front();
-            for (std::uint32_t suffix = 0; model != nullptr && suffix < 100; ++suffix) {
-                const auto name = prefix + (suffix < 10 ? "_0" : "_") + std::to_string(suffix);
-                if (!bone_index(*model->model, name)) break;
-                unit.muzzle_bones.push_back(point(name, model, unit.id, "Muzzle_Bone_Name"));
-            }
-        }
+        read_object_weapon(object, unit, model, false);
         const bool armed = unit.weapon || std::any_of(unit.hardpoints.begin(), unit.hardpoints.end(),
             [](const Hardpoint& hardpoint) { return hardpoint.weapon.has_value(); });
         if (!armed && unit.kind == UnitKind::craft) {
@@ -487,6 +514,17 @@ void Loader::load_body(Object& object, UnitType& unit) {
     }
 
 void Loader::load_squadron(Object& object, UnitType& unit) {
+        // FL-06: nonpositive maxima do not make progress in debug-build creation.
+        // Refuse them at validation rather than inventing a fallback or hanging.
+        if (const auto* node = object.single("Max_Squad_Size")) {
+            const auto maximum = number(trim(node->raw_text));
+            if (!maximum || maximum->raw() <= 0 || maximum->raw() % Fixed::scale != 0
+                || maximum->raw() / Fixed::scale > std::numeric_limits<std::int32_t>::max()) {
+                report_.missing(unit.id, "Max_Squad_Size", trim(node->raw_text), "type skipped: expected a positive signed 32-bit whole team size");
+                unit.max_squad_size = 0;
+                return;
+            } else unit.max_squad_size = static_cast<std::uint32_t>(maximum->raw() / Fixed::scale);
+        }
         // L-2 / WHE-SQ-01: this authored flag defaults to yes, independent of member names.
         unit.homogeneous = flag(object, "Is_Homogeneous", false).value_or(true);
         unit.footprint = read_footprint(object, nullptr);
@@ -508,10 +546,8 @@ void Loader::load_squadron(Object& object, UnitType& unit) {
             }
             offsets.push_back({*values[0], *values[1], *values[2]});
         }
-        if (offsets.size() < members.size()) {
-            report_.missing(unit.id, "Squadron_Offsets", std::to_string(offsets.size()),
-                            "fewer offsets than the " + std::to_string(members.size()) + " members");
-        } else if (offsets.size() > members.size()) {
+        // FM-10: slots beyond the authored offsets use zero when binding motion.
+        if (offsets.size() > members.size()) {
             report_.note(unit.id, "Squadron_Offsets", std::to_string(offsets.size()), "more offsets than members");
         }
         for (std::size_t index = 0; index < members.size(); ++index) {
@@ -566,7 +602,7 @@ void Loader::load_team(Object& object, UnitType& unit) {
         unit.team_hull = team->fixed("Tactical_Health", report_, false).value_or(Fixed::from_raw(100 * Fixed::scale));
         unit.team_shield_points = team->fixed("Shield_Points", report_, false);
         load_selection(*team, unit);
-        if (has_reveal(*team)) unit.team_reveal_range = team->fixed("Space_FOW_Reveal_Range", report_, true);
+        if (has_reveal(*team)) unit.team_reveal_range = team->fixed(domain_tag(input_.domain, DomainTag::reveal_range), report_, true);
         unit.team_dense_fow_multiplier = team->fixed("Dense_FOW_Reveal_Range_Multiplier", report_, false)
             .value_or(Fixed::from_raw(Fixed::scale / 2));
         // AB-60 (#561): a team ability's data lives on the team container.
@@ -580,20 +616,28 @@ void Loader::load_team(Object& object, UnitType& unit) {
     }
 
 void Loader::load_selection(Object& object, UnitType& unit) {
+        const auto selection_behavior = [&](const std::string_view behavior) {
+            const auto domain_list = input_.domain == sim::tactical::BattleDomain::land
+                ? std::string_view{"LandBehavior"} : std::string_view{"SpaceBehavior"};
+            for (const auto tag : {std::string_view{"Behavior"}, domain_list})
+                for (const auto& token : tokens(object.text(tag)))
+                    if (iequals(token, behavior)) return true;
+            return false;
+        };
         // WSU-21: behaviour presence, independent of authored or current speed.
-        unit.selectable = has_behavior(object, "SELECTABLE");
+        unit.selectable = selection_behavior("SELECTABLE");
         // WSU-13/50: presentation admission is independent of ownership and maximum hull.
         const bool impassable = flag(object, "Is_Impassable_Asteroid", false).value_or(false);
         const bool living_contact = flag(object, "Collidable_By_Projectile_Living", false).value_or(false);
         const bool valid_target = flag(object, "Is_Valid_Target", false).value_or(true);
         const bool generic_hero = flag(object, "Is_Generic_Hero", false).value_or(false);
         const bool named_hero = flag(object, "Is_Named_Hero", false).value_or(false);
-        unit.mouse_sensitive = unit.selectable || has_behavior(object, "TACTICAL_BUILD_OBJECTS")
-            || has_behavior(object, "DUMMY_TOOLTIP") || impassable || (living_contact && valid_target);
+        unit.mouse_sensitive = unit.selectable || selection_behavior("TACTICAL_BUILD_OBJECTS")
+            || selection_behavior("DUMMY_TOOLTIP") || impassable || (living_contact && valid_target);
         unit.bar_admitted = unit.selectable || unit.under_construction
-            || has_behavior(object, "SPAWN_INDIGENOUS_UNITS") || generic_hero || named_hero;
-        unit.locomotion = has_behavior(object, "SIMPLE_SPACE_LOCOMOTOR")
-            || has_behavior(object, "FIGHTER_LOCOMOTOR") || has_behavior(object, "TEAM_LOCOMOTOR");
+            || selection_behavior("SPAWN_INDIGENOUS_UNITS") || generic_hero || named_hero;
+        unit.locomotion = selection_behavior("SIMPLE_SPACE_LOCOMOTOR")
+            || selection_behavior("FIGHTER_LOCOMOTOR") || selection_behavior("TEAM_LOCOMOTOR");
         unit.decoration = flag(object, "Is_Decoration", false).value_or(false);
     }
 

@@ -34,7 +34,7 @@ using GalacticLobbyLoader = std::function<core::Result<GalacticLobbyContent>()>;
 
 // What a Galactic Conquest room needs from this machine's installed content, as one object the lobby hooks call. It
 // turns the agreed room choices into the #3768 setup offer (seal the roster with the local AI configurations and the
-// tick-zero claim, derive the content identities) and, on every peer, derives the same agreement again from the
+// tick-zero claim, derive the content identities) and, on every peer, reuses that local preparation for the matching
 // received offer. The lobby layer (net/galactic_lobby.hpp) knows nothing of content; this layer knows nothing of the
 // room beyond its snapshot.
 //
@@ -86,6 +86,16 @@ private:
     mutable bool loaded_{};
     AdapterFactory adapter_factory_;
     std::uint64_t acceptance_final_tick_{};
+    // One local preparation for an exact frozen attempt. Content and callbacks are immutable for this backend.
+    struct Preparation {
+        net::LobbySnapshot snapshot;
+        std::vector<net::SetupSeat> seats;
+        net::SetupOffer offer;
+        std::shared_ptr<campaign::MpAgreement> agreement;
+        std::string state_hash;
+    };
+    mutable std::mutex preparation_mutex_;
+    mutable std::optional<Preparation> preparation_;
     mutable std::mutex mutex_;
     std::shared_ptr<campaign::MpAgreement> agreement_;
 };

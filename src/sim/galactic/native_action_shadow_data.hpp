@@ -86,7 +86,7 @@ struct GalacticSession::NativeActionShadow::Data {
     PlayerId player{};
     EntityId first_id{}, next_id{}, range_end{};
     std::uint64_t first_invasion{1}, invasion_range_end{};
-    bool independent_player{};
+    bool independent_player{}, system_hold{};
     std::size_t live_objects{}, max_requests{};
     bool can_create{};
     std::map<PlayerId, math::Fixed> accounts;

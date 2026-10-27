@@ -444,7 +444,7 @@ complete checkpoint envelope.
 | U-09 | Capture-needed: WGEP-80 settles ordinary owned-offer disablement and direct repeated-offer payment; WGEP-81/WGCH-71 settles tech operands. WGCH-74 sources purchase-helper current-owner accounting. Zero-price AI selection and ordinary stale-owner menu reachability remain qualification questions. | Compare UI-disabled owned offer with explicit repeated command; change buyer owner and planet allegiance/corruption after preparation, and stage an all-zero versus mixed-price AI offer set. Record recipient, debit, unlock and absence; service-map C-04. Existing economy owner (legacy EAWR-1130). |
 | U-10 | Capture-needed: WGM-132..135 sources primary placement and authored company/squadron companions; WGCH-76 sources no-parent death scheduling and independent leader-victory checks. Equal-distance ties, retry/restoration and actual deletion callers remain unqualified. | Service-map C-03/05: due and ordinary-death/action-absence records, equal-distance insertion variants, capacity/blockade, source loss, secondary-only placement, backing-structure loss and no owned planets; compare persistent identity tree and checkpoint continuation. Existing return/placement owners (legacy EAWR-1116, EAWR-2486). |
 | U-11 | Capture-needed: WGCH-65 sources final-blow admission, current-type value, maximum-within-category/sum-across-category and allied payout. | Use stock corruption upgrade battlefield bounty in tactical handoff, overlapping same/different categories and allied killers. Record victim current/original type, final-blow player, each recipient percentage, credits and fly text; repeat disabled collection and rounded sub-one payout. |
-| U-12 | Capture-needed: WGCH-66..70 source prepared hack price/identity, ruins cleanup and distinct protection/Lua/ability removal; WGUI-101 sources termination qualification. | Prepare hack then remove/change weapon, hacker owner or target owner; verify missing weapon fails before payment and missing weapon owner after it, and record ruins/orbit/starbase/protection cleanup. Compare ordinary ability despawn, source death and finite consumed probe with distinct cleanup/respawn outcomes. |
+| U-12 | Capture-needed: WGCH-66..70 source prepared hack price/identity, ruins cleanup and distinct protection/Lua/ability removal; WGUI-101 sources termination qualification. | Prepare hack then remove/change weapon, hacker owner or target owner; verify missing weapon fails before payment and missing weapon owner after it, and record ruins/orbit/starbase/protection cleanup. Compare ordinary ability despawn, source death and finite consumed probe with distinct cleanup/respawn outcomes. WGCH-70 consumes the probe actor only; a single-child transport may remain, and its subsequent cleanup is capture-needed here. |
 
 Capture requests are follow-up evidence work, not a claim that a retail session
 was run or that M2 space behavior must change for this walk.
@@ -1048,8 +1048,8 @@ names and generic-hero corruption ability fields remain **land-or-galactic**;
 hero removal common lifecycle fields are **todo**, with sourced time/cost
 overrides scope-deferred. `UpgradeObject/Abilities/Bounty_On_Faction_Ability`
 name, percentage, category, faction list and ally-propagation rows are **todo**.
-Active original-type piracy authoring is `Piracy_Value_Credits`, still
-**land-or-galactic** for GroundCompany/SpaceUnit/Squadron. The earlier reader
+Active original-type piracy authoring is `Piracy_Value_Credits`, **applied** for
+SpaceUnit/Squadron departures (WGM-150) and **partial** for GroundCompany. The earlier reader
 inventory's shorthand `Piracy_Value` does not authorize reading an invented tag.
 
 Implementation must follow effective campaign/planet/faction/ability/type
@@ -1162,3 +1162,45 @@ Remote corruption slots and travel from Coruscant before the Byss dialog were
 also observed. Remote slot rendering and destination-actor travel remain (legacy EAWR-4471):
 the current receive path stays at the parked planet until the multiplayer command
 and checkpoint work is admitted. No retail image or fixture is committed.
+
+
+## Live ground deployment and probe invocation
+
+Live AI corruption preparation applies WGCH-03/49/50 to the existing typed
+corruption command. It filters authored slots by current credits, pooled unit
+alternatives, previous mission usage and any owned required planet; required
+types absent from the active galaxy are omitted. Positive scores use the actor
+owner's per-type usage. Selection consumes one synchronized economy draw in slot
+order, including a single eligible choice; no eligible choice consumes no draw
+and performs no debit or hero removal. The selected capability enters the shared
+executor immediately and uses direct corruption for AI (WGCH-08/09). Its request,
+usage, transition, return record and random-stream position use the existing
+checkpoint owners. This command path adds no idle actor scan or autonomous AI
+plan dispatch. The human prepared dialog and its separate execution remain
+unchanged; production land-mission admission remains the ground-combat hook.
+
+The generic planet-slot producer retains the original supplied actor/container and
+target IDs (WGCH-155/156), including the droid team's contained theft bearer.
+The stock team lists R2-D2 before its companion; R2-D2 authors the ground-activated
+theft ability. This is an XML identity qualification, not a new capture claim.
+A focused debug-build reread independently confirmed the WGCH-152 precedence,
+WGCH-155 container submission and WGCH-56/108 spy predicates/application. WGCH-55
+checks target allegiance, with no additional ruined-planet gate for ground spy.
+
+The supported selector now places spy between sabotage and neutralization. The
+preview reads `Activated_System_Spy_Ability_Names`, while deployment reads the
+bearer's authored ground activation membership and live enabled/cancelled state.
+WGCH-108 invokes the existing observer owner with authored mask/duration and the
+actor's current owner, registers the target after insertion is attempted, then
+publishes the ground land notice and effect result on success. WGCH-70 controls
+scheduling and consumption. WGUI-101 keeps a consumed finite probe's timed effect;
+ordinary registered source loss removes it. There is no action price or theft draw.
+All work is bounded by explicit commands/arrivals; idle ticks add no ability scan.
+
+The direct ground producer is galaxy-only (GFS-01/GFD-03); child-mode actions remain
+in the campaign's galactic command queue. It reads the active galaxy frame and the
+validated logical rate for WGUI-102 expiry. Automatic unit/structure spy influence
+callbacks, source-owner-transfer callbacks, siphon invocation and corruption
+removal remain their owning interfaces. Raw tutorial/special-map providers remain
+the existing named seam (legacy EAWR-2042). Land-mission entry remains the ground-combat
+owner's hook; this change adds no land battle or Defiler mission producer.

@@ -1268,6 +1268,16 @@ void test_abandoned_staging_releases_live_callbacks() {
 void test_recovery_staging_and_publication() {
     tactical::TacticalSetup setup;
     setup.players = {{1, 0, 1, tactical::player_flag_commandable}};
+    tactical::TacticalContent content;
+    content.combat.profiles.resize(1);
+    auto& profile = content.combat.profiles.front();
+    profile.type_id = 1011;
+    profile.collision = tactical::CollisionBox{at(-2, -2, -2), at(2, 2, 2)};
+    profile.mesh_bounds = profile.collision;
+    profile.meshes = {tactical::collision_mesh({{at(0, -1, -1), at(0, 1, -1), at(0, 0, 1)}},
+        tactical::no_hardpoint, tactical::no_hardpoint, false)};
+    const auto geometry_bytes = profile.meshes[0].triangles.capacity() * sizeof(tactical::CollisionTriangle)
+        + profile.meshes[0].nodes.capacity() * sizeof(tactical::CollisionNode);
     for (const auto workers : {1U, 2U, 4U, 8U}) {
         const auto caller = std::this_thread::get_id();
         bool replaced{};
@@ -1289,14 +1299,22 @@ void test_recovery_staging_and_publication() {
             auto stepped = context.step();
             return stepped ? Result::success(true) : Result::failure(stepped.error());
         };
-        auto live = LiveSession::start(setup, {}, {}, {}, {}, options);
+        auto live = LiveSession::start(setup, content, options);
         expect(static_cast<bool>(live), "recovery publication fixture starts"); if (!live) continue;
+        const auto shares_source = [&] {
+            auto inventory = live.value()->memory_capacity();
+            inventory.collision_buffer(profile.meshes[0].triangles);
+            inventory.collision_buffer(profile.meshes[0].nodes);
+            return inventory.physical_collision_bytes() == geometry_bytes;
+        };
+        expect(shares_source(), "DG-36: live world built from initializer shares source collision buffers");
         live.value()->advance_to(16);
         expect(live.value()->wait_for(16, std::chrono::seconds(10)), "replaced live world resumes on its owner");
         live.value()->stop();
+        expect(shares_source(), "DG-36: activated recovery world shares the original content buffers");
         expect(replaced && live.value()->tick_hashes().size() == 16 && live.value()->frame().latest->completed_tick() == 16,
             "recovery swaps controller references and retains one hash per completed tick");
-        const auto expected = eawr::platform::headless_tick_hashes(live.value()->record(), {}, {}, {}, {});
+        const auto expected = eawr::platform::headless_tick_hashes(live.value()->record(), content);
         expect(expected && expected.value() == live.value()->tick_hashes(), "recovery is deterministic at each worker count");
         expect(live.value()->events_after(0, 16).ticks.empty(), "headless catch-up does not emit presentation events");
     }

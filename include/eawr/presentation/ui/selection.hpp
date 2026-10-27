@@ -69,6 +69,9 @@ struct BattleUnit {
     sim::tactical::TypeId part_type{};          // that craft's own type (WSU-38); `type` is the squadron's
     bool own{};     // owned by the local player: the only selectable units
     bool hostile{}; // ordinary combat relationship: a right click attacks it
+    // #4919 (deliberate deviation): an allied structure the local player does not own. A click inspects it
+    // (viewer-local, never in the selection); it takes no command, build menu or ability.
+    bool allied_inspectable{};
     bool selectable{true};
     bool locomotion{true}; // WSU-21: behaviour presence, independent of speed
     bool decoration{};
@@ -147,6 +150,13 @@ struct Modifiers {
     bool ctrl{};
     bool alt{};
 };
+
+// #4919: whether an allied object may be inspected. Ownership and alliance only, never a type name:
+// a neutral, own, hostile, squadron-part, mobile or decoration unit never is.
+[[nodiscard]] bool allied_inspectable(const BattleUnit& unit, bool ally_of_local) noexcept;
+// #4919: the unit a plain left click inspects, or null (armed mode, a modifier or no inspectable hit).
+[[nodiscard]] const BattleUnit* inspect_click(std::span<const BattleUnit> units,
+                                              std::optional<sim::EntityId> picked, bool armed, Modifiers modifiers) noexcept;
 
 class Selection final {
 public:

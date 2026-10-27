@@ -322,14 +322,14 @@ void UnitCombat::idle_object_turret(const WeaponProfile& weapon, WeaponState::Tu
 }
 
 math::Vec3 UnitCombat::object_turret_muzzle(const WeaponProfile& weapon, const WeaponState::TurretState& state,
-    math::Vec3 muzzle) {
+    math::Vec3 muzzle, const bool direction) {
     if (!weapon.object_turret) return muzzle;
     const auto& turret = *weapon.object_turret;
     if (!turret.xy_only) {
         muzzle = manual_rotate(muzzle, turret.barrel ? turret.barrel_pivot : turret.pivot,
-            turret.barrel ? turret.barrel_axes : turret.axes, state.pitch, true, false);
+            turret.barrel ? turret.barrel_axes : turret.axes, state.pitch, true, direction);
     }
-    return manual_rotate(muzzle, turret.pivot, turret.axes, state.yaw, false, false);
+    return manual_rotate(muzzle, turret.pivot, turret.axes, state.yaw, false, direction);
 }
 
 math::Vec3 UnitCombat::manual_angles(const ManualTurretProfile& turret, const math::Vec3& point) {
@@ -360,6 +360,7 @@ core::Result<bool> UnitCombat::admit_manual(const CombatUnit& target, const std:
         [&](const WeaponProfile& weapon) { return weapon.hardpoint == hardpoint; });
     if (slot == profile_.weapons.end()) return core::Result<bool>::success(false);
     const auto index = static_cast<std::size_t>(slot - profile_.weapons.begin());
+    if (!slot->fires_in_mode(unit_.rocket_attack)) return core::Result<bool>::success(false);
     if (!slot->requires_manual_target || slot->hardpoint == object_weapon || slot->pulse_count != 1 || !weapon_up(*slot)
         || !slot->shot || index >= state_.weapons.size() || !state_.weapons[index].manual
         || state_.weapons[index].manual->target != invalid_entity_id
@@ -377,7 +378,7 @@ core::Result<bool> UnitCombat::admit_manual(const CombatUnit& target, const std:
     } else points = pointable(posed, midpoint, target.position);
     const auto distance = squared(midpoint, target.position, RangeMetric::planar);
     const auto minimum = squared({}, {slot->manual_min_range, {}, {}}, RangeMetric::planar);
-    const auto reach = take(math::add(slot->range, soft_radius.value_or(target_soft_radius(world_.motion, target))));
+    const auto reach = take(math::add(this->fire_reach(*slot), soft_radius.value_or(target_soft_radius(world_.motion, target))));
     const bool accepted = points && within_range(midpoint, target.position, reach, RangeMetric::planar)
         && math::detail::compare(distance, minimum) >= 0;
     if (error_) return core::Result<bool>::failure(*error_);
@@ -447,6 +448,11 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
         state.desired_yaw = clamp(desired.z, turret.yaw_extent, turret.offset.z);
         state.desired_pitch = clamp(desired.y, turret.pitch_extent, turret.offset.y);
     }
+    else if (!weapon.requires_manual_target) {
+        // HPT-04: ordinary guns return toward their offset, manual guns retain desire.
+        state.desired_yaw = turret.offset.z;
+        state.desired_pitch = turret.offset.y;
+    }
     const auto move = [&](const std::int64_t current, const std::int64_t desired) {
         return current + std::clamp(desired - current, -turret.speed.raw(), turret.speed.raw());
     };
@@ -458,7 +464,61 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
     state.yaw = math::Fixed::from_raw(wrap(yaw));
 }
 
+math::Vec3 UnitCombat::hardpoint_turret_position(const WeaponProfile& weapon, const ManualWeaponState& state,
+    math::Vec3 position, const bool direction) {
+    const auto& turret = *weapon.manual_turret;
+    if (turret.barrel)
+        position = manual_rotate(position, turret.barrel_pivot, turret.barrel_axes, state.pitch, true, direction);
+    return manual_rotate(position, turret.pivot, turret.axes, state.yaw, false, direction);
+}
+
+bool UnitCombat::hardpoint_turret_fire(const WeaponProfile& weapon, const ManualWeaponState& state,
+    const CombatUnit& target) {
+    // HPT-03: the full authored cone is a spatial dot gate around the yaw bone's X axis.
+    // Pitch belongs only to the optional barrel and cannot change this readiness test.
+    const auto& turret = *weapon.manual_turret;
+    const auto origin = world_point(unit_, turret.pivot);
+    const math::Vec3 delta{take(math::subtract(target.position.x, origin.x)),
+        take(math::subtract(target.position.y, origin.y)), take(math::subtract(target.position.z, origin.z))};
+    const auto length = take(math::length(delta));
+    if (length.raw() == 0) return false;
+    const auto direction = take(math::normalize(delta));
+    const auto forward = manual_rotate(turret.axes[0], {}, turret.axes, state.yaw, false, true);
+    const auto axis = take(math::transform_vector(unit_.transform, forward));
+    const auto cosine = math::sin_cos_turn(math::Fixed::from_raw(weapon.cone_width.raw() / 360)).cosine;
+    return take(math::dot(direction, axis)) >= cosine;
+}
+
+void UnitCombat::hardpoint_turret(const std::uint32_t slot) {
+    const auto& weapon = profile_.weapons[slot];
+    auto& retained = state_.weapons[slot].manual;
+    if (!weapon.manual_turret || !retained || hardpoint_destroyed_on(unit_, weapon.hardpoint)) return;
+    ++hardpoint_turret_steps;
+    // HPT-04: prefer a pointable directed target. Otherwise opportunity and last-fired
+    // references replace it sequentially; there is no nearest-target scan here.
+    auto aimed = *retained;
+    aimed.target = state_.direct || unit_.target_prepared ? state_.attack_target : invalid_entity_id;
+    const auto* direct = world_.find(aimed.target);
+    auto point = direct ? direct->position : math::Vec3{};
+    if (direct && direct->profile) point.z = take(math::add(point.z, direct->profile->ranged_target_z_adjust));
+    if (!direct || !pointable(weapon, {}, point)) {
+        if (state_.weapons[slot].opportunity.target != invalid_entity_id)
+            aimed.target = state_.weapons[slot].opportunity.target;
+        if (retained->target != invalid_entity_id) aimed.target = retained->target;
+    }
+    manual_turret(weapon, aimed);
+    retained->yaw = aimed.yaw;
+    retained->pitch = aimed.pitch;
+    retained->desired_yaw = aimed.desired_yaw;
+    retained->desired_pitch = aimed.desired_pitch;
+}
+
 [[nodiscard]] bool UnitCombat::pointable(const WeaponProfile& weapon, const math::Vec3& midpoint, const math::Vec3& point) {
+        if (!weapon.requires_manual_target && weapon.manual_turret_required) {
+            // HPT-02: candidate admission tests wrapped yaw, independently of current pose and pitch.
+            return weapon.manual_turret && std::llabs(manual_angles(*weapon.manual_turret, point).z.raw())
+                <= weapon.manual_turret->yaw_extent.raw();
+        }
         const bool turret = weapon.hardpoint == object_weapon;
         if (turret && (weapon.cone_width.raw() == 0 || weapon.cone_height.raw() == 0)) {
             return true;
@@ -497,7 +557,7 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
         const bool parent_projectile = std::any_of(profile_.weapons.begin(), profile_.weapons.end(),
             [](const WeaponProfile& entry) { return entry.hardpoint == object_weapon && entry.shot.has_value(); });
         const auto acceptable = [&](const math::Vec3& point, const bool fallback = false) {
-            const auto reach = parent_projectile || fallback ? take(math::add(weapon.range, radius)) : weapon.range;
+            const auto reach = parent_projectile || fallback ? take(math::add(this->fire_reach(weapon), radius)) : this->fire_reach(weapon);
             return within_range(midpoint, point, reach, metric) && pointable(weapon, midpoint, point);
         };
         if (target.profile != nullptr) {
@@ -536,7 +596,8 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
 
 [[nodiscard]] math::Vec3 UnitCombat::scatter(const WeaponProfile& weapon, const math::Fixed distance, const CombatUnit& target,
         const math::Vec3& point, CombatRandom& random) {
-        if (!weapon.shot || weapon.range.raw() <= 0) {
+        const auto range = weapon.hardpoint == object_weapon ? unit_.ability_attack_range.value_or(weapon.range) : weapon.range;
+        if (!weapon.shot || range.raw() <= 0) {
             return point;
         }
         const auto fixed = unit_.corrupt_inaccuracy ? unit_.corrupt_inaccuracy
@@ -554,7 +615,7 @@ void UnitCombat::manual_turret(const WeaponProfile& weapon, ManualWeaponState& s
             return point;
         }
         const auto doubled = math::Fixed::from_raw(row->distance.raw() * 2); // validated to 2^18 units, so at most 2^19
-        const auto radius = take(math::divide(take(math::multiply(distance, doubled)), weapon.range));
+        const auto radius = take(math::divide(take(math::multiply(distance, doubled)), range));
         const auto offset = [&](const math::Fixed value) {
             return take(math::add(value, math::Fixed::from_raw(random.symmetric_raw(radius.raw()))));
         };
@@ -613,7 +674,7 @@ void UnitCombat::face_target() {
         // Auto_Rotate_For_Space_Targeting is set; FoC ships it false.
         const bool scan_turn_allowed = world_.table != nullptr && world_.table->auto_rotate_for_targeting;
         if (!destination_turn
-            && (target == nullptr || !profile_.max_attack_distance
+            && (target == nullptr || !unit_.attack_distance()
                 || (!state_.direct && !scan_turn_allowed && total_hardpoints() != 0))) return;
         // WMV-20: the movement destination uses the unit centre and has no attack-distance
         // or player-direct gate. Ordinary targeting retains A-04/A-05 and its hardpoint aim.
@@ -629,7 +690,7 @@ void UnitCombat::face_target() {
         }
         if (!destination_turn) {
             const auto reach = take(target_attack_distance(world_.motion, *target, unit_.position,
-                *profile_.max_attack_distance, has_aim_hardpoint(*target)));
+                *unit_.attack_distance(), has_aim_hardpoint(*target)));
             if (!within_range(unit_.position, aim, reach, RangeMetric::planar)) return;
         }
         motion_detail::Calc calc;
@@ -743,6 +804,7 @@ core::Result<std::optional<std::uint32_t>> manual_special_fire_admission(
     own.transform = source->fixed_transform;
     own.position = {own.transform.rows[0][3], own.transform.rows[1][3], own.transform.rows[2][3]};
     own.profile = &own_profile; own.combat = &state;
+    own.rocket_attack = source->rocket_attack;
     const auto player = std::find_if(world.relationships.begin(), world.relationships.end(),
         [&](const SnapshotPlayer& entry) { return entry.player_id == own.owner; });
     if (player == world.relationships.end()) return Result::success(std::nullopt);

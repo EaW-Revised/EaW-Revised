@@ -18,26 +18,37 @@ const auto* find_row(const Rows& rows, Id id, Key key) {
 // Retaining the exact source snapshot makes equal-input reuse safe across rollback/restore.
 struct GalacticWorld::PreparedProducerOffers {
     struct Offer { galactic::ProductionOffer effective; std::uint64_t frames{}; };
-    using Prices = std::vector<Offer>;
     struct PriceCache {
-        mutable std::function<core::Result<std::shared_ptr<const Prices>>()> prepare;
+        using Index = std::map<galactic::TypeId, std::vector<std::size_t>>;
+        std::function<core::Result<Offer>(const galactic::GalacticSnapshot&, std::size_t, std::size_t)> prepare;
+        std::shared_ptr<const Index> by_type;
+        std::size_t count{};
         mutable std::once_flag once;
-        mutable std::optional<core::Result<std::shared_ptr<const Prices>>> value;
+        mutable std::optional<core::Result<void>> validation;
         mutable std::atomic<bool> ready{};
-        mutable std::map<galactic::TypeId, std::vector<std::size_t>> by_type;
-        core::Result<std::shared_ptr<const Prices>> get() const {
+        mutable std::mutex mutex;
+        mutable std::map<std::size_t, Offer> value;
+        core::Result<void> validate(const galactic::GalacticSnapshot& source, std::size_t location) const {
             std::call_once(once, [&] {
-                value = prepare();
-                if (*value) {
-                    const auto& offers = *value->value();
-                    for (std::size_t index = 0; index < offers.size(); ++index)
-                        by_type[offers[index].effective.type].push_back(index);
+                validation = core::Result<void>::success();
+                // Keep the original full-catalog error order, but do not retain
+                // prices that no consumer has requested. Scheduled warming only
+                // validates; the location's raw type index is shared by owners.
+                for (std::size_t index = 0; index < count; ++index) {
+                    auto offer = prepare(source, location, index);
+                    if (!offer) { validation = core::Result<void>::failure(offer.error()); break; }
                 }
-                // Drop the preparer's snapshot after its immutable values exist.
-                prepare = {};
                 ready.store(true, std::memory_order_release);
             });
-            return *value;
+            return *validation;
+        }
+        core::Result<Offer> get(const galactic::GalacticSnapshot& source, std::size_t location, std::size_t index) const {
+            if (auto checked = validate(source, location); !checked) return core::Result<Offer>::failure(checked.error());
+            std::scoped_lock lock(mutex);
+            if (const auto found = value.find(index); found != value.end()) return core::Result<Offer>::success(found->second);
+            auto offer = prepare(source, location, index);
+            if (offer) value.emplace(index, offer.value());
+            return offer;
         }
     };
     struct Job {
@@ -68,6 +79,52 @@ struct GalacticWorld::PreparedProducerOffers {
     mutable std::atomic<std::uint64_t> queried_offers{};
 };
 
+// Diagnostic only; caller holds the driven-session tick barrier.
+void GalacticWorld::memory_inventory(diagnostics::GcMemory& m) const {
+    for (const auto& [player, s] : shards_) {
+        const auto prefix = "gc.perception.player" + std::to_string(player);
+        m.row(prefix + ".cache", s.cache, s.cache_index, s.force_rows);
+        m.row(prefix + ".bindings", s.bindings, s.binding_ids, s.memo_bindings, s.memo_binding_ids);
+        m.row(prefix + ".economy", s.economy.queries);
+        m.row(prefix + ".visibility", s.visibility, s.flags, s.hints, s.visibility_index);
+        m.row(prefix + ".tokens", s.late_token_ids, s.late_tokens);
+    }
+    m.row("gc.perception.shared_tokens", token_ids_, tokens_);
+    m.row("gc.perception.type_metadata", setup_.types, setup_.force_types, setup_.economy_types, type_traits_, teams_);
+    const auto frontier = [&](const BoundState& f, const std::string& name) {
+        m.row(name + ".physical", f.planets_, f.accounts_, f.builds_, f.build_options_, f.economy_planets_, f.economy_players_);
+        if (f.connectivity_ && m.seen.insert(f.connectivity_.get()).second) {
+            const auto& c = *f.connectivity_;
+            m.row(name + ".routes", c.execution_routes, c.player_routes, c.island_paths, c.island_sizes, c.stealth_fleets);
+            m.row(name + ".reach", c.goal_reach.get());
+            for (const auto& r : c.goal_reach) m.row(name + ".reach_sites", r.production_sites.get());
+        }
+        if (f.prepared_producer_offers_ && m.seen.insert(f.prepared_producer_offers_.get()).second) {
+            const auto& c = *f.prepared_producer_offers_;
+            m.row(name + ".catalog", c.reductions, c.price_reductions, c.job_list(), c.owner_reservations);
+            for (const auto& j : c.job_list()) {
+                m.row(name + ".catalog_payload", j.offers, j.rows, j.owner_reservation);
+                if (j.prices && m.seen.insert(j.prices.get()).second) {
+                    m.row(name + ".catalog_price_index", j.prices->by_type);
+                    m.row(name + ".catalog_prices", j.prices->value);
+                }
+            }
+        }
+        if (f.economy_runtime_) {
+            const auto& e = *f.economy_runtime_;
+            m.row(name + ".economy_runtime", e.budgets, e.builds, e.base_credits, e.budget_publication, e.build_publication);
+        }
+        if (f.goal_reach_index_) m.row(name + ".reach_index", f.goal_reach_index_->entries);
+    };
+    frontier(bound_state_, "gc.frontier.default");
+    for (const auto& [player, f] : player_frontiers_) frontier(f, "gc.frontier.player" + std::to_string(player));
+    for (const auto& [player, p] : path_coefficients_) {
+        const auto name = "gc.path.player" + std::to_string(player);
+        for (const auto& input : p.inputs) m.row(name, input.planets, input.trades);
+        for (const auto& values : p.values) m.row(name, values);
+    }
+}
+
 core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_producers(
     const PreparedProducerOffers& catalog, std::uint32_t logical_fps, tactical::PlayerId player,
     galactic::PlanetId planet_id, std::span<const galactic::TypeId> types, bool first_allowed, const sim::PartitionExecutor& executor) {
@@ -92,7 +149,7 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
         const auto* population = find_row(snapshot.population(), job.player, [](const auto& p) { return p.player; });
         const auto* at = find_row(snapshot.planets(), job.planet, [](const auto& p) { return p.id; });
         if (!owner || !location || !account || !at || !job.prices) return core::Result<void>::success();
-        auto prices = job.prices->get(); if (!prices) return core::Result<void>::failure(prices.error());
+        if (auto checked = job.prices->validate(snapshot, job.source_location); !checked) return checked;
         std::array<math::Fixed, 2> queue_seconds{};
         for (std::size_t channel = 0; channel < queue_seconds.size(); ++channel) for (const auto& entry : location->queues[channel]) {
             auto total = math::add(queue_seconds[channel], entry.last_remaining);
@@ -101,16 +158,18 @@ core::Result<std::vector<galactic_ai::ProducerInput>> GalacticWorld::read_produc
         }
         std::vector<std::size_t> selected;
         if (!types.empty()) {
-            for (const auto type : types) if (const auto found = job.prices->by_type.find(type); found != job.prices->by_type.end())
+            for (const auto type : types) if (const auto found = job.prices->by_type->find(type); found != job.prices->by_type->end())
                 selected.insert(selected.end(), found->second.begin(), found->second.end());
             // Preserve original offer registration order, including duplicate
             // offer identities, while repeated requested types do not add rows.
             std::sort(selected.begin(), selected.end());
             selected.erase(std::unique(selected.begin(), selected.end()), selected.end());
         }
-        const auto count = types.empty() ? prices.value()->size() : selected.size();
+        const auto count = types.empty() ? job.prices->count : selected.size();
         for (std::size_t offer_index = 0; offer_index < count; ++offer_index) {
-            const auto& prepared = (*prices.value())[types.empty() ? offer_index : selected[offer_index]];
+            auto price = job.prices->get(snapshot, job.source_location, types.empty() ? offer_index : selected[offer_index]);
+            if (!price) return core::Result<void>::failure(price.error());
+            const auto& prepared = price.value();
             const auto& offer = prepared.effective;
             catalog.queried_offers.fetch_add(1, std::memory_order_relaxed);
             if (prepared.frames > std::numeric_limits<std::uint32_t>::max()) continue;
@@ -239,6 +298,7 @@ core::Result<void> GalacticWorld::refresh_live_producers(
         return cached == 1;
     };
     std::vector<signed char> queues_checked(production.planets.size(), 0);
+    std::vector<std::shared_ptr<const PreparedProducerOffers::PriceCache::Index>> type_indices(production.planets.size());
     std::vector<PreparedProducerOffers::Job> jobs;
     jobs.reserve(production.players.size() * production.planets.size());
     const std::vector<PreparedProducerOffers::Job>* old_jobs = previous_usable ? &previous->job_list() : nullptr;
@@ -265,20 +325,26 @@ core::Result<void> GalacticWorld::refresh_live_producers(
                 }
                 if (!job.prices) {
                     job.prices = std::make_shared<PreparedProducerOffers::PriceCache>();
-                    job.prices->prepare = [source = snapshot, reductions = next->price_reductions,
-                        location_index, selected = owner.player]() -> core::Result<std::shared_ptr<const PreparedProducerOffers::Prices>> {
-                        using Result = core::Result<std::shared_ptr<const PreparedProducerOffers::Prices>>;
-                        const auto& at = source->production()->planets[location_index];
-                        const auto* inputs = source->income() ? &source->income()->inputs : nullptr;
-                        auto offers = std::make_shared<PreparedProducerOffers::Prices>(); offers->reserve(at.offers.size());
-                        for (const auto& offer : at.offers) {
-                            auto effective = galactic::prepared_production_offer(offer, inputs, *reductions, at.planet, selected);
-                            if (!effective) return Result::failure(effective.error());
-                            auto frames = galactic::production_frames(effective.value().seconds);
-                            if (!frames) return Result::failure(frames.error());
-                            offers->push_back({std::move(effective).value(), frames.value()});
-                        }
-                        return Result::success(std::move(offers));
+                    if (!type_indices[location_index]) {
+                        auto index = std::make_shared<PreparedProducerOffers::PriceCache::Index>();
+                        for (std::size_t offer_index = 0; offer_index < location.offers.size(); ++offer_index)
+                            (*index)[location.offers[offer_index].type].push_back(offer_index);
+                        type_indices[location_index] = std::move(index);
+                    }
+                    job.prices->by_type = type_indices[location_index];
+                    job.prices->count = location.offers.size();
+                    // Reuse is admitted only for equal offers and price inputs. Read the
+                    // querying catalog so a retained memo never pins an obsolete snapshot.
+                    job.prices->prepare = [reductions = next->price_reductions,
+                        selected = owner.player](const galactic::GalacticSnapshot& source, std::size_t source_location, std::size_t index) -> core::Result<PreparedProducerOffers::Offer> {
+                        using Result = core::Result<PreparedProducerOffers::Offer>;
+                        const auto& at = source.production()->planets[source_location];
+                        const auto* inputs = source.income() ? &source.income()->inputs : nullptr;
+                        auto effective = galactic::prepared_production_offer(at.offers[index], inputs, *reductions, at.planet, selected);
+                        if (!effective) return Result::failure(effective.error());
+                        auto frames = galactic::production_frames(effective.value().seconds);
+                        if (!frames) return Result::failure(frames.error());
+                        return Result::success({std::move(effective).value(), frames.value()});
                     };
                 }
             }
@@ -343,9 +409,9 @@ core::Result<void> GalacticWorld::prepare_catalog_slice(const sim::PartitionExec
             const auto range = sim::partition_range(partition, end - begin);
             for (auto index = range.begin; index < range.end; ++index) if (const auto& cache = jobs[begin + index].prices) {
                 const bool ready = cache->ready.load(std::memory_order_acquire);
-                auto result = cache->get();
+                auto result = cache->validate(*bound().prepared_producer_offers_->source, jobs[begin + index].source_location);
                 if (!result) errors[index] = result.error();
-                else if (!ready) prepared[index] = result.value()->size();
+                else if (!ready) prepared[index] = cache->count;
             }
         });
         if (!phase) return phase;
@@ -512,8 +578,10 @@ core::Result<void> GalacticWorld::bind_native_frontier(tactical::PlayerId player
 core::Result<void> GalacticWorld::bind_publication(std::shared_ptr<const galactic::GalacticSnapshot> snapshot,
     std::shared_ptr<const GalacticConnectivity> publication, const sim::PartitionExecutor& executor,
     std::uint64_t synchronized_frame, sim::EntityId next_entity_id, bool perception_due) {
-    return bind_publication_impl(std::move(snapshot), std::move(publication), executor, synchronized_frame,
+    auto rebound = bind_publication_impl(std::move(snapshot), std::move(publication), executor, synchronized_frame,
         next_entity_id, perception_due, false);
+    if (!rebound || !path_coefficients_.empty()) return rebound;
+    return publish_path_coefficients(executor);
 }
 
 core::Result<void> GalacticWorld::bind_publication_impl(std::shared_ptr<const galactic::GalacticSnapshot> snapshot,

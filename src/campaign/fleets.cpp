@@ -34,7 +34,9 @@ core::Result<std::optional<gc::RaidSetup>> build_raid_inputs(const units::Galact
     const auto* limited = data.constant("Raid_Force_Limited_Object_Category_Mask");
     const auto* heroes = data.constant("Raid_Force_Max_Heros");
     const auto* count = data.constant("Raid_Force_Max_Limited_Objects");
-    if (!faction && !free && !limited && !heroes && !count) return core::Result<Out>::success({});
+    if (!faction && (!free || (free->text.empty() && !free->number))
+        && (!limited || (limited->text.empty() && !limited->number)) && !heroes && !count)
+        return core::Result<Out>::success({});
     if (!faction || !free || !limited || !heroes || !count) return fail("incomplete raid policy");
     const auto cap = [](const auto* constant) -> std::optional<std::uint32_t> {
         const auto value = constant->number;
@@ -117,11 +119,17 @@ core::Result<std::vector<sim::galactic::FleetTypeTraits>> build_fleet_type_trait
         previous = binding.id;
         const bool transport = std::any_of(type->behavior.begin(), type->behavior.end(),
             [&](const auto& behavior) { return equal(behavior, "TRANSPORT"); });
-        const bool children = !transport && (equal(type->object_class, "Container") || equal(type->object_class, "Squadron")
-            || !type->squadron_units.empty() || !type->company_units.empty());
+        // WGEP-41: production completion dispatches on the galactic behaviour; a DUMMY_STARSHIP
+        // type takes the single-ship fleet route even when its class or Squadron_Units make it a
+        // tactical squadron (AaW Kom'rk_Starfighter_Squadron), so it has no live galactic children.
+        const bool single_ship = std::any_of(type->behavior.begin(), type->behavior.end(),
+            [&](const auto& behavior) { return equal(behavior, "DUMMY_STARSHIP"); });
+        const bool children = !transport && !single_ship && (equal(type->object_class, "Container")
+            || equal(type->object_class, "Squadron") || !type->squadron_units.empty() || !type->company_units.empty());
         // WGM-100: every original shares the true omission default; specialized
         // container/transport dispatch decides how to consume that capability.
-        result.push_back({binding.id, transport, type->can_hyperspace_without_ability.value_or(true), children});
+        result.push_back({binding.id, transport, type->can_hyperspace_without_ability.value_or(true), children,
+            transport || type->can_participate_in_space.value_or(true)});
     }
     return core::Result<Out>::success(std::move(result));
 }
@@ -135,7 +143,7 @@ core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTabl
         return core::Result<MovementInputs>::failure(std::move(d));
     };
     const auto* base = data.constant("Object_Max_Speed_Multiplier_Galactic");
-    if (!base || !base->number || base->number->raw() <= 0) return fail("missing or invalid Object_Max_Speed_Multiplier_Galactic");
+    if (!base || !base->number) return fail("missing or invalid Object_Max_Speed_Multiplier_Galactic");
     out.base_mode_modifier = *base->number; // WGM-97: initialized GC base, never constructor/slider default
     const auto* bonus = data.constant("Corruption_Hyperspace_Bonus");
     sim::galactic::TypeId previous_type = 0;
@@ -150,8 +158,8 @@ core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTabl
         // WGM-26 uses live craft for fleet speed; WGM-118/151 uses the squadron
         // template speed only for its packing candidate key.
         if (binding.squadron || (!binding.fleet_container && binding.hyperspace_eligible)) {
-            if (!original->hyperspace_speed || original->hyperspace_speed->raw() < 0)
-                return fail(binding.original_type + ": negative Hyperspace_Speed", original->file, original->line);
+            if (!original->hyperspace_speed)
+                return fail(binding.original_type + ": missing Hyperspace_Speed", original->file, original->line);
             t.hyperspace_speed = *original->hyperspace_speed;
         }
         if (!binding.squadron && !binding.fleet_container) {
@@ -160,11 +168,18 @@ core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTabl
                 return fail(binding.original_type + ": invalid Squadron_Capacity", original->file, original->line);
             t.squadron_capacity = static_cast<std::uint32_t>(*original->squadron_capacity);
         }
+        // WGM-150: only the leaf original type carries the departure piracy value.
+        if (!binding.squadron && !binding.fleet_container) t.piracy_value = original->piracy_value_credits.value_or(sim::math::Fixed{});
+        // WGM-85: movement admission prices each leaf member by its original type; an omitted cost is the shared zero default.
+        if (!binding.squadron && !binding.fleet_container) {
+            t.cheap_bribe = original->cheap_bribe_cost.value_or(sim::math::Fixed{});
+            t.expensive_bribe = original->expensive_bribe_cost.value_or(sim::math::Fixed{});
+            if (t.cheap_bribe.raw() < 0 || t.expensive_bribe.raw() < 0)
+                return fail(binding.original_type + ": negative Cheap/Expensive_Bribe_Cost", original->file, original->line);
+        }
         if (binding.squadron) {
             // WGEP-92: authored absence consumes the shared zero default.
             t.build_cost = original->build_cost_credits.value_or(sim::math::Fixed{});
-            if (t.build_cost.raw() < 0)
-                return fail(binding.original_type + ": negative Build_Cost_Credits", original->file, original->line);
         }
         out.types.push_back(t);
     }
@@ -173,11 +188,12 @@ core::Result<MovementInputs> build_movement_inputs(const units::GalacticTypeTabl
         const auto* faction = data.faction(binding.faction);
         if (!faction || binding.id <= previous_player) return fail(binding.faction + ": missing faction or invalid player binding");
         previous_player = binding.id;
-        if (!faction->hyperspace_speed_factor || faction->hyperspace_speed_factor->raw() < 0 || !faction->benefits_from_corruption)
+        if (!faction->hyperspace_speed_factor || !faction->benefits_from_corruption)
             return fail(binding.faction + ": missing movement factor or corruption eligibility", faction->file);
-        sim::galactic::MovementPlayer p{binding.id, *faction->hyperspace_speed_factor, {}, *faction->benefits_from_corruption};
+        sim::galactic::MovementPlayer p{binding.id, *faction->hyperspace_speed_factor, {}, *faction->benefits_from_corruption,
+            faction->easily_bribed.value_or(false)};
         if (p.benefits_from_corruption) {
-            if (!bonus || !bonus->number || bonus->number->raw() < 0) return fail("missing or invalid Corruption_Hyperspace_Bonus");
+            if (!bonus || !bonus->number) return fail("missing or invalid Corruption_Hyperspace_Bonus");
             p.corruption_bonus = *bonus->number;
         }
         out.players.push_back(p);

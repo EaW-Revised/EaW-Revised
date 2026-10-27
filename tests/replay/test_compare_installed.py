@@ -86,3 +86,11 @@ def test_input_validation_reports_missing_program_root_and_layout(tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.mkdir() if part.endswith('/Data') else target.write_bytes(b'')
     tool.validate_inputs(program, tmp_path, True)
+
+
+def test_wide_native_identity_scan():
+    body = struct.pack('<HH', 7, 32) + bytes(32) + struct.pack('<HI', 15, 70000) + bytes(70000)
+    header = b'EAWRPLY\0' + struct.pack('<HI', 6, 110 + len(body)) + bytes(92) + struct.pack('<I', 2) + body
+    assert tool.carries_identity(header)
+    with pytest.raises(ValueError, match='truncated replay extension payload'):
+        tool.carries_identity(header[:-70000-4] + struct.pack('<I', 70001) + bytes(70000))

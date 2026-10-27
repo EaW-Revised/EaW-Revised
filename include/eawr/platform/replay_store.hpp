@@ -20,6 +20,9 @@ namespace eawr::platform {
 enum class ReplayWriteResult : std::uint8_t { saved, exists, invalid_name, failed };
 [[nodiscard]] ReplayWriteResult write_replay_store(const Path& store, std::string_view name,
     std::span<const std::uint8_t> bytes, bool overwrite, std::string& error);
+// Multiplayer session companion (<name><replay suffix>.session) written after the recording is saved.
+[[nodiscard]] bool write_replay_session_companion(const Path& store, std::string_view name,
+    std::span<const std::uint8_t> bytes);
 
 // Personal recordings stay on the native filesystem, separate from game-asset VFS mounts.
 [[nodiscard]] std::vector<presentation::ui::LoadGameEntry> scan_replay_store(const Path& store);

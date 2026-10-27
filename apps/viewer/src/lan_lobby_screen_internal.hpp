@@ -1,6 +1,7 @@
 #pragma once
 #include "eawr/battle/start.hpp"
 #include "lan_lobby_screen.hpp"
+#include "eawr/skirmish/land_flag.hpp"
 #include "online_service_settings.hpp"
 #include "dialog_rectangles.hpp"
 #include "settings_store.hpp"
@@ -85,13 +86,15 @@ struct GameTypeEntry {
 };
 inline constexpr GameTypeEntry game_types[] = {
     {"TEXT_GAME_TYPE_CAMPAIGN", "TEXT_GAME_DESCRIPTION_CAMPAIGN", true},
-    {"TEXT_GAME_TYPE_TEAM_LAND", "TEXT_GAME_DESCRIPTION_TEAM_LAND", false},
+    {"TEXT_GAME_TYPE_TEAM_LAND", "TEXT_GAME_DESCRIPTION_TEAM_LAND", skirmish::land_skirmish_enabled},
     {"TEXT_GAME_TYPE_TEAM_SPACE", "TEXT_GAME_DESCRIPTION_TEAM_SPACE01", true},
     {"TEXT_GAME_TYPE_CAPTURE_CONTROL_POINTS", "TEXT_GAME_DESCRIPTION_CAPTURE_CONTROL_POINTS", false},
 };
 
 // The game type that opens a Galactic Conquest room (GCMP-07); every other type is a skirmish room.
 inline constexpr const char* galactic_game_type = "TEXT_GAME_TYPE_CAMPAIGN";
+// #3776 L3: under the land skirmish build option this host game type lists land maps; every other skirmish type lists space maps.
+inline constexpr const char* land_game_type = "TEXT_GAME_TYPE_TEAM_LAND";
 
 inline constexpr const char* lobby_dialog = "IDD_LAN_LOBBY_DIALOG";
 inline constexpr const char* host_dialog = "IDD_INTERNET_HOST_OPTIONS_DIALOG";
@@ -209,7 +212,7 @@ inline constexpr const char* prompt_cancel_button = "EAWR_LOBBY_PROMPT_CANCEL";
     options.open_slots = selection.open_slots;
     options.match = selection.match;
     if (options.match) {
-        if (auto condition = sim::tactical::parse_victory_condition(options.match->space_win_condition))
+        if (auto condition = sim::tactical::parse_victory_condition(options.match->tactical_win_condition))
             options.victory_condition = condition.value();
     }
     return options;
@@ -367,6 +370,8 @@ struct EawrLanLobby::PageState final {
     EawrUiCombo* opt_win{};
     EawrUiButton *opt_accept{}, *opt_cancel{}, *opt_defaults{};
     bool opt_win_list_was_open{};
+    double shown_credits{};
+    std::uint64_t credits_revision{};
     // Set while a control is being filled: its signals must not edit the model.
     bool loading{};
 };
@@ -439,6 +444,7 @@ struct EawrLanLobby::Impl final {
     std::optional<net::GalacticLobbyOptions> galactic_options; // the room's agreed options as last read
     std::vector<std::string> campaign_list;                    // the host's campaign list, in row order
     std::string galactic_campaign;
+    std::set<std::string> campaign_text_logged;                // campaigns whose missing text was already named in the log
     bool galactic_seam_noted{};
 };
 

@@ -58,6 +58,10 @@ struct LanView {
     std::vector<presentation::ui::NetPeerLink> net_peers;
     presentation::ui::NetStallSnapshot net_stall;
     net::MatchOptions options{};
+    bool clock_paused{};
+    std::uint64_t session_tick{}, world_tick{}, pause_change_tick{};
+    std::optional<sim::SeatId> pause_actor;
+    std::string pause_name;
     std::uint64_t options_tick{};
     bool reconnect_enabled{}, rejoin_enabled{};
     bool credential_provider_available{};
@@ -334,8 +338,14 @@ public:
     virtual LanView view() const = 0;
     virtual sim::tactical::PlayerId local_player() const = 0;
     virtual platform::LiveStepDriver driver(const sim::tactical::TacticalSetup& setup) = 0;
-    // MP-06 requests wait for canonical future-tick admission. MP-33 pause is refused.
+    // TP-MP01: clock controls wait for canonical future session-tick admission.
     virtual bool request_speed(std::uint32_t) { return false; }
+    virtual bool request_pause(bool) { return false; }
+    // Only after the live worker is joined, like TacticalFeed::record().
+    virtual core::Result<std::vector<std::uint8_t>> record_pause_replay() const {
+        core::Diagnostic error; error.code = "EAWR-NET-1400"; error.message = "No multiplayer session recording.";
+        return core::Result<std::vector<std::uint8_t>>::failure(std::move(error));
+    }
     virtual void set_submission_observer(std::function<void(std::uint64_t, std::uint64_t)>) {}
     virtual void set_input_epoch_provider(std::function<std::optional<std::uint64_t>()>) {}
     // Acceptance-only event timing; never enters the lockstep wire or replay.

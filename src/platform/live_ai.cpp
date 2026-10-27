@@ -9,9 +9,10 @@ namespace eawr::platform {
 
 core::Result<LiveAi> live_ai(const battle::BattleStart& start, const skirmish::StartInputs& inputs, const units::UnitTables& tables,
     const vfs::Vfs& files, std::shared_ptr<const BattleScoring> scoring,
-    std::shared_ptr<script::foc::AiJournal> journal) {
+    std::shared_ptr<script::foc::AiJournal> journal, const bool trace_proposals) {
     auto setup = skirmish::ai_setup(start, inputs, tables);
     setup.journal = std::move(journal);
+    setup.trace_proposals = trace_proposals;
     // #449: the goal system runs the retail space plans beside the freestore.
     if (auto enabled = skirmish::enable_goal_system(files, setup); !enabled) return core::Result<LiveAi>::failure(enabled.error());
     auto modules = skirmish::ai_modules(files, setup);

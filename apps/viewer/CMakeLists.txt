@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.25)
 
 project(EawrViewer VERSION 0.1.0 LANGUAGES CXX)
+include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/EawrSymbols.cmake")
 find_package(Threads REQUIRED)
 
 set(EAWR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../.." CACHE PATH "EmpireAtWar-Revised source root")
@@ -13,6 +14,18 @@ set(EAWR_GODOT_CPP_GENERATED_INCLUDE "${EAWR_GODOT_CPP_ROOT}/gen/include" CACHE 
 set(GODOTCPP_API_VERSION "4.7" CACHE STRING "Godot API version" FORCE)
 set(GODOTCPP_TARGET "template_release" CACHE STRING "Godot target" FORCE)
 set(GODOTCPP_USE_HOT_RELOAD OFF CACHE BOOL "Viewer does not use hot reload" FORCE)
+# The core and viewer exchange standard exceptions during startup and worker
+# failure reporting. MSVC's disabled-exception STL uses a different exception
+# base and layout; exporting it from the binding corrupts those boundaries.
+if(MSVC)
+    set(GODOTCPP_DISABLE_EXCEPTIONS OFF CACHE BOOL "Match the exception-enabled viewer core" FORCE)
+    # Accepted prebuilt bindings may use the incompatible disabled-exception
+    # STL. Rebuild the pinned sources rather than link an unverified ABI.
+    if(EAWR_GODOT_CPP_LIBRARY)
+        message(STATUS "MSVC viewer rebuilds pinned godot-cpp sources for exception ABI consistency")
+        set(EAWR_GODOT_CPP_LIBRARY "")
+    endif()
+endif()
 # Keep dependency headers outside the viewer's strict warning policy.
 set(GODOTCPP_SYSTEM_HEADERS ON CACHE BOOL "Expose godot-cpp headers as SYSTEM" FORCE)
 if(NOT WIN32)
@@ -25,6 +38,12 @@ endif()
 include("${EAWR_ROOT}/cmake/EawrReserveGuard.cmake")
 # An MSVC that drops the guard in front of a shift crashes the first Lua state (legacy #3930).
 include("${EAWR_ROOT}/cmake/EawrMsvcGuard.cmake")
+# Land skirmish (#3776 L3): the skirmish setup and LAN lobby list land maps and start a land battle. OFF in
+# release builds, so the shipped setup screen stays byte-identical; ON only in the dev-land preset or with -D.
+option(EAWR_ENABLE_LAND_SKIRMISH "Offer land maps in the skirmish setup and LAN lobby" OFF)
+if(EAWR_ENABLE_LAND_SKIRMISH)
+    add_compile_definitions(EAWR_LAND_SKIRMISH=1)
+endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -61,7 +80,7 @@ if(EAWR_GODOT_CPP_LIBRARY)
     if(MSVC)
         target_compile_options(godot-cpp INTERFACE /utf-8 /Zc:__cplusplus)
         target_compile_definitions(godot-cpp INTERFACE
-            WINDOWS_ENABLED TYPED_METHOD_BIND NOMINMAX GDEXTENSION _HAS_EXCEPTIONS=0 THREADS_ENABLED)
+            WINDOWS_ENABLED TYPED_METHOD_BIND NOMINMAX GDEXTENSION THREADS_ENABLED)
     else()
         target_compile_definitions(godot-cpp INTERFACE
             GDEXTENSION LINUX_ENABLED UNIX_ENABLED THREADS_ENABLED)
@@ -109,6 +128,7 @@ add_custom_command(
 # profile, upstream Lua 5.0.2 compiled as C++ in its own namespace, the sandbox and the
 # scheduler) and the freestore host. Its own library: upstream Lua keeps its own warnings and
 # private include paths, as in the root build (src/script/CMakeLists.txt).
+include("${EAWR_ROOT}/src/mods/sources.cmake")
 include("${EAWR_ROOT}/src/core/sources.cmake")
 include("${EAWR_ROOT}/src/sim/sources.cmake")
 include("${EAWR_ROOT}/src/sim/galactic/sources.cmake")
@@ -160,6 +180,7 @@ endif()
 eawr_msvc_guard_apply(eawr_viewer_script "${EAWR_ROOT}/src/script/sflua/upstream/ltable.cpp")
 
 add_library(eawr_viewer_core STATIC
+    ${EAWR_MODS_SOURCES}
     ${EAWR_CORE_SOURCES}
     ${EAWR_SIM_SOURCES}
     ${EAWR_SIM_GALACTIC_SOURCES}
@@ -196,10 +217,14 @@ target_include_directories(eawr_viewer_core PUBLIC
 # src/sim/fog.cpp includes the private sim headers beside it; src/data/ui/command_bar.cpp
 # includes src/data/xml_internal.hpp.
 target_include_directories(eawr_viewer_core PRIVATE "${CMAKE_BINARY_DIR}/generated" "${EAWR_ROOT}/src/sim" "${EAWR_ROOT}/src/data")
+target_include_directories(eawr_viewer_core SYSTEM PRIVATE "${EAWR_ROOT}/third_party/stb")
 # The script library and the core use each other (the AI host reads the simulation; the live
 # session hosts the scripts); CMake repeats the two static libraries on the link line.
 target_link_libraries(eawr_viewer_core PUBLIC eawr_viewer_script ${EAWR_NET_PLATFORM_LIBRARIES})
 target_link_libraries(eawr_viewer_core PUBLIC eawr::gns_dependency)
+if(WIN32)
+    target_link_libraries(eawr_viewer_core PUBLIC advapi32)
+endif()
 target_link_libraries(eawr_viewer_core PUBLIC eawr::relay)
 target_link_libraries(eawr_viewer_script PUBLIC eawr_viewer_core)
 
@@ -215,6 +240,9 @@ target_include_directories(eawr_viewer PRIVATE
     "${EAWR_ROOT}/src/presentation/godot"
 )
 target_link_libraries(eawr_viewer PRIVATE godot-cpp eawr_viewer_core Threads::Threads)
+if(WIN32)
+    target_link_libraries(eawr_viewer PRIVATE dbghelp)
+endif()
 # FES-06: only the viewer's Debug configuration exposes debug menu entries.
 target_compile_definitions(eawr_viewer PRIVATE $<$<CONFIG:Debug>:EAWR_VIEWER_DEBUG_BUILD=1>)
 get_target_property(GODOTCPP_SUFFIX godot-cpp GODOTCPP_SUFFIX)
@@ -233,6 +261,7 @@ set_target_properties(eawr_viewer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_BIN}>"
     PDB_OUTPUT_DIRECTORY "$<1:${PROJECT_BIN}>"
 )
+eawr_target_symbols(eawr_viewer)
 
 if(MSVC)
     target_compile_options(eawr_viewer_core PRIVATE /W4 /permissive- /EHsc)

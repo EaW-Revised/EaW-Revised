@@ -192,6 +192,8 @@ core::Result<void> session_detail::Tick::retry_buzz_targets(std::vector<LiveUnit
             if (next_id == invalid_entity_id) continue;
             const auto point = *source.abilities->pending_buzz_position;
             auto droid = impl_->create_buzz_droids(source, point, tick, next_id);
+            if (impl_->motion.squadrons.find_spawner(droid.state.type_id, droid.state.owner) != nullptr)
+                staging_->born_spawners.push_back(droid.state.entity_id);
             track_victory_change(nullptr, &droid.state, false);
             droids.push_back(std::move(droid));
             apply_squadron_order(minds.at(source.state.entity_id), StopPayload{}, source.state.position, impl_->motion.squadrons);

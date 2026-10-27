@@ -6,6 +6,15 @@
 #include <map>
 
 namespace eawr::campaign {
+core::Result<sim::math::Fixed> prepare_control_alignment_multiplier(
+    sim::math::Fixed strength, bool like, sim::math::Fixed maximum) {
+    const auto one = sim::math::Fixed::from_raw(sim::math::Fixed::scale);
+    auto effect = sim::math::multiply(strength, maximum);
+    if (!effect) return effect;
+    if (effect.value().raw() <= 0) return core::Result<sim::math::Fixed>::success(one);
+    return like ? sim::math::subtract(one, effect.value()) : sim::math::add(one, effect.value());
+}
+
 core::Result<std::vector<sim::galactic::GroundCapabilityType>> prepare_ground_capability_types(
     const units::GalacticTypeTable& types, std::span<const FleetTypeBinding> bindings) {
     using Out = std::vector<sim::galactic::GroundCapabilityType>;
@@ -119,10 +128,10 @@ core::Result<sim::galactic::PoliticalControlSetup> bind_control_data(
         return fail("control planet/route bindings must cover runtime presence");
     for (std::size_t i = 0; i < planets.size(); ++i) {
         const auto* planet = data.planet(planets[i].original_type);
-        if (!planet || planets[i].id != presence.planets[i].planet || !planet->political_control
-            || !planet->planet_capture_bonus_reward || *planet->planet_capture_bonus_reward < 0)
-            return fail(planets[i].original_type + ": missing political leaning or capture reward", planet ? planet->file : std::string{});
-        auto reward = sim::math::Fixed::from_integer(*planet->planet_capture_bonus_reward);
+        if (!planet || planets[i].id != presence.planets[i].planet || !planet->political_control)
+            return fail(planets[i].original_type + ": missing political leaning", planet ? planet->file : std::string{});
+        // RGC-200: the reward is a signed integer kept as authored; an absent tag is 0 (WGS-90).
+        auto reward = sim::math::Fixed::from_integer(planet->planet_capture_bonus_reward.value_or(0));
         if (!reward) return fail(planets[i].original_type + ": capture reward overflows", planet->file);
         presence.planets[i].leaning = *planet->political_control;
         presence.planets[i].capture_reward = reward.value();

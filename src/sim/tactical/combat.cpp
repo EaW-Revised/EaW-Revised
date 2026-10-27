@@ -82,6 +82,8 @@ core::Result<void> validate_combat(const CombatTable& table) {
     const auto distance_ok = [](const math::Fixed value) {
         return value.raw() >= 0 && value.raw() <= max_combat_distance * one_raw;
     };
+    // Authored ranges are scalars, not coordinates or per-frame geometry steps.
+    const auto range_ok = [](const math::Fixed value) { return value.raw() >= 0; };
     const auto cone_ok = [](const math::Fixed value) { return value.raw() >= 0 && value.raw() <= 720 * one_raw; };
     if (!distance_ok(table.melee_cutoff)) return invalid("melee cutoff out of range");
     for (std::size_t index = 0; index < table.footprints.size(); ++index) {
@@ -130,7 +132,7 @@ core::Result<void> validate_combat(const CombatTable& table) {
         if (profile.priority_set && *profile.priority_set >= table.priority_sets.size()) {
             return invalid(name + "unknown priority set");
         }
-        if (profile.max_attack_distance && !distance_ok(*profile.max_attack_distance)) {
+        if (profile.max_attack_distance && !range_ok(*profile.max_attack_distance)) {
             return invalid(name + "attack distance out of range");
         }
         if (profile.weapons.size() > max_weapons_per_type) {
@@ -144,12 +146,12 @@ core::Result<void> validate_combat(const CombatTable& table) {
             return invalid(name + "invalid planetary weapon profile");
         for (const auto& weapon : profile.weapons) {
             if ((weapon.hardpoint != object_weapon && weapon.hardpoint >= max_hardpoints_per_type)
-                || !distance_ok(weapon.range) || !cone_ok(weapon.cone_width) || !cone_ok(weapon.cone_height)
+                || !range_ok(weapon.range) || !cone_ok(weapon.cone_width) || !cone_ok(weapon.cone_height)
                 || weapon.min_recharge_hundredths > weapon.max_recharge_hundredths
                 || weapon.max_recharge_hundredths > max_recharge_hundredths || weapon.pulse_count == 0
                 || weapon.pulse_delay_frames > max_recharge_hundredths || !point_in_bounds(weapon.fire_a)
                 || !point_in_bounds(weapon.fire_b) || !axes_ok(weapon.fire_axes, false)
-                || !distance_ok(weapon.manual_min_range) || weapon.manual_min_range > weapon.range
+                || !range_ok(weapon.manual_min_range) || weapon.manual_min_range > weapon.range
                 || weapon.manual_cooldown_frames > 108000
                 || weapon.full_salvo_delay.raw() < 0 || weapon.full_salvo_delay.raw() > max_ability_multiplier * one_raw
                 || weapon.ai_combat_power.raw() < 0 || weapon.ai_combat_power.raw() > max_weapon_combat_power * one_raw) {
@@ -157,6 +159,18 @@ core::Result<void> validate_combat(const CombatTable& table) {
             }
             if (!weapon.muzzles.empty() && (weapon.hardpoint != object_weapon || weapon.muzzles.size() > 100
                     || !std::all_of(weapon.muzzles.begin(), weapon.muzzles.end(), point_in_bounds))) {
+                return invalid(name + "invalid muzzle bones of weapon " + std::to_string(weapon.hardpoint));
+            }
+            // RFL-15: muzzle axes are absent or one per muzzle, each zero or unit length.
+            const auto launch_axis_ok = [](const math::Vec3& axis) {
+                if (axis == math::Vec3{}) return true;
+                const auto small = [](const math::Fixed value) { return std::llabs(value.raw()) <= one_raw; };
+                const auto product = math::dot(axis, axis);
+                return small(axis.x) && small(axis.y) && small(axis.z) && product
+                    && std::llabs(product.value().raw() - one_raw) <= frame_tolerance_raw;
+            };
+            if ((!weapon.muzzle_axes.empty() && weapon.muzzle_axes.size() != weapon.muzzles.size())
+                || !std::all_of(weapon.muzzle_axes.begin(), weapon.muzzle_axes.end(), launch_axis_ok)) {
                 return invalid(name + "invalid muzzle bones of weapon " + std::to_string(weapon.hardpoint));
             }
             if (weapon.object_turret) {
@@ -175,25 +189,30 @@ core::Result<void> validate_combat(const CombatTable& table) {
                     return within_distance(angles.x, 720) && within_distance(angles.y, 720)
                         && within_distance(angles.z, 720);
                 };
-                if (!weapon.requires_manual_target || !point_in_bounds(turret.pivot)
+                // Authored geometry may be inert: only the weapon flags create turret state.
+                // Its presence still requires the same valid geometry.
+                if (weapon.hardpoint == object_weapon || !point_in_bounds(turret.pivot)
                     || !point_in_bounds(turret.coordinate_pivot) || !axes_ok(turret.axes)
                     || !axes_ok(turret.coordinate_axes) || !angles_ok(turret.rest) || !angles_ok(turret.offset)
-                    || !cone_ok(turret.speed) || !cone_ok(turret.yaw_extent) || !cone_ok(turret.pitch_extent)
+                    || !cone_ok(turret.speed)
+                    // HPT-10: the manual-assignment extent contract does not bound ordinary turrets.
+                    || (weapon.requires_manual_target && (!within_distance(turret.yaw_extent, 720)
+                        || !within_distance(turret.pitch_extent, 720)))
                     || (turret.barrel && (!point_in_bounds(turret.barrel_pivot) || !axes_ok(turret.barrel_axes)))) {
-                    return invalid(name + "invalid manual turret");
+                    return invalid(name + "invalid manual turret of weapon " + std::to_string(weapon.hardpoint));
                 }
             }
             for (const auto* candidate : {&weapon.shot, &weapon.ability_shot, &weapon.barrage_shot, &weapon.charged_shot}) {
                 if (!*candidate) continue;
                 const auto& shot = **candidate;
-                const auto damage_ok = shot.damage.raw() >= 0 && shot.damage.raw() <= max_durability_health * one_raw;
+                const auto damage_ok = shot.damage.raw() >= 0 && shot.damage.raw() <= max_hit_damage * one_raw;
                 const auto& blast = shot.blast;
-                const auto blast_ok = blast.damage.raw() >= 0 && blast.damage.raw() <= max_durability_health * one_raw
+                const auto blast_ok = blast.damage.raw() >= 0 && blast.damage.raw() <= max_hit_damage * one_raw
                     && distance_ok(blast.radius) && blast.tiers >= 0 && blast.tiers <= 1024
                     && blast.max_delay.raw() >= 0 && blast.max_delay.raw() <= 3600 * one_raw;
                 const auto inaccuracy_ok = std::all_of(shot.inaccuracy.begin(), shot.inaccuracy.end(),
                     [&](const InaccuracyRow& row) { return distance_ok(row.distance); });
-                if (shot.damage_delay.raw() > 3600 * one_raw || shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !distance_ok(shot.max_travel)
+                if (shot.damage_delay.raw() > 3600 * one_raw || shot.appearance_delay_frames > 108000 || !damage_ok || !blast_ok || shot.speed.raw() <= 0 || !distance_ok(shot.speed) || !range_ok(shot.max_travel)
                     || !cone_ok(shot.turn_rate)
                     || !inaccuracy_ok || (shot.ion_stun && !valid_ion_stun(*shot.ion_stun))
 
@@ -210,15 +229,16 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 return invalid(name + "invalid collision box");
             }
         }
-        // #536: meshes need a box to gate them, vertices within max_mesh_extent and a well-formed
+        // DG-36: meshes need a box to gate them, vertices within max_combat_distance and a well-formed
         // tree (children after their parent, leaves inside the triangle list).
         if (!profile.meshes.empty() && (!profile.collision || !profile.mesh_bounds)) {
             return invalid(name + "collision meshes need a collision box and mesh bounds");
         }
         const auto in_mesh_extent = [](const math::Vec3& point) {
-            const auto limit = max_mesh_extent * one_raw;
-            return std::llabs(point.x.raw()) <= limit && std::llabs(point.y.raw()) <= limit
-                && std::llabs(point.z.raw()) <= limit;
+            const auto limit = max_combat_distance * one_raw;
+            return point.x.raw() >= -limit && point.x.raw() <= limit
+                && point.y.raw() >= -limit && point.y.raw() <= limit
+                && point.z.raw() >= -limit && point.z.raw() <= limit;
         };
         for (const auto& mesh : profile.meshes) {
             if (mesh.triangles.empty() || mesh.nodes.empty()
@@ -226,18 +246,33 @@ core::Result<void> validate_combat(const CombatTable& table) {
                 || (mesh.source_hardpoint != no_hardpoint && mesh.source_hardpoint >= max_hardpoints_per_type)) {
                 return invalid(name + "invalid collision mesh");
             }
+            const auto mesh_name = name + "collision mesh " + std::to_string(&mesh - profile.meshes.data()) + ": ";
             for (const auto& triangle : mesh.triangles) {
-                if (!in_mesh_extent(triangle.a) || !in_mesh_extent(triangle.b) || !in_mesh_extent(triangle.c)) {
-                    return invalid(name + "collision mesh beyond " + std::to_string(max_mesh_extent) + " units");
-                }
+                for (const auto* point : {&triangle.a, &triangle.b, &triangle.c})
+                    for (const auto coordinate : {point->x, point->y, point->z})
+                        if (coordinate.raw() < -max_combat_distance * one_raw
+                            || coordinate.raw() > max_combat_distance * one_raw)
+                            return invalid(mesh_name + "coordinate raw " + std::to_string(coordinate.raw())
+                                + " exceeds cap " + std::to_string(max_combat_distance) + " units (DG-36)");
             }
+            if (mesh.grid_exponent > 6 || mesh.grid_exponent != collision_grid_exponent({mesh.nodes[0].min, mesh.nodes[0].max}))
+                return invalid(mesh_name + "invalid derived grid exponent");
+            const auto grid_limit = (max_mesh_extent * one_raw) << mesh.grid_exponent;
+            const auto in_grid = [grid_limit](const math::Vec3& point) {
+                return point.x.raw() >= -grid_limit && point.x.raw() <= grid_limit
+                    && point.y.raw() >= -grid_limit && point.y.raw() <= grid_limit
+                    && point.z.raw() >= -grid_limit && point.z.raw() <= grid_limit;
+            };
+            for (const auto& triangle : mesh.triangles)
+                if (!in_grid(triangle.a) || !in_grid(triangle.b) || !in_grid(triangle.c))
+                    return invalid(mesh_name + "vertices exceed derived grid extent");
             for (std::size_t slot = 0; slot < mesh.nodes.size(); ++slot) {
                 const auto& node = mesh.nodes[slot];
                 const bool leaf_ok = node.count > 0 && node.first <= mesh.triangles.size()
                     && node.count <= mesh.triangles.size() - node.first;
                 const bool inner_ok = node.count == 0 && node.first > slot && node.second > slot
                     && node.first < mesh.nodes.size() && node.second < mesh.nodes.size();
-                if ((!leaf_ok && !inner_ok) || !in_mesh_extent(node.min) || !in_mesh_extent(node.max)) {
+                if ((!leaf_ok && !inner_ok) || !in_grid(node.min) || !in_grid(node.max)) {
                     return invalid(name + "invalid collision mesh tree");
                 }
             }
@@ -342,7 +377,7 @@ CombatState initial_combat(
         if (weapon.object_turret_required) {
             weapon_state.turret.emplace(WeaponState::TurretState{}); // FC-60: fresh current/desired angles are zero.
         }
-        if (weapon.requires_manual_target) {
+        if (weapon.requires_manual_target || weapon.manual_turret_required) {
             weapon_state.manual.emplace();
             if (weapon.manual_turret) {
                 auto& manual = *weapon_state.manual;

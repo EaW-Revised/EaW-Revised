@@ -1,0 +1,26 @@
+[
+  {
+    "old": "apps/viewer/src/space_populate.hpp#PlacedShip",
+    "new": "apps/viewer/src/battle_scene.hpp#PlacedUnit"
+  },
+  {
+    "old": "apps/viewer/src/space_populate.hpp#LivePose",
+    "new": "apps/viewer/src/battle_scene.hpp#LivePose"
+  },
+  {
+    "old": "apps/viewer/src/space_populate.hpp#LiveClipPose",
+    "new": "apps/viewer/src/battle_scene.hpp#LiveClipPose"
+  },
+  {
+    "old": "apps/viewer/src/space_populate.hpp#LiveShipBox",
+    "new": "apps/viewer/src/battle_scene.hpp#LiveShipBox"
+  },
+  {
+    "old": "apps/viewer/src/space_environment.hpp#SpaceLiveUpdate",
+    "new": "apps/viewer/src/battle_scene.hpp#Update"
+  },
+  {
+    "old": "include/eawr/scene/space_population.hpp#HardpointState",
+    "new": "include/eawr/scene/hardpoint_state.hpp#HardpointState"
+  }
+]

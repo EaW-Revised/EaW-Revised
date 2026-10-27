@@ -6,7 +6,8 @@
 #include "eawr/presentation/audio/announcements.hpp"
 #include "eawr/presentation/audio/command_cues.hpp"
 #include "eawr/presentation/audio/hardpoint_loss.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/audio/health_warning.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 
 #include <array>
 #include <cmath>
@@ -23,7 +24,7 @@
 namespace {
 
 namespace audio = eawr::presentation::audio;
-namespace space = eawr::presentation::space;
+namespace live = eawr::presentation::live;
 namespace sim = eawr::sim;
 using audio::Field;
 using Result = audio::Start::Result;
@@ -37,6 +38,33 @@ void expect(const bool condition, const std::string& message) {
 
 [[nodiscard]] bool near(const double a, const double b, const double tolerance = 1.0e-9) {
     return std::abs(a - b) <= tolerance;
+}
+
+void health_warnings() {
+    audio::SfxEvent low, critical, enemy_low, enemy_critical;
+    const audio::HealthWarningCues target{&low, &critical, nullptr, nullptr};
+    const audio::HealthWarningCues source{nullptr, nullptr, &enemy_low, &enemy_critical};
+    const auto cue = [&](double before, double after, bool own = true, bool attacker = false,
+                         double low_limit = 0.33, double critical_limit = 0.10) {
+        return audio::health_warning_cue(before, after, low_limit, critical_limit, own, attacker, target, source);
+    };
+    expect(cue(1.0, 0.33) == &low, "health warning includes exact lower threshold");
+    expect(cue(0.33, 0.32) == nullptr, "threshold start does not repeat");
+    expect(cue(0.32, 0.5) == nullptr, "healing is silent");
+    expect(cue(0.5, 0.3) == &low, "down/up/down repeats low warning");
+    expect(cue(1.0, 0.05) == &critical, "one hit crossing both prefers critical");
+    expect(cue(0.2, 0.1) == &critical && cue(0.1, 0.09) == nullptr, "critical boundary and no repeated low state");
+    expect(cue(0.09, 0.2) == nullptr && cue(0.2, 0.08) == &critical, "critical heals re-arm naturally");
+    expect(cue(1.0, 0.0) == nullptr && cue(0.5, 0.5) == nullptr, "death and shield/hardpoint-only loss silent");
+    expect(cue(1.0, 0.3, false, true) == &enemy_low, "local attacker uses its own enemy cue");
+    expect(cue(1.0, 0.05, false, true) == &enemy_critical, "local attacker critical variant");
+    expect(cue(1.0, 0.3, true, true) == &low, "local target takes precedence over attacker");
+    expect(cue(1.0, 0.3, false, false) == nullptr, "no local participant stays silent");
+    expect(cue(0.9, 0.7, true, false, 0.8, 0.6) == &low, "mod thresholds are used unchanged");
+    expect(audio::health_warning_cue(1.0, 0.1, 0.33, 0.1, true, true, {}, source) == nullptr,
+        "unauthored target cue is silent without attacker fallback");
+    expect(audio::health_warning_cue(1.0, 0.3, 0.33, 0.1, false, true, target, {}) == nullptr,
+        "unauthored attacker cue is silent");
 }
 
 void hardpoint_loss() {
@@ -1044,7 +1072,7 @@ void sighting_service_timing() {
 
     // Driven by the real fade: revealed from fog mid-countdown, the object is serviced every frame
     // while it eases in, so the cue request time follows the fade rather than a shared phase.
-    space::UnitFade fade;
+    live::UnitFade fade;
     audio::SightingService revealed;
     const std::vector<sim::EntityId> alive{9};
     int first_visible_service = -1, services_while_fading = 0;
@@ -1180,6 +1208,10 @@ int main() {
            "nebula line is used before ordinary movement");
     expect(audio::move_response(false, true, false, &asteroid, static_cast<const int*>(nullptr), &group, &ordinary) == &ordinary,
            "missing single-unit environment line falls through to ordinary");
+    expect(audio::ability_variant(true, &asteroid, &ordinary) == &asteroid, "enabled ability uses its authored variant");
+    expect(audio::ability_variant(false, &asteroid, &ordinary) == &ordinary, "no enabled ability keeps the ordinary line");
+    expect(audio::ability_variant(true, static_cast<const int*>(nullptr), &ordinary) == &ordinary,
+           "unauthored variant falls back to the ordinary line");
     expect(audio::assist_eligible(false, false, false), "different-type other selected object can assist");
     expect(!audio::assist_eligible(true, false, false) && !audio::assist_eligible(false, true, false)
            && !audio::assist_eligible(false, false, true), "speaker, same type and vehicle thief cannot assist");
@@ -1204,6 +1236,7 @@ int main() {
     chains.cancel(0);
     expect(!chains.complete(0).cue, "explicit cancellation removes pending assist");
     registry_and_presets();
+    health_warnings();
     hardpoint_loss();
     event_lifecycle();
     stolen_event_completion();

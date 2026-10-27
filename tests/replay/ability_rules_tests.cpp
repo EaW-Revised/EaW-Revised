@@ -145,6 +145,51 @@ void test_names_and_validation() {
     auto huge = table;
     huge.profiles[0].abilities[0].modifiers.shield_regen = units(65);
     expect(!tactical::validate_abilities(huge), "a multiplier beyond 64 is rejected");
+    // AB-22/AB-23 (#4868): an interval multiplier of 0 loads; a negative one and a too-large one still do not.
+    auto interval_zero = table;
+    interval_zero.profiles[0].abilities[0].modifiers.shield_regen_interval = Fixed{};
+    interval_zero.profiles[0].abilities[0].modifiers.energy_regen_interval = Fixed{};
+    expect(static_cast<bool>(tactical::validate_abilities(interval_zero)), "a zero regen interval multiplier is accepted");
+    auto interval_negative = table;
+    interval_negative.profiles[0].abilities[0].modifiers.shield_regen_interval = Fixed::from_raw(-1);
+    expect(!tactical::validate_abilities(interval_negative), "a negative shield interval multiplier is rejected");
+    interval_negative.profiles[0].abilities[0].modifiers.shield_regen_interval = Fixed{};
+    interval_negative.profiles[0].abilities[0].modifiers.energy_regen_interval = Fixed::from_raw(-1);
+    expect(!tactical::validate_abilities(interval_negative), "a negative energy interval multiplier is rejected");
+    auto interval_huge = table;
+    interval_huge.profiles[0].abilities[0].modifiers.energy_regen_interval = units(65);
+    expect(!tactical::validate_abilities(interval_huge), "an interval multiplier beyond 64 is rejected");
+    expect(tactical::scaled_interval(90, Fixed{}) == 1, "AB-22: a zero interval multiplier floors at one frame");
+    // WAB-70 (#4868): the buzz activation range has no ceiling in the debug build; a negative one is still refused.
+    tactical::AbilityProfile buzz_ability;
+    buzz_ability.kind = tactical::AbilityKind::buzz_droids; buzz_ability.recharge_frames = 60;
+    buzz_ability.buzz = tactical::BuzzDroidsProfile{0x2008, units(0), units(500000), units(5000), units(5000),
+        units(8), units(1), units(20), 30, 2, 0};
+    tactical::AbilityTable buzz_table; buzz_table.profiles = {unit_of(7, buzz_ability)};
+    expect(static_cast<bool>(tactical::validate_abilities(buzz_table)), "WAB-70: a 500000 buzz activation range is accepted");
+    auto buzz_negative = buzz_table;
+    buzz_negative.profiles[0].abilities[0].buzz->max_range = Fixed::from_raw(-1);
+    expect(!tactical::validate_abilities(buzz_negative), "WAB-70: a negative buzz maximum range is rejected");
+    buzz_negative = buzz_table;
+    buzz_negative.profiles[0].abilities[0].buzz->min_range = Fixed::from_raw(-1);
+    expect(!tactical::validate_abilities(buzz_negative), "WAB-70: a negative buzz minimum range is rejected");
+    buzz_negative = buzz_table;
+    buzz_negative.profiles[0].abilities[0].buzz->chase_radius = units(65537);
+    expect(!tactical::validate_abilities(buzz_negative), "WAB-70: the chase radius keeps its 65536 bound");
+    // WSH-09 (#4868): a negative automatic Heal_Amount is passive damage; it loads, but only within the health bound.
+    tactical::SpecialAbilityProfile aura; aura.name = "Passive_Damage"; aura.kind = tactical::SpecialAbilityKind::force_healing;
+    aura.style = tactical::SpecialActivationStyle::space_automatic; aura.initially_enabled = true;
+    aura.heal_range = units(1000); aura.heal_amount = units(-30); aura.heal_interval_frames = 15;
+    auto aura_table = table;
+    aura_table.profiles[0].special.push_back(aura);
+    expect(static_cast<bool>(tactical::validate_abilities(aura_table)), "WSH-09: a negative heal amount is accepted");
+    aura_table.profiles[0].special.back().heal_amount = Fixed::from_raw(-(tactical::max_hit_damage + 1) * Fixed::scale);
+    expect(!tactical::validate_abilities(aura_table), "WSH-09: a negative heal amount beyond the health bound is rejected");
+    aura_table.profiles[0].special.back().heal_amount = units(-30);
+    aura_table.profiles[0].special.back().heal_percent = Fixed::from_raw(-1);
+    expect(!tactical::validate_abilities(aura_table), "WSH-09: a negative heal percent stays rejected");
+    aura_table.profiles[0].special.back().heal_percent = Fixed::from_raw(Fixed::scale / 10);
+    expect(!tactical::validate_abilities(aura_table), "WSH-09: a negative amount with a positive percent is rejected");
     auto defaults = table;
     defaults.autofire_defaults = {1};
     expect(static_cast<bool>(tactical::validate_abilities(defaults)), "a human creation preference is valid");

@@ -37,6 +37,7 @@ struct Arguments final {
     std::string inspect_texture;
     std::string inspect_map;
     std::string only_format;
+    bool texture_closure{};
     std::filesystem::path game_root;
     std::filesystem::path mod_root;
     std::filesystem::path report;
@@ -49,6 +50,8 @@ struct Layer final {
     std::filesystem::path root;
     eawr::vfs::ManifestResolution manifest;
 };
+
+int texture_closure(const eawr::vfs::Vfs&, const Arguments&);
 
 struct AssetCounts final {
     std::uint64_t meshes{};

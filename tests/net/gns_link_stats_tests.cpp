@@ -54,6 +54,18 @@ void smoothing() {
     expect(sampler.cached()->sample_count == 3 && sampler.cached()->smoothed_rtt == 6125us,
         "Unavailable native estimate preserves cached observations");
 }
+void long_pause_keeps_transport_live() {
+    eawr::net::GnsLinkWatchdog watchdog;
+    const eawr::net::GnsLinkWatchdog::Clock::time_point start{};
+    for (unsigned ms = 0; ms <= 600'000; ms += 250) {
+        const auto now = start + std::chrono::milliseconds(ms);
+        watchdog.received_reliable(now); // keepalives/empty seals, no world tick required
+        expect(watchdog.observe(now, 0, 100) < 15s, "ten-minute pause with live traffic cannot trigger NET-1507");
+    }
+    expect(watchdog.observe(start + 615s, 0, 100) >= 15s,
+        "true ACK silence while the world remains paused still reaches the watchdog deadline");
+}
+
 void link_liveness() {
     eawr::net::GnsLinkWatchdog watchdog;
     const eawr::net::GnsLinkWatchdog::Clock::time_point start{};
@@ -111,7 +123,7 @@ void legacy_live_window_regression() {
 }
 }
 int main() {
-    try { cadence(); smoothing(); link_liveness(); legacy_live_window_regression();
+    try { cadence(); smoothing(); long_pause_keeps_transport_live(); link_liveness(); legacy_live_window_regression();
         std::cout << "GNS LinkStats contracts passed\n"; return 0; }
     catch (const std::exception& failure) { std::cerr << failure.what() << '\n'; return 1; }
 }

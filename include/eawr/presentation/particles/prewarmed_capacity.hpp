@@ -9,6 +9,11 @@
 
 namespace eawr::presentation::particles {
 
+struct AuthoredCapacity final {
+    std::vector<EmitterCapacity> emitters;
+    std::size_t total{};
+};
+
 // PL-01, PS-07, PS-08: bound the effective sampler, including the admitted
 // first update's prewarm before freeze. Scheduling slack is project policy.
 [[nodiscard]] inline double capacity_duration(const EmitterDefinition& emitter) {
@@ -30,7 +35,9 @@ namespace eawr::presentation::particles {
 // PS-18..PS-20: base clamp precedes both multiplicities. The caller budget
 // and scheduler allowance are project policies, not native global ceilings.
 [[nodiscard]] inline std::vector<EmitterCapacity> emitter_capacity_plan(
-    const SystemDefinition& system, const std::size_t vertices, const std::size_t budget) {
+    const SystemDefinition& system, const std::size_t vertices, const std::size_t budget,
+    bool* valid_definition = nullptr) {
+    if (valid_definition) *valid_definition = true;
     std::vector<EmitterCapacity> result(system.emitters.size());
     std::vector<std::uint8_t> done(system.emitters.size());
     const auto multiply = [](const std::size_t a, const std::size_t b) {
@@ -54,7 +61,10 @@ namespace eawr::presentation::particles {
                 || !std::isfinite(emitter.particles_per_interval) || emitter.particles_per_interval <= 0
                 || !std::isfinite(emitter.spawn_interval) || emitter.spawn_interval <= 0
                 || (emitter.creator_id != 34 && emitter.creator_id != 35
-                    && emitter.creator_id != 39 && emitter.creator_id != 40)) continue;
+                    && emitter.creator_id != 39 && emitter.creator_id != 40)) {
+                if (valid_definition) *valid_definition = false;
+                continue;
+            }
             const double count = emitter.bursting ? std::trunc(static_cast<double>(emitter.particles_per_interval)) : 1.0;
             const double interval = emitter.bursting ? emitter.spawn_interval
                 : static_cast<double>(emitter.spawn_interval) / emitter.particles_per_interval;
@@ -80,6 +90,8 @@ namespace eawr::presentation::particles {
         }
         if (!progress) break;
     }
+    if (valid_definition && std::find(done.begin(), done.end(), std::uint8_t{0}) != done.end())
+        *valid_definition = false;
     const auto admitted = static_cast<std::size_t>(std::count_if(result.begin(), result.end(),
         [](const auto& capacity) { return capacity.requested != 0; }));
     if (admitted == 0) return result;
@@ -95,6 +107,41 @@ namespace eawr::presentation::particles {
         capacity.reserved += extra; remaining -= extra;
     }
     return result;
+}
+
+// Full authored demand, with no aggregate presentation ceiling. Saturated
+// products from the permissive planning helper are rejected before allocation.
+[[nodiscard]] inline core::Result<AuthoredCapacity> authored_capacity(
+    const SystemDefinition& system, const std::size_t vertices = 0) {
+    const auto fail = [](const char* message) {
+        return core::Result<AuthoredCapacity>::failure({std::string(diagnostic_codes::invalid_value),
+            core::Severity::error, message, {}, {}, {}, {}});
+    };
+    if (system.emitters.empty()) return fail("effect definition has no emitters");
+    for (const auto& emitter : system.emitters) {
+        if ((emitter.creator_id == 39 || emitter.creator_id == 40)
+            && emitter.parent_emitter == EmitterDefinition::no_parent)
+            return fail("dependent effect emitter has no parent");
+        if (emitter.creator_id == 35 && emitter.mesh_mode != MeshSpawnMode::random_vertex
+            && emitter.mesh_mode != MeshSpawnMode::random_surface && emitter.mesh_mode != MeshSpawnMode::every_vertex)
+            return fail("effect mesh emitter has an unsupported mode");
+    }
+    bool valid_definition{};
+    auto plan = emitter_capacity_plan(system, vertices, std::numeric_limits<std::size_t>::max(), &valid_definition);
+    if (!valid_definition) return fail("effect definition has an unsupported, invalid or cyclic emitter");
+    std::size_t total{};
+    for (std::size_t index = 0; index < plan.size(); ++index) {
+        const auto& capacity = plan[index];
+        if (capacity.requested == std::numeric_limits<std::size_t>::max()
+            || capacity.native_requested == std::numeric_limits<std::size_t>::max()
+            || capacity.requested > std::numeric_limits<std::size_t>::max() - total)
+            return fail("effect capacity arithmetic overflow");
+        total += capacity.requested;
+    }
+    // The budget-free pass above is only a request calculation; all reserves
+    // are assigned after the checked sum succeeds.
+    for (auto& capacity : plan) capacity.reserved = capacity.requested;
+    return core::Result<AuthoredCapacity>::success({std::move(plan), total});
 }
 
 // PL-02, PS-18: automatic production sizing for independent legacy emitters.

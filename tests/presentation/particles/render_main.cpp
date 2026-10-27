@@ -3,6 +3,8 @@
 using namespace particle_render_contracts;
 
 int main() {
+    test_authored_effect_admission();
+    test_authored_effect_capacity_and_reset();
     test_parser_retains_renderer_fields();
     test_death_burst_ignores_parent_velocity();
     test_legacy_moving_kite();

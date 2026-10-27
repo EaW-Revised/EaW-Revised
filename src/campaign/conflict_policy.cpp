@@ -130,6 +130,7 @@ core::Result<LayerPresence> collect_conflict_presence(const sim::galactic::Galac
             const auto* movement = snapshot.movement();
             const auto contents = movement ? std::find_if(movement->contents.begin(), movement->contents.end(),
                 [&](const auto& c) { return c.container == member.id; }) : std::vector<gc::MovementContents>::const_iterator{};
+            row.value().pathfinder = member.pathfinder;
             if (row.value().deleted) continue;
             if (movement && contents != movement->contents.end() && !row.value().transport && !row.value().whole_squadron)
                 pending.insert(pending.end(), contents->children.rbegin(), contents->children.rend());

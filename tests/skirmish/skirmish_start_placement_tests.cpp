@@ -1,6 +1,7 @@
 #include "skirmish_start_support.hpp"
 #include "eawr/core/result.hpp"
 #include "eawr/core/diagnostic.hpp"
+#include "eawr/sim/math/geometry.hpp"
 #include "eawr/sim/tactical/free_space.hpp"
 #include "eawr/units/unit_tables_common.hpp"
 #include "eawr/units/unit_tables_combat.hpp"
@@ -174,9 +175,32 @@ void synthetic_failures() {
         fails(fixture, base_inputs, skirmish::diagnostic_codes::fixture, "a type the tables lack fails");
     }
     {
+        // SK-20: mod maps tilt markers (AaW _mp_space_kuat: 350, 350, 0). The station takes the
+        // marker's whole facing, Rz(yaw) Ry(pitch) Rx(roll); a company keeps the yaw and reports the rest.
         auto inputs = base_inputs;
+        inputs.placements[0].orientation_degrees = Vec3{whole(350), whole(10), whole(90)};
         inputs.placements[1].orientation_degrees->y = whole(1);
-        fails(base_fixture, inputs, skirmish::diagnostic_codes::fixture, "a tilted marker fails");
+        const auto built = skirmish::build_start(base_fixture, inputs);
+        expect(built.has_value(), "a tilted station or spawn marker is accepted");
+        if (built) {
+            const auto station = std::find_if(built.value().units.begin(), built.value().units.end(),
+                [](const auto& unit) { return unit.role == skirmish::UnitRole::station && unit.record == 0; });
+            // Yaw 90 then pitch 10: the +X axis points along +Y and 10 degrees down (sin 10 = 0.1736).
+            bool facing = false;
+            if (station != built.value().units.end()) {
+                const auto matrix = eawr::sim::math::to_matrix(station->state.rotation, station->state.position);
+                facing = matrix && near(matrix.value().rows[0][0], 0, 64)
+                    && near(matrix.value().rows[2][0], -Fixed::scale * 1736 / 10000, Fixed::scale / 1000)
+                    && !station->dropped_orientation_degrees && station->yaw_degrees == whole(90);
+            }
+            expect(facing, "the station takes the tilted marker's whole facing");
+            const auto company = std::find_if(built.value().units.begin(), built.value().units.end(),
+                [](const auto& unit) { return unit.role != skirmish::UnitRole::station && unit.record == 1; });
+            expect(company != built.value().units.end() && company->state.rotation.x == Fixed{}
+                    && company->state.rotation.y == Fixed{} && company->dropped_orientation_degrees
+                    && company->dropped_orientation_degrees->y == whole(1),
+                "a company on a tilted spawn marker keeps the yaw and reports the dropped angles");
+        }
     }
     {
         auto inputs = base_inputs;

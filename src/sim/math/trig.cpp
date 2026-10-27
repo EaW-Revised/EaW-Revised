@@ -114,10 +114,8 @@ core::Result<Fixed> atan2_turn(Fixed y_value, Fixed x_value) noexcept {
     std::int64_t x = x_value.raw();
     std::int64_t y = y_value.raw();
     if (x == 0 && y == 0) {
-        core::Diagnostic diagnostic;
-        diagnostic.code = diagnostic_codes::undefined_angle;
-        diagnostic.message = "atan2 is undefined for the zero vector";
-        return core::Result<Fixed>::failure(std::move(diagnostic));
+        // FM-27: a direction with no planar part has heading zero. Fixed has no signed zero.
+        return core::Result<Fixed>::success(Fixed{});
     }
     constexpr std::int64_t quarter = Fixed::scale / 4;
     constexpr std::int64_t half = Fixed::scale / 2;

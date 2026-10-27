@@ -214,7 +214,8 @@ void trig_exact_tests() {
     expect(wrap_turn(Fixed::from_raw(half)).raw() == -half, "positive half wraps negative");
     expect(atan2_turn(Fixed{}, Fixed::from_raw(-1)).value().raw() == -half,
            "atan2 negative x axis exact");
-    expect(!atan2_turn(Fixed{}, Fixed{}), "atan2 zero undefined");
+    const auto zero_heading = atan2_turn(Fixed{}, Fixed{});
+    expect(zero_heading && zero_heading.value() == Fixed{}, "FM-27: atan2 zero vector has exact zero heading");
 }
 
 } // namespace

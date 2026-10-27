@@ -31,6 +31,7 @@ using eawr::testing::take;
 
 namespace space_entry_test {
 using galactic_test::expect;
+using sim::math::Vec3;
 Fixed whole(std::int64_t n) { return Fixed::from_integer(n).value(); }
 void check(core::Result<void> result) { eawr::testing::must(std::move(result)); }
 
@@ -613,8 +614,10 @@ void ground_passenger_contracts() {
     }
 }
 
-void admitted_cycle() {
-    const auto tables = tables_for_entry(); const auto input = entry_inputs(tables); const auto galaxy = galaxy_for_entry();
+void admitted_station_cycle(const bool persistent) {
+    const auto tables = tables_for_entry(); auto input = entry_inputs(tables); const auto galaxy = galaxy_for_entry();
+    for (auto& placement : input.map.placements) if (placement.type == "Space Station Position")
+        placement.orientation_degrees = Vec3{whole(13), whole(27), whole(49)};
     const campaign::GameSession::ContentResolver content = [&](const auto& record) {
         auto bound = campaign::space_entry_content(record.tactical, input.map);
         if (bound) rider_bonus(bound.value());
@@ -627,6 +630,10 @@ void admitted_cycle() {
         record.seats = {{{1}, 1}, {{2}, 2}};
         for (const auto& fleet : snapshot.fleets()) if (fleet.orbit == event.value)
             for (const auto& member : fleet.members) record.forces.push_back({member.id, member.type, fleet.owner, fleet.id});
+        if (persistent) {
+            record.station = 39; record.station_type = 6;
+            record.forces.push_back({39, 6, 2, 0, campaign::ForceRole::escort});
+        }
         std::sort(record.forces.begin(), record.forces.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
         return core::Result<std::optional<campaign::RecordedAdmission>>::success(campaign::RecordedAdmission{
             snapshot.completed_tick(), std::move(record), {campaign::ConflictRoute::pending_tactical, false, true}});
@@ -684,6 +691,7 @@ void admitted_cycle() {
         const auto station = std::find_if(resolved.tactical.units.begin(), resolved.tactical.units.end(), [&](const auto& u) { return u.entity_id == resolved.station; });
         expect(station != resolved.tactical.units.end() && station->owner == 2 && station->garrison_enabled,
             "current station is defender-owned with authored garrison enabled");
+        expect(!persistent || resolved.station == 39, "tilted persistent station retains its identity through live admission");
         const auto spawner = std::find_if(game.battle()->motion().squadrons.spawners.begin(), game.battle()->motion().squadrons.spawners.end(), [](const auto& p) { return p.type_id == skirmish::type_id("Station"); });
         expect(spawner != game.battle()->motion().squadrons.spawners.end() && spawner->entries.front().reserve == -1,
             "campaign station uses its authored unlimited garrison reserve");
@@ -726,13 +734,97 @@ void admitted_cycle() {
     }
 }
 
+void admitted_cycle() {
+    admitted_station_cycle(false);
+    admitted_station_cycle(true);
+}
+
 void preparation_contracts() {
     const auto tables = tables_for_entry(); auto input = entry_inputs(tables);
     campaign::ConflictRecord record; record.id = 90; record.invader = 1; record.defender = 2;
     record.station_level = 2; record.map_identity = input.map.map;
     record.forces = {{20, 1, 1, 10}, {21, 2, 1, 10}, {22, 1, 1, 10}, {23, 3, 1, 10}, {30, 1, 2, 12}};
+    auto flagged = input; flagged.pathfinders = {20, 30};
+    flagged.roster_order = {20, 22, 21, 23, 30};
+    auto pathfinder_record = record; pathfinder_record.forces.push_back({31, 1, 2, 12});
+    const auto pathfinder = take(campaign::prepare_space_entry(pathfinder_record, flagged, 100, 17));
+    const auto role = [](const auto& plan, const auto id) {
+        return std::find_if(plan.conflict.forces.begin(), plan.conflict.forces.end(), [id](const auto& f) { return f.id == id; })->role;
+    };
+    expect(role(pathfinder, 20) == campaign::ForceRole::deployed
+        && role(pathfinder, 21) == campaign::ForceRole::reinforcement
+        && role(pathfinder, 22) == campaign::ForceRole::reinforcement
+        && role(pathfinder, 30) == campaign::ForceRole::deployed
+        && role(pathfinder, 31) == campaign::ForceRole::deployed,
+        "WGT-06/40: explicit invader pathfinder starts alone and defender flag does not constrain its split");
+    auto superweapon = flagged; superweapon.types[1].superweapon = true;
+    superweapon.map.placements.push_back(marker(99, "Death_Star_Position", 0));
+    const auto with_super = take(campaign::prepare_space_entry(record, superweapon, 100, 17));
+    expect(role(with_super, 20) == campaign::ForceRole::deployed && role(with_super, 21) == campaign::ForceRole::deployed,
+        "pathfinder selection preserves always-initial superweapons");
+    auto preferred = flagged; preferred.preferred_pathfinder_type = 2;
+    const auto preferred_plan = take(campaign::prepare_space_entry(record, preferred, 100, 17));
+    expect(role(preferred_plan, 21) == campaign::ForceRole::deployed && role(preferred_plan, 20) == campaign::ForceRole::reinforcement,
+        "story preferred type remains separate from the ordinary flag");
+    auto disabled = flagged; disabled.use_pathfinder = false;
+    expect(take(campaign::prepare_space_entry(record, disabled, 100, 17)).conflict
+        == take(campaign::prepare_space_entry(record, input, 100, 17)).conflict, "disabled flags retain the population split");
+    auto missing_flag = input; missing_flag.pathfinders = {999};
+    expect(take(campaign::prepare_space_entry(record, missing_flag, 100, 17)).conflict
+        == take(campaign::prepare_space_entry(record, input, 100, 17)).conflict, "missing pathfinder falls back to population split");
     auto prepared = take(campaign::prepare_space_entry(record, input, 100, 17));
     expect(prepared.marker_draws == 1, "multiple station markers consume one synchronized draw");
+    // WGT-09: complete three-axis station markers are valid, for new and persistent stations.
+    auto tilted_tables = tables;
+    std::find_if(tilted_tables.units.begin(), tilted_tables.units.end(), [](const auto& t) {
+        return t.id == "Station";
+    })->movement.layer_z_adjust = whole(17);
+    const std::array<Vec3, 4> angles{{{whole(90), {}, {}}, {{}, whole(90), {}},
+        {whole(90), whole(90), {}}, {{}, whole(90), whole(90)}}};
+    const std::array<Vec3, 4> up{{{{}, whole(-1), {}}, {whole(1), {}, {}},
+        {{}, whole(-1), {}}, {{}, whole(1), {}}}};
+    const std::array<Vec3, 4> forward{{{{}, {}, whole(1)}, {{}, whole(1), {}},
+        {whole(1), {}, {}}, {whole(-1), {}, {}}}};
+    const auto near = [](Vec3 a, Vec3 b) {
+        const auto close = [](Fixed x, Fixed y) {
+            const auto d = take(sim::math::subtract(x, y));
+            return d > Fixed::from_ratio(-1, 1000).value() && d < Fixed::from_ratio(1, 1000).value();
+        };
+        return close(a.x, b.x) && close(a.y, b.y) && close(a.z, b.z);
+    };
+    for (const bool persistent : {false, true}) for (std::size_t axis = 0; axis < angles.size(); ++axis) {
+        auto tilted = entry_inputs(tilted_tables);
+        for (auto& p : tilted.map.placements) if (p.type == "Space Station Position") {
+            p.orientation_degrees = angles[axis]; p.position->z = whole(23); p.layer_z_adjust = whole(99);
+        }
+        auto station_record = record;
+        if (persistent) {
+            station_record.station = 35; station_record.station_type = 6;
+            station_record.forces.push_back({35, 6, 2, 0, campaign::ForceRole::escort});
+        }
+        const auto plan = take(campaign::prepare_space_entry(station_record, tilted, 100, 17));
+        expect(plan.marker_draws == prepared.marker_draws, "station tilt does not change random marker selection");
+        const auto entry = take(campaign::build_space_entry(station_record, tilted, 100, 17));
+        const auto station = std::find_if(entry.start.units.begin(), entry.start.units.end(), [&](const auto& u) {
+            return u.state.entity_id == entry.conflict.station;
+        });
+        expect(station != entry.start.units.end(), "tilted station is created");
+        if (station == entry.start.units.end()) continue;
+        const auto frame = take(sim::math::to_matrix(station->state.rotation, {}));
+        expect(near(take(sim::math::transform_vector(frame, {{}, {}, whole(1)})), up[axis])
+            && near(take(sim::math::transform_vector(frame, {{}, whole(1), {}})), forward[axis]),
+            "station retains authored roll, pitch and yaw in placement order");
+        expect(station->state.position.z == whole(40) && station->state.owner == 2 && station->state.garrison_enabled,
+            "tilt retains station height, defender ownership and garrison; marker type height is not copied");
+        expect(tilted.map.placements[2].orientation_degrees == angles[axis], "station placement leaves source facts immutable");
+    }
+    for (const bool missing_position : {false, true}) {
+        auto absent = input;
+        for (auto& p : absent.map.placements) if (p.type == "Space Station Position") {
+            if (missing_position) p.position.reset(); else p.orientation_degrees.reset();
+        }
+        expect(!campaign::prepare_space_entry(record, absent, 100, 17), "incomplete station pose still refuses entry");
+    }
     expect(std::all_of(prepared.placements.begin(), prepared.placements.end(), [](const auto& p) {
         return p.force != 20 && p.force != 22 ? true : p.marker == 4;
     }), "closest attacker marker wins with authored list tie order");
@@ -1150,8 +1242,8 @@ void garrison_contracts() {
 }
 
 // #3956 / WSL-16, WSL-16a, WGT-10: a campaign station also launches a ship type (no squadron members) as one
-// single ship: starting count 1, a lost ship is replaced from the unlimited reserve, skirmish tables drop the
-// entry. The ship's own Hyperspace tag decides how it enters: with it down the reinforcement arrival lane, without
+// single ship: starting count 1, a lost ship is replaced from the unlimited reserve. Skirmish tables retain the
+// entry with no reserves. The ship's own Hyperspace tag decides how it enters: with it down the reinforcement arrival lane, without
 // it straight from the bay; the squadron entry always leaves the hangar. Level 2 places the "Station" row with a Tartan-like ship;
 // level 4 places its own "Station4" row (a different authored station type, as in the retail level-4 station)
 // with an Acclamator-like ship; the rule is the same.
@@ -1180,13 +1272,24 @@ void station_ship_spawn_scenario(const std::string& ship_name, const bool hypers
             && generic_station->entries[1].ship && generic_station->entries[1].arrival == hyperspace
             && generic_station->entries[0].reserve == 0 && generic_station->entries[1].reserve == 0,
             "generic campaign conflict content retains single ships and zero reserves");
-        if (!campaign_policy) result.content.motion = take(skirmish::session_content(tables)).motion;
+        if (!campaign_policy) {
+            result.content.motion = take(skirmish::session_content(tables)).motion;
+            // A ship-only beacon must retain its spawner even without any SquadronProfile entry.
+            station->spawner->starting = {{ship_name, units::no_index, 3}};
+            station->spawner->delay_seconds = whole(2);
+            const auto beacon_motion = take(units::motion_table(tables));
+            const auto* beacon = beacon_motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
+            expect(beacon && beacon->entries.size() == 1 && beacon->entries[0].ship
+                && beacon->entries[0].starting == 3 && beacon->delay_frames == 60,
+                "WSL-16a: skirmish retains a ship-only spawner and converts its authored two-second delay");
+        }
         return result;
     };
     const auto skirmish_like = build(false);
-    expect(std::none_of(skirmish_like.content.motion.squadrons.spawners.begin(), skirmish_like.content.motion.squadrons.spawners.end(),
-        [](const auto& profile) { return std::any_of(profile.entries.begin(), profile.entries.end(), [](const auto& e) { return e.ship; }); }),
-        "the skirmish spawn policy keeps dropping ship spawn entries");
+    const auto* skirmish_station = skirmish_like.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
+    expect(skirmish_station && skirmish_station->entries.size() == 2 && skirmish_station->entries[1].ship
+        && skirmish_station->entries[1].arrival == hyperspace && skirmish_station->entries[1].reserve == 0,
+        "WSL-16a: skirmish profiles retain ordinary ship entries without campaign reserves");
     const auto entry = build(true);
     const auto* profile = entry.content.motion.squadrons.find_spawner(skirmish::type_id(station_name), 2);
     expect(entry.conflict.station_level == level && profile != nullptr && profile->entries.size() == 2 && !profile->entries[0].ship && !profile->entries[0].arrival

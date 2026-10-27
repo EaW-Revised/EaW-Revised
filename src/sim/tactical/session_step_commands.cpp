@@ -311,7 +311,8 @@ core::Result<void> session_detail::Tick::abilities_tracking() {
             if (mc30_fired[index]) {
                 const auto& profile = *impl_->abilities.find(unit.state.type_id);
                 const auto slot = *ability_slot(profile, AbilityKind::cluster_bomb);
-                spawn_instant_ability(unit, AbilityKind::cluster_bomb, *profile.abilities[slot].spawned, unit.state.position);
+                if (profile.abilities[slot].spawned)
+                    spawn_instant_ability(unit, AbilityKind::cluster_bomb, *profile.abilities[slot].spawned, unit.state.position);
             }
             if (jammer_ended[index]) register_jammer(unit.state.entity_id, false);
             if (detonating[index] != 0U) self_destructs.push_back(unit.state.entity_id);

@@ -111,10 +111,16 @@ public:
     // `files` in load order: (logical path, XML text).
     [[nodiscard]] static core::Result<EquationSet> parse(
         const std::vector<std::pair<std::string, std::string>>& files, const ConverterFunction& converters);
+    // First-wins addition; a failed batch leaves the existing equations unchanged.
+    [[nodiscard]] core::Result<void> append(
+        const std::vector<std::pair<std::string, std::string>>& files, const ConverterFunction& converters);
     [[nodiscard]] const Equation* find(std::string_view name) const; // case-insensitive
+    [[nodiscard]] bool uses_lookup(const std::vector<std::string>& tokens) const;
     [[nodiscard]] std::size_t size() const noexcept { return equations_.size(); }
 
 private:
+    [[nodiscard]] static core::Result<EquationSet> parse_new(
+        const std::vector<std::pair<std::string, std::string>>&, const ConverterFunction&, const EquationSet* prior);
     std::map<std::string, Equation, std::less<>> equations_; // key upper case
 };
 

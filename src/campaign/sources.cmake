@@ -3,6 +3,7 @@
 
 set(EAWR_CAMPAIGN_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_runtime.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/galactic_story_scripts.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_stock_runtime.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_usability.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/galactic_ai_services.cpp"

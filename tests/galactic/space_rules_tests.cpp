@@ -110,7 +110,11 @@ void proof() {
     health.percentages[0] = Fixed::from_raw(Fixed::scale / 2);
     upgrade.production.combat_bonuses.push_back(health);
     tables.units.push_back(upgrade);
+    auto shipyard = tables.units.front(); shipyard.id = "ModShipyard";
+    shipyard.production.buildable_campaign = {{"Empire", {"Upgrade"}}};
+    tables.units.push_back(shipyard);
     auto inputs = synthetic_inputs(tables);
+    inputs.match_defaults.credits = whole(4321);
     inputs.factions[0].space_unit_cap = 2; inputs.factions[1].space_unit_cap = 7;
     auto fixture = fixture_for(inputs);
     fixture.victory_condition = tactical::VictoryCondition::enemy_starbase_destroyed;
@@ -132,7 +136,41 @@ void proof() {
     expect(multiplayer && multiplayer.value().players.size() == 2
         && multiplayer.value().players[0].credits == whole(4321) && multiplayer.value().players[1].credits == whole(4321)
         && !multiplayer.value().players[0].strategic_credits && !multiplayer.value().players[1].strategic_credits,
-        "skirmish/multiplayer preserves MP_Default_Credits without campaign category switching");
+        "skirmish/multiplayer preserves authored default match credits without campaign category switching");
+    {
+        auto authored = tables;
+        auto& bonus = std::find_if(authored.units.begin(), authored.units.end(),
+            [](const auto& unit) { return unit.id == "Upgrade"; })->production.combat_bonuses.front();
+        bonus.percentages[1] = Fixed::from_decimal("0.05").value();
+        bonus.percentages[4] = Fixed::from_decimal("-0.025").value();
+        const auto signed_rules = skirmish::economy_rules(ordinary, inputs, authored, true);
+        const auto id = skirmish::type_id("Upgrade");
+        expect(signed_rules && signed_rules.value().upgrade(id)->bonuses.front().percentages == bonus.percentages,
+            "WPR-51: signed authored trade-offs survive economy compilation");
+        bonus.percentages[1] = whole(9);
+        const auto limited = skirmish::economy_rules(ordinary, inputs, authored, true);
+        expect(static_cast<bool>(limited), "project upgrade support limit does not abort session content");
+        if (limited && multiplayer) {
+            expect(limited.value().disabled_types.contains(id)
+                && limited.value().upgrade(id)->bonuses.front().percentages[1] == whole(9),
+                "over-limit upgrade is unavailable with authored data retained");
+            bool diagnosed = false;
+            for (const auto& menu : limited.value().menus) for (const auto& option : menu.options)
+                if (option.type == id) diagnosed = !option.available && option.disabled_reason.find("+8") != std::string::npos;
+            expect(diagnosed, "over-limit upgrade menu explains the project support limit");
+            auto bounded = limited.value();
+            // Campaign compilation expects its caller to supply the galactic accounts.
+            bounded.players = multiplayer.value().players;
+            for (auto& player : bounded.players) player.credit_cap = whole(6000);
+            auto setup = ordinary.setup; setup.first_free_entity_id = 1024;
+            setup.free_garrisons.clear();
+            setup.campaign.emplace(); setup.campaign->players = bounded.players;
+            const auto session = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, bounded);
+            expect(static_cast<bool>(session),
+                "unavailable over-limit upgrade permits session construction");
+            if (!session) std::cerr << session.error().message << '\n';
+        }
+    }
     rules.players = {{1, whole(777), 3, 5, 1, whole(90), false, {}},
         {2, whole(2345), 2, 5, 3, whole(180), true, {{whole(600), Fixed::from_raw(Fixed::scale / 2)}}}};
     rules.restricted_reserves = {80};
@@ -210,6 +248,27 @@ void proof() {
         && !entry.content.economy.players[1].strategic_credits, "WGA-201 campaign space retains ordinary credits/tech without a land switch");
     const auto* menu = entry.content.economy.menu(conflict.station_type, skirmish::faction_id("Empire"));
     expect(menu && menu->options.size() == 1 && menu->options[0].price == whole(123), "campaign list/cost excludes multiplayer ship menu");
+    {
+        auto priced_setup = setup;
+        priced_setup.campaign->corruption_price_multiplier = whole(2);
+        auto priced_content = entry.content;
+        expect(static_cast<bool>(campaign::bind_space_rules(priced_setup, inputs, priced_content)), "campaign prices bind");
+        const auto* yard_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Empire"));
+        const auto* station_menu = priced_content.economy.menu(conflict.station_type, skirmish::faction_id("Empire"));
+        expect(yard_menu && yard_menu->station_producer && yard_menu->options.size() == 1
+            && yard_menu->options[0].available && yard_menu->options[0].price == whole(246),
+            "ordinary mod shipyard eligibility preserves the campaign corruption price multiplier");
+        expect(station_menu && station_menu->options.size() == 1 && station_menu->options[0].price == whole(123),
+            "existing station price exemption is unchanged");
+        auto tiny_tables = tables;
+        for (auto& type : tiny_tables.units) if (type.id == "Upgrade") type.production.build_cost_campaign = Fixed::from_raw(1);
+        auto tiny_inputs = inputs; tiny_inputs.tables = &tiny_tables;
+        priced_setup.campaign->corruption_price_multiplier = Fixed::from_raw(1);
+        expect(static_cast<bool>(campaign::bind_space_rules(priced_setup, tiny_inputs, priced_content)), "tiny campaign prices bind");
+        yard_menu = priced_content.economy.menu(skirmish::type_id("ModShipyard"), skirmish::faction_id("Empire"));
+        expect(yard_menu && yard_menu->options.size() == 1 && yard_menu->options[0].price == Fixed{} && !yard_menu->options[0].available,
+            "ordinary mod shipyard still rejects a campaign price rounded to zero");
+    }
     expect(entry.content.victory.condition == tactical::VictoryCondition::all_enemy_units_destroyed
         && entry.content.victory.countdown_frames == 210 && setup.free_garrisons.empty()
         && !setup.skirmish->match.free_starting_units && setup.skirmish->match.game_timer == 0,

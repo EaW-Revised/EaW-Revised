@@ -30,6 +30,21 @@ build's assertions and malformed numeric conversions establish no normal-game
 recovery contract. This refusal is not a claim of retail clamping or saturation.
 Planet inputs beyond the range reader's qualified 1000-index cap also refuse.
 
+The derived matrix uses a 64-bit word with 32-bit threat and distance halves.
+For `n` planets and largest entering halves `T` and `D`, a simple retained
+path has at most `n-1` edges; joining two paths is bounded by `2*(n-1)*T`
+and `2*(n-1)*D`. If both are below `2^32-1`, every relaxation fits exactly.
+Graphs above that sufficient bound are checked against their actual finite
+row/column maxima at each stage, rather than refused from the coarse bound.
+Each half-sum is computed in 64 bits and must remain below `2^32-1`, so it
+cannot carry into the other half or collide with the all-ones missing word.
+Reconstruction checks each actual prefix sum too. Missing words never enter
+addition. This preserves lexicographic threat/distance ordering and strict
+ties for every graph in the old domain, without saturating larger graphs.
+The WGA-386 missing-route decoded fallback remains distance `6553.5` and
+threat `6553500`; it is independent of the internal matrix width. Matrix,
+geometry and memo are derived and do not alter checkpoint encoding.
+
 Initialization computes immediately and installs the sourced first deadline.
 Ordinary refresh only runs inside admitted execution, tests its independent
 mode-frame deadline inclusively and rearms at current frame plus ninety. Query

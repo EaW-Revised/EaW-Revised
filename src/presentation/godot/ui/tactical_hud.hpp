@@ -1,5 +1,7 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 // The tactical space HUD shell in Godot (ticket P2-20a, #83; docs/ui/ui-layer.md
 // sections 1.3, 3.3 and 3.4). The engine-free presentation::ui::HudShell says
 // what to draw; this draws it on a canvas layer over the 3D view:
@@ -176,6 +178,7 @@ public:
     [[nodiscard]] bool build(const vfs::Vfs& filesystem, const data::Catalog* objects,
                              const std::optional<std::string>& context_name, godot::Node& parent);
 
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     [[nodiscard]] const std::string& failure() const noexcept;
     [[nodiscard]] int options_presses() const noexcept;
     [[nodiscard]] EawrTacticalHud* hud() const noexcept;
@@ -270,11 +273,12 @@ public:
         std::uint32_t speed_step{2};
     };
     void set_time_view(const TimeView& view);
+    void set_pause_notice(const std::string& text);
     // #453: the local player's result (true: victory) once decided, and whether the battle ended.
     void set_battle(std::optional<bool> won, bool ended);
     void set_results(const presentation::ui::BattleResults& results);
     using ReplayWriter = std::function<std::vector<std::uint8_t>(std::string&)>;
-    void set_replay_writer(bool allowed, ReplayWriter writer);
+    void set_replay_writer(bool allowed, ReplayWriter writer, ReplayWriter session_writer = {});
     void set_begin(bool ready);
     // RP-06..RP-08: the retreat countdown line (already built, localized) in the retreating faction's
     // colour; an empty line hides it. The position is the tactical countdown share of GameConstants.

@@ -1,14 +1,19 @@
 #include "../support/check.hpp"
+#include "../support/env.hpp"
 #include "../../src/sim/tactical/combat_internal.hpp"
 #include "../../src/sim/tactical/collection.hpp"
 #include "../../src/sim/tactical/rocket_internal.hpp"
 #include "../../src/sim/tactical/motion_internal.hpp"
 #include "eawr/platform/sim_workers.hpp"
+#include "eawr/sim/tactical/session.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -222,8 +227,8 @@ void seeded_spatial_offsets() {
             && std::llabs(control.y.raw() - y.raw()) < 100 && std::llabs(control.z.raw() - z.raw()) < 100,
             "RFL-03: interior controls pin angle-before-radius uniform draws and spatial axes");
     }
-    expect(random.draws() == 6 && work.control_points == 5 && work.arc_visits <= d::rocket_arc_visit_limit,
-        "RFL-03/04: two draws per interior point, bounded arc work");
+    expect(random.draws() == 6 && work.control_points == 5 && work.arc_visits > 0,
+        "RFL-03/04: two draws per interior point with measured arc work");
     expect(projectile.flight->path.front().a == at(0)
         && m::length(minus(spline_end(*projectile.flight), at(200))).value().raw() < 100,
         "RFL-03: endpoints have no random offsets");
@@ -338,19 +343,285 @@ void extension_and_construction_states() {
     expect(!d::prepare_rocket_path(projectile) && *projectile.flight == unbuilt,
         "RFL-06: failed construction is a diagnostic and leaves no initialized route");
     profile.curve_distance = Fixed::from_raw(1);
+    const d::RocketPathPolicy small{32};
     projectile = launch(profile, at(220)); t::CombatRandom random(7, 9, 1, t::rocket_path_slot);
-    expect(!d::prepare_rocket_path(projectile, &random, &work) && !projectile.flight->path_initialized
-        && projectile.flight->path.empty() && random.draws() == 0 && work.control_points <= d::rocket_point_limit,
-        "RFL-03/06: pathological subdivision fails before draws or canonical path commit");
+    expect(!d::prepare_rocket_path(projectile, &random, &work, small) && !projectile.flight->path_initialized
+        && projectile.flight->path.empty() && random.draws() == 0 && work.control_points == 1 && work.required_points > small.max_controls,
+        "RFL-03/06: injected deterministic storage refusal precedes draws and canonical path commit");
     auto repeated = projectile; d::RocketPathWork repeated_work;
     t::CombatRandom repeated_random(7, 9, 1, t::rocket_path_slot);
-    expect(!d::prepare_rocket_path(repeated, &repeated_random, &repeated_work)
+    expect(!d::prepare_rocket_path(repeated, &repeated_random, &repeated_work, small)
         && repeated_work.control_points == work.control_points && repeated_work.arc_visits == work.arc_visits,
         "RFL-03/04: failed construction has repeatable deterministic work bounds");
     profile = rocket_profile(); profile.straight_distance = {};
     projectile = launch(profile, at(1));
     expect(static_cast<bool>(d::prepare_rocket_path(projectile)) && projectile.flight->path_initialized
         && projectile.flight->path.empty(), "RFL-06: an unevaluable retained route is distinct from failed construction");
+}
+
+// Independent unlimited recursive RFL-04 reference, with the same Q24 policy at
+// a nonprogressing interval. No route-wide work/depth ceiling.
+Fixed reference_arc(const t::RocketSegment& segment, const Fixed low, const Fixed high, std::size_t& visits) {
+    using t::motion_detail::Calc;
+    Calc calc;
+    const auto scale = [&](const m::Vec3& v, const Fixed factor) {
+        return m::Vec3{calc.mul(v.x, factor), calc.mul(v.y, factor), calc.mul(v.z, factor)};
+    };
+    const auto eval = [&](const Fixed value) {
+        return plus(segment.a, scale(plus(segment.b, scale(plus(segment.c, scale(segment.d, value)), value)), value));
+    };
+    ++visits;
+    const auto first = eval(low), last = eval(high);
+    const auto chord = calc.length(minus(last, first));
+    const auto tolerance = Fixed::from_raw(17);
+    if (chord < tolerance) return chord;
+    const auto mid = Fixed::from_raw(low.raw() + (high.raw() - low.raw()) / 2);
+    const auto center = eval(mid);
+    const auto halves = calc.add(calc.length(minus(center, first)), calc.length(minus(last, center)));
+    if (halves.raw() == 0 || calc.abs(calc.sub(calc.div(chord, halves), q(1))) <= tolerance
+        || calc.abs(calc.sub(chord, halves)) <= tolerance || mid == low || mid == high) return halves;
+    const auto left = reference_arc(segment, low, mid, visits);
+    const auto right = reference_arc(segment, mid, high, visits);
+    expect(calc.ok(), "RFL-04: reference arithmetic remains representable");
+    return calc.add(left, right);
+}
+
+void dynamic_route_contracts() {
+    d::RocketPathWork numeric_work;
+    const t::RocketSegment fast{{}, at(1000000), {}, {}, {}};
+    const auto estimate = d::rocket_arc_length(fast, {}, Fixed::from_raw(1), numeric_work);
+    expect(estimate && estimate.value().raw() == 1000000 && numeric_work.midpoint_estimates == 1,
+        "RFL-04/09: Q24 nonprogress accepts available two-chord estimate with a diagnostic counter");
+    auto profile = rocket_profile(); profile.straight_distance = {}; profile.curve_distance = q(1);
+    const auto spacing = Fixed::from_raw(Fixed::scale * 11 / 10);
+    for (const std::size_t count : {2047U, 2048U, 2049U, 8193U}) {
+        auto projectile = launch(profile);
+        projectile.flight->aim = {Fixed::from_raw(spacing.raw() * static_cast<std::int64_t>(count - 1)), {}, {}};
+        d::RocketPathWork work;
+        const auto built = d::prepare_rocket_path(projectile, nullptr, &work);
+        expect(built && work.control_points == count && projectile.flight->path.size() + 1 == count,
+            "RFL-03/09: full authored subdivision below, at and above former control ceiling");
+        if (!built) continue;
+        expect(m::length(minus(spline_end(*projectile.flight), projectile.flight->aim)).value().raw() <= 4,
+            "RFL-03/04: dynamic natural cubic preserves exact endpoint");
+        std::size_t visits{};
+        for (const auto& segment : projectile.flight->path) {
+            expect(segment.length == reference_arc(segment, {}, q(1), visits),
+                "RFL-04: dynamic spline lengths equal unlimited recursive reference");
+        }
+        expect(visits == work.arc_visits, "RFL-04: exact visits count all segment evaluations");
+    }
+    auto repro = launch(profile, at(2252)); d::RocketPathWork work;
+    expect(d::prepare_rocket_path(repro, nullptr, &work) && work.control_points == 2049,
+        "RFL-09: formerly rejected 2252-unit spacing-one route constructs 2049 controls");
+    d::CombatWorld world; d::CollectionTrees collidables; world.projectile_collection = &collidables;
+    d::ProjectileScratch scratch;
+    const auto moved = d::step_projectile(world, repro, scratch);
+    expect(moved && !moved.value().expired && moved.value().projectile.position.x > repro.position.x,
+        "RFL-09: old-boundary route advances instead of terminal fallback");
+    profile.target_radius = false;
+    auto extended = launch(profile, at(220));
+    expect(d::prepare_rocket_path(extended, nullptr, &work) && work.control_points > 2048
+        && work.tangent_samples == 2 && extended.flight->path.size() > 2048,
+        "RFL-05/09: unnormalized extension crosses former ceiling before trim");
+
+    // Many lightly curved controls make cumulative evaluation/extension/trim work
+    // cross the former route-wide visit ceiling without an expensive deep curve.
+    profile.curve_offset = Fixed::from_raw(1); profile.authored_distance = q(90000);
+    auto curved = launch(profile, at(100000)); t::CombatRandom random(7, 9, 1, t::rocket_path_slot);
+    const auto built = d::prepare_rocket_path(curved, &random, &work);
+    expect(built && work.arc_visits > 131072 && work.control_points > 2048 && work.tangent_samples == 2,
+        "RFL-04/05/09: curved extension and trim exceed former cumulative visit ceiling");
+    if (built) {
+        std::size_t visits{};
+        for (const auto& segment : curved.flight->path) expect(
+            segment.length == reference_arc(segment, {}, q(1), visits),
+            "RFL-04/09: large curved trimmed path equals unlimited reference");
+    }
+}
+
+void refusal_and_dynamic_workers() {
+    auto profile = rocket_profile(); profile.straight_distance = {}; profile.curve_distance = q(1);
+    const d::RocketPathPolicy small{32};
+    d::CombatWorld world; d::CollectionTrees collidables; world.projectile_collection = &collidables;
+    std::vector<std::uint8_t> reference;
+    std::vector<std::string> reference_diagnostics;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        eawr::platform::ThreadWorkerAdapter pool(workers);
+        std::vector<t::Projectile> flying;
+        for (std::size_t index = 0; index < 8; ++index) {
+            auto projectile = launch(profile, at(index % 2 == 0 ? 2252 : 20)); projectile.id = index + 1;
+            flying.push_back(projectile);
+        }
+        std::vector<std::string> diagnostics(flying.size());
+        std::vector<std::uint8_t> terminal(flying.size());
+        for (std::uint64_t frame = 1; frame <= 3; ++frame) {
+            world.frame = frame;
+            const auto ran = pool.execute_phase("rocket-dynamic", flying.size(), [&](const std::size_t index) {
+                if (terminal[index]) return;
+                d::ProjectileScratch scratch;
+                // Only one refused projectile; the other long paths must advance.
+                const auto stepped = d::step_projectile(world, flying[index], scratch, nullptr, index == 0 ? &small : nullptr);
+                expect(static_cast<bool>(stepped), "RFL-09: refusal is a successful per-projectile terminal result");
+                if (!stepped) return;
+                const auto& result = stepped.value();
+                if (index == 0) {
+                    expect(result.expired && result.expiry_reason == t::ProjectileExpiryReason::rocket_path_exhausted
+                        && result.projectile.position == flying[index].position && !result.projectile.flight->path_initialized
+                        && !result.hit && scratch.candidate_count == 0 && result.path_diagnostic.has_value(),
+                        "RFL-06/09: refusal retains current pose, no partial path or collision, one diagnostic");
+                }
+                if (index == 2) expect(!result.expired && result.projectile.position.x > flying[index].position.x,
+                    "RFL-09: unrelated long projectile keeps advancing through later frames");
+                if (result.path_diagnostic) diagnostics[index] += result.path_diagnostic->message;
+                flying[index] = result.projectile;
+                terminal[index] = result.expired ? 1 : 0;
+            });
+            expect(static_cast<bool>(ran), "RFL-09: partitioned dynamic/refused flight completes later frames");
+        }
+        std::vector<std::uint8_t> bytes;
+        for (const auto& projectile : flying) d::append_projectile(bytes, projectile);
+        if (workers == 1) { reference = bytes; reference_diagnostics = diagnostics; }
+        else expect(bytes == reference && diagnostics == reference_diagnostics,
+            "RFL-09: dynamic/refused canonical flight and diagnostic order agree on 1/2/4/8 workers");
+    }
+    auto invalid = launch(profile); invalid.flight->profile.curve_distance = {};
+    d::ProjectileScratch scratch;
+    const auto malformed = d::step_projectile(world, invalid, scratch);
+    expect(!malformed && malformed.error().code == t::diagnostic_codes::invalid_setup,
+        "RFL-09: malformed profile remains setup failure, separate from storage refusal");
+    auto overflow = launch(profile); overflow.flight->aim.x = Fixed::from_raw(std::numeric_limits<std::int64_t>::max());
+    // Force an unrepresentable Q24 quotient before storage allocation. A spacing
+    // of one whole unit instead requests a representable multi-terabyte route.
+    overflow.flight->profile.curve_distance = Fixed::from_raw(1);
+    const auto refused = d::step_projectile(world, overflow, scratch);
+    expect(refused && refused.value().expired && refused.value().path_diagnostic
+        && refused.value().projectile.position == overflow.position,
+        "RFL-09: unrepresentable geometry expires only its projectile at current pose");
+}
+
+void refusal_session_contract() {
+    t::TacticalSetup setup;
+    setup.seed = 73;
+    setup.players = {{1, 1, 1, t::player_flag_commandable}, {2, 2, 2, t::player_flag_commandable}};
+    for (std::uint32_t id = 1; id <= 3; ++id) {
+        t::UnitState unit; unit.entity_id = id; unit.type_id = id; unit.owner = id == 3 ? 2 : 1;
+        unit.position = id == 3 ? at(100000) : at(0, static_cast<std::int64_t>(id) * 10);
+        unit.rotation = m::identity_quat(); setup.units.push_back(unit);
+    }
+    t::CombatTable combat;
+    combat.priority_sets.emplace_back(); combat.priority_sets.back().unlisted = q(1);
+    for (std::uint32_t type = 1; type <= 3; ++type) {
+        t::CombatProfile profile; profile.type_id = type; profile.category_bits = 1; profile.priority_set = 0;
+        profile.max_attack_distance = q(200000);
+        if (type < 3) {
+            t::WeaponProfile weapon; weapon.range = q(200000);
+            weapon.min_recharge_hundredths = 0; weapon.max_recharge_hundredths = 0;
+            weapon.opportunity_when_idle = true; weapon.opportunity_when_targeting = true;
+            weapon.shot.emplace(); weapon.shot->speed = q(25); weapon.shot->max_travel = q(200000);
+            auto flight = rocket_profile(); flight.straight_distance = {};
+            // Count division itself is unrepresentable, before any large allocation.
+            flight.curve_distance = type == 1 ? Fixed::from_raw(1) : q(500);
+            weapon.shot->flight = flight; profile.weapons.push_back(weapon);
+        }
+        combat.profiles.push_back(profile);
+    }
+    const std::vector<t::SensorProfile> sensors{{1, q(200000)}, {2, q(200000)}, {3, q(200000)}};
+    t::DurabilityTable durability;
+    durability.damage.emplace(); durability.damage->damage_types = 1; durability.damage->armor_types = 1;
+    durability.damage->armor_mods = {q(1)};
+    durability.damage->shield_recharge_frames = 1;
+    std::vector<std::string> reference;
+    for (const auto workers : {1U, 2U, 4U, 8U}) {
+        auto created = t::TacticalSession::create(setup, sensors, durability, {}, std::nullopt, combat);
+        expect(static_cast<bool>(created), "RFL-09: mixed refusal session accepts valid numeric profile domains");
+        if (!created) continue;
+        auto session = std::move(created).value(); eawr::platform::ThreadWorkerAdapter pool(workers);
+        std::size_t diagnostics{}; bool survivor = false, stopped_source = false; std::vector<std::string> hashes;
+        for (unsigned tick = 0; tick < 8; ++tick) {
+            const auto stepped = session.step(pool);
+            expect(static_cast<bool>(stepped), "RFL-09: one numerical refusal does not stop later battle ticks");
+            if (!stepped) break;
+            hashes.push_back(stepped.value().state_sha256);
+            for (const auto& entry : stepped.value().diagnostics) {
+                if (entry.code == t::diagnostic_codes::resource_limit) {
+                    ++diagnostics; hashes.push_back(entry.message);
+                }
+            }
+            bool fired = false;
+            for (const auto& projectile : session.projectiles()) {
+                if (projectile.shooter == 2 && projectile.position.x > Fixed{}) survivor = true;
+                fired = fired || projectile.shooter == 1;
+            }
+            // Isolate one refused shot, while the other source keeps firing.
+            if (fired && !stopped_source) {
+                expect(static_cast<bool>(session.stage_remove(1)), "RFL-09: remove source after its single shot");
+                stopped_source = true;
+            }
+        }
+        expect(diagnostics == 1 && survivor, "RFL-09: one diagnostic and unrelated projectile advancement in real session");
+        if (workers == 1) reference = hashes;
+        else expect(hashes == reference, "RFL-09: real session hashes and diagnostic order equal on 1/2/4/8 workers");
+    }
+}
+
+void dynamic_detour_contracts() {
+    auto profile = rocket_profile(); profile.curve_distance = Fixed::from_raw(Fixed::scale / 10);
+    profile.authored_distance = q(500);
+    auto projectile = launch(profile, at(500));
+    projectile.flight->path_initialized = true;
+    projectile.flight->path = {{at(0), at(512), {}, {}, q(512)}};
+    d::RocketPathWork work;
+    const auto built = d::repath_rocket(projectile, at(100, 20), at(25), &work);
+    expect(built && work.control_points > 2048 && projectile.flight->path.size() > 2048,
+        "RFL-07/09: spherical plus straight detour exceeds former control ceiling");
+    if (built) {
+        projectile.flight->path_distance = q(25);
+        const auto repeated = d::repath_rocket(projectile, at(100, 20), at(25), &work);
+        expect(repeated && projectile.flight->shield_allowance == q(475) && work.control_points > 2048,
+            "RFL-07/09: repeated dynamic detour preserves consumed allowance");
+    }
+    auto original = launch(profile, at(500)); const auto before = original;
+    const d::RocketPathPolicy small{8};
+    const auto refused = d::repath_rocket(original, at(100, 20), at(25), &work, small);
+    expect(!refused && refused.error().code == t::diagnostic_codes::resource_limit && original == before,
+        "RFL-07/09: refused detour leaves path, marker, allowance and tracking atomic");
+    auto ray_profile = rocket_profile(); ray_profile.curve_distance = q(10);
+    // A unit step normalizes exactly in Q24; a 25-unit step does not.
+    const auto exact_step = at(1);
+    t::motion_detail::Calc geometry;
+    const auto heading_x = geometry.mul(exact_step.x, geometry.div(q(1), geometry.length(exact_step)));
+    const auto lead_x = geometry.mul(heading_x, q(60));
+    const auto ray_intersection = [&](const m::Vec3& source) {
+        return geometry.neg(geometry.mul(q(2), geometry.mul(geometry.sub(lead_x, source.x), heading_x)));
+    };
+    auto ray = launch(ray_profile, at(500));
+    auto source = at(60, 20); source.x = Fixed::from_raw(q(60).raw() + Fixed::scale / 4 - 1);
+    expect(heading_x == q(1) && lead_x == q(60)
+        && ray_intersection(source).raw() == Fixed::scale / 2 - 2,
+        "RFL-07: outside-ray fixture lies exactly two Q24 raw units below the half-unit bound");
+    expect(d::repath_rocket(ray, source, exact_step) && !ray.flight->path_initialized && ray.flight->shield_redirected,
+        "RFL-07: ray immediately below half-unit bound retains old route");
+    ray = launch(ray_profile, at(500)); source.x = Fixed::from_raw(source.x.raw() + 1);
+    expect(ray_intersection(source).raw() == Fixed::scale / 2,
+        "RFL-07: inclusive-ray fixture intersects at exactly half a unit in Q24");
+    expect(d::repath_rocket(ray, source, exact_step) && ray.flight->path_initialized,
+        "RFL-07: ray at inclusive half-unit bound constructs route");
+    // A power-of-two radius also makes the opposed normalized seeds exact.
+    const auto antipodal_source = at(92);
+    const auto near_x = geometry.sub(lead_x, antipodal_source.x);
+    const auto far_x = geometry.add(near_x, geometry.mul(heading_x, ray_intersection(antipodal_source)));
+    const auto near_direction = geometry.mul(near_x, geometry.div(q(1), geometry.abs(near_x)));
+    const auto far_direction = geometry.mul(far_x, geometry.div(q(1), geometry.abs(far_x)));
+    expect(geometry.ok() && near_x == q(-32) && far_x == q(32)
+        && near_direction == q(-1) && far_direction == q(1)
+        && geometry.add(near_direction, far_direction) == Fixed{},
+        "RFL-07/09: antipodal fixture has exact opposed Q24 seeds and a zero midpoint");
+    expect(geometry.atan2_deg({}, q(-1)) == q(-180),
+        "RFL-07/09: antipodal angle wraps to a negative half-turn before the angular stop");
+    const auto antipodal = d::repath_rocket(original, antipodal_source, exact_step, &work);
+    expect(!antipodal && antipodal.error().code == t::diagnostic_codes::resource_limit && original == before,
+        "RFL-07/09: antipodal midpoint refuses atomically instead of looping");
 }
 
 void seeded_worker_and_target_independence() {
@@ -622,13 +893,105 @@ void rocket_defence_contracts() {
     expect(before != after, "RFL-07: remaining allowance affects state hash");
 }
 } // namespace
+// RFL-15 (#4986): one 24-missile unit-level salvo with a Victory-like muzzle layout (three four-bone
+// batteries per flank, bone x axes 70 degrees off the bow, outward; research/victory-salvo-launch.md)
+// at a target dead ahead. Each rocket leaves along its bone axis for the straight leg, then curves
+// to the aim; without a launch direction (the old path) it leaves straight at the aim. Set
+// EAWR_ROCKET_TRACE to print every frame's raw Q24 position and step for the path plot.
+void unit_salvo_launch_axis() {
+    const bool trace = eawr::testing::environment("EAWR_ROCKET_TRACE").has_value();
+    const auto tenth = [](const std::int64_t value) { return Fixed::from_raw(value * Fixed::scale / 10); };
+    struct Battery { std::int64_t x0, y0, x1, y1; };
+    // Model (x, y) in tenths, bow -y: four bones each from the first point to the second.
+    const Battery batteries[6]{{726, -101, 766, 21}, {-726, -101, -766, 21}, {851, 289, 887, 402},
+        {-851, 289, -892, 411}, {976, 681, 1015, 804}, {-977, 680, -1016, 804}};
+    const auto port = m::normalize(m::Vec3{Fixed::from_raw(342 * Fixed::scale / 1000), Fixed::from_raw(940 * Fixed::scale / 1000), {}}).value();
+    const auto starboard = m::Vec3{port.x, Fixed::from_raw(-port.y.raw()), {}};
+    auto flight = rocket_profile();
+    flight.curve_distance = q(800); flight.curve_offset = q(5); flight.straight_distance = q(400);
+    const auto aim = at(3000);
+    for (const bool launched : {false, true}) {
+        d::CollectionTrees collidables;
+        d::CombatWorld world; d::ProjectileScratch scratch;
+        world.projectile_collection = &collidables;
+        world.seed = 4986;
+        std::vector<t::Projectile> salvo;
+        std::vector<m::Vec3> axes;
+        for (std::int64_t muzzle = 0; muzzle < 24; ++muzzle) {
+            const auto& b = batteries[muzzle / 4];
+            const auto k = muzzle % 4;
+            const auto mx = b.x0 + (b.x1 - b.x0) * k / 3, my = b.y0 + (b.y1 - b.y0) * k / 3;
+            t::CombatEvent event; event.shooter = 1; event.target = 2; event.aim = aim;
+            event.origin = m::Vec3{tenth(-my), tenth(mx), {}}; // unit x = -model y, unit y = model x
+            const auto axis = mx > 0 ? port : starboard;
+            if (launched) event.launch = axis;
+            t::ShotProfile shot; shot.speed = q(25); shot.max_travel = q(5000); shot.flight = flight;
+            shot.turn_rate = q(25); // inert for a rocket's path (RFL-11)
+            auto created = d::launch_projectile(event, shot, 1, true, static_cast<std::uint64_t>(muzzle + 1), {});
+            expect(static_cast<bool>(created), "RFL-15: salvo rocket launches");
+            if (!created) return;
+            salvo.push_back(created.value());
+            axes.push_back(axis);
+        }
+        for (std::size_t i = 0; i < salvo.size(); ++i) {
+            const auto origin = salvo[i].position;
+            Fixed widest = Fixed::from_raw(std::llabs(origin.y.raw())), nearest = q(100000), bend = q(100000);
+            // RFL-12: the straight leg ends min(400, planar distance / 2) along the launch facing.
+            const auto corner = plus(origin, m::Vec3{m::multiply(axes[i].x, q(400)).value(), m::multiply(axes[i].y, q(400)).value(), {}});
+            m::Vec3 straight{};
+            for (std::uint32_t frame = 0; frame < 400; ++frame) {
+                world.frame = 100 + frame;
+                auto step = d::step_projectile(world, salvo[i], scratch);
+                expect(static_cast<bool>(step), "RFL-15: salvo rocket step succeeds");
+                if (!step) return;
+                salvo[i] = step.value().projectile;
+                const auto& p = salvo[i].position;
+                if (trace) std::cout << "TRACE " << (launched ? "after" : "before") << ' ' << i << ' ' << frame << ' '
+                    << p.x.raw() << ' ' << p.y.raw() << ' ' << salvo[i].step.x.raw() << ' '
+                    << salvo[i].step.y.raw() << '\n';
+                widest = std::max(widest, Fixed::from_raw(std::llabs(p.y.raw())));
+                nearest = std::min(nearest, m::length(minus(aim, p)).value());
+                bend = std::min(bend, m::length(minus(corner, p)).value());
+                if (frame == 7) straight = minus(p, origin);
+                if (step.value().expired) break;
+            }
+            const auto along = m::divide(m::dot(straight, axes[i]).value(), m::length(straight).value()).value();
+            if (launched) {
+                expect(along > Fixed::from_raw(Fixed::scale * 85 / 100),
+                    "RFL-15/RFL-12: the rocket departs along the muzzle bone's x axis (sideways)");
+                expect(bend < q(15), "RFL-15/RFL-12: the straight leg ends 400 units along the muzzle bone's x axis");
+                expect(widest > q(400), "RFL-15: the rocket swings out wide of its flank before it curves in");
+            } else {
+                expect(widest < q(115), "RFL-15: without a launch direction the rocket leaves at its aim");
+            }
+            expect(nearest < q(40), "RFL-15: every rocket still reaches its aim point");
+        }
+    }
+}
+
 int main() {
-    defence_flight_contracts(); external_redirect_contracts(); rocket_defence_contracts();
-    impact_suppresses_expiry();
-    appearance_delay_contract();
-    endpoint_and_retained_aim(); cubic_height_and_boundary(); default_endpoints_and_lifetime(); unsupported_and_encoding();
-    seeded_spatial_offsets(); extension_and_construction_states(); seeded_worker_and_target_independence();
+    const auto run = [](const char* name, void (*contract)()) {
+        std::cout << "CASE " << name << std::endl;
+        contract();
+    };
+    run("dynamic_route_contracts", dynamic_route_contracts);
+    run("refusal_and_dynamic_workers", refusal_and_dynamic_workers);
+    run("refusal_session_contract", refusal_session_contract);
+    run("dynamic_detour_contracts", dynamic_detour_contracts);
+    run("defence_flight_contracts", defence_flight_contracts);
+    run("external_redirect_contracts", external_redirect_contracts);
+    run("rocket_defence_contracts", rocket_defence_contracts);
+    run("impact_suppresses_expiry", impact_suppresses_expiry);
+    run("appearance_delay_contract", appearance_delay_contract);
+    run("endpoint_and_retained_aim", endpoint_and_retained_aim);
+    run("cubic_height_and_boundary", cubic_height_and_boundary);
+    run("default_endpoints_and_lifetime", default_endpoints_and_lifetime);
+    run("unsupported_and_encoding", unsupported_and_encoding);
+    run("seeded_spatial_offsets", seeded_spatial_offsets);
+    run("extension_and_construction_states", extension_and_construction_states);
+    run("seeded_worker_and_target_independence", seeded_worker_and_target_independence);
+    run("unit_salvo_launch_axis", unit_salvo_launch_axis);
     if (failures) return 1;
-    std::cout << "rocket endpoint contracts passed (WAD-04, RFL-01..08)\n";
+    std::cout << "rocket endpoint contracts passed (WAD-04, RFL-01..09)\n";
     return 0;
 }

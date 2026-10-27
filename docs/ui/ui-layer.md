@@ -101,6 +101,16 @@ As built (HUD shell, `presentation/ui/hud_shell.hpp`, viewer `--eawr-hud tactica
   control at its art quad and restricts its `_has_point` to the component rect, the rect the
   hit mask holds. A rig click in the overhang would confirm this at runtime; it has not been
   recorded.
+- UI-12 tooltip stacking: the owner's retail play knowledge on 2026-10-26 (legacy EAWR-5118)
+  establishes that tooltips draw above every HUD panel, including reinforcements,
+  the command bar and the minimap. The shared tactical hover presenter draws its
+  entire tooltip (background, text, art and glow) on a mouse-ignoring child Control
+  one relative CanvasItem z step above the tactical HUD panels. Cards retain their normal order and hit testing;
+  the tooltip inherits their transforms, visibility and lifetime. Unit, structure,
+  ability and build-card hover all use this presenter, including the shared land
+  HUD. The shared GC fleet presenter keeps relative z zero, inheriting its
+  fleet-popup depth below the enclosing modal dialogs. Independent GC tooltip
+  presenters are separate.
 - The HUD's hit mask is `HudViewModel::hit_test_screen`, so every bound component rect stops
   the pointer, including the slots later tickets fill.
 - Button art keeps its texture's size. In the debug build, each state quad of a button

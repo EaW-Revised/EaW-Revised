@@ -1,10 +1,11 @@
+#include "eawr/scene/scene.hpp"
 #include "eawr/battle/start.hpp"
 #include "eawr/core/load_profile.hpp"
 #include "live_session_view.hpp"
 
 #include "battle_source_internal.hpp"
 #include "battle_source_draw.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/presentation/ui/minimap.hpp"
 #include "eawr/units/unit_tables.hpp"
@@ -26,6 +27,9 @@
 #include <utility>
 
 #include "live_session_internal.hpp"
+#include "lan_match_internal.hpp"
+#include <fstream>
+#include <iterator>
 
 namespace eawr::presentation::godot_backend {
 namespace tactical = sim::tactical;
@@ -81,6 +85,7 @@ bool LiveSessionView::prepare_source(const BattleSource& source, const vfs::Vfs&
 
 bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& catalog, const std::string_view map_path,
                               std::string& failure) {
+    if (options_.land) return prepare_land(filesystem, catalog, map_path, failure);
     shield_flash_constants_ = presentation_constants::load_flash(filesystem);
     deployment_facing_.reset(); // WR-X01: per local player, per battle
     core::load_profile::Scope load_scope(core::load_profile::Phase::session);
@@ -174,10 +179,10 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
             object ? tag_text(object.value(), "Space_Model_Anim_Override_Name") : std::string{});
         const auto index = animation::death_clip_variant(clips.size(), type.neutral_fog_animation_index, 0);
         if (!index) continue; // No matching native clip: preserve the copied pose.
-        auto model = assets::load_model(filesystem, type.model_path);
+        auto model = scene::VfsAssetCache(filesystem).shared_model(type.model_path);
         auto clip = assets::load_animation(filesystem, clips[*index]);
         if (!model || !clip) { failure = "fog capture-point copy: neutral animation asset is unreadable"; return false; }
-        auto player = animation::Player::create(model.value(), &clip.value());
+        auto player = animation::Player::create(*model.value(), &clip.value());
         if (!player) { failure = core::format_diagnostic(player.error()); return false; }
         auto pose = player.value().sample({});
         if (!pose) { failure = core::format_diagnostic(pose.error()); return false; }
@@ -190,7 +195,7 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         neutral_fog_poses_.emplace(battle::type_id(type.id), std::move(pose.value().bones));
     }
     const auto prepare_sfoil_clips = [&] {
-        for (SpacePopulation::Options::PlacedShip& ship : placed_ships_) {
+        for (BattleScene::PlacedUnit& ship : placed_ships_) {
             const auto type = std::find_if(tables_->units.begin(), tables_->units.end(),
                                            [&](const units::UnitType& entry) { return entry.id == ship.object_id; });
             if (!ship.clip.empty() || type == tables_->units.end()
@@ -217,7 +222,7 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
         const auto type = std::find_if(catalog.definitions().begin(), catalog.definitions().end(),
             [&](const auto& value) { return value.category == data::Category::game_object && battle::type_id(value.id) == rule.type; });
         if (type == catalog.definitions().end()) { failure = "beacon type is absent from the presentation catalog"; return false; }
-        SpacePopulation::Options::PlacedShip ship;
+        BattleScene::PlacedUnit ship;
         ship.object_id = type->id;
         ship.live_entity = std::numeric_limits<sim::EntityId>::max() / 16U + rule.player;
         ship.beacon_model = true;
@@ -227,7 +232,7 @@ bool LiveSessionView::prepare(const vfs::Vfs& filesystem, const data::Catalog& c
     }
     // BP-22: purchased reinforcements need the same shell as starting ships, including
     // heroes with DEFEND in their second slot. Include their newly prepared arrival slots.
-    for (SpacePopulation::Options::PlacedShip& ship : placed_ships_) {
+    for (BattleScene::PlacedUnit& ship : placed_ships_) {
         const auto* type = tables_->find(ship.object_id);
         ship.defend_shell = type != nullptr && !ship.placement_preview
             && std::any_of(type->abilities.begin(), type->abilities.end(),
@@ -395,12 +400,38 @@ bool LiveSessionView::start(std::string& failure) {
     content.map_box = content_->map_box;
     content.victory = victory_;
     content.economy = economy_;
+    if (land_content_) content = *land_content_;
+    if (replay_) {
+        auto companion = options_.replay_input; companion += ".session";
+        std::error_code code;
+        const bool exists = std::filesystem::exists(companion, code);
+        if (code) { failure = "Cannot inspect multiplayer replay session companion."; return false; }
+        if (exists) {
+            const auto size = std::filesystem::file_size(companion, code);
+            if (code || size > net::match_pause_replay_limit) { failure = "Multiplayer session journal exceeds its byte limit."; return false; }
+            std::ifstream input(companion, std::ios::binary);
+            std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+            auto journal = net::parse_match_pause_replay(bytes);
+            if (!input || !journal) { failure = "Expected eawr-match-session-replay-v1 multiplayer journal."; return false; }
+            auto offer = net::decode_setup_offer(journal.value().setup);
+            auto encoded_setup = net::encode_skirmish_setup(replay_->setup);
+            if (!offer || !encoded_setup || offer.value().domain != net::tactical_setup_domain
+                || offer.value().setup != encoded_setup.value()
+                || (journal.value().rows.empty() ? 0 : journal.value().rows.back().world_tick) != replay_->final_tick_count) {
+                failure = "Multiplayer session journal and tactical replay setup or final world tick differ."; return false;
+            }
+            auto playback = std::make_shared<lan_detail::LivePauseReplay>(replay_->setup, offer.value().seats, std::move(journal).value());
+            session_options.recorded_step_driver = [playback](platform::LiveStepContext& context,
+                std::span<const tactical::PlayerCommand> commands, std::uint64_t) { return playback->step(context, commands); };
+        }
+    }
     auto live = replay_ ? platform::LiveSession::start(*replay_, content, session_options)
         : platform::LiveSession::start(*setup_, content, session_options);
     if (!live) {
         failure = "live session: " + core::format_diagnostic(live.error());
         return false;
     }
+    if (land_content_) bind_land_roster(*live.value());
     session_ = std::make_shared<platform::StandaloneTacticalFeed>(std::move(live).value());
     // The debug hook: each order as its unit's owner would give it, at its tick.
     for (const ScheduledOrder& order : options_.orders) {

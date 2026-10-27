@@ -136,7 +136,7 @@ void test_difficulty_validation() {
     expect(!tactical::validate_durability(table), "a scale above the bound is rejected");
     table.difficulty = {scale(1, "16", "1", "1")};
     expect(static_cast<bool>(tactical::validate_durability(table)), "a scale that keeps every hull inside the health limit is valid");
-    table.profiles[0].max_hull = units(100000);
+    table.profiles[0].max_hull = units(tactical::max_durability_health / 16 + 1);
     expect(!tactical::validate_durability(table), "a scale that pushes a hull past the health limit is rejected");
     expect(table.difficulty_of(1) != nullptr && table.difficulty_of(2) == nullptr, "difficulty_of finds the player's entry");
 }

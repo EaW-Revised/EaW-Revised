@@ -7,8 +7,8 @@
 #include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -254,8 +254,7 @@ const tactical::EconomyView* LiveSessionView::local_economy() const {
             else pending_economy_state_.view = ui::pending_economy(view, rows, [this](const sim::EntityId station, const tactical::TypeId type) -> const tactical::BuildOption* {
                 if (station) {
                     const auto* instance = space::find_instance(*battle_frame_.latest, station);
-                    const auto faction = local_faction_id();
-                    const auto* menu = instance && faction ? economy_.menu(instance->type_id, *faction) : nullptr;
+                    const auto* menu = instance ? producer_menu(*instance) : nullptr;
                     return menu ? menu->find(type) : nullptr;
                 }
                 for (const auto& menu : economy_.menus) if (const auto* option = menu.find(type)) return option;
@@ -293,8 +292,7 @@ ui::BuildOptionState LiveSessionView::build_menu_state(const tactical::BuildOpti
                 return ui::pending_production_counts(view.counts, ledger, view.snapshot->completed_tick(), rows,
                     [&](const sim::EntityId station, const tactical::TypeId queued_type) -> const tactical::BuildOption* {
                         const auto* instance = space::find_instance(*view.snapshot, station);
-                        const auto faction = local_faction_id();
-                        const auto* menu = instance && faction ? economy_.menu(instance->type_id, *faction) : nullptr;
+                        const auto* menu = instance ? producer_menu(*instance) : nullptr;
                         return menu ? menu->find(queued_type) : nullptr;
                     }, type);
             }
@@ -340,6 +338,16 @@ std::optional<tactical::FactionId> LiveSessionView::local_faction_id() const noe
         if (player.player_id == player_) return player.faction_id;
     }
     return std::nullopt;
+}
+
+const tactical::StationMenu* LiveSessionView::producer_menu(const tactical::TacticalInstance& instance) const noexcept {
+    const auto local = local_faction_id();
+    if (!local || !setup_) return nullptr;
+    auto owner = *local;
+    for (const tactical::Player& player : setup_->players) {
+        if (player.player_id == instance.owner) { owner = player.faction_id; break; }
+    }
+    return economy_.producer_menu(instance.type_id, owner, *local);
 }
 
 namespace {
@@ -426,8 +434,7 @@ bool LiveSessionView::buy(const sim::EntityId station, const tactical::TypeId ty
         }
     }
     const auto* instance = snapshot_index_.instance(station);
-    const auto faction = local_faction_id();
-    const auto* menu = instance && faction ? economy_.menu(instance->type_id, *faction) : nullptr;
+    const auto* menu = instance ? producer_menu(*instance) : nullptr;
     const auto* option = menu ? menu->find(type) : nullptr;
     const auto* ledger = local_economy();
     if (!option || !ledger || ledger->credits < option->price || !build_allowed(*option)

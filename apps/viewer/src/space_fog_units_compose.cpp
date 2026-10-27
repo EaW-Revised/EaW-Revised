@@ -98,7 +98,11 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
         for (const scene::SceneAsset& candidate : scene_->assets) {
             if (candidate.asset_id == placement.asset_id) asset = &candidate;
         }
-        const assets::Model* model = asset == nullptr ? nullptr : cache.model(asset->logical_path);
+        std::shared_ptr<const assets::Model> model;
+        if (asset != nullptr) {
+            const auto loaded = cache.shared_model(asset->logical_path);
+            if (loaded) model = loaded.value();
+        }
         const std::string identity = "placement " + std::to_string(placement.scene_ordinal) + " "
             + placement.object_id + " (" + decisions_[ordinal].type_name + ")";
         if (model == nullptr) {
@@ -142,13 +146,7 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                 }
             }
             const assets::Mesh& source_mesh = model->meshes[surface.mesh_index];
-            assets::Model single;
-            single.source = model->source;
-            single.bones = model->bones;
-            assets::Mesh mesh = source_mesh;
-            mesh.submeshes = {source_mesh.submeshes[surface.submesh_index]};
-            single.meshes.push_back(std::move(mesh));
-            const assets::Submesh& submesh = single.meshes.front().submeshes.front();
+            const assets::Submesh& submesh = source_mesh.submeshes[surface.submesh_index];
             MaterialDescription material{
                 .schema_version = MaterialDescription::current_schema_version,
                 .route = MaterialRoute::legacy_effect,
@@ -176,7 +174,10 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
                     return std::nullopt;
                 });
             const sim::AssetId renderer_asset = next_asset++;
-            const auto uploaded = renderer.upload(renderer_asset, single, found->second, material, family_textures);
+            const auto uploaded = renderer.upload(renderer_asset,
+                ModelUpload{model,
+                    ModelSurface{surface.mesh_index, surface.submesh_index, false}},
+                found->second, material, family_textures);
             if (!uploaded) {
                 unsupported_.push_back(where + ": upload failed: " + core::format_diagnostic(uploaded.error()));
                 return fail("fog-enabled space capture could not upload an admitted surface: " + unsupported_.back());
@@ -195,9 +196,9 @@ bool SpaceFogUnits::compose(GodotRenderer& renderer, const assets::Map& map, con
             // A static scene draws the bind pose: each rigid mesh at its
             // bone's attachment, with no clip playing.
             std::optional<std::vector<animation::BonePose>> pose;
-            const std::int32_t bone = single.meshes.front().bone;
-            if (!single.bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
-                auto player = animation::Player::create(single);
+            const std::int32_t bone = source_mesh.bone;
+            if (!model->bones.empty() && (bone >= 0 || !submesh.skin_bones.empty())) {
+                auto player = animation::Player::create(*model);
                 if (!player) {
                     unsupported_.push_back(where + ": bind pose player: " + core::format_diagnostic(player.error()));
                     return fail("fog-enabled space capture could not pose an admitted surface: " + unsupported_.back());

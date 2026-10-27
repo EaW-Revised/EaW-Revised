@@ -714,6 +714,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::continue_nati
         return invalid<NativeActionShadow>("native continuation requires its player owner and bounded requests");
     auto data = std::make_shared<NativeActionShadow::Data>(); const auto& before = *previous.data_;
     data->owner = before.owner; data->base = before.base; data->parent = previous.data_; data->player = before.player;
+    data->system_hold = before.system_hold;
     data->inherit_reads(previous.data_);
     data->first_id = data->next_id = before.next_id; data->live_objects = before.live_objects; data->max_requests = max_requests;
     data->independent_player = before.independent_player; data->range_end = before.range_end;
@@ -967,6 +968,7 @@ core::Result<GalacticSession::NativeActionShadow> GalacticSession::begin_native_
         return invalid<NativeActionShadow>("native shadow requires a live campaign and bounded requests");
     auto state = std::make_shared<NativeActionShadow::Data>();
     state->owner = impl_.get(); state->base = impl_->snapshot;
+    state->system_hold = impl_->system_hold;
     state->population_schema = impl_->native_population_schema; state->income_schema = impl_->native_income_schema;
     state->observer_generation = state->base->observer_input_generation();
     state->first_id = state->next_id = impl_->next_id;

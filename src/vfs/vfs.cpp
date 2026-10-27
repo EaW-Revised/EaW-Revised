@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -271,6 +272,21 @@ core::Result<ManifestResolution> resolve_manifest_mount(
     if (!manifest_path) {
         if (manifest_path.error().code != diagnostic_codes::not_found)
             return core::Result<ManifestResolution>::failure(manifest_path.error());
+        // ML-09: registered mod roots can supply loose files without a manifest.
+        // Installation layers still require their manifest; present manifests use
+        // the unchanged archive ordering and validation below.
+        if (layer_id != "base" && layer_id != "expansion") {
+            auto diagnostic = manifest_path.error();
+            diagnostic.code = std::string(diagnostic_codes::manifest_absent);
+            diagnostic.severity = core::Severity::info;
+            diagnostic.message = "mod layer has no Data/MegaFiles.xml; mounting loose files only";
+            std::clog << core::format_diagnostic(diagnostic) << '\n';
+            ManifestResolution result;
+            result.mount.layer_id = std::move(layer_id);
+            result.mount.data_root = data_root;
+            result.mount.loose_logical_prefix = "data";
+            return core::Result<ManifestResolution>::success(std::move(result));
+        }
         auto diagnostic = manifest_path.error();
         diagnostic.code = std::string(diagnostic_codes::manifest_invalid);
         diagnostic.message = "MegaFiles.xml is required under '" + path_utf8(data_root) +
@@ -431,13 +447,15 @@ core::Result<ManifestResolution> resolve_manifest_mount(
     return core::Result<ManifestResolution>::success(std::move(result));
 }
 
+std::filesystem::path mod_data_root(const std::filesystem::path& root) {
+    return !root.empty() && std::filesystem::is_directory(root / "Data") ? root / "Data" : root;
+}
+
 std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain) {
     std::vector<LayerRoot> roots;
     // A directory whose own name contains ';' (legal on Windows) is one root, not a chain.
     if (!chain.empty() && std::filesystem::is_directory(chain)) {
-        auto root = chain;
-        if (std::filesystem::is_directory(root / "Data")) root /= "Data";
-        roots.emplace_back("mod", root);
+        roots.emplace_back("mod", mod_data_root(chain));
         return roots;
     }
     const auto text = chain.native();
@@ -445,8 +463,7 @@ std::vector<LayerRoot> mod_chain_roots(const std::filesystem::path& chain) {
     while (!text.empty() && begin <= text.size()) {
         const auto end = text.find(static_cast<std::filesystem::path::value_type>(';'), begin);
         auto root = std::filesystem::path(text.substr(begin, end == text.npos ? text.npos : end - begin));
-        if (!root.empty() && std::filesystem::is_directory(root / "Data")) root /= "Data";
-        roots.emplace_back(roots.empty() ? "mod" : "mod-parent-" + std::to_string(roots.size()), root);
+        roots.emplace_back(roots.empty() ? "mod" : "mod-parent-" + std::to_string(roots.size()), mod_data_root(root));
         if (end == text.npos) break;
         begin = end + 1;
     }
@@ -513,6 +530,8 @@ struct Vfs::Impl {
     };
     std::vector<StoredAsset> assets;
     std::unordered_map<std::string, std::vector<std::size_t>> by_path;
+    mutable std::mutex attachments_mutex;
+    mutable std::map<std::type_index, std::shared_ptr<void>> attachments;
     // Used only by exact-candidate audio reads, never by open(logical_path).
     mutable std::mutex archive_names_mutex;
     mutable std::map<std::filesystem::path, std::map<std::pair<std::uint64_t, std::uint64_t>, std::set<std::string>>> archive_names;
@@ -523,6 +542,15 @@ Vfs::~Vfs() = default;
 Vfs::Vfs(Vfs&&) noexcept = default;
 Vfs& Vfs::operator=(Vfs&&) noexcept = default;
 Vfs::Vfs(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+std::shared_ptr<void> Vfs::attachment(const std::type_index type,
+    std::shared_ptr<void> (*create)()) const {
+    if (!impl_) return create();
+    std::lock_guard lock(impl_->attachments_mutex);
+    auto& slot = impl_->attachments[type];
+    if (!slot) slot = create();
+    return slot;
+}
 
 core::Result<Vfs> Vfs::mount(const std::span<const MountSpec> ordered_layers) {
     core::load_profile::Scope load_scope(core::load_profile::Phase::vfs);

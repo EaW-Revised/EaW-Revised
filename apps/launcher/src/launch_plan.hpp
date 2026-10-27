@@ -16,12 +16,19 @@ struct LaunchInputs {
     fs::path game_root;
     fs::path report;               // --eawr-report: the viewer writes {"status":"failed","failure":...} here
     bool allow_unknown_build = false; // --eawr-allow-unknown-build: accept a game build the viewer has not verified
+    std::optional<bool> safe_render_thread;  // Explicit CLI override: true Safe, false Separate
+    std::optional<fs::path> mod_profile; // selected by the manager loop
+    std::optional<std::wstring> render_thread; // profile mode or saved fallback, before Godot user arguments
     std::optional<int> quit_after; // smoke checks: Godot --quit-after N frames
     std::vector<std::wstring> extra; // appended after the viewer arguments (after "--")
 };
 
 // argv[1..] for the Godot executable.
 [[nodiscard]] std::vector<std::wstring> godot_arguments(const LaunchInputs& inputs);
+
+[[nodiscard]] std::vector<std::wstring> mods_arguments(const fs::path& kit, const fs::path& godot,
+                                                        const fs::path& project, const fs::path& game_root,
+                                                        const fs::path& next_action);
 
 // One CreateProcess command line that CommandLineToArgvW / the MSVC CRT parse back into
 // program + args exactly (spaces, quotes and trailing backslashes included).

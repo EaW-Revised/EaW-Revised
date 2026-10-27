@@ -216,10 +216,12 @@ core::Result<void> validate_setup(const TacticalSetup& setup) {
             body_size += 2U + value.size();
             return value.size() <= 1024U && value.find('\0') == std::string::npos;
         };
+        const auto map_prefix = metadata.map.starts_with("data/art/maps/") ? std::string_view("data/art/maps/")
+            : std::string_view("data/custommaps/");
         if (!text(metadata.map) || !text(metadata.map_sha256) || !text(match.win_condition)
-            || !text(match.space_win_condition) || !metadata.map.starts_with("data/art/maps/")
+            || !text(match.tactical_win_condition) || !metadata.map.starts_with(map_prefix)
             || !metadata.map.ends_with(".ted") || metadata.map.find("..") != std::string::npos
-            || metadata.map.find('\\') != std::string::npos || metadata.map_sha256.size() != 64U
+            || metadata.map.find_first_of("/\\", map_prefix.size()) != std::string::npos || metadata.map_sha256.size() != 64U
             || !std::all_of(metadata.map_sha256.begin(), metadata.map_sha256.end(),
                 [](const char value) { return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f'); })) {
             return fail<void>(diagnostic_codes::invalid_setup, "SKSU map or match text is invalid", path);
@@ -374,8 +376,9 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
                     return fail<void>(diagnostic_codes::invalid_setup, "native scene type is empty, duplicate or oversized", path);
             }
         }
-        if (size > std::numeric_limits<std::uint16_t>::max())
-            return fail<void>(diagnostic_codes::invalid_setup, "native scene body exceeds header limit", path);
+        if (size > replay_max_bytes)
+            return fail<void>(diagnostic_codes::resource_limit, "native scene body size " + std::to_string(size)
+                + " exceeds the " + std::to_string(replay_max_bytes) + "-byte replay limit", path);
     }
     if (replay.final_tick_count > max_ticks || replay.commands.size() > max_commands
         || replay.object_turns.size() > max_commands) {
@@ -418,7 +421,7 @@ core::Result<void> validate_replay(const TacticalReplay& replay) {
             }
         }
         if (record.use.unit == invalid_entity_id || record.use.ability == AbilityKind::none
-            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::blast)
+            || static_cast<std::uint8_t>(record.use.ability) > static_cast<std::uint8_t>(AbilityKind::rocket_attack)
             || static_cast<std::uint8_t>(record.use.action) < static_cast<std::uint8_t>(AbilityAction::activate)
             || static_cast<std::uint8_t>(record.use.action) > static_cast<std::uint8_t>(AbilityAction::autofire_off)) {
             return fail<void>(diagnostic_codes::invalid_command, label + " names no unit, ability or action", path);

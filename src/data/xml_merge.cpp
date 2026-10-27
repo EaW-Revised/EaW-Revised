@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <optional>
+#include <string_view>
 #include <unordered_set>
 #include <utility>
 
@@ -27,10 +28,14 @@ core::Result<TypeMemberFlags> Catalog::member_flags(const std::string_view objec
         "member-parse-timeline: game object has no timeline slot"));
 }
 
+const std::vector<MemberRosterNote>& Catalog::member_roster_notes() const noexcept {
+    return overlay_ ? overlay_->member_roster_notes : impl_->member_roster_notes;
+}
+
 // WGA-363/364, WAR-84: load-only state machine. Preserve copy-time flags and
 // rosters rather than closing the final variant ancestry over the final roster.
 void derive_member_flags(const std::span<const Definition* const> definitions,
-    std::vector<TypeMemberFlags>& flags, std::string& issue) {
+    std::vector<TypeMemberFlags>& flags, std::string& issue, std::vector<MemberRosterNote>& notes) {
     struct State {
         bool complete{};
         std::string base;
@@ -38,6 +43,7 @@ void derive_member_flags(const std::span<const Definition* const> definitions,
     };
     flags.assign(definitions.size(), {});
     issue.clear();
+    notes.clear();
     std::vector<State> states(definitions.size());
     std::vector<std::size_t> order;
     std::unordered_map<std::string, std::size_t> available;
@@ -64,21 +70,67 @@ void derive_member_flags(const std::span<const Definition* const> definitions,
             }
         }
     };
+    // The entry a variant overlays: the catalog's winner for the base name (the strongest layer, then the later registration,
+    // as Catalog lookups answer), except that an entry naming ITSELF as its base overlays the nearest earlier entry of that
+    // name, and none when there is no earlier one. The catalog still answers duplicates with the last registered entry; the
+    // debug build's first-registered rule (RGC-180..187) is the follow-up #3741.
+    std::unordered_map<std::string, std::vector<std::size_t>> entries;
+    const auto base_of = [&](const std::size_t index) -> std::optional<std::size_t> {
+        const auto name = ascii_lower(states[index].base);
+        if (name == ascii_lower(definitions[index]->id)) {
+            std::optional<std::size_t> earlier;
+            if (const auto list = entries.find(name); list != entries.end())
+                for (const auto candidate : list->second) if (candidate < index) earlier = candidate;
+            return earlier;
+        }
+        const auto found = available.find(name);
+        if (found == available.end()) return std::nullopt;
+        return found->second;
+    };
+    // An entry a stronger layer redefines is shadowed: it still serves as the base of a same-named variant, but its roster no
+    // longer marks anything. Duplicates inside one layer are not shadowed; each keeps its own roster marks.
+    const auto shadowed = [&](const std::size_t index) {
+        const auto winner = available.find(ascii_lower(definitions[index]->id));
+        return winner != available.end()
+            && definitions[winner->second]->root.source.layer_id != definitions[index]->root.source.layer_id;
+    };
     const auto overlay = [&](const std::size_t index) {
-        const auto found = available.find(ascii_lower(states[index].base));
-        if (found == available.end() || !states[found->second].complete) return;
-        flags[index] = flags[found->second];
-        states[index].rosters = states[found->second].rosters;
+        const auto base = base_of(index);
+        if (!base || !states[*base].complete) return;
+        flags[index] = flags[*base];
+        states[index].rosters = states[*base].rosters;
         authored(index, true);
         states[index].complete = true;
     };
+    // A variant whose base chain ends at a name no game object carries can never finish: its overlay returns false and the
+    // object keeps its own authored tags (CGS-13). Such a variant is not a reason to refuse the whole timeline.
+    const auto blocked = [&](std::size_t index) {
+        for (std::size_t steps = 0; steps <= definitions.size(); ++steps) {
+            if (states[index].base.empty()) return false;
+            const auto base = base_of(index);
+            if (!base) return true;
+            index = *base;
+        }
+        return false; // a cycle stays incomplete
+    };
+    // Roster references and base names resolve to the catalog winner of each name: a cross-layer override (the base layer
+    // defines X, a stronger layer redefines it in another file) answers with the stronger layer's entry.
     for (std::size_t index = 0; index < definitions.size(); ++index) {
         const auto& definition = *definitions[index];
         if (!definition.active || definition.category != Category::game_object) continue;
-        if (definition.id.empty() || !available.emplace(ascii_lower(definition.id), index).second) {
-            issue = "empty or duplicate game-object identity: " + definition.id;
+        if (definition.id.empty()) {
+            issue = "empty game-object identity";
             return;
         }
+        const auto name = ascii_lower(definition.id);
+        entries[name].push_back(index);
+        if (definition.namespace_winner) available.insert_or_assign(name, index);
+        else available.emplace(name, index);
+    }
+    for (std::size_t index = 0; index < definitions.size(); ++index) {
+        const auto& definition = *definitions[index];
+        if (!definition.active || definition.category != Category::game_object) continue;
+        // A later definition of the same name is a separate entry with its own state, flags and roster marks.
         order.push_back(index);
         if (const auto* base = child_named(definition.root, "Variant_Of_Existing_Type");
             base && !retail::is_placeholder(base->raw_text)) {
@@ -109,13 +161,18 @@ void derive_member_flags(const std::span<const Definition* const> definitions,
         // All current rosters participate, including an incomplete variant's
         // authored roster. Writes only set true; the fix-up never clears bits.
         for (const auto index : order) {
+            if (shadowed(index)) continue;
             for (std::size_t roster = 0; roster < tags.size(); ++roster) {
+                std::size_t slot = 0;
                 for (const auto& member : states[index].rosters[roster]) {
+                    const auto position = slot++;
                     const auto found = available.find(ascii_lower(member));
                     if (found == available.end()) {
-                        issue = "unresolved " + std::string(tags[roster]) + " member " + member
-                            + " in " + definitions[index]->id;
-                        return;
+                        // Recovery policy (RGC-154): skip the slot, keep marking the others, report it once.
+                        MemberRosterNote note{definitions[index]->id, std::string(tags[roster]), position, member,
+                            definitions[index]->root.source.logical_path, definitions[index]->root.source.line};
+                        if (std::find(notes.begin(), notes.end(), note) == notes.end()) notes.push_back(std::move(note));
+                        continue;
                     }
                     auto& target = flags[found->second];
                     (roster == 0 ? target.ground_company_member : target.squadron_member) = true;
@@ -124,7 +181,13 @@ void derive_member_flags(const std::span<const Definition* const> definitions,
         }
         if (std::all_of(order.begin(), order.end(), [&](const auto index) { return states[index].complete; })) return;
     }
-    issue = "variant loading incomplete after ten passes";
+    if (std::all_of(order.begin(), order.end(), [&](const auto index) { return states[index].complete || blocked(index); })) return;
+    issue = "variant loading incomplete after ten passes:";
+    std::size_t listed = 0;
+    for (const auto index : order) {
+        if (states[index].complete || blocked(index) || listed++ == 5) continue;
+        issue += " " + definitions[index]->id + " (base " + states[index].base + ")";
+    }
 }
 
 const EffectiveValue* EffectiveObject::value(const std::string_view tag_name) const noexcept {
@@ -170,6 +233,95 @@ void trace_chain(const Catalog& catalog, const EffectiveObject& object, const st
 }
 
 } // namespace
+
+namespace {
+
+// SG-CLS-01: the element names FoC's game-object files use (lower case, sorted). The retail loader reads no class
+// from an element name, so a name outside this list is a mod's own label, not a class.
+constexpr std::array<std::string_view, 165> foc_object_classes{
+    "absorb_blaster_ability", "ambient_map_sound", "ambientmapsound", "arc_sweep_attack_ability", "attack_action",
+    "base_power_ability", "battlefield_modifier_ability", "berserker_ability", "black_market_ability",
+    "blast_ability", "bounty_on_faction_ability", "buzz_droids_ability", "cable_ability", "campaign",
+    "cin_groundinfantry", "cin_groundprop", "cin_groundstructure", "cin_groundvehicle", "cin_projectile",
+    "cin_spaceprop", "cin_spaceunit", "cin_transportunit", "cluster_bomb_ability", "combat_bonus_ability",
+    "commandbarcomponent", "concentrate_fire_attack_ability", "container", "corrupt_systems_ability",
+    "corruption_ability", "decal", "difficulty_adjustment", "drain_life_ability", "earthquake_attack_ability",
+    "eat_attack_ability", "enable_ability", "enable_radar_ability", "energy_weapon_attack_ability",
+    "enhance_defense_ability", "event", "faction", "find_weakness_ability", "force_cloak_ability",
+    "force_confuse_ability", "force_healing_ability", "force_lightning_ability", "force_sight_ability",
+    "force_telekinesis_ability", "force_whirlwind_ability", "galactic_sabotage_ability", "galactic_stealth_ability",
+    "galaxy_wide_upgrade_ability", "garrison_upgrade_ability", "generic_attack_ability", "genericherounit",
+    "grenade_attack_ability", "groundbase", "groundbuildable", "groundcompany", "groundinfantry", "groundstructure",
+    "groundvehicle", "hack_ability", "hack_super_weapon_ability", "hardpoint", "hero_clash",
+    "hero_protection_ability", "herocompany", "herounit", "income_stream_ability", "income_stream_mod_ability",
+    "indigenous_unit", "infection_ability", "ion_cannon_shot_attack_ability", "item", "landbombingunit",
+    "landprimaryskydome", "landsecondaryskydome", "laser_defense_ability", "leech_shields_ability", "lensflare",
+    "lightsource", "lucky_shot_attack_ability", "marker", "maximum_firepower_attack_ability", "miscobject",
+    "mobile_defense_unit", "mousepointer", "mov_cinematic", "move_action", "movie", "multiplayerstructuremarker",
+    "musicevent", "neutralize_hero_ability", "particle", "permanent_weapon_swap_ability",
+    "personal_flame_thrower_ability", "planet", "planet_destruction_ability", "planet_income_bonus_ability",
+    "planet_income_gambling_ability", "political_control_protection_ability", "political_transition_bonus_ability",
+    "priority_set", "projectile", "prop_desert", "prop_felucia", "prop_forest", "props_generic", "props_snow",
+    "props_story", "props_swamp", "props_temperate", "props_urban", "props_volcanic", "proximity_mines_ability",
+    "radioactive_contaminate_ability", "redirect_blaster_ability", "reduce_production_price_ability",
+    "reduce_production_time_ability", "reduce_technology_price_ability", "remote_bomb_ability",
+    "remove_corruption_ability", "repair_ability", "retreat_prevention_ability", "saber_throw_ability",
+    "scriptmarker", "secondarystructure", "sensor_jamming_ability", "settings_for_faction", "sfxevent",
+    "shield_flare_ability", "siphon_credits_ability", "slave_unit", "slavecompany", "slicer_ability",
+    "spacebuildable", "spaceprimaryskydome", "spaceprop", "spacesecondaryskydome", "spacestructure", "spaceunit",
+    "spawn_ability", "special_ability_action", "specialeffect", "specialstructure", "speechevent", "squadron",
+    "starbase", "starbase_upgrade_ability", "stealth_ability", "stun_ability", "summon_ability",
+    "super_laser_ability", "system_spy_ability", "tactical_bribe_ability", "tacticalcamera", "techbuilding",
+    "tractor_beam_attack_ability", "traderoute", "traderouteline", "transportunit", "uniqueunit", "upgradeobject",
+    "vehicle_thief_ability", "weatherproof_ability",
+};
+
+// SG-CLS-01: tokens of a flag list tag (`A | B`, `A, B`, `A B`), lower case.
+std::vector<std::string> class_tokens(const std::string_view text) {
+    std::vector<std::string> result;
+    std::string current;
+    for (const char c : text) {
+        if (c == '|' || c == ',' || c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            if (!current.empty()) result.push_back(std::move(current));
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) result.push_back(std::move(current));
+    for (auto& token : result) token = ascii_lower(token);
+    return result;
+}
+
+bool has_class_token(const EffectiveObject& object, const std::string_view tag, const std::string_view token) {
+    const auto tokens = class_tokens(object.single_text(tag));
+    return std::find(tokens.begin(), tokens.end(), std::string(token)) != tokens.end();
+}
+
+bool class_flag(const EffectiveObject& object, const std::string_view tag) {
+    const auto text = ascii_lower(object.single_text(tag));
+    return text == "yes" || text == "true" || text == "1";
+}
+
+// The class the effective tags imply for an object with no class named along its chain: the same tags the FoC
+// objects of that class carry (a squad lists units, a company lists units, a dummy starbase behavior, an upgrade
+// category, a hero flag). Empty when no tag implies one.
+std::string class_from_tags(const EffectiveObject& object) {
+    const bool hero = class_flag(object, "Is_Named_Hero") || class_flag(object, "Is_Generic_Hero");
+    if (object.single("Company_Units")) return hero ? "HeroCompany" : "GroundCompany";
+    if (object.single("Squadron_Units")) return "Squadron";
+    if (has_class_token(object, "Behavior", "dummy_star_base")) return "StarBase";
+    if (has_class_token(object, "CategoryMask", "upgrade")) return "UpgradeObject";
+    if (hero) return "HeroUnit";
+    return {};
+}
+
+} // namespace
+
+bool is_foc_object_class(const std::string_view name) {
+    const auto key = ascii_lower(name);
+    return std::binary_search(foc_object_classes.begin(), foc_object_classes.end(), std::string_view(key));
+}
 
 core::Result<EffectiveObject> Catalog::resolve(const std::string_view object_id) const {
     return resolve_in(object_id, std::nullopt);
@@ -298,6 +450,22 @@ core::Result<EffectiveObject> Catalog::resolve_in(const std::string_view object_
     };
     for (auto& group : groups) {
         for (auto& occurrence : group.occurrences) result.values.push_back(std::move(occurrence));
+    }
+    if (top.category == Category::game_object && !is_foc_object_class(result.type_name)) {
+        for (const auto* ancestor : chain) {
+            if (!is_foc_object_class(ancestor->type_name)) continue;
+            result.type_name = ancestor->type_name;
+            result.class_origin = "ancestor:" + ancestor->type_name;
+            break;
+        }
+        if (result.class_origin.empty()) {
+            if (auto implied = class_from_tags(result); !implied.empty()) {
+                result.class_origin = "tags:" + implied;
+                result.type_name = std::move(implied);
+            } else {
+                result.class_origin = "unclassed";
+            }
+        }
     }
     {
         const std::scoped_lock lock(cache_mutex);

@@ -98,6 +98,12 @@ target_compile_features(ui_perf_stats_tests PRIVATE cxx_std_20)
 eawr_target_project_warnings(ui_perf_stats_tests)
 add_test(NAME ui_perf_stats_contracts COMMAND ui_perf_stats_tests)
 
+add_executable(ui_render_categories_tests render_categories_tests.cpp)
+target_link_libraries(ui_render_categories_tests PRIVATE eawr::ui_model)
+target_compile_features(ui_render_categories_tests PRIVATE cxx_std_20)
+eawr_target_project_warnings(ui_render_categories_tests)
+add_test(NAME ui_render_categories_contracts COMMAND ui_render_categories_tests)
+
 # #455: the tactical minimap's model (settings, mapping, blips, the camera guide, the fog layer).
 add_executable(ui_minimap_tests minimap_tests.cpp)
 target_link_libraries(ui_minimap_tests PRIVATE eawr::ui_model eawr::sim)

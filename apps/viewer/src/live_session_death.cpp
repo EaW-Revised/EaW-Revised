@@ -6,8 +6,8 @@
 #include "frame_timer.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -95,17 +95,17 @@ void LiveSessionView::prepare_clips(const vfs::Vfs& filesystem, const data::Cata
             reported[type] = true;
             auto object = catalog.resolve(type, data::Category::game_object);
             if (!object) continue;
-            const std::string model = space_model_path(object.value());
+            const std::string model = battle_model_path(object.value(), options_.land);
             std::string row = "{\"type\": " + json(type) + ", \"model\": " + json(model) + ", \"clips\": "
                 + (model.empty() ? std::string("null")
-                                 : clip_counts(model, tag_text(object.value(), "Space_Model_Anim_Override_Name")));
+                                 : clip_counts(model, tag_text(object.value(), options_.land ? "Land_Model_Anim_Override_Name" : "Space_Model_Anim_Override_Name")));
             const auto clone_type = death_clone_of(object.value());
             row += ", \"death_clone\": " + (clone_type ? json(*clone_type) : std::string("null"));
             if (clone_type) {
                 if (auto clone = catalog.resolve(*clone_type, data::Category::game_object)) {
-                    const std::string clone_model = space_model_path(clone.value());
+                    const std::string clone_model = battle_model_path(clone.value(), options_.land);
                     row += ", \"clone_model\": " + json(clone_model) + ", \"clone_clips\": "
-                        + clip_counts(clone_model, tag_text(clone.value(), "Space_Model_Anim_Override_Name"));
+                        + clip_counts(clone_model, tag_text(clone.value(), options_.land ? "Land_Model_Anim_Override_Name" : "Space_Model_Anim_Override_Name"));
                 }
             }
             unit_clip_rows_.push_back(row + "}");
@@ -154,9 +154,9 @@ std::optional<LiveSessionView::DeathClone> LiveSessionView::prepare_death_clone(
                 if (*value != 0xFFFFU) declared_index = static_cast<std::uint32_t>(*value);
             }
         }
-        const std::string clone_model = space_model_path(clone.value());
+        const std::string clone_model = battle_model_path(clone.value(), options_.land);
         const auto clips = animation::model_clip_paths(clone_model, type, exists,
-            tag_text(clone.value(), "Space_Model_Anim_Override_Name"));
+            tag_text(clone.value(), options_.land ? "Land_Model_Anim_Override_Name" : "Space_Model_Anim_Override_Name"));
         // Retail draws an undeclared variant with the synchronized random generator; the view
         // takes it from the unit's ID, so every run shows the same one (UA-P2).
         const auto variant = animation::death_clip_variant(clips.size(), declared_index, variant_key);
@@ -188,7 +188,7 @@ std::optional<LiveSessionView::DeathClone> LiveSessionView::prepare_death_clone(
         + (death.playback.persistence_ticks ? std::to_string(*death.playback.persistence_ticks) : "null")
         + ", \"status\": " + json(status) + "}");
     if (!clone || removed) return std::nullopt;
-    SpacePopulation::Options::PlacedShip ship;
+    BattleScene::PlacedUnit ship;
     ship.object_id = *clone_type;
     ship.position = placed_ships_[source].position;
     ship.yaw_degrees = placed_ships_[source].yaw_degrees;
@@ -213,7 +213,7 @@ std::optional<animation::DeathFrame> LiveSessionView::clone_death_frame(const De
         tick, tactical::logical_frames_per_second);
 }
 
-std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const SpacePopulation& population,
+std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const BattleScene& population,
                                                                         const std::size_t ship,
                                                                         const double tick) const {
     // A clone that left this frame still stood in the samples before its fade (#429).
@@ -237,7 +237,7 @@ std::optional<LiveSessionView::CloneFrame> LiveSessionView::clone_frame(const Sp
     return std::nullopt;
 }
 
-void LiveSessionView::retire_clones(SpacePopulation& population, GodotRenderer& renderer,
+void LiveSessionView::retire_clones(BattleScene& population, GodotRenderer& renderer,
     const std::function<bool(std::size_t)>& terminal_ready) {
     for (const ActiveClone& retiring : retiring_clones_) {
         const auto ship = death_clones_.at(retiring.unit).ship;

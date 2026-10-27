@@ -154,11 +154,12 @@ Evidence run(const std::uint32_t locations, const std::size_t workers, const std
             require(step.work.fiscal_cycles == (serviced && (tick + 1) % 10 == 0 ? 1U : 0U), "fiscal budget");
             require(step.work.periodic_checks == (serviced && (tick + 1) % 30 == 0 ? 1U : 0U), "periodic budget");
             // #2979 adds the campaign-scoring section on the first ownership change.
-            // This workload changes every planet each tick: commands encode 6 sections
-            // initially and 4 thereafter (session, planets, fleets, scoring). Quiet and
-            // paused worlds keep the original 5-section closure and encode only session
-            // after tick zero. Across 60 ticks these totals are 242 / 64 / 64.
-            const std::uint64_t total_sections = load == Load::commands ? 6 : 5;
+            // This workload changes every planet each tick: commands encode 7 sections
+            // initially (including the always-present History section) and 4 thereafter
+            // (session, planets, fleets, scoring). Quiet and paused worlds keep a 6-section
+            // closure and encode only session after tick zero. Across 60 ticks these totals
+            // are 243 / 65 / 65.
+            const std::uint64_t total_sections = load == Load::commands ? 7 : 6;
             const std::uint64_t sections = tick == 0 ? total_sections : load == Load::commands ? 4 : 1;
             require(step.work.sections_encoded == sections, "section encoding budget");
             require(step.work.sections_reused == total_sections - sections, "section reuse budget");

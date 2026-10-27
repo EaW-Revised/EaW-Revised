@@ -1,7 +1,9 @@
 #include "galactic_mode_internal.hpp"
+#include "ground_stack.hpp"
 #include "ui/input_routing.hpp"
 #include "fleet_drag.hpp"
 #include "fleet_member_placement.hpp"
+#include "eawr/presentation/ui/fleet_pathfinder.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include <godot_cpp/classes/input.hpp>
 
@@ -22,7 +24,10 @@ bool allowed(const GalacticMode::State& state) {
         && gates.galactic && gates.hud_enabled && gates.world_allowed() && !gates.tutorial_locked
         && !gates.action_menu && !gates.selection_locked && !state.retreat_dialog_open
         && (!state.battle_dialog || !state.battle_dialog->visible())
-        && state.published_snapshot->clock().pause_depth == 0;
+        && (state.pause_allows(presentation::GalacticPausedAction::fleet_management)
+            || state.pause_allows(presentation::GalacticPausedAction::fleet_move)
+            || state.pause_allows(presentation::GalacticPausedAction::surface_deploy)
+            || state.pause_allows(presentation::GalacticPausedAction::ability));
 }
 void hide_empty_fleet_slots(GalacticMode::State& state) {
     for (std::size_t icon = 0; icon < state.fleet_empty_slots.size(); ++icon) {
@@ -43,16 +48,21 @@ void GalacticMode::State::attach_fleet_drag(Control* control, const std::string&
     const bool should_ghost = authored && authored->flag(data::ui::Field::should_ghost);
     const bool base_only = authored && authored->flag(data::ui::Field::ghost_base_only);
     const bool drag_back = authored && authored->flag(data::ui::Field::drag_back);
-    drag->right_action([this, identity](Vector2 point) {
+    drag->right_action([this, identity, component](Vector2 point) {
         const auto picked = identity();
+        if (component.ends_with("_0000")) {
+            if (picked.member && !request_pathfinder(picked.fleet, 0, true) && audio) audio->negative_feedback();
+            return;
+        }
         // GHUD-S93: reuse the exact cell representative, never its type stack or whole fleet header.
         static_cast<void>(open_object_sale(picked.member, point));
     });
-    drag->source([this, control, preview, should_ghost, base_only, drag_back, identity = std::move(identity)](Vector2 start) -> std::optional<std::uint64_t> {
+    drag->source([this, control, component, preview, should_ghost, base_only, drag_back, identity = std::move(identity)](Vector2 start) -> std::optional<std::uint64_t> {
         auto* input = Input::get_singleton();
         if (!allowed(*this) || !input) return std::nullopt;
         const auto picked = identity();
-        const bool ctrl = input->is_key_pressed(KEY_CTRL);
+        const bool pathfinder = component.ends_with("_0000");
+        const bool ctrl = !pathfinder && input->is_key_pressed(KEY_CTRL);
         if (ctrl && !picked.member) return std::nullopt; // Galaxy stack Ctrl path remains separate.
         const auto id = picked.fleet;
         const auto* source = local_fleet(*this, id);
@@ -68,6 +78,7 @@ void GalacticMode::State::attach_fleet_drag(Control* control, const std::string&
                 const auto* fleet = local_fleet(*this, fleet_id);
                 if (!fleet) continue;
                 for (const auto& member : fleet->members) {
+                    if (!pathfinder && picked.cell_slot && pathfinder_source(*picked.cell_slot).member == member.id) continue;
                     const auto actors = published_snapshot->actor_records();
                     const auto actor = std::lower_bound(actors.begin(), actors.end(), member.id,
                         [](const auto& row, auto key) { return row.id < key; });
@@ -79,6 +90,7 @@ void GalacticMode::State::attach_fleet_drag(Control* control, const std::string&
             }
             if (dragged_members.empty()) return std::nullopt;
         }
+        dragged_pathfinder = pathfinder;
         dragged_fleet = id; map_input.dragged = id; map_input.hyperspace = true;
         dragged_cell_slot = picked.cell_slot; dragged_cell_type = picked.cell_type;
         ++fleet_drag_begins;
@@ -121,20 +133,126 @@ void GalacticMode::State::attach_fleet_drag(Control* control, const std::string&
     });
 }
 
+void GalacticMode::State::attach_ground_stack_drag(Control* control, const galactic_view::ObjectId planet) {
+    auto* drag = memnew(EawrFleetDrag); control->add_child(drag);
+    drag->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    drag->source([this, control, planet](Vector2 start) -> std::optional<std::uint64_t> {
+        if (!allowed(*this) || !fleet_drag_receiver || !control->is_visible_in_tree()
+            || static_cast<EawrHudButton*>(control)->is_disabled()
+            || !pause_allows(presentation::GalacticPausedAction::fleet_management)) return {};
+        const auto stack = galactic_view::ground_stack(*published_snapshot, galaxy->local.player, planet, 0);
+        if (!stack) return {};
+        auto units = galactic_view::ground_stack_units(*stack);
+        if (units.empty()) return {};
+        dragged_ground_planet = planet; dragged_ground_units = std::move(units); ground_stack_accepted = false;
+        map_input.dragged = planet; map_input.hyperspace = true; ++fleet_drag_begins;
+        const auto* style = command_catalog.find("g_planet_land_forces");
+        if (!style || style->flag(data::ui::Field::should_render_at_drag_pos, true)) {
+            fleet_drag_receiver->start(EawrFleetDrag::ghost_of(*control, start - control->get_global_position(), {}, false,
+                style && style->flag(data::ui::Field::drag_back)));
+            fleet_drag_receiver->lift_source(*control);
+        } else fleet_drag_receiver->start();
+        if (audio) audio->ui_sound("GUI_Drag_Fleet");
+        return planet;
+    }, [control] {
+        if (control->is_visible_in_tree() && !static_cast<EawrHudButton*>(control)->is_disabled())
+            static_cast<EawrHudButton*>(control)->_pressed();
+    });
+}
+
+bool GalacticMode::State::ground_stack_drop(const Vector2 point, const bool submit) {
+    if (!allowed(*this) || !dragged_ground_planet || dragged_ground_units.empty()
+        || !pause_allows(presentation::GalacticPausedAction::fleet_management)) return false;
+    const auto origin = dragged_ground_planet;
+    galactic_view::ObjectId destination{}, target{};
+    std::uint8_t source_slot{};
+    std::optional<std::uint8_t> arrival_slot;
+    bool hit{}, land_on_arrival{};
+    for (const auto& [key, badge] : fleet_badges) {
+        if (!badge.shown || !badge.button->is_visible_in_tree() || !badge.button->get_global_rect().has_point(point)) continue;
+        if (badge.ground_planet) {
+            if (key.first == origin || !pause_allows(presentation::GalacticPausedAction::surface_deploy)) return false;
+            destination = key.first; hit = true; land_on_arrival = true; break;
+        }
+        destination = key.first; hit = true;
+        const auto slot = badge.owner == galaxy->local.player ? stack_icon_slot(destination, key.second) : std::nullopt;
+        if (destination == origin) {
+            if (badge.owner != galaxy->local.player || !slot) return false;
+            target = badge.fleet.value_or(0); source_slot = target ? 0 : *slot;
+        } else arrival_slot = slot;
+        break;
+    }
+    for (std::size_t icon = 0; !hit && icon < fleet_empty_slots.size(); ++icon) {
+        if (!fleet_empty_shown[icon] || !fleet_empty_slots[icon]->is_visible_in_tree()
+            || !fleet_empty_slots[icon]->get_global_rect().has_point(point)) continue;
+        const auto slot = stack_icon_slot(fleet_drag_planet, static_cast<std::uint8_t>(icon));
+        if (!slot) return false;
+        destination = fleet_drag_planet; hit = true;
+        if (destination == origin) source_slot = *slot; else arrival_slot = slot;
+    }
+    if (!hit && selected_planet == origin && fleet_organize && fleet_organize->is_visible_in_tree()) {
+        for (std::size_t panel = 0; panel < fleet_drop_rects.size(); ++panel) {
+            if (!fleet_drop_rects[panel].has_point(point)) continue;
+            if (!fleet_panels.drop_slot[panel]) return false;
+            destination = origin; hit = true;
+            const auto* card = shown_panel_cards[panel];
+            target = card ? card->fleet.value_or(0) : 0;
+            source_slot = target ? 0 : *fleet_panels.drop_slot[panel];
+            break;
+        }
+    }
+    if (!hit) {
+        if (hud && pointer_over_panel(*hud, point)) return false;
+        const auto* picked = picked_planet(point.x, point.y);
+        if (!picked || picked->id == origin) return false;
+        destination = picked->id;
+    }
+    std::vector<sim::galactic::PlanetId> path;
+    if (destination != origin) {
+        if (!pause_allows(presentation::GalacticPausedAction::fleet_move)
+            || galactic_view::observer_discovery(*published_snapshot, galaxy->local.player, destination) != true) return false;
+        const auto planets = input_planets();
+        auto planned = galactic_view::destination_path(*published_snapshot, galaxy->local.player, origin, destination, planets);
+        if (!planned) return false;
+        path = std::move(*planned); source_slot = 2; // GGS-04 / WGM-199.
+    }
+    const auto intent = galactic_view::ground_stack_launch(*published_snapshot, galaxy->local.player,
+        origin, dragged_ground_units, target, source_slot, std::move(path), arrival_slot, land_on_arrival);
+    if (!intent) return false;
+    const auto planets = input_planets();
+    const auto command = map_input.command(*intent, planets);
+    if (!command) return false;
+    if (!submit) return true;
+    game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *command, {}});
+    ++submitted_orders; ++ground_hud.launch_orders; ground_stack_accepted = true;
+    ground_hud.last_launch_units = dragged_ground_units; ground_hud.last_launch_target = target;
+    ground_hud.last_launch_slot = source_slot; ground_hud.last_launch_path = intent->path;
+    ground_hud.last_launch_land = land_on_arrival;
+    if (audio) audio->ui_sound("GUI_Drop_Fleet");
+    return true;
+}
+
 void GalacticMode::State::build_fleet_drag_receiver() {
     fleet_drag_receiver = memnew(EawrFleetDrag); hud->add_child(fleet_drag_receiver);
     fleet_drag_receiver->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
-    fleet_drag_receiver->receiver([this](auto id, auto point, bool submit) { return fleet_drop(id, point, submit); },
+    fleet_drag_receiver->receiver([this](auto id, auto point, bool submit) {
+        return dragged_ground_planet ? ground_stack_drop(point, submit) : fleet_drop(id, point, submit);
+    },
         [this] { cancel_fleet_drag(); }, [this](Vector2 point) { fleet_drag_hover(point); });
 }
 
 void GalacticMode::State::cancel_fleet_drag() {
+    if (dragged_ground_planet) {
+        if (!ground_stack_accepted) { ++ground_hud.rejected; if (audio) audio->negative_feedback(); }
+        dragged_ground_planet = 0; dragged_ground_units.clear(); ground_stack_accepted = false;
+    }
     if (dragged_fleet) ++fleet_drag_ends;
     dragged_fleet = 0; map_input.dragged = 0; map_input.hyperspace = false;
     dragged_stack.clear(); fleet_drag_planet = 0; hide_empty_fleet_slots(*this);
     dragged_cell_slot.reset(); dragged_cell_type.reset();
     dragged_members.clear();
     dragged_type_stack = false;
+    dragged_pathfinder = false;
     if (fleet_drag_receiver) fleet_drag_receiver->cancel();
     if (ground_hud.input && ground_hud.input->drag_art) ground_hud.input->drag_art->cancel();
 }
@@ -155,10 +273,23 @@ std::vector<std::uint8_t> GalacticMode::State::stack_icon_slots(const galactic_v
 }
 
 void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
-    if (!dragged_fleet) return;
+    const auto change_planet = [this](const galactic_view::ObjectId planet) {
+        if (planet == fleet_drag_planet) return;
+        hide_empty_fleet_slots(*this);
+        // Hover receivers change without a simulation publication (especially paused).
+        // Re-place both ends so the shared empty-slot controls appear at the new planet.
+        hud_label_key.reset();
+        for (const auto id : {fleet_drag_planet, planet})
+            if (const auto label = planet_label_records.find(id); label != planet_label_records.end())
+                label->second.placed = false;
+        fleet_drag_planet = planet;
+    };
+    if (!dragged_fleet && !dragged_ground_planet && !(ground_hud.pressed_object && map_input.box_end)) {
+        hide_empty_fleet_slots(*this); change_planet(0); return;
+    }
     if (hud && pointer_over_panel(*hud, point)) {
         hide_empty_fleet_slots(*this);
-        fleet_drag_planet = 0;
+        change_planet(0);
         return;
     }
     // The pointer's planet: one of its stack icons (empty ones included, so the
@@ -176,8 +307,7 @@ void GalacticMode::State::fleet_drag_hover(const Vector2 point) {
             planet = key.first;
     }
     if (!planet) if (const auto* picked = picked_planet(point.x, point.y)) planet = picked->id;
-    if (planet != fleet_drag_planet) hide_empty_fleet_slots(*this);
-    fleet_drag_planet = planet;
+    change_planet(planet);
 }
 
 bool GalacticMode::State::submit_fleet_stack(const galactic_view::DropIntent& intent,
@@ -185,9 +315,28 @@ bool GalacticMode::State::submit_fleet_stack(const galactic_view::DropIntent& in
     const auto planets = input_planets();
     const auto order = map_input.command(intent, planets);
     if (!order) return false;
-    for (auto& command : galactic_view::stack_commands(intent, stack, *order)) {
+    auto commands = galactic_view::fleet_stack_orders(*published_snapshot, galaxy->local.player, intent, stack, *order,
+        [this](const auto fleet, const auto planet) { return hero_ability_drop(fleet, planet); });
+    if (!commands) return false;
+    for (auto& command : *commands) {
         game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, std::move(command), {}});
         ++submitted_orders;
+    }
+    return true;
+}
+
+bool GalacticMode::State::request_pathfinder(const sim::galactic::FleetId fleet, const sim::EntityId member, const bool submit) {
+    if (!allowed(*this)) return false;
+    const auto frame = game->frame(sim::SeatId{galaxy->local.seat});
+    if (!frame.latest) return false;
+    const bool pending = frame.pending_conflict != nullptr;
+    const bool hold = pending || frame.summary_hold != 0 || frame.conflict != nullptr || frame.auto_resolve_progress != nullptr;
+    const auto order = presentation::ui::fleet_pathfinder_order(*frame.latest, sim::SeatId{galaxy->local.seat}, fleet, member, hold, pending);
+    if (!order) return false;
+    if (submit) {
+        game->submit(platform::LiveGameOrder{sim::SeatId{galaxy->local.seat}, *order, {}});
+        ++submitted_orders; ++fleet_drag_orders;
+        if (audio) audio->ui_sound("GUI_Drop_Fleet");
     }
     return true;
 }
@@ -196,6 +345,36 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     if (!allowed(*this) || id != dragged_fleet) return false;
     const auto* source = local_fleet(*this, id);
     if (!source) return false; // Stable identity is revalidated at the current publication.
+    if (fleet_organize && fleet_organize->is_visible_in_tree()) {
+        for (const auto& [name, control] : fleet_buttons) {
+            if (!name.ends_with("_0000") || !control->is_visible_in_tree() || !control->get_global_rect().has_point(point)) continue;
+            const auto panel = static_cast<std::size_t>(name[1] - '1');
+            if (source->orbit != selected_planet || galactic_view::fleet_panel_for_slot(fleet_panels.mode, source->orbit_slot) != panel
+                || dragged_members.size() != 1) return false;
+            if (!request_pathfinder(id, dragged_members.front().member, false)) return false;
+            // A panel can aggregate several native fleets. Replace its old selector
+            // through commands too; presentation never clears a published flag itself.
+            std::vector<sim::galactic::FleetId> clear;
+            for (const auto& fleet : published_snapshot->fleets()) {
+                if (fleet.id == id || fleet.owner != source->owner || fleet.orbit != source->orbit || fleet.motion.transit
+                    || galactic_view::fleet_panel_for_slot(fleet_panels.mode, fleet.orbit_slot) != panel) continue;
+                if (std::any_of(fleet.members.begin(), fleet.members.end(), [](const auto& member) { return member.pathfinder; })) {
+                    if (!request_pathfinder(fleet.id, 0, false)) return false;
+                    clear.push_back(fleet.id);
+                }
+            }
+            if (submit) for (const auto fleet : clear) static_cast<void>(request_pathfinder(fleet, 0, true));
+            return request_pathfinder(id, dragged_members.front().member, submit);
+        }
+        // GHUD-R44: returning the selector to its fleet's ordinary area clears it;
+        // it never transfers the whole fleet or changes membership.
+        if (dragged_pathfinder) {
+            const auto panel = galactic_view::fleet_panel_for_slot(fleet_panels.mode, source->orbit_slot);
+            return source->orbit == selected_planet && fleet_drop_rects[panel].has_point(point)
+                && request_pathfinder(id, 0, submit);
+        }
+    }
+    if (dragged_pathfinder) return false;
     for (const auto& [planet, slot] : destruction_hud.raid_slots)
         if (slot.button && slot.button->is_visible_in_tree() && slot.button->get_global_rect().has_point(point))
             return drop_raid(id, planet, submit);
@@ -222,12 +401,10 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
     }
     std::optional<galactic_view::DropIntent> intent;
     if (fleet_organize && fleet_organize->is_visible_in_tree()) {
-        // The reserved leading pathfinder slot is never an ordinary fleet target.
-        for (const auto& [name, control] : fleet_buttons)
-            if (name.ends_with("_0000") && control->get_global_rect().has_point(point)) return false;
         for (std::size_t slot = 0; slot < fleet_drop_rects.size(); ++slot) {
             if (!fleet_drop_rects[slot].has_point(point)) continue;
-            if (source->orbit != selected_planet) return false;
+            if (source->orbit != selected_planet
+                || !pause_allows(presentation::GalacticPausedAction::fleet_management)) return false;
             // WGUI-175: the other owner's panel takes no drop; a local panel names the orbit slot it stands for.
             if (!fleet_panels.drop_slot[slot]) return false;
             const std::uint8_t orbit_slot = *fleet_panels.drop_slot[slot];
@@ -352,6 +529,16 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
                 if (intent || destination) break;
                 if (!badge.shown || !badge.button->is_visible_in_tree()
                     || !badge.button->get_global_rect().has_point(point)) continue;
+                if (badge.ground_planet) {
+                    // GGS-05: only the existing same-planet landing command is expressible here.
+                    if (key.first != source->orbit || !pause_allows(presentation::GalacticPausedAction::surface_deploy)) return false;
+                    if (dragged_stack.size() > 1 && !pause_allows(presentation::GalacticPausedAction::fleet_management)) return false;
+                    const auto* roster = command_roster(key.first);
+                    if (!roster || !roster->accessible || !roster->allied
+                        || !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)) return false;
+                    intent = galactic_view::DropIntent{galactic_view::DropKind::land, id, 0, key.first, {}};
+                    break;
+                }
                 if (badge.owner != galaxy->local.player) {
                     // GHUD-S77: a foreign stack is its planet, never a merge
                     // target or a request for the foreign fleet's orbit slot.
@@ -383,14 +570,21 @@ bool GalacticMode::State::fleet_drop(std::uint64_t id, Vector2 point, bool submi
         if (!intent) {
             if (destination == source->orbit || galactic_view::observer_discovery(*published_snapshot, galaxy->local.player, destination) != true)
                 return false;
+            if (!pause_allows(presentation::GalacticPausedAction::fleet_move)
+                || (dragged_stack.size() > 1 && !pause_allows(presentation::GalacticPausedAction::fleet_management))) return false;
             if (!submit) return published_snapshot->movement() != nullptr;
             // Search only on release, never in the GUI's per-frame drop predicate.
             const auto planets = input_planets();
-            intent = galactic_view::fleet_destination_intent(*published_snapshot, galaxy->local.player, id, destination, planets);
+            intent = galactic_view::fleet_destination_intent(*published_snapshot, galaxy->local.player, id, destination, planets, dragged_stack);
             if (intent) intent->destination_slot = destination_slot;
         }
     }
     if (!intent) return false;
+    if (intent->kind == galactic_view::DropKind::land
+        && !galactic_view::fleet_can_land(*published_snapshot, galaxy->local.player, id, dragged_stack)) return false;
+    if (!pause_allows(intent->kind == galactic_view::DropKind::move ? presentation::GalacticPausedAction::fleet_move
+            : intent->kind == galactic_view::DropKind::land ? presentation::GalacticPausedAction::surface_deploy
+            : presentation::GalacticPausedAction::fleet_management)) return false;
     if (!submit) return true;
     if (!submit_fleet_stack(*intent, dragged_stack)) return false;
     // WGP-184: a same-owner merge drop (only local fleets are merge targets here).

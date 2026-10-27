@@ -913,7 +913,7 @@ core::Result<GalacticSession> GalacticSession::create(const GalacticSetup& setup
         }
         std::uint8_t enabled{}, cancelled{}, kind{};
         if (!in.read_u8(enabled) || enabled > 1 || !in.read_u8(cancelled) || cancelled > 1
-            || !in.read_u8(kind) || kind < 1 || kind > 7 || in.remaining())
+            || !in.read_u8(kind) || kind < 1 || kind > 8 || in.remaining())
             return fail<void>(diagnostic_codes::invalid_setup, "invalid ability service journal");
         return world.set_ability_lifecycle(actor, enabled != 0, cancelled != 0, static_cast<AbilityKind>(kind));
     });

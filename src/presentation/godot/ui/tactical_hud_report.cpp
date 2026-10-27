@@ -4,6 +4,11 @@
 #include <sstream>
 
 namespace eawr::presentation::godot_backend {
+
+diagnostics::MemoryCapacity TacticalHud::memory_capacity() const {
+    return state_->minimap_fog.memory_capacity();
+}
+
 using tactical_hud_detail::text;
 using tactical_hud_detail::rect2;
 

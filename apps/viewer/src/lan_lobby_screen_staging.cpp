@@ -166,6 +166,20 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
         state.preview->set_position(rect.position);
         state.preview->set_size(rect.size);
         dialog.frame->add_child(state.preview);
+        // #4553: a Galactic Conquest room shows the campaign's description where the two map-source buttons sit
+        // (retail has no description on this screen; the owner asked for one).
+        auto* description = memnew(EawrUiLabel);
+        description->set_theme(resources.theme);
+        Rect2 area = rect;
+        const BuiltGadget* official = find_gadget(dialog, "IDC_SELECT_OFFICIAL_MAPS");
+        const BuiltGadget* custom = find_gadget(dialog, "IDC_SELECT_CUSTOM_MAPS");
+        if (official != nullptr && custom != nullptr) area = local_rect(dialog, *official).merge(local_rect(dialog, *custom));
+        description->set_position(area.position);
+        description->set_size(area.size);
+        description->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+        description->set_visible(false);
+        dialog.frame->add_child(description);
+        state.controls["EAWR_CAMPAIGN_DESCRIPTION"] = description;
     }
     // The accepted and status icons are image gadgets too: a small square per row.
     for (std::size_t row = 0; row < state.dialog_rows; ++row) {
@@ -322,7 +336,7 @@ void EawrLanLobby::open_staging(const bool host, const std::string& game, const 
 
 // MNU-22 (#4041): the catalogue's advanced options dialog, built hidden over the host's staging. Heroes,
 // starting units, super weapons and the win condition reach the match through the lobby game blob;
-// the credits slider only displays the data's value, as the skirmish setup does (WSS-25).
+// the host edits the selected credits, as the skirmish setup does (WSS-25).
 void EawrLanLobby::fill_map_list() {
     Impl& impl = *impl_;
     Resources& resources = *resources_;
@@ -337,6 +351,7 @@ void EawrLanLobby::fill_map_list() {
     for (std::size_t index = 0; index < resources.maps.size(); ++index) {
         const skirmish::SetupMap& map = resources.maps[index];
         if (map.metadata.custom != impl.custom_maps) continue;
+        if ((map.domain == sim::tactical::BattleDomain::land) != (impl.host_options.game_type == land_game_type)) continue;
         impl.listed.push_back(index);
         list->add_item(text(map.name + (map.unavailable.empty() ? "" : " (unavailable)")));
         list->set_item_tooltip(list->get_item_count() - 1, text(map.unavailable.empty() ? map.path : map.unavailable));

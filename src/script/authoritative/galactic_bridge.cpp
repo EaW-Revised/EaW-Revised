@@ -250,7 +250,7 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore(
 }
 core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preserving(
     gc::GalacticSession& world, ScriptScheduler ai, ScriptScheduler story, const GalacticScriptSave& saved,
-    const bool conflict_paused) {
+    const bool timer_held) {
     auto refuse = [](std::string message) {
         return core::Result<ScriptedGalacticSession>::failure(error(codes::load_rejected, std::move(message)));
     };
@@ -275,14 +275,29 @@ core::Result<ScriptedGalacticSession> ScriptedGalacticSession::restore_preservin
     // frame timer, so while the pause is pending the AI host has served at least one frame more than the galaxy has
     // counted, all stamped with the barrier frame. A paused tick services no AI unless the engine admits one (the
     // retained manager's auto-resolve planning), so the lead is not capped at one; it is capped by one service per
-    // elapsed tick. The pause resumes with a timer advance that closes the first frame of the lead.
-    const bool paused_service_lead = conflict_paused && world.clock().pause_depth != 0 &&
-        ai.galactic_frame() == saved.galactic_frame && ai.completed_tick() > saved.galactic_frame &&
+    // elapsed tick. The pause resumes with a timer advance that closes the first frame of the lead. The outer timer
+    // tail is skipped for the tick that selects a tactical child (GFS-15), so a victory-monitored galaxy keeps that
+    // lead through the battle, the return and the battle-summary hold until the timer resumes: the owner reports
+    // every such held state through `timer_held`, not only the pending-conflict pause.
+    const bool paused_service_lead = timer_held && ai.galactic_frame() == saved.galactic_frame && ai.completed_tick() > saved.galactic_frame &&
         ai.completed_tick() <= saved.completed_tick;
-    if ((ai.completed_tick() != saved.galactic_frame && !paused_service_lead) ||
-        story.completed_tick() > saved.completed_tick || !served_frame(ai.galactic_frame()) ||
-        !served_frame(story.galactic_frame()) || !unique_instances(ai, story))
-        return refuse("saved AI/story service clocks or instance identities do not match the barrier");
+    const bool ai_tick_ok = ai.completed_tick() == saved.galactic_frame || paused_service_lead;
+    const bool story_tick_ok = story.completed_tick() <= saved.completed_tick;
+    const bool ai_frame_ok = served_frame(ai.galactic_frame());
+    const bool story_frame_ok = served_frame(story.galactic_frame());
+    const bool instances_ok = unique_instances(ai, story);
+    if (!ai_tick_ok || !story_tick_ok || !ai_frame_ok || !story_frame_ok || !instances_ok) {
+        // Name the failing conditions and both host clocks against the barrier: the one message covers five checks.
+        const auto number = [](const std::uint64_t value) { return std::to_string(value); };
+        std::string detail = std::string(" [failed:") + (ai_tick_ok ? "" : " ai-tick") + (story_tick_ok ? "" : " story-tick")
+            + (ai_frame_ok ? "" : " ai-frame") + (story_frame_ok ? "" : " story-frame") + (instances_ok ? "" : " instances")
+            + "; ai tick " + number(ai.completed_tick()) + " frame " + number(ai.galactic_frame())
+            + ", story tick " + number(story.completed_tick()) + " frame " + number(story.galactic_frame())
+            + ", barrier tick " + number(saved.completed_tick) + " frame " + number(saved.galactic_frame)
+            + ", pause depth " + number(static_cast<std::uint64_t>(world.clock().pause_depth))
+            + (timer_held ? ", timer held" : "") + (tail_lag ? ", victory tail" : "") + "]";
+        return refuse("saved AI/story service clocks or instance identities do not match the barrier" + detail);
+    }
     for (const auto& [id, sequence] : saved.next_sequence) {
         static_cast<void>(sequence);
         const auto& seats = world.setup().seats;
@@ -396,6 +411,7 @@ void ScriptedGalacticSession::set_state_hasher(std::shared_ptr<sim::StateHasher>
 gc::GalacticSession& ScriptedGalacticSession::parent_world() noexcept { return impl_->world; }
 const gc::GalacticSession& ScriptedGalacticSession::world() const noexcept { return impl_->world; }
 ScriptScheduler& ScriptedGalacticSession::ai_scheduler() noexcept { return impl_->ai; }
+ScriptScheduler& ScriptedGalacticSession::story_scheduler() noexcept { return impl_->story; }
 std::uint64_t ScriptedGalacticSession::completed_tick() const noexcept { return impl_->world.completed_tick(); }
 std::size_t ScriptedGalacticSession::pending_script_commands() const noexcept { return impl_->pending.size(); }
 gc::GalacticReplay ScriptedGalacticSession::record() const { return impl_->world.record(); }
@@ -445,6 +461,9 @@ core::Result<void> register_missing_galactic_api(ScriptScheduler& scripts, std::
         if (auto registered = scripts.register_binding(name, missing(std::string(name))); !registered) return registered;
     }
     return core::Result<void>::success();
+}
+std::span<const std::string_view> missing_galactic_api_names() noexcept {
+    return std::span<const std::string_view>(detail::missing_galactic_globals);
 }
 core::Result<void> register_missing_galactic_method(ScriptScheduler& scripts, std::uint32_t kind, std::string_view method) {
     return scripts.register_method(kind, method, missing(std::string(method)));

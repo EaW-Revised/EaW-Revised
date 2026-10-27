@@ -97,6 +97,10 @@ struct ObservedProductionOffer {
 [[nodiscard]] core::Result<void> validate_production(const GalacticSetup&);
 // WGEP-61: the countdown truncates seconds * logical FPS, unlike fiscal rounding.
 [[nodiscard]] core::Result<std::uint64_t> production_frames(math::Fixed seconds);
+// WGEP-30: positive sub-credit floor, then signed half-away rounding.
+[[nodiscard]] math::Fixed production_price(math::Fixed price);
+// LSA-P3: fixed-point representation of an overflowing price/time product saturates by sign.
+[[nodiscard]] math::Fixed production_product(math::Fixed left, math::Fixed right);
 [[nodiscard]] core::Result<void> validate_census(const GalacticSetup&);
 // Explicit owned-list inputs; per-object arithmetic runs in partitioned phases.
 [[nodiscard]] core::Result<std::vector<PopulationTotal>> population_totals(

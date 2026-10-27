@@ -23,6 +23,7 @@
 #include <future>
 #include <ios>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -35,6 +36,65 @@
 
 namespace skirmish_start_test_support {
 void setup_contract(const std::filesystem::path& fixtures) {
+    // WSS-25/52: chosen cash reaches all playable factions without an AI income multiplier.
+    {
+        auto tables = synthetic_tables();
+        for (const auto* tag : {"MP_Default_Credits", "Tactical_Build_Time_Multiplier", "Space_Elevated_Vulnerability_Factor",
+            "Space_Elevated_Vulnerability_Duration", "Space_Reinforcement_Collision_Check_Distance"})
+            tables.constants.scalars.push_back({tag, whole(std::string_view(tag) == "MP_Default_Credits" ? 6000
+                : std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
+        tables.ai_credit_multiplier = whole(2);
+        auto inputs = synthetic_inputs(tables);
+        inputs.match_defaults.credits = whole(6000);
+        for (auto& faction : inputs.factions) faction.space_unit_cap = 25;
+        for (const bool free_units : {false, true}) for (const auto credits : {2750, 4750, 11750, 6000}) {
+            auto fixture = synthetic_fixture();
+            fixture.match = inputs.match_defaults;
+            fixture.match->credits = whole(credits);
+            fixture.match->free_starting_units = free_units;
+            const auto start = skirmish::build_start(fixture, inputs);
+            expect(static_cast<bool>(start), "WSS-52: selected-credit fixture starts with either roster policy");
+            if (!start) continue;
+            const auto rules = skirmish::economy_rules(start.value(), inputs, tables);
+            expect(rules && rules.value().players.size() == fixture.slots.size(), "WSS-52: every occupied slot has an account");
+            if (!rules) continue;
+            for (const auto& player : start.value().players) if (player.lobby)
+                expect(player.credits == credits && rules.value().player(player.player.player_id)
+                    && rules.value().player(player.player.player_id)->credits == whole(credits),
+                    "WSS-52: selected cash is independent of faction, team station, free forces and AI income scaling");
+            auto setup = skirmish::recording_setup(fixture, start.value());
+            const auto encoded = tactical::write_replay({setup, 30, {}});
+            const auto decoded = encoded ? tactical::parse_replay(encoded.value())
+                : eawr::core::Result<tactical::TacticalReplay>::failure(encoded.error());
+            expect(decoded && decoded.value().setup.skirmish && decoded.value().setup.skirmish->match.credits == whole(credits),
+                "WSS-52: the replay header records the selected amount exactly");
+            if (decoded) {
+                const auto rebound_fixture = skirmish::replay_fixture(fixture, inputs, decoded.value().setup);
+                const auto rebound = rebound_fixture ? skirmish::build_start(rebound_fixture.value(), inputs)
+                    : eawr::core::Result<skirmish::SkirmishStart>::failure(rebound_fixture.error());
+                const auto replay_rules = rebound ? skirmish::economy_rules(rebound.value(), inputs, tables)
+                    : eawr::core::Result<tactical::EconomyRules>::failure(rebound.error());
+                expect(replay_rules && replay_rules.value() == rules.value(), "WSS-52: replay reconstructs the same initial accounts");
+            }
+            if (credits == 6000 && free_units) {
+                // Identity check against the former table-default grant, with the same recorded setup.
+                auto previous = rules.value();
+                for (auto& player : previous.players) player.credits = whole(6000);
+                auto before = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, previous);
+                auto after = tactical::TacticalSession::create(setup, {}, {}, {}, std::nullopt, {}, {}, {}, rules.value());
+                expect(before && after, "WSS-52: both default-grant sessions start");
+                if (!before || !after) continue;
+                const eawr::sim::InlineExecutor executor;
+                for (unsigned frame = 0; frame < 8; ++frame) {
+                    expect(before.value().step(executor) && after.value().step(executor), "WSS-52: default identity ticks");
+                    expect(before.value().state_sha256() == after.value().state_sha256(), "WSS-52: default sim hashes stay identical");
+                }
+                const auto old_bytes = tactical::write_replay(before.value().record());
+                const auto new_bytes = tactical::write_replay(after.value().record());
+                expect(old_bytes && new_bytes && old_bytes.value() == new_bytes.value(), "WSS-52: default replay bytes stay identical");
+            }
+        }
+    }
     {
         std::vector<unsigned> visits(13);
         unsigned launches{};
@@ -155,6 +215,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
                 : std::string_view(tag) == "Space_Elevated_Vulnerability_Factor" ? -1 : 1), {}});
         tables.ai_credit_multiplier = whole(1);
         auto inputs = synthetic_inputs(tables);
+        inputs.match_defaults.credits = whole(4750);
         inputs.placements.pop_back();
         inputs.placements.push_back(marker(15, "Team_00_Spawn_Point_Marker", at(50, 60), 90));
         inputs.placements.push_back(marker(16, "Team_01_Spawn_Point_Marker", at(-30, -40), 225));
@@ -211,8 +272,11 @@ void setup_contract(const std::filesystem::path& fixtures) {
                 "WSS-54: overflow retains its economy account");
             if (!economy) continue;
             const auto* account = economy.value().player(overflow_player);
-            expect(account && account->credits == whole(1000) && account->population_cap == 25
+            expect(account && account->credits == whole(4750) && account->population_cap == 25
                 && account->reinforcement_yaw == Fixed{}, "WSS-54: overflow retains credits, cap and default facing");
+            expect(std::all_of(economy.value().players.begin(), economy.value().players.end(), [](const auto& player) {
+                return player.credits == whole(4750);
+            }), "WSS-52: every human and AI receives selected cash, including overflow and shared-station teammates");
             std::string expected_hash;
             for (const std::size_t workers : {1U, 2U, 4U, 8U}) {
                 auto session = tactical::TacticalSession::create(start.value().setup, {}, {}, {}, std::nullopt, {}, {}, {}, economy.value());
@@ -373,7 +437,9 @@ void setup_contract(const std::filesystem::path& fixtures) {
             const auto field = [&](unsigned char id, std::uint32_t value) { root.push_back(id); root.push_back(4); integer(value); };
             field(0, 0x0201); field(1, kind); field(2, capacity); field(3, 5);
             root.push_back(11); root.push_back(1); root.push_back(custom ? 1 : 0);
-            std::ofstream file(directory / "art/maps" / name, std::ios::binary);
+            const auto path = directory / "art/maps" / name;
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream file(path, std::ios::binary);
             const std::array<unsigned char, 4> zero{};
             file.write(reinterpret_cast<const char*>(zero.data()), 4);
             const auto size = static_cast<std::uint32_t>(root.size());
@@ -386,6 +452,38 @@ void setup_contract(const std::filesystem::path& fixtures) {
         write("_mp_space_single.ted", 2, 1, false);
         write("eligible_bad_body.ted", 2, 4, false);
         { std::ofstream file(directory / "art/maps/eligible_bad_body.ted", std::ios::binary | std::ios::app); file.put('x'); }
+        write("../../custommaps/loose.ted", 2, 4, true);
+        write("../../custommaps/false_header.ted", 2, 6, false);
+        write("../../custommaps/_mp_space_custom.ted", 2, 6, true);
+        write("../../custommaps/unrelated_name.ted", 2, 6, true);
+        write("../../custommaps/land.ted", 1, 4, true);
+        // Original MEG-v1 fixture: two authored maps, one shadowed by loose data.
+        const std::array<std::string, 2> archive_names{
+            "DATA\\CUSTOMMAPS\\ARCHIVED.TED", "DATA\\CUSTOMMAPS\\LOOSE.TED"};
+        std::ifstream payload_file(directory / "custommaps/loose.ted", std::ios::binary);
+        const std::string payload((std::istreambuf_iterator<char>(payload_file)), std::istreambuf_iterator<char>());
+        payload_file.close();
+        std::ofstream archive(directory / "maps.meg", std::ios::binary);
+        const auto archive_integer = [&](std::uint32_t value) {
+            for (unsigned i = 0; i < 4; ++i) archive.put(static_cast<char>((value >> (8U * i)) & 255U));
+        };
+        archive_integer(2); archive_integer(2);
+        std::uint32_t offset = 8 + 40;
+        for (const auto& name : archive_names) {
+            archive.put(static_cast<char>(name.size())); archive.put(0);
+            archive << name;
+            offset += 2 + static_cast<std::uint32_t>(name.size());
+        }
+        for (std::uint32_t index = 0; index < 2; ++index) {
+            archive_integer(0); archive_integer(index);
+            archive_integer(static_cast<std::uint32_t>(payload.size()));
+            archive_integer(offset); archive_integer(index);
+            offset += static_cast<std::uint32_t>(payload.size());
+        }
+        archive << payload << payload;
+        archive.close();
+        // Different capacity proves the loose winner supplies decoded metadata.
+        write("../../custommaps/loose.ted", 2, 8, true);
         std::filesystem::create_directories(directory / "xml");
         std::ofstream(directory / "xml/factionfiles.xml")
             << "<Faction_Files><File>factions.xml</File></Faction_Files>";
@@ -425,25 +523,60 @@ void setup_contract(const std::filesystem::path& fixtures) {
             "<UpgradeObject Name=\"Policy_Super\"><Is_Skirmish_Tactical_Super_Weapon>yes</Is_Skirmish_Tactical_Super_Weapon></UpgradeObject>"
             "</Objects>";
         const eawr::vfs::MountSpec mount{.layer_id = "synthetic-mod", .data_root = directory,
-            .loose_logical_prefix = "data", .active_archives = {}};
+            .loose_logical_prefix = "data", .active_archives = {{directory / "maps.meg", "synthetic-maps", ""}}};
         auto filesystem = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
         expect(static_cast<bool>(filesystem), "synthetic map corpus mounts");
         if (filesystem) {
             const eawr::data::Catalog catalog;
             auto official = skirmish::setup_maps(filesystem.value(), catalog);
-            expect(official && official.value().size() == 1 && official.value()[0].path.ends_with("unrelated_name.ted")
-                && official.value()[0].name == "unrelated_name", "WSS-03/06: header selects arbitrary stem and preserves absent-name fallback");
+            expect(official && official.value().size() == 1
+                && std::all_of(official.value().begin(), official.value().end(), [](const auto& map) {
+                    return map.path.ends_with("unrelated_name.ted") && map.name == "unrelated_name" && map.metadata.custom == false;
+                }), "WSS-03/06/07: custom-directory official headers do not alter the original official list");
             skirmish::SetupMapQuery custom_query; custom_query.custom = true;
             auto custom = skirmish::setup_maps(filesystem.value(), catalog, custom_query);
-            expect(custom && custom.value().size() == 1 && custom.value()[0].path.ends_with("_mp_space_custom.ted"),
-                "WSS-07: official and custom maps in the same layer are classified only by authored flags");
-            for (const auto& query : {skirmish::SetupMapQuery{}, custom_query}) {
+            expect(custom && custom.value().size() == 4,
+                "WSS-07: custom tab includes art/maps, loose custommaps and MEG custommaps once each; excludes land");
+            if (custom) {
+                expect(std::any_of(custom.value().begin(), custom.value().end(), [](const auto& map) {
+                    return map.path == "data/custommaps/unrelated_name.ted" && map.metadata.capacity == 6U;
+                }), "official-directory map with the same stem does not hide a custom-tab map");
+                expect(std::count_if(custom.value().begin(), custom.value().end(), [](const auto& map) {
+                    return map.path.ends_with("/_mp_space_custom.ted");
+                }) == 1 && std::any_of(custom.value().begin(), custom.value().end(), [](const auto& map) {
+                    return map.path == "data/art/maps/_mp_space_custom.ted" && map.metadata.capacity == 4U;
+                }), "same custom-map stem appears once, with the original directory path and metadata");
+                const auto loose = std::find_if(custom.value().begin(), custom.value().end(), [](const auto& map) {
+                    return map.path == "data/custommaps/loose.ted";
+                });
+                expect(loose != custom.value().end() && loose->metadata.capacity == 8U,
+                    "loose custom map wins over the same archived path");
+                expect(std::any_of(custom.value().begin(), custom.value().end(), [](const auto& map) {
+                    return map.path == "data/custommaps/archived.ted";
+                }), "archive-only custom map is discovered through the mounted VFS");
+            }
+            for (const auto* list : {&official, &custom}) {
+                expect(*list && std::none_of(list->value().begin(), list->value().end(), [](const auto& map) {
+                    return map.path == "data/custommaps/false_header.ted";
+                }), "false-header custom-directory map is absent by path from both tabs");
+            }
+            skirmish::SetupMapQuery all_query; all_query.custom.reset();
+            const auto all = skirmish::setup_maps(filesystem.value(), catalog, all_query);
+            expect(all && all.value().size() == 5, "shared local/LAN catalogue retains both tab classes with same-stem separation");
+            for (const auto& query : {skirmish::SetupMapQuery{}, custom_query, all_query}) {
                 const auto eager = setup_map_reference::eager_maps(filesystem.value(), catalog, query);
                 expect(static_cast<bool>(eager), "eager synthetic setup reference succeeds");
                 for (const unsigned workers : {1U, 2U, 4U, 8U}) {
                     const auto parallel = skirmish::setup_maps(filesystem.value(), catalog, query, workers);
-                    expect(eager && parallel && setup_map_reference::bytes(eager.value()) == setup_map_reference::bytes(parallel.value()),
-                        "setup map bytes and diagnostics equal eager reference at every worker count");
+                    if (parallel) {
+                        auto stock = parallel.value();
+                        std::erase_if(stock, [](const auto& map) { return !map.path.starts_with("data/art/maps/"); });
+                        expect(eager && setup_map_reference::bytes(eager.value()) == setup_map_reference::bytes(stock),
+                            "original directory map bytes and diagnostics equal frozen eager reference at every worker count");
+                    }
+                    const auto& expected = !query.custom ? all : (query.custom == true ? custom : official);
+                    expect(expected && parallel && setup_map_reference::bytes(expected.value()) == setup_map_reference::bytes(parallel.value()),
+                        "combined map catalogue is identical on 1/2/4/8 workers");
                 }
             }
             auto shared_fs = std::make_shared<const eawr::vfs::Vfs>(std::move(filesystem).value());
@@ -451,7 +584,8 @@ void setup_contract(const std::filesystem::path& fixtures) {
             skirmish::SetupMapCache cache;
             expect(static_cast<bool>(cache.load(shared_fs, shared_catalog, {})), "setup cache builds loaded snapshot");
             const auto* cached = cache.find(*shared_fs, *shared_catalog, {});
-            expect(cached && setup_map_reference::bytes(*cached) == setup_map_reference::bytes(official.value()), "setup and lobby share identical map bytes");
+            const auto shown = skirmish::setup_domain_maps(*shared_fs, *shared_catalog, {}, skirmish::land_skirmish_enabled);
+            expect(cached && shown && setup_map_reference::bytes(*cached) == setup_map_reference::bytes(shown.value()), "setup and lobby share identical map bytes");
             expect(!cache.find(*shared_fs, *shared_catalog, custom_query), "cache rejects different map query");
             auto remounted = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
             expect(remounted && !cache.find(remounted.value(), *shared_catalog, {}), "cache rejects remounted effective content");
@@ -476,6 +610,29 @@ void setup_contract(const std::filesystem::path& fixtures) {
             auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
             expect(static_cast<bool>(loaded), "synthetic inherited policy catalog loads");
             if (loaded) {
+                skirmish::FixtureOptions custom_start;
+                custom_start.map = "data/custommaps/loose.ted";
+                const auto custom_fixture = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
+                expect(!custom_fixture && custom_fixture.error().message == "Legacy map starts are not supported yet.",
+                    "custom-directory fixture reaches authored start validation instead of rejecting its logical path");
+                custom_start.map = "data/custommaps/land.ted";
+                const auto custom_land = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
+                expect(!custom_land && custom_land.error().message == "skirmish map must be a space map",
+                    "custom-directory fixture still rejects an authored land map");
+                const auto placed_land = skirmish::placed_fixture("data/custommaps/land.ted", {}, 0,
+                    filesystem.value(), loaded.value().catalog);
+                expect(!placed_land && placed_land.error().message == "demo map must be a space map",
+                    "placed fixture shares custom-directory path admission and battle-kind validation");
+                for (const auto* path : {"data/other/loose.ted", "data/custommaps/nested/loose.ted",
+                    "data/custommaps/../loose.ted", "data/custommaps/loose.xml", "data/custommaps/nested\\loose.ted"}) {
+                    custom_start.map = path;
+                    const auto invalid = skirmish::fixture_from_options(custom_start, filesystem.value(), loaded.value().catalog);
+                    expect(!invalid && invalid.error().message.starts_with("skirmish map must be a logical"),
+                        "custom-directory support retains directory, extension and traversal guards");
+                    const auto invalid_placed = skirmish::placed_fixture(path, {}, 0, filesystem.value(), loaded.value().catalog);
+                    expect(!invalid_placed && invalid_placed.error().message.starts_with("demo map must be a logical"),
+                        "placed custom-directory fixtures retain the same path guards");
+                }
                 skirmish::FixtureOptions land;
                 land.map = "data/art/maps/_mp_space_misleading_land.ted";
                 auto land_fixture = skirmish::fixture_from_options(land, filesystem.value(), loaded.value().catalog);
@@ -514,6 +671,117 @@ void setup_contract(const std::filesystem::path& fixtures) {
         }
         std::filesystem::remove_all(directory);
     }
+    // WSS-12/13: the dropdown is the catalog's playable factions in data order, whatever any map offers.
+    {
+        const auto directory = std::filesystem::temp_directory_path()
+            / ("eawr-setup-factions-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory / "xml");
+        std::ofstream(directory / "xml/factionfiles.xml")
+            << "<Faction_Files><File>factions.xml</File><File>factions_more.xml</File></Faction_Files>";
+        std::ofstream(directory / "xml/factions.xml")
+            << "<Factions>"
+               "<Faction Name=\"Rebel\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_REBEL</Text_ID></Faction>"
+               "<Faction Name=\"Empire\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "<Faction Name=\"Pirates\"><Is_Playable>No</Is_Playable><Create_Player_In_Multiplayer_Games>Yes</Create_Player_In_Multiplayer_Games></Faction>"
+               "<Faction Name=\"Alpha_Fleet\"><Is_Playable>Yes</Is_Playable><Text_ID>TEXT_ALPHA</Text_ID>"
+               "<Is_Debug_Switchable_To>No</Is_Debug_Switchable_To></Faction>"
+               "<Faction Name=\"Derived_Fleet\"><Variant_Of_Existing_Type>Alpha_Fleet</Variant_Of_Existing_Type></Faction>"
+               "<Faction Name=\"Bare_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "</Factions>";
+        // A later file shadows Bare_Fleet: the resolved flag, not the first definition, decides.
+        std::ofstream(directory / "xml/factions_more.xml")
+            << "<Factions>"
+               "<Faction Name=\"Bare_Fleet\"><Is_Playable>No</Is_Playable></Faction>"
+               "<Faction Name=\"Zed_Fleet\"><Is_Playable>Yes</Is_Playable></Faction>"
+               "</Factions>";
+        const eawr::vfs::MountSpec mount{.layer_id = "synthetic-factions", .data_root = directory,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        auto filesystem = eawr::vfs::Vfs::mount(std::span<const eawr::vfs::MountSpec>(&mount, 1));
+        auto loaded = filesystem ? eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc)
+                                 : eawr::core::Result<eawr::data::LoadResult>::failure(filesystem.error());
+        expect(static_cast<bool>(loaded), "synthetic faction catalog loads");
+        if (loaded) {
+            const auto factions = skirmish::setup_factions(loaded.value().catalog);
+            std::vector<std::string> names;
+            for (const auto& faction : factions) names.push_back(faction.name);
+            expect(names == std::vector<std::string>{"Rebel", "Empire", "Alpha_Fleet", "Derived_Fleet", "Zed_Fleet"},
+                "WSS-12/13: playable catalog factions in data order, with no name list, count limit or debug-switch gate");
+            expect(factions.size() == 5 && factions[0].text_id == "TEXT_REBEL" && factions[1].text_id.empty()
+                && factions[2].text_id == "TEXT_ALPHA" && factions[3].text_id == "TEXT_ALPHA",
+                "WSS-12: captions come from the resolved Text_ID, inherited when a variant omits it");
+            // WSS-LAN: host and peers key the roster on the catalog ordinals of scene::faction_order.
+            const auto ordinals = eawr::scene::faction_order(loaded.value().catalog);
+            std::size_t previous{};
+            bool ordered = true;
+            for (const auto& name : names) {
+                const auto at = std::find(ordinals.begin(), ordinals.end(), name);
+                ordered = ordered && at != ordinals.end() && static_cast<std::size_t>(at - ordinals.begin()) >= previous;
+                if (at != ordinals.end()) previous = static_cast<std::size_t>(at - ordinals.begin());
+            }
+            expect(ordered && ordinals.size() > names.size(), "every dropdown entry keeps its catalog ordinal, in the same order");
+        }
+        std::filesystem::remove_all(directory);
+    }
+    {
+        const auto directory = std::filesystem::temp_directory_path()
+            / ("eawr-playable-candidates-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        setup_map_golden::write_playable_candidate_corpus(directory);
+        const eawr::vfs::MountSpec mount{.layer_id = "playable-candidates", .data_root = directory,
+            .loose_logical_prefix = "data", .active_archives = {}};
+        auto filesystem = eawr::vfs::Vfs::mount(std::span(&mount, 1));
+        expect(static_cast<bool>(filesystem), "playable station candidate corpus mounts");
+        if (filesystem) {
+            auto loaded = eawr::data::load_catalog(filesystem.value(), eawr::data::Profile::foc);
+            expect(static_cast<bool>(loaded), "playable station candidate catalog loads");
+            if (loaded) {
+                const auto maps = skirmish::setup_maps(filesystem.value(), loaded.value().catalog);
+                expect(maps && maps.value().size() == 1 && maps.value().front().unavailable.empty(),
+                    "mixed-case and non-playable station affiliations leave a supported map");
+                if (maps && maps.value().size() == 1) {
+                    const auto& map = maps.value().front();
+                    expect(map.teams.size() == 2 && std::all_of(map.teams.begin(), map.teams.end(), [](const auto& team) {
+                        return team.factions == std::vector<std::string>{"Rebel", "Empire", "Additional_Fleet"};
+                    }), "station candidates are canonical playable names, excluding non-playable and non-faction tokens");
+                    skirmish::SetupSelection pick; pick.map = map.path;
+                    pick.slots.front().faction = "additional_fleet";
+                    expect(static_cast<bool>(skirmish::setup_options(pick, maps.value())),
+                        "authored mod faction starts case-insensitively after catalog filtering");
+                    for (const auto* invalid : {"Pirates", "Not_A_Faction"}) {
+                        pick.slots.front().faction = invalid;
+                        const auto refused = skirmish::setup_options(pick, maps.value());
+                        expect(!refused && refused.error().message.starts_with("Project limit:")
+                            && refused.error().message.find(invalid) != std::string::npos,
+                            "a station affiliation outside the playable catalog cannot bypass local Start validation");
+                    }
+                }
+            }
+        }
+        std::filesystem::remove_all(directory);
+    }
+    // A playable faction no station names keeps its dropdown entry; Start refuses it with the named project limit,
+    // and an affiliation matches case-insensitively with any number of candidates.
+    {
+        skirmish::SetupMap many;
+        many.path = "data/art/maps/_mp_space_many.ted";
+        many.name = "Many";
+        many.metadata.capacity = 2;
+        many.metadata.new_markers = true;
+        many.metadata.start_positions = std::vector<eawr::assets::Vec2f>(2);
+        many.teams = {{0, {"Rebel", "Empire", "Underworld", "CIS", "Republic"}}, {1, {"Rebel", "Empire", "Underworld", "CIS", "Republic"}}};
+        const std::array many_maps{many};
+        skirmish::SetupSelection pick;
+        pick.map = many.path;
+        pick.slots[0].faction = "cis";
+        pick.slots[1].faction = "REPUBLIC";
+        pick.slots[1].team = 1;
+        expect(static_cast<bool>(skirmish::setup_options(pick, many_maps)),
+            "fourth and fifth station candidates start, matched case-insensitively");
+        pick.slots[1].faction = "Alpha_Fleet";
+        const auto refused = skirmish::setup_options(pick, many_maps);
+        expect(!refused && refused.error().message.starts_with("Project limit:")
+            && refused.error().message.find("Alpha_Fleet") != std::string::npos,
+            "a playable faction without a station is refused at Start, by name, as a project limit");
+    }
     eawr::assets::Map authored;
     authored.kind = eawr::assets::MapKind::space;
     authored.lobby.capacity = 9;
@@ -548,6 +816,12 @@ void setup_contract(const std::filesystem::path& fixtures) {
     expect(skirmish::setup_map_eligible(authored, query), "game-type filter matches authored substring");
     query.game_type.clear(); authored.kind = eawr::assets::MapKind::land;
     expect(!skirmish::setup_map_eligible(authored, query), "space query excludes land header regardless of name");
+    query.kind = skirmish::setup_map_kind(tactical::BattleDomain::land);
+    expect(skirmish::setup_map_eligible(authored, query), "land query admits the authored land header");
+    authored.kind = eawr::assets::MapKind::space;
+    expect(!skirmish::setup_map_eligible(authored, query), "land query excludes the authored space header");
+    query.kind = skirmish::setup_map_kind(tactical::BattleDomain::space);
+    expect(skirmish::setup_map_eligible(authored, query), "space domain query preserves ordinary map eligibility");
     authored.kind = eawr::assets::MapKind::space; authored.lobby.capacity.reset();
     expect(!skirmish::setup_map_eligible(authored, query), "unknown or malformed capacity never becomes a lobby default");
     skirmish::SetupMap map;
@@ -576,17 +850,17 @@ void setup_contract(const std::filesystem::path& fixtures) {
     expect(!options.value().victory_condition, "no copied record leaves the data's victory default");
     auto victory = selection;
     victory.match = skirmish::MatchOptions{};
-    victory.match->space_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
+    victory.match->tactical_win_condition = "SKIRMISH_ALL_ENEMY_UNITS_DESTROYED";
     auto chosen = skirmish::setup_options(victory, maps);
     expect(chosen && chosen.value().victory_condition
         && *chosen.value().victory_condition == eawr::sim::tactical::VictoryCondition::all_enemy_units_destroyed,
         "WSS-31: all enemy units destroyed is passed to the start");
-    victory.match->space_win_condition = "SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED";
+    victory.match->tactical_win_condition = "SKIRMISH_SPACE_ENEMY_STARBASE_DESTROYED";
     chosen = skirmish::setup_options(victory, maps);
     expect(chosen && chosen.value().victory_condition
         && *chosen.value().victory_condition == eawr::sim::tactical::VictoryCondition::enemy_starbase_destroyed,
         "WSS-31: the starbase condition is passed to the start");
-    victory.match->space_win_condition = "SKIRMISH_ALL_ENEMY_BASE_COMPONENTS_DESTROYED";
+    victory.match->tactical_win_condition = "SKIRMISH_ALL_ENEMY_BASE_COMPONENTS_DESTROYED";
     chosen = skirmish::setup_options(victory, maps);
     expect(chosen && !chosen.value().victory_condition,
         "WSS-31: a land condition in the record leaves the data's default");
@@ -797,14 +1071,18 @@ void setup_contract(const std::filesystem::path& fixtures) {
             && std::any_of(rules.value().players.begin(), rules.value().players.end(), [](const auto& player) { return !player.ai; }),
             "WSW-07: the production contract covers an AI and a human player");
         expect(std::all_of(rules.value().players.begin(), rules.value().players.end(), [&](const auto& player) {
-            return player.start_tech == static_cast<std::uint32_t>(defaults.start_tech)
+            return player.credits == defaults.credits
+                && player.start_tech == static_cast<std::uint32_t>(defaults.start_tech)
                 && player.max_tech == static_cast<std::uint32_t>(defaults.max_tech);
-        }), "WPR-02: selected lobby tech and maximum bind each player independently of default constants");
+        }), "WSS-52/WPR-02: selected cash and tech bind every player independently of default constants");
         auto missing_difficulty = policy_tables;
         missing_difficulty.ai_credit_multiplier.reset();
         expect(!skirmish::economy_rules(policy_start.value(), policy_inputs, missing_difficulty),
             "WPR-12: missing selected AI credit data cannot silently use a neutral multiplier");
-        auto session = tactical::TacticalSession::create(policy_start.value().setup, {}, {}, {}, std::nullopt, {}, {}, {}, rules.value());
+        const auto recorded_setup = skirmish::recording_setup(policy_fixture, policy_start.value());
+        expect(recorded_setup.skirmish && recorded_setup.skirmish->match.credits == defaults.credits,
+            "WSS-52: recording retains selected credits independently of default constants");
+        auto session = tactical::TacticalSession::create(recorded_setup, {}, {}, {}, std::nullopt, {}, {}, {}, rules.value());
         expect(static_cast<bool>(session), "policy admission session starts");
         if (!session) continue;
         std::uint32_t purchase_frames = 0;
@@ -850,7 +1128,7 @@ void setup_contract(const std::filesystem::path& fixtures) {
                     "WSW-07/08: player and AI economy views retain the enabling use object after purchase");
             }
         }
-        const auto replay_fixture = skirmish::replay_fixture(policy_fixture, policy_inputs, policy_start.value().setup);
+        const auto replay_fixture = skirmish::replay_fixture(policy_fixture, policy_inputs, recorded_setup);
         expect(replay_fixture && replay_fixture.value().slots.size() == policy_fixture.slots.size(),
             "recorded lobby players resolve the matching faction bindings");
         if (!replay_fixture) continue;

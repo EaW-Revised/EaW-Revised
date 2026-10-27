@@ -112,6 +112,16 @@ bool GalacticMode::State::build_hud() {
     world_overlays->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
     hud->add_child(world_overlays);
     world_overlays->set_anchors_and_offsets_preset(Control::PRESET_FULL_RECT);
+    departure_hint = memnew(Label);
+    departure_hint->set_name("GalacticDepartureHint");
+    departure_hint->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+    departure_hint->set_text("Ready to depart - resumes when unpaused");
+    departure_hint->add_theme_font_override("font", hud_fonts->font(name_font));
+    departure_hint->add_theme_font_size_override("font_size", 18);
+    departure_hint->add_theme_constant_override("outline_size", 4);
+    departure_hint->add_theme_color_override("font_outline_color", Color(0, 0, 0, 1));
+    hud->add_child(departure_hint);
+    departure_hint->hide();
     return build_command_bar() && build_fleet_hud() && build_radar_hud() && build_ground_hud() && build_orbit_hud() && build_corruption_hud() && build_battle_dialog() && build_campaign_score() && build_hero_map_bar() && build_hero_action_hud() && build_weapon_action_hud() && build_destruction_hud() && build_black_market_hud();
 }
 
@@ -130,6 +140,14 @@ void GalacticMode::State::update_hud() {
     // The live story-to-HUD publication remains #2042.
     if (options.hud_provider) options.hud_provider->update_hud(*this);
     { const auto measured = measure_frame(FramePhase::hud_facts); refresh_hud_facts(); }
+    if (departure_hint && displayed_snapshot && galaxy) {
+        const auto fleets = displayed_snapshot->fleets();
+        const bool ready = std::any_of(fleets.begin(), fleets.end(), [this](const auto& fleet) {
+            return fleet.owner == galaxy->local.player && presentation::galactic_departure_ready(*displayed_snapshot, fleet);
+        });
+        departure_hint->set_position(Vector2(24, 24));
+        departure_hint->set_visible(ready && !tactical && !loading);
+    }
     service_production_tooltip();
     service_reference_pages(*this);
     { const auto measured = measure_frame(FramePhase::hud_commands); update_command_bar(); }
@@ -234,7 +252,8 @@ void GalacticMode::State::update_planet_labels() {
             const auto facts = hud_facts.find(id);
             if (!visible(id) || facts == hud_facts.end() || !facts->second.visible_income) label->hide();
         }
-        for (const auto& [id, buttons] : visible_fleet_badges) if (!visible(id))
+        for (const auto& [id, buttons] : visible_fleet_badges)
+            if (!visible(id) && !(ground_hud.pressed_object && map_input.box_end && id == selected_planet))
             for (auto* button : buttons) button->hide();
         for (const auto& [id, icon] : production_icons) {
             const auto facts = hud_facts.find(id);
@@ -1068,7 +1087,7 @@ void GalacticMode::State::build_command_bar_labels(const data::ui::TextDatabase*
 }
 
 void GalacticMode::State::build_command_bar_controls(const data::ui::TextDatabase* text) {
-    for (const auto name : {"b_space_tab", "b_planet_tab", "b_play_pause", "b_fast_forward", "b_filters1", "b_filters0",
+    for (const auto name : {"b_space_tab", "b_planet_tab", "b_play_pause", "b_fast_forward", "b_filters1", "b_filters0", "b_filters3",
              "b_scroll_left", "b_scroll_right"}) {
         const auto* component = command_catalog.find(name);
         if (!component || !command_anchors.find(name)) continue;
@@ -1076,7 +1095,7 @@ void GalacticMode::State::build_command_bar_controls(const data::ui::TextDatabas
         button->set_name(name);
         button->set_toggle_mode(std::string_view(name) == "b_space_tab" || std::string_view(name) == "b_planet_tab"
             || std::string_view(name) == "b_fast_forward" || std::string_view(name) == "b_filters1"
-            || std::string_view(name) == "b_filters0");
+            || std::string_view(name) == "b_filters0" || std::string_view(name) == "b_filters3");
         const auto keys = component->list(data::ui::Field::tooltip_text);
         if (text && !keys.empty()) if (const auto* entry = text->find(keys.front()))
             button->set_tooltip_text(String::utf8(data::ui::to_utf8(entry->value).c_str()));
@@ -1102,6 +1121,11 @@ void GalacticMode::State::build_command_bar_controls(const data::ui::TextDatabas
             if (name == "b_space_tab") selected_hud.space_tab = true;
             else if (name == "b_filters0") income_layer_visible = !income_layer_visible;
             else if (name == "b_filters1") base_levels_visible = !base_levels_visible;
+            else if (name == "b_filters3") {
+                ground_hero_preference = !ground_hero_preference;
+                fleet_popup_publication.reset();
+                fleet_layout_dirty = true;
+            }
             else if (name == "b_planet_tab" && selected_hud.ground_enabled) selected_hud.space_tab = false;
             else if (name == "b_play_pause" && clock_controls_enabled) request_pause(!paused);
             else if (name == "b_fast_forward" && galactic_view::fast_forward_available(clock_controls_enabled, paused, fast_forward_factor.has_value()) && game) {
@@ -1709,6 +1733,7 @@ void GalacticMode::State::update_command_bar_buttons(const presentation::ui::She
         }
         else if (name == "b_filters1") button->set_pressed_no_signal(base_levels_visible);
         else if (name == "b_filters0") button->set_pressed_no_signal(income_layer_visible);
+        else if (name == "b_filters3") button->set_pressed_no_signal(ground_hero_preference);
         else if (name == "b_play_pause") {
             button->set_disabled(!clock_controls_enabled);
             hud_button->set_flashing(paused && clock_controls_enabled);

@@ -32,7 +32,8 @@ name does not contain `console`. The packaging side (`tools/release/package_rele
 2. **Starts Godot hidden**: `Godot_v4.7.2-stable_win64.exe --path project -- --eawr-game-root <root>
    --eawr-front-end [--eawr-allow-unknown-build] --eawr-report <report>` from the launcher's folder with
    `CREATE_NO_WINDOW`. Fonts are extracted by the viewer itself, so no `--eawr-font-cache` is passed;
-   `--allow-unknown-build` is forwarded as `--eawr-allow-unknown-build`. Anything after `--` (and unknown
+   `--allow-unknown-build` is forwarded as `--eawr-allow-unknown-build`. The project's default is the Separate render thread;
+   `--safe-render-thread` adds Godot's `--render-thread safe` right after `--path` (the opt-out; the player zip's `EAWR (Safe render thread).cmd` uses it). Anything after `--` (and unknown
    options) goes to the viewer, `--godot-quit-after <n>` becomes Godot's `--quit-after`.
 3. **Explains failures**: a missing game, a bad folder, a missing runtime or project, a runtime that will not
    start, or Godot exiting with an error within a minute of starting opens a message box with the reason (the
@@ -59,18 +60,50 @@ The viewer's own `logs\godot.log` is named in the error dialogs.
 
 `launcher_flow` holds the steps behind `Ui`, `RegistryReader` and `ProcessRunner` interfaces, so the tests run
 them with fakes; `install_discovery` (VDF/registry search and validation), `launch_plan` (command line and
-quoting), `launcher_state` (saved choice), `text_formats` (JSON and KeyValues parsers) and `paths` (UTF-8 and
-case-insensitive paths) are portable standard C++; `win_*.cpp` are the registry, process, dialog and entry-point
-layers.
+quoting) and `launcher_state` (saved choice) are portable standard C++; `win_*.cpp` are the registry, process,
+dialog and entry-point layers. The JSON and KeyValues parsers, the UTF-8 and case-insensitive path helpers and the
+`libraryfolders.vdf` reader live in `src/mods/steam` (shared with the mod core); the launcher compiles those
+sources itself with its static C runtime instead of linking `eawr_mods`, and `src/text_formats.hpp` and
+`src/paths.hpp` keep the launcher's names for them.
 
 ## Tests
 
-- `launcher_core_contracts` (`launcher_tests`): parsers, discovery against VDF and registry fixtures, Unicode
+- `launcher_core_contracts` (`launcher_tests`): discovery against VDF and registry fixtures, Unicode
   and space paths, validation, the saved choice, the Godot command line round-trip and the whole flow with a
-  fake UI and process runner.
+  fake UI and process runner. The parser cases run in `mods_contracts` (`tests/mods`).
 - `launcher_smoke`: the built exe against `launcher_fake_godot` (records its argv and whether it has a console
   window): front-end arguments, hidden start, saved choice, readable errors; and checks on the exe itself (GUI
   subsystem, imports system DLLs only, `asInvoker` manifest).
 - `launcher_ui_smoke`: the real dialogs, clicked on a private desktop (`tools/rig/private_desktop.py`).
 
 Fixtures are empty folders and made-up bytes; no retail data.
+
+The Performance **Render thread (restart)** setting persists in Godot's `user://eawr-settings.cfg` and applies at the next launcher start. For the bundled project this is `%APPDATA%\Godot\app_userdata\EAWR Viewer\eawr-settings.cfg` on Windows, or `$XDG_DATA_HOME/godot/app_userdata/EAWR Viewer/eawr-settings.cfg` on Linux (defaulting to `~/.local/share` for `$XDG_DATA_HOME`). The launcher reads that same file even when `--user-data` puts its own state and logs elsewhere. `--render-thread safe|separate` (or `--safe-render-thread`) overrides the saved choice. With no saved choice or flag, the project default applies. An explicit `--eawr-settings-file` forwarded to the viewer selects the same settings file for startup. Relative overrides resolve from the launcher folder, matching Godot's working directory; an empty final override restores the default user:// file. Direct engine launches use their explicit engine flag or project default; they do not read this startup preference themselves. Shipped Safe start files and the owner comparison kit deliberately select a mode explicitly.
+For manager-selected profiles, render-thread precedence is explicit CLI mode > profile mode > saved Performance setting > project default. Both explicit Safe and explicit Separate override a profile. A plain EAWR start remains CLI > saved Performance setting > project default.
+
+With a bundled manager, `EAWR.exe --mods` starts EAWR Mods and passes
+`--eawr-launch-loop <user-data>/launcher/next-action.json`. A successful child exit
+may request `{"action":"launch-profile","profile":"<id>"}` or
+`{"action":"open-manager"}`. The launcher consumes the request before starting
+the next process and clears stale requests before every start. Missing or invalid
+requests end the launcher normally; nonzero child exits retain their exit code.
+If an old request cannot be deleted, startup stops with a readable error, including
+on a plain EAWR start, so a stale request can never trigger a later launch.
+More than 16 immediate restart requests stop with an error; a game session lasting
+at least 60 seconds resets that guard.
+
+Profile launches use `mods/profiles/<id>.json` under the launcher user-data folder,
+pass `--eawr-mod-profile` to the game and put the profile's `--render-thread safe|separate`
+before Godot's `--` separator. An explicit `--safe-render-thread` overrides the
+profile setting. The launcher remembers `last_profile` in
+`launcher/launcher.json`; a plain EAWR start keeps its existing front-end behaviour.
+The engine remains responsible for loading and validating the full profile.
+
+`--user-data` is not yet supported together with `--mods`: the manager currently
+starts the profile service with its default user-data folder. Use the default
+folder for manager launches until the manager forwards this option to the service.
+
+Manager-equipped kits also include `Create EAWR Mods desktop shortcut.vbs`.
+Double-click it to create an **EAWR Mods** desktop shortcut pointing directly at
+`EAWR.exe --mods`. The installer explains an incomplete kit in a message box and asks before
+replacing an existing desktop shortcut. Neither installation nor startup opens a console.

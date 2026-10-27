@@ -87,13 +87,16 @@ constexpr unsigned local_setup_rows=8;
 using skirmish::LobbySlot;
 __OWNERKEY__
 __VALIDATE__
-namespace space { int instance_yaw_degrees(int value) { return value; } }
+namespace live { int instance_yaw_degrees(int value) { return value; } }
 float to_float(int value) { return static_cast<float>(value); }
 struct SpacePopulation { struct Options { struct PlacedShip {
  std::string object_id; std::array<float,3> position;
  float yaw_degrees=0; unsigned live_entity=0;
  std::optional<std::array<std::uint8_t,3>> team_colour;
-}; }; };
+}; };
+    using PlacedUnit = Options::PlacedShip;
+};
+using BattleScene = SpacePopulation;
 struct LiveSessionView {
  struct PreparedBattle { tactical::TacticalReplay replay; int content=17, victory=19, economy=23;
  units::UnitTables tables; std::optional<skirmish::SkirmishStart> start; };

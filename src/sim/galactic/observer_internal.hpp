@@ -31,7 +31,9 @@ inline bool nearby(const math::Vec3& a, const math::Vec3& b, math::Fixed range) 
         (void)math::detail::add_magnitude(sum, math::detail::multiply_u64(delta, delta));
     };
     add(a.x, b.x); add(a.y, b.y); add(a.z, b.z);
-    const auto r = static_cast<std::uint64_t>(range.raw());
+    // WGUI-04: this consumer compares range squared, so either sign has the same radius.
+    const auto bits = static_cast<std::uint64_t>(range.raw());
+    const auto r = range.raw() < 0 ? std::uint64_t{0} - bits : bits;
     return math::detail::compare(sum, math::detail::multiply_u64(r, r)) < 0;
 }
 struct Presence { bool fleet{}, reveal_force{}, superweapon{}; };

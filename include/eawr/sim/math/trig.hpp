@@ -40,6 +40,7 @@ private:
     std::size_t next_{};
     std::uint64_t builds_{};
 };
+// FM-27: the zero vector uses heading zero, including a vertical direction's planar part.
 [[nodiscard]] core::Result<Fixed> atan2_turn(Fixed y, Fixed x) noexcept;
 
 } // namespace eawr::sim::math

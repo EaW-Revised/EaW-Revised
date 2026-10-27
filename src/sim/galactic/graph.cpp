@@ -68,8 +68,8 @@ core::Result<PlanetGraph> PlanetGraph::build(const std::span<const Planet> plane
     const std::span<const Route> routes, const math::Fixed maximum_distance) {
     // A hostile replay must not make a quadratic allocation over the million-object setup cap.
     constexpr std::size_t max_graph_nodes = 4096;
-    if (planets.size() > max_graph_nodes || routes.size() > 500'000 || maximum_distance.raw() < 0)
-        return invalid<PlanetGraph>("graph needs at most 4096 planets and a nonnegative movement distance");
+    if (planets.size() > max_graph_nodes || routes.size() > 500'000)
+        return invalid<PlanetGraph>("graph exceeds planet or route resource limits");
     PlanetGraph graph;
     std::set<EntityId> ids;
     for (const auto& planet : planets) graph.nodes_.push_back({planet.id, planet.position, {}});

@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include "eawr/platform/campaign_battle_view.hpp"
 #include "eawr/sim/galactic/types.hpp"
+#include "eawr/presentation/galactic_pause.hpp"
 
 // Private to the galactic mode's translation units (galactic_*.cpp).
 #include "galactic_mode.hpp"
@@ -235,6 +236,12 @@ struct GalacticMode::State final {
     // #3931: the session's own latest publication. Equals displayed_snapshot unless the galaxy reveal
     // is on, when displayed_snapshot is the omniscient draw view; command gating reads this one.
     std::shared_ptr<const sim::galactic::GalacticSnapshot> published_snapshot;
+    bool published_system_hold{};
+    godot::Label* departure_hint{};
+    [[nodiscard]] bool pause_allows(presentation::GalacticPausedAction action) const {
+        return published_snapshot && galaxy && presentation::galactic_pause_allows(*published_snapshot,
+            sim::SeatId{galaxy->local.seat}, action, published_system_hold);
+    }
     std::vector<sim::galactic::GalacticEvent> snapshot_events;
     galactic_view::CampaignCaptureMetrics capture_metrics;
     std::uint64_t proof_requested_tick{};
@@ -497,6 +504,12 @@ struct GalacticMode::State final {
     void update_fleet_captions(const presentation::ui::ShellPlacement& placement);
     void update_fleet_diorama();
     void update_fleet_badges(galactic_view::ObjectId planet, godot::Vector2 anchor, float scale, float alpha);
+    void rebuild_ground_badges();
+    void attach_ground_stack_drag(godot::Control* control, galactic_view::ObjectId planet);
+    bool ground_stack_drop(godot::Vector2 point, bool submit);
+    galactic_view::ObjectId dragged_ground_planet{};
+    std::vector<galactic_view::ObjectId> dragged_ground_units;
+    bool ground_stack_accepted{};
     [[nodiscard]] godot::Ref<godot::Texture2D> fleet_faction_texture(galactic_view::PlayerId owner, bool overview, bool hover = false);
     void write_fleet_report(std::ostream& output) const;
     GroundHudState ground_hud;
@@ -546,6 +559,8 @@ struct GalacticMode::State final {
     struct FleetStackBadge final {
         godot::TextureButton* button{};
         godot::TextureRect* ship{};
+        godot::TextureRect* stealth_overlay{}; // WGUI-92; orbit icons only
+        bool stealth{};
         galactic_view::PlayerId owner{};
         std::optional<sim::galactic::FleetId> fleet;
         std::size_t texture{};
@@ -556,8 +571,10 @@ struct GalacticMode::State final {
         galactic_view::Retained<std::size_t> shown_stack;
         galactic_view::Retained<std::optional<sim::galactic::TypeId>> shown_ship;
         galactic_view::Retained<galactic_view::PlayerId> shown_owner;
+        galactic_view::Retained<bool> shown_stealth;
         std::vector<viewer::galactic::FleetStackEntry> contents;
         std::optional<sim::galactic::TypeId> best;
+        galactic_view::ObjectId ground_planet{}; // GGS-01: aggregate key 3; never an orbit slot.
     };
     std::map<std::pair<galactic_view::ObjectId, std::uint8_t>, FleetStackBadge> fleet_badges;
     // #4316: max health by type. Never cleared: production_names and production_art are assigned only while the view
@@ -602,6 +619,9 @@ struct GalacticMode::State final {
         std::optional<sim::galactic::TypeId> cell_type;
         galactic_view::ObjectId member{};
     };
+    [[nodiscard]] FleetDragSource pathfinder_source(std::size_t panel) const;
+    bool request_pathfinder(sim::galactic::FleetId fleet, sim::EntityId member, bool submit);
+    bool dragged_pathfinder{};
     void attach_fleet_drag(godot::Control* control, const std::string& component, std::function<FleetDragSource()> identity);
     void build_fleet_drag_receiver();
     void cancel_fleet_drag();
@@ -687,6 +707,7 @@ struct GalacticMode::State final {
     };
     std::map<galactic_view::ObjectId, PlanetLevels> planet_levels;
     std::optional<std::array<std::size_t, 2>> name_size_thresholds;
+    bool ground_hero_preference{}; // GGS-09: local image preference, outside simulation state.
     bool base_levels_visible{}; // Local filter adapter; callback/default remains unverified.
     godot::TextureRect* allegiance_icon{};
     void refresh_hud_facts();
@@ -919,6 +940,7 @@ struct GalacticMode::State final {
     std::vector<Cycle> cycles;
     EawrLoadingScreen* loading{};
     sim::EntityId conflict{};
+    bool handoff_requested{}; // Retained after the ordinary child presentation is released.
     std::uint64_t loading_frames{};
     std::uint64_t returned_frame{};
     std::chrono::steady_clock::time_point returned_at{};
@@ -934,6 +956,7 @@ struct GalacticMode::State final {
     std::uint32_t capture_width{};
     std::uint32_t capture_height{};
     bool completed{};
+    std::uint8_t load_trace_frames{}; // the second processed frame closes the GC load trace
     // Interactive input: held pan keys and a middle-button orbit drag.
     std::set<std::int64_t> held;
     bool orbiting{};
@@ -958,7 +981,7 @@ struct GalacticMode::State final {
     [[nodiscard]] bool service_space_cycle_proof();
     bool proof_move_submitted{}, proof_fight_enabled{}, proof_summary_seen{};
     sim::galactic::FleetId proof_merge_target{};
-    sim::galactic::PlanetId proof_merge_destination{};
+    std::vector<sim::galactic::PlanetId> proof_move_path;
     std::uint64_t proof_merge_orders{}, proof_merge_frame{};
     bool proof_summary_acknowledged{}, proof_won{}, proof_invasion_offered{};
     std::uint64_t proof_summary_milliseconds{};

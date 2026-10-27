@@ -1,3 +1,4 @@
+#include "viewer_profile_arguments.hpp"
 #include "settings_store.hpp"
 
 #include "audio_buses.hpp"
@@ -190,7 +191,10 @@ void update_frame_pacing(const ui::VideoSettings& video, const bool menu) {
     const int refresh = std::isfinite(hz) && hz >= 30.0 && hz <= 1000.0 ? static_cast<int>(hz) : 60;
     const bool focused = display->window_is_focused()
         && display->window_get_mode() != godot::DisplayServer::WINDOW_MODE_MINIMIZED;
-    const int cap = ui::frame_rate_cap(video, refresh, menu, focused);
+    auto effective = video;
+    if (const auto& launch = viewer_profile_options().launch; launch && launch->frame_rate_limit)
+        effective.frame_rate_limit = *launch->frame_rate_limit;
+    const int cap = ui::frame_rate_cap(effective, refresh, menu, focused);
     if (engine->get_max_fps() != cap) engine->set_max_fps(cap);
 }
 

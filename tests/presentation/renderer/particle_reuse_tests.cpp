@@ -1,7 +1,10 @@
 #include "particle_reuse.hpp"
+#include "particle_submission_cache.hpp"
 
 #include <array>
 #include <cstdlib>
+#include <cmath>
+#include <vector>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -167,6 +170,61 @@ void empty_residency_lifetime() {
     check(!Policy::keep_identity(false, false) && !Policy::keep_identity(true, false),
         "nonopaque retirement releases identities after its dwell");
 }
+void exact_submission_and_lifetimes() {
+    using Bounds = std::array<float, 6>;
+    ParticleSubmissionCache<Bounds> cache;
+    ParticleCallCounts bounds, visibility;
+    std::vector<Bounds> submitted_bounds;
+    std::vector<bool> submitted_visibility;
+    const auto send_bounds = [&](const Bounds& value) { submitted_bounds.push_back(value); };
+    const auto send_visibility = [&](const bool value) { submitted_visibility.push_back(value); };
+    const Bounds initial{1, 2, 3, 4, 5, 6};
+    cache.bounds.apply(initial, send_bounds, &bounds);
+    cache.visibility.apply(true, send_visibility, &visibility);
+    for (unsigned frame = 0; frame < 100; ++frame) {
+        cache.bounds.apply(initial, send_bounds, &bounds);
+        cache.visibility.apply(true, send_visibility, &visibility);
+    }
+    check(submitted_bounds.size() == 1 && submitted_visibility.size() == 1,
+        "stationary rendered geometry sends bounds and visibility once");
+    auto moved = initial;
+    moved[0] = std::nextafter(moved[0], 2.0F);
+    cache.bounds.apply(moved, send_bounds, &bounds);
+    check(submitted_bounds.size() == 2 && submitted_bounds.back() == moved,
+        "one representable float step must not be treated as approximately equal");
+    cache.visibility.apply(false, send_visibility, &visibility); // culled/empty
+    cache.visibility.apply(false, send_visibility, &visibility);
+    cache.bounds.apply(initial, send_bounds, &bounds); // re-entry at a different bound
+    cache.visibility.apply(true, send_visibility, &visibility);
+    cache.visibility.apply(true, send_visibility, &visibility); // registry after first upload
+    check(submitted_visibility == std::vector<bool>({true, false, true}),
+        "cull/empty/re-entry publishes every transition but no duplicate state");
+    check(submitted_bounds.back() == initial, "re-entry restores the exact current live bound");
+    // Each resource/surface lifecycle invalidates both actual observations.
+    for (unsigned lifecycle = 0; lifecycle < 4; ++lifecycle) {
+        const auto old_bounds = submitted_bounds.size(), old_visibility = submitted_visibility.size();
+        cache.reset(); // allocation/reuse, detach, restore, surface replacement
+        cache.bounds.apply(initial, send_bounds, &bounds);
+        cache.visibility.apply(true, send_visibility, &visibility);
+        check(submitted_bounds.size() == old_bounds + 1 && submitted_visibility.size() == old_visibility + 1,
+            "new resource or surface identity resends unchanged values before visibility");
+    }
+    auto invalid = initial;
+    invalid[0] = std::numeric_limits<float>::quiet_NaN();
+    const auto before_nan = submitted_bounds.size();
+    cache.bounds.apply(invalid, send_bounds, &bounds);
+    cache.bounds.apply(invalid, send_bounds, &bounds);
+    check(submitted_bounds.size() == before_nan + 2, "unordered bounds never produce an equality-cache hit");
+    check(bounds.attempted == bounds.sent + bounds.skipped && bounds.sent == submitted_bounds.size(),
+        "bounds counters partition every attempted command");
+    check(visibility.attempted == visibility.sent + visibility.skipped
+        && visibility.sent == submitted_visibility.size(), "visibility counters partition every attempted command");
+    check(bounds.skipped == 100 && visibility.skipped == 102,
+        "deterministic skip counts distinguish stable geometry from real transitions");
+    cache.visibility.apply(false, send_visibility); // profiling disabled
+    check(!submitted_visibility.back(), "disabled counters do not disable a real visibility transition");
+}
+
 } // namespace
 
 int main() {
@@ -178,4 +236,5 @@ int main() {
     restore_failure_backoff();
     acquisition_scope_negative_control();
     empty_residency_lifetime();
+    exact_submission_and_lifetimes();
 }

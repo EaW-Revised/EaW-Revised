@@ -19,6 +19,7 @@
 #include <ios>
 #include <iostream>
 #include <map>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -223,6 +224,8 @@ constexpr std::string_view constants_xml = R"xml(<?xml version="1.0"?>
   <Credit_Cap_Per_Planet> 40000.0 </Credit_Cap_Per_Planet>
   <MaxCreditIncomeAlignmentBonus>0.5</MaxCreditIncomeAlignmentBonus>
   <MaxCreditIncomeAlignmentPenalty>0.4</MaxCreditIncomeAlignmentPenalty>
+  <MaxInfluenceTransitionAlignmentBonus>0.5</MaxInfluenceTransitionAlignmentBonus>
+  <MaxInfluenceTransitionAlignmentPenalty>0.25</MaxInfluenceTransitionAlignmentPenalty>
   <Political_Income_Curve>0,0, 1,2</Political_Income_Curve>
   <Political_Income_Curve>5,1, 0,0, 1,1</Political_Income_Curve>
   <MaximumPoliticalControl> 5 </MaximumPoliticalControl>
@@ -266,6 +269,82 @@ std::optional<galactic::GalacticData> load_tree(const std::filesystem::path& roo
         return std::nullopt;
     }
     return std::move(loaded).value();
+}
+
+void story_name_contracts() {
+    TempTree tree;
+    write_tree(tree.root, R"xml(<Campaigns>
+      <Campaign Name="Story_Base"><Locations>Alpha</Locations>
+        <Rebel_Story_Name>named.xml</Rebel_Story_Name>
+        <Story_Name>Rebel, first.xml</Story_Name><Story_Name>TBD</Story_Name>
+        <Story_Name>Empire second.xml, Rebel</Story_Name><Story_Name>repeat.xml</Story_Name>
+        <Story_Name>TBD</Story_Name><Story_Name> </Story_Name>
+      </Campaign>
+      <Campaign Name="Story_Child"><Variant_Of_Existing_Type>Story_Base</Variant_Of_Existing_Type>
+        <Story_Name>Renamed_Fourth, fourth.xml</Story_Name>
+        <Story_Name>Rebel, last.xml</Story_Name>
+      </Campaign>
+      <Campaign Name="Story_Inherited"><Variant_Of_Existing_Type>Story_Base</Variant_Of_Existing_Type>
+        <Story_Name>TBD</Story_Name><Story_Name> </Story_Name>
+      </Campaign>
+      <Campaign Name="Story_Odd"><Locations>Alpha</Locations><Story_Name>Rebel, kept.xml, tail</Story_Name></Campaign>
+      <Campaign Name="Story_Default"><Locations>Alpha</Locations></Campaign>
+    </Campaigns>)xml");
+    const auto loaded = load_tree(tree.root);
+    if (!loaded) return;
+    const auto& base = loaded->campaign("Story_Base")->story_names;
+    const auto& child = loaded->campaign("Story_Child")->story_names;
+    const auto& inherited = loaded->campaign("Story_Inherited")->story_names;
+    expect(base.size() == 3 && base[0].faction == "Rebel" && base[0].name == "first.xml"
+        && base[1].faction == "Empire" && base[1].name == "second.xml"
+        && base[2].faction == "Rebel" && base[2].name == "repeat.xml",
+        "WST-86 a mid-stream TBD is ignored and a pair split across occurrences retains authored order");
+    expect(child.size() == 5 && child[0].name == "first.xml" && child[2].name == "repeat.xml"
+        && child[3].faction == "Renamed_Fourth" && child[3].name == "fourth.xml" && child[4].name == "last.xml",
+        "WST-86 inherited associations precede derived associations, including repeated factions");
+    expect(inherited.size() == 3 && inherited.back().name == "repeat.xml"
+        && loaded->campaign("Story_Default")->story_names.empty(), "WST-86 placeholders preserve inheritance and omission defaults empty");
+    expect(loaded->campaign("Story_Child")->rebel_story_name == "named.xml", "named story inheritance remains separate");
+    expect(loaded->campaign("Story_Odd")->story_names.size() == 1
+        && has_issue(*loaded, IssueKind::bad_value, "Story_Odd", "Story_Name", "tail"),
+        "WST-86 an odd trailing token is diagnosed without losing complete pairs");
+    expect(has_issue(*loaded, IssueKind::dangling_reference, "Story_Child", "Story_Name", "Renamed_Fourth"),
+        "WST-88 unknown story factions are validated");
+    const auto identity = galactic::content_identity(*loaded);
+    const auto changed = [&](const auto& mutate) {
+        auto copy = *loaded; mutate(copy.campaigns[1].story_names);
+        expect(galactic::content_identity(copy) != identity, "story faction/path/count/order participate in content identity");
+    };
+    changed([](auto& rows) { rows[0].faction = "Renamed"; });
+    changed([](auto& rows) { rows[0].name = "other.xml"; });
+    changed([](auto& rows) { rows.push_back(rows.front()); });
+    changed([](auto& rows) { std::swap(rows[0], rows[1]); });
+    // This sequence parser's delimiter set is narrower than arbitrary C whitespace.
+    write_tree(tree.root, "<Campaigns><Campaign Name=\"Limits\"><Locations>Alpha</Locations><Story_Name>"
+        + std::string(65536, 'x') + "</Story_Name></Campaign></Campaigns>");
+    const auto overlong = load_tree(tree.root);
+    expect(overlong && overlong->campaign("Limits")->story_names.empty()
+        && has_issue(*overlong, IssueKind::bad_value, "Limits", "Story_Name"), "WST-86 oversized parser inputs are diagnosed");
+}
+
+void empty_raid_masks() {
+    TempTree tree;
+    write_tree(tree.root, campaigns_xml);
+    for (const auto value : {std::string_view{}, std::string_view{" \t "}, std::string_view{" | , "}}) {
+        write(tree.root / "XML" / "GameConstants.xml", "<GameConstants><Raid_Force_Free_Object_Category_Mask>"
+            + std::string(value) + "</Raid_Force_Free_Object_Category_Mask><Raid_Force_Limited_Object_Category_Mask>"
+            + std::string(value) + "</Raid_Force_Limited_Object_Category_Mask></GameConstants>");
+        const auto loaded = load_tree(tree.root);
+        if (!loaded) continue;
+        for (const auto tag : {"Raid_Force_Free_Object_Category_Mask", "Raid_Force_Limited_Object_Category_Mask"}) {
+            expect(loaded->constant(tag) != nullptr, "CGS-15 empty raid mask retains the initialized category set");
+            expect(!has_issue(*loaded, IssueKind::missing_required, "GameConstants", tag), "empty raid mask is not missing");
+        }
+    }
+    write(tree.root / "XML" / "GameConstants.xml", "<GameConstants/>");
+    const auto absent = load_tree(tree.root);
+    if (absent) for (const auto tag : {"Raid_Force_Free_Object_Category_Mask", "Raid_Force_Limited_Object_Category_Mask"})
+        expect(absent->constant(tag) && absent->constant(tag)->text.empty(), "CGS-15 absent raid mask keeps the zero default");
 }
 
 void campaign_contracts(const galactic::GalacticData& data) {
@@ -413,6 +492,11 @@ void world_contracts(const galactic::GalacticData& data) {
     const auto* surface_limit = data.constant("Max_Ground_Forces_On_Planet");
     expect(surface_limit && surface_limit->number == Fixed::from_raw(raw(12)),
         "WGM-39 preserves the authored surface limit without a stock fallback");
+    const auto* transition_bonus = data.constant("MaxInfluenceTransitionAlignmentBonus");
+    const auto* transition_penalty = data.constant("MaxInfluenceTransitionAlignmentPenalty");
+    expect(transition_bonus && transition_bonus->number == decimal("0.5")
+        && transition_penalty && transition_penalty->number == decimal("0.25"),
+        "CGS-16 publishes authored control alignment constants for campaign setup");
     const auto* hyperspace_bonus = data.constant("Corruption_Hyperspace_Bonus");
     expect(hyperspace_bonus && hyperspace_bonus->text == "1.75" && hyperspace_bonus->number == decimal("1.75"),
         "WGM-27 retains the authored corruption movement bonus without a stock default");
@@ -453,6 +537,28 @@ void identity_contracts(const std::filesystem::path& root, const galactic::Galac
     changed.inputs.clear();
     expect(galactic::content_identity(changed) == galactic::content_identity(data),
         "issues and input receipts stay out of the identity");
+}
+
+void movement_float_parsing() {
+    for (const auto value : {"-1.25", "0", "text", "1e99"}) {
+        TempTree tree; write_tree(tree.root, campaigns_xml);
+        const std::string text(value);
+        write(tree.root / "XML" / "GameConstants.xml", "<GameConstants>"
+            "<Object_Max_Speed_Multiplier_Galactic>" + text + "</Object_Max_Speed_Multiplier_Galactic>"
+            "<Corruption_Hyperspace_Bonus>" + text + "</Corruption_Hyperspace_Bonus>"
+            "<MaximumFleetMovementDistance>" + text + "</MaximumFleetMovementDistance></GameConstants>");
+        write(tree.root / "XML" / "Factions.xml", "<Factions><Faction Name='Rebel'>"
+            "<Hyperspace_Speed_Factor>" + text + "</Hyperspace_Speed_Factor></Faction></Factions>");
+        const auto loaded = load_tree(tree.root);
+        expect(loaded.has_value(), "retail movement float fixture must load for every authored value");
+        if (!loaded) return;
+        const auto expected = text == "-1.25" ? Fixed::from_ratio(-5, 4).value()
+            : text == "1e99" ? Fixed::from_raw(std::numeric_limits<std::int64_t>::max()) : Fixed{};
+        for (const auto tag : {"Object_Max_Speed_Multiplier_Galactic", "Corruption_Hyperspace_Bonus", "MaximumFleetMovementDistance"})
+            expect(loaded->constant(tag) && loaded->constant(tag)->number == expected, "scoped float constants keep signs and accept text/overflow");
+        expect(loaded->faction("Rebel") && loaded->faction("Rebel")->hyperspace_speed_factor == expected,
+            "faction movement float uses the same retail parser");
+    }
 }
 
 void synthetic_contracts() {
@@ -644,7 +750,10 @@ void foc_contracts() {
 } // namespace
 
 int main() {
+    story_name_contracts();
     synthetic_contracts();
+    movement_float_parsing();
+    empty_raid_masks();
     art_contracts();
     foc_contracts();
     if (failures == 0) std::cout << "galactic data contracts passed\n";

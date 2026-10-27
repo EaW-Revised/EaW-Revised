@@ -59,11 +59,13 @@ They remain named issue rows; schema absence alone does not establish runtime be
 
 ## Identity
 
-`content_identity` is SHA-256 over the length-framed encoding `eawr-galactic-data-v4` of every
+`content_identity` is SHA-256 over the length-framed encoding `eawr-galactic-data-v5` of every
 table field in table order, the unit tables' encoding style. Issues and input receipts are not
 part of it. It joins the galactic session identity when the session is built.
 Planet fields include the effective authored system-spy definitions: ability name, activation
 style, enabled/despawn flags, duration, resolved influence range and requested intelligence mask.
+Campaign fields include the ordered `Story_Name` faction/plot associations, retaining repeated
+factions and paths (WST-86..89 in [the story walk](behaviour/walks/gc-story.md)).
 
 ## Galactic constants
 

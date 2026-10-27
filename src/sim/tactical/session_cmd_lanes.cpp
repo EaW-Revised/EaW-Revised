@@ -1042,6 +1042,7 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_damage(const Player
             redirected = apply_damage(*recipient_profile, *live.durability, hull_target, amount.value());
         }
         phase.impl_->track_damage(live, hull_before, shields_before);
+        phase.record_damage_change(live, hull_before);
         if (redirected.unit_destroyed) {
             events.push_back(phase.destruction_event(phase.tick, EventKind::unit_destroyed, live.state, 0, command.key.player_id));
             killed.push_back(live.state);
@@ -1080,6 +1081,7 @@ core::Result<void> session_detail::Tick::PlanLanes::scripted_damage(const Player
     }
     // WCC-54/82: raw scripted damage is tracked even without the optional damage rules.
     phase.impl_->track_damage(unit->second, hull_before, shields_before);
+    phase.record_damage_change(unit->second, hull_before);
     if (outcome.destroyed_hardpoint) {
         events.push_back(phase.destruction_event(
             phase.tick, EventKind::hardpoint_destroyed, unit->second.state, *outcome.destroyed_hardpoint));

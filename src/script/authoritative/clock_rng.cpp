@@ -70,7 +70,17 @@ std::uint64_t random_word(
     return mix(state + draw_index * 0xABC98388FB8FAC03ULL);
 }
 
-std::uint64_t RandomStream::next_word() noexcept { return random_word(seed_, tick_, instance_, draws_++); }
+std::uint64_t RandomStream::next_word() noexcept {
+    const std::uint64_t index = draws_ & 0xFFFFFFFFULL;
+    draws_ = (draws_ & ~0xFFFFFFFFULL) | ((index + 1) & 0xFFFFFFFFULL);
+    return random_word(seed_, tick_, instance_, index);
+}
+
+std::uint64_t RandomStream::next_free_word() noexcept {
+    const std::uint64_t index = draws_ >> 32U;
+    draws_ = (draws_ & 0xFFFFFFFFULL) | (((index + 1) & 0xFFFFFFFFULL) << 32U);
+    return random_word(free_stream_seed, tick_, instance_, index);
+}
 
 std::uint64_t RandomStream::next_below(const std::uint64_t bound) noexcept {
     if (bound == 0) return next_word();

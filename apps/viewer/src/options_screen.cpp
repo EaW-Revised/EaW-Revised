@@ -81,6 +81,7 @@ constexpr PageInfo pages[] = {
     {EawrOptionsScreen::Page::hub, "hub", ""},
     {EawrOptionsScreen::Page::audio, "audio", "IDD_AUDIO_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::video, "video", "IDD_VIDEO_OPTIONS_DIALOG"},
+    {EawrOptionsScreen::Page::performance, "performance", "IDD_VIDEO_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::advanced_video, "advanced", "IDD_ADVANCED_VIDEO_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::gameplay, "gameplay", "IDD_GAMEPLAY_OPTIONS_DIALOG"},
     {EawrOptionsScreen::Page::keyboard, "keyboard", "IDD_KEYBOARD_OPTIONS_DIALOG"},
@@ -378,6 +379,24 @@ void EawrOptionsScreen::rebuild_page() {
             service.controls.insert(back, std::move(network));
         }
     }
+    if (page_ == Page::hub) {
+        const bool main = options_.context == Context::main_menu;
+        const auto back = std::find_if(service.controls.begin(), service.controls.end(), [main](const auto& control) {
+            return control.id_name == (main ? "IDC_OK_MAIN" : "IDC_OK_IN_GAME");
+        });
+        if (back != service.controls.end()) {
+            data::DialogControl performance = *back;
+            performance.id_name = main ? "IDC_MAIN_OPTIONS_PERFORMANCE" : "IDC_IN_GAME_OPTIONS_PERFORMANCE";
+            performance.id.reset();
+            performance.text = "Performance";
+            if (!main) {
+                const int step = std::max(24, back->rect.height + 8);
+                back->rect.y += step;
+                service.rect.height += step;
+            }
+            service.controls.insert(back, std::move(performance));
+        }
+    }
     if (page_ == Page::keyboard) {
         // ST-K3: append the owner-requested preset to the loaded keyboard page.
         const int top = service.rect.height;
@@ -406,6 +425,49 @@ void EawrOptionsScreen::rebuild_page() {
         combo.rect = {service.rect.width / 2, top + 4, service.rect.width / 2 - 12, 22};
         combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"};
         service.controls.push_back(combo);
+    }
+    if (page_ == Page::performance) {
+        // Project-owned page; reuse the loaded dialog's skin and button styles.
+        data::Dialog performance = service;
+        performance.rect.height = 168;
+        performance.controls.clear();
+        const int width = performance.rect.width;
+        const auto label = [&](const char* id, const char* caption, const data::RcRect rect) {
+            data::DialogControl control;
+            control.statement = "LTEXT"; control.id_name = id; control.text = caption;
+            control.rect = rect; control.style = {"WS_VISIBLE"};
+            performance.controls.push_back(std::move(control));
+        };
+        label("IDC_PERFORMANCE_TITLE", "Performance", {12, 12, width - 24, 24});
+        label("IDC_RENDER_THREAD_LABEL", "Render thread (restart)", {12, 52, width / 2 - 18, 24});
+        data::DialogControl combo;
+        combo.statement = "COMBOBOX"; combo.id_name = "IDC_RENDER_THREAD";
+        combo.rect = {width / 2, 50, width / 2 - 12, 26};
+        combo.style = {"WS_VISIBLE", "WS_TABSTOP", "CBS_DROPDOWNLIST"};
+        performance.controls.push_back(std::move(combo));
+        const auto button = [&](const char* id, const char* caption, const int column, const int row) {
+            const auto authored = std::find_if(service.controls.begin(), service.controls.end(),
+                                               [id](const auto& control) { return control.id_name == id; });
+            data::DialogControl control;
+            if (authored != service.controls.end()) control = *authored;
+            else {
+                const auto prototype = std::find_if(service.controls.begin(), service.controls.end(), [](const auto& c) {
+                    return c.statement == "PUSHBUTTON" || c.statement == "DEFPUSHBUTTON";
+                });
+                if (prototype != service.controls.end()) control = *prototype;
+                else { control.statement = "PUSHBUTTON"; control.style = {"WS_VISIBLE", "WS_TABSTOP"}; }
+            }
+            control.id_name = id; control.id.reset();
+            if (caption != nullptr) control.text = caption;
+            const int button_width = (width - 36) / 2;
+            control.rect = {12 + column * (button_width + 12), 98 + row * 30, button_width, 24};
+            performance.controls.push_back(std::move(control));
+        };
+        button("IDC_RESTORE_DEFAULT", "Defaults", 0, 0);
+        button("IDC_APPLY", "Apply", 1, 0);
+        button("IDC_CANCEL", "Cancel", 0, 1);
+        button("IDC_OK", "Accept", 1, 1);
+        service = std::move(performance);
     }
     if (page_ == Page::network) {
         // Keep every authored control in place. Extend the loaded dialog with a
@@ -436,7 +498,7 @@ void EawrOptionsScreen::rebuild_page() {
         add("LTEXT", "IDC_ONLINE_SERVICE_ERROR", "", row, true);
         service.controls.back().rect.height = height / 6;
     }
-    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement, page_ == Page::network || page_ == Page::video || page_ == Page::keyboard));
+    state.dialog.emplace(build_dialog(service, *resources.theme_model, resources.text ? &*resources.text : nullptr, placement, page_ == Page::network || page_ == Page::video || page_ == Page::performance || page_ == Page::keyboard));
     root->add_child(state.dialog->frame);
     for (BuiltGadget& gadget : state.dialog->gadgets) {
         if (gadget.control == nullptr) continue;
@@ -484,15 +546,41 @@ void EawrOptionsScreen::rebuild_page() {
         if (gadget.kind == "group") state.dialog->frame->move_child(gadget.control, 0);
     }
     wire_page();
-    if (page_ == Page::hub && options_.context == Context::main_menu) {
+    if (page_ == Page::performance) {
+        // A skin can make live buttons taller than their authored resource rectangles.
+        Control* buttons[] = {state.controls["IDC_RESTORE_DEFAULT"], state.controls["IDC_APPLY"],
+                              state.controls["IDC_CANCEL"], state.controls["IDC_OK"]};
+        if (buttons[0] && buttons[1] && buttons[2] && buttons[3]) {
+            float row_height = 0.0F;
+            for (Control* control : buttons) row_height = std::max(row_height, control->get_size().y);
+            const float top = buttons[0]->get_position().y;
+            const float gap = std::max(6.0F, row_height / 5.0F);
+            for (int index = 0; index < 4; ++index) {
+                Control* control = buttons[index];
+                Vector2 button_size = control->get_size();
+                button_size.y = row_height;
+                control->set_size(button_size);
+                control->set_position(Vector2(control->get_position().x,
+                    top + static_cast<float>(index / 2) * (row_height + gap)));
+            }
+            Control* frame = state.dialog->frame;
+            const float required = top + 2.0F * (row_height + gap);
+            if (required > frame->get_size().y) {
+                frame->set_size(Vector2(frame->get_size().x, required));
+                frame->set_position(Vector2(frame->get_position().x, (size.y - frame->get_size().y) / 2.0F));
+            }
+        }
+    }
+    if (page_ == Page::hub) {
         // Authored rectangles can be shorter than the skin's minimum button height.
         // Lay out the live controls, including additions, rather than scanning for
         // empty authored rectangles (ST-N2). Keep mod entries in their visual order.
         std::vector<Control*> column;
         Control* back = nullptr;
+        const char* back_id = options_.context == Context::main_menu ? "IDC_OK_MAIN" : "IDC_OK_IN_GAME";
         for (const BuiltGadget& gadget : state.dialog->gadgets) {
             if (gadget.kind != "button" || !gadget.control || !gadget.control->is_visible()) continue;
-            if (gadget.id == "IDC_OK_MAIN") back = gadget.control;
+            if (gadget.id == back_id) back = gadget.control;
             else column.push_back(gadget.control);
         }
         if (back && !column.empty()) {
@@ -666,6 +754,22 @@ void EawrOptionsScreen::wire_page() {
         if (has("IDC_APPLY")) {
             auto* apply = Object::cast_to<BaseButton>(state.controls["IDC_APPLY"]);
             apply->set_disabled(true); // enabled by the first change, as retail's dirty flag does
+            apply->set_tooltip_text(text("Nothing to apply yet."));
+        }
+        break;
+    }
+    case Page::performance: {
+        const model::VideoSettings& video = draft_.video;
+        if (has("IDC_RENDER_THREAD")) {
+            auto* combo = Object::cast_to<EawrUiCombo>(state.controls["IDC_RENDER_THREAD"]);
+            combo->add_item(text("Separate (default)"));
+            combo->add_item(text("Safe"));
+            combo->select(video.render_thread == model::RenderThreadSetting::safe ? 1 : 0);
+            combo->set_tooltip_text(text("Takes effect after restart. Launch flags and mod profiles override this setting."));
+        }
+        if (has("IDC_APPLY")) {
+            auto* apply = Object::cast_to<BaseButton>(state.controls["IDC_APPLY"]);
+            apply->set_disabled(true);
             apply->set_tooltip_text(text("Nothing to apply yet."));
         }
         break;
@@ -877,6 +981,15 @@ void EawrOptionsScreen::on_item_selected(const int64_t index, String id) {
         rebuild_page(); // refresh every displayed shortcut from the same resolved preset
         return;
     }
+    if (page_ == Page::performance && name == "IDC_RENDER_THREAD" && (index == 0 || index == 1)) {
+        draft_.video.render_thread = index == 1 ? model::RenderThreadSetting::safe : model::RenderThreadSetting::separate;
+        dirty_ = draft_.video.render_thread != committed_.video.render_thread;
+        if (auto* apply = Object::cast_to<BaseButton>(state_->controls["IDC_APPLY"])) {
+            apply->set_disabled(!dirty_);
+            apply->set_tooltip_text(text(dirty_ ? "Render thread changes take effect after restart." : "Nothing to apply yet."));
+        }
+        return;
+    }
     if (page_ == Page::video && name == "IDC_FRAME_RATE_LIMIT") {
         const std::array<int, 9> choices{0, -1, 30, 60, 90, 120, 144, 165, 240};
         if (index >= 0 && index <= static_cast<int64_t>(choices.size())) {
@@ -1019,6 +1132,7 @@ void EawrOptionsScreen::commit_page(const bool leave) {
     switch (page_) {
     case Page::audio: committed_.audio = draft_.audio; break;
     case Page::video: committed_.video = draft_.video; break;
+    case Page::performance: committed_.video.render_thread = draft_.video.render_thread; break;
     case Page::gameplay: committed_.gameplay = draft_.gameplay; break;
     case Page::network: committed_.network = draft_.network; break;
     case Page::keyboard: committed_.camera_wasd = draft_.camera_wasd; break;
@@ -1060,6 +1174,11 @@ void EawrOptionsScreen::defaults_page() {
     const model::PlayerSettings defaults;
     switch (page_) {
     case Page::audio: draft_.audio = defaults.audio; break;
+    case Page::performance:
+        draft_.video.render_thread = defaults.video.render_thread;
+        rebuild_page();
+        on_item_selected(defaults.video.render_thread == model::RenderThreadSetting::safe ? 1 : 0, text("IDC_RENDER_THREAD"));
+        return;
     case Page::gameplay:
         // The honoured option only: the others are not editable here, so Defaults leaves them.
         draft_.gameplay.tactical_speed = defaults.gameplay.tactical_speed;
@@ -1154,6 +1273,7 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         if (id == "IDC_OK_MAIN" || id == "IDC_OK_IN_GAME") leave_hub();
         else if (id == "IDC_MAIN_OPTIONS_AUDIO" || id == "IDC_IN_GAME_OPTIONS_AUDIO") open_page(Page::audio);
         else if (id == "IDC_MAIN_OPTIONS_VIDEO" || id == "IDC_IN_GAME_OPTIONS_VIDEO") open_page(Page::video);
+        else if (id == "IDC_MAIN_OPTIONS_PERFORMANCE" || id == "IDC_IN_GAME_OPTIONS_PERFORMANCE") open_page(Page::performance);
         else if (id == "IDC_MAIN_OPTIONS_KEYBOARD" || id == "IDC_IN_GAME_OPTIONS_KEYBOARD") open_page(Page::keyboard);
         else if (id == "IDC_MAIN_OPTIONS_GAMEPLAY" || id == "IDC_IN_GAME_OPTIONS_GAMEPLAY") open_page(Page::gameplay);
         else if (id == "IDC_IN_GAME_OPTIONS_NETWORK" || id == "IDC_MAIN_OPTIONS_NETWORK") open_page(Page::network);
@@ -1168,6 +1288,12 @@ void EawrOptionsScreen::handle_button(const std::string& id) {
         else if (id == "IDC_APPLY") commit_page(false);
         else if (id == "IDC_CANCEL") cancel_page();
         else if (id == "IDC_ADVANCED") open_page(Page::advanced_video);
+        break;
+    case Page::performance:
+        if (id == "IDC_OK") commit_page(true);
+        else if (id == "IDC_APPLY") commit_page(false);
+        else if (id == "IDC_CANCEL") cancel_page();
+        else if (id == "IDC_RESTORE_DEFAULT") defaults_page();
         break;
     case Page::advanced_video:
         if (id == "IDC_OK" || id == "IDC_CANCEL") cancel_page();

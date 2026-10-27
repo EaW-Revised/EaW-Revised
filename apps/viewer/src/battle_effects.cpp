@@ -61,7 +61,7 @@ void BattleEffects::move_feedback(const sim::math::Vec3& point, const ui::OrderM
     // OF-02: the authored model scale affects the emitter frame; the particle
     // size tracks keep their authored dimensions through ordinary projection.
     basis.x.x = basis.y.y = basis.z.z = move_scale_;
-    static_cast<void>(spawn(move_particles_[index], {to_float(point.x), to_float(point.y), to_float(point.z)},
+    static_cast<void>(process_spawn(move_particles_[index], {to_float(point.x), to_float(point.y), to_float(point.z)},
         basis, "move_feedback", tick));
     birth_ = birth;
     due_ = due;

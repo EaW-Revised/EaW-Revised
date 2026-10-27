@@ -7,10 +7,103 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cassert>
 #include <cstddef>
 #include <functional>
 #include <iterator>
 #include <system_error>
+#include <unordered_map>
+
+namespace eawr::units {
+
+struct IndexedCollisionTriangles::Storage final {
+    std::vector<Vec3> vertices;
+    std::vector<Indices> indices;
+    std::optional<std::pair<Fixed, Fixed>> bounds;
+};
+
+IndexedCollisionTriangles::IndexedCollisionTriangles(std::vector<Vec3> vertices, std::vector<Indices> indices) {
+    if (indices.empty()) return;
+    auto storage = std::make_shared<Storage>();
+    storage->vertices = std::move(vertices);
+    storage->indices = std::move(indices);
+    // Summarize referenced coordinates only, even for a caller supplying unused vertices.
+    for (const auto& triangle : storage->indices) for (const auto index : triangle) {
+        assert(index < storage->vertices.size());
+        const auto& point = storage->vertices[index];
+        for (const auto coordinate : {point.x, point.y, point.z}) {
+            if (!storage->bounds) storage->bounds = std::pair{coordinate, coordinate};
+            else {
+                storage->bounds->first = std::min(storage->bounds->first, coordinate);
+                storage->bounds->second = std::max(storage->bounds->second, coordinate);
+            }
+        }
+    }
+    storage_ = std::move(storage);
+}
+
+std::size_t IndexedCollisionTriangles::size() const noexcept { return storage_ ? storage_->indices.size() : 0; }
+
+IndexedCollisionTriangles::Triangle IndexedCollisionTriangles::operator[](const std::size_t index) const noexcept {
+    const auto& corners = storage_->indices[index];
+    return {storage_->vertices[corners[0]], storage_->vertices[corners[1]], storage_->vertices[corners[2]]};
+}
+
+std::span<const Vec3> IndexedCollisionTriangles::vertices() const noexcept {
+    return storage_ ? std::span<const Vec3>(storage_->vertices) : std::span<const Vec3>{};
+}
+
+std::span<const IndexedCollisionTriangles::Indices> IndexedCollisionTriangles::indices() const noexcept {
+    return storage_ ? std::span<const Indices>(storage_->indices) : std::span<const Indices>{};
+}
+
+std::size_t IndexedCollisionTriangles::capacity_bytes() const noexcept {
+    return storage_ ? storage_->vertices.capacity() * sizeof(Vec3)
+        + storage_->indices.capacity() * sizeof(Indices) + sizeof(Storage) : 0;
+}
+
+std::optional<std::pair<Fixed, Fixed>> IndexedCollisionTriangles::coordinate_bounds() const noexcept {
+    return storage_ ? storage_->bounds : std::nullopt;
+}
+
+bool IndexedCollisionTriangles::shares_storage_with(const IndexedCollisionTriangles& other) const noexcept {
+    return storage_ == other.storage_;
+}
+
+bool operator==(const IndexedCollisionTriangles& a, const IndexedCollisionTriangles& b) {
+    if (a.shares_storage_with(b)) return true;
+    if (a.size() != b.size()) return false;
+    for (std::size_t index = 0; index < a.size(); ++index) if (a[index] != b[index]) return false;
+    return true;
+}
+
+std::optional<std::string> collision_capability_error(const UnitType& unit) {
+    if (!unit.collision) return std::nullopt;
+    const auto scale = unit.scale_factor.value_or(Fixed::from_raw(Fixed::scale));
+    const auto limit = sim::tactical::max_combat_distance * Fixed::scale;
+    const auto allowed = [&](const Fixed coordinate) {
+        const auto scaled = sim::math::multiply(coordinate, scale);
+        return scaled && scaled.value().raw() >= -limit && scaled.value().raw() <= limit;
+    };
+    for (const auto& mesh : unit.collision_meshes) {
+        const auto bounds = mesh.triangles.coordinate_bounds();
+        // Fixed multiplication is monotonic (also for negative/zero scale). If both
+        // extrema fit, every original coordinate fits; otherwise retain first-failure order.
+        if (!bounds || (allowed(bounds->first) && allowed(bounds->second))) continue;
+        for (const auto triangle : mesh.triangles) for (const auto& point : triangle)
+            for (const auto coordinate : {point.x, point.y, point.z}) {
+                const auto scaled = sim::math::multiply(coordinate, scale);
+                if (!scaled || scaled.value().raw() < -limit || scaled.value().raw() > limit)
+                    return "reachable type " + unit.id + " mesh " + mesh.name
+                        + " coordinate " + (scaled ? "raw " + std::to_string(scaled.value().raw())
+                                                   : "unrepresentable after scale, source raw " + std::to_string(coordinate.raw()))
+                        + " exceeds cap " + std::to_string(sim::tactical::max_combat_distance) + " units (DG-36)";
+            }
+    }
+    return std::nullopt;
+}
+
+} // namespace eawr::units
 
 namespace eawr::units::detail {
 namespace {
@@ -124,6 +217,14 @@ constexpr std::string_view combat_scalars[] = {
     "Allow_Reinforcement_Percentage_Normalized", // #530 PU-21
     "FormationMinimumSideError",          // #599
     "FormationMaximumSideError",          // #599
+};
+
+// The scalar constants FoC's database map reads as integers (engine-tags game-constants rows typed signed or
+// unsigned integer): the C `atoi` of the text with no range or sign check (#4992).
+constexpr std::string_view integer_constants[] = {
+    "SpacePathfindMaxExpansions", "SpacePathingTries", "SpaceObjectTrackingInterval", "SpaceObjectTrackingTreeCount",
+    "MovementReevaluationFrameCount", "MaxWaypointsPerPath", "MP_Default_Credits", "MP_Default_Start_Tech_Level",
+    "MP_Default_Max_Tech_Level",
 };
 
 constexpr std::string_view constants_path = "data/xml/gameconstants.xml";
@@ -255,6 +356,17 @@ std::optional<Fixed> number(const std::string_view text) {
     return parsed.value();
 }
 
+std::optional<std::int32_t> read_integer(std::string_view text, Report& report,
+    const std::string_view owner, const std::string_view field) {
+    const auto value = data::retail::integer_value(text);
+    if (!value) return std::nullopt;
+    if (!value->exact) {
+        report.note(std::string(owner), std::string(field), std::string(text),
+            "PR-C4 / LSL-P2: retail signed integer prefix retained (text becomes zero; overflow saturates)");
+    }
+    return value->value;
+}
+
 std::optional<bool> boolean(const std::string_view text) {
     return data::retail::boolean(text); // AU-82
 }
@@ -294,6 +406,24 @@ std::optional<Fixed> Object::fixed(const std::string_view tag, Report& report, c
     auto value = number(node->raw_text);
     if (!value) report.missing(effective.object_id, std::string(tag), trim(node->raw_text), "not a decimal in Q24 range");
     return value;
+}
+
+std::optional<Fixed> Object::retail_float(const std::string_view tag, Report& report) {
+    const auto* node = single(tag);
+    if (node == nullptr) return std::nullopt;
+    const auto value = data::retail::float_value(node->raw_text);
+    if (!value) return std::nullopt;
+    if (!value->exact) report.note(effective.object_id, std::string(tag), trim(node->raw_text), "read as the retail float parse does (LSL-P1)");
+    return value->value;
+}
+
+std::optional<std::int32_t> Object::integer(const std::string_view tag, Report& report, const bool required) {
+    const auto* node = single(tag);
+    if (node == nullptr) {
+        if (required) report.missing(effective.object_id, std::string(tag), {}, "required tag is absent");
+        return std::nullopt;
+    }
+    return read_integer(node->raw_text, report, effective.object_id, tag);
 }
 
 std::vector<const data::XmlNode*> Object::list(const std::string_view tag, Report& report) const {
@@ -396,6 +526,17 @@ void append_collision_meshes(const assets::Model& model, const std::vector<sim::
         CollisionMesh entry;
         entry.name = mesh.name;
         entry.hardpoint = hardpoint;
+        std::vector<Vec3> vertices;
+        std::vector<IndexedCollisionTriangles::Indices> triangles;
+        struct PointHash final {
+            std::size_t operator()(const std::array<std::int64_t, 3>& point) const noexcept {
+                std::size_t seed = 0;
+                for (const auto coordinate : point)
+                    seed ^= std::hash<std::int64_t>{}(coordinate) + std::size_t{0x9e3779b9U} + (seed << 6U) + (seed >> 2U);
+                return seed;
+            }
+        };
+        std::unordered_map<std::array<std::int64_t, 3>, std::uint32_t, PointHash> vertex_index;
         const auto frame_of = [&](const std::int64_t bone) {
             auto local = bone >= 0 && static_cast<std::size_t>(bone) < frames.size()
                 ? frames[static_cast<std::size_t>(bone)]
@@ -435,9 +576,22 @@ void append_collision_meshes(const assets::Model& model, const std::vector<sim::
                 const auto b = submesh.indices[index + 1];
                 const auto c = submesh.indices[index + 2];
                 if (a >= placed.size() || b >= placed.size() || c >= placed.size()) continue;
-                entry.triangles.push_back({placed[a], placed[b], placed[c]});
+                IndexedCollisionTriangles::Indices corners{};
+                std::size_t corner = 0;
+                for (const auto source_index : {a, b, c}) {
+                    const auto& point = placed[source_index];
+                    const std::array key{point.x.raw(), point.y.raw(), point.z.raw()};
+                    const auto [at, inserted] = vertex_index.try_emplace(key, static_cast<std::uint32_t>(vertices.size()));
+                    if (inserted) vertices.push_back(point);
+                    corners[corner++] = at->second;
+                }
+                triangles.push_back(corners);
             }
         }
+        // Request compact immutable payloads after the builders' geometric growth.
+        vertices.shrink_to_fit();
+        triangles.shrink_to_fit();
+        entry.triangles = IndexedCollisionTriangles(std::move(vertices), std::move(triangles));
         if (!entry.triangles.empty()) out.push_back(std::move(entry));
     }
 }
@@ -538,7 +692,8 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
     record(report, document.value());
     const auto& root = document.value().root;
     data::tag_trace::document(root);
-    for (const auto tag : combat_scalars) {
+    for (const auto space_tag : combat_scalars) {
+        const auto tag = domain_variant(tables.domain, space_tag); // BF-2: land reads its own multipliers
         NamedConstant constant{std::string(tag), std::nullopt, {}};
         const auto* node = last_child(root, tag);
         if (tag == "Stealth_Detection_Time") {
@@ -569,6 +724,10 @@ void load_constants(const vfs::Vfs& filesystem, const std::set<std::string>& dam
                         [](const std::string& value) { return number(value).has_value(); })) {
                     report.missing("GameConstants", constant.tag, constant.text, "not a list of decimals");
                 }
+            } else if (std::find(std::begin(integer_constants), std::end(integer_constants), tag) != std::end(integer_constants)
+                       && !data::retail::is_placeholder(constant.text)) {
+                const auto integer = data::retail::integer_constant(constant.text);
+                constant.value = Fixed::from_raw(static_cast<std::int64_t>(integer) * Fixed::scale);
             } else {
                 constant.value = number(constant.text);
             }

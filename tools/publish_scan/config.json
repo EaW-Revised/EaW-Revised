@@ -116,24 +116,29 @@
         "path": "tools/publish_scan/config.json",
         "identifier": "EawrBuildIdentity",
         "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
+      },
+      {
+        "path": "apps/mods_service/CMakeLists.txt",
+        "identifier": "EawrBuildIdentity",
+        "reason": "Exact public project type or CMake module identifier; no other private-name substring is exempt."
       }
     ],
     "exact_line_allow": [
+      {
+        "path": "apps/viewer/src/live_session_land.cpp",
+        "sha256": "1b838aef0fc34a55e56ccf50e54025e592a712553eb0cbecb676c7dd895e13b3",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the live-session options' lan flag; exact full line only."
+      },
       {
         "path": "apps/viewer/src/skirmish_setup_mode.cpp",
         "sha256": "335c5c4d213d283dd6cdb7b9bfd66d11a0886b5fd1430271f64e7a760919b70a",
         "patterns": [
           "lan-host"
         ],
-        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
-      },
-      {
-        "path": "apps/viewer/src/skirmish_setup_mode.cpp",
-        "sha256": "472c75068cb30e09049ca34b84200a025094095a0b7fb3129a395ddc9b49a057",
-        "patterns": [
-          "lan-host"
-        ],
-        "reason": "Reviewed existing LAN field access or synthetic endpoint fixture; exact full line only."
+        "reason": "C++ member access to the state object's lan member reads the skirmish setup LAN flag; exact full line only."
       },
       {
         "path": "apps/viewer/src/live_session_config.cpp",
@@ -982,6 +987,54 @@
           "lan-host"
         ],
         "reason": "Reviewed source-routing lookup in a test fixture; the matched text is a local field name with no host value, exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "bd8544dd75d2b626eeb4b8d5a5b373c29dc33d95c6185cebe739e021ec82c6c8",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "3821bac92f225a35ab16b5a0efbc627b943244d38cc7622f31d4aef6075e074f",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "3f76fa680d0cf6b7ba167243bc254923a35ab30efd004932bfdfd685c16b584b",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_frame.cpp",
+        "sha256": "9b91aafe778cff9ba5b186a70338ae0fe2d91b9499d5688c797d9c1672e7910f",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_report.cpp",
+        "sha256": "675666353716505101279f77a02e109464be5728aaca60f19c1830fc9a065147",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
+      },
+      {
+        "path": "apps/viewer/src/live_session_report.cpp",
+        "sha256": "0ccc86a9ba41b89f553034c9ec2a35bdd833da2c47d21a7979d772a3b100a5e5",
+        "patterns": [
+          "lan-host"
+        ],
+        "reason": "C++ member access to the options_ object's lan member controls the LAN session; exact full line only."
       }
     ]
   },
@@ -1036,9 +1089,9 @@
       "third_party/lua/etc/lua.xpm": "2efc535d4e7ea430363a9592a6238217c3a24d825994f6546262bac3c83b709e"
     },
     "binary_allowlist": {
-      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "7943b02755ce44a7853c38eef055118bf6a4104b0d0bb663b35467047f2974c8",
-      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "f9e3d60429c114df858e1358419b2d6f425494787caa1b110f837ab0ccaf088a",
-      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "c73e88d0c8a1d8d969fdd35c31d4ca6e8022bff19846ff206e2e894cd9739038",
+      "tests/fidelity/fixtures/S-15-duel-damage.eawr-replay": "7f85bf5ef86e21c08287c304dc160e39a4e2d0fe053c691f1b05002b7001a560",
+      "tests/fidelity/fixtures/S-28-squadron-vs-capital.eawr-replay": "87cb9b606ce92c572b1f8219f7fe8c1b5a42f93152f933e2bc98af747c2a4ca4",
+      "tests/fidelity/fixtures/S-51-mc80-ion-drains-tartan.eawr-replay": "32dac57a2a7a1cbedb88e3bfd76b8ac641c320b963a74b3ea9663d5bdbf509f5",
       "tests/fog/fixtures/fog-stub-v1-one-cell.eawr-fog": "a3f3015681fac46bb56f8fd5270c46bf29e7f090559a6d6d2f8e7c29246f9b27",
       "tests/fog/fixtures/fog-stub-v1-zero-tick.eawr-fog": "34a86fcc4b9bc2a39556d8aa249355c5df37e9955a3bda7e983c10bb5e53664b",
       "tests/fog/fixtures/fog-stub-v1.eawr-fog": "259541928e1855e91b084d6743fbde1f579851cd41b81199f440f1881c0a9c58",
@@ -1082,6 +1135,7 @@
       "tests/replay/fixtures/mutated-overflow.eawr-replay": "2fffae87684f816e6513d35da784bbc8bda5295b890d0194fa212615297833ee",
       "tests/replay/fixtures/mutated-trailing.eawr-replay": "2b3564aca6736d4122543e609662a24c683ce98c76b32739dfc957fb08adfe8a",
       "tests/replay/fixtures/mutated-version.eawr-replay": "520b700df650d37eb3d2127c35d709ec55ee7e62b6b6c08631c6ef1e10198811",
+      "tests/replay/fixtures/native-large.bin": "1094229543f32df6f40fb28599fa068b7b5cbc74f674a94ee7a30831722fdaf9",
       "tests/replay/fixtures/original-v1.eawr-replay": "fcf7f050a4ae8be540def3e4609fc7ff68a21e4ed4fce59e46c1fc62e59a4f90",
       "tests/replay/fixtures/tactical-durability.eawr-replay": "2270ed3ef7d06312b75760da2ca400f69afba543cb78f3764ff1abf974374135",
       "tests/replay/fixtures/tactical-motion-blocked.eawr-replay": "a687ddeb4fc18007eacd191d86be197a39c931c92d2b3ac473bf33eb61f8ea1c",
@@ -1108,24 +1162,24 @@
       "tests/replay/fixtures/tactical-visibility-frame-6.eawr-replay": "8bc3d6aa2d789702fde9af586071cb36a06ff28f0d679907b3eba9219f85668a",
       "tests/replay/fixtures/tactical-visibility-frame-7.eawr-replay": "74a4215f28f015cae40e791baf58d3be76efb3ba2125ac588e57126d24d7c9c4",
       "tests/replay/fixtures/zero-tick-v1.eawr-replay": "f92cda7a6f86d6a321a1f0a8858b35318959d54b6f35a6457f353d0dbeab9345",
-      "tests/skirmish/fixtures/m2-start.eawr-replay": "671507c662ea6daf6d8a13da2ae8b70565ae4cec188cec871eec11e42edfe193",
+      "tests/skirmish/fixtures/m2-start.eawr-replay": "f3df4e4e5b636e51fb5b564b88bd3d6b142e939c4f64d774a9f374e99246ca55",
       "third_party/lua/test/life.lua": "8b6d100472572d4baf4ff06901077aad24d98336cdf7500871f07a486c7a25d2",
-      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "5de18cf77870675b3ec7a184a7611237af3d5e6188448e7b91ea8f5044149fc1",
-      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "427a20237b1f22a35232bb56c67a23cadccb7443c5a7e1ac9472ad0e9d2d8251",
-      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "d4cc4cc09c468b61e36c48a5cb9f5294e43c97f49ea219bd2c1966292407afd0",
-      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "b1192496cc319429e18926138577b55b8f75ed8926fa1bf140399e9d66637762",
-      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "207dba4ef69eac6eb58df338856ee95033f401dd6fe53e25988903d0d8c4eeca",
-      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "8368607a2af62ceabdbf80fc17b782fa903b90a18cbd9482c30dda010fdbad3d",
-      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "a5e4e6f6cd089810d8594cdadc17351f761a9086f152811c8f824ebc8045e002",
-      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "3dfa8fdd42611e7dc780441d12ab50a96778350c49d46b304b975c09babfa263",
-      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "b3c932ccb20206e9227a13e90ef5c7b7ca0881ee4e3951e8aa57e7bd566f02ea",
-      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "95f46587e64b7ccc2c74c5a9451ee15b60812bc3f34c5b14f84db7c577826f69",
-      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "6a8feaf0f386c597ca7bb4ea80955f9f3666e58c4c2392db270709db90bcfc34",
-      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "847f32a3830adca6c249ba9bf44149f3ff685c4807c2e2aca2a22566f81f0012",
-      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "2adb6efd6b2bd92ff84d5e28eabc3a7e8222128b04c24912bca6bb478113e94f",
-      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "0d6db05c021afc5dee38f9f601d36b115e270dfc1d396c6ea722513e5abd253b",
-      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "cf5cc819e70445e9e1265bb14583e292b5eb55583129d8d0ad8866c5cfeef8ff",
-      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "a923668e25245fca6bcdc7377068d12a5ebbed97d3623eb6230da4cbfb128584"
+      "tests/galactic/fixtures/control-corpus/political-conquest.eawr-gcreplay": "08a6ab57d166028846eb7f172f0f99aadc9a4c4788ebac4094d521bcea4d790c",
+      "tests/galactic/fixtures/corpus/coop-orders.eawr-gcreplay": "3da8d1272ec01ca834ae001ec99e46a65c1306f6e27bcd780483f559bbdd705c",
+      "tests/galactic/fixtures/corpus/fiscal-boundary.eawr-gcreplay": "8ee8caf4cd1512727bfa80cf017a77d32e856e40b60a4ae802d1b0ccf372ca58",
+      "tests/galactic/fixtures/corpus/partitioned-orders.eawr-gcreplay": "c2ddf57b69076c9404cebbdffb7ede6a66d919412be0923bc376b892b6aa2fb1",
+      "tests/galactic/fixtures/corpus/quiet-minimal.eawr-gcreplay": "749db81128e4529135d7402856411b246402d5c81565bc50235df48000166393",
+      "tests/galactic/fixtures/fleet-corpus/fleet-commands.eawr-gcreplay": "692cadcf05b92869b3466340097c7003cc3f74579c1c385688d44571ff0c70a5",
+      "tests/galactic/fixtures/graph-corpus/graph-rules.eawr-gcreplay": "2a5fccfebd9ccb42b4397668c69b4742bcc108fc5a540e7c40e802ea03935246",
+      "tests/galactic/fixtures/movement-corpus/fleet-travel.eawr-gcreplay": "e23a330f7c58e86f52ecbbc4c0cd97d3390ad999cd1e4e4e565df756ef71b16a",
+      "tests/galactic/fixtures/outcome-corpus/space-loss.eawr-gcreplay": "f46afdc80081a0223fc6e0e8e2b4ce18ae89bf95cc1c5756af371b90ce4b0a69",
+      "tests/galactic/fixtures/production-corpus/queues-basic.eawr-gcreplay": "8f1255be1c1ca1bf1208201056a6aba6434cefed336e4e9be5e6c29799966caf",
+      "tests/galactic/fixtures/production-corpus/queues-orbit.eawr-gcreplay": "0a882486124d334e491121e08946f4f95623f2ef140b3541f0bfd35da713c5a0",
+      "tests/galactic/fixtures/production-corpus/queues-paygo.eawr-gcreplay": "134296ec2d63efa45c5a98e6f67e8abf7053a249dcfc65a536f8f7d15ea060fd",
+      "tests/skirmish/fixtures/installed/banked-hardpoints.eawr-replay": "409e212ca189f3a16e2e7b47b5fbc33862555da0e27e13c2013ffb0b71b84ead",
+      "tests/skirmish/fixtures/installed/carrier-waypoints.eawr-replay": "dcbec633230ecfd7c437f5b1bc3e201552493d7f2f36f974c9731e2a238c8ac2",
+      "tests/skirmish/fixtures/installed/leech-shields.eawr-replay": "82894dfbc4f0ad81dbef7444a5fb9468e846482280e6c43e2b5d50dd12fbb173",
+      "tests/skirmish/fixtures/installed/special-blast.eawr-replay": "0ef0f51176cabd5785169061b236cd08a26b098a9be200210b8dc439e6918fc1"
     },
     "image_allowlist_origins": {
       "third_party/lua/doc/logo.gif": "Unmodified upstream Lua 5.0.2 distribution artwork; Lua logo from https://www.lua.org/ftp/lua-5.0.2.tar.gz (see third_party/lua/COPYRIGHT).",

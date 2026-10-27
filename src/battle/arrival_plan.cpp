@@ -12,18 +12,26 @@ namespace tt = sim::tactical;
 ArrivalPlan plan_start_arrivals(const BattleStart& start, const units::UnitTables& tables,
                               const tt::EconomyRules* economy) {
     ArrivalPlan plan;
-    const bool campaign = start.setup.campaign.has_value();
     for (const auto& launch : start.launches) {
         const auto* type = tables.find(launch.squadron);
         if (!type || launch.count <= 0) continue;
-        // Preserve the established skirmish slot stream. Campaign demand has no menu cap.
-        if (!campaign && (launch.count > 64 || type->members.empty())) continue;
-        // Preserve the legacy launch/member order, including repeated craft types.
-        for (std::int32_t index = 0; index < launch.count; ++index) {
-            if (type->members.empty()) plan.add(launch.owner, type->id, 1, ArrivalSource::launch, launch.spawner);
-            for (const auto& member : type->members)
-                plan.add(launch.owner, member.craft, 1, ArrivalSource::launch, launch.spawner);
+        // Keep the established preload identity stream for ordinary launches.
+        // This is a presentation warm budget, never an authored arrival limit.
+        constexpr std::int32_t warm_launches = 64;
+        if (launch.count <= warm_launches) {
+            for (std::int32_t index = 0; index < launch.count; ++index) {
+                if (type->members.empty()) plan.add(launch.owner, type->id, 1, ArrivalSource::launch, launch.spawner);
+                for (const auto& member : type->members)
+                    plan.add(launch.owner, member.craft, 1, ArrivalSource::launch, launch.spawner);
+            }
+            continue;
         }
+        // Capacity metadata stays proportional to the authored roster, not the launch
+        // count. Repeated member types contribute separately, in authored order.
+        const auto count = static_cast<std::size_t>(launch.count);
+        if (type->members.empty()) plan.add(launch.owner, type->id, count, ArrivalSource::launch, launch.spawner);
+        for (const auto& member : type->members)
+            plan.add(launch.owner, member.craft, count, ArrivalSource::launch, launch.spawner);
     }
     if (!start.setup.campaign) return plan;
     using Key = std::tuple<tt::PlayerId, std::string, ArrivalSource>;

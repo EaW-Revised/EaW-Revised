@@ -165,8 +165,62 @@ chain of SplitMix64 finalizers), so an instance's draws never depend on other in
 worker counts. Each instance draws from index 0 in every tick. A bounded draw in [0, b)
 rejects words below 2^64 mod b, each rejected word consuming a draw; a unit draw is
 (word >> 11) × 2^-53, exact. The test `lua_sandbox_clock_rng` freezes words, draws and a
-10,000-word digest. `GameRandom.Free_Random` cannot be registered as a binding; FoC's
-`GameRandom` API itself belongs to the tactical AI host.
+10,000-word digest. FoC's `GameRandom` API belongs to the tactical AI host, and to the
+galactic story-script host (below).
+
+**Free stream (RGC-195..199).** A stream also has a second, *free* draw counter: `RandomStream::next_free_word` is
+`random_word(free_stream_seed, tick, instance, free_draw)` under a fixed seed that no game start, load or campaign
+start changes (retail's free generator is built once with a constant seed and never reseeded, RGC-197), so the words
+of a free draw do not follow the session seed. The two counters share the one saved `draws` value: the game
+stream's in the low 32 bits (all that existed before, so streams that take no free draw have their old bytes and
+hashes) and the free stream's in the high 32 bits. The free counter is therefore saved, restored, hashed and rolled
+back with the instance, like every other draw, and a free draw never moves the game stream. Retail's free generator is
+process-wide; ours is per instance and tick, which keeps the draws independent of the worker count. `register_binding` still refuses `GameRandom.Free_Random`; a host with a
+sourced policy binds it through `register_free_random`. A script reads the
+free stream only through `GameRandom.Free_Random`; the host that binds it decides when the call uses the game stream
+instead (the galactic story host: no-argument form always, every form in a multiplayer game, RGC-195/196).
+
+**Galactic story-script host random calls.** The story scheduler of a scripted campaign
+(`create_galactic_story_scheduler`) binds the following random APIs separately from tactical AI:
+
+- `GameRandom` and `GameRandom.Free_Random` take the same forms (none: a 15-bit draw of the game stream, 0..32767; one
+  number n: 0..n; two numbers: a..b, either order, both inclusive; numbers truncate). The integer draw is rejection
+  sampling on the smallest covering bit mask over 15-bit steps; equal bounds return the bound without a draw; a span
+  above 32766 is cut to 32766 with a diagnostic (RGC-198; the release build's cut is unverified). A non-number
+  first argument reports `EAWR-SCRIPT-0210` and still draws over the default range, a non-number second argument one
+  over 0..first (RGC-195). In a single-player game the one- and two-argument `Free_Random` draw from the free
+  stream and the no-argument form from the game stream; in a multiplayer game `Free_Random` raises one
+  `EAWR-SCRIPT-0217` warning and is the plain `GameRandom` call on the game stream (RGC-196/199). `GameRandom.Get_Float`
+  stays an unbound named fault (EAWR-SCRIPT-0215) until its contract is sourced for this host.
+- `DiscreteDistribution.Create()` (RGC-190..194) is not a host binding but a pinned prelude module
+  (`ScriptScheduler::register_prelude`) that runs in every story instance before its script. The list is a Lua table
+  of the script's own state holding the inserted values exactly as passed (identity preserved, no type check) and
+  their running 32-bit totals; `Insert(value, weight)` needs exactly two arguments and a number weight (errors store
+  nothing), narrows the weight to a 32-bit float and stores nothing for a weight that is zero, negative or NaN, without
+  an error. `Sample()` on an empty list returns nothing and draws nothing; otherwise one 15-bit draw of the *game*
+  stream (the same high 15 bits of one word as no-argument `GameRandom`), f = draw / 32767 and u = f x total in 32-bit floats, picks the first entry whose running total reaches u
+  (RGC-192, 194). Three natives (`EAWR_Distribution.Weight/Add/Pick`) do the float arithmetic and the draw, so the list's
+  save, hash, rollback and 1/2/4/8-worker equality are the Lua graph's own and a large starting roster costs no host
+  storage or rebuild. A script can see the natives; nothing relies on them being hidden.
+
+**Galactic story player lookup.** `Find_Player(name)` (WST-90..94) requires exactly one string. Faction names match
+without case sensitivity against all loaded factions, including minor factions and factions without a player in this
+campaign. It returns the first registered player of that faction in player-ID order, or no values when a known faction
+has no player. `local`, in any case, uses the recorded observer's player; a headless session without that observer returns
+no values. It does not substitute the script owner or a human player. In multiplayer, `local` always returns no values:
+a per-peer local identity inside the lockstep simulation would desynchronize peers. This is a deliberate project
+deviation from retail's per-machine local slot (WST-91). Unknown factions and invalid arguments emit a
+diagnostic, request script exit and return no values; `pcall` cannot cancel that exit request. The current invocation
+returns normally, as with `_ScriptExit`.
+
+The host builds this immutable lookup from the loaded faction database, campaign player bindings and recorded
+`solo_reference_human` observer policy. Checkpoint reconstruction binds it again before loading script state. Player handles use the sandbox's existing
+per-script wrapper registry, so repeated lookups preserve identity, including after restore, and consume no random draws.
+A small pinned prelude validates arity and string type before `EAWR_Story_Player.Lookup`; arbitrary Lua graphs never need
+host conversion. The native remains visible to scripts. Player wrapper methods remain unbound until implemented from their
+own sourced rules.
+The tactical/AI `Find_Player` in `src/script/foc/plan_bindings.cpp` is not yet aligned with WST-90..94; that
+separate correction is tracked in (legacy EAWR-4901).
 
 ## Scheduler
 
@@ -434,7 +488,9 @@ owner remain composition dependencies.
   (`FLASH_GUI`, `FORCE_CLICK_GUI` as immutable presentation messages whose clicks enter the
   command path once) come with the tactical AI host's bindings and the Lua HUD presentation bridge.
 - FoC's per-object service gate (`ServiceRate`, `LastService`, L-29; a first offset drawn from the
-  sync random stream) and `GameRandom` belong to the tactical AI host with the object script bindings.
+  sync random stream) and the tactical `GameRandom` belong to the tactical AI host with the object script bindings.
+  (The galactic story host binds its own `GameRandom` per RGC-195/198; the tactical one still draws a 16-bit
+  no-argument value, a known difference from RGC-198 left to the tactical host's owner.)
 - The memory quota is per instance; a session-wide total (many instances each near their
   quota) is not bounded.
 - Mod gap (LuaJIT evaluation scan): Fall of the Republic's EaWX cross-plot serialiser round-trips values

@@ -34,8 +34,9 @@ namespace {
 
 } // namespace
 
-bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, const SpacePopulation& population,
-                        SpaceEnvironment& space) {
+bool BattleInput::input(const Ref<InputEvent>& event, LiveSessionView& live, const BattleScene& population,
+                        BattleCamera& space) {
+    scene_ = &population;
     if (event.is_null()) return false;
     // Capture before refreshing/picking; decoding an input may span simulation
     // frames. LAN reserves this epoch until its intent reaches the core.
@@ -139,7 +140,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     if (beacon_targeting_) {
         left_.reset();
         const auto pick = ray(at[0], at[1]);
-        const auto point = pick ? ui::battle_plane_point(*pick) : std::nullopt;
+        const auto point = pick ? ground_point(*pick) : std::nullopt;
         if (!point) return;
         const auto x = scene::fixed_from_binary32((*point)[0]);
         const auto y = scene::fixed_from_binary32((*point)[1]);
@@ -160,7 +161,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     if (auto* input = live.order_input(); input && input->mode() == ui::OrderMode::waypoint && !placing_ && !ability_target_) {
         left_.reset();
         const auto pick_ray = ray(at[0], at[1]);
-        const auto point = pick_ray ? ui::battle_plane_point(*pick_ray) : std::nullopt;
+        const auto point = pick_ray ? ground_point(*pick_ray) : std::nullopt;
         if (!point) return;
         const auto x = scene::fixed_from_binary32((*point)[0]);
         const auto y = scene::fixed_from_binary32((*point)[1]);
@@ -186,7 +187,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
         placing_.reset();
         left_.reset();
         const auto placing_ray = ray(at[0], at[1]);
-        const auto point = placing_ray ? ui::battle_plane_point(*placing_ray) : std::nullopt;
+        const auto point = placing_ray ? ground_point(*placing_ray) : std::nullopt;
         if (!point) {
             live.reinforcement_feedback(LiveSessionView::ReinforcementFeedback::Kind::cancelled, type);
             note("reinforce " + std::to_string(type) + ": no plane point");
@@ -212,6 +213,7 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     left_.reset();
     if (drag.moved && ui::drag_extent(drag.start, at) > ui::minimum_drag_select_distance) {
         ++boxes_;
+        if (!modifiers.shift) inspect_.reset(); // #4919: a box drag leaves the inspect card
         if (selection_.box(ui::drag_rect(drag.start, at), modifiers.shift, units_, world_ui_->box_icons())) {
             note("box select");
             acknowledge(Acknowledgement::Kind::select);
@@ -323,6 +325,15 @@ void BattleInput::left_release(const std::array<float, 2> at, const ui::Modifier
     }
     pad_palette_.close();
     cards_snapshot_.reset();
+    // #4919 (deliberate deviation): a plain click on an allied structure inspects it. The inspect target
+    // stays out of selection_, so no order, build menu or ability can reach it; nothing goes to the sim.
+    if (const ui::BattleUnit* inspected = ui::inspect_click(units_, picked, armed, modifiers)) {
+        selection_.clear();
+        inspect_ = inspected->entity;
+        note("inspect allied " + std::to_string(*inspect_));
+        return;
+    }
+    inspect_.reset();
     if (selection_.click(picked, modifiers, units_, viewport_rect())) {
         note(picked ? "click select " + std::to_string(*picked) : std::string("click: deselect"));
         acknowledge(Acknowledgement::Kind::select);
@@ -408,7 +419,7 @@ void BattleInput::right_release(const std::array<float, 2> at, const ui::Modifie
     case ui::RightClick::order:
         break;
     }
-    const auto point = ui::battle_plane_point(*pick_ray);
+    const auto point = ground_point(*pick_ray);
     if (!point) return;
     auto x = scene::fixed_from_binary32((*point)[0]);
     auto y = scene::fixed_from_binary32((*point)[1]);
@@ -490,7 +501,7 @@ bool BattleInput::local_order_selection(const LiveSessionView& live) const {
 }
 
 bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, LiveSessionView& live,
-                      SpaceEnvironment& space) {
+                      BattleCamera& space) {
     ui::OrderInput* input = live.order_input();
     // MP-06: requests enter the shared future-tick options stream, never local pacing.
     // The keyboard binding is a remake control; MP-U1 allows either human to request.
@@ -501,6 +512,10 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
             ? std::min<std::uint32_t>(step + 1, static_cast<std::uint32_t>(ui::speed_step_rates.size() - 1))
             : step == 0 ? 0 : step - 1;
         if (requested != step) static_cast<void>(live.request_speed(requested));
+        return true;
+    }
+    if (inspect_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) { // #4919: Esc drops the inspect card
+        inspect_.reset();
         return true;
     }
     if (beacon_targeting_ && code == static_cast<std::int64_t>(KEY_ESCAPE)) {
@@ -524,6 +539,7 @@ bool BattleInput::key(const std::int64_t code, const ui::Modifiers modifiers, Li
             const auto* instance = live.snapshot_index().instance(unit.entity);
             unit.own = instance != nullptr && instance->owner == live.local_player();
         }
+        inspect_.reset();
         selection_.all(own_units);
         note("select all");
         acknowledge(Acknowledgement::Kind::select);

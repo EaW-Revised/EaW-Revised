@@ -56,16 +56,18 @@ void test_settings() {
     radar.children = {settings};
     data::XmlNode constants = tag("GameConstants", "");
     constants.children = {tag("Radar_Colorize_Selected_Units", "Yes"), tag("Radar_Selected_Units_Color", "209, 255, 209, 255"),
-                          tag("Nebula_Effect_Color", "255, 255, 255, 64")};
+                          tag("Nebula_Effect_Color", "255, 255, 255, 64"),
+                          tag("Radar_Colorize_Multiplayer_Enemy", "Yes"), tag("Radar_Multiplayer_Enemy_Color", "1, 2, 3, 255")};
     const ui::MinimapSettings read = ui::minimap_settings(&radar, &constants);
     expect(read.diagnostics.empty(), "the FoC settings parse without warnings");
     expect(read.backdrop == "i_radar_map_grid.tga" && read.fog == data::ui::Rgba8{25, 66, 120, 100} && !read.guide_rectangle,
            "MM-01 space backdrop, fog colour and trapezoid guide");
+    expect(read.colorize_enemy && read.enemy == data::ui::Rgba8{1, 2, 3, 255}, "Radar_*_Multiplayer_Enemy tags are read");
     expect(read.colorize_selected && read.selected == data::ui::Rgba8{209, 255, 209, 255}, "MM-05 selected colour");
     expect(read.background == data::ui::Rgba8{12, 30, 51, 255}, "MM-14: the space colour fills the background");
     // Missing singleton colours diagnose while preserving the same FoC default.
     for (const auto name : {"Space_FOW_Color", "Space_Asteroid_Field_Color", "Space_Asteroid_Field_Border_Color",
-                           "Radar_Selected_Units_Color", "Nebula_Effect_Color"}) {
+                           "Radar_Selected_Units_Color", "Nebula_Effect_Color", "Radar_Multiplayer_Enemy_Color"}) {
         auto missing_radar = radar;
         auto missing_constants = constants;
         std::erase_if(missing_radar.children[0].children, [&](const auto& child) { return child.name == name; });
@@ -83,11 +85,11 @@ void test_settings() {
     data::XmlNode broken = tag("RadarMap", "");
     broken.children = {broken_settings};
     const ui::MinimapSettings fallback = ui::minimap_settings(&broken, nullptr);
-    expect(fallback.fog == data::ui::Rgba8{25, 66, 120, 100} && fallback.guide_rectangle && fallback.diagnostics.size() == 5,
+    expect(fallback.fog == data::ui::Rgba8{25, 66, 120, 100} && fallback.guide_rectangle && fallback.diagnostics.size() == 6,
            "malformed and missing colours keep FoC defaults with warnings; a rectangle guide is read");
     const ui::MinimapSettings missing = ui::minimap_settings(nullptr, nullptr);
     expect(missing.backdrop == "i_radar_map_grid.tga" && missing.colorize_selected, "missing files keep FoC's values");
-    expect(missing.diagnostics.size() == 5, "missing roots diagnose all singleton colour fallbacks");
+    expect(missing.diagnostics.size() == 6, "missing roots diagnose all singleton colour fallbacks");
 
     // MM-07: owners without a lobby colour take their faction's Factions.xml colour.
     data::XmlNode factions = tag("Factions", "");
@@ -112,7 +114,8 @@ void test_faction_registry() {
         "<Space_Asteroid_Field_Color>103,130,139,127</Space_Asteroid_Field_Color>"
         "<Space_Asteroid_Field_Border_Color>174,171,200,127</Space_Asteroid_Field_Border_Color></RadarMapSettings></RadarMap>");
     test::ui::write_text(tree.root / "XML/GameConstants.xml", "<GameConstants><Nebula_Effect_Color>255,255,255,64</Nebula_Effect_Color>"
-        "<Radar_Selected_Units_Color>209,255,209,255</Radar_Selected_Units_Color></GameConstants>");
+        "<Radar_Selected_Units_Color>209,255,209,255</Radar_Selected_Units_Color>"
+        "<Radar_Multiplayer_Enemy_Color>255,0,0</Radar_Multiplayer_Enemy_Color></GameConstants>");
     test::ui::write_text(tree.root / "XML/FactionFiles.xml",
         "<Faction_Files><File>Factions.xml</File><File>Data/XML/extra.xml</File></Faction_Files>");
     test::ui::write_text(tree.root / "XML/Factions.xml", R"xml(<Factions>
@@ -213,6 +216,18 @@ void test_blips() {
     settings.colorize_selected = false;
     const std::vector<ui::MinimapBlip> plain = ui::minimap_blips(units, looks, extents, settings);
     expect(plain.size() == 4 && plain[1].colour == red, "without Radar_Colorize_Selected_Units a selected unit keeps its colour");
+    {
+        const data::ui::Rgba8 green{0, 255, 0, 255};
+        ui::MinimapSettings enemy_settings;
+        enemy_settings.colorize_enemy = true;
+        enemy_settings.enemy = green;
+        const auto recoloured = ui::minimap_blips(units, looks, extents, enemy_settings);
+        expect(recoloured.size() == 4 && recoloured[2].colour == green && recoloured[3].colour == red,
+            "Radar_Colorize_Multiplayer_Enemy recolours hostile blips only");
+        enemy_settings.colorize_enemy = false;
+        const auto stock = ui::minimap_blips(units, looks, extents, enemy_settings);
+        expect(stock.size() == 4 && stock[2].colour == blue, "stock No keeps the owner colour of a hostile blip");
+    }
     units[5].owner_colour = blue;
     const auto claimed = ui::minimap_blips(units, looks, extents, settings);
     expect(claimed.size() == 4 && claimed[0].id == 6 && claimed[0].colour == blue,

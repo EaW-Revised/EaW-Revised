@@ -1,4 +1,14 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+if(MSVC)
+    set(symbol_checks --without-symbols "$<TARGET_FILE:tests>")
+    foreach(target IN LISTS EAWR_SYMBOL_TARGETS)
+        list(APPEND symbol_checks
+            "$<IF:$<BOOL:${EAWR_DEBUG_SYMBOLS}>,--with-symbols,--without-symbols>"
+            "$<TARGET_FILE:${target}>")
+    endforeach()
+    add_test(NAME ci_windows_symbol_scope COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/check_windows_symbol_scope.py" ${symbol_checks})
+endif()
 add_test(NAME ci_python_helpers COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_python_helpers.py")
 
 # Public documentation describes work; tracker numbers are explicit legacy references.
@@ -9,6 +19,7 @@ add_test(NAME ci_doc_refs_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURR
 add_test(NAME ci_replay_numbers COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/check_replay_numbers.py"
          --root "${PROJECT_SOURCE_DIR}")
 add_test(NAME ci_replay_numbers_contract COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_replay_numbers.py")
+
 
 add_test(NAME ci_native_cpp_fixture COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_native_cpp_fixture.py")
 add_test(NAME ci_game_data_tests COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_game_data_tests.py")
@@ -29,7 +40,7 @@ add_test(NAME ci_tag_registry_no_targets COMMAND "${Python3_EXECUTABLE}"
 add_test(
     NAME ci_xml_literal_gate
     COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/inventory/xml_literal_check.py" check
-            --repo "${PROJECT_SOURCE_DIR}" --base-ref origin/Thom-Ernst/Skirmish
+            --repo "${PROJECT_SOURCE_DIR}" --base-ref origin/main
 )
 set_tests_properties(ci_xml_literal_gate PROPERTIES LABELS "ci-tools")
 add_test(NAME ci_xml_literal_check COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/test_xml_literal_check.py")
@@ -62,6 +73,7 @@ add_test(
 # The release packager (tools/release, docs/releasing.md) on a stand-in build tree.
 
 
+
 # Contracts added by the melee, menu, minimap and galactic HUD work.
 eawr_add_python_contract(python_performance_melee_parity_analyze tests.performance.test_melee_parity_analyze)
 eawr_add_python_contract(python_performance_melee_staging tests.performance.test_melee_staging)
@@ -72,9 +84,20 @@ eawr_add_python_contract(python_presentation_renderer_viewer_galactic_planet_too
 
 eawr_add_python_contract(python_presentation_renderer_viewer_galactic_orbit_runtime tests.presentation.renderer.test_viewer_galactic_orbit_runtime)
 
+
+
+
+eawr_add_python_contract(python_performance_remake_bench tests.performance.test_remake_bench)
+
+eawr_add_python_contract(python_presentation_renderer_land_viewport tests.presentation.renderer.test_land_viewport)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_ground_stack_runtime tests.presentation.renderer.test_viewer_galactic_ground_stack_runtime)
+eawr_add_python_contract(python_presentation_renderer_viewer_galactic_pause_runtime tests.presentation.renderer.test_viewer_galactic_pause_runtime)
+
 # Tier labels (cmake/EawrTestTiers.cmake).
 add_test(NAME ci_campaign_policy_compare COMMAND "${Python3_EXECUTABLE}"
          "${CMAKE_CURRENT_SOURCE_DIR}/test_campaign_policy_compare.py")
+
+
 
 
 

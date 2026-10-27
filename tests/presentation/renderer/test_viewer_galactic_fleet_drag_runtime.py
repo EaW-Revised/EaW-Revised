@@ -175,7 +175,7 @@ func _process(delta):
         scale = camera["height"] / (2 * dot(offset, forward) * math.tan(math.radians(camera["vertical_fov"] / 2)))
         return [camera["width"] / 2 + dot(offset, right) * scale, camera["height"] / 2 - dot(offset, up) * scale]
 
-    def native_drag(self, action, fixture=None, ctrl=False, save_order=False):
+    def native_drag(self, action, fixture=None, ctrl=False, save_order=False, paused=False):
         focused = action not in {"world", "radar", "hidden-radar", "world-slot", "enemy-world"}
         if fixture is None:
             fixture = "fleet-drag-slot" if action in {"first-fleet-radar", "second-fleet-radar"} else "fleet-drag"
@@ -468,6 +468,8 @@ func _process(delta):
        json.dumps(str(directory / "save-driver.json").replace("\\", "/")),
        json.dumps(str(capture).replace("\\", "/"))), encoding="utf-8")
         extra = ["--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750"] if focused else []
+        if paused:
+            extra += ["--eawr-galactic-paused", "yes"]
         result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
             "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
             "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", fixture,
@@ -494,6 +496,7 @@ func _process(delta):
                          initial["map_input"]["selection_invalidations"] + (0 if focused else 2))
         self.assertEqual(data["fleet_hud"]["drag"]["active_fleet"], 0)
         self.assertTrue(band.is_file() and capture.is_file())
+        data["evidence_directory"] = str(directory)
         return data
 
     def test_merge_uses_the_displayed_source_identity(self):
@@ -605,13 +608,96 @@ func _process(delta):
         self.assertEqual(data["fleet_hud"]["drag"]["cell_reorders"], 2)
         self.assertEqual(data["live_session"]["submitted_orders"], 0)
 
-    def test_pathfinder_and_empty_world_drops_issue_no_order(self):
-        for action in ["pathfinder", "empty-world", "hidden-radar"]:
+    def test_empty_world_drops_issue_no_order(self):
+        for action in ["empty-world", "hidden-radar"]:
             with self.subTest(action=action):
                 data = self.native_drag(action)
                 self.assertEqual(data["fleet_hud"]["drag"]["orders"], 0)
                 self.assertEqual(data["live_session"]["submitted_orders"], 0)
                 self.assertEqual(sum(card["count"] for card in data["fleet_hud"]["cards"] if card["local"]), 4)
+
+    def test_pathfinder_empty_filled_and_clear(self):
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="eawr-pathfinder-"))
+        report, probe, driver = [directory / name for name in ["report.json", "samples.json", "driver.gd"]]
+        driver.write_text('''extends SceneTree
+var frame = 0
+var elapsed = 0.0
+var viewport: SubViewport
+var start = Vector2.ZERO
+var target = Vector2.ZERO
+var samples = []
+func _initialize():
+    viewport = SubViewport.new()
+    viewport.size = Vector2i(1280, 720)
+    viewport.handle_input_locally = true
+    viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+    root.add_child(viewport)
+    viewport.add_child(load(ProjectSettings.get_setting("application/run/main_scene")).instantiate())
+    viewport.notify_mouse_entered()
+    current_scene = viewport
+func pointer(point, down, motion):
+    var event
+    if motion:
+        event = InputEventMouseMotion.new()
+        event.relative = Vector2(24, 0)
+        event.button_mask = MOUSE_BUTTON_MASK_LEFT if down else 0
+    else:
+        event = InputEventMouseButton.new()
+        event.button_index = MOUSE_BUTTON_LEFT
+        event.pressed = down
+    event.position = point
+    event.global_position = point
+    viewport.push_input(event, true)
+func sample(phase):
+    var slot = current_scene.find_child("q1_0000", true, false)
+    samples.append({"phase": phase, "visible": slot.is_visible_in_tree(),
+        "member": slot.get_meta("pathfinder_member", -1), "tooltip": slot.tooltip_text})
+    viewport.get_texture().get_image().save_png(%s + "/" + phase + ".png")
+func _process(delta):
+    elapsed += delta
+    if elapsed < 1.5: return false
+    frame += 1
+    if frame == 25:
+        sample("empty")
+        start = current_scene.find_child("q1_0001", true, false).get_global_rect().get_center()
+        target = current_scene.find_child("q1_0000", true, false).get_global_rect().get_center()
+        pointer(start, false, true)
+    if frame == 30: pointer(start, true, false)
+    if frame == 32: pointer(start + Vector2(24, 0), true, true)
+    if frame == 34: pointer(target, true, true)
+    if frame == 36: pointer(target, false, false)
+    if frame == 65:
+        sample("filled")
+        start = target
+        target = current_scene.find_child("q1_0201", true, false).get_global_rect().get_center()
+        pointer(start, false, true)
+    if frame == 70: pointer(start, true, false)
+    if frame == 72: pointer(start + Vector2(24, 0), true, true)
+    if frame == 74: pointer(target, true, true)
+    if frame == 76: pointer(target, false, false)
+    if frame == 110:
+        sample("clear")
+        var file = FileAccess.open(%s, FileAccess.WRITE)
+        file.store_string(JSON.stringify(samples))
+        file.close()
+        current_scene.propagate_notification(Node.NOTIFICATION_WM_CLOSE_REQUEST)
+        quit()
+    return false
+''' % (json.dumps(str(directory).replace("\\", "/")), json.dumps(str(probe).replace("\\", "/"))), encoding="utf-8")
+        result = subprocess.run([os.environ["EAWR_GODOT_EXECUTABLE"], "--resolution", "1280x720",
+            "--path", str(support.ROOT / "apps/viewer/project"), "--script", str(driver), "--",
+            "--eawr-galactic", "synthetic", "--eawr-galactic-hud-fixture", "fleet-drag",
+            "--eawr-galactic-focus", "101", "--eawr-galactic-flight-ms", "750",
+            "--eawr-game-root", support.GAME_ROOT, "--eawr-report", str(report)],
+            cwd=support.ROOT, capture_output=True, text=True, timeout=300, check=False)
+        (directory / "viewer.log").write_text(result.stdout + result.stderr, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        samples = json.loads(probe.read_text(encoding="utf-8"))
+        self.assertEqual([row["member"] for row in samples], [0, 7001, 0])
+        self.assertTrue(all(row["visible"] and row["tooltip"] for row in samples))
+        data = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(data["fleet_hud"]["drag"]["orders"], 2)
+        self.assertEqual(data["live_session"]["submitted_orders"], 2)
 
     def test_ctrl_reorder_keeps_untouched_groups_in_their_cells(self):
         initial, _ = self.capture()

@@ -5,10 +5,12 @@
 
 #include "shutdown_trace.hpp"
 #include "frame_timer.hpp"
+#include "container_memory.hpp"
+#include "owner_census.hpp"
 
 #include "eawr/platform/live_ai.hpp"
-#include "eawr/presentation/space/live_units.hpp"
-#include "eawr/presentation/space/unit_fade.hpp"
+#include "eawr/presentation/live/live_units.hpp"
+#include "eawr/presentation/live/unit_fade.hpp"
 #include "eawr/presentation/ui/production.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/roster_gate.hpp"
@@ -63,6 +65,15 @@ std::vector<std::uint8_t> LiveSessionView::finished_replay_bytes(std::string& er
     if (!bytes) { error = core::format_diagnostic(bytes.error()); return {}; }
     error.clear();
     return std::move(bytes).value();
+}
+
+std::vector<std::uint8_t> LiveSessionView::finished_session_replay_bytes(std::string& error) {
+    if (!options_.lan) { error.clear(); return {}; }
+    // The main recording callback joins the worker before the companion is read.
+    session_->stop();
+    auto bytes = options_.lan->record_pause_replay();
+    if (!bytes) { error = core::format_diagnostic(bytes.error()); return {}; }
+    error.clear(); return std::move(bytes).value();
 }
 
 void LiveSessionView::save_failure_replay() {
@@ -183,8 +194,8 @@ private:
 
 } // namespace
 
-void LiveSessionView::record_draw_digest(const std::vector<SpacePopulation::LivePose>& drawn,
-                                       const std::vector<SpacePopulation::LiveClipPose>& clips, const std::uint64_t tick) {
+void LiveSessionView::record_draw_digest(const std::vector<BattleScene::LivePose>& drawn,
+                                       const std::vector<BattleScene::LiveClipPose>& clips, const std::uint64_t tick) {
     if (options_.hashes_path.empty() || draw_digest_rows_.size() >= 1U << 20) return;
     DrawHash visible_hash;
     for (const VisibleUnit& unit : visible_) {
@@ -198,7 +209,7 @@ void LiveSessionView::record_draw_digest(const std::vector<SpacePopulation::Live
         visible_hash.add(hundredths(unit.yaw));
     }
     DrawHash drawn_hash;
-    for (const SpacePopulation::LivePose& pose : drawn) {
+    for (const BattleScene::LivePose& pose : drawn) {
         drawn_hash.add(static_cast<std::uint64_t>(pose.ship));
         drawn_hash.add(static_cast<std::uint64_t>(pose.entity));
         for (const auto& value : {pose.position.x, pose.position.y, pose.position.z, pose.yaw_degrees, pose.roll_degrees,
@@ -223,7 +234,7 @@ void LiveSessionView::record_draw_digest(const std::vector<SpacePopulation::Live
         }
     }
     drawn_hash.add(static_cast<std::uint64_t>(clips.size()));
-    for (const SpacePopulation::LiveClipPose& clip : clips) {
+    for (const BattleScene::LiveClipPose& clip : clips) {
         drawn_hash.add(static_cast<std::uint64_t>(clip.ship));
         drawn_hash.add(clip.position.position);
         drawn_hash.add(static_cast<std::uint64_t>(clip.position.subdivisions));
@@ -334,6 +345,9 @@ void LiveSessionView::write_report(std::ostream& output) const {
     write_report_final_state(output);
     write_report_battle_end(output);
     write_report_status(output);
+    if (!memory_capacity_report_.empty()) output << ",\"memory_capacity\":" << memory_capacity_report_;
+    if (!memory_capacity_600_report_.empty()) output << ",\"memory_capacity_tick_600\":" << memory_capacity_600_report_;
+    if (!memory_capacity_post_load_report_.empty()) output << ",\"memory_capacity_post_load\":" << memory_capacity_post_load_report_;
     output << "},\n";
 }
 
@@ -450,6 +464,16 @@ void LiveSessionView::write_report_slots(std::ostream& output) const {
            << ", \"undrawn_fallbacks\": " << identity_undrawn_ << ", \"both_undrawn\": " << identity_both_undrawn_
            << ", \"entries\": " << slot_identity_of_entity_.size() << "}"
            << ", \"slots_grown\": " << arrival_slots_.grown
+           << ", \"campaign_warm\": {\"requested\": " << arrival_slots_.warm_requested
+           << ", \"admitted\": " << arrival_slots_.warm_admitted
+           << ", \"complete\": " << (arrival_slots_.warm_complete ? "true" : "false")
+           << ", \"probe_available\": " << (arrival_slots_.warm_probe_available ? "true" : "false")
+           << ", \"admission_policy\": " << json(arrival_slots_.warm_budget_off ? "off"
+               : arrival_slots_.warm_probe_available ? "device" : "unknown_existing_only")
+           << ", \"available_bytes\": " << arrival_slots_.warm_available_bytes
+           << ", \"estimated_additional_bytes\": " << arrival_slots_.warm_estimated_bytes
+           << ", \"load_ms\": " << arrival_slots_.warm_ms
+           << ", \"driver_overhead_known\": false}"
            << ", \"undrawn_entities\": " << arrival_slots_.undrawn.size()
            << ", \"slot_growth_failure\": " << (arrival_slots_.failure.empty() ? "null" : json(arrival_slots_.failure))
            << ", \"slotless\": [" << slotless_report_rows() << "]";
@@ -725,6 +749,18 @@ void LiveSessionView::write_report_object_turrets(std::ostream& output) const {
                    << ", \"yaw\": " << static_cast<double>(turret.yaw.raw()) / sim::math::Fixed::scale
                    << ", \"pitch\": " << static_cast<double>(turret.pitch.raw()) / sim::math::Fixed::scale << "}";
             first_manual = false;
+        }
+    }
+    output << "]";
+    output << ", \"hardpoint_turrets\": [";
+    bool first_hardpoint = true;
+    if (ability_snapshot_) for (const auto& instance : ability_snapshot_->instances()) {
+        for (const auto& turret : instance.hardpoint_turrets) {
+            output << (first_hardpoint ? "" : ", ") << "{\"entity\": " << instance.entity_id
+                   << ", \"hardpoint\": " << turret.hardpoint << ", \"last_fired_target\": " << turret.target
+                   << ", \"yaw\": " << static_cast<double>(turret.yaw.raw()) / sim::math::Fixed::scale
+                   << ", \"pitch\": " << static_cast<double>(turret.pitch.raw()) / sim::math::Fixed::scale << "}";
+            first_hardpoint = false;
         }
     }
     output << "]";

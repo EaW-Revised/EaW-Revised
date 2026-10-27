@@ -126,8 +126,22 @@ void advanced_options() {
     expect(ui::setup_credits_clamp(modded, 6900) == 6900 && ui::setup_credits_clamp(modded, 7500) == 7000,
            "SSC-09: only values outside modded bounds clamp");
     expect(ui::setup_credits_clamp({5000, 1000}, 3000) == 5000, "SSC-09: an inverted range gives its minimum");
-    expect(!ui::setup_notice(ui::SetupNotice::credits_not_applied).empty(),
-           "SSC-09: the unwired credits value has its reason");
+    expect(ui::setup_credits_button_step(stock) == 1000.0,
+           "WSS-25: stock arrows span the data's seven positions");
+    expect(ui::setup_credits_button_step(modded) == 1125.0,
+           "WSS-25: modded arrow positions derive from the authored range");
+    const std::array<std::int64_t, 5> expected{2500, 4500, 5500, 6500, 7500};
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        const auto position = static_cast<double>(modded.minimum) + static_cast<double>(index)
+            * ui::setup_credits_button_step(modded);
+        expect(ui::setup_credits_edit(modded, position) == expected[index],
+               "WSS-25: modded choices use a minimum-relative ceil bucket, retaining endpoint overshoot");
+    }
+    expect(ui::setup_credits_edit(modded, 2500.49) == 2500
+        && ui::setup_credits_edit(modded, 2500.5) == 3500,
+           "WSS-25: track movement rounds its offset before selecting the upper bucket");
+    expect(ui::setup_credits_edit(stock, 6000) == 6000,
+           "WSS-25: the vanilla default is unchanged by editing its position");
 }
 
 // A quoted string with a letter in it, after `from` on the line.

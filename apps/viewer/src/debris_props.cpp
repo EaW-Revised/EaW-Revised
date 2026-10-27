@@ -17,8 +17,6 @@ namespace {
 
 namespace tactical = sim::tactical;
 
-// Every prop's fire and explosion draws from its own capacity.
-constexpr std::size_t effect_capacity = 4096;
 // A detached effect that never reports finished is released after this many further samples.
 constexpr std::uint32_t drain_limit_frames = 300;
 // The report keeps this many spawn and expiry rows.
@@ -83,6 +81,7 @@ DebrisProps::DebrisProps(godot::Node3D& host, const vfs::Vfs& filesystem, const 
       backend_(std::make_unique<GodotParticleBackend>(
           host, [this](const std::string_view name) { return resolve_texture(name); })),
       registry_(std::make_unique<particles::EffectRegistry>(*backend_)) {
+    backend_->set_churn_owner(render_churn::Owner::debris_particle);
     // #638: nothing here reads the streams' hashes, so the frames do not compute them.
     registry_->set_stream_hashes(false);
 }
@@ -136,7 +135,7 @@ const DebrisProps::ParticleType* DebrisProps::particle_type(const std::string& n
             } else if (system.value().emitters.empty()) {
                 type.cause = "particle system declares no emitters";
             } else {
-                type.system = std::move(system).value();
+                type.system = std::make_shared<const particles::SystemDefinition>(std::move(system).value());
             }
         }
     }
@@ -409,14 +408,14 @@ bool DebrisProps::start(const std::string& particle, const space::DebrisPose& po
         ++skipped_[key];
         return true;
     }
-    auto handle = registry_->spawn(*type->system, seed_++, effect_capacity);
-    if (!handle || !registry_->set_frame(handle.value(), frame_of(pose))) {
-        if (handle) static_cast<void>(registry_->release(handle.value()));
+    auto handle = registry_->spawn_authored(type->system, seed_++);
+    if (!handle || !registry_->set_frame(handle.handle, frame_of(pose))) {
+        if (handle) static_cast<void>(registry_->release(handle.handle));
         ++start_failed_[key];
         return true;
     }
     ++started_[key];
-    Effect effect{handle.value(), particle, born, 0U, type->lifetime_frames, false, follows};
+    Effect effect{handle.handle, particle, born, 0U, type->lifetime_frames, false, follows};
     // Born before the clock's present: it catches up.
     bool gone = false;
     for (std::uint64_t sample = born; sample < samples_ && !gone; ++sample) {
@@ -519,6 +518,7 @@ void DebrisProps::release() {
     released_ = true;
     for (const Effect& effect : effects_) static_cast<void>(registry_->release(effect.handle));
     effects_.clear();
+    registry_->evict_idle();
     backend_->release_prewarm();
     flights_.clear();
     pending_.clear();
@@ -551,6 +551,8 @@ void DebrisProps::write_report(std::ostream& output) const {
     rows("spawned", spawn_rows_);
     rows("expired", expired_rows_);
     counts("effects_started", started_);
+    output << ", \"effect_admission\": ";
+    registry_->write_admission_report(output);
     counts("effects_failed", start_failed_);
     counts("effects_skipped", skipped_);
     output << ", \"particle_types\": {";

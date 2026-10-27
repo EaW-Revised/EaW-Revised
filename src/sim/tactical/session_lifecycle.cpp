@@ -76,7 +76,7 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             owner_profiles.push_back(std::move(scaled));
         }
         for (const auto& profile : combat.profiles) for (const auto& weapon : profile.weapons)
-            if (weapon.requires_manual_target) manual_admission_profiles.emplace(
+            if (weapon.requires_manual_target || weapon.manual_turret_required) manual_admission_profiles.emplace(
                 std::pair{profile.type_id, weapon.hardpoint}, std::make_shared<const WeaponProfile>(weapon));
         // WPR-55: content-indexed counters and bonus profiles; storage is reused by every phase.
         std::vector<TypeId> types;
@@ -247,9 +247,9 @@ TacticalSession::Impl::Impl(const TacticalSetup& source, const std::span<const S
             auto ledger = update_command_ledger(live, 0, InlineExecutor{});
             if (!ledger) initialization_error = ledger.error();
             else {
-                command_ledger = std::move(ledger).value();
-                const auto applied = apply_command_bonuses(live, command_ledger, ledgers, 0, InlineExecutor{});
+                const auto applied = apply_command_bonuses(live, ledger.value(), ledgers, 0, InlineExecutor{});
                 if (!applied) initialization_error = applied.error();
+                else command_ledger = std::move(ledger).value();
             }
             rebuild(live, false);
         }
@@ -460,6 +460,20 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
     }
     auto resolved = setup;
     if (auto valid = validate_setup(resolved); !valid) return core::Result<TacticalSession>::failure(valid.error());
+    if (setup.domain == BattleDomain::land) {
+        if (!content.land_terrain) return core::Result<TacticalSession>::failure(detail::diagnostic(
+            diagnostic_codes::land_provider_unavailable, "land tactical provider unavailable: terrain field required (L1)"));
+        if (setup.campaign || !setup.squadrons.empty() || !setup.free_garrisons.empty())
+            return core::Result<TacticalSession>::failure(detail::diagnostic(diagnostic_codes::invalid_setup,
+                "land movement host does not support campaign, space squadrons or free garrisons"));
+        // Land has its own movement-only host. Space content validation and phase order remain independent.
+        auto impl = std::make_unique<Impl>(resolved, std::span<const SensorProfile>{}, DurabilityTable{}, MotionTable{},
+            std::nullopt, CombatTable{}, VictoryRules{}, AbilityTable{}, EconomyRules{}, content.map_box);
+        if (impl->initialization_error) return core::Result<TacticalSession>::failure(*impl->initialization_error);
+        if (auto initialized = impl->initialize_land(content); !initialized)
+            return core::Result<TacticalSession>::failure(initialized.error());
+        return core::Result<TacticalSession>::success(TacticalSession(std::move(impl)));
+    }
     if (content.retreat) resolve_cinematic_seats(resolved, content.economy.players);
     auto result = create(resolved, content.sensors, content.durability, content.motion, content.fog, content.combat,
         content.victory, content.abilities, content.economy, content.map_box);
@@ -472,6 +486,8 @@ core::Result<TacticalSession> TacticalSession::create(const TacticalSetup& setup
 
 core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay& replay,
     const TacticalContent& content) {
+    if (replay.setup.domain == BattleDomain::land)
+        if (auto valid = validate_replay(replay); !valid) return core::Result<TacticalSession>::failure(valid.error());
     auto result = create(replay.setup, content);
     if (!result) return result;
     for (const auto& command : replay.commands)
@@ -489,6 +505,8 @@ core::Result<TacticalSession> TacticalSession::from_replay(const TacticalReplay&
 
 
 core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
+    if (impl_->land) return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+        "land creation is bound by the setup company expansion"));
     if (impl_->object_turn_running) {
         return core::Result<EntityId>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "stage_spawn during an object-turn provider call"));
@@ -557,6 +575,8 @@ core::Result<EntityId> TacticalSession::stage_spawn(const UnitState& unit) {
 }
 
 core::Result<void> TacticalSession::stage_remove(const EntityId unit) {
+    if (impl_->land) return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
+        "land movement host does not support external destruction"));
     if (impl_->object_turn_running) {
         return core::Result<void>::failure(detail::diagnostic(diagnostic_codes::invalid_command,
             "stage_remove during an object-turn provider call"));
@@ -596,9 +616,13 @@ core::Result<void> TacticalSession::stage_remove(const EntityId unit) {
         const auto profiles = impl_->build_bonus_profiles(ledgers, containers, InlineExecutor{});
         if (!profiles) return profiles;
         // Staging is outside the tick: publish the reconciled profiles and unit maxima atomically.
+        std::vector<CombatBonuses> categories(impl_->bonus_categories.size());
         for (auto& entry : live) {
             if (command_ledger) break;
-            const auto applied = impl_->apply_bonuses(entry, impl_->bonuses_for(entry));
+            const auto retained = impl_->profile_bonuses({entry.state.owner, entry.state.type_id}, ledgers, containers, categories, true, true);
+            const auto removed = impl_->apply_bonuses(entry, retained, Impl::BonusAdjustment::loss);
+            if (!removed) return removed;
+            const auto applied = impl_->apply_bonuses(entry, impl_->bonuses_for(entry), Impl::BonusAdjustment::gain);
             if (!applied) return applied;
         }
     }

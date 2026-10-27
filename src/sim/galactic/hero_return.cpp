@@ -43,13 +43,14 @@ core::Result<HeroSchedule> schedule_hero_return(std::vector<HeroReturnRecord>& r
     }
     if (!exists(location)) return core::Result<HeroSchedule>::success(out);
     const auto seconds = defeat.seconds.raw() > 0 ? defeat.seconds : defeat.default_seconds;
-    if (seconds.raw() <= 0) return fail<HeroSchedule>("hero respawn needs a positive sourced default time");
     const auto frames = math::multiply(seconds, math::Fixed::from_raw(30 * math::Fixed::scale)); // ADR-013 logical frame rate
     if (!frames) return core::Result<HeroSchedule>::failure(frames.error());
     const auto rounded = math::add(frames.value(), math::Fixed::from_raw(math::Fixed::scale / 2));
-    if (!rounded || rounded.value().trunc_to_integer() < 0)
-        return fail<HeroSchedule>("hero respawn delay overflow");
-    const auto delay = static_cast<std::uint64_t>(rounded.value().trunc_to_integer());
+    if (!rounded) return fail<HeroSchedule>("hero respawn delay overflow");
+    // CGS-12: the debug build passes a non-positive delay straight to the creation schedule, which then holds an
+    // already elapsed time; the next service creates the hero.
+    const auto delay = rounded.value().trunc_to_integer() < 0 ? std::uint64_t{0}
+        : static_cast<std::uint64_t>(rounded.value().trunc_to_integer());
     if (frame > std::numeric_limits<std::uint64_t>::max() - delay || records.size() >= galactic_max_objects)
         return fail<HeroSchedule>("hero respawn record limit");
     records.push_back({defeat.id, defeat.respawn_type, defeat.structure, defeat.owner,

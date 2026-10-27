@@ -1,8 +1,11 @@
 #include "galactic_mode_internal.hpp"
+#include "ground_stack.hpp"
+#include "eawr/sim/galactic/ground_intelligence.hpp"
 #include "ui/tactical_hud_internal.hpp"
 #include "ui/input_routing.hpp"
 #include "eawr/presentation/ui/hud_shell.hpp"
 #include "eawr/presentation/ui/layout.hpp"
+#include "eawr/presentation/ui/fleet_pathfinder.hpp"
 #include <godot_cpp/classes/image_texture.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <cmath>
@@ -43,6 +46,21 @@ Ref<Texture2D> GalacticMode::State::fleet_faction_texture(const galactic_view::P
     // at indices 0..2 (Rebel/Empire/pirates), without q1's fourth raid entry.
     if (galaxy_overview && *faction == presentation::ui::HudFaction::underworld) index = 3;
     return index < icons.size() ? command_texture(icons[index]) : Ref<Texture2D>{};
+}
+
+GalacticMode::State::FleetDragSource GalacticMode::State::pathfinder_source(const std::size_t panel) const {
+    if (!published_snapshot || !galaxy || panel >= 3 || !shown_panel_cards[panel] || !shown_panel_cards[panel]->local) return {};
+    std::vector<std::uint8_t> slots;
+    for (std::uint8_t slot = 0; slot < 3; ++slot)
+        if (galactic_view::fleet_panel_for_slot(fleet_panels.mode, slot) == panel) slots.push_back(slot);
+    const auto found = presentation::ui::fleet_pathfinder(*published_snapshot, galaxy->local.player, selected_planet, slots);
+    if (!found) return {};
+    auto type = found->member.type;
+    const auto actors = published_snapshot->actor_records();
+    const auto actor = std::lower_bound(actors.begin(), actors.end(), found->member.id,
+        [](const auto& row, auto id) { return row.id < id; });
+    if (actor != actors.end() && actor->id == found->member.id && actor->original_type) type = actor->original_type;
+    return {found->fleet, {}, static_cast<std::uint8_t>(panel), type, found->member.id};
 }
 
 bool GalacticMode::State::build_fleet_hud() {
@@ -120,6 +138,11 @@ bool GalacticMode::State::build_fleet_hud() {
         button->set_action([this, name] {
             if (!map_input.hud_event() || !map_input.gates.world_allowed()) return;
             const std::size_t slot = static_cast<std::size_t>(name[1] - '1');
+            if (name.ends_with("_0000")) {
+                const auto picked = pathfinder_source(slot);
+                if (picked.member) { selected_fleet = picked.fleet; selected_fleet_member = picked.member; update_fleet_hud(); }
+                return;
+            }
             // Cells act on their panel's card; the aggregate icons keep the local slot / other-owner cards.
             const sim::galactic::ObservedFleet* card = name.ends_with("_fleet") ? shown_fleet_cards[slot] : slot < 3 ? shown_panel_cards[slot] : nullptr;
             // The other owner's panel is read-only: its ships cannot be selected or given orders.
@@ -152,9 +175,10 @@ bool GalacticMode::State::build_fleet_hud() {
         }
         if (!name.ends_with("_fleet") && name[1] <= '3') {
             fleet_group_buttons[static_cast<std::size_t>(name[1] - '1')].push_back(name);
-            if (!name.ends_with("_0000")) attach_fleet_drag(button, name, [this, name, button] {
+            attach_fleet_drag(button, name, [this, name, button] {
                 if (!button->is_visible_in_tree() || button->is_disabled()) return FleetDragSource{};
                 const auto slot = static_cast<std::size_t>(name[1] - '1');
+                if (name.ends_with("_0000")) return pathfinder_source(slot);
                 const auto* card = shown_panel_cards[slot];
                 if (!card || !card->local || !card->fleet) return FleetDragSource{};
                 const auto& names = fleet_group_buttons[slot];
@@ -171,7 +195,7 @@ bool GalacticMode::State::build_fleet_hud() {
             });
         }
     }
-    // WGUI-U07: pathfinder's first slot is reserved until the producer exists.
+    // GHUD-R43: the leading selector has its own snapshot binding, outside ordinary packing.
     for (auto& slots : fleet_group_buttons) {
         std::sort(slots.begin(), slots.end());
         slots.erase(std::remove_if(slots.begin(), slots.end(), [](const auto& name) { return name.ends_with("_0000"); }), slots.end());
@@ -253,20 +277,26 @@ presentation::ui::UnitCardLooks GalacticMode::State::fleet_stack_looks(const Fle
         const auto art = production_art.find(name->second);
         return art == production_art.end() ? nullptr : &art->second;
     };
-    std::string title_key = "TEXT_PIRATE_SPACE_FLEET";
+    std::string title_key = badge.ground_planet ? "TEXT_PIRATE_LAND_GARRISON" : "TEXT_PIRATE_SPACE_FLEET";
     if (content) if (const auto owner = content->factions.find(badge.owner); owner != content->factions.end()) {
         // Debug build fleet name: the GameConstants good/evil/corrupt side, else pirate.
         constexpr std::array<std::string_view, 3> sides{"TEXT_GOOD_SPACE_FLEET", "TEXT_EVIL_SPACE_FLEET", "TEXT_CORRUPT_SPACE_FLEET"};
+        constexpr std::array<std::string_view, 3> ground_sides{"TEXT_GOOD_LAND_GARRISON", "TEXT_EVIL_LAND_GARRISON", "TEXT_CORRUPT_LAND_GARRISON"};
         const auto side = presentation::ui::allegiance_emblem_index(owner->second.faction, content->side_names);
-        if (side < sides.size()) title_key = sides[side];
+        if (side < sides.size()) title_key = badge.ground_planet ? ground_sides[side] : sides[side];
         if (owner->second.present) looks.icon_back_tint = data::ui::Rgba8{
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.r, 0.0F, 1.0F) * 255.0F)),
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.g, 0.0F, 1.0F) * 255.0F)),
             static_cast<std::uint8_t>(std::lround(std::clamp(owner->second.primary.b, 0.0F, 1.0F) * 255.0F)), 255};
     }
     looks.name = battle_text(title_key);
+    // WGUI-92/166: an all-stealth fleet adds the first authored Tooltip_Text key of icon_fleet01.
+    if (badge.stealth) if (const auto* tip = command_catalog.find("icon_fleet01")) {
+        const auto keys = tip->list(data::ui::Field::tooltip_text);
+        if (!keys.empty()) looks.description = battle_text(keys.front());
+    }
     if (const auto* art = art_of(badge.best)) looks.icon = art->icon;
-    if (const auto* style = command_catalog.find("g_planet_fleet")) {
+    if (const auto* style = command_catalog.find(badge.ground_planet ? "g_planet_land_forces" : "g_planet_fleet")) {
         const auto stacks = style->list(data::ui::Field::blank_texture_name);
         if (!stacks.empty()) looks.icon_back = stacks[std::min(badge.texture, stacks.size() - 1)];
         looks.icon_scale = style->vec2(data::ui::Field::size).value_or(data::ui::Vec2{}).x;
@@ -289,7 +319,7 @@ void GalacticMode::State::service_fleet_stack_popup() {
     if (!fleet_popup) return;
     std::uint64_t hovered{};
     const FleetStackBadge* shown{};
-    fleet_popup_admitted = encyclopedia_admitted() && !dragged_fleet;
+    fleet_popup_admitted = encyclopedia_admitted() && !dragged_fleet && !dragged_ground_planet;
     auto* pointer = hud->get_viewport()->gui_get_hovered_control();
     if (pointer != fleet_popup_pointer_control) {
         fleet_popup_pointer_control = pointer; // name only on change, no per-frame text
@@ -307,7 +337,9 @@ void GalacticMode::State::service_fleet_stack_popup() {
     if (hovered == fleet_popup_key && fleet_popup_publication == fleet_publication) return;
     fleet_popup_key = hovered; fleet_popup_publication = fleet_publication;
     std::optional<presentation::ui::UnitCardLooks> looks;
-    if (shown && fleet_publication) {
+    if (shown && shown->ground_planet) {
+        looks = fleet_stack_looks(*shown);
+    } else if (shown && fleet_publication) {
         // WGUI-166: the encyclopedia lists all admitted types. WGUI-72's
         // focused-grid capacity and individually positioned groups belong to
         // the grid, so reuse the observer filter without those display limits.
@@ -327,7 +359,7 @@ void GalacticMode::State::service_fleet_stack_popup() {
             if (icon.icon != ((hovered - 1U) & 3U) || icon.owner != shown->owner) continue;
             FleetStackBadge popup;
             popup.owner = shown->owner; popup.best = shown->best; popup.texture = shown->texture;
-            popup.contents = icon.contents;
+            popup.contents = icon.contents; popup.stealth = icon.stealth;
             if (!popup.contents.empty()) looks = fleet_stack_looks(popup);
             break;
         }
@@ -364,6 +396,71 @@ void GalacticMode::State::update_fleet_diorama() {
     }
     fleet_diorama_alternate = index; fleet_diorama_alpha = alpha;
     fleet_organize->set_alternate(index, alpha);
+}
+
+void GalacticMode::State::rebuild_ground_badges() {
+    const auto* style = command_catalog.find("g_planet_land_forces");
+    if (!style || !displayed_snapshot || !galaxy) return;
+    const auto stacks = style->list(data::ui::Field::blank_texture_name);
+    const auto displays = sim::galactic::observed_ground_display(*displayed_snapshot, galaxy->local.player,
+        [this](sim::galactic::TypeId type) -> std::optional<sim::galactic::GroundDisplayType> {
+            const auto name = production_names.find(type);
+            if (name == production_names.end()) return {};
+            const auto art = production_art.find(name->second);
+            if (art == production_art.end()) return {};
+            const auto& look = art->second;
+            return sim::galactic::GroundDisplayType{galactic_view::stack_health_rank(look.max_health),
+                look.named_hero, look.generic_hero, !look.icon.empty(), look.hero_rank};
+        });
+    for (const auto& planet : galaxy->planets) {
+        const auto icon = galactic_view::ground_stack(*displayed_snapshot, galaxy->local.player, planet.id, stacks.size());
+        if (!icon || stacks.empty()) continue;
+        const auto key = std::pair{planet.id, std::uint8_t{3}};
+        auto [entry, inserted] = fleet_badges.try_emplace(key);
+        auto& badge = entry->second;
+        if (inserted) {
+            auto* button = memnew(EawrHudButton);
+            button->set_sounds(*style, [this](const std::string& cue) { if (audio) audio->ui_sound(cue); });
+            button->set_name(String::utf8(("ground_presence_" + std::to_string(planet.id)).c_str()));
+            world_overlays->add_child(button); badge.button = button;
+            badge.ship = memnew(TextureRect);
+            badge.ship->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            badge.ship->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+            badge.ship->set_stretch_mode(TextureRect::STRETCH_SCALE);
+            button->add_child(badge.ship);
+            button->set_action([this, id = planet.id] {
+                if (!map_input.hud_event() || map_input.gates.selection_locked || !map_input.gates.world_allowed()) return;
+                const auto planets = selection_planets();
+                apply_selection(map_input.select(planets, id, seat_flight().state()));
+            });
+            attach_ground_stack_drag(button, planet.id);
+            if (fleet_drag_receiver) hud->move_child(fleet_drag_receiver, hud->get_child_count() - 1);
+        }
+        badge.ground_planet = planet.id; badge.owner = icon->owner; badge.shown = true; badge.hidden = false;
+        badge.texture = icon->texture; badge.contents = icon->contents;
+        const auto hover = style->list(data::ui::Field::mouse_over_texture_name);
+        badge.button->set_texture_hover(icon->contents_known && hover.size() > 1 ? command_texture(hover[1]) : Ref<Texture2D>{});
+        // GGS-09: image permission is independent of tooltip contents. The
+        // projection publishes candidates only, never a hidden payload identity.
+        const auto display = std::find_if(displays.begin(), displays.end(),
+            [&](const auto& row) { return row.planet == planet.id; });
+        const auto best = display == displays.end() ? std::nullopt : display->image(ground_hero_preference);
+        badge.best = best;
+        if (badge.shown_stack.set(icon->texture)) badge.button->set_texture_normal(command_texture(stacks[icon->texture]));
+        if (badge.shown_ship.set(best)) {
+            Ref<Texture2D> image;
+            if (best) if (const auto name = production_names.find(*best); name != production_names.end())
+                if (const auto art = production_art.find(name->second); art != production_art.end()) image = command_texture(art->second.icon);
+            badge.ship->set_texture(image);
+        }
+        if (badge.shown_owner.set(icon->owner)) {
+            Color tint(1, 1, 1, 1);
+            if (content) if (const auto owner = content->factions.find(icon->owner); owner != content->factions.end() && owner->second.present)
+                tint = Color(owner->second.primary.r, owner->second.primary.g, owner->second.primary.b, 1);
+            badge.button->set_self_modulate(tint);
+        }
+        visible_fleet_badges[planet.id].push_back(badge.button);
+    }
 }
 
 void GalacticMode::State::rebuild_fleet_projection(const bool publication_changed) {
@@ -419,6 +516,7 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
             placed.emplace_back(planet, icon);
     }
     for (auto& [key, badge] : fleet_badges) badge.shown = false;
+    rebuild_ground_badges();
     for (const auto& [planet, icon] : placed) {
         const auto key = std::pair{planet, icon.icon};
         auto [entry, inserted] = fleet_badges.try_emplace(key);
@@ -434,6 +532,13 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
             badge.ship->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
             badge.ship->set_stretch_mode(TextureRect::STRETCH_SCALE);
             button->add_child(badge.ship);
+            badge.stealth_overlay = memnew(TextureRect);
+            badge.stealth_overlay->set_name("fleet_stealth_overlay");
+            badge.stealth_overlay->set_mouse_filter(Control::MOUSE_FILTER_IGNORE);
+            badge.stealth_overlay->set_expand_mode(TextureRect::EXPAND_IGNORE_SIZE);
+            badge.stealth_overlay->set_stretch_mode(TextureRect::STRETCH_SCALE);
+            badge.stealth_overlay->hide();
+            button->add_child(badge.stealth_overlay);
             button->set_action([this, planet = planet] {
                 if (!map_input.hud_event() || map_input.gates.selection_locked || !map_input.gates.world_allowed()) return;
                 const auto planets = selection_planets();
@@ -459,6 +564,12 @@ void GalacticMode::State::rebuild_fleet_projection(const bool publication_change
         badge.hidden = false;
         if (badge.contents != icon.contents) badge.contents = icon.contents;
         badge.best = icon.best;
+        badge.stealth = icon.stealth;
+        if (badge.shown_stealth.set(icon.stealth)) {
+            // WGUI-92: the fleet overlay uses the padded asset; its art positions the badge in the corner.
+            badge.stealth_overlay->set_texture(icon.stealth ? command_texture("i_icon_stealth.tga")
+                                                          : Ref<Texture2D>{});
+        }
         if (badge.shown_stack.set(icon.texture)) badge.button->set_texture_normal(stacks.empty() ? Ref<Texture2D>{}
             : command_texture(stacks[std::min(icon.texture, stacks.size() - 1)]));
         if (badge.shown_ship.set(icon.best)) {
@@ -513,6 +624,14 @@ void GalacticMode::State::update_fleet_panel_cards() {
         fleet_group_buttons[0].size());
     for (std::size_t panel = 0; panel < 3; ++panel)
         if (fleet_panels.panel[panel]) shown_panel_cards[panel] = &*fleet_panels.panel[panel];
+    const std::vector<std::pair<sim::EntityId, std::int64_t>> indices(fleet_gui_indices.begin(), fleet_gui_indices.end());
+    for (std::size_t panel = 0; panel < 3; ++panel) if (fleet_panels.panel[panel]) {
+        const auto picked = pathfinder_source(panel);
+        std::vector<std::uint8_t> slots;
+        for (std::uint8_t slot = 0; slot < 3; ++slot)
+            if (galactic_view::fleet_panel_for_slot(fleet_panels.mode, slot) == panel) slots.push_back(slot);
+        presentation::ui::separate_pathfinder(*fleet_panels.panel[panel], *displayed_snapshot, picked.member, indices, slots);
+    }
 }
 
 void GalacticMode::State::rebuild_fleet_cell_layouts(const presentation::ui::ShellPlacement& placement) {
@@ -591,8 +710,34 @@ void GalacticMode::State::update_fleet_controls(const presentation::ui::ShellPla
             }
         }
         const sim::galactic::ObservedFleet* card = name.ends_with("_fleet") ? shown_fleet_cards[slot] : shown_panel_cards[slot];
-        button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
+        // The leading frame is drawn on every panel; it only acts on a local panel (the disabled state falls back to its
+        // blank art, which is the empty rounded frame).
+        const bool inert_frame = slot < 3 && name.ends_with("_0000") && !(card && card->local);
+        button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked || inert_frame);
         if (!changed) continue; // No text, icon resolution or allocations per render frame.
+        if (slot < 3 && name.ends_with("_0000")) {
+            button->set_position({static_cast<float>(pixels.x), static_cast<float>(pixels.y)});
+            button->set_size({static_cast<float>(pixels.width), static_cast<float>(pixels.height)});
+            button->set_hit_rect({{}, button->get_size()});
+            const auto picked = pathfinder_source(slot);
+            button->set_meta("pathfinder_member", static_cast<std::int64_t>(picked.member));
+            button->set_meta("pathfinder_fleet", static_cast<std::int64_t>(picked.fleet));
+            Ref<Texture2D> icon;
+            if (picked.cell_type) if (const auto type = production_names.find(*picked.cell_type); type != production_names.end())
+                if (const auto art = production_art.find(type->second); art != production_art.end()) icon = command_texture(art->second.icon);
+            button->set_icon_texture(icon);
+            const Vector2 centre = button->get_size() * 0.5F;
+            const auto size = icon.is_valid() ? icon->get_size() * static_cast<float>(placement.scale) : Vector2{};
+            button->set_cell_portrait_box({centre - size * 0.5F, size});
+            const auto& resources = fleet_cell_resources.at(name);
+            HudButtonArt art; art.normal = resources.normal; art.pressed = resources.pressed;
+            if (!resources.hover.empty()) art.hover = resources.hover.front();
+            button->set_cell_state_art(std::move(art), centre, static_cast<float>(placement.scale));
+            button->set_tooltip_text(inert_frame ? String{} : String::utf8(battle_text("TEXT_TOOLTIP_PATHFINDER").c_str()));
+            button->set_order_selected(picked.member && selected_fleet_member == picked.member);
+            button->set_visible(true);
+            continue;
+        }
         if (!name.ends_with("_fleet")) {
             const auto hide_cell = [&] {
                 button->hide(); button->set_icon_texture({}); button->set_tooltip_text({});
@@ -750,7 +895,10 @@ void GalacticMode::State::update_fleet_hud() {
 // planet point shifted by g_planet_fleet Default_Offset X (left -X, right +X), Y up by
 // Default_Offset Y; the centre icon is raised by Offset Y. Each ellipse is centred on its point.
 void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId planet,
-    const Vector2 anchor, const float scale, const float alpha) {
+    const Vector2 anchor, const float scale, const float label_alpha) {
+    // Focused labels fade out, but a held surface company still needs its orbit receivers.
+    const bool surface_drag = ground_hud.pressed_object && map_input.box_end && planet == selected_planet;
+    const float alpha = surface_drag ? 1.0F : label_alpha;
     const auto* style = command_catalog.find("g_planet_fleet");
     if (!style) return;
     const auto side = style->vec2(data::ui::Field::default_offset).value_or(data::ui::Vec2{});
@@ -770,7 +918,8 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
     // #3072: during a fleet drag the hovered planet also shows its empty local
     // stack icons as drop targets: the authored empty stack art (texture 0, as a
     // presence-only stack) in the local faction's colour. The receiver hit-tests them.
-    if (dragged_fleet && planet == fleet_drag_planet) {
+    if ((dragged_fleet || dragged_ground_planet || (ground_hud.pressed_object && map_input.box_end))
+        && planet == fleet_drag_planet) {
         const auto stacks = style->list(data::ui::Field::blank_texture_name);
         const bool mixed = mixed_fleet_planets.contains(planet);
         for (std::size_t index = mixed ? 1 : 0; index < fleet_empty_slots.size() && !stacks.empty(); ++index) {
@@ -800,6 +949,25 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
         auto& badge = found->second;
         auto* button = badge.button;
         if (!badge.shown) continue;
+        if (badge.ground_planet) {
+            const auto* ground_style = command_catalog.find("g_planet_land_forces");
+            if (!ground_style) { button->hide(); continue; }
+            const auto offset = ground_style->vec2(data::ui::Field::offset).value_or(data::ui::Vec2{});
+            const auto texture = button->get_texture_normal();
+            const auto size = texture.is_valid() ? texture->get_size() * scale : Vector2{};
+            button->set_position(anchor - Vector2(0, offset.y) * scale - size * 0.5F);
+            button->set_size(size); static_cast<EawrHudButton*>(button)->set_hit_rect({{}, size});
+            if (badge.ship->get_texture().is_valid()) {
+                const auto image = badge.ship->get_texture()->get_size()
+                    * ground_style->vec2(data::ui::Field::size).value_or(data::ui::Vec2{1, 0}).x * scale;
+                badge.ship->set_position((size - image) * 0.5F - Vector2(0, offset.x * static_cast<float>(badge.texture) * scale));
+                badge.ship->set_size(image);
+            }
+            button->set_modulate(Color(1, 1, 1, alpha));
+            button->set_visible(alpha > 0 && texture.is_valid());
+            button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
+            continue;
+        }
         const auto size = place(button, found->first.second);
         if (badge.ship->get_texture().is_valid()) {
             const auto image = badge.ship->get_texture()->get_size() * icon_scale * scale;
@@ -807,6 +975,13 @@ void GalacticMode::State::update_fleet_badges(const galactic_view::ObjectId plan
             badge.ship->set_position((size - image) * 0.5F - Vector2(0, layer * static_cast<float>(badge.texture) * scale));
             badge.ship->set_size(image);
         }
+        if (badge.stealth_overlay->get_texture().is_valid()) {
+            // The overlay sits over the ship image on the stack, at the same scale and lift.
+            const auto image = badge.stealth_overlay->get_texture()->get_size() * icon_scale * scale;
+            badge.stealth_overlay->set_position((size - image) * 0.5F - Vector2(0, layer * static_cast<float>(badge.texture) * scale));
+            badge.stealth_overlay->set_size(image);
+            badge.stealth_overlay->show();
+        } else badge.stealth_overlay->hide();
         button->set_modulate(Color(1, 1, 1, alpha)); button->set_visible(alpha > 0 && button->get_texture_normal().is_valid());
         button->set_disabled(!map_input.gates.hud_enabled || map_input.gates.tutorial_locked);
     }
@@ -880,9 +1055,11 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
         if (!badge.shown) continue;
         const auto rect = badge.button->get_global_rect();
         output << (written++ ? ", " : "") << "{\"planet\": " << key.first << ", \"owner\": " << badge.owner
+            << ", \"ground\": " << (badge.ground_planet ? "true" : "false")
             << ", \"icon\": " << static_cast<int>(key.second) << ", \"stack_texture\": " << badge.texture
             << ", \"fleet\": " << (badge.fleet ? std::to_string(*badge.fleet) : "null")
             << ", \"ship\": " << (badge.ship->get_texture().is_valid() ? "true" : "false")
+            << ", \"display_type\": " << (badge.best ? std::to_string(*badge.best) : "null")
             << ", \"name\": " << json(galactic_detail::utf8(badge.button->get_name()))
             << ", \"visible\": " << (badge.button->is_visible_in_tree() ? "true" : "false")
             << ", \"rect\": [" << rect.position.x << ", " << rect.position.y << ", " << rect.size.x << ", " << rect.size.y << "]"
@@ -918,7 +1095,7 @@ void GalacticMode::State::write_fleet_report(std::ostream& output) const {
         << ", \"last_source\": " << last_fleet_drag_source << ", \"last_target\": " << last_fleet_drag_target
         << ", \"last_destination\": " << last_fleet_drag_destination
         << ", \"member_transfer\": \"unavailable: atomic provider legacy #2586\""
-        << ", \"pathfinder\": \"unavailable: snapshot and command provider legacy #2586\""
+        << ", \"pathfinder\": \"published selector and opcode 23\""
         << ", \"binding\": \"whole-fleet from aggregate, visible group member or badge; unit-group gesture and WGUI-U04 activation seam\""
         << ", \"aggregate_placement\": " << json(fixture_enabled(GalacticHudFixture::Feature::ground_placement) ? "explicit-synthetic-visible-controls" : "authored-GHUDL-09-parking")
         << ", \"preview\": \"dragged card or stack art (#3072)\", \"stack\": [";

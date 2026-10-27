@@ -119,6 +119,17 @@ Production has no per-unit update. It runs in four places:
 | WPR-32 | **Bring a pooled unit in** at a point. <br>**Checks** (else the command is dropped and the unit stays pooled): <br>- the type is in the player's pool; <br>- the point is valid (PU-31, PU-32); <br>- there is room: (the type's `Population_Value` + 0.5), truncated, is at most the cap minus the count (WPR-41). <br>**Creation:** <br>- a ship is created at the point with height 0, facing the reinforcement facing; <br>- each craft of a squadron is created at free space within 2500 of the point, also at height 0 (the point itself when none is found), and then the squadron. <br>**Then** each created object registers its population share (WPR-41), the type leaves the pool, the arrival starts (WPR-40) and the elevated vulnerability is set (PU-38). | debug build WP-06, WP-19 | same (PU-30 to PU-34); PU-34 puts craft at their formation offsets and layer height (PU-G6) | does, with PU-G6's craft placement (walk 4 owns the search; free-space placement applies it to arrivals). |
 | WPR-33 | **Can be produced** (used by WPR-20 and WPR-30). The type is in the units or upgrades queue. The station is allied to the buyer and lists the type in its `Tactical_Buildable_Objects_Multiplayer` for its faction. The build limits allow it: <br>- `Build_Limit_Lifetime_Per_Player`, against the player's ever-built count; <br>- `Build_Limit_Current_Per_Player`, against owned plus in production; <br>- `Build_Limit_Lifetime_For_All_Allies`, the same counted over the player and its allies; <br>- `Build_Limit_Current_For_All_Allies`, likewise. <br>A limit of 0 forbids the type; negative and unauthored limits allow it (constructor default -1; rechecked for station upgrades). The price is `Tactical_Build_Cost_Multiplayer` with price modifiers, and must be above 0. The time must be above 0: (whole) `Tactical_Build_Time_Seconds` × `Tactical_Build_Time_Multiplier` × an AI's difficulty `Space_Build_Time_Multiplier` × (1 − the type's time modifiers), then × (1 + the station's build-time bonuses, WPR-51) when the entry is created. The player or an ally has at least one of each `Tactical_Build_Prerequisites` type, including completed and pooled objects; queued objects alone do not qualify. The galactic tags `Required_Star_Base_Level`, `Tech_Level` and `Build_Initially_Locked` are not read here. | debug build WP-10, WP-11, WP-12; data | same (PU-11 to PU-13), except the limits and prerequisites, which PU-11 says no M2 type authors | does all four optional limits and every owned prerequisite, at buy and reverse queue validation. |
 
+The WPR-22/33 admission and completion paths were rechecked for mod-authored producers and
+research tokens (legacy EAWR-4643). An ordinary producer's authored faction menu does not require a
+`StarBase` class, income stream or capture behavior. Construction pads and their UC objects
+keep their separate construction route (WBP-11/33). An `UpgradeObject` with no authored effect
+still queues and completes as a held owned object, so it can satisfy later tactical prerequisites.
+Upgrades with authored effects outside implemented subsystems remain unavailable as a project
+limit, including ground-only effects in space; this is separate from the retail admission rule.
+Ordinary price, time, queue, alliance, faction-list and limit checks still apply. Campaign price
+exemptions remain independent of producer eligibility. This qualification is from the static
+debug-build admission/completion paths; it does not assert that every authored ability is implemented.
+
 ### Arrival and population
 
 | Rule | Behaviour | Source | Existing | Ours |
@@ -249,8 +260,27 @@ deltas, proportional hardpoint increases and clamp-only removal. WCC-44
 samples shooter damage at launch and target defense at impact. The sourced
 projectile delivery instead resolves the retained shooter and its current damage
 modifiers at impact; a removed shooter contributes no shooter modifier (EUS-16).
-This launch-versus-impact difference is gap in-flight shooter modifier gap (legacy EAWR-1809). These six authored modifiers are nonnegative;
-negative bonus authoring is outside this validated upgrade profile.
+This launch-versus-impact difference is gap in-flight shooter modifier gap (legacy EAWR-1809).
+Stock space-automatic upgrade percentages are nonnegative (the stock ground
+combat-armor penalty authors -0.5 defense). Signed mod contributions follow
+WHE-55: zero fields are absent, negative-only categories retain their largest
+signed contribution, and distinct categories add before the consumer floors and
+ceilings apply. Defense uses 1-total. Upgrade and command sources share this
+reduction, including when both occupy the same category.
+Source gains apply the signed maximum delta to current damaged hull, shield and
+energy values. Source loss restores the maximum and only clamps current values;
+removing a negative upgrade does not heal. This also applies to staged holder
+removal outside the tick. When a tick loses and gains sources, first reduce the
+sources retained on both sides and clamp to their maxima, then apply the signed
+delta from the gained sources. Rehomed campaign sources also require eligibility
+under both the former and new holder type to count as retained.
+
+The authored +8 upper bound remains a project support limit, not a retail rule
+or a fixed-point representability boundary. Content compilation retains the
+authored percentages, marks the affected upgrade unavailable and attaches a
+named menu diagnostic; it does not abort the session or clamp the data. No new
+lower authoring bound is imposed: WHE-55's health/speed -0.99 floors and
+damage/energy/shield -1 floors apply only after category reduction.
 
 WPR-52 creates the next type at the old owner/pose, carries hardpoint slots by
 index (repairing health/players preserved; destroyed or disabled slots return

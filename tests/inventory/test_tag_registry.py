@@ -86,6 +86,21 @@ class Fixture(unittest.TestCase):
 
 
 class UniverseTests(unittest.TestCase):
+    def test_mod_claims_require_exact_authored_profile_pairs(self) -> None:
+        data = {"rows": INVENTORY["rows"] + [
+            inventory_row("Campaign/Story_Name", profile="remake"),
+            inventory_row("Campaign/Unreviewed_Tag", profile="remake")]}
+        row = {"tag": "Story_Name", "classes": ["Campaign"], "inventory_profile": "remake"}
+        universe = tr.load_universe(data, registry=registry(row))
+        self.assertIn(("campaign", "story_name"), universe)
+        self.assertNotIn(("campaign", "unreviewed_tag"), universe)
+        for change in ({"tag": "Misspelling"}, {"classes": ["Planet"]},
+                       {"inventory_profile": "missing-profile"}):
+            with self.subTest(change=change), self.assertRaises(tr.RegistryError):
+                tr.load_universe(data, registry=registry({**row, **change}))
+        with self.assertRaises(tr.RegistryError):
+            tr.load_universe(data, registry=registry({**row, "tag": "Max_Speed", "classes": ["SpaceUnit"]}))
+
     def test_paths_collapse_data_names(self) -> None:
         self.assertEqual(tr.normalise_path("Goals/Build_Fleet/Reachability"), "Goals/*/Reachability")
         self.assertEqual(tr.normalise_path("GUIDialogs/Textures/IDD_A/Frame_Left"), "GUIDialogs/Textures/*/Frame_Left")
@@ -107,6 +122,13 @@ class UniverseTests(unittest.TestCase):
 
 
 class RegistryRuleTests(Fixture):
+    def test_inventory_profile_is_an_explicit_non_stock_name(self) -> None:
+        for value in (None, True, [], {}, "", "foc"):
+            rows = full_rows()
+            rows[0]["inventory_profile"] = value
+            with self.subTest(value=value):
+                self.assertIn("inventory_profile must name", self.problems(registry(*rows)))
+
     def test_campaign_scene_requires_reviewed_sourced_consumers(self) -> None:
         rows = full_rows()
         row = next(row for row in rows if row["tag"] == "Max_Speed")
@@ -663,7 +685,7 @@ class CheckedInRegistryTests(unittest.TestCase):
         self.assertFalse(any(classes.intersection(row["classes"]) for row in root["rows"]))
         self.assertTrue(classes.issubset({c for c, _t, _r in tr.expand(child)}))
         registry = tr.load_registry(tr.DEFAULT_STATUSES)
-        universe = tr.load_universe(tr.load_inventory(tr.DEFAULT_INVENTORY))
+        universe = tr.load_universe(tr.load_inventory(tr.DEFAULT_INVENTORY), registry=registry)
         registered = {tr.pair_key(c, tag) for c, tag, _row in tr.expand(registry)}
         # The tactical registry also reviews the two mod-authorable turret tags
         # absent from the pinned authored stock inventory. Retain exact coverage

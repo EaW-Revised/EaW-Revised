@@ -71,6 +71,10 @@ public:
     const sim::PartitionExecutor* executor{}; // the running step's, for rewards applied inside it
     std::set<std::string> story_reported;     // refusal texts already published (diagnostics only, never saved)
     core::Result<void> apply_story_rewards();
+    // WST-20 (3)/55: the engine's Lua callbacks, forwarded to the story scripts before the rewards are applied.
+    std::shared_ptr<const GalacticStoryScripts> story_scripts;
+    std::uint64_t story_call_sequence{};
+    core::Result<void> forward_story_calls();
     core::Result<void> tech_assigned(galactic::PlayerId player, std::int64_t level);
     core::Result<void> service_story();
     static std::string with_story(const std::string& base, const std::string& story);
@@ -159,6 +163,7 @@ public:
     bool conflict_pause{};
     galactic::SeatId interactive_seat{};
     sim::EntityId summary_conflict{};
+    void refresh_system_hold();
     core::Result<void> release_summary();
     core::Result<void> hold_summary(sim::EntityId conflict, galactic::PlayerId invader, galactic::PlayerId defender);
     static std::string with_summary(const std::string& base, galactic::SeatId observer, sim::EntityId conflict);

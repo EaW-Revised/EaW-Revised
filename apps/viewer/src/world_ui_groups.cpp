@@ -319,8 +319,9 @@ void WorldUiView::draw_icons(const Frame& frame, const RID canvas_item, const fl
                                                  std::trunc((*base)[1]) + slot[1] * ui_scale};
                 const std::array<float, 2> anchor_screen{std::trunc(target[0]),
                     std::trunc(target[1] - ui::squadron_icon_screen_offset(frame.viewport[1]))};
-                if (frame.world_at_height) {
-                    if (const auto world = frame.world_at_height(anchor_screen, at[2])) {
+                if (frame.scene && frame.ray) {
+                    const auto pick = frame.ray(anchor_screen);
+                    if (const auto world = pick ? frame.scene->point_at_height(*pick, at[2]) : std::nullopt) {
                         desired = *world;
                         if (ui::settle_squadron_icon(gripper.motion, desired, gripper_snap_distance_,
                                                     gripper.settled_cell.has_value())) {

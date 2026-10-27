@@ -47,6 +47,38 @@ class CorpusTests(unittest.TestCase):
             self.assertEqual(len(raw), 5)  # manifest + loose winner + three archive members
             self.assertEqual(sum(not s.active for s in raw), 1)
 
+    def test_loose_only_mod_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "game"
+            base = root / "GameData/Data"
+            expansion = root / "corruption/Data"
+            leaf = Path(temp) / "leaf/Data"
+            parent = Path(temp) / "parent/Data"
+            for data in (base, expansion):
+                data.mkdir(parents=True)
+                (data / "MegaFiles.xml").write_text("<Mega_Files><File>Base.meg</File></Mega_Files>")
+                write_meg(data / "Base.meg", [("Data/Xml/Fallback.xml", b"<Fallback/>")])
+            for data, name in ((leaf, "Objects"), (parent, "Parent")):
+                (data / "Xml").mkdir(parents=True)
+                (data / f"Xml/{name}.xml").write_text(f"<{name}/>")
+            write_meg(leaf / "Patch.meg", [("Data/Xml/Inactive.xml", b"<Inactive/>")])
+            corpus = Corpus(root, [leaf.parent, parent])
+            diagnostics = io.StringIO()
+            with contextlib.redirect_stderr(diagnostics):
+                sources = {s.logical_path: s for s in corpus.iter_sources("remake", ".xml", "effective")}
+            self.assertEqual(diagnostics.getvalue().count("EAWR-VFS-0012"), 2)
+            self.assertEqual(sources["data/xml/objects.xml"].data, b"<Objects/>")
+            self.assertEqual(sources["data/xml/parent.xml"].layer_id, "mod[1]")
+            self.assertEqual(sources["data/xml/fallback.xml"].layer_id, "expansion")
+            self.assertNotIn("data/xml/inactive.xml", sources)
+            self.assertEqual(corpus.last_manifest["layers"][0]["active_archives_low_to_high"], [])
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(corpus.read_effective("remake", "data/xml/fallback.xml").data, b"<Fallback/>")
+                self.assertEqual(corpus.read_effective("remake", "data/xml/objects.xml").data, b"<Objects/>")
+            (leaf / "MegaFiles.xml").write_text("<Mega_Files><File>broken</Mega_Files>")
+            with self.assertRaises(CorpusError):
+                list(corpus.iter_sources("remake", ".xml", "effective"))
+
     def test_missing_manifest_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); (root / "GameData" / "Data").mkdir(parents=True)

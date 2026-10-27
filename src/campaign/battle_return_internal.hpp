@@ -8,6 +8,10 @@
 
 namespace eawr::campaign {
 
+// WGM-211/212: shared tiered closest-planet selection for both battle return paths.
+[[nodiscard]] core::Result<sim::galactic::PlanetId> retreat_destination(
+    const sim::galactic::GalacticSnapshot&, sim::galactic::PlanetId, sim::galactic::PlayerId, bool surface);
+
 // Both return paths supply their qualified station level and casualty list;
 // transport survival remains qualified by the caller's retained roster.
 [[nodiscard]] inline sim::galactic::ControlBattleReturn build_control_battle_return(

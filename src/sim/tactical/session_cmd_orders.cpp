@@ -252,9 +252,8 @@ core::Result<void> session_detail::Tick::CommandOrders::apply(
         const auto range = impl->approach_range(live, guard, target_view ? &*target_view : nullptr);
         auto reach = core::Result<math::Fixed>::success(range);
         if (!guard && target_view) {
-            const auto* attack_profile = impl->combat.find(live.state.type_id);
             reach = detail::target_attack_distance(&impl->motion, *target_view, live.state.position,
-                attack_profile != nullptr ? attack_profile->max_attack_distance.value_or(math::Fixed{}) : math::Fixed{},
+                impl->attack_distance(live).value_or(math::Fixed{}),
                 detail::has_aim_hardpoint(*target_view));
         }
         if (!reach) return failed(reach.error());

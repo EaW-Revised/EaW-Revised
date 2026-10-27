@@ -1,4 +1,5 @@
 #include "unit_emitters.hpp"
+#include "eawr/assets/geometry_stripped.hpp"
 
 #include "eawr/presentation/animation/animation.hpp"
 #include "eawr/presentation/particles/map_attachment_owner.hpp"
@@ -6,7 +7,7 @@
 #include "eawr/presentation/particles/prewarmed_capacity.hpp"
 #include "eawr/presentation/particles/proxy_binding.hpp"
 #include "eawr/presentation/space/debris.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -80,6 +81,15 @@ void apply_seed_identity(scene::Placement& local, const SpacePopulation::LiveShi
     if (proxy.bone >= model.bones.size()) return "bone out of range";
     return nullptr;
 }
+
+// An EnhancedMesh system (legacy v1, CPU ready, creator 35) emits from a bound mesh.
+template<class System>
+[[nodiscard]] bool mesh_emitter(const System& system) {
+    return system.system && std::any_of(system.system->emitters.begin(), system.system->emitters.end(), [&](const auto& emitter) {
+        return system.system->version == particles::AloParticleVersion::legacy_v1 && emitter.cpu_ready
+            && emitter.creator_id == 35;
+    });
+}
 } // namespace
 
 void UnitEmitters::prepare_assets(const SpacePopulation& population) {
@@ -114,6 +124,10 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
                 || clone_proxy_skip(model->proxies[ordinal], *model))) continue;
             const auto& effect = placement.effects[ordinal];
             prepare_system(effect.resolved);
+            // EnhancedMesh emitters bind a mesh at plan time; decode it here, never on the frame path.
+            if (model && ordinal < model->proxies.size() && mesh_emitter(effect_system(effect.resolved))) {
+                static_cast<void>(emitter_binding(path, ordinal));
+            }
             // Non-particle model proxies use the same cached classification as plan_model.
             if (!effect.resolved.empty() && !effect_system(effect.resolved).system) {
                 if (models.insert(effect.resolved).second) {
@@ -148,7 +162,35 @@ void UnitEmitters::prepare_assets(const SpacePopulation& population) {
 
 const assets::Model* UnitEmitters::emitter_model(const std::string& path) {
     if (model_paths_.insert(path).second && assets_prepared_) ++unprepared_models_[path];
-    return cache_.model(path);
+    const auto found = emitter_models_.find(path);
+    if (found != emitter_models_.end()) return found->second.get();
+    std::unique_ptr<const assets::Model> metadata;
+    if (auto loaded = cache_.shared_model(path)) {
+        metadata = std::make_unique<const assets::Model>(assets::geometry_stripped_copy(*loaded.value()));
+    }
+    return emitter_models_.emplace(path, std::move(metadata)).first->second.get();
+}
+
+const core::Result<particles::ProxyMeshBinding>& UnitEmitters::emitter_binding(const std::string& path,
+                                                                                const std::size_t ordinal) {
+    auto key = std::make_pair(path, ordinal);
+    const auto found = emitter_bindings_.find(key);
+    if (found != emitter_bindings_.end()) return found->second;
+    using Binding = core::Result<particles::ProxyMeshBinding>;
+    auto loaded = cache_.shared_model(path);
+    Binding binding = loaded ? particles::bind_proxy_mesh(*loaded.value(), ordinal)
+                             : Binding::failure(loaded.error());
+    return emitter_bindings_.emplace(std::move(key), std::move(binding)).first->second;
+}
+
+const core::Result<particles::ProxyMeshBinding>* UnitEmitters::planned_binding(const std::string& path,
+                                                                                const std::size_t ordinal) {
+    // Prepared bindings only once preparation is done: a late miss is counted and skipped, not decoded.
+    if (!assets_prepared_) return &emitter_binding(path, ordinal);
+    const auto found = emitter_bindings_.find(std::make_pair(path, ordinal));
+    if (found != emitter_bindings_.end()) return &found->second;
+    ++unprepared_bindings_[path + "#" + std::to_string(ordinal)];
+    return nullptr;
 }
 
 const assets::Texture* UnitEmitters::resolve_texture(const std::string_view authored) {
@@ -388,7 +430,14 @@ void UnitEmitters::plan_model(Ship& ship, const SpacePopulation::LiveShipEmitter
             // The static attached plan's mesh binding: the first mesh on the proxy bone's parent,
             // found by the proxy's index, as a model may name several proxies alike (the X-wing's
             // and Z-95's twin pe_Z95engines).
-            auto binding = particles::bind_proxy_mesh(*model, record.proxy_ordinal);
+            const auto* found_binding = planned_binding(placement.model_path, record.proxy_ordinal);
+            if (found_binding == nullptr) {
+                wanted.failed = true;
+                ++start_failed_[wanted.effect + ": mesh binding: not prepared"];
+                ship.wanted.push_back(std::move(wanted));
+                continue;
+            }
+            auto binding = *found_binding;
             if (binding && binding.value().owner_bone < frames->bones.size() && frames->bones[binding.value().owner_bone]) {
                 wanted.mesh = std::move(binding.value().binding);
                 const auto frame = sim::math::compose(attachment, *frames->bones[binding.value().owner_bone]);
@@ -443,7 +492,12 @@ void UnitEmitters::plan_clone(Ship& ship, const SpacePopulation::LiveShipEmitter
             })) {
             // An EnhancedMesh system emits from the first mesh on the proxy bone's parent, bound as
             // the engine emitters bind theirs (BP-42), by the proxy's index.
-            auto binding = particles::bind_proxy_mesh(*model, ordinal);
+            const auto* found_binding = planned_binding(view.placement->model_path, ordinal);
+            if (found_binding == nullptr) {
+                skip("mesh binding: not prepared");
+                continue;
+            }
+            auto binding = *found_binding;
             if (!binding || binding.value().owner_bone >= model->bones.size()) {
                 skip("mesh binding: " + (binding ? std::string("owner bone out of range")
                                                  : core::format_diagnostic(binding.error())));

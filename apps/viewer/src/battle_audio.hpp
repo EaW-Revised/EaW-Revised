@@ -1,11 +1,14 @@
 #pragma once
 
+#include "eawr/diagnostics/memory_capacity.hpp"
+
 #include "battle_input.hpp"
 #include "live_session_view.hpp"
 
 #include "eawr/data/xml.hpp"
 #include "eawr/presentation/audio/sfx.hpp"
 #include "eawr/presentation/audio/announcements.hpp"
+#include "eawr/presentation/audio/health_warning.hpp"
 #include "eawr/presentation/renderer.hpp"
 #include "eawr/presentation/ui/retreat_presentation.hpp"
 #include "eawr/sim/tactical/combat.hpp"
@@ -109,6 +112,7 @@ public:
                 attract_events_refused_, events_admitted_, spatial_starts_ + two_d_starts_, attract_2d_deaths_refused_};
     }
     // The report's "battle_audio" member, followed by ",\n".
+    [[nodiscard]] diagnostics::MemoryCapacity memory_capacity() const;
     void write_report(std::ostream& output) const;
 
 private:
@@ -145,6 +149,7 @@ private:
         const audio::SfxEvent* death{};
         const audio::SfxEvent* spin_death{};
         const audio::SfxEvent* asteroid_damage{};
+        audio::HealthWarningCues health_warning;
         const audio::SfxEvent* ambient_moving{};
         const audio::SfxEvent* engine_idle{};
         const audio::SfxEvent* engine_moving{};
@@ -181,6 +186,9 @@ private:
         const audio::SfxEvent* attack{};
         const audio::SfxEvent* group_move{};
         const audio::SfxEvent* group_attack{};
+        const audio::SfxEvent* select_ability{}; // SND-77 variants while a non-hero ability is enabled
+        const audio::SfxEvent* move_ability{};
+        const audio::SfxEvent* attack_ability{};
         const audio::SfxEvent* assist_move{};
         const audio::SfxEvent* assist_attack{};
         const audio::SfxEvent* move_asteroid{};
@@ -384,7 +392,7 @@ private:
     const audio::SfxEvent* stealth_reveal_{};
     std::set<sim::EntityId> stealth_hidden_;
     audio::SightingService sighting_service_;
-    space::UnitFade sighting_fade_;
+    live::UnitFade sighting_fade_;
     std::uint64_t sighting_pruned_at_{};
     std::uint64_t ducked_starts_{};
     std::uint64_t ducked_updates_{};
@@ -399,6 +407,7 @@ private:
     Options options_;
     audio::SfxRegistry registry_;
     audio::Space3D space_;
+    std::optional<double> health_low_threshold_, health_critical_threshold_;
     bool spatial_audio_available_{};
     std::uint64_t spatial_starts_{};
     std::uint64_t two_d_starts_{};

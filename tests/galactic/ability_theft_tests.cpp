@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -12,6 +13,7 @@
 #include "eawr/platform/sim_workers.hpp"
 #include "eawr/sim/galactic/ability_host.hpp"
 #include "eawr/sim/galactic/income.hpp"
+#include "eawr/sim/galactic/observer.hpp"
 
 #include <exception>
 #include <utility>
@@ -174,8 +176,9 @@ void parent_loss(const eawr::sim::PartitionExecutor& pool, std::vector<std::stri
     auto& movement = ability_fixture::add_movement(config);
     movement.types[1].transport = true; // the transport type that carries the hero and companion
     movement.contents = {{parent, {{hero, 1000}, {companion, 3000}}}};
+    config.ability_host->profiles[0].ground_activated = {gc::AbilityKind::technology_theft};
     auto game = take(eawr::campaign::GameSession::create(config));
-    order(game, 1, gc::PrepareGalacticAbility{hero, target, gc::AbilityKind::technology_theft}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    order(game, 1, gc::DeployGroundAbility{parent, target}); hashes.push_back(take(game.step(pool)).state_hash.get());
     const auto prepared = gc::prepared_ability(game.galaxy().ability_state()->preparations.at(0), 0);
     order(game, 2, gc::ExecutePreparedAbility{prepared}); hashes.push_back(take(game.step(pool)).state_hash.get());
     const auto records = game.galaxy().snapshot()->actor_records();
@@ -187,13 +190,171 @@ void parent_loss(const eawr::sim::PartitionExecutor& pool, std::vector<std::stri
     auto fresh = take(cp::load_game_checkpoint(saved, identities, {}, pool));
     expect(take(cp::save_game_checkpoint(fresh.session, identities)) == saved, "parent-loss cleanup reconstructs in canonical saved owners");
 }
+gc::GalacticSetup spy_setup(bool consumes = true) {
+    auto s = setup();
+    auto& p = s.ability_host->profiles[0]; p.theft.reset(); p.named = false;
+    p.spy = gc::SpyAbilityProfile{"SYNTHETIC_SPY", "synthetic probe", 7, f(1), gc::bit(gc::Intelligence::fleet_contents), true, consumes, true};
+    p.ground_activated = {gc::AbilityKind::system_spy};
+    s.ability_host->activated_spy_abilities = {"SYNTHETIC_SPY"};
+    s.seats.push_back({{3}, 3, gc::SeatKind::script, 2, true, 0});
+    gc::ObserverSetup o; o.human_observers = {1, 2};
+    for (const auto& player : s.players) o.players.push_back({player.player_id, false, false, 0, 0, {}});
+    for (const auto& planet : s.planets) {
+        o.planets.push_back({planet.id, planet.owner, planet.owner, 0, 0, 0, 0, false, false, false, false, {}});
+        o.planets.back().current_owner = o.planets.back().current_controller = planet.owner;
+    }
+    o.types = {{1000, false, false, false}};
+    for (const auto& player : s.players) for (const auto& planet : s.planets)
+        o.records.push_back({player.player_id, planet.id, true, 0, 0, 0, {}});
+    s.observer = std::move(o); return s;
+}
+void first_appropriate_bearer(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    auto config = spy_setup(false); const auto parent = buyer(config), target = config.planets[0].id;
+    constexpr eawr::sim::EntityId slicer = 51000, spy = 51001;
+    auto& host = *config.ability_host;
+    gc::GalacticAbilityProfile theft; theft.type = 2000; theft.has_market = false; theft.theft.emplace();
+    theft.ground_activated = {gc::AbilityKind::technology_theft}; host.profiles.push_back(theft);
+    host.technologies.clear(); // first contained actor has no appropriate slice target
+    config.fleets[1].members[0].type = 3000;
+    auto& root = config.census->objects[1]; root.current_type = root.original_type = 3000;
+    root.combat_role = gc::ActorCombatRole::transport;
+    config.census->objects.push_back(ability_fixture::census_actor(slicer, 2000, 2, target, parent));
+    config.census->objects.push_back(ability_fixture::census_actor(spy, 1000, 2, target, parent));
+    for (const auto type : {2000U, 3000U}) {
+        config.census->types.push_back({type, {}, 0}); config.fleet_control->types.push_back({type, type == 3000, true, false});
+        config.control->types.push_back({type, 0, false, false}); config.observer->types.push_back({type, false, false, false});
+    }
+    auto& movement = ability_fixture::add_movement(config); movement.types[2].transport = true;
+    movement.contents = {{parent, {{slicer, 2000}, {spy, 1000}}}};
+    auto game = take(eawr::campaign::GameSession::create(config));
+    order(game, 1, gc::DeployGroundAbility{parent, target}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    expect(game.galaxy().ability_state()->results.size() == 1 && game.galaxy().ability_state()->results[0].actor == spy
+        && game.galaxy().ability_state()->results[0].kind == gc::AbilityKind::system_spy,
+        "live container scan skips inappropriate empty theft and invokes the first appropriate bearer");
+}
+void consumed_contained_spy(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (const bool escort : {false, true}) {
+    auto config = spy_setup(); const auto parent = buyer(config), target = config.planets[0].id;
+    constexpr eawr::sim::EntityId spy = 52000;
+    config.fleets[1].members[0].type = 2000;
+    auto& root = config.census->objects[1]; root.current_type = root.original_type = 2000;
+    root.combat_role = gc::ActorCombatRole::transport;
+    config.census->objects.push_back(ability_fixture::census_actor(spy, 1000, 2, target, parent));
+    config.census->types.push_back({2000, {}, 0}); config.fleet_control->types.push_back({2000, true, true, false});
+    config.control->types.push_back({2000, 0, false, false}); config.observer->types.push_back({2000, false, false, false});
+    auto& movement = ability_fixture::add_movement(config); movement.types[1].transport = true;
+    movement.contents = {{parent, {{spy, 1000}}}};
+    constexpr eawr::sim::EntityId companion = 52001;
+    if (escort) {
+        config.census->objects.push_back(ability_fixture::census_actor(companion, 1000, 2, target, parent));
+        movement.contents[0].children.push_back({companion, 1000});
+    }
+    auto game = take(eawr::campaign::GameSession::create(config));
+    order(game, 1, gc::DeployGroundAbility{parent, target}); hashes.push_back(take(game.step(pool)).state_hash.get());
+    const auto records = game.galaxy().snapshot()->actor_records();
+    expect(std::none_of(records.begin(), records.end(), [&](const auto& r) { return r.id == spy; })
+        && std::any_of(records.begin(), records.end(), [&](const auto& r) { return r.id == parent; }) == escort,
+        "consumed spy removes an empty transport and retains a non-empty carrier");
+    expect(std::any_of(records.begin(), records.end(), [&](const auto& r) { return r.id == companion; }) == escort,
+        "consumed spy leaves the carrier's other passenger unchanged");
+    expect(std::any_of(game.galaxy().snapshot()->fleets().begin(), game.galaxy().snapshot()->fleets().end(),
+        [&](const auto& fleet) { return fleet.id == config.fleets[1].id; }) == escort,
+        "ordinary loss cleanup removes the empty fleet shell and preserves an occupied fleet");
+    const auto observer = game.galaxy().snapshot()->observer();
+    expect(std::any_of(observer->records.begin(), observer->records.end(), [&](const auto& r) {
+        return r.player == 2 && r.planet == target && r.sources.size() == 1 && r.sources[0].source == spy;
+    }), "contained consumed probe retains its finite intelligence source");
+    const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
+    auto loaded = take(cp::load_game_checkpoint(saved, ids, {}, pool));
+    expect(take(cp::save_game_checkpoint(loaded.session, ids)) == saved, "carrier cleanup and finite effect restore together");
+    }
+}
+void spy_cases(const eawr::sim::PartitionExecutor& pool, std::vector<std::string>& hashes) {
+    for (const bool consumes : {false, true}) {
+        auto config = spy_setup(consumes); auto game = take(eawr::campaign::GameSession::create(config));
+        const auto actor = buyer(config), planet = config.planets[0].id;
+        const gc::CommandPayload request = gc::DeployGroundAbility{actor, planet};
+        expect(gc::opcode_of(request) == gc::galactic_opcodes::ground_deploy
+            && gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::ground_deploy, gc::encode_payload(request)) == request,
+            "generic deployment wire retains only supplied actor and planet");
+        auto malformed = gc::encode_payload(request); malformed.push_back(0);
+        expect(!gc::decode_payload(gc::CommandLayer::galactic, gc::galactic_opcodes::ground_deploy, malformed), "deployment rejects trailing forged fields");
+        // Wrong owner refuses before applying intelligence.
+        take(game.submit({{game.completed_tick(), {1}, 1}, request}));
+        hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->results.empty(), "foreign seat cannot deploy a spy");
+        take(game.set_ability_lifecycle(actor, true, true, gc::AbilityKind::system_spy));
+        order(game, 2, request); hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->results.empty(), "cancelled spy service refuses deployment");
+        take(game.set_ability_lifecycle(actor, true, false, gc::AbilityKind::system_spy));
+        const auto ids = cp::game_identities(config); const auto saved = take(cp::save_game_checkpoint(game, ids));
+        auto loaded = take(cp::load_game_checkpoint(saved, ids, {}, pool)); game = std::move(loaded.session);
+        unsigned land_notices{};
+        game.set_story_notice_handler([&](const eawr::campaign::GameStoryNotice& notice) {
+            if (const auto* travel = std::get_if<gc::story::TravelNotice>(&notice.payload); travel && travel->kind == gc::story::Travel::land) {
+                expect(notice.player == gc::PlayerId{2} && notice.observer_planet == planet && travel->hero == "synthetic probe",
+                    "spy land notice uses current owner and authored source");
+                ++land_notices;
+            }
+            return eawr::core::Result<void>::success();
+        });
+        order(game, 3, request); hashes.push_back(take(game.step(pool)).state_hash.get());
+        const auto* state = game.galaxy().ability_state();
+        expect(state->results.size() == 1 && state->results[0].kind == gc::AbilityKind::system_spy
+            && state->results[0].outcome == gc::AbilityOutcome::purchased && land_notices == 1, "spy invocation settles after successful insertion and story notice");
+        const auto observer = game.galaxy().snapshot()->observer();
+        const auto row = std::find_if(observer->records.begin(), observer->records.end(), [&](const auto& r) { return r.player == 2 && r.planet == planet; });
+        expect(row != observer->records.end() && row->sources.size() == 1 && row->sources[0].source == actor
+            && row->sources[0].ability == 7 && row->sources[0].mask == gc::bit(gc::Intelligence::fleet_contents), "authored source-keyed intelligence applied once");
+        expect(game.galaxy().snapshot()->player_economy()->players[1].credits == f(1000) && game.return_state().heroes.empty(),
+            "spy has no debit or random theft/unnamed-hero respawn");
+        const auto records = game.galaxy().snapshot()->actor_records();
+        expect(std::any_of(records.begin(), records.end(), [&](const auto& r) { return r.id == actor; }) == !consumes,
+            "Causes_Despawn controls success-only actor consumption");
+        const auto settled = take(cp::save_game_checkpoint(game, ids)); auto restored = take(cp::load_game_checkpoint(settled, ids, {}, pool));
+        expect(take(cp::save_game_checkpoint(restored.session, ids)) == settled, "spy service/registered targets/timed effect restore without reapplication");
+        hashes.push_back(restored.session.state_sha256());
+        if (consumes) {
+            const auto deadline = row->sources[0].final_frame;
+            for (const auto frame : {deadline, deadline + 1}) {
+                gc::ObserverCommand refresh; refresh.action = gc::ObserverAction::refresh; refresh.gameplay_frame = frame;
+                take(restored.session.submit({{restored.session.completed_tick(), {3}, frame}, refresh}));
+                hashes.push_back(take(restored.session.step(pool)).state_hash.get());
+                const auto intel = restored.session.galaxy().snapshot()->observer();
+                const auto effect = std::find_if(intel->records.begin(), intel->records.end(), [&](const auto& r) { return r.player == 2 && r.planet == planet; });
+                expect(effect != intel->records.end() && effect->sources.empty() == (frame > deadline),
+                    "consumed finite probe survives through its deadline and expires strictly afterward");
+            }
+        }
+        if (!consumes) {
+            auto standalone = take(gc::GalacticSession::create(config));
+            take(standalone.submit({{0, {2}, 1}, request})); const auto invoked = take(standalone.step(pool));
+            const auto events = invoked.snapshot->events();
+            expect(std::count_if(events.begin(), events.end(), [&](const auto& event) {
+                return event.kind == gc::GalacticEventKind::intelligence_refreshed && event.subject == planet;
+            }) == static_cast<std::ptrdiff_t>(config.players.size()), "spy insertion refreshes every extant player's target visibility");
+            const std::array gone{actor}; take(standalone.apply_battle_losses(gone));
+            const auto remaining = standalone.snapshot()->observer();
+            expect(std::all_of(remaining->records.begin(), remaining->records.end(), [](const auto& r) { return r.sources.empty(); }),
+                "ordinary spy source loss cleans registered intelligence");
+        }
+    }
+    for (const bool allied : {false, true}) {
+        auto config = spy_setup(); if (allied) config.fleets[1].orbit = config.planets[1].id;
+        if (allied) config.census->objects[1].planet = config.planets[1].id;
+        auto game = take(eawr::campaign::GameSession::create(config));
+        const auto target = config.planets[allied ? 1 : 2].id;
+        order(game, 1, gc::DeployGroundAbility{buyer(config), target}); hashes.push_back(take(game.step(pool)).state_hash.get());
+        expect(game.galaxy().ability_state()->results.empty(), "allied target or remote invocation refuses without consumption");
+    }
+}
 } // namespace
 int case_galactic_ability_theft_tests() {
     ability_fixture::arm_watchdog();
     try {
-        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline);
+        std::vector<std::string> baseline; eawr::platform::ThreadWorkerAdapter one(1); cases(one, baseline); lifecycle(one, baseline); parent_loss(one, baseline); spy_cases(one, baseline); first_appropriate_bearer(one, baseline); consumed_contained_spy(one, baseline);
         for (std::size_t workers : {2U, 4U, 8U}) {
-            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes);
+            eawr::platform::ThreadWorkerAdapter pool(workers); std::vector<std::string> hashes; cases(pool, hashes); lifecycle(pool, hashes); parent_loss(pool, hashes); spy_cases(pool, hashes); first_appropriate_bearer(pool, hashes); consumed_contained_spy(pool, hashes);
             expect(hashes == baseline, "theft effects and restore hashes equal on1/2/4/8");
         }
         observer_and_idle();

@@ -3,7 +3,7 @@
 #include "frame_timer.hpp"
 
 #include "eawr/presentation/space/space.hpp"
-#include "eawr/presentation/space/live_units.hpp"
+#include "eawr/presentation/live/live_units.hpp"
 #include "eawr/presentation/space/snapshot_index.hpp"
 #include "eawr/scene/scene.hpp"
 #include "eawr/skirmish/start.hpp"
@@ -76,7 +76,7 @@ struct ScreenAxes final {
     ScreenAxes axes;
     axes.across = length(across);
     axes.along = normalized(across).value_or(view.up);
-    if (const auto tangent = space::projectile_screen_axis(
+    if (const auto tangent = live::projectile_screen_axis(
             {view.eye.x, view.eye.y, view.eye.z}, {view.forward.x, view.forward.y, view.forward.z},
             {centre.x, centre.y, centre.z}, {direction.x, direction.y, direction.z})) {
         axes.along = vec(*tangent);
@@ -103,7 +103,7 @@ void push(particles::VertexStream& stream, const V position, const particles::Co
 }
 
 // A projectile's pose as a live ship's (BP-60): Q24 position and R-ROT-01 yaw and pitch.
-[[nodiscard]] std::optional<SpacePopulation::LivePose> live_pose(const std::size_t ship, const space::ProjectilePose& pose) {
+[[nodiscard]] std::optional<SpacePopulation::LivePose> live_pose(const std::size_t ship, const live::ProjectilePose& pose) {
     SpacePopulation::LivePose placed;
     placed.ship = ship;
     const std::array<double, 5> source{pose.position[0], pose.position[1], pose.position[2], pose.yaw_degrees,
@@ -135,7 +135,7 @@ void BattleEffects::plan_projectile_models(std::vector<SpacePopulation::Options:
             const ProjectileLook& look = *entry;
             if (look.render != Render::model || model_pools_.contains(look.projectile)) continue;
             ModelPool& pool = model_pools_[look.projectile];
-            for (std::size_t index = 0; index < model_slots; ++index) {
+            for (std::size_t index = 0; index < pool.slots.size(); ++index) {
                 SpacePopulation::Options::PlacedShip ship;
                 ship.object_id = look.projectile;
                 ship.live_entity = first_slot_entity + model_ship_slot_.size();
@@ -253,7 +253,8 @@ float BattleEffects::projectile_model_opacity(const std::size_t ship) const {
 
 void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& previous,
                                            const tactical::TacticalSnapshot& latest, const double alpha,
-                                           const UnitLookup&, std::vector<SpacePopulation::LivePose>& live) {
+                                           const UnitLookup&, std::vector<SpacePopulation::LivePose>& live,
+                                           BattleScene* population, GodotRenderer* renderer) {
     modelled_now_.clear();
     if (released_ || model_pools_.empty()) return;
     note_types(previous, latest);
@@ -274,23 +275,94 @@ void BattleEffects::pose_projectile_models(const tactical::TacticalSnapshot& pre
         if (found != flying.end()) {
             for (const tactical::Projectile* projectile : found->second) ids.push_back(projectile->id);
         }
-        const auto slots = pool.slots.bind(ids);
+        pool.peak_requested = std::max(pool.peak_requested, ids.size());
+        bool grow_called = false;
+        const auto attempts_before = pool.slots.growth_attempts();
+        const auto grow = [&](const live::ProjectileModelSlots::GrowthRequest request) {
+            using Slots = live::ProjectileModelSlots;
+            grow_called = true;
+            pool.last_refusal = {};
+            pool.last_refusal_bytes = 0;
+            pool.budget_probe_available = renderer->proxy_budget().probe_available;
+            const auto old_size = pool.ships.size();
+            pool.ships.reserve(request.preferred);
+            std::vector<SpacePopulation::Options::PlacedShip> placed;
+            placed.reserve(request.preferred - old_size);
+            // Stage map nodes before backend publication: adding an index must
+            // never fail after a proxy has been successfully admitted.
+            std::map<std::size_t, std::pair<std::string, std::size_t>> staged;
+            constexpr sim::EntityId first_slot_entity = std::numeric_limits<sim::EntityId>::max() / 8U;
+            for (std::size_t index = old_size; index < request.preferred; ++index) {
+                SpacePopulation::Options::PlacedShip ship;
+                ship.object_id = name;
+                ship.live_entity = first_slot_entity + model_ship_slot_.size() + placed.size();
+                ship.projectile_slot = true;
+                placed.push_back(std::move(ship));
+                staged.emplace(index - old_size, std::pair{name, index});
+            }
+            auto result = population->append_model_proxies(*renderer, pool.ships.front(), placed);
+            // Spare chunk capacity is optional under pressure; live demand is not.
+            if (result.outcome == ProxyOutcome::refused_budget && request.minimum < request.preferred) {
+                placed.resize(request.minimum - old_size);
+                result = population->append_model_proxies(*renderer, pool.ships.front(), placed);
+            }
+            if (result.outcome != ProxyOutcome::reserved) {
+                pool.last_refusal = result.reason;
+                return Slots::GrowthResult{result.outcome == ProxyOutcome::refused_budget
+                    ? Slots::GrowthStatus::refused_budget : result.outcome == ProxyOutcome::invalid_recipe
+                    ? Slots::GrowthStatus::invalid_recipe : Slots::GrowthStatus::allocation_failed,
+                    old_size, result.bytes};
+            }
+            for (std::size_t offset = 0; offset < placed.size(); ++offset) {
+                const auto ship = result.first_slot + offset;
+                pool.ships.push_back(ship);
+                auto node = staged.extract(offset);
+                node.key() = ship;
+                model_ship_slot_.insert(std::move(node));
+            }
+            pool.reserved_bytes += result.bytes;
+            return Slots::GrowthResult{Slots::GrowthStatus::admitted, pool.ships.size(), result.bytes};
+        };
+        // reference_wrapper keeps the callback non-owning: no closure heap
+        // allocation on steady frames that never ask the backend to grow.
+        const live::ProjectileModelSlots::Reserve reserve = population && renderer
+            ? live::ProjectileModelSlots::Reserve(std::cref(grow)) : live::ProjectileModelSlots::Reserve{};
+        const auto slots = pool.slots.bind(ids, reserve);
+        if (pool.slots.last_growth().status != live::ProjectileModelSlots::GrowthStatus::admitted) {
+            pool.last_refusal_bytes = pool.slots.last_growth().bytes;
+            if (!reserve) pool.last_refusal = "proxy_recipe_unavailable";
+            else if (pool.last_refusal.empty() || (!grow_called && pool.slots.growth_attempts() != attempts_before))
+                pool.last_refusal = "proxy_owner_allocation";
+        }
+        for (std::size_t index = 0; index < slots.size(); ++index) {
+            if (slots[index]) continue;
+            auto& visibility = projectile_visibility_.at(ids[index]);
+            if (!visibility.model_denied) {
+                visibility.model_denied = true;
+                ++pool.unique_denied_flights;
+            }
+            if (pool.slots.last_growth().status == live::ProjectileModelSlots::GrowthStatus::refused_budget)
+                ++pool.budget_refusals;
+            else if (pool.slots.last_growth().status == live::ProjectileModelSlots::GrowthStatus::invalid_recipe)
+                ++pool.recipe_refusals;
+            else ++pool.allocation_failures;
+        }
         for (std::size_t index = 0; index < ids.size(); ++index) {
             if (!slots[index]) continue;
             const tactical::Projectile& projectile = *found->second[index];
             const auto before = std::lower_bound(earlier.begin(), earlier.end(), projectile.id,
                 [](const tactical::Projectile& item, const std::uint64_t id) { return item.id < id; });
-            auto pose = space::interpolate_projectile(
+            auto pose = live::interpolate_projectile(
                 before != earlier.end() && before->id == projectile.id ? &*before : nullptr, projectile, alpha);
             const auto spawns = latest.ability_spawns();
             const auto entry = std::lower_bound(spawns.begin(), spawns.end(), projectile.id,
                 [](const auto& spawn, const std::uint64_t id) { return spawn.id < id; });
             if (entry != spawns.end() && entry->id == projectile.id && entry->kind != tactical::AbilityKind::cluster_bomb) {
                 const auto& spawn = *entry;
-                pose = space::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
+                pose = live::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
                 if (auto frame = sim::math::to_matrix(spawn.rotation, spawn.position)) {
-                    pose->yaw_degrees = space::instance_yaw_degrees(frame.value());
-                    pose->pitch_degrees = space::instance_pitch_degrees(frame.value());
+                    pose->yaw_degrees = live::instance_yaw_degrees(frame.value());
+                    pose->pitch_degrees = live::instance_pitch_degrees(frame.value());
                 }
             }
             if (!pose) continue;
@@ -333,17 +405,17 @@ std::optional<SpacePopulation::LivePose> BattleEffects::projectile_model_pose_at
     };
     const tactical::Projectile* latest = find(*after);
     if (latest == nullptr || (latest->muzzle_delay_until != 0 && after->completed_tick() <= latest->muzzle_delay_until)) return std::nullopt;
-    auto pose = space::interpolate_projectile(before ? find(*before) : nullptr, *latest,
+    auto pose = live::interpolate_projectile(before ? find(*before) : nullptr, *latest,
                                                     std::max(0.0, tick - static_cast<double>(base)));
     const auto spawns = after->ability_spawns();
     const auto entry = std::lower_bound(spawns.begin(), spawns.end(), latest->id,
         [](const auto& spawn, const std::uint64_t id) { return spawn.id < id; });
     if (entry != spawns.end() && entry->id == latest->id && entry->kind != tactical::AbilityKind::cluster_bomb) {
         const auto& spawn = *entry;
-        pose = space::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
+        pose = live::ProjectilePose{{to_float(spawn.position.x), to_float(spawn.position.y), to_float(spawn.position.z)}, 0, 0};
         if (auto frame = sim::math::to_matrix(spawn.rotation, spawn.position)) {
-            pose->yaw_degrees = space::instance_yaw_degrees(frame.value());
-            pose->pitch_degrees = space::instance_pitch_degrees(frame.value());
+            pose->yaw_degrees = live::instance_yaw_degrees(frame.value());
+            pose->pitch_degrees = live::instance_pitch_degrees(frame.value());
         }
     }
     if (!pose) return std::nullopt;
@@ -593,7 +665,7 @@ bool BattleEffects::update_weaken_effects(const sim::tactical::TacticalSnapshot&
             auto active = weaken_effects_.find(key);
             if (active == weaken_effects_.end()) {
                 const auto count = effects_.size();
-                if (!spawn(particle->second, pose->position, {}, "weaken_status", latest.completed_tick())) return false;
+                if (!process_spawn(particle->second, pose->position, {}, "weaken_status", latest.completed_tick())) return false;
                 if (effects_.size() > count) {
                     effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
                     active = weaken_effects_.emplace(key, effects_.back().handle).first;
@@ -722,7 +794,7 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
                 if (active == energy_owner_effects_.end()) {
                     const auto before = effects_.size();
                     const particles::Basis3 basis{};
-                    if (!spawn(type->second.energy_owner_particle, origin, basis, "energy_owner", latest.completed_tick())) return false;
+                    if (!process_spawn(type->second.energy_owner_particle, origin, basis, "energy_owner", latest.completed_tick())) return false;
                     if (effects_.size() > before) {
                         effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
                         active = energy_owner_effects_.emplace(instance.entity_id, effects_.back().handle).first;
@@ -739,7 +811,7 @@ bool BattleEffects::draw_ability_beams(const sim::tactical::TacticalSnapshot& la
                 if (active == leech_effects_.end() && !type->second.leech_effect.empty()) {
                     const auto before = effects_.size();
                     const particles::Basis3 basis{};
-                    if (!spawn(type->second.leech_effect, endpoint, basis, "shield_leech", latest.completed_tick())) return false;
+                    if (!process_spawn(type->second.leech_effect, endpoint, basis, "shield_leech", latest.completed_tick())) return false;
                     if (effects_.size() > before) {
                         effects_.back().lifetime = std::numeric_limits<std::uint32_t>::max();
                         active = leech_effects_.emplace(instance.entity_id, effects_.back().handle).first;

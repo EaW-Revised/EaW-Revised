@@ -14,7 +14,7 @@ declaration. Such a literal is accepted only when it is
     on its missing branch (including local helpers, lambdas and tag tables); otherwise the line still fails, or
   * listed in the allowlist (config/xml-literal-allowlist.json): one entry per existing finding with its ticket. The
     allowlist may only shrink: an entry without a finding fails (delete it), and so does a list longer than `max_entries`.
-    Growth is checked against the merge base (`--base-ref`, e.g. origin/Thom-Ernst/Skirmish): an entry the base list lacks fails
+    Growth is checked against the merge base (`--base-ref`, e.g. origin/main): an entry the base list lacks fails
     unless the allowlist carries a new reviewed `growth_override` ({"ticket": <issue>, "reason": ...}). A replacement
     in the same file with the same registry tags, numeric literals (including conversion divisors), ticket and other
     metadata is a rename, not growth; each removed base entry covers at most one replacement. A new override that
@@ -44,7 +44,7 @@ ROOTS = ("src", "include", "apps")
 SUFFIXES = (".cpp", ".hpp", ".h", ".cc", ".gd")
 SKIP_PARTS = ("/third_party/", "/upstream/", "/tests/")
 FALLBACK_WINDOW = 20
-_DIAGNOSTIC = re.compile(r"(?i)\b\w*(?:diagnos|warn|log|report|error|complain)\w*\s*\(|\bdiagnostics\s*\.\s*(?:push_back|emplace_back)\s*\(")
+_DIAGNOSTIC = re.compile(r"(?i)\b\w*(?:diagnos|warn|log|report|error|complain|note)\w*\s*\(|\bdiagnostics\s*\.\s*(?:push_back|emplace_back)\s*\(")
 ALLOWLIST_PATH = "config/xml-literal-allowlist.json"
 STATUSES_PATH = "docs/tag-coverage/statuses.json"
 LOAD_REFERENCE = re.compile(r"\bload:\s*([A-Za-z_0-9/.-]+)#([A-Za-z_][A-Za-z_0-9]*)")
@@ -209,7 +209,7 @@ def calls(text: str):
         yield match.group(1), args
 
 
-_LOAD_CALLS = {"read", "has", "last_child", "number", "integer", "child", "find_child"}
+_LOAD_CALLS = {"read", "has", "fixed", "retail_float", "last_child", "number", "integer", "child", "find_child"}
 
 
 def reads_key(text: str, key: str) -> bool:
